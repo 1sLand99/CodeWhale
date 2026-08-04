@@ -260,7 +260,8 @@ the next turn.
 Up to **64** sub-agents run concurrently by default (`DEFAULT_MAX_SUBAGENTS`),
 configurable via `[subagents].max_concurrent` in `~/.codewhale/config.toml` up to
 the hard ceiling of **128** (`MAX_SUBAGENTS`). The session admits a bounded
-queue of up to **200** running plus queued sub-agents by default, so a turn can
+queue of up to **1024** running plus queued sub-agents by default
+(`MAX_SUBAGENT_ADMISSION`, `crates/tui/src/config/subagent_limits.rs:21`), so a turn can
 request broad fan-out and let the manager drain it without creating an
 unbounded population.
 
@@ -537,14 +538,18 @@ scouts and reviewers should be precise here.
 
 ## Memory and the `remember` tool (#489)
 
-Sub-agents inherit the parent's memory file when memory is enabled
+Sub-agents share the parent's native memory store when memory is enabled
 (`[memory] enabled = true` or `DEEPSEEK_MEMORY=on`). They can
-append durable notes via the `remember` tool — handy for an
+append durable notes via the `remember` tool — handy for a
 scout that discovers a project convention worth carrying across
 sessions, or a verifier that learns "this test is flaky".
 
-Memory writes are scoped to the user's own `memory.md` file; they
-don't go through the standard write-approval flow.
+`remember` takes a `scope` of `global` or `workspace`
+(`crates/tui/src/tools/remember.rs:79-108`) and writes through
+`NativeMemoryStore` to `~/.codewhale/memory/global/MEMORY.md` or
+`~/.codewhale/memory/workspaces/<id>/MEMORY.md`. Writes do not go through the
+standard write-approval flow. The legacy single-file `memory.md` path was
+removed in v0.9.4 (remember.rs:165); see `docs/MEMORY.md` for the full layout.
 
 ## Implementation notes
 

@@ -86,21 +86,16 @@ npm/*/bin/downloads/
 apps/
 
 # Claude Code runtime artifacts
-.claude/settings.json
-.claude/scheduled_tasks.lock
-.claude/worktrees/
 .worktrees/
 .ace-tool/
 
-# Local-only Claude / ralph notes
-.claude/*.local.md
-.claude/*.local.json
-
-# Maintainer handoff + codemap notes are working-state, not user-facing
-# artifacts. They've leaked into the public repo via .claude/ in the past
-# (HANDOFF_v0.8.28, CODEMAP_v0.8.25) — those files now live under
-# .private/handoffs/ instead. Block the patterns here so a future accidental
-# add doesn't silently land on main.
+# NOTE: the blanket `.claude/` rule further down already ignores everything
+# under .claude/ — `git check-ignore -v` attributes every path below to that
+# line, not to these. The handoff/codemap patterns are kept as defense in depth:
+# those notes are working state, not user-facing artifacts, and they leaked into
+# the public repo through .claude/ before (HANDOFF_v0.8.28, CODEMAP_v0.8.25).
+# They live under .private/handoffs/ now. If anyone ever narrows the blanket
+# rule to track part of .claude/, these must keep holding.
 .claude/HANDOFF_*
 .claude/CODEMAP_*
 .claude/handoff_*

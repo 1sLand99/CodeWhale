@@ -9,7 +9,8 @@ setup and adding a model are deliberately separate operations.
 1. **Configured, enabled, current, saved, and default are distinct.** A provider
    is configured when `config::provider_is_configured` finds the active route,
    usable auth/external consent, or meaningful explicit provider configuration
-   (`crates/tui/src/config.rs:8625-8669`). An enabled model is a
+   (`provider_is_configured` in `crates/tui/src/config.rs`; grep the symbol
+   rather than trusting a line number). An enabled model is a
    `(provider identity, model id)` entry in `Settings::enabled_models`; the
    current model is `App::{api_provider,model,auto_model}`; a saved
    provider-specific preference is `Settings::provider_models`; and the startup

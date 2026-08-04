@@ -15,7 +15,7 @@ Implementation sources:
 
 ## Default-active contract
 
-The default-active policy contains exactly these ten names:
+The default-active policy contains exactly these nine names:
 
 1. `Bash`
 2. `File`
@@ -24,15 +24,23 @@ The default-active policy contains exactly these ten names:
 5. `agent`
 6. `remember`
 7. `tasks`
-8. `update_plan`
-9. `work_update`
-10. `tool_search`
+8. `work_update`
+9. `tool_search`
+
+The first eight are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
+`crates/tui/src/core/engine/tool_catalog.rs`. `tool_search` is synthetic rather
+than registry-backed and is always active.
 
 `remember` is registered only when the user enables the built-in memory path;
 once present, it stays eager so a model can capture a durable preference without
-first discovering the tool. A memory-disabled or Moraine-fallback runtime omits
-that registration and therefore exposes nine of the ten policy names.
-`tool_search` is synthetic rather than registry-backed and is always active.
+first discovering the tool. A memory-disabled runtime omits that registration and
+therefore exposes eight of the nine policy names.
+
+`update_plan` is **not** default-active. It is registered
+(`crates/tui/src/tools/plan.rs:401`) but reachable only through `tool_search`, so
+it does not appear in the first-turn catalog. Plan mode narrows the active set
+further: `Bash` and `Run` drop out, leaving `File`, `Git`, `agent`, `tasks`,
+`work_update`, and `tool_search`.
 
 The surface is action-based. A model calls one stable tool name and selects the
 operation through its `action` field instead of choosing among many synonymous
@@ -65,7 +73,7 @@ by the former spellings remain in force.
 | `agent` | Dispatch one focused sub-agent run and return an id, compact receipt, and transcript handle. |
 | `remember` | Append one terse durable preference or convention when the user has enabled built-in memory. |
 | `tasks` | Create, list, read, cancel, gate, and inspect durable task work through one action family. |
-| `update_plan` | Publish optional high-level strategy, phases, constraints, verification, and handoff context. |
+| `update_plan` | Publish optional high-level strategy, phases, constraints, verification, and handoff context. Reachable through `tool_search` only — see the default-active contract above. |
 | `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
 | `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
@@ -135,22 +143,40 @@ Modes and permission postures are separate controls:
 
 See `docs/MODES.md` for the full mode and posture contract.
 
+## Removed spellings
+
+The per-action single-purpose names below are **not registered**. They were
+deleted, not hidden: a call to any of them fails with `tool '<name>' is not
+registered`, because `resolve` has deliberately no fuzzy step
+(`crates/tui/src/tools/registry.rs:313-316` — "a hallucinated name must fail,
+never dispatch"). There is no replay path for them; a transcript that calls one
+will not re-execute.
+
+| Removed spelling | Use instead |
+|---|---|
+| `exec_shell`, `exec_shell_wait`, `exec_wait`, `exec_shell_interact`, `exec_interact`, `exec_shell_cancel` | `Bash`: `run`, `wait`, `interact`, `cancel` |
+| `read_file`, `list_dir`, `grep_files`, `file_search`, `write_file`, `edit_file` | `File`: `read`, `list`, `search_content`, `search_name`, `write`, `edit` |
+| `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` | `Git`: matching action |
+| `run_tests`, `run_verifiers` | `Run`: `tests`, `verifiers` |
+| `web_search`, `fetch_url`, `wait_for_dev_server` | `Web`: `search`, `fetch`, `wait` |
+
+Enforced by `shell_surface_contains_only_the_canonical_bash_tool`
+(registry.rs:2290, `"{alias} must be removed"`) and the retired-name loop at
+registry.rs:2066-2088 (`"{retired} must stay removed"` /
+`"{retired} must not be advertised"`).
+
 ## Replay-only aliases
 
-Legacy single-purpose names stay registered so saved transcripts, sessions, and
+These legacy names *are* still registered so saved transcripts, sessions, and
 recorded automation replay without migration. They are hidden from the model
 catalog and from `tool_search`; new prompts and docs must use the canonical
 action tools.
 
 | Replay-only spellings | Canonical action |
 |---|---|
-| `exec_shell`, `exec_shell_wait`, `exec_wait`, `exec_shell_interact`, `exec_interact`, `exec_shell_cancel` | `Bash`: `run`, `wait`, `interact`, `cancel` |
-| `read_file`, `list_dir`, `grep_files`, `file_search`, `write_file`, `edit_file`, `apply_patch` | `File`: `read`, `list`, `search_content`, `search_name`, `write`, `edit`, `patch` |
-| `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` | `Git`: matching action |
-| `run_tests`, `run_verifiers` | `Run`: `tests`, `verifiers` |
-| `web_search`, `fetch_url`, `wait_for_dev_server` | `Web`: `search`, `fetch`, `wait` |
-| `task_*` | `tasks`: matching action |
-| `github_*` | `github`: matching action |
+| `apply_patch` | `File`: `patch` (also DeepSeek Responses' one custom tool) |
+| `task_create`, `task_list`, `task_read` | `tasks`: matching action |
+| `github_issue_context`, `github_pr_context`, `github_comment` | `github`: matching action |
 | `automation_*` | `automation`: matching action |
 | `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` | `rlm`: `open`, `eval`, `configure`, `close` |
 | `checklist_*`, `todo_*` | `work_update` |
@@ -263,13 +289,18 @@ catalog and alias visibility at the exact candidate SHA:
 
 ```bash
 python3 scripts/measure-runtime-contract.py
-cargo test -p codewhale-tui --bin codewhale-tui --locked canonical_runtime_tools_hide_legacy_aliases
-cargo test -p codewhale-tui --bin codewhale-tui --locked shell_alias_tools_hidden_from_model_catalog
-cargo test -p codewhale-tui --bin codewhale-tui --locked runtime_task_families_expose_canonical_tools_with_hidden_aliases
+cargo test -p codewhale-tui --bin codewhale-tui --locked shell_surface_contains_only_the_canonical_bash_tool
+cargo test -p codewhale-tui --bin codewhale-tui --locked runtime_task_families_expose_only_canonical_tools
+cargo test --locked -p codewhale-tui --bin codewhale-tui print_mode_tool_catalog_metrics -- --ignored --nocapture
 ```
 
+Check the test names against the source before trusting a green run: `cargo test`
+exits 0 with "0 passed; N filtered out" when a filter matches nothing, so a
+misspelled filter is indistinguishable from a pass. (Three filters printed here
+before v0.9.4 named tests that did not exist.)
+
 The provider-free full-policy receipt enables built-in memory and must report the
-ten default-active names listed above. A memory-disabled receipt truthfully omits
-`remember`. A separate repository-wide tool count may include deferred, dynamic,
+nine default-active names listed above. A memory-disabled receipt truthfully omits
+`remember` and reports eight. A separate repository-wide tool count may include deferred, dynamic,
 feature-gated, and replay-only registrations; it is not the number of tools
 placed in the first-turn model catalog.

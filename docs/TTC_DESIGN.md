@@ -1,6 +1,8 @@
 # Test-Time Compute (TTC) in CodeWhale — design
 
-Status: **approved direction** (maintainer greenlit). Synthesized from three independent reviews — the verify-tool implementation contributor, GLM 5.2, and an internal analysis — which all converged. This doc is the spec; implementation is deferred beyond v0.9.0 and is split so nothing here blocks the current release.
+Status: **landed in part.** Capability (A), the `verify` tool, shipped and is default-on as of v0.9.4 — `crates/tui/src/tools/verify.rs`, feature key `verify_tool` (`crates/tui/src/features.rs:262`), registered at `crates/tui/src/tools/registry.rs:1040-1041` with `verify_tool_enabled` defaulting to `true` (registry.rs:546-561). Capability (B) (sub-agent reasoning-effort escalation) and the #3982/#4013 triggers remain deferred. Treat the (A) sections below as a design record of what shipped, not as a plan; the deferred-work notes at the end still stand for (B).
+
+Synthesized from three independent reviews — the verify-tool implementation contributor, GLM 5.2, and an internal analysis — which all converged.
 
 ## What TTC means here
 
@@ -27,7 +29,7 @@ Then three *distinct* entry points share that engine but **keep their own invoca
 
 **Why a tool, not a critic sub-agent:** a `verify` tool is *structurally isomorphic to the existing `review` tool* — same `ToolSpec` trait, same `ToolRegistryBuilder` path, same `Feature` gate, same `MessageRequest` reasoning normalization. It inherits every existing guarantee for almost no new surface. A critic *sub-agent* would be a **second runtime with a second policy surface** (spawn-depth, allowlist, sub-agent tier resolution) — the textbook bolted-on smell. (A sub-agent critic that autonomously explores may return as an opt-in follow-up *behind the same tool contract* once #4193's spawn work has settled — but it is NOT the default.)
 
-**Interface:** registered via `ToolRegistryBuilder::with_verify(critic)`, gated by a `Feature` flag. Input: `claim` (required) + optional `requirement`, `scope` (`diff|staged|none`), `base`, `files[]`, `focus`. It snapshots evidence deterministically (diff by scope — **including uncommitted working-tree changes when a base is given**, per PR #4199 fix — plus named files), builds ONE `MessageRequest` at `ReasoningEffort::Max` with **tools disabled**, and returns the structured verdict as a tool result.
+**Interface:** registered via `ToolRegistryBuilder::with_verify_tool(client, model)` (registry.rs:886 — the design said `with_verify(critic)`; the shipped signature takes an optional client and a model name), gated by a `Feature` flag. Input: `claim` (required) + optional `requirement`, `scope` (`diff|staged|none`), `base`, `files[]`, `focus`. It snapshots evidence deterministically (diff by scope — **including uncommitted working-tree changes when a base is given**, per PR #4199 fix — plus named files), builds ONE `MessageRequest` at `ReasoningEffort::Max` with **tools disabled**, and returns the structured verdict as a tool result.
 
 **Where it plugs in:** the standard tool loop. No new control plane. The model invokes it like `read`/`edit`/`review`.
 

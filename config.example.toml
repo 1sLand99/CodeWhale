@@ -892,21 +892,26 @@ max_subagents = 10 # optional (1-20)
 # Off by default.  Enable with `[advisor] enabled = true` or toggle per-session
 # with `/advisor on` / `/advisor off`.
 #
-# Options:
+# Options (the full set — `AdvisorConfigToml` in crates/config/src/lib.rs):
 #   enabled            — master switch (default: false)
-#   max_tool_pairs     — number of recent tool call/result pairs to read
-#                        (default: 8, max: 32)
+#   max_tool_calls     — number of recent tool call/result pairs to read
+#                        (default: 10, clamped to 1–50)
 #   rate_limit_secs    — minimum seconds between successive advisor notes
-#                        (default: 60)
-#   dedup_window_secs  — notes with identical text within this window are
-#                        suppressed (default: 300)
-#   system_prompt      — override the default advisor system prompt
+#                        (default: 60, clamped to 5–3600)
+#   dedup_window_secs  — notes whose content hash matches the previous note
+#                        within this window are dropped (default: 300)
+#   model              — model override for the advisory call; when absent the
+#                        advisor reuses the session's current model
+#
+# Unknown keys under [advisor] are silently ignored, not rejected — a typo
+# leaves the default in place with no error.
 #
 # [advisor]
 # enabled = false
-# max_tool_pairs = 8
+# max_tool_calls = 10
 # rate_limit_secs = 60
 # dedup_window_secs = 300
+# model = "deepseek-v4-flash"
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Skills (#140)
@@ -1430,8 +1435,9 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # instructions = "Run cargo fmt --check and cargo clippy; never apply fixes."
 #
 # [fleet.profiles.ci-linter.permissions]
-# allow_tools = ["exec_shell"]
-# deny_tools = []
+# allow_shell = true          # the only three keys are allow_shell, trust,
+# trust = false               # and approval_required (FleetProfilePermissions
+# approval_required = true    # in crates/config/src/lib.rs)
 #
 # [fleet.profiles.pr-reviewer]
 # slot = "reviewer"

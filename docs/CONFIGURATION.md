@@ -2031,12 +2031,6 @@ iTerm2, WezTerm, Ghostty, and kitty are matched first and use their own
 notification protocols, and `method = "osc9"` / `"bel"` / `"off"` opt out
 of the `osascript` path explicitly.
 
-### Parsed but currently unused (reserved for future versions)
-
-These keys are accepted by the config loader but not currently used by the interactive TUI or built-in tools:
-
-- `tools_file`
-
 ## Tool Catalog
 
 Codewhale loads a small core native tool catalog by default and leaves less
