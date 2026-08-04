@@ -27,10 +27,10 @@ pub use line_buffer::LineBuffer;
 /// text. This intentionally tracks animation frames rather than upstream SSE
 /// cadence, so tiny bursty deltas coalesce into one history/cache mutation.
 ///
-/// ~30 FPS (33ms). Full motion may catch up sooner when backlog crosses
+/// ~60 FPS (16ms). Full motion may catch up sooner when backlog crosses
 /// [`CATCH_UP_QUEUE_DEPTH`] / [`CATCH_UP_OLDEST_AGE`]; reduced motion never
 /// accelerates — it stays on this steady clock (not a slow typewriter).
-pub const DEFAULT_STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(33);
+pub const DEFAULT_STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Queue-depth threshold that pulls the display clock forward (catch-up).
 pub const CATCH_UP_QUEUE_DEPTH: usize = chunking::ENTER_QUEUE_DEPTH_LINES;
