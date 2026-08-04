@@ -371,6 +371,15 @@ fn is_exact_modelstudio_chat_route(provider: ApiProvider, base_url: &str) -> boo
     // `{workspace}.<region>.maas.aliyuncs.com/compatible-mode/v1` hosts.
     let token_plan_chat = host.ends_with(".maas.aliyuncs.com") && path == "compatible-mode/v1";
     let coding_plan_chat = host == "coding-intl.dashscope.aliyuncs.com" && path == "v1";
+    // Alibaba's classic pay-as-you-go DashScope endpoints serve the same
+    // models and the same dialect; leaving them off the allowlist silently
+    // stripped every reasoning control on a genuine Alibaba host
+    // (2026-08-04 review). The intl spelling matches the repo's own
+    // provider defaults.
+    let classic_dashscope_chat = matches!(
+        host,
+        "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com"
+    ) && path == "compatible-mode/v1";
 
     match provider {
         // The primary Model Studio provider selects Coding Plan through
@@ -380,7 +389,7 @@ fn is_exact_modelstudio_chat_route(provider: ApiProvider, base_url: &str) -> boo
         // complete Model Studio OpenAI family. The `*Anthropic` identities
         // speak the Messages dialect and are never verified here.
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioCodingPlan => {
-            token_plan_chat || coding_plan_chat
+            token_plan_chat || coding_plan_chat || classic_dashscope_chat
         }
         _ => false,
     }
@@ -5201,6 +5210,51 @@ mod alias_thinking_detection_tests {
         // #3016: Moonshot's native endpoint streams Kimi thinking as
         // reasoning_content.
         assert!(provider_accepts_reasoning_content(ApiProvider::Moonshot));
+    }
+
+    /// Alibaba's classic pay-as-you-go DashScope endpoints are genuine
+    /// Alibaba Chat Completions hosts serving the same models; before
+    /// 2026-08-04 they were missing from the verifier allowlist, so every
+    /// reasoning control was silently stripped there (fail-closed feature
+    /// loss, not a leak). The intl spelling matches provider_defaults.
+    #[test]
+    fn classic_dashscope_hosts_are_verified_modelstudio_chat_routes() {
+        for base_url in [
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/",
+        ] {
+            assert!(
+                super::is_exact_modelstudio_chat_route(
+                    ApiProvider::ModelstudioTokenPlan,
+                    base_url
+                ),
+                "{base_url}"
+            );
+            let mut body = json!({});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::ModelstudioTokenPlan,
+                base_url,
+                "qwen3.7-plus",
+                Some("off"),
+            );
+            assert_eq!(body["enable_thinking"], json!(false), "{base_url}: {body}");
+        }
+        // Lookalike hosts stay unverified — fail closed.
+        for base_url in [
+            "https://dashscope.aliyuncs.com.evil.example/compatible-mode/v1",
+            "https://notdashscope.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/other-path/v1",
+        ] {
+            assert!(
+                !super::is_exact_modelstudio_chat_route(
+                    ApiProvider::ModelstudioTokenPlan,
+                    base_url
+                ),
+                "{base_url}"
+            );
+        }
     }
 
     #[test]

@@ -159,6 +159,13 @@ impl DeepSeekClient {
             Some("off" | "disabled" | "none" | "false")
                 if (is_minimax || is_deepseek || is_modelstudio) && thinking_capable =>
             {
+                // Deliberately includes thinking-only Model Studio models
+                // (qwen3.8-max family): unlike the chat dialect's
+                // enable_thinking switch, the Messages endpoint documents the
+                // portable {"type":"disabled"} shape for them
+                // (alibabacloud.com/help/en/model-studio/anthropic-api-messages)
+                // — pinned by modelstudio_messages_body_requests_thinking_
+                // with_budget. Re-checked 2026-08-04.
                 body["thinking"] = json!({ "type": "disabled" });
             }
             Some("off" | "disabled" | "none" | "false") => {}
