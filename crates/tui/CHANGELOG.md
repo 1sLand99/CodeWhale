@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Surfaces no longer claim an OS sandbox on platforms that cannot enforce one.
+  The policy resolver takes no platform input, so on default Linux (bubblewrap
+  is opt-in) and on all Windows the header chip read `files: workspace` and
+  `/status` read `sandbox workspace-write` while nothing was restricted. Both
+  now resolve the real backend and say `(unenforced)`.
+- `tool_category` hook conditions matched only retired tool names, so a
+  `category = "shell"` **deny** hook — the security control `docs/HOOKS.md`
+  documents — silently never fired. Categories now use the registered names,
+  and multi-action tools classify by action.
+- A `Retry-After` header of `-5`, `nan`, or `1e300` crashed the request task
+  (`Duration::from_secs_f64` panics on a negative). Parsing is now guarded and
+  bounded to one hour.
+- Bearer tokens no longer leak into operator-visible receipts. `Authorization:
+  Bearer <jwt>` split into two tokens and the JWT matched no redaction rule;
+  prefix matching was also case-sensitive, so `SK-live-…` survived.
+- `prune_older_than` destroyed the NEWEST rollback snapshots and kept the old
+  ones — on every boot, for any workspace with snapshots spanning the retention
+  window. Both prune paths now share one orphan-chain rebuild and preserve each
+  survivor's real timestamp.
+- An absolute or relative command path no longer defeats every execpolicy deny
+  rule (`/bin/rm -rf /` did not match a `rm -rf /` rule), and a typed `Allow`
+  rule no longer auto-approves a chained suffix such as `git log ; curl … | sh`.
+- Wrong types on `File` read range params and `Bash` stdin/cwd/task_id are now
+  errors instead of silent defaults — a `start_line:"1200"` string used to
+  return the head of the file, and a non-string `stdin` ran the command with no
+  stdin and reported success.
+- Multibyte tool ids no longer panic the context inspector, wide (CJK) text no
+  longer overflows the decision card, and a hostname like `127.evil.example.com`
+  is no longer treated as loopback.
+- Refusals name calls the model can actually make (`rlm action='open'` rather
+  than a retired `rlm_open`; `Bash` rather than `exec_shell`).
 
 - Sub-agent dispatch no longer aborts the process. The Tokio runtime was built
   by `#[tokio::main]`, leaving every worker thread on the 2 MiB default while
