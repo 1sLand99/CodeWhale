@@ -477,6 +477,60 @@ async fn forced_off_run_preserves_a_consenting_users_state() {
     );
 }
 
+/// The documented one-command kill switch stops collection and destroys
+/// nothing.
+///
+/// `CODEWHALE_TELEMETRY=0` used to resolve as an *answer*, so it took the
+/// destructive opt-out branch: an agent harness that set it for one command
+/// deleted the install id and truncated the dry-run records of the person who
+/// owns the machine, and the "permanent" tombstone it left was cleared by the
+/// user's very next ordinary run. Off for the run, and only for the run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_scoped_kill_switch_preserves_a_consenting_users_state() {
+    let server = start_recorder().await;
+    let fixture = Fixture::new().with_endpoint(&server.uri());
+    let root = fixture.telemetry_root();
+    seed_consenting_home(&root);
+    let before = snapshot(&root);
+    fixture.write_config("telemetry = true\n");
+    fixture.record_notice(true);
+
+    for value in ["0", "off", "false"] {
+        fixture
+            .command()
+            .env("CODEWHALE_TELEMETRY", value)
+            .args([
+                "--config",
+                fixture.config_path.to_str().expect("config path"),
+                "completions",
+                "bash",
+            ])
+            .output()
+            .expect("run codewhale-tui completions");
+
+        assert_no_batches(&server, "a run-scoped kill switch").await;
+        assert!(
+            !root.join("disabled").exists(),
+            "`CODEWHALE_TELEMETRY={value}` tombstoned a machine nobody opted out"
+        );
+        assert_eq!(
+            snapshot(&root),
+            before,
+            "`CODEWHALE_TELEMETRY={value}` touched a consenting user's telemetry state"
+        );
+    }
+
+    // And the persistent switch still is the destructive one, on the same
+    // home, so the two are not merely both no-ops here.
+    fixture.write_config("telemetry = false\n");
+    fixture.run_completions();
+    assert!(
+        root.join("disabled").exists(),
+        "the config-file opt-out must still wipe and tombstone"
+    );
+    assert!(!root.join("install_id.json").exists());
+}
+
 /// A run that was never permitted to collect creates no directory at all —
 /// which is also what makes the process panic hook, installed before the
 /// command line is even parsed, write nothing for a disabled user.

@@ -61,6 +61,16 @@ fn stale_setup() -> SetupState {
 
 /// One instance of every event variant, populated with the most adversarial
 /// values the schema permits.
+///
+/// **This list is hand-written, and the compiler cannot make you extend it.**
+/// A new `Event` variant carrying a free-form `String` would be walked by none
+/// of the red-line tests below — they all start here — and `golden_payload_v1`
+/// would still pass, because it serializes this same fixture. Nothing closes
+/// that hole from inside this file; enumerating an enum's variants needs
+/// reflection this workspace deliberately does not depend on. What does bite is
+/// [`Event::is_bounded`], whose `match self` is exhaustive: adding a variant
+/// fails the build until its author states a bound. If you are that author,
+/// add the variant here too.
 fn every_event() -> Vec<Event> {
     vec![
         Event::InstallOrUpgrade {

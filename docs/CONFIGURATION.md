@@ -1494,12 +1494,18 @@ If you are upgrading from older releases:
   default**. Setting it to `true` is only half of the switch: nothing is
   collected unless the first-run notice has also been answered with "Enable" on
   this machine, so a `telemetry = true` written before 0.9.4 stays inert. An
-  explicit `false` is an *answer* — it deletes the random install id, truncates
-  every buffered event, and leaves a permanent tombstone — while the unset
-  default simply never collects. Override per process with
-  `CODEWHALE_TELEMETRY` (legacy alias `DEEPSEEK_TELEMETRY`), where an explicit
-  "off" is a hard floor that beats both this key and `--telemetry true`. A
-  repo-local `.codewhale/config.toml` cannot set it. Full schema and red lines:
+  explicit `false` here is the *opt-out* — it deletes the random install id,
+  truncates every buffered event, and leaves a tombstone that every later run
+  re-asserts for as long as the key says `false` — while the unset default
+  simply never collects. It is also a floor: `--telemetry true` and
+  `CODEWHALE_TELEMETRY=1` both lose to it, and turning telemetry back on means
+  writing `true` here. Override per process with `CODEWHALE_TELEMETRY` (legacy
+  alias `DEEPSEEK_TELEMETRY`), where an explicit "off" is a hard floor that
+  beats both this key and `--telemetry true` — but is a *kill switch*, not an
+  opt-out: it stops the run and erases nothing, so a harness disabling
+  telemetry for one command never discards the machine owner's install id or
+  dry-run records. A repo-local `.codewhale/config.toml` cannot set it. Full
+  schema and red lines:
   [`TELEMETRY.md`](TELEMETRY.md).
 - `telemetry_endpoint` (string, optional): where batches are POSTed. **Unset by
   default, and 0.9.4 ships with no endpoint configured** — with no endpoint an
