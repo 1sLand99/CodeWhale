@@ -251,13 +251,18 @@ Useful environment variables:
 
 | Variable                            | Purpose                                                                                |
 | ----------------------------------- | -------------------------------------------------------------------------------------- |
-| `CODEWHALE_VERSION`                 | Pin which release the wrapper downloads (canonical)                                    |
-| `DEEPSEEK_TUI_VERSION`              | Legacy alias for `CODEWHALE_VERSION` (defaults to `codewhaleBinaryVersion`)            |
+| `DEEPSEEK_TUI_VERSION`              | Pin which release the wrapper downloads (defaults to `codewhaleBinaryVersion`)         |
+| `DEEPSEEK_VERSION`                  | Fallback alias, checked after `DEEPSEEK_TUI_VERSION`                                   |
 | `DEEPSEEK_TUI_GITHUB_REPO`          | Point the downloader at a fork (`owner/repo`)                                          |
 | `DEEPSEEK_TUI_RELEASE_BASE_URL`     | Override the download root (e.g. an internal mirror or release-asset proxy)            |
 | `DEEPSEEK_TUI_FORCE_DOWNLOAD=1`     | Re-download even if a cached binary marker matches                                     |
 | `DEEPSEEK_TUI_DISABLE_INSTALL=1`    | Skip the `postinstall` download entirely (CI smoke, vendored binaries)                 |
 | `DEEPSEEK_TUI_OPTIONAL_INSTALL=1`   | Don't fail `npm install` on download/extract errors — useful in CI matrices            |
+
+These keep the `DEEPSEEK_*` spelling because the npm wrapper reads exactly
+these names and no others (`npm/codewhale/scripts/install.js:88-90`). There is
+no `CODEWHALE_VERSION` — setting it has no effect. (The `CODEWHALE_*` rename
+applies to the runtime's own environment variables, not to the installer.)
 
 > **Slow npm download from mainland China?** If `npm install` itself is slow
 > (not just the postinstall binary download), use an npm registry mirror:

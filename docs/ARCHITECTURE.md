@@ -2,7 +2,8 @@
 
 This document provides an overview of the codewhale architecture for developers and contributors.
 
-Current boundary note (v0.9.1):
+Current boundary note (read the workspace version from `Cargo.toml`; this
+boundary has held since v0.9.1):
 - `crates/tui` is still the live end-user runtime for the TUI, runtime API, task manager, and tool execution loop.
 - Other workspace crates are being split out incrementally, but they are not yet the sole runtime source of truth.
 - The LSP subsystem (`crates/tui/src/lsp/`) is fully wired into the engine's
@@ -93,7 +94,9 @@ Current boundary note (v0.9.1):
 - **`crates/agent`** - Model/provider registry (ModelRegistry) for resolving model IDs to provider endpoints.
 - **`crates/app-server`** - HTTP/SSE + JSON-RPC app server transport for headless agent workflows.
 - **`crates/config`** - Config loading, profiles, environment variable precedence, CLI runtime overrides.
-- **`crates/core`** - Agent loop, session management, turn orchestration, capacity flow guardrails.
+- **`crates/core`** - Agent loop, session management, turn orchestration. (The
+  "capacity flow guardrails" once listed here were part of the removed capacity
+  system; no `capacity` symbol remains in this crate.)
 - **`crates/execpolicy`** - Approval/sandbox policy engine for tool execution decisions.
 - **`crates/hooks`** - Lifecycle hooks (stdout, jsonl, webhook) for pre/post tool events.
 - **`crates/mcp`** - MCP client + stdio server for Model Context Protocol tool servers.
@@ -136,7 +139,9 @@ drives turns through Chat Completions.
   - `github.rs` - Read-only GitHub context and guarded comment/closure tools backed by `gh`
   - `automation.rs` - Model-visible scheduling tools over `AutomationManager`
   - `plan.rs` - Planning tools
-  - `subagent.rs` - Persistent sub-agent sessions
+  - `subagent/` - Sub-agent launch and supervision. The one model-facing tool
+    is `agent`; the `agent_open`/`agent_eval`/`agent_close` lifecycle surface
+    was retired (see `subagent/coord.rs:5`)
   - `spec.rs` - Tool specifications
   - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — sandboxed Python REPLs with semantic helper calls and `var_handle` output support
 
@@ -155,15 +160,15 @@ drives turns through Chat Completions.
   - `clipboard.rs` - Clipboard handling
   - `streaming.rs` - Streaming text collector
 
-- **`ui.rs`** - Legacy/simple UI utilities
-
 ### LSP Integration
 
 - **`lsp/`** - Post-edit diagnostics injection (#136)
   - `mod.rs` - `LspManager` — lazy per-language transport pool + config
   - `client.rs` - `StdioLspTransport` — JSON-RPC over stdio with `didOpen`/`didChange`/`publishDiagnostics`
   - `diagnostics.rs` - Diagnostic types, severity, and HTML-block renderer
-  - `registry.rs` - Language detection and default server map (rust-analyzer, pyright, gopls, clangd, typescript-language-server, jdtls, vue-language-server)
+  - `registry.rs` - Language detection and the default server map: `rust-analyzer`,
+    `gopls`, `pyright-langserver`, `typescript-language-server`, `jdtls`,
+    `intelephense` (PHP), `vue-language-server`, `clangd` (`lsp/registry.rs:98-110`)
   - Wired into the engine via `core/engine/lsp_hooks.rs` — called after every successful edit
 
 ### Security
@@ -185,8 +190,6 @@ drives turns through Chat Completions.
 - **`purge.rs`** - Agent-driven context purging (surgical message removal/rewriting)
 - **`pricing.rs`** - Cost estimation
 - **`prompts.rs`** - System prompt templates
-- **`project_doc.rs`** - Project documentation handling
-- **`session.rs`** - Session serialization
 - **`runtime_api.rs`** - HTTP/SSE runtime API (`codewhale serve --http`)
 - **`runtime_threads.rs`** - Durable thread/turn/item store + replayable event timeline
 - **`task_manager.rs`** - Durable queue, worker pool, task timelines and artifacts

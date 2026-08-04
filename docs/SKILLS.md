@@ -199,8 +199,9 @@ Simplified `zh` fallback). **No bundled skill ships a localized routing
 description**, and none is fabricated. The shipped contract is therefore an
 explicit, tested fallback:
 
-- For every skill in the bundle × every locale in `Locale::shipped()`
-  (`en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`, `ko`),
+- For every skill in the bundle × every locale in `Locale::shipped()` — all 15
+  of `en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`, `ko`, `ca`,
+  `de`, `fr`, `id`, `hi`, `ru`, `uk` (`crates/tui/src/localization.rs:70-88`) —
   `description_for_locale` returns the canonical English description.
 - The rendered catalogue block is byte-identical across all shipped locales.
 - Exact-tag match, primary-subtag fallback (`pt-BR` → `description_pt`), and
