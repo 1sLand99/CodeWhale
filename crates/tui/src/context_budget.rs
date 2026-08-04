@@ -14,10 +14,10 @@
 //!     can render without re-deriving thresholds.
 //!
 //! This module is the budget-math *foundation*. It is intentionally pure (no
-//! I/O, no clock, no engine/config types) so it can be unit-tested in isolation
-//! and later consumed by the engine capacity checkpoints and the TUI pressure
-//! indicator. Those consumers are wired in a separate pass; nothing here calls
-//! into them.
+//! I/O, no clock, no engine/config types) so it can be unit-tested in isolation.
+//! Its consumers live outside it and call in, never the reverse: `route_budget`
+//! and `core::engine::context` for [`ContextBudget`], `context_report` for
+//! [`PressureLevel`].
 //!
 //! ### Why the output reservation is window-dependent
 //!
@@ -31,17 +31,13 @@
 //! always clamped to leave at least [`MIN_INPUT_BUDGET_TOKENS`] of input room,
 //! so the budget can never collapse to zero on a legitimately sized window.
 
-// Foundation module: the public surface is exercised by unit tests but is not
-// yet referenced by the engine capacity checkpoints or the TUI pressure
-// indicator (those consumers are wired in a later pass). Allow dead_code so the
-// substrate can land warning-clean ahead of its callers, matching how other
-// not-yet-wired primitives in this crate are gated.
-//
-// Note: the context report now consumes `PressureLevel::from_usage_percent` and
-// `label`, but the rest of the substrate (`ContextBudget` and its methods,
-// `PressureLevel::suggests_compaction`) is still pending its engine/TUI
-// consumers, so the blanket allow stays until those land.
-#![allow(dead_code)]
+// This module IS wired. `ContextBudget` is consumed by `route_budget.rs` and
+// `core/engine/context.rs`; `PressureLevel` by `context_report.rs`. It sits on
+// the do-not-delete list in AGENTS.md because a blanket `allow(dead_code)` here,
+// plus a comment that used to claim the module was "not yet referenced," taught
+// several dead-code audits to propose deleting a live file. The allow is now
+// per-item on the three genuinely-unused methods, so anything that goes dead
+// here shows up as a warning instead of hiding behind a module-wide waiver.
 
 /// Fraction of the window, expressed as a percentage, at or above which
 /// compaction should be suggested. Mirrors the "high" pressure boundary the
@@ -124,7 +120,11 @@ impl PressureLevel {
 
     /// Whether this level is at or past the point where compaction should be
     /// suggested to the user.
+    ///
+    /// Unused by the engine today; kept as the pressure-level counterpart of
+    /// `ContextBudget::should_compact` so both live next to their thresholds.
     #[must_use]
+    #[allow(dead_code)]
     pub const fn suggests_compaction(self) -> bool {
         matches!(self, PressureLevel::High | PressureLevel::Critical)
     }
@@ -217,6 +217,7 @@ impl ContextBudget {
     /// Whether current input has reached the compaction trigger and compaction
     /// should be suggested.
     #[must_use]
+    #[allow(dead_code)]
     pub fn should_compact(&self) -> bool {
         self.window_tokens > 0 && self.input_tokens >= self.compaction_trigger_tokens
     }
@@ -224,6 +225,7 @@ impl ContextBudget {
     /// Whether another `additional_input_tokens` of input would fit within the
     /// available budget (i.e. not exceed the reserved boundary).
     #[must_use]
+    #[allow(dead_code)]
     pub fn fits_additional(&self, additional_input_tokens: u64) -> bool {
         additional_input_tokens <= self.available_input_tokens
     }
