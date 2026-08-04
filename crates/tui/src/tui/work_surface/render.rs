@@ -428,7 +428,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let start = app.work_surface.scroll_offset;
     let visible = rows.iter().skip(start).take(list_rows).collect::<Vec<_>>();
-    let role_column = agent_role_column(&visible);
+    let identity_cap = agent_identity_cap(usize::from(content_area.width));
+    let identity_column = agent_identity_column(&visible, identity_cap);
     let mut lines = Vec::with_capacity(visible.len().saturating_add(1));
     let mut hover_rows = Vec::new();
     let mut hitboxes = Vec::new();
@@ -466,8 +467,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             let laid_out = layout_agent_row(
                 usize::from(content_area.width),
                 UnicodeWidthStr::width(prefix.as_str()),
-                &row.label,
-                role_column,
+                agent_identity(row, identity_cap),
+                identity_column,
                 facts,
             );
             let (normal, muted) = agent_row_styles(app, selected, hovered, opened);
@@ -860,16 +861,46 @@ fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String {
     }
 }
 
-/// Shared width of the agent-type column across the rows painted this frame,
-/// so the objectives line up the way a fleet listing should read.
+/// Ceiling on the shared identity column, as a fraction of the row. The
+/// column is shared, so without a cap a single long nickname would widen it
+/// for every row and starve every objective on the surface. An identity wider
+/// than this is dropped for *that* row only.
+const AGENT_IDENTITY_CAP_NUMERATOR: usize = 2;
+const AGENT_IDENTITY_CAP_DENOMINATOR: usize = 5;
+
+/// Widest identity the shared column will carry at this row width.
+fn agent_identity_cap(width: usize) -> usize {
+    width
+        .saturating_mul(AGENT_IDENTITY_CAP_NUMERATOR)
+        .saturating_div(AGENT_IDENTITY_CAP_DENOMINATOR)
+}
+
+/// Which spelling of a sub-agent's identity fits the column: its nickname
+/// first, then its fleet role, then nothing.
 ///
-/// Deliberately uncapped: an agent type is either shown whole or dropped by
-/// the tier machinery. A truncated `general-purpo…` is a worse answer than no
-/// type column at all, and it would misname roles that share a prefix.
-fn agent_role_column(rows: &[&WorkRow]) -> usize {
+/// Identities are never truncated, only dropped. `Fluke the Deep…` and
+/// `general-purpo…` both misidentify an agent, and roles that share a prefix
+/// would become indistinguishable.
+fn agent_identity<'row>(row: &'row WorkRow, cap: usize) -> &'row str {
+    let Some(facts) = row.agent.as_ref() else {
+        return "";
+    };
+    for candidate in [row.label.as_str(), facts.role_label.as_str()] {
+        if !candidate.is_empty() && UnicodeWidthStr::width(candidate) <= cap {
+            return candidate;
+        }
+    }
+    ""
+}
+
+/// Shared width of the identity column across the rows painted this frame, so
+/// the objectives line up the way a fleet listing should read. Rows whose
+/// identity exceeded the cap contribute nothing, so one outlier cannot widen
+/// the column for everyone else.
+fn agent_identity_column(rows: &[&WorkRow], cap: usize) -> usize {
     rows.iter()
         .filter(|row| row.agent.is_some())
-        .map(|row| UnicodeWidthStr::width(row.label.as_str()))
+        .map(|row| UnicodeWidthStr::width(agent_identity(row, cap)))
         .max()
         .unwrap_or(0)
 }
@@ -880,17 +911,19 @@ fn agent_role_column(rows: &[&WorkRow]) -> usize {
 fn layout_agent_row(
     width: usize,
     prefix_width: usize,
-    label: &str,
-    role_column: usize,
+    identity: &str,
+    identity_column: usize,
     facts: &AgentRowFacts,
 ) -> AgentRowText {
     for tier in AGENT_ROW_TIERS {
         let receipt = agent_receipt(facts, tier);
-        let role = if tier == AgentRowTier::ObjectiveOnly || role_column == 0 {
+        let role = if tier == AgentRowTier::ObjectiveOnly || identity_column == 0 {
             String::new()
         } else {
-            let pad = role_column.saturating_sub(UnicodeWidthStr::width(label));
-            format!("{label}{}", " ".repeat(pad))
+            // A row whose own identity was dropped still reserves the column,
+            // so every objective on the surface stays on the same axis.
+            let pad = identity_column.saturating_sub(UnicodeWidthStr::width(identity));
+            format!("{identity}{}", " ".repeat(pad))
         };
         let role_cost = if role.is_empty() {
             0

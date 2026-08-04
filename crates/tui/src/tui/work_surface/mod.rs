@@ -972,10 +972,12 @@ mod tests {
             .iter()
             .find(|row| row.id.0 == "worker:agent_worker")
             .expect("agent work row");
-        // The identity column is the agent's type. It is never the raw agent
-        // id (#36), and it carries no `(+N)` while the agent is childless.
-        assert_eq!(row.label, "worker");
+        // The identity column leads with the agent's nickname and keeps the
+        // fleet role as the fallback spelling. It is never the raw agent id
+        // (#36), and carries no `(+N)` while the agent is childless.
+        assert_eq!(row.label, "Blue Whale");
         let facts = row.agent.as_ref().expect("agent row facts");
+        assert_eq!(facts.role_label, "worker");
         assert_eq!(facts.objective, "Wire settled file activity");
         assert_eq!(facts.elapsed_secs, Some(0));
         // No usage envelope has been seen, so there is no token figure at all.
@@ -1238,6 +1240,97 @@ mod tests {
             rows.iter().any(|line| line.contains("Subagents 1")),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn fleet_identity_prefers_the_nickname_and_falls_back_to_the_role() {
+        // Nicknames are CodeWhale identity, so they lead. An agent that has
+        // none falls back to its fleet role rather than showing a blank or a
+        // fabricated name.
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        let mut named = fleet_worker(
+            "agent_named",
+            "general-purpose",
+            "Streaming dead-code removal",
+            753_000,
+            SubAgentStatus::Running,
+        );
+        named.nickname = Some("Fluke".to_string());
+        app.subagent_cache.push(named);
+        app.subagent_cache.push(fleet_worker(
+            "agent_plain",
+            "general-purpose",
+            "Ambient visual calm-down",
+            741_000,
+            SubAgentStatus::Running,
+        ));
+
+        let rows = super::model::project(&mut app);
+        let row = |id: &str| {
+            rows.iter()
+                .find(|row| row.id.0 == format!("worker:{id}"))
+                .unwrap_or_else(|| panic!("row for {id}"))
+        };
+        assert_eq!(row("agent_named").label, "Fluke");
+        assert_eq!(
+            row("agent_named").agent.as_ref().expect("facts").role_label,
+            "general-purpose"
+        );
+        // No nickname: the identity and its fallback are the same string.
+        assert_eq!(row("agent_plain").label, "general-purpose");
+
+        // Both spellings share one column, so the objectives stay aligned.
+        let painted = render_rows(&mut app, 100, 5);
+        let named_line = painted
+            .iter()
+            .find(|line| line.contains("Fluke"))
+            .expect("nicknamed row");
+        let plain_line = painted
+            .iter()
+            .find(|line| line.contains("general-purpose"))
+            .expect("un-nicknamed row");
+        assert_eq!(
+            named_line.find("Streaming"),
+            plain_line.find("Ambient"),
+            "objectives must share a column:\n{named_line}\n{plain_line}"
+        );
+    }
+
+    #[test]
+    fn an_identity_too_wide_for_the_column_falls_back_without_widening_it() {
+        // The identity column is shared, so one outlier must not starve every
+        // other objective — and a name is shown whole or not at all.
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        let mut long = fleet_worker(
+            "agent_long",
+            "general-purpose",
+            "Streaming dead-code removal",
+            753_000,
+            SubAgentStatus::Running,
+        );
+        long.nickname = Some("Bartholomew the Extremely Long-Winded Humpback".to_string());
+        app.subagent_cache.push(long);
+        app.subagent_cache.push(fleet_worker(
+            "agent_plain",
+            "scout",
+            "Ambient visual calm-down",
+            741_000,
+            SubAgentStatus::Running,
+        ));
+
+        let painted = render_rows(&mut app, 100, 5);
+        let joined = painted.join("\n");
+        // The oversized nickname never renders, whole or truncated.
+        assert!(!joined.contains("Bartholomew"), "{joined}");
+        assert!(!joined.contains("Bartholom"), "{joined}");
+        // It falls back to its role, and the other row is untouched.
+        assert!(joined.contains("general-purpose"), "{joined}");
+        assert!(joined.contains("scout"), "{joined}");
+        // Neither objective was starved by the outlier.
+        assert!(joined.contains("Streaming dead-code removal"), "{joined}");
+        assert!(joined.contains("Ambient visual calm-down"), "{joined}");
     }
 
     #[test]

@@ -129,11 +129,17 @@ pub(super) struct WorkRow {
 
 /// The parts of a sub-agent row that are laid out as their own columns.
 ///
-/// `label` already carries the identity column (nesting indent, agent type,
-/// `(+N)` child count). This carries the rest: what the agent is doing, and
-/// the right-aligned receipt.
+/// `label` already carries the preferred identity column (nesting indent,
+/// nickname when the agent has one, `(+N)` child count). This carries the
+/// rest: the role-only spelling of that same column, what the agent is doing,
+/// and the right-aligned receipt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct AgentRowFacts {
+    /// The identity column spelled with the fleet role instead of the
+    /// nickname. Equal to `label` when the agent has no nickname. The
+    /// renderer falls back to this when a nickname is too wide for the
+    /// identity column — a name is shown whole or not at all.
+    pub role_label: String,
     /// What the agent was sent to do.
     pub objective: String,
     /// Wall-clock seconds, frozen once the agent is observed terminal so a
@@ -1028,6 +1034,8 @@ struct AgentRowSeed {
     agent_id: String,
     parent_run_id: Option<String>,
     role: String,
+    /// A real nickname or stable label, never the raw agent id (#36).
+    name: Option<String>,
     ranked: RankedWorkRow,
 }
 
@@ -1041,17 +1049,18 @@ fn agent_nesting_indent(depth: usize) -> String {
     }
 }
 
-/// Compose the sub-agent identity column: nesting indent, the agent's
-/// type/role, and `(+N)` when that agent has spawned children of its own.
+/// Compose the sub-agent identity column: nesting indent, who the agent is,
+/// and `(+N)` when that agent has spawned children of its own.
 ///
-/// The raw agent-id hash is never a name and is never rendered (#36); the
-/// nickname lives in Agent Details, not in this column, so the type stays
-/// scannable down the left edge the way a fleet listing should read.
-fn agent_strip_label(indent: &str, role: &str, children: usize) -> String {
+/// `who` is the agent's nickname when it has one and its fleet role when it
+/// does not. A nickname is identity that CodeWhale actually has, so it leads;
+/// the role is the honest fallback. The raw agent-id hash is never a name and
+/// is never rendered (#36).
+fn agent_strip_label(indent: &str, who: &str, children: usize) -> String {
     if children == 0 {
-        format!("{indent}{role}")
+        format!("{indent}{who}")
     } else {
-        format!("{indent}{role} (+{children})")
+        format!("{indent}{who} (+{children})")
     }
 }
 
@@ -1123,7 +1132,14 @@ fn order_agent_seeds(seeds: Vec<AgentRowSeed>) -> Vec<RankedWorkRow> {
             let seed = slots[idx].take().expect("each row emitted exactly once");
             let mut ranked = seed.ranked;
             let indent = agent_nesting_indent(depth.min(3));
-            ranked.row.label = agent_strip_label(&indent, &seed.role, child_counts[idx]);
+            let role_label = agent_strip_label(&indent, &seed.role, child_counts[idx]);
+            ranked.row.label = match seed.name.as_deref() {
+                Some(name) => agent_strip_label(&indent, name, child_counts[idx]),
+                None => role_label.clone(),
+            };
+            if let Some(facts) = ranked.row.agent.as_mut() {
+                facts.role_label = role_label;
+            }
             // `ordered_rows` re-sorts within status buckets by `order`; stamp
             // the tree position so a child sorts directly under its parent
             // whenever they share a bucket.
@@ -1163,6 +1179,14 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 .filter(|role| !role.trim().is_empty())
                 .unwrap_or_else(|| agent.agent_type.as_str())
                 .to_string();
+            // A name is a nickname or stable label — never `agent.name`,
+            // which is the raw session id hash (#36). Absent rather than
+            // fabricated, so the identity column falls back to the role.
+            let name = agent
+                .nickname
+                .clone()
+                .filter(|name| !name.trim().is_empty() && name != &agent.agent_id)
+                .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned());
             let terminal = agent_is_terminal(agent, meta);
             let objective = summarize_assignment(&agent.assignment.objective);
             let mut facts = vec![status.to_string(), objective.clone()];
@@ -1195,6 +1219,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 agent_id: agent.agent_id.clone(),
                 parent_run_id: agent.parent_run_id.clone(),
                 role,
+                name,
                 ranked: RankedWorkRow {
                     bucket,
                     order,
@@ -1212,6 +1237,9 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             agent_id: agent.agent_id.clone(),
                         }),
                         agent: Some(AgentRowFacts {
+                            // Stamped by `order_agent_seeds`, which is where
+                            // the indent and child count become known.
+                            role_label: String::new(),
                             objective,
                             elapsed_secs: Some(
                                 agent_elapsed_ms(app, &agent.agent_id, agent.duration_ms) / 1_000,
@@ -1243,6 +1271,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 let bucket = current_activity
                     .map(|activity| current_activity_status_bucket(activity.status))
                     .unwrap_or(WorkBucket::Active);
+                let name = app.agent_label_map.get(id).cloned();
                 let mut facts = vec![status.to_string()];
                 if let Some(detail) =
                     current_activity.and_then(|activity| activity.detail.as_deref())
@@ -1269,6 +1298,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                     // Role is unknown until the manager snapshot arrives;
                     // "agent" is the honest fallback, not a fabrication.
                     role: "agent".to_string(),
+                    name,
                     ranked: RankedWorkRow {
                         bucket,
                         order: 5_000usize.saturating_add(order),
@@ -1284,6 +1314,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                                 agent_id: id.clone(),
                             }),
                             agent: Some(AgentRowFacts {
+                                role_label: String::new(),
                                 // No manager snapshot yet, so there is no
                                 // assignment to quote: the live activity line
                                 // is the honest answer to "what is it doing".
