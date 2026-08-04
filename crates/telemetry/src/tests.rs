@@ -707,6 +707,101 @@ fn only_opt_out_touches_disk() {
 }
 
 #[test]
+fn the_tombstone_outlives_every_run_the_opt_out_covers() {
+    // `docs/TELEMETRY.md` says the opt-out's tombstone survives, and an
+    // adversary showed it did not: one ordinary run afterwards called
+    // `buffer::arm`, which removes the tombstone, and minted a fresh install
+    // id. Both halves of that are now impossible, and for the same reason —
+    // the opt-out is a *persisted* statement, so every later run re-reads it,
+    // takes the OptedOut branch again, and never reaches arming at all.
+    let home = temp_home();
+    let root = root_of(&home);
+    buffer::ensure_dir(&root).expect("create root");
+    seed_consenting_home(&root);
+
+    // The user writes `telemetry = false`.
+    let opted_out = resolved(false, true, None);
+    assert!(matches!(
+        decide_in_home(
+            Some(home.path()),
+            &opted_out,
+            &accepted_setup(),
+            Surface::Tui
+        ),
+        TelemetryDecision::OptedOut
+    ));
+    assert!(buffer::tombstone_present(&root));
+    let after_wipe = snapshot(&root);
+
+    // Three more launches of any surface, with the setting still in place.
+    for surface in [Surface::Tui, Surface::Exec, Surface::AppServer] {
+        let decision = decide_in_home(Some(home.path()), &opted_out, &accepted_setup(), surface);
+        assert!(
+            matches!(decision, TelemetryDecision::OptedOut),
+            "{surface:?} re-read the opt-out as {}",
+            decision.label()
+        );
+        assert!(
+            buffer::tombstone_present(&root),
+            "{surface:?} cleared the tombstone"
+        );
+        assert!(
+            !buffer::install_id_path(&root).exists(),
+            "{surface:?} minted a new identity for an opted-out machine"
+        );
+        assert_eq!(snapshot(&root), after_wipe, "{surface:?} touched disk");
+    }
+
+    // Only writing the setting back turns collection on again, and that is the
+    // one path allowed to clear the tombstone.
+    assert!(
+        decide_in_home(
+            Some(home.path()),
+            &resolved(true, false, None),
+            &accepted_setup(),
+            Surface::Tui,
+        )
+        .is_enabled()
+    );
+    buffer::arm(&root).expect("re-consent arms");
+    assert!(!buffer::tombstone_present(&root));
+}
+
+#[test]
+fn a_run_scoped_kill_switch_costs_a_consenting_user_nothing() {
+    // The documented one-command recipe — `CODEWHALE_TELEMETRY=0 codewhale` —
+    // used to take the destructive opt-out branch, so it deleted the install
+    // id and truncated the user's own dry-run records every time it was used.
+    // The resolver now reports that as "off, but nobody revoked anything", and
+    // this is the half of that contract the telemetry crate owns.
+    let home = temp_home();
+    let root = root_of(&home);
+    buffer::ensure_dir(&root).expect("create root");
+    let before = seed_consenting_home(&root);
+    let identity = std::fs::read(buffer::install_id_path(&root)).expect("seeded install id");
+
+    for _ in 0..3 {
+        let decision = decide_in_home(
+            Some(home.path()),
+            // `telemetry == false`, `telemetry_explicit_off == false`: the
+            // shape a run-scoped kill switch resolves to.
+            &resolved(false, false, None),
+            &accepted_setup(),
+            Surface::Exec,
+        );
+        assert!(matches!(decision, TelemetryDecision::ForcedOff));
+    }
+
+    assert_eq!(snapshot(&root), before, "a kill-switch run touched disk");
+    assert!(!buffer::tombstone_present(&root));
+    assert_eq!(
+        std::fs::read(buffer::install_id_path(&root)).expect("install id"),
+        identity,
+        "the install id churned across a kill-switch run"
+    );
+}
+
+#[test]
 fn an_opt_out_on_a_fresh_home_creates_nothing() {
     let home = temp_home();
     let root = root_of(&home);

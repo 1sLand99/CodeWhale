@@ -14,23 +14,42 @@ here and not in the code — or in the code and not here — fails the build.
 
 ## Turning it off
 
+There are two off switches and they do different things. Both stop collection
+completely; only one of them erases anything.
+
 ```sh
-codewhale config set telemetry false     # persistent
-CODEWHALE_TELEMETRY=0 codewhale          # one run, and a hard floor
+codewhale config set telemetry false     # opt out: stops collection and erases state
+CODEWHALE_TELEMETRY=0 codewhale          # kill switch: stops collection, erases nothing
+codewhale --telemetry false              # the same kill switch, for one command
 ```
+
+**`telemetry = false` in the config file is the opt-out.** It is a floor:
+`--telemetry true` and `CODEWHALE_TELEMETRY=1` both lose to it, because a
+setting you can undo by accident from a wrapper script is not a setting. It
+deletes the random install id, truncates every buffered event and every
+dry-run record, and writes a tombstone that a session already running re-checks
+before it appends anything and before it sends anything. If any part of that
+wipe fails, the tombstone is still there and the buffer is undrainable — a
+failed wipe fails closed. Every later run re-asserts the tombstone for as long
+as the setting stands, so it survives; turning telemetry back on means writing
+`telemetry = true` in the same place, and that is also what clears it. Nothing
+buffered before that point is ever sent.
+
+**The environment variable and the flag are kill switches, not opt-outs.**
+Telemetry is off for the run, nothing is written, nothing is sent — and
+nothing on disk is touched or deleted. That is deliberate: a harness or agent
+that sets `CODEWHALE_TELEMETRY=0` for one command must not silently discard the
+install id and the dry-run records of the person who owns the machine. If you
+want the erasing kind, use the config file.
 
 `CODEWHALE_TELEMETRY` (and its `DEEPSEEK_TELEMETRY` alias) accepts
 `0`, `1`, `true`, `false`, `yes`, `no`, `on`, `off`, `enabled`, `disabled`.
-An explicit "off" in the environment is a **floor**: it wins over
-`--telemetry true` and over `telemetry = true` in the config file. A value
-this list cannot read also resolves to off — a typo in a kill switch must
-never resolve to "on".
+A value this list cannot read also resolves to off — a typo in a kill switch
+must never resolve to "on".
 
-Turning it off is not just a flag. It deletes the random install id, truncates
-every buffered event, and writes a permanent tombstone that a session already
-running re-checks before it appends anything and before it sends anything. If
-any part of that wipe fails, the tombstone is still there and the buffer is
-permanently undrainable — a failed wipe fails closed.
+The first-run notice is not shown at all when either switch is already set:
+it never asks a question this environment would override, and answering it
+never rewrites a `telemetry = false` you put there yourself.
 
 A repo-local `.codewhale/config.toml` can set neither `telemetry` nor
 `telemetry_endpoint`, and a workspace `.env` can set neither. Someone else's
