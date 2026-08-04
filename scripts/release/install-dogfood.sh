@@ -12,7 +12,9 @@ src_dir="${1:-${repo_root}/target/release}"
 
 if [[ ! -x "${src_dir}/codewhale" || ! -x "${src_dir}/codew" || ! -x "${src_dir}/codewhale-tui" ]]; then
   echo "ERROR: expected executable codewhale, codew, and codewhale-tui in ${src_dir}" >&2
-  echo "Build first: cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
+  # Since #5245 local builds are unstamped ("(dev)"); a dogfood build must be
+  # stamped explicitly or the identity check below will (correctly) refuse it.
+  echo "Build first: DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
   exit 1
 fi
 
@@ -38,7 +40,8 @@ if [[ "${cli_version}" != *"${short_sha}"* || "${shim_version}" != *"${short_sha
   echo "  codewhale: ${cli_version}" >&2
   echo "  codew: ${shim_version}" >&2
   echo "  codewhale-tui: ${tui_version}" >&2
-  echo "Rebuild this checkout before installing." >&2
+  echo "Rebuild this checkout before installing:" >&2
+  echo "  DEEPSEEK_BUILD_SHA=\$(git rev-parse HEAD) cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
   exit 1
 fi
 cli_sha="$(shasum -a 256 "${src_dir}/codewhale" | awk '{print $1}')"

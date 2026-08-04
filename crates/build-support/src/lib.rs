@@ -5,39 +5,57 @@
 //! directives on stdout.
 //!
 //! Two different shas live here and they are not interchangeable.
-//! `DEEPSEEK_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *this checkout*
-//! and fall back to local `git rev-parse`, which is right for a `--version`
-//! string a developer reads about their own build.
+//! `DEEPSEEK_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *the build the
+//! environment asked for* (`DEEPSEEK_BUILD_SHA`/`GITHUB_SHA`); an unstamped
+//! local build renders a `(dev)` marker instead.
 //! `CODEWHALE_RELEASE_BUILD_SHA` describes a *published* binary and has no
 //! fallback at all, because it leaves the machine.
+//!
+//! ## Why the stamp never reads the local checkout (#5245)
+//!
+//! These helpers used to watch `.git/HEAD`/refs and fall back to
+//! `git rev-parse HEAD`, so every local commit invalidated the two largest
+//! compile units in the workspace (a ~14-minute release rebuild with zero
+//! code changes). And the alternative — resolving the sha at *runtime* —
+//! would lie: the binary runs inside users' repositories, and a stale binary
+//! would report whatever the checkout's HEAD is *now*, which breaks the
+//! dogfood-receipt identity `scripts/release/install-dogfood.sh` verifies.
+//! So the contract is: a sha appears in the version string only when the
+//! build environment supplied one (`DEEPSEEK_BUILD_SHA` wins over
+//! `GITHUB_SHA`), the build script reruns only when those variables change,
+//! and a build nobody stamped says `(dev)`. CI and release builds are
+//! byte-identical to the old behavior; dogfood builds pass the sha
+//! explicitly (the install script prints the exact command).
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::Path;
 
-/// Declare the rerun conditions for the build-metadata directives: the
-/// SHA-override environment variables plus the git files that track `HEAD`.
+/// Declare the rerun conditions for the build-metadata directives: the two
+/// SHA-override environment variables, and deliberately nothing about the
+/// local checkout — watching `.git` files is what made every local commit
+/// rebuild the whole crate (#5245).
 ///
-/// `manifest_dir` is the calling build script's `CARGO_MANIFEST_DIR`.
-pub fn declare_rerun_conditions(manifest_dir: &Path) {
+/// `manifest_dir` is accepted (and ignored) so build scripts keep one call
+/// shape; it documents that the decision is per-crate, not global state.
+pub fn declare_rerun_conditions(_manifest_dir: &Path) {
     println!("cargo:rerun-if-env-changed=DEEPSEEK_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
-    declare_git_head_rerun(manifest_dir);
 }
 
 /// Emit `cargo:rustc-env=DEEPSEEK_BUILD_VERSION=...` — the package version,
-/// suffixed with the short build SHA when one can be determined.
+/// suffixed with the short build SHA when the environment supplied one
+/// (`DEEPSEEK_BUILD_SHA`, then `GITHUB_SHA`), or with the literal `dev`
+/// marker when it did not. `CODEWHALE_BUILD_COMMIT` is emitted only in the
+/// stamped case.
 ///
-/// `manifest_dir` and `package_version` are the calling build script's
-/// `CARGO_MANIFEST_DIR` and `CARGO_PKG_VERSION`.
-pub fn emit_build_version(manifest_dir: &Path, package_version: &str) {
-    let commit = build_commit(manifest_dir);
+/// `package_version` is the calling build script's `CARGO_PKG_VERSION`;
+/// `manifest_dir` is accepted for call-shape stability.
+pub fn emit_build_version(_manifest_dir: &Path, package_version: &str) {
+    let commit = build_commit();
     let build_version = commit
         .as_ref()
         .and_then(|sha| short_sha(sha.clone()))
         .map(|sha| format!("{package_version} ({sha})"))
-        .unwrap_or_else(|| package_version.to_string());
+        .unwrap_or_else(|| format!("{package_version} (dev)"));
 
     println!("cargo:rustc-env=DEEPSEEK_BUILD_VERSION={build_version}");
     if let Some(commit) = commit {
@@ -64,10 +82,10 @@ pub fn declare_release_sha_rerun() {
 /// telemetry payload may carry. There is deliberately no fallback to the local
 /// checkout:
 ///
-/// - [`build_commit`] falls back to `git_commit`, so `CODEWHALE_BUILD_COMMIT`
-///   is the builder's own private `HEAD` on every local build. A maintainer
-///   running the release build this repo's own guidance prescribes would ship
-///   the sha of an unpublished tree.
+/// - `CODEWHALE_BUILD_COMMIT` historically fell back to the builder's own
+///   private `HEAD` on every local build; since #5245 it is env-only too,
+///   but this value keeps its own name and rule because it is the only sha
+///   a telemetry payload may carry.
 /// - The "was this a published release" gate proposed earlier cannot be built:
 ///   `codewhale_release::latest_release_tag_{async,blocking}` are **network
 ///   calls** to `api.github.com` that return *tag names*, not shas, so the only
@@ -96,128 +114,16 @@ pub fn release_build_sha(read_env: impl Fn(&str) -> Option<String>) -> Option<St
         .and_then(short_sha)
 }
 
-/// Tell Cargo to invalidate the cached build script output when `HEAD`
-/// moves, so the embedded short-SHA stays in sync with the checkout.
-///
-/// `.git/HEAD` only changes on branch switches and detached-HEAD moves —
-/// `git commit` on the current branch updates the underlying ref file
-/// (loose `refs/heads/<name>`, or `packed-refs` after `git pack-refs`)
-/// without touching `HEAD` itself. So when `HEAD` is a symbolic ref we
-/// also watch the resolved target and `packed-refs`. Linked worktrees keep
-/// `HEAD` in a private gitdir but store branch refs in the shared common gitdir,
-/// so the symbolic target must be watched from that common directory. A
-/// non-existent `rerun-if-changed` path is treated as "always changed" by
-/// Cargo, which covers the loose→packed transition.
-fn declare_git_head_rerun(manifest_dir: &Path) {
-    let workspace_root = manifest_dir.join("..").join("..");
-    let git_meta = workspace_root.join(".git");
-
-    let gitdir = if git_meta.is_dir() {
-        git_meta
-    } else if git_meta.is_file() {
-        // Worktree pointer file: watch it directly, then follow `gitdir:`.
-        println!("cargo:rerun-if-changed={}", git_meta.display());
-        let Ok(contents) = std::fs::read_to_string(&git_meta) else {
-            return;
-        };
-        let Some(rest) = contents.lines().find_map(|l| l.strip_prefix("gitdir:")) else {
-            return;
-        };
-        let trimmed = rest.trim();
-        if Path::new(trimmed).is_absolute() {
-            PathBuf::from(trimmed)
-        } else {
-            workspace_root.join(trimmed)
-        }
-    } else {
-        return;
-    };
-
-    let head = gitdir.join("HEAD");
-    println!("cargo:rerun-if-changed={}", head.display());
-
-    if let Ok(contents) = std::fs::read_to_string(&head)
-        && let Some(target) = parse_symbolic_ref(&contents)
-    {
-        let common_gitdir = git_common_dir(&gitdir);
-        println!(
-            "cargo:rerun-if-changed={}",
-            common_gitdir.join(target).display()
-        );
-        println!(
-            "cargo:rerun-if-changed={}",
-            common_gitdir.join("packed-refs").display()
-        );
-    }
+fn build_commit() -> Option<String> {
+    build_commit_with(|name| std::env::var(name).ok())
 }
 
-/// Resolve the shared ref store for a normal repository or a linked worktree.
-/// Git writes `commondir` in a linked worktree's private gitdir; its value is
-/// relative to that directory unless Git supplied an absolute path.
-fn git_common_dir(gitdir: &Path) -> PathBuf {
-    let commondir = gitdir.join("commondir");
-    let Ok(contents) = std::fs::read_to_string(commondir) else {
-        return gitdir.to_path_buf();
-    };
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        return gitdir.to_path_buf();
-    }
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        gitdir.join(path)
-    }
-}
-
-/// If `.git/HEAD` is a symbolic ref (`ref: refs/heads/...`) return the
-/// target ref path. Returns `None` for a detached HEAD (raw SHA).
-fn parse_symbolic_ref(head_contents: &str) -> Option<&str> {
-    head_contents
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("ref:"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-}
-
-fn build_commit(manifest_dir: &Path) -> Option<String> {
-    env_commit("DEEPSEEK_BUILD_SHA")
-        .or_else(|| env_commit("GITHUB_SHA"))
-        .or_else(|| git_commit(manifest_dir))
-}
-
-fn env_commit(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(full_sha)
-}
-
-fn git_commit(manifest_dir: &Path) -> Option<String> {
-    let top_level_output = Command::new("git")
-        .args(["-C"])
-        .arg(manifest_dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !top_level_output.status.success() {
-        return None;
-    }
-    let top_level = PathBuf::from(String::from_utf8_lossy(&top_level_output.stdout).trim());
-    if !top_level.join("Cargo.toml").is_file() || !top_level.join("crates/tui").is_dir() {
-        return None;
-    }
-
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(top_level)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    full_sha(String::from_utf8_lossy(&output.stdout).to_string())
+/// The stamping decision with the environment injected, so the no-local-
+/// fallback contract is testable without mutating the process (#5245).
+fn build_commit_with(read_env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    read_env("DEEPSEEK_BUILD_SHA")
+        .and_then(full_sha)
+        .or_else(|| read_env("GITHUB_SHA").and_then(full_sha))
 }
 
 fn full_sha(value: String) -> Option<String> {
@@ -238,27 +144,7 @@ fn short_sha(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{full_sha, git_common_dir, parse_symbolic_ref, release_build_sha, short_sha};
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    #[test]
-    fn symbolic_ref_strips_prefix_and_whitespace() {
-        assert_eq!(
-            parse_symbolic_ref("ref: refs/heads/main\n"),
-            Some("refs/heads/main")
-        );
-    }
-
-    #[test]
-    fn symbolic_ref_handles_no_trailing_newline() {
-        assert_eq!(
-            parse_symbolic_ref("ref: refs/heads/work/v0.8.26-security"),
-            Some("refs/heads/work/v0.8.26-security")
-        );
-    }
+    use super::{full_sha, release_build_sha, short_sha};
 
     #[test]
     fn full_commit_requires_exact_forty_hex_characters() {
@@ -316,40 +202,29 @@ mod tests {
         );
     }
 
+    /// #5245 contract: the version stamp reads ONLY the two environment
+    /// variables. There is no fallback to the local checkout, so a plain
+    /// local build renders `(dev)` and — the actual point — the build script
+    /// declares no `.git` rerun paths, meaning `git commit` no longer
+    /// invalidates the two largest compile units in the workspace.
     #[test]
-    fn detached_head_is_not_a_symbolic_ref() {
+    fn the_build_commit_never_reads_the_local_checkout() {
+        // This test runs inside the real repository; if a git fallback still
+        // existed it would resolve a sha here. Absent env vars must mean
+        // absent commit, in the repo or out of it.
+        assert_eq!(super::build_commit_with(|_| None), None);
+        let ci = "abcdef0123456789abcdef0123456789abcdef01";
         assert_eq!(
-            parse_symbolic_ref("506343f44e48b9c2c8d6b2d3e8e8e8e8e8e8e8e8\n"),
-            None
+            super::build_commit_with(|name| (name == "GITHUB_SHA").then(|| ci.to_string())),
+            Some(ci.to_string())
         );
-    }
-
-    #[test]
-    fn empty_input_returns_none() {
-        assert_eq!(parse_symbolic_ref(""), None);
-        assert_eq!(parse_symbolic_ref("ref: \n"), None);
-    }
-
-    #[test]
-    fn linked_worktree_uses_the_common_ref_store() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "codewhale-build-support-{}-{unique}",
-            std::process::id()
-        ));
-        let common = root.join(".git");
-        let worktree_gitdir = common.join("worktrees/candidate");
-        fs::create_dir_all(&worktree_gitdir).expect("create worktree gitdir");
-        fs::write(worktree_gitdir.join("commondir"), "../..\n").expect("write commondir");
-
         assert_eq!(
-            fs::canonicalize(git_common_dir(&worktree_gitdir)).expect("canonical common gitdir"),
-            fs::canonicalize(&common).expect("canonical expected gitdir")
+            super::build_commit_with(|name| match name {
+                "DEEPSEEK_BUILD_SHA" => Some("f".repeat(40)),
+                "GITHUB_SHA" => Some(ci.to_string()),
+                _ => None,
+            }),
+            Some("f".repeat(40))
         );
-
-        fs::remove_dir_all(root).expect("remove isolated test directory");
     }
 }
