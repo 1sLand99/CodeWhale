@@ -15505,3 +15505,121 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         "the wake must queue a goal continuation that will claim the evidence"
     );
 }
+
+/// The user's prompt reaches the model **exactly once**, on every request of
+/// every turn.
+///
+/// A dogfood session (`qwen3.8-max`, 2026-08-04) had the model narrate "the
+/// user resent the same brief (probably a relay of the queued message)" in six
+/// separate thinking blocks. The persisted session proves nothing was resent:
+/// the brief occurs in exactly one `role: "user"` message and every message
+/// preceding a "resent" narration is an ordinary `tool_result`. The model
+/// confabulated the repetition.
+///
+/// That makes this the invariant worth pinning rather than a bug worth fixing:
+/// no per-turn re-append, no per-step re-append, and no duplication inside the
+/// constructed message. It is also the invariant the prefix-cache design
+/// depends on — a re-sent prompt would break caching on every turn.
+///
+/// Two turns, each with a tool step, gives four provider requests. The turn-1
+/// sentinel must appear in exactly one content block of each of them.
+#[tokio::test]
+async fn user_prompt_reaches_the_model_exactly_once_per_request() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const FIRST_TURN_SENTINEL: &str = "SENTINEL-BRIEF-ALPHA-do-not-redeliver";
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("README.md"), "once-only-proof\n").expect("write fixture");
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-read-turn-1",
+            "File",
+            r#"{"action":"read","path":"README.md"}"#,
+        ),
+        canned::simple_text_turn("First turn complete."),
+        canned::tool_call_turn(
+            "call-read-turn-2",
+            "File",
+            r#"{"action":"read","path":"README.md"}"#,
+        ),
+        canned::simple_text_turn("Second turn complete."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    for content in [
+        format!("{FIRST_TURN_SENTINEL} — do the first thing."),
+        "A second, unrelated instruction.".to_string(),
+    ] {
+        handle
+            .send(external_user_message_op(
+                &content,
+                AppMode::Agent,
+                &Config::default(),
+            ))
+            .await
+            .expect("send turn");
+
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for turn")
+                .expect("engine event stream closed");
+            if let Event::TurnComplete { status, error, .. } = event {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+        }
+    }
+
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 4, "two turns of two steps each");
+
+    for (index, request) in requests.iter().enumerate() {
+        let carriers = request
+            .messages
+            .iter()
+            .filter(|message| {
+                message.content.iter().any(|block| match block {
+                    ContentBlock::Text { text, .. } => text.contains(FIRST_TURN_SENTINEL),
+                    ContentBlock::ToolResult { content, .. } => {
+                        content.contains(FIRST_TURN_SENTINEL)
+                    }
+                    _ => false,
+                })
+            })
+            .count();
+        assert_eq!(
+            carriers, 1,
+            "request {index} must carry the turn-1 prompt in exactly one message"
+        );
+
+        let occurrences: usize = request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .map(|block| match block {
+                ContentBlock::Text { text, .. } => text.matches(FIRST_TURN_SENTINEL).count(),
+                ContentBlock::ToolResult { content, .. } => {
+                    content.matches(FIRST_TURN_SENTINEL).count()
+                }
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            occurrences, 1,
+            "request {index} must contain the turn-1 prompt text exactly once"
+        );
+    }
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
