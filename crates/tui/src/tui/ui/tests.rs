@@ -19904,281 +19904,542 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
 /// fixed band evicts the whale on exactly the terminal sizes the release
 /// evidence is captured at. These tests pin the operator-visible threshold at
 /// 80 columns; the row-by-row arithmetic lives in `ui::rail_row_budget`.
-fn idle_rail_app(panel: crate::tui::work_surface::RailPanel) -> App {
-    let mut app = create_test_app();
-    // Pin the chrome the budget charges for: `App::new` reads the developer's
-    // real settings.toml, and a host with `composer_border = false` would
-    // shift every threshold below by a row.
-    app.composer_border = true;
-    // Same reason, and it bites harder: `work_surface_top_height` is
-    // user-settable over 2..=16 and drag-resizing the divider persists it. A
-    // developer whose settings.toml carries a short strip asks for a short
-    // strip and gets one, at a *lower* row threshold than the default 8 — so
-    // leaving this unpinned makes the thresholds below depend on whoever runs
-    // the suite. Pin the shipped default.
-    app.work_surface.top_height = 8;
-    app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Top;
-    app.work_surface.panel = panel;
-    app
-}
+///
+/// The module is named `work_surface` on purpose. The rail regression these
+/// tests exist to catch shipped anyway because the work-surface change was
+/// verified with `cargo test -- work_surface::`, which matches only
+/// `tui::work_surface::tests` and skipped every assertion below. Under this
+/// name the same filter reaches them: `tui::ui::tests::work_surface::…`.
+mod work_surface {
+    use super::*;
+    use crate::tui::ui::{rail_min_chat_width, rail_row_budget};
+    use crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH;
+    use crate::tui::widgets::should_render_empty_state;
+    use crate::tui::work_surface::{RailPanel, WorkSurfacePlacement};
 
-/// The whale's belly: a run of upper-block glyphs no other chrome draws.
-fn has_idle_whale(rendered: &str) -> bool {
-    rendered.contains("▀▀▀▀▀▀▀▀")
-}
+    /// The lowest strip a Top panel may render at: one content row plus the
+    /// divider. Mirrors `work_surface::model::TOP_HEIGHT_MIN`, which is
+    /// `pub(super)` to that module and so not nameable from here.
+    const TOP_HEIGHT_MIN: u16 = 2;
 
-#[test]
-fn rail_strip_yields_its_rows_so_the_idle_whale_survives_at_24_rows() {
-    // Agents, not Pinned: an empty Pinned panel now collapses on its own, so it
-    // cannot exercise the row budget. Agents still holds its strip while idle.
-    let panel = crate::tui::work_surface::RailPanel::Agents;
-    // Below the threshold the always-on panel strip yields entirely and the
-    // ocean keeps its full height. 24 rows is the release-evidence size the
-    // rail regression took the whale away from.
-    for rows in [22_u16, 23, 24, 25] {
+    fn idle_rail_app(panel: RailPanel) -> App {
+        let mut app = create_test_app();
+        // Pin the chrome the budget charges for: `App::new` reads the developer's
+        // real settings.toml, and a host with `composer_border = false` would
+        // shift every threshold below by a row.
+        app.composer_border = true;
+        // Same reason, and it bites harder: `work_surface_top_height` is
+        // user-settable over 2..=16 and drag-resizing the divider persists it. A
+        // developer whose settings.toml carries a short strip asks for a short
+        // strip and gets one, at a *lower* row threshold than the default 8 — so
+        // leaving this unpinned makes the thresholds below depend on whoever runs
+        // the suite. Pin the shipped default.
+        app.work_surface.top_height = 8;
+        app.work_surface.placement = WorkSurfacePlacement::Top;
+        app.work_surface.panel = panel;
+        app
+    }
+
+    /// The nickname the seeded sub-agent renders under. A marker the test owns,
+    /// rather than chrome the shell might stop drawing.
+    const AGENT_MARK: &str = "railprobe";
+
+    /// A rail app whose panel actually has something to show.
+    ///
+    /// Since `4206ebd2c` an empty Top panel collapses to zero rows — "an empty
+    /// panel is not a panel" — so an idle `Agents` (or `Pinned`) panel measures
+    /// 0 at every terminal size. A *yield* rule is only observable when there
+    /// are rows to yield, so these tests seat real content first; without it
+    /// every assertion below would be about a strip that was never going to
+    /// exist.
+    ///
+    /// `Agents` is the panel that can hold content without ending the idle
+    /// session: `should_render_empty_state` looks at history, todos, goal and
+    /// background tasks, and a cached sub-agent is in none of them. A `Pinned`
+    /// panel with content needs a goal or a checklist, either of which puts the
+    /// session to work and takes the ocean away — which is the other half of
+    /// what is being measured here.
+    fn busy_rail_app(panel: RailPanel) -> App {
         let mut app = idle_rail_app(panel);
-        let rendered = render_underwater_test_app(&mut app, 80, rows);
-        assert!(
-            has_idle_whale(&rendered),
-            "the idle whale must survive at 80x{rows}: decorative water outranks \
-             a panel nobody is watching\n{rendered}"
+        let mut agent = make_subagent(
+            "agent_rail_probe",
+            crate::tools::subagent::SubAgentStatus::Running,
         );
+        agent.nickname = Some(AGENT_MARK.to_string());
+        app.subagent_cache.push(agent);
         assert!(
-            !rendered.contains(panel.title()),
-            "the {panel:?} strip must be absent at 80x{rows}, not squeezed to a \
-             two-row stub\n{rendered}"
+            should_render_empty_state(&app),
+            "the Agents fixture must leave the session idle — the ocean it is \
+             measured against only draws in the empty state"
+        );
+        app
+    }
+
+    /// The whale's belly: a run of upper-block glyphs no other chrome draws.
+    fn has_idle_whale(rendered: &str) -> bool {
+        rendered.contains("▀▀▀▀▀▀▀▀")
+    }
+
+    /// The strip height for this frame, measured the way the shell measures it:
+    /// the idle predicate, then the budget, then `height()` — the same three
+    /// calls, in the same order, that `ui::render` makes.
+    ///
+    /// This replaces the old `rendered.contains(panel.title())` probe, which is
+    /// no longer capable of reporting a strip at all: `4206ebd2c` made the only
+    /// Top title an active goal, so panel chrome ("Agents", "Pinned") is
+    /// deliberately never painted there. Worse than under-reporting, the probe
+    /// *passed* every `!contains(title)` assertion for free, so the negative
+    /// half of the yield rule had quietly stopped testing anything.
+    /// `a_strip_that_measures_nonzero_is_a_strip_that_paints` keeps this
+    /// number honest against what the frame actually contains, and
+    /// `top_placement_never_paints_panel_chrome_as_a_title` is the guard that
+    /// fails if Top starts painting titles again.
+    fn strip_height(app: &mut App, width: u16, rows: u16) -> u16 {
+        let idle_empty = should_render_empty_state(app);
+        let budget = rail_row_budget(app, width, rows, idle_empty);
+        crate::tui::work_surface::height(app, width, rows, budget)
+    }
+
+    /// The rows the panel asks for when nothing constrains it: auto-fitted
+    /// content plus the divider. Derived rather than hard-coded, so adding a
+    /// column or a line to the Agents panel moves the yardstick instead of
+    /// breaking the yield rule that is measured against it.
+    fn natural_strip_rows(panel: RailPanel) -> u16 {
+        let mut app = busy_rail_app(panel);
+        strip_height(&mut app, 80, 48)
+    }
+
+    #[test]
+    fn rail_strip_yields_its_rows_so_the_idle_whale_survives_at_24_rows() {
+        let panel = RailPanel::Agents;
+        let natural = natural_strip_rows(panel);
+        assert!(
+            natural > TOP_HEIGHT_MIN,
+            "the fixture must want more rows than the floor, or 'the strip \
+             yielded rows' is unobservable (natural={natural})"
+        );
+
+        // Below the threshold the rail hands rows back to the water: it renders
+        // shorter than it wants, or not at all, and the ocean keeps its floor.
+        // 24 rows is the release-evidence size the rail regression took the
+        // whale away from.
+        for rows in [22_u16, 23, 24, 25] {
+            let mut app = busy_rail_app(panel);
+            let budget = rail_row_budget(&app, 80, rows, true);
+            let strip = strip_height(&mut app, 80, rows);
+            assert!(
+                strip < natural,
+                "at 80x{rows} the {panel:?} strip took its full {natural} rows \
+                 instead of yielding; decorative water outranks a panel nobody \
+                 is watching"
+            );
+            assert!(
+                strip <= budget,
+                "at 80x{rows} the {panel:?} strip took {strip} rows out of a \
+                 {budget}-row budget — those rows belong to the transcript"
+            );
+            // The old fixed-height rail expressed "no stub" as "absent below the
+            // threshold": a four-row band squeezed to two was a title over one
+            // clipped line. Auto-fit made that framing obsolete — a two-row
+            // Agents strip is the running/done status plus the divider, the
+            // panel's most useful line, not a stub. What is still worth
+            // forbidding is a strip that is *only* its own divider.
+            assert!(
+                strip == 0 || strip >= TOP_HEIGHT_MIN,
+                "at 80x{rows} the strip is {strip} row(s): a divider with no \
+                 panel under it. Yield to zero or keep a content row."
+            );
+            let rendered = render_underwater_test_app(&mut app, 80, rows);
+            assert!(
+                has_idle_whale(&rendered),
+                "the idle whale must survive at 80x{rows}: decorative water \
+                 outranks a panel nobody is watching\n{rendered}"
+            );
+        }
+
+        // At and above the threshold the rows are genuinely spare, so the rail
+        // takes its full auto-fit height over an intact 16-row ocean.
+        for rows in [26_u16, 27, 28, 30] {
+            let mut app = busy_rail_app(panel);
+            let strip = strip_height(&mut app, 80, rows);
+            assert_eq!(
+                strip, natural,
+                "the {panel:?} strip must render at its full height once the \
+                 transcript can spare the rows at 80x{rows}"
+            );
+            let rendered = render_underwater_test_app(&mut app, 80, rows);
+            assert!(
+                has_idle_whale(&rendered),
+                "the idle whale must still be earned at 80x{rows}\n{rendered}"
+            );
+            assert!(
+                rendered.contains(AGENT_MARK),
+                "the strip measures {strip} rows at 80x{rows} but the agent it \
+                 is made of is not on screen\n{rendered}"
+            );
+        }
+
+        // 21 rows cannot seat the ocean at any strip height. That is pre-rail
+        // behavior and the yield rule must not pretend otherwise.
+        let mut app = busy_rail_app(panel);
+        assert_eq!(
+            strip_height(&mut app, 80, 21),
+            0,
+            "80x21 has no spare rows for a strip at all"
+        );
+        let rendered = render_underwater_test_app(&mut app, 80, 21);
+        assert!(
+            !has_idle_whale(&rendered),
+            "80x21 has no room for the ocean even with no strip at all\n{rendered}"
         );
     }
 
-    // At and above the threshold the rows are genuinely spare, so the rail
-    // behaves exactly as it does today: a four-row panel over a 16-row ocean.
-    for rows in [26_u16, 27, 28, 30] {
-        let mut app = idle_rail_app(panel);
-        let rendered = render_underwater_test_app(&mut app, 80, rows);
+    #[test]
+    fn the_rail_never_costs_the_ocean_a_single_terminal_size() {
+        // The whole point of the row budget, stated directly and swept rather
+        // than sampled: turning the rail on must not remove the whale from any
+        // size it would have had with the rail off. This is what the old
+        // "the strip must be absent at 22..=25" assertion was reaching for —
+        // that framing only worked while the strip was a fixed four-row band,
+        // and it now under-tests (four hand-picked sizes) and over-constrains
+        // (a two-row strip that costs the water nothing is fine).
+        //
+        // A rail that never renders costs the ocean nothing either, so pin that
+        // there is a strip to compare against before comparing.
+        let mut probe = busy_rail_app(RailPanel::Agents);
         assert!(
-            has_idle_whale(&rendered),
-            "the idle whale must still be earned at 80x{rows}\n{rendered}"
+            strip_height(&mut probe, 80, 40) > 0,
+            "no strip renders at 80x40, so 'the rail costs the ocean nothing' is \
+             a statement about nothing"
         );
-        assert!(
-            rendered.contains(panel.title()),
-            "the {panel:?} strip must render once the transcript can spare the \
-             rows at 80x{rows}\n{rendered}"
-        );
+
+        for rows in 18_u16..=40 {
+            let mut with_rail = busy_rail_app(RailPanel::Agents);
+            let with = has_idle_whale(&render_underwater_test_app(&mut with_rail, 80, rows));
+
+            let mut without_rail = busy_rail_app(RailPanel::Agents);
+            without_rail.work_surface.placement = WorkSurfacePlacement::Off;
+            let without = has_idle_whale(&render_underwater_test_app(&mut without_rail, 80, rows));
+
+            assert_eq!(
+                with, without,
+                "at 80x{rows} the rail changed whether the ocean draws \
+                 (rail on: {with}, rail off: {without}) — the strip is spending \
+                 rows the transcript needed"
+            );
+        }
     }
 
-    // 21 rows cannot seat the ocean at any strip height. That is pre-rail
-    // behavior and the yield rule must not pretend otherwise.
-    let mut app = idle_rail_app(panel);
-    let rendered = render_underwater_test_app(&mut app, 80, 21);
-    assert!(
-        !has_idle_whale(&rendered),
-        "80x21 has no room for the ocean even with no strip at all\n{rendered}"
-    );
-}
-
-#[test]
-fn rail_strip_and_idle_whale_never_thrash_across_a_resize() {
-    // A threshold that is not monotonic in terminal height reads as flicker:
-    // drag a terminal edge and the strip blinks in and out. Growing the
-    // terminal may only ever *add* chrome, never take it away, and the same
-    // size must always produce the same answer.
-    for panel in [
-        crate::tui::work_surface::RailPanel::Pinned,
-        crate::tui::work_surface::RailPanel::Agents,
-        crate::tui::work_surface::RailPanel::Context,
-    ] {
-        for idle_empty in [true, false] {
-            let mut previous_strip = 0_u16;
-            for rows in 8_u16..=48 {
-                let mut app = idle_rail_app(panel);
-                let budget = super::rail_row_budget(&app, 80, rows, idle_empty);
-                let strip = crate::tui::work_surface::height(&mut app, 80, rows, budget);
-                let again = crate::tui::work_surface::height(&mut app, 80, rows, budget);
-                assert_eq!(
-                    strip, again,
-                    "{panel:?} at 80x{rows} (idle={idle_empty}) must be a pure \
-                     function of this frame, not of the last one"
-                );
+    #[test]
+    fn rail_strip_and_idle_whale_never_thrash_across_a_resize() {
+        // A threshold that is not monotonic in terminal height reads as flicker:
+        // drag a terminal edge and the strip blinks in and out. Growing the
+        // terminal may only ever *add* chrome, never take it away, and the same
+        // size must always produce the same answer.
+        for panel in [RailPanel::Pinned, RailPanel::Agents, RailPanel::Context] {
+            for idle_empty in [true, false] {
+                let mut previous_strip = 0_u16;
+                for rows in 8_u16..=48 {
+                    // Content, not an empty fixture: an empty Pinned or Agents
+                    // panel collapses to 0 at every size, and a sweep of zeros
+                    // is monotone for a reason that has nothing to do with the
+                    // budget. `height()` takes `idle_empty` through the budget
+                    // argument, so seeding work here does not disturb the sweep.
+                    let mut app = busy_rail_app(panel);
+                    app.todos.try_lock().expect("todos lock").add(
+                        "rail-checklist-item".to_string(),
+                        crate::tools::todo::TodoStatus::InProgress,
+                    );
+                    let budget = rail_row_budget(&app, 80, rows, idle_empty);
+                    let strip = crate::tui::work_surface::height(&mut app, 80, rows, budget);
+                    let again = crate::tui::work_surface::height(&mut app, 80, rows, budget);
+                    assert_eq!(
+                        strip, again,
+                        "{panel:?} at 80x{rows} (idle={idle_empty}) must be a pure \
+                         function of this frame, not of the last one"
+                    );
+                    assert!(
+                        strip >= previous_strip,
+                        "{panel:?} strip shrank from {previous_strip} to {strip} when the \
+                         terminal grew to {rows} rows (idle={idle_empty}); a strip that \
+                         blinks on resize is worse than the eviction bug"
+                    );
+                    previous_strip = strip;
+                }
                 assert!(
-                    strip >= previous_strip,
-                    "{panel:?} strip shrank from {previous_strip} to {strip} when the \
-                     terminal grew to {rows} rows (idle={idle_empty}); a strip that \
-                     blinks on resize is worse than the eviction bug"
+                    previous_strip > 0,
+                    "{panel:?} (idle={idle_empty}) measured 0 across the whole \
+                     8..=48 sweep — the fixture has no content and the \
+                     monotonicity check is vacuous"
                 );
-                previous_strip = strip;
             }
         }
-    }
 
-    // The whale is monotone too: once the ocean is earned, growing the
-    // terminal never takes it back.
-    let mut seen_whale = false;
-    for rows in 16_u16..=34 {
-        let mut app = idle_rail_app(crate::tui::work_surface::RailPanel::Pinned);
-        let rendered = render_underwater_test_app(&mut app, 80, rows);
-        let whale = has_idle_whale(&rendered);
-        assert!(
-            whale || !seen_whale,
-            "the idle whale disappeared again at 80x{rows} after being earned at a \
-             smaller size\n{rendered}"
-        );
-        seen_whale |= whale;
-    }
-    assert!(seen_whale, "the sweep never rendered an idle whale at all");
-}
-
-#[test]
-fn rail_strip_and_whale_swap_at_the_ambient_width() {
-    // The width gate is a real trade and this test exists so it stays a
-    // decision rather than drifting into an accident.
-    //
-    // `rail_row_budget` charges the ambient floor only when the mark can
-    // actually draw, which needs AMBIENT_MIN_CHAT_WIDTH columns. So on a
-    // terminal tall enough to be interesting but narrower than that floor,
-    // the rail keeps its rows; widening past the floor hands them to the
-    // water. Unlike the height axis — where the same rule would make the
-    // strip vanish as you drag the very axis it is measured in — this fires
-    // on a deliberate horizontal resize with a visible payoff.
-    // Agents for the same reason as above: Pinned self-collapses while idle.
-    let panel = crate::tui::work_surface::RailPanel::Agents;
-    let width_floor = crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH;
-    let rows = 24_u16;
-
-    let mut app = idle_rail_app(panel);
-    let narrow_budget = super::rail_row_budget(&app, width_floor - 1, rows, true);
-    let narrow_strip =
-        crate::tui::work_surface::height(&mut app, width_floor - 1, rows, narrow_budget);
-
-    let mut app = idle_rail_app(panel);
-    let wide_budget = super::rail_row_budget(&app, width_floor, rows, true);
-    let wide_strip = crate::tui::work_surface::height(&mut app, width_floor, rows, wide_budget);
-
-    assert!(
-        narrow_strip > wide_strip,
-        "below {width_floor} columns the ambient mark cannot draw, so the rail should \
-         keep its rows ({narrow_strip}) and yield them at the floor ({wide_strip}); if \
-         these are equal the width gate has stopped doing anything"
-    );
-
-    // And the payoff is real: the rows the rail gave up become water.
-    let mut app = idle_rail_app(panel);
-    let rendered = render_underwater_test_app(&mut app, width_floor, rows);
-    assert!(
-        has_idle_whale(&rendered),
-        "yielding the strip at {width_floor}x{rows} must actually buy the ocean\n{rendered}"
-    );
-}
-
-#[test]
-fn side_rail_yields_the_columns_the_idle_ocean_needs() {
-    // The width axis carried the same defect: a side rail reserves at least
-    // 26 columns while `split_chat` only ever protected a 40-column
-    // transcript, well under the ocean's 60-column floor.
-    let idle_floor = super::rail_min_chat_width(true);
-    let right = crate::tui::work_surface::WorkSurfacePlacement::Right;
-
-    let mut app = idle_rail_app(crate::tui::work_surface::RailPanel::Pinned);
-    app.work_surface.placement = right;
-    let area = ratatui::layout::Rect::new(0, 0, 80, 40);
-    let (chat, rail) = crate::tui::work_surface::split_chat(&mut app, area, idle_floor);
-    assert!(
-        rail.is_none(),
-        "an 80-column host cannot seat a 26-column rail beside a 60-column ocean"
-    );
-    assert_eq!(chat, area, "the transcript keeps every column");
-
-    // Wide enough for both: the rail comes back and the ocean keeps its floor.
-    let mut app = idle_rail_app(crate::tui::work_surface::RailPanel::Pinned);
-    app.work_surface.placement = right;
-    let area = ratatui::layout::Rect::new(0, 0, 100, 40);
-    let (chat, rail) = crate::tui::work_surface::split_chat(&mut app, area, idle_floor);
-    let rail = rail.expect("a 100-column host seats both");
-    assert!(
-        chat.width >= crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH,
-        "chat kept {} columns, below the ambient floor",
-        chat.width
-    );
-    assert!(rail.width >= 26, "rail kept {} columns", rail.width);
-
-    // With work on screen there is no ambient floor, so the 80-column host
-    // keeps its rail: work never yields to decoration.
-    let mut app = idle_rail_app(crate::tui::work_surface::RailPanel::Pinned);
-    app.work_surface.placement = right;
-    let area = ratatui::layout::Rect::new(0, 0, 80, 40);
-    let (_chat, rail) =
-        crate::tui::work_surface::split_chat(&mut app, area, super::rail_min_chat_width(false));
-    assert!(rail.is_some(), "a busy 80-column shell keeps its side rail");
-}
-
-#[test]
-fn a_user_who_asks_for_a_short_strip_keeps_it_at_every_terminal_size() {
-    // `work_surface_top_height` is a preference over 2..=16 that drag-resizing
-    // the divider persists to settings.toml. It must never be fed into the
-    // collapse cliff: a 4-row threshold charged against a 2-row *request*
-    // deletes the panel outright, at every size, for a user who explicitly
-    // asked for it.
-    //
-    // Agents, not Pinned: an empty Pinned panel collapses on its own now, so it
-    // would report 0 at every size for a reason that has nothing to do with the
-    // height preference this test is about.
-    let panel = crate::tui::work_surface::RailPanel::Agents;
-    for top_height in [2_u16, 3] {
-        let mut seen = false;
-        for rows in 20_u16..=40 {
-            let mut app = idle_rail_app(panel);
-            app.work_surface.top_height = top_height;
-            let budget = super::rail_row_budget(&app, 80, rows, true);
-            let strip = crate::tui::work_surface::height(&mut app, 80, rows, budget);
+        // The whale is monotone too: once the ocean is earned, growing the
+        // terminal never takes it back.
+        let mut seen_whale = false;
+        for rows in 16_u16..=34 {
+            let mut app = busy_rail_app(RailPanel::Agents);
+            let rendered = render_underwater_test_app(&mut app, 80, rows);
+            let whale = has_idle_whale(&rendered);
             assert!(
-                strip == 0 || strip == top_height,
-                "top_height={top_height} at 80x{rows} produced a {strip}-row strip: \
-                 the user's height is the height, not a starting point"
+                whale || !seen_whale,
+                "the idle whale disappeared again at 80x{rows} after being earned at a \
+                 smaller size\n{rendered}"
             );
-            seen |= strip == top_height;
+            seen_whale |= whale;
         }
+        assert!(seen_whale, "the sweep never rendered an idle whale at all");
+    }
+
+    #[test]
+    fn rail_strip_and_whale_swap_at_the_ambient_width() {
+        // The width gate is a real trade and this test exists so it stays a
+        // decision rather than drifting into an accident.
+        //
+        // `rail_row_budget` charges the ambient floor only when the mark can
+        // actually draw, which needs AMBIENT_MIN_CHAT_WIDTH columns. So on a
+        // terminal tall enough to be interesting but narrower than that floor,
+        // the rail keeps its rows; widening past the floor hands them to the
+        // water. Unlike the height axis — where the same rule would make the
+        // strip vanish as you drag the very axis it is measured in — this fires
+        // on a deliberate horizontal resize with a visible payoff.
+        let panel = RailPanel::Agents;
+        let width_floor = AMBIENT_MIN_CHAT_WIDTH;
+        let rows = 24_u16;
+
+        let mut app = busy_rail_app(panel);
+        let narrow_strip = strip_height(&mut app, width_floor - 1, rows);
+
+        let mut app = busy_rail_app(panel);
+        let wide_strip = strip_height(&mut app, width_floor, rows);
+
         assert!(
-            seen,
-            "top_height={top_height} never produced a strip at any size in 20..=40 — \
-             the cliff is being charged against the user's preference again"
+            narrow_strip > wide_strip,
+            "below {width_floor} columns the ambient mark cannot draw, so the rail should \
+             keep its rows ({narrow_strip}) and yield them at the floor ({wide_strip}); if \
+             these are equal the width gate has stopped doing anything"
+        );
+
+        // And the payoff is real: the rows the rail gave up become water.
+        let mut app = busy_rail_app(panel);
+        let rendered = render_underwater_test_app(&mut app, width_floor, rows);
+        assert!(
+            has_idle_whale(&rendered),
+            "yielding the strip at {width_floor}x{rows} must actually buy the ocean\n{rendered}"
         );
     }
 
-    // And it is still honoured end to end, with the ocean intact: the budget
-    // is what protects the whale, so a short strip costs it nothing.
-    let mut app = idle_rail_app(panel);
-    app.work_surface.top_height = 2;
-    let rendered = render_underwater_test_app(&mut app, 80, 24);
-    assert!(
-        has_idle_whale(&rendered),
-        "a 2-row strip must not cost the whale its rows at 80x24\n{rendered}"
-    );
-    assert!(
-        rendered.contains(panel.title()),
-        "the 2-row strip the user asked for must render at 80x24\n{rendered}"
-    );
-}
+    #[test]
+    fn side_rail_yields_the_columns_the_idle_ocean_needs() {
+        // The width axis carried the same defect: a side rail reserves at least
+        // 26 columns while `split_chat` only ever protected a 40-column
+        // transcript, well under the ocean's 60-column floor.
+        let idle_floor = rail_min_chat_width(true);
+        let right = WorkSurfacePlacement::Right;
 
-#[test]
-fn the_ambient_floor_is_not_charged_where_the_mark_cannot_draw() {
-    // `should_render_empty_state` knows the session is quiet; it does not
-    // know the terminal is too narrow to draw the mark at all. Charging the
-    // 16-row ambient floor below `AMBIENT_MIN_CHAT_WIDTH` reserves rows for
-    // something that can never appear, and the strip yields for nothing.
-    let app = idle_rail_app(crate::tui::work_surface::RailPanel::Pinned);
-    let narrow = crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH - 1;
-    assert_eq!(
-        super::rail_row_budget(&app, narrow, 24, true),
-        super::rail_row_budget(&app, narrow, 24, false),
-        "a {narrow}-column terminal cannot draw the mark, so idleness must not \
-         change the rail's budget"
-    );
-    assert!(
-        super::rail_row_budget(
-            &app,
-            crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH,
-            24,
-            true
-        ) < super::rail_row_budget(&app, narrow, 24, true),
-        "at the ambient width floor the mark can draw, so the budget must shrink"
-    );
+        // A populated panel for the same reason as the row tests: `split_chat`
+        // reserves no columns at all for an empty panel, so an idle fixture
+        // would report "no rail" for a reason unrelated to the ocean's floor.
+        let mut app = busy_rail_app(RailPanel::Agents);
+        app.work_surface.placement = right;
+        let area = ratatui::layout::Rect::new(0, 0, 80, 40);
+        let (chat, rail) = crate::tui::work_surface::split_chat(&mut app, area, idle_floor);
+        assert!(
+            rail.is_none(),
+            "an 80-column host cannot seat a 26-column rail beside a 60-column ocean"
+        );
+        assert_eq!(chat, area, "the transcript keeps every column");
+
+        // Wide enough for both: the rail comes back and the ocean keeps its floor.
+        let mut app = busy_rail_app(RailPanel::Agents);
+        app.work_surface.placement = right;
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let (chat, rail) = crate::tui::work_surface::split_chat(&mut app, area, idle_floor);
+        let rail = rail.expect("a 100-column host seats both");
+        assert!(
+            chat.width >= AMBIENT_MIN_CHAT_WIDTH,
+            "chat kept {} columns, below the ambient floor",
+            chat.width
+        );
+        assert!(rail.width >= 26, "rail kept {} columns", rail.width);
+
+        // With work on screen there is no ambient floor, so the 80-column host
+        // keeps its rail: work never yields to decoration.
+        let mut app = busy_rail_app(RailPanel::Agents);
+        app.work_surface.placement = right;
+        let area = ratatui::layout::Rect::new(0, 0, 80, 40);
+        let (_chat, rail) =
+            crate::tui::work_surface::split_chat(&mut app, area, rail_min_chat_width(false));
+        assert!(rail.is_some(), "a busy 80-column shell keeps its side rail");
+    }
+
+    #[test]
+    fn a_user_who_asks_for_a_short_strip_keeps_it_at_every_terminal_size() {
+        // `work_surface_top_height` is a preference over 2..=16 that drag-resizing
+        // the divider persists to settings.toml. It must never be fed into the
+        // collapse cliff: a 4-row threshold charged against a 2-row *request*
+        // deletes the panel outright, at every size, for a user who explicitly
+        // asked for it.
+        let panel = RailPanel::Agents;
+
+        // The cliff is charged against ambient room alone, so the size at which
+        // a strip first appears must be the *same* for every requested height.
+        // This is the property the old `strip == 0 || strip == top_height`
+        // assertion was standing in for, and it is stronger: that form was true
+        // of the fixed-height rail but is now false for an honest reason — the
+        // ambient budget can clamp an auto-fitted strip to fewer rows than the
+        // user's ceiling, which is the yield rule working, not the cliff.
+        let mut first_visible_at: Option<(u16, u16)> = None;
+        for top_height in [2_u16, 3, 4, 8, 16] {
+            let mut first = None;
+            let mut tallest = 0_u16;
+            for rows in 8_u16..=48 {
+                let mut app = busy_rail_app(panel);
+                app.work_surface.top_height = top_height;
+                let strip = strip_height(&mut app, 80, rows);
+                assert!(
+                    strip <= top_height,
+                    "top_height={top_height} at 80x{rows} produced a {strip}-row \
+                     strip: the user's height is a ceiling, not a suggestion"
+                );
+                if strip > 0 && first.is_none() {
+                    first = Some(rows);
+                }
+                tallest = tallest.max(strip);
+            }
+            let first = first.unwrap_or_else(|| {
+                panic!(
+                    "top_height={top_height} never produced a strip at any size in \
+                     8..=48 — the cliff is being charged against the user's preference \
+                     again"
+                )
+            });
+            match first_visible_at {
+                None => first_visible_at = Some((top_height, first)),
+                Some((other_height, other_first)) => assert_eq!(
+                    first, other_first,
+                    "top_height={top_height} first shows a strip at {first} rows but \
+                     top_height={other_height} shows one at {other_first}: the \
+                     requested height is leaking into the collapse threshold"
+                ),
+            }
+            // A ceiling below the panel's natural height must be reachable, or
+            // it is a number the cliff quietly ate.
+            if top_height < natural_strip_rows(panel) {
+                assert_eq!(
+                    tallest, top_height,
+                    "top_height={top_height} never reached its own ceiling across \
+                     8..=48 (tallest was {tallest} rows)"
+                );
+            }
+        }
+
+        // And it is still honoured end to end, with the ocean intact: the budget
+        // is what protects the whale, so a short strip costs it nothing.
+        let mut app = busy_rail_app(panel);
+        app.work_surface.top_height = 2;
+        assert_eq!(
+            strip_height(&mut app, 80, 24),
+            2,
+            "the 2-row strip the user asked for must render at 80x24"
+        );
+        let rendered = render_underwater_test_app(&mut app, 80, 24);
+        assert!(
+            has_idle_whale(&rendered),
+            "a 2-row strip must not cost the whale its rows at 80x24\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_strip_that_measures_nonzero_is_a_strip_that_paints() {
+        // `strip_height` is the oracle the rest of this module trusts for "the
+        // strip rendered". This is the test that earns that trust: a number
+        // nobody checks against a frame is exactly the mistake the old
+        // `contains(panel.title())` probe made in the other direction.
+        let panel = RailPanel::Agents;
+
+        let mut app = busy_rail_app(panel);
+        let tall = strip_height(&mut app, 80, 30);
+        assert!(tall > 0, "80x30 must have room for a strip");
+        let rendered = render_underwater_test_app(&mut app, 80, 30);
+        assert!(
+            rendered.contains(AGENT_MARK),
+            "strip_height says {tall} rows at 80x30, but the agent that panel is \
+             made of never reached the frame\n{rendered}"
+        );
+
+        let mut app = busy_rail_app(panel);
+        let short = strip_height(&mut app, 80, 22);
+        assert_eq!(short, 0, "80x22 has no spare rows for a strip");
+        let rendered = render_underwater_test_app(&mut app, 80, 22);
+        assert!(
+            !rendered.contains(AGENT_MARK),
+            "strip_height says 0 rows at 80x22, but the panel painted anyway\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn top_placement_never_paints_panel_chrome_as_a_title() {
+        // `4206ebd2c`: the only Top title is an active goal — never a panel name.
+        // Four rail tests were silently reduced to no-ops by that change because
+        // they used `contains(panel.title())` as their "did the strip render"
+        // probe; the assertions that were supposed to fail loudly instead passed
+        // for free. This guard is the inverse and cannot go vacuous: the strip is
+        // proven present by `strip_height` *before* the frame is searched for
+        // chrome, so if Top starts painting "Agents" or "Pinned" again, it fails
+        // here rather than quietly re-arming that trap.
+        for panel in [RailPanel::Agents, RailPanel::Pinned, RailPanel::Context] {
+            let mut app = idle_rail_app(panel);
+            let mut agent = make_subagent(
+                "agent_rail_probe",
+                crate::tools::subagent::SubAgentStatus::Running,
+            );
+            agent.nickname = Some(AGENT_MARK.to_string());
+            app.subagent_cache.push(agent);
+            // Goal and checklist so `Pinned` has content too, and so the goal
+            // title — the one title Top *is* allowed to paint — is in play.
+            app.hunt.quarry = Some("keep the chrome off the strip".to_string());
+            app.todos.try_lock().expect("todos lock").add(
+                "rail-checklist-item".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+
+            let strip = strip_height(&mut app, 100, 34);
+            assert!(
+                strip > 0,
+                "{panel:?} must have a strip at 100x34 for this guard to mean \
+                 anything"
+            );
+            let rendered = render_underwater_test_app(&mut app, 100, 34);
+            assert!(
+                !rendered.contains(panel.title()),
+                "a {strip}-row {panel:?} strip painted its panel name \
+                 ({:?}) as chrome. Top titles are goals only — and a title \
+                 probe is what let the rail regression through last time\n{rendered}",
+                panel.title()
+            );
+        }
+    }
+
+    #[test]
+    fn the_ambient_floor_is_not_charged_where_the_mark_cannot_draw() {
+        // `should_render_empty_state` knows the session is quiet; it does not
+        // know the terminal is too narrow to draw the mark at all. Charging the
+        // 16-row ambient floor below `AMBIENT_MIN_CHAT_WIDTH` reserves rows for
+        // something that can never appear, and the strip yields for nothing.
+        let app = idle_rail_app(RailPanel::Pinned);
+        let narrow = AMBIENT_MIN_CHAT_WIDTH - 1;
+        assert_eq!(
+            rail_row_budget(&app, narrow, 24, true),
+            rail_row_budget(&app, narrow, 24, false),
+            "a {narrow}-column terminal cannot draw the mark, so idleness must not \
+             change the rail's budget"
+        );
+        assert!(
+            rail_row_budget(&app, AMBIENT_MIN_CHAT_WIDTH, 24, true)
+                < rail_row_budget(&app, narrow, 24, true),
+            "at the ambient width floor the mark can draw, so the budget must shrink"
+        );
+    }
 }
