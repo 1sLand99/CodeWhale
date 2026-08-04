@@ -53,7 +53,7 @@ const MAX_ACP_SESSIONS: usize = 64;
 
 /// Content is streamed to the model in full (no truncation); this cap only
 /// bounds how much of a tool's output is echoed into the `tool_call_update`
-/// notification the editor renders, so a large `read_file`/`exec_shell`
+/// notification the editor renders, so a large `File`/`Bash`
 /// result does not flood the client UI.
 const TOOL_CALL_CONTENT_PREVIEW_CHARS: usize = 4_000;
 
@@ -491,7 +491,7 @@ enum ToolBatchOutcome {
 /// racing every execution against the reader for a `session/cancel`
 /// targeting `session_id`. On cancel, the tool's [`CancellationToken`] is
 /// signalled and the in-flight call is awaited to completion (so a
-/// cancel-aware tool like `exec_shell` gets a chance to kill its child
+/// cancel-aware tool like `Bash` gets a chance to kill its child
 /// process) before returning [`ToolBatchOutcome::Cancelled`].
 async fn execute_tool_calls_with_cancellation<R, W>(
     registry: &ToolRegistry,
@@ -1101,15 +1101,15 @@ impl AcpServer {
 /// (`crate::main::run_exec_agent`) and the MCP server adapter
 /// (`crate::mcp_server`) use — no ACP-specific tool implementations.
 ///
-/// `allow_shell` gates `exec_shell`/terminal tools on the client's declared
+/// `allow_shell` gates `Bash`/terminal tools on the client's declared
 /// `clientCapabilities.terminal` support (see [`AcpServer::client_supports_terminal`]).
-/// Shell commands run with safety-heuristic checks disabled
-/// (`auto_approve = true`), matching `codewhale exec --auto`: ACP has no
-/// per-tool approval round-trip yet, so gating on the safety heuristic
-/// instead would just make some tool calls silently fail.
+/// `ToolContext::new` leaves `auto_approve` at its default (`false`), so the
+/// `SafetyLevel::Dangerous` heuristic still runs — matching `mcp_server`'s
+/// trust posture. ACP has no `session/request_permission` round-trip yet, so
+/// a blocked command surfaces as a normal `success: false` tool result
+/// (`BLOCKED: ...`) fed back to the model, rather than a silent failure.
 fn build_acp_tool_registry(workspace: &std::path::Path, allow_shell: bool) -> ToolRegistry {
     let mut context = ToolContext::new(workspace);
-    context.auto_approve = true;
     context.shell_policy = if allow_shell {
         ShellPolicy::Full
     } else {
@@ -2068,7 +2068,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         // Shell access is gated on the client declaring terminal support at
-        // `initialize` time; sessions created without it omit `exec_shell`.
+        // `initialize` time; sessions created without it omit `Bash`.
         server.client_supports_terminal = true;
         let s1 = server.new_session(json!({ "cwd": "/tmp" })).unwrap();
         let s2 = server.new_session(json!({ "cwd": "/tmp" })).unwrap();
@@ -2150,13 +2150,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_registry_exec_shell_runs_a_real_command() {
+    async fn tool_registry_bash_runs_a_real_command() {
         let (_dir, registry) = workspace_registry();
 
         let result = registry
             .execute_full("Bash", json!({"command": "echo acp-terminal-check"}))
             .await
-            .expect("exec_shell succeeds");
+            .expect("Bash succeeds");
 
         assert!(result.content.contains("acp-terminal-check"));
     }
@@ -2408,12 +2408,12 @@ mod tests {
     async fn agentic_turn_cancels_while_a_tool_is_running() {
         let (_dir, registry) = workspace_registry();
 
-        // exec_shell runs long enough for the cancel line to win the race.
+        // Bash runs long enough for the cancel line to win the race.
         let round1 = ready_stream({
             let mut events = tool_use_events(
                 0,
                 "call_1",
-                "exec_shell",
+                "Bash",
                 &json!({ "command": SLOW_SHELL_COMMAND }).to_string(),
             );
             events.push(StreamEvent::MessageStop);
