@@ -493,6 +493,11 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
 /// for explicit inspectors, while persistent chrome stays literal: plan-step
 /// to-dos first, then current sub-agents. Tool operations, coordination
 /// receipts, file activity, and generic graph headings never enter this list.
+///
+/// On Top, the list is GrokBuild-shaped without losing CodeWhale identity:
+/// selectable to-dos, then a `▾ Subagents N` group header (when any workers
+/// are present), then the workers. To-do density still uses the pinned
+/// progress receipt in `render` rather than a second "To-do" section title.
 pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
     let rows = project(app);
     if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
@@ -531,9 +536,19 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
         return Vec::new();
     }
 
-    todos.extend(agents);
-    app.work_surface.latest_rows = todos.clone();
-    todos
+    let mut out = Vec::with_capacity(todos.len() + agents.len() + 1);
+    out.extend(todos);
+    if !agents.is_empty() {
+        // GrokBuild: `▾ Subagents 2` — count in the header, not a panel name.
+        out.push(section_heading(
+            "agents",
+            &format!("Subagents {}", agents.len()),
+            "",
+        ));
+        out.extend(agents);
+    }
+    app.work_surface.latest_rows = out.clone();
+    out
 }
 
 /// Classify the current session against this process's session-instance

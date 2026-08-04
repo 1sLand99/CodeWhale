@@ -125,9 +125,14 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         collapse_strip(app);
         return 0;
     }
-    let selectable = rows.iter().filter(|row| row.selectable).count();
+    // Count every painted row: selectable work + group headers (Subagents N).
+    // Progress receipt and goal title are layered above in render.
+    let list_rows = rows
+        .iter()
+        .filter(|row| row.selectable || row.id.0.starts_with("section:"))
+        .count();
     let progress = u16::from(top_todo_progress(app, &rows).is_some());
-    let desired = u16::try_from(selectable)
+    let desired = u16::try_from(list_rows)
         .unwrap_or(u16::MAX)
         .saturating_add(progress)
         .saturating_add(goal_rows)
@@ -300,10 +305,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let mut rows = project_visible(app);
     if placement == WorkSurfacePlacement::Top {
-        // The top bar is the literal list: to-dos first, then sub-agents.
-        // Section summaries belong to the optional side/detail surface and
-        // must not spend scarce transcript rows on generic chrome.
-        rows.retain(|row| row.selectable);
+        // Literal work list only: selectable to-dos/agents plus the
+        // GrokBuild-style `▾ Subagents N` group header. Generic graph chrome
+        // from the side/inspector projection stays out.
+        rows.retain(|row| row.selectable || row.id.0.starts_with("section:"));
     }
     let todo_ordinals = if placement == WorkSurfacePlacement::Top {
         todo_ordinals(&rows)
@@ -657,8 +662,11 @@ fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
 }
 
 fn row_style(app: &App, row: &WorkRow, selected: bool, hovered: bool, opened: bool) -> Style {
+    // Headings (group headers like `▾ Subagents 2`) are muted structure, not
+    // interaction — accent_primary is reserved for selection/focus. GrokBuild
+    // uses the same gray-on-header treatment.
     let fg = match row.tone {
-        WorkTone::Heading => app.ui_theme.accent_primary,
+        WorkTone::Heading => app.ui_theme.text_muted,
         WorkTone::Live => app.ui_theme.status_working,
         WorkTone::Attention => app.ui_theme.error_fg,
         WorkTone::Success => app.ui_theme.success,
