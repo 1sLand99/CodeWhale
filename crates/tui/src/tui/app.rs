@@ -840,7 +840,6 @@ pub enum SidebarRowAction {
     /// The user confirms with Enter or cancels by editing/clearing the draft.
     #[allow(dead_code)] // destructive confirm path; mouse_ui already matches it (TUI-DOG-008)
     PrefillCommand(String),
-    HotbarSlot(u8),
     ToggleAgentDetails {
         agent_id: String,
     },
@@ -872,26 +871,11 @@ impl SidebarRowAction {
         match self {
             Self::Command(command) => Some(command.as_str()),
             Self::PrefillCommand(_)
-            | Self::HotbarSlot(_)
             | Self::ToggleAgentDetails { .. }
             | Self::OpenAgentDetail { .. }
             | Self::OpenAgentTranscript { .. }
             | Self::CancelAgent { .. }
             | Self::InspectWork { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub fn is_cancel_action(&self) -> bool {
-        match self {
-            Self::Command(command) => command.contains(" cancel "),
-            Self::PrefillCommand(command) => command.contains(" cancel "),
-            Self::CancelAgent { .. } => true,
-            Self::ToggleAgentDetails { .. }
-            | Self::OpenAgentDetail { .. }
-            | Self::OpenAgentTranscript { .. }
-            | Self::InspectWork { .. }
-            | Self::HotbarSlot(_) => false,
         }
     }
 }
@@ -3170,25 +3154,6 @@ impl App {
         }
     }
 
-    /// Estimated cost saved by the last turn's cache-hit tokens in the
-    /// configured display currency.  Returns `None` when the model's pricing
-    /// is unknown or there were no cache hits.
-    pub fn last_turn_cache_savings(&self) -> Option<f64> {
-        let hit_tokens = self.session.last_prompt_cache_hit_tokens?;
-        let estimate = crate::pricing::calculate_cache_savings_for_provider(
-            self.api_provider,
-            &self.model,
-            hit_tokens,
-        )?;
-        Some(match self.cost_currency {
-            crate::pricing::CostCurrency::Usd => estimate.usd,
-            crate::pricing::CostCurrency::Cny if estimate.cny == 0.0 && estimate.usd > 0.0 => {
-                estimate.usd
-            }
-            crate::pricing::CostCurrency::Cny => estimate.cny,
-        })
-    }
-
     /// Fold the oldest [`Self::HISTORY_FOLD_BATCH`] cells into a single
     /// `ArchivedContext` placeholder when history exceeds the soft cap.
     /// Called from [`Self::add_message`]; the caller is responsible for
@@ -4007,12 +3972,6 @@ impl App {
             self.receipt_started_at = None;
             self.needs_redraw = true;
         }
-    }
-
-    pub fn active_receipt_text(&self) -> Option<&str> {
-        let receipt = self.receipt_text.as_deref()?;
-        let started = self.receipt_started_at?;
-        (started.elapsed() <= Self::RECEIPT_VISIBLE_DURATION).then_some(receipt)
     }
 
     /// Tick called from the redraw loop so transient receipts leave the UI

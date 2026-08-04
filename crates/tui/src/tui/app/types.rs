@@ -713,20 +713,7 @@ pub enum VimMode {
     Visual,
 }
 
-impl VimMode {
-    /// Localized status-bar label shown in the composer border (user-facing).
-    #[must_use]
-    pub fn label_localized(self, locale: Locale) -> Cow<'static, str> {
-        tr(
-            locale,
-            match self {
-                Self::Normal => MessageId::VimModeNormal,
-                Self::Insert => MessageId::VimModeInsert,
-                Self::Visual => MessageId::VimModeVisual,
-            },
-        )
-    }
-}
+impl VimMode {}
 
 /// Message queued while the engine is busy.
 #[derive(Debug, Clone, PartialEq, Eq)]

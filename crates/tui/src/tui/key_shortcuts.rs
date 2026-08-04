@@ -68,10 +68,6 @@ pub(super) fn tool_details_shortcut_action_hint(noun: &str) -> String {
     format!("{} opens {noun}", tool_details_shortcut_label())
 }
 
-pub(super) fn reasoning_detail_shortcut_label() -> &'static str {
-    "Ctrl+O"
-}
-
 /// Open the full reasoning detail pager for the selected or current turn.
 /// Ctrl+O now shows the recorded reasoning timeline, not the whole-turn
 /// inspector (#v092-reasoning-fix).
@@ -81,10 +77,6 @@ pub(super) fn is_reasoning_detail_shortcut(key: &KeyEvent) -> bool {
         && !key
             .modifiers
             .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::SUPER)
-}
-
-pub(super) fn turn_inspector_shortcut_label() -> &'static str {
-    "Ctrl+Alt+O"
 }
 
 /// Open the whole-turn inspector on a dedicated, collision-free chord.

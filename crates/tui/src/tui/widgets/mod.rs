@@ -25,7 +25,7 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppMode, ComposerDensity, VimMode};
+use crate::tui::app::{App, AppMode, ComposerDensity};
 use crate::tui::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel,
     ToolCategory,
@@ -3027,21 +3027,6 @@ impl Renderable for ElevationWidget<'_> {
     }
 }
 
-pub(crate) fn pad_lines_to_bottom(lines: &mut Vec<Line<'static>>, height: usize) {
-    if lines.len() >= height {
-        return;
-    }
-    let padding = height.saturating_sub(lines.len());
-    if padding == 0 {
-        return;
-    }
-
-    let mut padded = Vec::with_capacity(height);
-    padded.extend(std::iter::repeat_n(Line::from(""), padding));
-    padded.append(lines);
-    *lines = padded;
-}
-
 fn apply_selection(lines: &mut [Line<'static>], top: usize, app: &App) {
     let Some((start, end)) = app.viewport.transcript_selection.ordered_endpoints() else {
         return;
@@ -3192,41 +3177,6 @@ fn apply_selection_to_line(
     }
 
     result
-}
-
-fn truncate_display_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width <= 3 {
-        return text.chars().take(max_width).collect();
-    }
-
-    let mut out = String::new();
-    let mut width = 0usize;
-    let limit = max_width.saturating_sub(3);
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > limit {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out.push_str("...");
-    out
-}
-
-fn vim_mode_style(mode: VimMode) -> Style {
-    let color = match mode {
-        VimMode::Normal => palette::TEXT_MUTED,
-        VimMode::Insert => palette::WHALE_INFO,
-        VimMode::Visual => palette::MODE_PLAN,
-    };
-    Style::default().fg(color).bold()
 }
 
 /// The "fully idle" predicate: nothing in the transcript, nothing running,
@@ -4147,9 +4097,9 @@ mod tests {
         composer_height, composer_max_height, composer_top_padding, cursor_row_col,
         empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
         fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
-        pad_lines_to_bottom, placeholder_visual_lines, push_command_entry, receipt_is_settling,
-        revision_in_domain, should_render_empty_state, slash_completion_hints,
-        tool_run_summary_revision, wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
+        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
+        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -4607,33 +4557,6 @@ mod tests {
         ChatWidget::new(&mut app, area).render(area, &mut second_buf);
         let second = buffer_text(&second_buf, area);
         assert!(second.contains("Explored 2 files, 1 search"), "{second}");
-    }
-
-    #[test]
-    fn pad_lines_to_bottom_noop_when_already_filled() {
-        let mut lines = vec![Line::from("one"), Line::from("two")];
-        pad_lines_to_bottom(&mut lines, 2);
-        assert_eq!(lines, vec![Line::from("one"), Line::from("two")]);
-    }
-
-    #[test]
-    fn pad_lines_to_bottom_prepends_empty_lines() {
-        let mut lines = vec![Line::from("one"), Line::from("two")];
-        pad_lines_to_bottom(&mut lines, 5);
-
-        assert_eq!(lines.len(), 5);
-        assert_eq!(lines[0], Line::from(""));
-        assert_eq!(lines[1], Line::from(""));
-        assert_eq!(lines[2], Line::from(""));
-        assert_eq!(lines[3], Line::from("one"));
-        assert_eq!(lines[4], Line::from("two"));
-    }
-
-    #[test]
-    fn pad_lines_to_bottom_noop_when_height_is_zero() {
-        let mut lines = vec![Line::from("one")];
-        pad_lines_to_bottom(&mut lines, 0);
-        assert_eq!(lines, vec![Line::from("one")]);
     }
 
     // Cursor alignment tests

@@ -595,20 +595,7 @@ fn sidebar_click_action(app: &App, mouse: MouseEvent) -> Option<SidebarRowAction
             {
                 return Some(action.clone());
             }
-            return row.click_action.as_ref().map(|action| match action {
-                SidebarRowAction::HotbarSlot(first_slot) => {
-                    let cell_width = section
-                        .content_area
-                        .width
-                        .saturating_sub(3)
-                        .saturating_div(4)
-                        .max(1);
-                    let column = mouse.column.saturating_sub(section.content_area.x);
-                    let cell = (column / (cell_width + 1)).min(3);
-                    SidebarRowAction::HotbarSlot(first_slot.saturating_add(cell as u8))
-                }
-                _ => action.clone(),
-            });
+            return row.click_action.clone();
         }
     }
     None
@@ -627,10 +614,6 @@ pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) 
             app.cursor_position = app.input.len();
             app.status_message = Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
             app.needs_redraw = true;
-            Vec::new()
-        }
-        SidebarRowAction::HotbarSlot(slot) => {
-            app.pending_hotbar_slot = Some(slot);
             Vec::new()
         }
         SidebarRowAction::ToggleAgentDetails { agent_id } => {

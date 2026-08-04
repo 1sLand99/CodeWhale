@@ -1674,19 +1674,6 @@ fn provider_switch_keeps_audited_cumulative_spend_visible() {
 }
 
 #[test]
-fn cny_cache_savings_falls_back_to_usd_for_usd_only_models() {
-    let mut app = App::new(test_options(false), &Config::default());
-    app.cost_currency = CostCurrency::Cny;
-    app.api_provider = ApiProvider::Moonshot;
-    app.model = "kimi-k2.6".to_string();
-    app.session.last_prompt_cache_hit_tokens = Some(1_000_000);
-
-    // 1M cache-hit tokens save (input 0.95 - cache-read 0.16) = $0.79.
-    let savings = app.last_turn_cache_savings().expect("kimi-k2.6 is priced");
-    assert!((savings - 0.79).abs() < 1e-9, "got {savings}");
-}
-
-#[test]
 fn slash_command_classifier_treats_absolute_path_as_message() {
     assert!(looks_like_slash_command_input("/"));
     assert!(looks_like_slash_command_input("/help"));
@@ -4540,24 +4527,6 @@ fn quit_armed_expires_after_window() {
 }
 
 #[test]
-fn receipt_expires_and_requests_redraw() {
-    let mut app = App::new(test_options(false), &Config::default());
-    app.set_receipt_text("✓ turn completed");
-    app.receipt_started_at =
-        Some(Instant::now() - App::RECEIPT_VISIBLE_DURATION - Duration::from_millis(10));
-    assert_eq!(app.active_receipt_text(), None);
-
-    app.needs_redraw = false;
-    app.tick_receipt();
-    assert!(app.receipt_text.is_none());
-    assert!(app.receipt_started_at.is_none());
-    assert!(
-        app.needs_redraw,
-        "receipt expiry should repaint composer chrome"
-    );
-}
-
-#[test]
 fn quit_armed_tick_is_noop_within_window() {
     let mut app = App::new(test_options(false), &Config::default());
     app.arm_quit();
@@ -5626,41 +5595,6 @@ fn status_classifier_does_not_paint_negated_success_green() {
     assert_eq!(level, StatusToastLevel::Warning);
     let (level, _, _) = App::classify_status_text("Turn cancelled");
     assert_eq!(level, StatusToastLevel::Warning);
-}
-
-#[test]
-fn status_toasts_expire_even_behind_a_persistent_entry() {
-    let mut app = App::new(test_options(false), &Config::default());
-    app.status_message = None;
-    app.last_status_message_seen = None;
-    app.status_toasts.clear();
-    app.sticky_status = None;
-
-    app.push_status_toast("persistent", StatusToastLevel::Info, None);
-    app.push_status_toast("expired-list", StatusToastLevel::Warning, Some(1));
-    app.status_toasts
-        .back_mut()
-        .expect("temporary toast")
-        .created_at = Instant::now() - std::time::Duration::from_millis(2);
-
-    let visible = app.active_status_toasts(3);
-    assert_eq!(
-        visible
-            .iter()
-            .map(|toast| toast.text.as_str())
-            .collect::<Vec<_>>(),
-        vec!["persistent"]
-    );
-
-    app.push_status_toast("expired-single", StatusToastLevel::Warning, Some(1));
-    app.status_toasts
-        .back_mut()
-        .expect("temporary toast")
-        .created_at = Instant::now() - std::time::Duration::from_millis(2);
-
-    let active = app.active_status_toast().expect("persistent toast remains");
-    assert_eq!(active.text, "persistent");
-    assert_eq!(app.status_toasts.len(), 1);
 }
 
 #[test]

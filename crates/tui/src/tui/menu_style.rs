@@ -149,17 +149,6 @@ pub const fn status_mark(kind: StatusKind) -> StatusMark {
     }
 }
 
-/// Pre-composed inline label for surfaces that print the word and glyph
-/// together (today only the footer's `paused ⏸`). Everything else takes
-/// [`StatusMark::word`] alone.
-#[must_use]
-pub const fn status_inline_label(kind: StatusKind) -> &'static str {
-    match kind {
-        StatusKind::Paused => "paused \u{23F8}",
-        _ => status_mark(kind).word,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,18 +239,6 @@ mod tests {
         assert_eq!(
             status_mark(StatusKind::Attention).tone,
             palette::STATUS_WARNING
-        );
-    }
-
-    #[test]
-    fn status_words_match_the_footer_vocabulary() {
-        assert_eq!(status_mark(StatusKind::Ready).word, "idle");
-        assert_eq!(status_mark(StatusKind::Working).word, "working");
-        assert_eq!(status_mark(StatusKind::Paused).word, "paused");
-        assert_eq!(status_inline_label(StatusKind::Paused), "paused \u{23F8}");
-        assert_eq!(
-            status_inline_label(StatusKind::Working),
-            status_mark(StatusKind::Working).word
         );
     }
 }

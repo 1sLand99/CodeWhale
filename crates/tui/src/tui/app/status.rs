@@ -200,36 +200,6 @@ impl App {
         }
     }
 
-    /// Up to `limit` currently-active toasts, most recent last (so a stacked
-    /// renderer iterating top-to-bottom shows the freshest message at the
-    /// bottom, like a chat log). Prunes expired toasts throughout the queue as
-    /// a side effect — the same cleanup as `active_status_toast` so callers see
-    /// a consistent queue. Whalescale#439.
-    pub fn active_status_toasts(&mut self, limit: usize) -> Vec<StatusToast> {
-        self.sync_status_message_to_toasts();
-        let now = Instant::now();
-        self.prune_expired_status_toasts(now);
-
-        let mut out: Vec<StatusToast> = Vec::with_capacity(limit);
-        if let Some(sticky) = self.sticky_status.clone() {
-            out.push(sticky);
-        }
-        let take = limit.saturating_sub(out.len());
-        let queued: Vec<StatusToast> = self
-            .status_toasts
-            .iter()
-            .rev()
-            .take(take)
-            .cloned()
-            .collect();
-        // Iterate in queue order (oldest of the visible window first) so the
-        // stacked renderer feels chronological — most recent at the bottom.
-        for toast in queued.into_iter().rev() {
-            out.push(toast);
-        }
-        out
-    }
-
     pub fn active_status_toast(&mut self) -> Option<StatusToast> {
         self.sync_status_message_to_toasts();
         let now = Instant::now();

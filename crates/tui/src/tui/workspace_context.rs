@@ -10,7 +10,6 @@
 use crate::dependencies::{ExternalTool, Git};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::App;
 
@@ -205,49 +204,6 @@ pub(crate) fn identity_from_context(workspace: &Path, context: Option<&str>) -> 
     }
 }
 
-/// Render the footer repo label, keeping the most useful identity when width
-/// is constrained (#3188 acceptance criteria). Layout priority, widest first:
-///
-/// 1. `Repo: <name> @ <branch>` (git repo, room for both)
-/// 2. `Repo: <name>` (drop the branch before truncating the name)
-/// 3. `Repo: <truncated name…>` then the bare label when truly tiny
-///
-/// Non-git workspaces render `Repo: <name> (no git)`, degrading to
-/// `Repo: <name>` and then truncation under width pressure. Returns an empty
-/// string only when `max_width` cannot fit even the `Repo:` prefix.
-pub(crate) fn format_repo_identity(identity: &WorkspaceIdentity, max_width: usize) -> String {
-    use crate::localization::truncate_to_width;
-
-    const PREFIX: &str = "Repo: ";
-    let prefix_width = PREFIX.width();
-    if max_width < prefix_width {
-        return String::new();
-    }
-
-    // Candidates from richest to leanest; the first that fits wins.
-    let mut candidates: Vec<String> = Vec::new();
-    match (&identity.branch, identity.is_git) {
-        (Some(branch), _) => {
-            candidates.push(format!("{PREFIX}{} @ {branch}", identity.name));
-            candidates.push(format!("{PREFIX}{}", identity.name));
-        }
-        (None, _) => {
-            candidates.push(format!("{PREFIX}{} (no git)", identity.name));
-            candidates.push(format!("{PREFIX}{}", identity.name));
-        }
-    }
-
-    for candidate in &candidates {
-        if candidate.width() <= max_width {
-            return candidate.clone();
-        }
-    }
-
-    // Even the lean form overflows: keep the prefix + a truncated name so the
-    // identity never collapses into a bare, useless `Repo:` label.
-    truncate_to_width(&format!("{PREFIX}{}", identity.name), max_width)
-}
-
 pub(super) fn branch(workspace: &Path) -> Option<String> {
     let branch = run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     let branch = branch.trim().to_string();
@@ -316,7 +272,6 @@ fn run_git(workspace: &Path, args: &[&str]) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn memory_size_hint_is_cached_off_the_render_path() {
@@ -357,118 +312,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_in_git_repo_carries_name_and_branch() {
-        let id = identity_from_context(
-            &PathBuf::from("/work/CodeWhale"),
-            Some("codex/v0.8.61 | 3 modified"),
-        );
-        assert_eq!(id.name, "CodeWhale");
-        assert_eq!(id.branch.as_deref(), Some("codex/v0.8.61"));
-        assert!(id.is_git);
-        // Full-width render keeps both the repo identity and the branch.
-        assert_eq!(
-            format_repo_identity(&id, 80),
-            "Repo: CodeWhale @ codex/v0.8.61"
-        );
-    }
-
-    #[test]
-    fn identity_outside_git_uses_cwd_basename_with_explicit_state() {
-        // `None` context == not a git repo / git unavailable. We must not show
-        // a stale repo, but we also must not collapse to an empty `Repo:`.
-        let id = identity_from_context(&PathBuf::from("/tmp/scratch-dir"), None);
-        assert_eq!(id.name, "scratch-dir");
-        assert_eq!(id.branch, None);
-        assert!(!id.is_git);
-        assert_eq!(format_repo_identity(&id, 80), "Repo: scratch-dir (no git)");
-    }
-
-    #[test]
-    fn detached_head_branch_passes_through_to_label() {
-        // `branch()` encodes detached HEAD as "detached:<hash>"; the footer
-        // must surface that verbatim rather than dropping the identity.
-        let id = identity_from_context(
-            &PathBuf::from("/work/CodeWhale"),
-            Some("detached:ae101a1 | clean"),
-        );
-        assert_eq!(id.branch.as_deref(), Some("detached:ae101a1"));
-        assert_eq!(
-            format_repo_identity(&id, 80),
-            "Repo: CodeWhale @ detached:ae101a1"
-        );
-    }
-
-    #[test]
-    fn narrow_width_keeps_identity_over_branch_then_truncates() {
-        let id = identity_from_context(
-            &PathBuf::from("/work/CodeWhale"),
-            Some("codex/v0.8.61 | clean"),
-        );
-
-        // Too narrow for "name @ branch" -> drop the branch, keep the name.
-        let dropped = format_repo_identity(&id, 20);
-        assert_eq!(dropped, "Repo: CodeWhale");
-        assert!(dropped.width() <= 20);
-
-        // Too narrow even for the name -> truncate but keep the prefix so the
-        // chip never becomes a bare, useless "Repo:" label.
-        let truncated = format_repo_identity(&id, 11);
-        assert!(truncated.width() <= 11, "{truncated:?} must fit width 11");
-        assert!(truncated.starts_with("Repo: "), "{truncated:?}");
-        assert!(truncated.ends_with('…'), "{truncated:?}");
-
-        // Below the bare "Repo:" prefix -> render nothing so the footer hides
-        // the chip cleanly instead of printing garbage.
-        assert_eq!(format_repo_identity(&id, 3), "");
-    }
-
-    #[test]
-    fn non_git_identity_degrades_before_truncating() {
-        let id = identity_from_context(&PathBuf::from("/tmp/scratch-dir"), None);
-        // No room for the "(no git)" suffix -> fall back to just the name.
-        assert_eq!(format_repo_identity(&id, 18), "Repo: scratch-dir");
-    }
-
-    #[test]
     fn workspace_basename_handles_root_path() {
         assert_eq!(workspace_basename(Path::new("/")), "(root)");
         assert_eq!(workspace_basename(Path::new("/a/b/project")), "project");
-    }
-
-    #[test]
-    fn collect_and_identity_agree_on_a_real_repo() {
-        // Real-git integration: in an actual worktree, `collect()` yields a
-        // "branch | status" string and `identity_from_context` must read a
-        // git identity back out of it. Skipped when git is unavailable
-        // (mirrors dependencies::external_tool_output_respects_cwd).
-        if !Git::available() {
-            return;
-        }
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-        // `git init` so the directory is a real repo with a HEAD.
-        let init = Git::output(&["init", "-q"], root);
-        if init.is_err() || !init.unwrap().status.success() {
-            return; // hermetic CI without writable git config: skip.
-        }
-        let _ = Git::output(&["config", "user.email", "t@example.com"], root);
-        let _ = Git::output(&["config", "user.name", "Test"], root);
-
-        match collect(root) {
-            Some(ctx) => {
-                let id = identity_from_context(root, Some(ctx.as_str()));
-                assert!(id.is_git, "fresh repo should detect a git identity");
-                assert!(id.branch.is_some(), "repo must report a branch/HEAD");
-                let label = format_repo_identity(&id, 80);
-                assert!(label.starts_with("Repo: "), "{label:?}");
-            }
-            None => {
-                // Some sandboxes report no branch on an empty repo; the
-                // non-git fallback must still produce a usable label.
-                let id = identity_from_context(root, None);
-                assert!(!id.is_git);
-                assert!(format_repo_identity(&id, 80).starts_with("Repo: "));
-            }
-        }
     }
 }

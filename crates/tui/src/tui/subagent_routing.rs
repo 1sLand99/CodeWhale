@@ -23,29 +23,6 @@ use crate::tui::workspace_context;
 const SUBAGENT_TERMINAL_CARD_TTL: Duration = Duration::from_secs(5 * 60);
 const SUBAGENT_TERMINAL_CARD_MAX_RETAINED: usize = 24;
 
-fn foreground_rlm_running(app: &App) -> bool {
-    use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
-    app.active_cell.as_ref().is_some_and(|active| {
-        active.entries().iter().any(|entry| {
-            matches!(
-                entry,
-                HistoryCell::Tool(ToolCell::Generic(generic))
-                    if matches!(
-                        generic.name.as_str(),
-                        "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm"
-                    ) && generic.status == ToolStatus::Running
-            )
-        })
-    })
-}
-
-/// True when the rail's Agents panel is on-screen and already owns fanout
-/// summary, so the footer chip would be redundant.
-pub(super) fn agents_sidebar_surface_visible(app: &App) -> bool {
-    app.work_surface.panel == crate::tui::work_surface::RailPanel::Agents
-        && app.work_surface.last_area.is_some()
-}
-
 pub(super) fn running_agent_count(app: &App) -> usize {
     let mut ids: std::collections::HashSet<&str> =
         app.agent_progress.keys().map(String::as_str).collect();
