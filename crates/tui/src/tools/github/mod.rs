@@ -386,6 +386,10 @@ mod tests {
     ///
     /// The close path must never reach a real `gh`, so the recorder both
     /// proves what was attempted and keeps the test from touching GitHub.
+    /// Unix-only like its consumers: the recorder is a `sh` script, and on
+    /// Windows the ungated helper is dead code that fails `-D warnings` —
+    /// this was the unexplained red `Test (windows-latest)` on #5135.
+    #[cfg(unix)]
     fn install_recording_gh(dir: &std::path::Path, log: &std::path::Path) -> PathBuf {
         let bin = dir.join("gh-recorder.sh");
         std::fs::write(
@@ -405,6 +409,7 @@ mod tests {
         bin
     }
 
+    #[cfg(unix)]
     fn close_input_with_dry_run(dry_run: Value) -> Value {
         json!({
             "number": 424_242,
