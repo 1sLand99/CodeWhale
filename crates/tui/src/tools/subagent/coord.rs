@@ -465,7 +465,7 @@ impl ToolSpec for AgentsWaitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Block until a child shows activity, settles (completion/failure/interrupt), or the timeout elapses. Prefer one wait over polling agents/list. until=completion (default) waits for settle; until=activity returns on progress or settle."
+        "Block until watched children settle or the timeout elapses. One blocking wait is the right shape; polling agents/list in a loop is not. until=all is the fan-out join: it returns only when every child running at call time has left running, with each child's outcome. until=completion (default) returns as soon as any one child settles. until=activity also returns on progress."
     }
 
     fn input_schema(&self) -> Value {
@@ -474,7 +474,7 @@ impl ToolSpec for AgentsWaitTool {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Optional specific child. When omitted, waits for the next watched child event."
+                    "description": "Optional specific child. When omitted, watches every child running at call time."
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -484,8 +484,8 @@ impl ToolSpec for AgentsWaitTool {
                 },
                 "until": {
                     "type": "string",
-                    "enum": ["completion", "activity"],
-                    "description": "completion (default): return when a child leaves running. activity: also return when recent progress changes."
+                    "enum": ["completion", "all", "activity"],
+                    "description": "completion (default): return when any one child leaves running. all: return only when every watched child has left running — use this after a fan-out so one wait covers the whole batch. activity: also return when recent progress changes. Children spawned after the call are not watched; no children means an immediate return."
                 }
             },
             "required": []
@@ -505,30 +505,208 @@ impl ToolSpec for AgentsWaitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let until = input
-            .get("until")
-            .and_then(Value::as_str)
-            .unwrap_or("completion")
-            .trim()
-            .to_ascii_lowercase();
+        dispatch_wait(&input, Arc::clone(&self.manager), context).await
+    }
+}
 
-        if until == "completion" || until.is_empty() {
+/// Single entry point for every blocking wait, shared by `agents/wait` and
+/// `agent(action="wait")` so the two surfaces cannot drift.
+///
+/// `until` selects the join shape:
+/// - `completion` (default) — return as soon as any one watched child settles.
+/// - `all` — return only when every watched child has settled (the fan-out
+///   join the parent should use after dispatching a batch).
+/// - `activity` — also return when a running child makes visible progress.
+pub(super) async fn dispatch_wait(
+    input: &Value,
+    manager: SharedSubAgentManager,
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let until = input
+        .get("until")
+        .and_then(Value::as_str)
+        .unwrap_or("completion")
+        .trim()
+        .to_ascii_lowercase();
+
+    match until.as_str() {
+        "" | "completion" => {
             let mut wait_input = input.clone();
             if wait_input.get("action").is_none() {
                 wait_input["action"] = json!("wait");
             }
-            return wait_for_subagents_from_input(&wait_input, Arc::clone(&self.manager), context)
-                .await;
+            wait_for_subagents_from_input(&wait_input, manager, context).await
         }
-
-        if until != "activity" {
-            return Err(ToolError::invalid_input(format!(
-                "Invalid until '{until}'. Use completion or activity."
-            )));
-        }
-
-        wait_for_activity(&input, Arc::clone(&self.manager), context).await
+        "all" => wait_for_all_children(input, manager, context).await,
+        "activity" => wait_for_activity(input, manager, context).await,
+        other => Err(ToolError::invalid_input(format!(
+            "Invalid until '{other}'. Use completion, all, or activity."
+        ))),
     }
+}
+
+/// `until=all`: block until every child that was running when the call was
+/// made has left `Running`.
+///
+/// The watch set is fixed at call time. A child spawned while this wait is
+/// blocked is deliberately **not** joined — the parent asked to join the batch
+/// it had just dispatched, and silently extending the set would make the call
+/// unbounded in a way the caller never asked for. Callers that fan out again
+/// simply issue another wait.
+///
+/// Cancel-safe (no lock is held across an await), honours `timeout_secs`, and
+/// returns immediately with `all_settled: true` when nothing is running.
+async fn wait_for_all_children(
+    input: &Value,
+    manager: SharedSubAgentManager,
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let timeout_secs = input
+        .get("timeout_secs")
+        .or_else(|| input.get("timeout"))
+        .and_then(Value::as_u64)
+        .unwrap_or(COORD_WAIT_DEFAULT_TIMEOUT_SECS)
+        .clamp(COORD_WAIT_MIN_TIMEOUT_SECS, COORD_WAIT_MAX_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(timeout_secs);
+    let agent_ref = parse_agent_ref(input);
+
+    // Resolve the watch set up front so a bad reference fails immediately
+    // rather than blocking for the whole timeout.
+    let watched: Vec<String> = {
+        let manager = manager.read().await;
+        if let Some(agent_ref) = &agent_ref {
+            let snapshot = manager
+                .get_result_by_ref(agent_ref)
+                .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+            if snapshot.status != SubAgentStatus::Running {
+                // Already settled: hand back its outcome rather than an empty
+                // "nothing to join" that hides what the caller asked about.
+                let settled = json!({
+                    "agent_id": snapshot.agent_id,
+                    "name": snapshot.name,
+                    "status": subagent_status_name(&snapshot.status),
+                    "steps_taken": snapshot.steps_taken,
+                });
+                drop(manager);
+                return wait_all_payload(&[settled], &[], 0, false);
+            }
+            vec![snapshot.agent_id]
+        } else {
+            manager
+                .list_filtered(false)
+                .into_iter()
+                .filter(|snapshot| snapshot.status == SubAgentStatus::Running)
+                .map(|snapshot| snapshot.agent_id)
+                .collect()
+        }
+    };
+
+    // Zero children is an immediate return, never a hang.
+    if watched.is_empty() {
+        return wait_all_payload(&[], &[], 0, false);
+    }
+
+    let started = Instant::now();
+    let cancelled = async {
+        match &context.cancel_token {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(cancelled);
+
+    loop {
+        let (settled, still_running) = {
+            let manager = manager.read().await;
+            let mut settled = Vec::new();
+            let mut still_running = Vec::new();
+            for agent_id in &watched {
+                match manager.get_result_by_ref(agent_id) {
+                    Ok(snapshot) if snapshot.status == SubAgentStatus::Running => {
+                        still_running.push(json!({
+                            "agent_id": snapshot.agent_id,
+                            "name": snapshot.name,
+                            "status": "running",
+                        }));
+                    }
+                    Ok(snapshot) => settled.push(json!({
+                        "agent_id": snapshot.agent_id,
+                        "name": snapshot.name,
+                        "status": subagent_status_name(&snapshot.status),
+                        "steps_taken": snapshot.steps_taken,
+                    })),
+                    // A watched child that vanished from the ledger (retention
+                    // cleanup) is no longer running; report it rather than
+                    // blocking on a record that will never settle.
+                    Err(_) => settled.push(json!({
+                        "agent_id": agent_id,
+                        "status": "gone",
+                    })),
+                }
+            }
+            (settled, still_running)
+        };
+
+        if still_running.is_empty() {
+            return wait_all_payload(&settled, &[], started.elapsed().as_millis(), false);
+        }
+        if started.elapsed() >= timeout {
+            return wait_all_payload(
+                &settled,
+                &still_running,
+                started.elapsed().as_millis(),
+                true,
+            );
+        }
+
+        tokio::select! {
+            biased;
+            () = &mut cancelled => {
+                return Err(ToolError::cancelled(
+                    "Wait interrupted by user cancellation before every child settled.".to_string(),
+                ));
+            }
+            () = tokio::time::sleep(COORD_WAIT_CHECK_INTERVAL) => {}
+        }
+    }
+}
+
+/// `until=all` result: every watched child with its own outcome, so the parent
+/// can synthesize from one return instead of re-inspecting each child.
+fn wait_all_payload(
+    settled: &[Value],
+    still_running: &[Value],
+    waited_ms: u128,
+    timed_out: bool,
+) -> Result<ToolResult, ToolError> {
+    let note = if timed_out {
+        "Timed out with children still running. Do not poll — wait again (until=all), or end your turn; results arrive as <codewhale:subagent.done> sentinels."
+    } else if settled.is_empty() {
+        "No sub-agents were running; nothing to join."
+    } else {
+        "Every watched child has settled. Full results arrive as <codewhale:subagent.done> sentinels — synthesize from those."
+    };
+    let payload = json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": still_running.is_empty(),
+        "settled": settled,
+        "still_running": still_running,
+        "waited_ms": u64::try_from(waited_ms).unwrap_or(u64::MAX),
+        "timed_out": timed_out,
+        "note": note,
+    });
+    let mut tool_result =
+        ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
+    tool_result.metadata = Some(json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": still_running.is_empty(),
+        "settled": settled.len(),
+        "running": still_running.len(),
+        "timed_out": timed_out,
+    }));
+    Ok(tool_result)
 }
 
 async fn wait_for_activity(
@@ -1322,6 +1500,239 @@ mod tests {
         let guard = manager.read().await;
         assert_eq!(guard.queued_mail_depth(&agent_id).unwrap(), 1);
         assert!(!guard.child_was_woken(&agent_id));
+    }
+
+    // === until="all": the fan-out join ===================================
+    //
+    // Before this existed a parent with five children had to issue five
+    // waits — while the prompt told it not to poll. These lock the join in.
+
+    fn empty_manager(workspace: &std::path::Path) -> SharedSubAgentManager {
+        Arc::new(tokio::sync::RwLock::new(
+            super::super::SubAgentManager::new(workspace.to_path_buf(), 8),
+        ))
+    }
+
+    async fn settle(manager: &SharedSubAgentManager, agent_id: &str, status: SubAgentStatus) {
+        let mut guard = manager.write().await;
+        if let Some(agent) = guard.agents.get_mut(agent_id) {
+            agent.status = status;
+        }
+    }
+
+    #[test]
+    fn wait_schema_offers_all_as_a_first_class_until() {
+        let tmp = tempdir().unwrap();
+        let tool = AgentsWaitTool::new(empty_manager(tmp.path()));
+        let schema = tool.input_schema();
+        let until = &schema["properties"]["until"];
+        assert_eq!(
+            until["enum"],
+            json!(["completion", "all", "activity"]),
+            "until must expose all alongside completion/activity: {schema}"
+        );
+        let described = until["description"].as_str().unwrap_or_default();
+        assert!(
+            described.contains("every watched child") && described.contains("any one child"),
+            "the schema must make completion vs all unmistakable: {described}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_until_all_on_an_already_settled_child_reports_its_outcome() {
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        let agent_id = {
+            let mut guard = manager.write().await;
+            guard.insert_test_running_agent("all_already_done", tmp.path())
+        };
+        settle(&manager, &agent_id, SubAgentStatus::Completed).await;
+
+        let result = dispatch_wait(
+            &json!({ "until": "all", "agent_id": agent_id, "timeout_secs": 60 }),
+            Arc::clone(&manager),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect("a settled child is an immediate return");
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["all_settled"], json!(true), "{body}");
+        let settled = body["settled"].as_array().unwrap();
+        assert_eq!(settled.len(), 1, "{body}");
+        assert_eq!(settled[0]["status"], json!("completed"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn wait_until_all_returns_immediately_with_no_children() {
+        let tmp = tempdir().unwrap();
+        let started = Instant::now();
+        let result = dispatch_wait(
+            &json!({ "until": "all", "timeout_secs": 60 }),
+            empty_manager(tmp.path()),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect("wait-for-all with zero children must return, not hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "zero children must not burn the timeout"
+        );
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["all_settled"], json!(true));
+        assert_eq!(body["timed_out"], json!(false));
+        assert!(body["settled"].as_array().unwrap().is_empty(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn wait_until_all_blocks_until_every_child_settles() {
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        let (first, second, third) = {
+            let mut guard = manager.write().await;
+            (
+                guard.insert_test_running_agent("all_first", tmp.path()),
+                guard.insert_test_running_agent("all_second", tmp.path()),
+                guard.insert_test_running_agent("all_third", tmp.path()),
+            )
+        };
+
+        // Staggered settles: an `until=completion` wait would return after the
+        // first one. `until=all` must stay blocked through the last.
+        let flip = Arc::clone(&manager);
+        let (a, b, c) = (first.clone(), second.clone(), third.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            settle(&flip, &a, SubAgentStatus::Completed).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            settle(&flip, &b, SubAgentStatus::Failed("boom".to_string())).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            settle(&flip, &c, SubAgentStatus::Cancelled).await;
+        });
+
+        let result = dispatch_wait(
+            &json!({ "until": "all", "timeout_secs": 30 }),
+            Arc::clone(&manager),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect("wait-for-all should succeed");
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["all_settled"], json!(true), "{body}");
+        assert_eq!(body["timed_out"], json!(false), "{body}");
+        assert!(
+            body["still_running"].as_array().unwrap().is_empty(),
+            "{body}"
+        );
+
+        // Per-child outcomes come back on the single return.
+        let settled = body["settled"].as_array().unwrap();
+        assert_eq!(settled.len(), 3, "{body}");
+        let outcomes: std::collections::BTreeMap<&str, &str> = settled
+            .iter()
+            .map(|entry| {
+                (
+                    entry["agent_id"].as_str().unwrap(),
+                    entry["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(outcomes.get(first.as_str()), Some(&"completed"), "{body}");
+        assert_eq!(outcomes.get(second.as_str()), Some(&"failed"), "{body}");
+        assert_eq!(outcomes.get(third.as_str()), Some(&"cancelled"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn wait_until_all_times_out_reporting_settled_and_still_running() {
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        let (done, stuck) = {
+            let mut guard = manager.write().await;
+            (
+                guard.insert_test_running_agent("all_done", tmp.path()),
+                guard.insert_test_running_agent("all_stuck", tmp.path()),
+            )
+        };
+
+        let flip = Arc::clone(&manager);
+        let done_id = done.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            settle(&flip, &done_id, SubAgentStatus::Completed).await;
+        });
+
+        let result = dispatch_wait(
+            &json!({ "until": "all", "timeout_secs": 1 }),
+            Arc::clone(&manager),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect("a timeout is a partial receipt, not an error");
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["timed_out"], json!(true), "{body}");
+        assert_eq!(body["all_settled"], json!(false), "{body}");
+
+        let settled = body["settled"].as_array().unwrap();
+        assert_eq!(settled.len(), 1, "{body}");
+        assert_eq!(settled[0]["agent_id"], json!(done), "{body}");
+        assert_eq!(settled[0]["status"], json!("completed"), "{body}");
+
+        let running = body["still_running"].as_array().unwrap();
+        assert_eq!(running.len(), 1, "{body}");
+        assert_eq!(running[0]["agent_id"], json!(stuck), "{body}");
+    }
+
+    #[tokio::test]
+    async fn wait_until_all_ignores_children_spawned_mid_wait() {
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        let original = {
+            let mut guard = manager.write().await;
+            guard.insert_test_running_agent("all_original", tmp.path())
+        };
+
+        let flip = Arc::clone(&manager);
+        let tmp_path = tmp.path().to_path_buf();
+        let original_id = original.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            {
+                let mut guard = flip.write().await;
+                guard.insert_test_running_agent("all_latecomer", &tmp_path);
+            }
+            settle(&flip, &original_id, SubAgentStatus::Completed).await;
+        });
+
+        let result = dispatch_wait(
+            &json!({ "until": "all", "timeout_secs": 30 }),
+            Arc::clone(&manager),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect("wait-for-all should succeed");
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        // The watch set is the batch as of call time: the latecomer must not
+        // extend a wait the caller never asked to include it in.
+        assert_eq!(body["all_settled"], json!(true), "{body}");
+        assert_eq!(body["timed_out"], json!(false), "{body}");
+        let settled = body["settled"].as_array().unwrap();
+        assert_eq!(settled.len(), 1, "{body}");
+        assert_eq!(settled[0]["agent_id"], json!(original), "{body}");
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_unknown_until_naming_every_supported_mode() {
+        let tmp = tempdir().unwrap();
+        let error = dispatch_wait(
+            &json!({ "until": "forever" }),
+            empty_manager(tmp.path()),
+            &ToolContext::new(tmp.path()),
+        )
+        .await
+        .expect_err("an unknown until must fail loudly");
+        let message = error.to_string();
+        for mode in ["completion", "all", "activity"] {
+            assert!(message.contains(mode), "{message}");
+        }
     }
 }
 

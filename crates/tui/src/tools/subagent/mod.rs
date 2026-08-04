@@ -6665,7 +6665,7 @@ impl ToolSpec for AgentTool {
             "Use multiple starts for independent parallel tasks. Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
-            "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait only observes. ",
+            "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
             "In Operate, background workers are the default for independent or long work; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
@@ -6679,7 +6679,12 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "cancel"],
-                    "description": "start (default) launches a background worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes until a child settles. cancel permanently cancels a running child."
+                    "description": "start (default) launches a background worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
+                },
+                "until": {
+                    "type": "string",
+                    "enum": ["completion", "all", "activity"],
+                    "description": "For action=wait. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
                 },
                 "agent_id": {
                     "type": "string",
@@ -6916,7 +6921,9 @@ impl ToolSpec for AgentTool {
                     .await;
             }
             AgentToolAction::Wait => {
-                return wait_for_subagents_from_input(&input, self.manager.clone(), context).await;
+                // Shared with `agents/wait` so `until` (completion | all |
+                // activity) means the same thing on both surfaces.
+                return coord::dispatch_wait(&input, self.manager.clone(), context).await;
             }
             AgentToolAction::Cancel => {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
@@ -7070,7 +7077,7 @@ async fn inspect_agent_from_input(
                     "name": snapshot.name,
                     "status": "running",
                     "unchanged": true,
-                    "hint": "No change since your last check. Do not poll: results arrive automatically as <codewhale:subagent.done> sentinels. Either continue independent work, end your turn, or make one agent(action=\"wait\") call to block until this child settles.",
+                    "hint": "No change since your last check. Checking again in a loop is the anti-pattern; one blocking wait is not. Make one agent(action=\"wait\") call — until=\"all\" to join every running child in a single block — or continue independent work, or end your turn. Results arrive automatically as <codewhale:subagent.done> sentinels.",
                 });
                 let mut tool_result = ToolResult::json(&payload)
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -7244,6 +7251,11 @@ const SUBAGENT_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// blocked). Returns immediately when nothing is running. Cancel-safe: the
 /// engine turn's cancel token interrupts the block, and no lock is held
 /// across an await.
+///
+/// This is the `until=completion` arm only. `until=all` — the fan-out join
+/// that blocks for *every* watched child — lives in
+/// [`coord::dispatch_wait`]; both arms are reachable from `agents/wait` and
+/// from `agent(action="wait")`.
 async fn wait_for_subagents_from_input(
     input: &Value,
     manager: SharedSubAgentManager,
@@ -7360,7 +7372,7 @@ async fn wait_result_payload(
         })
         .collect();
     let note = if timed_out {
-        "Wait timed out with children still running. Do not poll — either wait again, continue independent work, or end your turn; results arrive automatically as <codewhale:subagent.done> sentinels."
+        "Wait timed out with children still running. Do not poll — wait again (until=\"all\" blocks for the whole batch), continue independent work, or end your turn; results arrive automatically as <codewhale:subagent.done> sentinels."
     } else if settled_entries.is_empty() {
         "No sub-agents are running anymore."
     } else {
