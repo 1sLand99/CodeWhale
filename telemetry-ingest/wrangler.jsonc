@@ -46,13 +46,13 @@
     }
   }
 
-  // ROUTE — the owner's step, not an agent's. Deploying with no route publishes
-  // only to `*.workers.dev`. To put it on a custom hostname, uncomment and set
-  // the DNS record first:
-  //
-  // "routes": [
-  //   { "pattern": "telemetry.codewhale.net", "custom_domain": true }
-  // ]
+  ,
+  // ROUTE. A self-describing hostname on purpose: someone inspecting their own
+  // network traffic should be able to tell what this is from the name alone.
+  // An opaque `t.` would have been shorter and would have looked evasive.
+  "routes": [
+    { "pattern": "telemetry.codewhale.net", "custom_domain": true }
+  ]
   //
   // Nothing is aimed at this endpoint until `telemetry_endpoint` is set, which
   // is unset in the shipped default and stays that way until the owner deploys
