@@ -3245,19 +3245,18 @@ mod tests {
     #[test]
     fn operate_mode_prompt_keeps_multitask_simple_and_async() {
         for phrase in [
-            "ordinary messages",
-            "coordination capabilities present in the current catalog",
+            "dispatch, join,",
+            "capabilities present in the current catalog",
             "When worker dispatch is available",
-            "When background execution is available",
+            "Fan out, block on one wait until the batch lands",
             "queued user messages as new tasks",
             "Preserve approval",
-            "settled work from verified work",
+            "settled is not",
             "internal control-plane mechanics",
             "When goal control is available",
             "Dispatch is not completion",
             "verification capabilities",
             "When an ordered Workflow capability is present",
-            "keep the parent responsive",
         ] {
             assert!(
                 OPERATE_MODE.contains(phrase),
@@ -3273,6 +3272,36 @@ mod tests {
             assert!(
                 !OPERATE_MODE.contains(implementation_detail),
                 "OPERATE_MODE leaks implementation detail {implementation_detail:?}"
+            );
+        }
+    }
+
+    /// The owner watched a model reason that it had to stay available for its
+    /// children instead of simply joining them. Operate must not frame a
+    /// blocking join as a lapse: the anti-pattern is the poll loop, not the
+    /// single wait, and returning control mid-flight is the exception.
+    #[test]
+    fn operate_mode_endorses_one_blocking_join_over_staying_responsive() {
+        for obligation in [
+            "keep the parent responsive",
+            "parent responsive",
+            "busy-waiting",
+            "return control instead",
+        ] {
+            assert!(
+                !OPERATE_MODE.contains(obligation),
+                "OPERATE_MODE still frames staying responsive as an obligation: {obligation:?}"
+            );
+        }
+        for endorsement in [
+            "Fan out, block on one wait until the batch lands, then synthesize",
+            "endorsed default",
+            "Polling in a loop is the anti-pattern; one blocking wait",
+            "Returning control mid-flight is the exception",
+        ] {
+            assert!(
+                OPERATE_MODE.contains(endorsement),
+                "OPERATE_MODE missing fan-out/join endorsement {endorsement:?}"
             );
         }
     }
