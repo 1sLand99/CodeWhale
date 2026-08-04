@@ -268,11 +268,20 @@ pub fn optional_str<'a>(
 }
 
 /// Helper to extract a required u64 field from JSON input.
+///
+/// Absence (field missing or `null`) is a `missing_field` error; a value
+/// that is present but not a u64 is a [`type_mismatch`] naming the field and
+/// the expected type, so the caller fixes the field's type instead of
+/// re-sending it as missing.
 pub fn required_u64(input: &Value, field: &str) -> std::result::Result<u64, ToolError> {
-    input
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| ToolError::missing_field(field))
+    let value = input.get(field);
+    if is_absent(value) {
+        return Err(ToolError::missing_field(field));
+    }
+    let value = value.expect("is_absent covers the None case");
+    value
+        .as_u64()
+        .ok_or_else(|| type_mismatch(field, value, "a non-negative integer"))
 }
 
 /// Helper to extract an optional u64 field with default.
@@ -677,10 +686,15 @@ mod tests {
         assert_eq!(optional_str(&json!({"name": null}), "name").unwrap(), None);
         assert_eq!(optional_u64(&input, "count", 0).unwrap(), 7);
         assert!(optional_bool(&input, "enabled", false).unwrap());
-        assert!(matches!(
-            required_u64(&input, "name"),
-            Err(ToolError::MissingField { .. })
-        ));
+        // "name" is present but a string: a type mismatch, not a missing
+        // field, so the caller fixes the type instead of re-sending the name.
+        let err = required_u64(&input, "name")
+            .expect_err("a present string is not a missing u64")
+            .to_string();
+        assert!(
+            err.contains("field 'name' must be a non-negative integer"),
+            "{err}"
+        );
     }
 
     /// The rule, stated once: an optional parameter of the wrong JSON type is
@@ -734,22 +748,34 @@ mod tests {
     }
 
     #[test]
-    fn required_u64_rejects_missing_or_non_integer_values() {
+    fn required_u64_distinguishes_missing_from_type_mismatch() {
+        // Absent (or null) is a missing-field error.
         assert!(matches!(
             required_u64(&json!({}), "count"),
             Err(ToolError::MissingField { .. })
         ));
+        assert!(matches!(
+            required_u64(&json!({"count": null}), "count"),
+            Err(ToolError::MissingField { .. })
+        ));
+
+        // Present and valid values pass through, including the extremes.
         assert_eq!(required_u64(&json!({"count": 42}), "count").unwrap(), 42);
         assert_eq!(
             required_u64(&json!({"count": u64::MAX}), "count").unwrap(),
             u64::MAX
         );
 
+        // Present but wrongly typed is a type mismatch naming the field and
+        // the expected type — never a missing-field misdirection.
         for value in [json!(-1), json!(2.5), json!("42")] {
-            assert!(matches!(
-                required_u64(&json!({"count": value}), "count"),
-                Err(ToolError::MissingField { .. })
-            ));
+            let err = required_u64(&json!({"count": value}), "count")
+                .expect_err("wrong type must not look missing")
+                .to_string();
+            assert!(
+                err.contains("field 'count' must be a non-negative integer"),
+                "{err}"
+            );
         }
     }
 
