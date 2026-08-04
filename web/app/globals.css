@@ -576,6 +576,12 @@ mark.search-highlight {
 .site-footer-meta > div { display: flex; gap: 1rem; }
 
 /* ---------- ticker ---------- */
+.ticker-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .ticker-track {
   display: inline-flex;
   gap: 3rem;
@@ -587,6 +593,54 @@ mark.search-highlight {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }
 }
+
+/* One wire entry: verb, number or tag, title, by-line, age. Baseline-aligned
+   so the mono verb sits on the same line as the title it qualifies. */
+.ticker-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+/* The verb carries the state. Merges are the headline case, so they get the
+   one warm-neutral ink on the sheet; releases take ochre; anything closed
+   recedes to mute. Everything else is the action blue. */
+.ticker-verb {
+  color: var(--indigo);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ticker-verb[data-event="merged"] { color: var(--jade); }
+.ticker-verb[data-event="published"] { color: var(--ochre); }
+.ticker-verb[data-event="closed"] { color: var(--ink-mute); }
+
+.ticker-num,
+.ticker-tag,
+.ticker-by,
+.ticker-age {
+  color: var(--ink-mute);
+}
+
+.ticker-title { color: var(--ink); }
+
+/* The contributor's handle is the point of the line, not a footnote. */
+.ticker-handle {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.ticker-first {
+  padding: 0 0.35rem;
+  border: 1px solid var(--ochre);
+  color: var(--ochre);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ticker-sep { color: var(--paper-line-soft); }
 
 /* ---------- terminal player caret ---------- */
 .tp-caret {
@@ -605,6 +659,9 @@ mark.search-highlight {
 @media (prefers-reduced-motion: reduce) {
   .tp-caret { animation: none; }
   .ticker-track { animation: none; }
+  /* A frozen track would clip every entry past the fold with no way to reach
+     them. Stopping the motion must not also remove the content. */
+  .ticker-viewport { overflow-x: auto; }
 }
 
 /* ---------- ambient ---------- */

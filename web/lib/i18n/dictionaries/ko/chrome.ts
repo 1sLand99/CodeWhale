@@ -53,6 +53,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "실시간",
   tickerLiveTag: "LIVE",
+  tickerMerged: "병합됨",
+  tickerOpened: "열림",
+  tickerClosed: "닫힘",
+  tickerReleased: "릴리스",
+  tickerFirstContribution: "첫 기여",
+  tickerBy: "{handle} 님",
+  tickerAria: "저장소 최근 활동",
 
   traceLabel: "추론 기록",
   traceTabsAria: "세션 발췌",

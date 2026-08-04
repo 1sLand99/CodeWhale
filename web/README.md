@@ -120,7 +120,7 @@ web/
 │   ├── nav.tsx                 sticky header w/ date strip + CJK accents
 │   ├── footer.tsx              dense 5-column footer
 │   ├── whale.tsx               shared Codewhale mark
-│   ├── ticker.tsx              animated live activity strip
+│   ├── ticker.tsx              live wire: merges, issues, releases + handles
 │   ├── feed-card.tsx           one issue/PR card
 │   ├── locale-switcher.tsx     N-locale dropdown with partial badges
 │   └── install-*.tsx           install page blocks (binary, code block, tiles)

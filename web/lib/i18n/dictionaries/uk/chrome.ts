@@ -43,6 +43,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "Наживо",
   tickerLiveTag: "LIVE",
+  tickerMerged: "влито",
+  tickerOpened: "відкрито",
+  tickerClosed: "закрито",
+  tickerReleased: "реліз",
+  tickerFirstContribution: "перший внесок",
+  tickerBy: "автор {handle}",
+  tickerAria: "Нещодавня активність репозиторію",
 
   traceLabel: "хід міркувань",
   traceTabsAria: "Фрагменти сеансу",

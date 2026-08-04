@@ -41,6 +41,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "实 时",
   tickerLiveTag: "LIVE",
+  tickerMerged: "已合并",
+  tickerOpened: "已提出",
+  tickerClosed: "已关闭",
+  tickerReleased: "已发布",
+  tickerFirstContribution: "首次贡献",
+  tickerBy: "作者 {handle}",
+  tickerAria: "仓库近期动态",
 
   traceLabel: "推理痕迹",
   traceTabsAria: "会话片段",

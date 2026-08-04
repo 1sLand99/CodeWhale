@@ -47,6 +47,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "速 報",
   tickerLiveTag: "LIVE",
+  tickerMerged: "マージ",
+  tickerOpened: "オープン",
+  tickerClosed: "クローズ",
+  tickerReleased: "リリース",
+  tickerFirstContribution: "初コントリビュート",
+  tickerBy: "{handle} さん",
+  tickerAria: "リポジトリの最近の動き",
 
   traceLabel: "推論トレース",
   traceTabsAria: "セッションの抜粋",

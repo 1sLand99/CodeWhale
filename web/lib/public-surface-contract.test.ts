@@ -585,6 +585,53 @@ done
     }
   });
 
+  it("keeps the homepage wire strip a record of GitHub, not a summary of it", () => {
+    const ticker = text("web/components/ticker.tsx");
+    const homepage = text("web/app/[locale]/page.tsx");
+    const github = text("web/lib/github.ts");
+
+    // An empty or unreachable feed removes the strip. No skeleton, no
+    // placeholder row, no invented item.
+    expect(ticker).toContain("if (!ordered.length) return null;");
+    expect(homepage).toContain("{feed.length > 0 ? (");
+
+    // Drafts are the author's own not-ready marker, not an event.
+    expect(ticker).toContain("EVENT_STATES.includes(item.state)");
+    expect(ticker).not.toContain('"draft"');
+
+    // Every verb resolves through the caller's dictionary — the strip never
+    // hardcodes an English event word next to a translated page.
+    for (const key of [
+      "tickerMerged",
+      "tickerOpened",
+      "tickerClosed",
+      "tickerReleased",
+      "tickerFirstContribution",
+      "tickerBy",
+      "tickerAria",
+    ] as const) {
+      expect(homepage, `homepage passes chrome.${key}`).toContain(`chrome.${key}`);
+      for (const locale of ["en", "zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id"]) {
+        expect(getChrome(locale)[key].trim().length, `${locale} ${key}`).toBeGreaterThan(0);
+      }
+    }
+    expect(getChrome("en").tickerBy).toContain("{handle}");
+
+    // The first-contribution mark is GitHub's verdict, copied, never ours.
+    expect(github).toContain('association === "FIRST_TIME_CONTRIBUTOR"');
+    expect(ticker).toContain("item.firstTimeContributor");
+
+    // A verb is dated by its own event, so a merge is never dated by a later
+    // comment on the thread.
+    expect(github).toContain("eventAt");
+    expect(ticker).toContain("item.eventAt ?? item.updatedAt");
+
+    // Merged pull requests, issues, and releases — the whole life of the repo,
+    // within the existing three-call budget.
+    expect(github).toContain("/releases?per_page=");
+    expect(github).toContain('kind: "release"');
+  });
+
   it("keeps reduced motion static without hiding the reasoning trace", () => {
     const css = text("web/app/globals.css");
     const terminalPlayer = text("web/components/terminal-player.tsx");
@@ -592,6 +639,8 @@ done
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.tp-caret\s*\{\s*animation:\s*none;\s*\}[\s\S]*?\.ticker-track\s*\{\s*animation:\s*none;\s*\}[\s\S]*?\}/,
     );
+    // Freezing the track must not also hide the entries it stopped scrolling.
+    expect(css).toMatch(/\.ticker-viewport\s*\{\s*overflow-x:\s*auto;\s*\}/);
     expect(terminalPlayer).toContain(
       'window.matchMedia("(prefers-reduced-motion: reduce)").matches',
     );

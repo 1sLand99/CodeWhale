@@ -34,6 +34,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "Ao vivo",
   tickerLiveTag: "LIVE",
+  tickerMerged: "mesclado",
+  tickerOpened: "aberto",
+  tickerClosed: "fechado",
+  tickerReleased: "lançado",
+  tickerFirstContribution: "primeira contribuição",
+  tickerBy: "por {handle}",
+  tickerAria: "Atividade recente do repositório",
 
   traceLabel: "rastro de raciocínio",
   traceTabsAria: "Trechos da sessão",

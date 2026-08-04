@@ -101,15 +101,51 @@ interface RawIssue {
   user: { login: string; avatar_url: string };
   created_at: string;
   updated_at: string;
+  closed_at?: string | null;
   comments: number;
   labels: { name: string; color: string }[];
   pull_request?: unknown;
   draft?: boolean;
   body?: string | null;
+  /**
+   * GitHub's relationship verdict for the author, present on both list
+   * endpoints. "FIRST_TIME_CONTRIBUTOR" is the only value we read.
+   */
+  author_association?: string;
 }
 
+interface RawRelease {
+  tag_name: string;
+  name?: string | null;
+  html_url: string;
+  created_at: string;
+  published_at?: string | null;
+  draft?: boolean;
+  prerelease?: boolean;
+  author?: { login: string; avatar_url: string } | null;
+}
+
+/** How many releases to pull. The tail is noise; the ticker sorts by date. */
+const RELEASE_WINDOW = 5;
+
+/** How recent a release must be to keep a reserved slot in a busy feed. */
+const RELEASE_PIN_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+
+function firstTimer(association?: string): boolean {
+  return association === "FIRST_TIME_CONTRIBUTOR";
+}
+
+/**
+ * The repository's recent life: issues, pull requests, and releases.
+ *
+ * Three cached GitHub calls, no per-item follow-ups. Merge state, the
+ * author's handle, and GitHub's first-time-contributor verdict all arrive in
+ * the list payloads we already fetch, so naming a newcomer on the homepage
+ * costs nothing extra. Releases change rarely and cache for an hour;
+ * unauthenticated that is ~13 requests/hour against GitHub's 60/hour/IP.
+ */
 export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]> {
-  const [issuesRes, pullsRes] = await Promise.all([
+  const [issuesRes, pullsRes, releasesRes] = await Promise.all([
     fetch(
       `${GH}/repos/${REPO}/issues?state=all&per_page=${limit}&sort=updated&direction=desc`,
       { headers: headers(token), next: { revalidate: 600 } }
@@ -118,10 +154,15 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
       `${GH}/repos/${REPO}/pulls?state=all&per_page=${limit}&sort=updated&direction=desc`,
       { headers: headers(token), next: { revalidate: 600 } }
     ),
+    fetch(`${GH}/repos/${REPO}/releases?per_page=${RELEASE_WINDOW}`, {
+      headers: headers(token),
+      next: { revalidate: 3600 },
+    }),
   ]);
 
   const issues = await responseArray<RawIssue>(issuesRes);
   const pulls = await responseArray<RawIssue & { merged_at?: string | null }>(pullsRes);
+  const releases = await responseArray<RawRelease>(releasesRes);
 
   const items: FeedItem[] = [];
 
@@ -137,16 +178,25 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
       authorAvatar: it.user.avatar_url,
       createdAt: it.created_at,
       updatedAt: it.updated_at,
+      eventAt: (it.state === "closed" ? it.closed_at : it.created_at) ?? it.created_at,
       comments: it.comments,
       labels: it.labels?.map((l) => ({ name: l.name, color: l.color })) ?? [],
       body: it.body ?? undefined,
+      firstTimeContributor: firstTimer(it.author_association),
     });
   }
 
   for (const pr of pulls) {
     let state: FeedItem["state"] = pr.state;
-    if (pr.merged_at) state = "merged";
-    else if (pr.draft) state = "draft";
+    let eventAt = pr.created_at;
+    if (pr.merged_at) {
+      state = "merged";
+      eventAt = pr.merged_at;
+    } else if (pr.draft) {
+      state = "draft";
+    } else if (pr.state === "closed") {
+      eventAt = pr.closed_at ?? pr.updated_at;
+    }
     items.push({
       kind: "pull",
       number: pr.number,
@@ -157,15 +207,52 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
       authorAvatar: pr.user.avatar_url,
       createdAt: pr.created_at,
       updatedAt: pr.updated_at,
+      eventAt,
       comments: pr.comments,
       labels: pr.labels?.map((l) => ({ name: l.name, color: l.color })) ?? [],
       body: pr.body ?? undefined,
+      firstTimeContributor: firstTimer(pr.author_association),
     });
   }
 
-  return items
-    .sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt))
-    .slice(0, limit);
+  for (const rel of releases) {
+    if (rel.draft) continue; // an unpublished draft is not news
+    const publishedAt = rel.published_at ?? rel.created_at;
+    items.push({
+      kind: "release",
+      number: 0,
+      tag: rel.tag_name,
+      title: rel.name?.trim() || rel.tag_name,
+      url: rel.html_url,
+      state: "published",
+      author: rel.author?.login ?? "",
+      authorAvatar: rel.author?.avatar_url ?? "",
+      createdAt: rel.created_at,
+      updatedAt: publishedAt,
+      eventAt: publishedAt,
+      comments: 0,
+      labels: [],
+    });
+  }
+
+  const ordered = items.sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt));
+  const kept = ordered.slice(0, limit);
+
+  // A release is the one event a busy week can bury: twenty issue comments
+  // will push last week's tag out of a pure recency window. Keep the newest
+  // published release in view — but only a recent one, and always carrying its
+  // real date, so a quiet quarter reads as a quiet quarter instead of pinning
+  // a two-year-old tag beside today's merges.
+  const newestRelease = ordered.find((i) => i.kind === "release");
+  const pinnable =
+    newestRelease &&
+    Date.now() - +new Date(newestRelease.eventAt ?? newestRelease.updatedAt) <
+      RELEASE_PIN_WINDOW_MS;
+  if (pinnable && kept.length === limit && !kept.some((i) => i.kind === "release")) {
+    kept[kept.length - 1] = newestRelease;
+  }
+
+  return kept;
 }
 
 async function responseArray<T>(res: Response): Promise<T[]> {
@@ -182,16 +269,49 @@ export function formatStars(n: number): string {
   return String(n);
 }
 
-export function relativeTime(iso: string): string {
-  const diff = Date.now() - +new Date(iso);
-  const mins = Math.round(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m`;
+/**
+ * An age expressed the way `Intl.RelativeTimeFormat` wants it: a negative
+ * count and a unit. Past ages are negative; anything under a minute (and any
+ * unparseable or future date) is `0 seconds`, which `numeric: "auto"` renders
+ * as the locale's own "now".
+ *
+ * This exists so a surface can print an age in the reader's language without
+ * a hand-translated abbreviation table per locale — CLDR already has one, and
+ * the masthead already formats its date the same way off `chrome.dateLocale`.
+ */
+export interface RelativeAge {
+  value: number;
+  unit: "second" | "minute" | "hour" | "day" | "month" | "year";
+}
+
+export function relativeAge(iso: string): RelativeAge {
+  const then = +new Date(iso);
+  if (!Number.isFinite(then)) return { value: 0, unit: "second" };
+
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return { value: 0, unit: "second" };
+  if (mins < 60) return { value: -mins, unit: "minute" };
   const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
+  if (hrs < 24) return { value: -hrs, unit: "hour" };
   const days = Math.round(hrs / 24);
-  if (days < 30) return `${days}d`;
+  if (days < 30) return { value: -days, unit: "day" };
   const months = Math.round(days / 30);
-  if (months < 12) return `${months}mo`;
-  return `${Math.round(months / 12)}y`;
+  if (months < 12) return { value: -months, unit: "month" };
+  return { value: -Math.round(months / 12), unit: "year" };
+}
+
+const AGE_SUFFIX: Record<RelativeAge["unit"], string> = {
+  second: "",
+  minute: "m",
+  hour: "h",
+  day: "d",
+  month: "mo",
+  year: "y",
+};
+
+/** Compact English age, e.g. "5m", "3h", "2y". Same thresholds as `relativeAge`. */
+export function relativeTime(iso: string): string {
+  const age = relativeAge(iso);
+  if (age.unit === "second") return "just now";
+  return `${Math.abs(age.value)}${AGE_SUFFIX[age.unit]}`;
 }

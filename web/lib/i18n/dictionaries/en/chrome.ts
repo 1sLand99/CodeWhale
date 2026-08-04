@@ -43,6 +43,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "实 时",
   tickerLiveTag: "LIVE",
+  tickerMerged: "merged",
+  tickerOpened: "opened",
+  tickerClosed: "closed",
+  tickerReleased: "released",
+  tickerFirstContribution: "first contribution",
+  tickerBy: "by {handle}",
+  tickerAria: "Recent repository activity",
 
   traceLabel: "reasoning trace",
   traceTabsAria: "Session excerpts",

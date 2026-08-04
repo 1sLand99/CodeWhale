@@ -47,6 +47,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "Langsung",
   tickerLiveTag: "LIVE",
+  tickerMerged: "digabungkan",
+  tickerOpened: "dibuka",
+  tickerClosed: "ditutup",
+  tickerReleased: "dirilis",
+  tickerFirstContribution: "kontribusi pertama",
+  tickerBy: "oleh {handle}",
+  tickerAria: "Aktivitas terbaru repositori",
 
   traceLabel: "jejak penalaran",
   traceTabsAria: "Cuplikan sesi",

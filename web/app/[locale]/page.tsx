@@ -49,7 +49,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   let feed: FeedItem[] = [];
   try {
     const env = await getEnv();
-    feed = await fetchFeed(env.GITHUB_TOKEN, 12);
+    feed = await fetchFeed(env.GITHUB_TOKEN, 20);
   } catch {
     /* ticker is optional chrome */
   }
@@ -155,12 +155,23 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         </div>
       </section>
 
-      {/* Live repo ticker — industrial cyberpunk newspaper energy */}
+      {/* Live repo wire — merges, issues, and releases straight from GitHub,
+          with the contributor named. Absent entirely when the feed is empty. */}
       {feed.length > 0 ? (
         <Ticker
           items={feed}
-          liveLabel={chrome.tickerLiveLabel}
-          liveTag={chrome.tickerLiveTag}
+          labels={{
+            liveLabel: chrome.tickerLiveLabel,
+            liveTag: chrome.tickerLiveTag,
+            ariaLabel: chrome.tickerAria,
+            merged: chrome.tickerMerged,
+            opened: chrome.tickerOpened,
+            closed: chrome.tickerClosed,
+            released: chrome.tickerReleased,
+            firstContribution: chrome.tickerFirstContribution,
+            by: chrome.tickerBy,
+            dateLocale: chrome.dateLocale,
+          }}
         />
       ) : null}
 

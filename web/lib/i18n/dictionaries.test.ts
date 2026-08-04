@@ -53,6 +53,15 @@ const CHROME_PROSE_KEYS = [
   "switcherLabel",
   "switcherSwitchTo",
   "partialBadge",
+  // Ticker chrome. The repository's own record (titles, handles, tags) stays
+  // verbatim, but the verbs the strip prints around it are copy.
+  "tickerMerged",
+  "tickerOpened",
+  "tickerClosed",
+  "tickerReleased",
+  "tickerFirstContribution",
+  "tickerBy",
+  "tickerAria",
 ] as const satisfies readonly (keyof ChromeDict)[];
 
 /** Home keys that are real sentences and must be translated. */
@@ -274,6 +283,18 @@ describe("website dictionaries", () => {
       const parts = splitToken(lede, "brand");
       expect(parts.length, `${locale} heroIntro brand split`).toBe(2);
       expect(parts.join("").includes("{brand}")).toBe(false);
+    }
+  });
+
+  it("carries the {handle} token through every ticker by-line", () => {
+    // components/ticker.tsx splits on the token so the handle is typeset in
+    // its own element. A locale that drops it would print a by-line with no
+    // contributor in it — the opposite of the point.
+    for (const locale of ["en", ...DICTIONARY_LOCALES]) {
+      const byLine = getChrome(locale).tickerBy;
+      expect(byLine, `${locale} tickerBy`).toContain("{handle}");
+      const parts = splitToken(byLine, "handle");
+      expect(parts.length, `${locale} tickerBy split`).toBe(2);
     }
   });
 

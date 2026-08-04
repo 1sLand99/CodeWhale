@@ -86,6 +86,36 @@ export interface ChromeDict {
   /** Live-ticker mono tag beside the seal label, e.g. "LIVE". */
   tickerLiveTag: string;
 
+  /**
+   * Ticker event verbs — the chrome around the repository's own record.
+   * Pull-request titles, issue titles, release tags, and contributor handles
+   * are CONTENT and stay verbatim in every locale; these verbs are copy and
+   * must be translated.
+   *
+   * `tickerReleased` covers `state: "published"`, and `tickerOpened` covers
+   * both a newly filed issue and an open pull request. There is deliberately
+   * no draft verb: the strip reports events, and a draft pull request is one
+   * its author has marked not-ready (components/ticker.tsx `EVENT_STATES`).
+   */
+  tickerMerged: string;
+  tickerOpened: string;
+  tickerClosed: string;
+  tickerReleased: string;
+  /**
+   * Mark shown when GitHub itself reports the author as a
+   * FIRST_TIME_CONTRIBUTOR — the warmest item on the strip, and never our
+   * inference. Keep it short; it sits inline in a scrolling mono line.
+   */
+  tickerFirstContribution: string;
+  /**
+   * By-line template carrying a `{handle}` token, e.g. "by {handle}". The
+   * handle is typeset in its own element, so a locale may place it anywhere
+   * (or make it the whole value, as ja/ko do with an honorific suffix).
+   */
+  tickerBy: string;
+  /** aria-label for the ticker's group landmark. */
+  tickerAria: string;
+
   /** TerminalPlayer title-bar label, e.g. "reasoning trace". */
   traceLabel: string;
   /** aria-label for the TerminalPlayer scene tablist. */

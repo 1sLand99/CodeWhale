@@ -50,6 +50,13 @@ export const chrome: ChromeDict = {
 
   tickerLiveLabel: "Trực tiếp",
   tickerLiveTag: "LIVE",
+  tickerMerged: "đã hợp nhất",
+  tickerOpened: "đã mở",
+  tickerClosed: "đã đóng",
+  tickerReleased: "đã phát hành",
+  tickerFirstContribution: "đóng góp đầu tiên",
+  tickerBy: "bởi {handle}",
+  tickerAria: "Hoạt động gần đây của kho mã",
 
   traceLabel: "mạch suy luận",
   traceTabsAria: "Trích đoạn phiên làm việc",
