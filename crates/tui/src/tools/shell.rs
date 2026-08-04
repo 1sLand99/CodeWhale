@@ -3657,12 +3657,17 @@ impl BashTool {
         let task_id = required_task_id(input)?;
         let close_stdin = optional_bool(input, "close_stdin", false)?;
         let timeout_ms = optional_u64(input, "timeout_ms", 1_000)?;
-        let interaction_input = input
-            .get("input")
-            .or_else(|| input.get("stdin"))
-            .or_else(|| input.get("data"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        // Same strict-type contract as `run` (2026-08-04): a non-string here
+        // was silently dropped, so an `interact` call reported success while
+        // writing nothing to the child's stdin. Alias order also matches
+        // `run` now — `stdin` first — so the same payload reaches the same
+        // place whichever spelling the model uses.
+        let interaction_input = match first_present_field(input, &["stdin", "input", "data"]) {
+            None => "",
+            Some((name, value)) => value
+                .as_str()
+                .ok_or_else(|| type_mismatch(name, value, "a string"))?,
+        };
 
         {
             let mut manager = context
