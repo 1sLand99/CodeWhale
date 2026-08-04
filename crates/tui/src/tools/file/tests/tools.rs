@@ -313,15 +313,30 @@ async fn read_file_large_file_without_range_uses_default_window() {
         .execute(json!({ "path": "big.txt" }), &ctx)
         .await
         .expect("execute");
-    assert!(result.content.contains("<file "));
-    assert!(result.content.contains("shown_lines=\"1-200\""));
-    assert!(result.content.contains("next_start_line=\"201\""));
-    assert!(result.content.contains("     1│ row 1"));
-    assert!(result.content.contains("   200│ row 200"));
+    // 250 rows is ~1.7 KB — far inside the 16 KB byte budget — so it reads in
+    // ONE call. The old 200-line default truncated here and charged a second
+    // round trip to fetch 50 lines, which is what this change removes.
+    // No `<file …>` envelope: at 250 lines / ~1.7 KB it now takes the
+    // whole-file path and comes back as plain text, which is the point.
+    assert!(result.content.contains("row 1"));
+    assert!(result.content.contains("row 250"));
     assert!(
-        !result.content.contains("   201│ row 201"),
-        "default max_lines=200 must hold"
+        !result.content.contains("next_start_line"),
+        "a 250-line, ~1.7 KB file must not window: {}",
+        result.content
     );
+
+    // Past the line cap it still windows, because the cap is a real guard for
+    // pathologically short lines.
+    let many = tmp.path().join("many.txt");
+    let body: String = (1..=600).map(|n| format!("row {n}\n")).collect();
+    fs::write(&many, &body).expect("write");
+    let windowed = tool
+        .execute(json!({ "path": "many.txt" }), &ctx)
+        .await
+        .expect("execute");
+    assert!(windowed.content.contains("shown_lines=\"1-500\""));
+    assert!(windowed.content.contains("next_start_line=\"501\""));
 }
 
 #[tokio::test]
@@ -364,8 +379,8 @@ async fn read_file_streamed_range_on_large_file_matches_windowed_contract() {
         .execute(json!({ "path": "large.txt" }), &ctx)
         .await
         .expect("execute");
-    assert!(default_window.content.contains("shown_lines=\"1-200\""));
-    assert!(default_window.content.contains("next_start_line=\"201\""));
+    assert!(default_window.content.contains("shown_lines=\"1-500\""));
+    assert!(default_window.content.contains("next_start_line=\"501\""));
     assert!(default_window.content.contains("     1│ line 1"));
 
     // Paging past EOF returns the no-content sentinel, not an error.

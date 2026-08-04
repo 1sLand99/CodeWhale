@@ -101,7 +101,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns up to 500 lines or 16KB, whichever comes first. If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -118,7 +118,7 @@ impl ToolSpec for ReadFileTool {
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return (default 200, max 500)"
+                    "description": "Maximum lines to return (default 500, max 500; a 16KB byte budget applies regardless)"
                 },
                 "pages": {
                     "type": "string",
@@ -288,10 +288,16 @@ impl ToolSpec for ReadFileTool {
 // window with continuation hints so the model can page through
 // without re-loading the entire file on every turn. Harvested
 // from PR #1451 by @Oliver-ZPLiu, closes part of #1450.
-const DEFAULT_READ_LINES: usize = 200;
+// One bound, not two competing ones. The real cost of a read is BYTES of
+// context, and `MAX_VISIBLE_BYTES` already enforces that. A separate 200-line
+// default fired long before the byte budget on any prose file — a 229-line,
+// 12 KB document truncated at line 200 with a third of the budget unspent,
+// costing a second round trip to fetch 29 lines. The line cap now only guards
+// pathologically short lines, where 500 lines is still a small read.
+const DEFAULT_READ_LINES: usize = HARD_MAX_READ_LINES;
 const HARD_MAX_READ_LINES: usize = 500;
 const MAX_VISIBLE_BYTES: usize = 16 * 1024;
-const SMALL_FILE_LINES: usize = 200;
+const SMALL_FILE_LINES: usize = HARD_MAX_READ_LINES;
 const SMALL_FILE_BYTES: usize = 16 * 1024;
 
 /// Stream a line window out of `file`: skip `start_line - 1` lines, collect
