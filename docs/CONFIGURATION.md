@@ -569,10 +569,14 @@ With `model = "auto"`, Codewhale routes each turn between a strong and a cheap
 model. The routing decision comes from a small classifier call, or from a local
 heuristic when no classifier route is available.
 
-By default the classifier is `deepseek-v4-flash` via DeepSeek, used only when a
-DeepSeek key is configured; every other setup falls back to the local heuristic
-with no classifier call. Point the classifier at any configured provider with
-`[auto.router]`:
+**There is no default classifier.** With `[auto.router]` unset, Auto is local
+and free: it uses the heuristic and makes no classifier call, whatever keys you
+hold. Holding a DeepSeek key used to elect `deepseek-v4-flash` automatically;
+that was removed because it spent tokens on a route the user never chose and
+privileged one provider over the rest (`crates/tui/src/config.rs:2392-2402`).
+Electing a network classifier is now something you write down.
+
+Point the classifier at any configured provider with `[auto.router]`:
 
 ```toml
 [auto.router]
@@ -581,18 +585,23 @@ model = "glm-5-turbo"
 thinking = "off"        # optional; defaults to off
 ```
 
-When `[auto.router]` is unset, the DeepSeek-flash default applies; when the
-configured route has no credentials, Auto mode falls back to the heuristic
-instead of failing. The turn's route receipt (`/status` → Auto) records
-whether the classifier or the heuristic decided.
+A classifier call happens only when `[auto.router]` is set *and* that provider
+has a key — `router_available = router_configured && has_api_key_for(...)`
+(`crates/tui/src/model_inventory.rs:206-218`). Either condition failing means
+the heuristic decides, not a failure. The turn's route receipt (`/status` →
+Auto) records which one it was.
 
 To bootstrap MCP and skills directories at their resolved paths, run `codewhale-tui setup`.
 To only scaffold MCP, run `codewhale-tui mcp init`.
 
-Note: setup, doctor, mcp, features, sessions, resume/fork, exec, review, and eval
-are subcommands of the `codewhale-tui` binary. The `codewhale` dispatcher exposes a
-distinct set of commands (`auth`, `config`, `model`, `thread`, `sandbox`,
-`app-server`, `mcp-server`, `completion`) and forwards plain prompts to
+Note: `setup`, `doctor`, `mcp`, `features`, `sessions`, `resume`/`fork`, `exec`,
+`review`, and `eval` are subcommands of the `codewhale-tui` binary, and the
+`codewhale` dispatcher accepts every one of them as a passthrough
+(`TuiPassthroughArgs`, `crates/cli/src/lib.rs:244-429`) — the dispatcher's
+surface is a **superset**, not a distinct set. It adds commands the TUI binary
+does not have of its own: `auth`, `config`, `model`, `thread`, `sandbox`,
+`app-server`, `mcp-server`, `completions`, `login`/`logout`, `account`,
+`metrics`, `update`, `lane`, `workflow`, `web`. Plain prompts are forwarded to
 `codewhale-tui`.
 
 ### Startup Update Checks
@@ -1562,8 +1571,13 @@ Common settings keys:
   which session was skipped and why. It applies to the interactive launch only
   — `codewhale "<prompt>"` and `codewhale exec` are never silently prefixed
   with a prior conversation.
-- `max_history` (number of submitted input history entries; cleared drafts are
-  also kept locally for composer history search)
+- `max_input_history` (number of submitted input history entries; cleared
+  drafts are also kept locally for composer history search). Note the spelling:
+  the serde field on disk is `max_input_history`
+  (`crates/tui/src/settings.rs:426`, default 100). `max_history` is the key
+  name accepted by `/config set` and `settings.set()` (`settings.rs:1388`), not
+  a settings.toml key — writing `max_history` into the file is silently
+  ignored.
 - `default_model` (model name override)
 
 `/task digest` (alias `/tasks digest`) renders the canonical Work Graph
@@ -1833,9 +1847,11 @@ If you are upgrading from older releases:
   max_concurrent` value overrides
   top-level `max_subagents` and is also clamped to `1..=128`. `[subagents]
   max_admitted` (aliases: `max_total`, `admission_limit`) is the bounded total
-  of queued plus running sub-agents; it defaults to `200` so high-fanout turns
-  can queue and drain while runtime launch pressure remains bounded, and is
-  clamped to `max_concurrent..=1024`. `[subagents]
+  of queued plus running sub-agents; it defaults to `1024`
+  (`MAX_SUBAGENT_ADMISSION`, `crates/tui/src/config/subagent_limits.rs:21`,
+  applied at `config.rs:6400`) so high-fanout turns can queue and drain while
+  runtime launch pressure remains bounded, and is clamped to
+  `max_concurrent..=1024`. `[subagents]
   launch_concurrency` sets how many direct children start at once before the
   rest queue for a launch slot; it defaults to the resolved `max_subagents` cap
   and is clamped to `1..=max_subagents` (the deprecated
