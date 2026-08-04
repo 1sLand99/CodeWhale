@@ -1571,51 +1571,107 @@ async fn test_edit_file_not_found_shows_search_preview() {
     );
 }
 
-/// #157 / #5209 — When the model uses a wrong alias (`replacement`,
-/// `new_str`, …) instead of `replace`, hard-error naming the correct
-/// parameter. Never silent-accept or fabricate a success receipt.
+/// #157 / #5209 — `replacement` is an unambiguous synonym for `replace`, so
+/// the edit the model asked for is the edit that lands. The #5209 guarantee
+/// being protected is that the file and the receipt agree: a reported
+/// replacement must correspond to a real one.
 #[tokio::test]
-async fn test_edit_file_wrong_param_name_shows_provided_fields() {
+async fn edit_file_accepts_replacement_alias_and_applies_the_edit() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());
 
     let test_file = tmp.path().join("test.txt");
     fs::write(&test_file, "hello world").expect("write");
+    read_before_edit(&ctx, "test.txt").await;
 
-    let tool = EditFileTool;
-    // Model uses `replacement` instead of `replace`.
-    let result = tool
+    let result = EditFileTool
         .execute(
             json!({"path": "test.txt", "search": "hello", "replacement": "hi"}),
             &ctx,
         )
-        .await;
+        .await
+        .expect("replacement alias must be honored");
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("replace"),
-        "error must name the correct parameter: {err}"
-    );
-    assert!(
-        err.contains("replacement") || err.contains("invalid File edit parameter"),
-        "error must call out the wrong name: {err}"
-    );
-    assert!(
-        !err.contains("Replaced 1 occurrence"),
-        "must not fabricate a success receipt: {err}"
-    );
+    assert!(result.success);
     assert_eq!(
         fs::read_to_string(&test_file).expect("read"),
-        "hello world",
-        "file must be unchanged after rejected edit"
+        "hi world",
+        "the receipt claimed an edit, so the file must actually carry it"
     );
 }
 
-/// #5209 — `new_str` (common alternate harness name) must hard-error
-/// naming `replace`, never report success.
+/// Every cross-harness spelling of the two edit arguments resolves to the
+/// same applied edit. A model that guesses from a different harness's prior
+/// gets its work done instead of a rejection and a wasted turn (#5209).
 #[tokio::test]
-async fn edit_file_rejects_new_str_alias_with_hard_error() {
+async fn edit_file_accepts_every_cross_harness_edit_alias() {
+    for (search_key, replace_key) in [
+        ("old_string", "new_string"),
+        ("old_str", "new_str"),
+        ("oldText", "newText"),
+        ("old_text", "new_text"),
+    ] {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("doc.md");
+        fs::write(&path, "old text line\n").expect("write");
+        read_before_edit(&ctx, "doc.md").await;
+
+        let result = EditFileTool
+            .execute(
+                json!({
+                    "path": "doc.md",
+                    search_key: "old text line",
+                    replace_key: "new text line",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{search_key}/{replace_key} must apply: {err}"));
+
+        assert!(result.success, "{search_key}/{replace_key}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            "new text line\n",
+            "{search_key}/{replace_key} must reach the file"
+        );
+    }
+}
+
+/// The unified `File` tool takes the same alias path as the inner tool, so
+/// the model-facing surface and the dispatch target cannot disagree.
+#[tokio::test]
+async fn file_tool_action_edit_accepts_new_str_alias() {
+    use crate::tools::file_tool::FileTool;
+
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.md");
+    fs::write(&path, "old text line\n").expect("write");
+    read_before_edit(&ctx, "doc.md").await;
+
+    let result = FileTool::with_patch("File")
+        .execute(
+            json!({
+                "action": "edit",
+                "path": "doc.md",
+                "search": "old text line",
+                "new_str": "new text line",
+            }),
+            &ctx,
+        )
+        .await
+        .expect("File action=edit with new_str must apply");
+
+    assert!(result.success);
+    assert_eq!(fs::read_to_string(&path).expect("read"), "new text line\n");
+}
+
+/// An alias that contradicts an explicitly supplied canonical value is
+/// ambiguous. Picking one would be the guess this whole path exists to
+/// avoid, so it fails and changes nothing.
+#[tokio::test]
+async fn edit_file_rejects_alias_conflicting_with_canonical_name() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());
     let path = tmp.path().join("doc.md");
@@ -1627,48 +1683,118 @@ async fn edit_file_rejects_new_str_alias_with_hard_error() {
             json!({
                 "path": "doc.md",
                 "search": "old text line",
-                "new_str": "new text line",
+                "replace": "one thing",
+                "new_string": "a different thing",
             }),
             &ctx,
         )
         .await
-        .expect_err("new_str must hard-error");
+        .expect_err("conflicting alias must not be silently resolved");
+
     let msg = err.to_string();
     assert!(
-        msg.contains("`new_str`") && msg.contains("`replace`"),
-        "must name wrong alias and correct param: {msg}"
+        msg.contains("`replace`") && msg.contains("`new_string`"),
+        "must name both spellings: {msg}"
     );
-    assert!(!msg.contains("Replaced 1 occurrence"), "{msg}");
-    assert_eq!(fs::read_to_string(&path).expect("read"), "old text line\n");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "old text line\n",
+        "nothing may change on an ambiguous call"
+    );
 }
 
-/// #5209 — unified File action=edit takes the same hard-error path.
+/// An alias that merely repeats the canonical value is a harmless
+/// duplicate, not a conflict.
 #[tokio::test]
-async fn file_tool_action_edit_rejects_new_str_alias() {
-    use crate::tools::file_tool::FileTool;
-
+async fn edit_file_accepts_alias_agreeing_with_canonical_name() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());
     let path = tmp.path().join("doc.md");
     fs::write(&path, "old text line\n").expect("write");
     read_before_edit(&ctx, "doc.md").await;
 
-    let err = FileTool::with_patch("File")
+    EditFileTool
         .execute(
             json!({
-                "action": "edit",
                 "path": "doc.md",
                 "search": "old text line",
-                "new_str": "new text line",
+                "replace": "new text line",
+                "new_string": "new text line",
             }),
             &ctx,
         )
         .await
-        .expect_err("File action=edit with new_str must hard-error");
-    let msg = err.to_string();
-    assert!(msg.contains("`replace`"), "must name replace: {msg}");
-    assert!(!msg.contains("Replaced 1 occurrence"), "{msg}");
-    assert_eq!(fs::read_to_string(&path).expect("read"), "old text line\n");
+        .expect("agreeing duplicate must be accepted");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "new text line\n");
+}
+
+/// `file_path` is the other widespread spelling of `path` and is accepted on
+/// every file action.
+#[tokio::test]
+async fn file_actions_accept_file_path_alias() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    WriteFileTool
+        .execute(json!({"file_path": "note.txt", "content": "first\n"}), &ctx)
+        .await
+        .expect("write must accept file_path");
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("note.txt")).expect("read"),
+        "first\n"
+    );
+
+    let read = ReadFileTool
+        .execute(json!({"file_path": "note.txt"}), &ctx)
+        .await
+        .expect("read must accept file_path");
+    assert!(read.content.contains("first"));
+
+    EditFileTool
+        .execute(
+            json!({"file_path": "note.txt", "search": "first", "replace": "second"}),
+            &ctx,
+        )
+        .await
+        .expect("edit must accept file_path");
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("note.txt")).expect("read"),
+        "second\n"
+    );
+}
+
+/// `offset`/`limit` name the same read window as `start_line`/`max_lines`.
+/// Before they were translated, a wrong guess was dropped and the model
+/// silently got the head of the file instead of the window it asked for.
+#[tokio::test]
+async fn read_file_accepts_offset_and_limit_aliases() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let body: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+    fs::write(tmp.path().join("many.txt"), &body).expect("write");
+
+    let aliased = ReadFileTool
+        .execute(json!({"path": "many.txt", "offset": 5, "limit": 3}), &ctx)
+        .await
+        .expect("offset/limit must be honored");
+    let canonical = ReadFileTool
+        .execute(
+            json!({"path": "many.txt", "start_line": 5, "max_lines": 3}),
+            &ctx,
+        )
+        .await
+        .expect("canonical read");
+
+    assert_eq!(
+        aliased.content, canonical.content,
+        "aliases must select the same window as the canonical names"
+    );
+    assert!(
+        aliased.content.contains("line 5") && !aliased.content.contains("line 1\n"),
+        "must start at the requested offset: {}",
+        aliased.content
+    );
 }
 
 /// #5209 — unknown keys on edit hard-error even when required fields are present.

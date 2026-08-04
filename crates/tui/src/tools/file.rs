@@ -20,6 +20,103 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+// === Cross-harness parameter aliases ===
+
+/// Rewrite well-known parameter spellings from other coding harnesses onto the
+/// names this tool actually implements.
+///
+/// Every mainstream harness names the same three file-edit arguments
+/// differently — `old_string`/`new_string`, `old_str`/`new_str`,
+/// `oldText`/`newText` — and models carry whichever spelling their training
+/// saw most. CodeWhale's canonical `search`/`replace` is the odd one out, so a
+/// model reaching for its prior used to burn a full turn on a rejection
+/// (#5209) and then guess again. Translating an unambiguous synonym is
+/// strictly better than refusing it: the edit the model asked for is the edit
+/// that happens, and the schema still advertises exactly one canonical name so
+/// there is no new ambiguity to learn.
+///
+/// This is deliberately *not* a silent-acceptance path. Only exact synonyms
+/// are mapped, a synonym that disagrees with an explicitly supplied canonical
+/// value is an error rather than a coin flip, and any parameter that is not a
+/// known synonym still fails validation. The #5209 guarantee — no fabricated
+/// "Replaced 1 occurrence" for an edit that never landed — is unchanged.
+struct ParamAlias {
+    /// Spelling a model might emit.
+    alias: &'static str,
+    /// Parameter this tool implements.
+    canonical: &'static str,
+}
+
+const fn alias(alias: &'static str, canonical: &'static str) -> ParamAlias {
+    ParamAlias { alias, canonical }
+}
+
+/// Path spellings shared by every file action. `path` is CodeWhale's
+/// canonical name and the most common one in the field, but `file_path` is
+/// widespread enough in training data to be worth accepting everywhere.
+const PATH_ALIASES: &[ParamAlias] = &[alias("file_path", "path"), alias("filePath", "path")];
+
+/// Edit-specific spellings. Ordered most- to least-common.
+const EDIT_ALIASES: &[ParamAlias] = &[
+    alias("old_string", "search"),
+    alias("new_string", "replace"),
+    alias("old_str", "search"),
+    alias("new_str", "replace"),
+    alias("oldText", "search"),
+    alias("newText", "replace"),
+    alias("old_text", "search"),
+    alias("new_text", "replace"),
+    alias("replacement", "replace"),
+];
+
+/// Read-window spellings. `offset`/`limit` and `line_offset`/`n_lines` both
+/// name the same two numbers as CodeWhale's `start_line`/`max_lines` in widely
+/// trained-on tool surfaces. A wrong guess here used to be ignored outright,
+/// silently returning the head of the file instead of the window the model
+/// asked for — a wrong answer shaped like a right one.
+const READ_ALIASES: &[ParamAlias] = &[
+    alias("offset", "start_line"),
+    alias("line_offset", "start_line"),
+    alias("limit", "max_lines"),
+    alias("n_lines", "max_lines"),
+    alias("num_lines", "max_lines"),
+];
+
+/// Apply `aliases` to `input`, in place.
+///
+/// An alias is consumed only when the canonical key is absent. When both are
+/// present and *equal* the alias is dropped as a harmless duplicate; when both
+/// are present and disagree the call fails, because guessing which one the
+/// model meant is exactly the fabrication this path exists to prevent.
+fn apply_param_aliases(
+    input: &mut Value,
+    aliases: &[ParamAlias],
+    tool_label: &str,
+) -> Result<(), ToolError> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+
+    for ParamAlias { alias, canonical } in aliases {
+        let Some(alias_value) = obj.remove(*alias) else {
+            continue;
+        };
+        match obj.get(*canonical) {
+            None => {
+                obj.insert((*canonical).to_string(), alias_value);
+            }
+            Some(existing) if existing == &alias_value => {}
+            Some(_) => {
+                return Err(ToolError::invalid_input(format!(
+                    "{tool_label} received both `{canonical}` and its alias `{alias}` with different values, so the intended argument is ambiguous; nothing was changed. Pass only `{canonical}`."
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // === ReadFileTool ===
 
 fn canonical_path_for_credential_guard(path: &Path) -> PathBuf {
@@ -110,15 +207,15 @@ impl ToolSpec for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (relative to workspace or absolute)"
+                    "description": "Path to the file (relative to workspace or absolute). Alias: `file_path`"
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "Starting line (1-based, default 1)"
+                    "description": "Starting line (1-based, default 1). Aliases: `offset`, `line_offset`"
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return (default 500, max 500; a 16KB byte budget applies regardless)"
+                    "description": "Maximum lines to return (default 500, max 500; a 16KB byte budget applies regardless). Aliases: `limit`, `n_lines`"
                 },
                 "pages": {
                     "type": "string",
@@ -138,6 +235,10 @@ impl ToolSpec for ReadFileTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File read")?;
+        apply_param_aliases(&mut input, READ_ALIASES, "File read")?;
+
         let path_str = required_str(&input, "path")?;
         let file_path = context.resolve_path(path_str)?;
         if is_codewhale_credential_path(&file_path) {
@@ -608,7 +709,7 @@ impl ToolSpec for WriteFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file"
+                    "description": "Path to the file. Alias: `file_path`"
                 },
                 "content": {
                     "type": "string",
@@ -632,6 +733,9 @@ impl ToolSpec for WriteFileTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File write")?;
+
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
 
@@ -723,15 +827,15 @@ impl ToolSpec for EditFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file"
+                    "description": "Path to the file. Alias: `file_path`"
                 },
                 "search": {
                     "type": "string",
-                    "description": "Exact text to search for, including whitespace, indentation, and newlines"
+                    "description": "Exact text to search for, including whitespace, indentation, and newlines. Aliases: `old_string`, `old_str`, `oldText`"
                 },
                 "replace": {
                     "type": "string",
-                    "description": "Text to replace with"
+                    "description": "Text to replace with. Aliases: `new_string`, `new_str`, `newText`"
                 },
                 "fuzz": {
                     "type": "boolean",
@@ -755,9 +859,15 @@ impl ToolSpec for EditFileTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        // #5209 — reject wrong/unknown parameter names before any soft
-        // defaults or success-shaped receipts can be produced. Models
-        // frequently invent `new_str`/`new_string` instead of `replace`.
+        // Translate known cross-harness spellings (`old_string`/`new_string`,
+        // `old_str`/`new_str`, …) onto `search`/`replace` first, then reject
+        // whatever is left that we do not implement. #5209 required that a
+        // mis-named edit never produce a success-shaped receipt for a file
+        // that did not change; performing the edit the model unambiguously
+        // asked for satisfies that more directly than refusing it did.
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File edit")?;
+        apply_param_aliases(&mut input, EDIT_ALIASES, "File edit")?;
         validate_edit_file_params(&input)?;
 
         let path_str = required_str(&input, "path")?;
@@ -965,13 +1075,15 @@ impl ToolSpec for EditFileTool {
     }
 }
 
-/// Reject wrong or unexpected parameter names for File/`edit_file` before any
-/// mutation or success-shaped receipt is produced (#5209).
+/// Reject parameter names for File/`edit_file` that this tool does not
+/// implement, before any mutation or success-shaped receipt is produced
+/// (#5209).
 ///
-/// Models frequently invent `new_str` / `new_string` / `old_string` from other
-/// harnesses. Accepting those silently (or only failing on the missing
-/// required field with a weak message) caused fabricated "Replaced 1
-/// occurrence" loops. Hard-error with the correct names.
+/// Runs *after* [`apply_param_aliases`], so the cross-harness spellings a
+/// model is most likely to reach for have already been folded onto
+/// `search`/`replace`/`path` and are not seen here. What remains is a name
+/// with no known meaning, where continuing would mean guessing — so this
+/// still hard-errors rather than dropping the argument and reporting success.
 fn validate_edit_file_params(input: &Value) -> Result<(), ToolError> {
     let Some(obj) = input.as_object() else {
         return Err(ToolError::invalid_input(
@@ -980,27 +1092,6 @@ fn validate_edit_file_params(input: &Value) -> Result<(), ToolError> {
     };
 
     const ALLOWED: &[&str] = &["path", "search", "replace", "fuzz"];
-    // Wrong alias → correct parameter name.
-    const WRONG_ALIASES: &[(&str, &str)] = &[
-        ("new_str", "replace"),
-        ("new_string", "replace"),
-        ("replacement", "replace"),
-        ("old_str", "search"),
-        ("old_string", "search"),
-    ];
-
-    let mut wrong_hits: Vec<String> = Vec::new();
-    for (wrong, correct) in WRONG_ALIASES {
-        if obj.contains_key(*wrong) {
-            wrong_hits.push(format!("`{wrong}` (use `{correct}` instead)"));
-        }
-    }
-    if !wrong_hits.is_empty() {
-        return Err(ToolError::invalid_input(format!(
-            "invalid File edit parameter name(s): {}. Required parameters are `path`, `search`, and `replace` — not alternates. The edit was not applied.",
-            wrong_hits.join("; ")
-        )));
-    }
 
     let unexpected: Vec<&str> = obj
         .keys()

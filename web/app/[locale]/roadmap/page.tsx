@@ -41,7 +41,7 @@ const tracksEn = [
     title: "Underway",
     items: [
       { title: "VS Code extension", note: "The repository ships a Phase 0 local-runtime companion: terminal launch, health checks, read-only thread summaries, and restore-point browsing. Full chat and editor actions are not part of this slice." },
-      { title: "Memory typed store", note: "SQLite + FTS5 backend with graph-structured agent memory and multi-signal recall (#534–#536)" },
+      { title: "Memory typed store", note: "The native store has shipped: Markdown is the durable source of truth, with a rebuildable SQLite FTS5 index over it. Graph-structured agent memory and multi-signal recall are still ahead (#534–#536)" },
       { title: "Feishu / Lark bot", note: "First long-connection bridge over the runtime API shipped; richer chat features underway (#757)" },
       { title: "Chinese-market & i18n", note: "Locale-aware UI, platform refinements, region-specific search backends (#755)" },
       { title: "Hugging Face model discovery + Model Lab", note: "Browse, download, and manage models from Hugging Face Hub directly in the TUI" },
@@ -100,7 +100,7 @@ const tracksZh = [
     title: "进行中",
     items: [
       { title: "VS Code 扩展", note: "仓库已提供 Phase 0 本地 Runtime 配套扩展：终端启动、健康检查、只读线程摘要和还原点浏览；完整聊天与编辑器操作尚未包含在此版本中。" },
-      { title: "记忆类型化存储", note: "SQLite + FTS5 后端，图结构 Agent 记忆，多信号召回（#534–#536）" },
+      { title: "记忆类型化存储", note: "原生存储已发布：以 Markdown 作为持久化事实来源，并在其上建立可重建的 SQLite FTS5 索引。图结构 Agent 记忆与多信号召回仍在规划中（#534–#536）" },
       { title: "飞书 / Lark 机器人", note: "基于 runtime API 的长连接桥接已发布首版；更丰富的对话能力进行中（#757）" },
       { title: "中国市场与国际化改进", note: "本地化 UI、平台优化、区域搜索引擎（#755）" },
       { title: "Hugging Face 模型发现 + 模型实验室", note: "在 TUI 中直接浏览、下载和管理 Hugging Face Hub 上的模型" },
