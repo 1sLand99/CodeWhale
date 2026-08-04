@@ -752,7 +752,18 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
             continue;
         }
         let token = &command_tokens[i];
-        if *token == rule_tokens[j] {
+        // The rule's FIRST token is the command word, and a command word can
+        // be spelled as a path: before 2026-08-04 a `rm -rf /` deny rule did
+        // not match `/bin/rm -rf /`, `./rm`, or `../bin/rm` — an absolute or
+        // relative path defeated every deny rule. Fold the basename at the
+        // anchor only; argument positions keep exact matching so a rule token
+        // cannot accidentally match the tail of an unrelated path argument.
+        let matches_rule_token = if j == 0 {
+            command_word_matches(&rule_tokens[0], token)
+        } else {
+            *token == rule_tokens[j]
+        };
+        if matches_rule_token {
             stack.push((i + 1, j + 1));
         }
         if token.starts_with('-') {
@@ -769,6 +780,28 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
         // this path, which is what keeps the match anchored.
     }
     false
+}
+
+/// Whether a command word matches a deny rule's command word.
+///
+/// Exact first, then the command's basename — `/bin/rm`, `./rm`, and
+/// `../bin/rm` are all the `rm` a `rm -rf /` rule names. Folding runs in one
+/// direction only: a rule that spells a path (`/usr/bin/rm`) still requires
+/// that path, because the rule author asked for it specifically. Both
+/// separators are honored so a Windows spelling cannot slip past.
+fn command_word_matches(rule_token: &str, command_token: &str) -> bool {
+    if command_token == rule_token {
+        return true;
+    }
+    // Only fold when the rule names a bare command, not a path.
+    if rule_token.contains('/') || rule_token.contains('\\') {
+        return false;
+    }
+    let basename = command_token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command_token);
+    !basename.is_empty() && basename == rule_token
 }
 
 /// True for a leading shell environment assignment such as `FOO=bar`, which
@@ -1158,6 +1191,15 @@ mod tests {
             ("wrapper around a shell payload", "sudo bash -c 'rm -rf /'"),
             ("here-string feeding a chain", "cat <<< text; rm -rf /"),
             ("leading env assignment", "FOO=bar rm -rf /"),
+            // 2026-08-04: a command word spelled as a path used to defeat
+            // every deny rule — the most obvious spelling was missing from
+            // this "every shell spelling" table.
+            ("absolute command path", "/bin/rm -rf /"),
+            ("usr-bin command path", "/usr/bin/rm -rf /"),
+            ("relative command path", "./rm -rf /"),
+            ("parent-relative command path", "../bin/rm -rf /"),
+            ("absolute path behind sudo", "sudo /bin/rm -rf /"),
+            ("absolute path in a chain", "ls && /bin/rm -rf /"),
         ];
 
         let mut evaded = Vec::new();
@@ -1214,6 +1256,14 @@ mod tests {
             // denied command.
             ("denied word as an operand", "ls && echo npm publish"),
             ("word-boundary neighbour", "rmdir /tmp/scratch"),
+            // The basename fold must not leak past the command word: a path
+            // ARGUMENT that ends in a denied command's name is just a path.
+            ("denied name as a path argument", "echo /usr/bin/rm"),
+            ("denied name as a file operand", "git add tools/rm"),
+            // …and a command whose basename merely *contains* the rule word
+            // is a different command.
+            ("basename superstring", "/bin/rmdir /tmp/scratch"),
+            ("basename with a suffix", "./rm-helper --dry-run"),
         ];
 
         let mut over_denied = Vec::new();
