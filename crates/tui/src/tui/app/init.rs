@@ -662,6 +662,9 @@ impl App {
             last_effective_reasoning_effort: None,
             workspace,
             configured_sandbox_mode: config.sandbox_mode.clone(),
+            sandbox_backend: crate::sandbox::get_platform_sandbox_with_bwrap_preference(
+                config.prefer_bwrap.unwrap_or(false),
+            ),
             // #4022: the worker thread is spawned lazily on first submit, so
             // constructing an App never costs a thread.
             lane_control: crate::lane_control::LaneControlQueue::new(),

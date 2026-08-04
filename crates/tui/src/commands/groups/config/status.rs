@@ -156,8 +156,20 @@ fn safety_summary(app: &App) -> &'static str {
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
     );
+    // The policy is the intent; `sandbox_backend` is what this platform can
+    // actually enforce with. Default Linux (bubblewrap is opt-in) and all
+    // Windows have none, and /status used to report "sandbox workspace-write"
+    // while nothing was restricted (2026-08-04 audit). `doctor` has always
+    // been honest about this; /status now agrees with it.
+    let unenforced = app.sandbox_backend.is_none();
     match policy {
+        crate::sandbox::SandboxPolicy::ReadOnly if unenforced => {
+            "no OS sandbox on this platform (read-only requested, not enforced), network off"
+        }
         crate::sandbox::SandboxPolicy::ReadOnly => "sandbox read-only, network off",
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } if unenforced => {
+            "no OS sandbox on this platform (workspace-write requested, not enforced), network on"
+        }
         crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => {
             "sandbox workspace-write, network on"
         }

@@ -594,16 +594,35 @@ fn filesystem_scope_label(app: &App) -> Cow<'static, str> {
     // Spelled out because the old `fs:` prefix read as an unexplained
     // acronym (user report, 2026-07-23): this chip states which files the
     // session may write.
-    match crate::core::authority::sandbox_policy_for_turn(
+    let policy = crate::core::authority::sandbox_policy_for_turn(
         app.mode,
         app.approval_mode,
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
-    ) {
+    );
+    // A policy is an intent; enforcement needs a backend. On default Linux
+    // (bubblewrap is opt-in) and on all Windows there is none, and this chip
+    // used to say "files: workspace" while nothing restricted anything
+    // (2026-08-04 audit). Say "unenforced" rather than name a boundary that
+    // is not applied. `DangerFullAccess` is already honest, and
+    // `ExternalSandbox` is enforced by the external runner, not by us.
+    let unenforced = app.sandbox_backend.is_none()
+        && !matches!(
+            policy,
+            crate::sandbox::SandboxPolicy::DangerFullAccess
+                | crate::sandbox::SandboxPolicy::ExternalSandbox { .. }
+        );
+    match policy {
+        crate::sandbox::SandboxPolicy::ReadOnly if unenforced => {
+            Cow::Borrowed("files: read-only (unenforced)")
+        }
         crate::sandbox::SandboxPolicy::ReadOnly => Cow::Borrowed("files: read-only"),
         crate::sandbox::SandboxPolicy::DangerFullAccess => Cow::Borrowed("files: full disk"),
         crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => {
             Cow::Borrowed("files: external sandbox")
+        }
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } if unenforced => {
+            Cow::Borrowed("files: workspace (unenforced)")
         }
         crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => Cow::Borrowed("files: workspace"),
     }
