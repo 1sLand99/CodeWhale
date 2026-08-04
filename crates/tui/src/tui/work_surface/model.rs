@@ -1436,7 +1436,14 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
 }
 
 fn summarize_assignment(value: &str) -> String {
-    crate::tui::history::summarize_tool_output(value)
+    // Flatten newlines the way the goal-title path does: a multi-line
+    // objective must not break the one-line work-bar row (2026-08-04 review).
+    let summary = crate::tui::history::summarize_tool_output(value);
+    if summary.contains(['\n', '\r']) {
+        summary.replace(['\n', '\r'], " ")
+    } else {
+        summary
+    }
 }
 
 /// Has this agent stopped working? Typed live activity wins over the worker

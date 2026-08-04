@@ -1741,10 +1741,15 @@ fn route_discriminator(display: &str, provider_id: &str) -> Option<String> {
     }
     // Walk the raw id until the display name's alphanumerics are consumed; what
     // remains is the endpoint-specific tail (`-anthropic`, `-CN`, …).
+    // Count CHARACTERS, not bytes: `display_key.len()` is a byte length, and
+    // for a non-ASCII display name it exceeds the alphanumeric char count, so
+    // the loop would over-consume and the discriminator would be wrong or
+    // empty (2026-08-04 review).
+    let display_key_chars = display_key.chars().count();
     let mut consumed = 0usize;
     let mut tail = provider_id;
     for (offset, ch) in provider_id.char_indices() {
-        if consumed == display_key.len() {
+        if consumed == display_key_chars {
             tail = &provider_id[offset..];
             break;
         }
@@ -5677,6 +5682,23 @@ mod tests {
         assert!(
             title.contains("Thinking 2-3/4"),
             "multi visible row should render a real range: {title:?}"
+        );
+    }
+
+    #[test]
+    fn route_discriminator_handles_ascii_and_non_ascii_display_names() {
+        // ASCII: the endpoint tail after the display name's alphanumerics.
+        assert_eq!(
+            route_discriminator("DeepSeek", "deepseek-anthropic"),
+            Some("anthropic".to_string())
+        );
+        assert_eq!(route_discriminator("DeepSeek", "deepseek"), None);
+        // Non-ASCII display: `consumed` is a char count, so comparing it to a
+        // byte length would over-consume and drop the tail. The multibyte
+        // prefix is matched char-for-char and the ASCII tail survives.
+        assert_eq!(
+            route_discriminator("深度求索", "深度求索-anthropic"),
+            Some("anthropic".to_string())
         );
     }
 }
