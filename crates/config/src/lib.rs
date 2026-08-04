@@ -210,13 +210,29 @@ pub struct ProvidersToml {
         alias = "deepseek_claude"
     )]
     pub deepseek_anthropic: ProviderConfigToml,
-    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        // The canonical provider id is the kebab `nvidia-nim` (see
+        // `provider.rs`); without these aliases a `[providers.nvidia-nim]`
+        // TOML section was silently dropped (2026-08-04 review).
+        alias = "nvidia-nim",
+        alias = "nvidia",
+        alias = "nim"
+    )]
     pub nvidia_nim: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub openai: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub atlascloud: ProviderConfigToml,
-    #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "wanjie-ark",
+        alias = "wanjie",
+        alias = "ark-wanjie",
+        alias = "ark_wanjie"
+    )]
     pub wanjie_ark: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub volcengine: ProviderConfigToml,
@@ -225,6 +241,7 @@ pub struct ProvidersToml {
     #[serde(
         default,
         skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "xiaomi-mimo",
         alias = "xiaomi",
         alias = "mimo",
         alias = "xiaomimimo"

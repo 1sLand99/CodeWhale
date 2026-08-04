@@ -1842,6 +1842,37 @@ fn nvidia_nim_provider_uses_provider_specific_credentials() {
 }
 
 #[test]
+fn multiword_provider_sections_accept_the_kebab_canonical_id() {
+    // The canonical provider ids are kebab (`nvidia-nim`, `wanjie-ark`,
+    // `xiaomi-mimo`) everywhere users see them; before 2026-08-04 the TOML
+    // fields carried only the snake_case name, so a `[providers.nvidia-nim]`
+    // section parsed into nothing and the override was silently lost.
+    let toml_src = "\
+[providers.nvidia-nim]
+model = \"nim-kebab-model\"
+
+[providers.wanjie-ark]
+model = \"wanjie-kebab-model\"
+
+[providers.xiaomi-mimo]
+model = \"mimo-kebab-model\"
+";
+    let parsed: ConfigToml = toml::from_str(toml_src).expect("kebab provider sections parse");
+    assert_eq!(
+        parsed.providers.nvidia_nim.model.as_deref(),
+        Some("nim-kebab-model")
+    );
+    assert_eq!(
+        parsed.providers.wanjie_ark.model.as_deref(),
+        Some("wanjie-kebab-model")
+    );
+    assert_eq!(
+        parsed.providers.xiaomi_mimo.model.as_deref(),
+        Some("mimo-kebab-model")
+    );
+}
+
+#[test]
 fn nvidia_nim_provider_normalizes_flash_aliases() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
