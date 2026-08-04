@@ -664,20 +664,15 @@ impl SnapshotRepo {
                 let _ = std::fs::remove_file(&packed);
             }
         } else {
-            // Reset HEAD to the youngest commit older-than-cutoff's
-            // *predecessor* — i.e. the oldest surviving snapshot.
-            let survivor = &snapshots[cut - 1];
-            let reset = run_git(
-                &self.git_dir,
-                &self.work_tree,
-                &["update-ref", "HEAD", survivor.id.as_str()],
-            )?;
-            if !reset.status.success() {
-                return Err(io_other(format!(
-                    "git update-ref failed: {}",
-                    String::from_utf8_lossy(&reset.stderr).trim()
-                )));
-            }
+            // Keep the newest `cut` snapshots (indices [0..cut], newest-first)
+            // and drop the older tail. This MUST rebuild the survivors as a
+            // fresh orphan chain, not `update-ref HEAD <oldest survivor>`:
+            // the snapshots are a parent-linked commit chain with the newest
+            // at HEAD, so pointing HEAD at the oldest survivor orphaned every
+            // NEWER snapshot (gc then destroyed them) while keeping the very
+            // snapshots we meant to remove as its ancestors — the exact
+            // inverse of the intent (2026-08-04 review, reproduced).
+            self.rebuild_survivor_chain(&snapshots[..cut])?;
         }
 
         // Reclaim space.
@@ -695,29 +690,15 @@ impl SnapshotRepo {
         Ok(removed)
     }
 
-    /// Keep only the latest `max_count` snapshots, dropping older ones.
-    ///
-    /// Uses `commit-tree` with no `-p` to create a true orphan commit at
-    /// the eldest survivor's tree, preserving its label.  The old chain
-    /// has zero refs after gc and is physically reclaimed.
-    /// Keep only the latest `max_count` snapshots by rebuilding the
-    /// survivor chain as orphan commits.  Each survivor's tree and label
-    /// are preserved — only the parent chain to older snapshots is cut.
-    /// Old objects become unreachable and gc reclaims them.
-    pub fn prune_keep_last_n(&self, max_count: usize) -> io::Result<usize> {
-        let snapshots = self.list(usize::MAX)?;
-        if snapshots.len() <= max_count {
-            return Ok(0);
-        }
-        let keep = max_count;
-        let removed = snapshots.len() - keep;
-        // snapshots are newest-first: [0..keep-1] are the survivors.
-        // Rebuild the chain from oldest survivor → newest, each as a
-        // commit-tree with the original tree but no link to the old chain.
+    /// Rebuild `survivors` (newest-first) as a fresh orphan commit chain and
+    /// point HEAD at its tip, so every snapshot NOT in `survivors` becomes
+    /// unreachable for gc to reclaim. Each survivor's tree, label, session
+    /// id, and author/committer timestamp are preserved, so ages do not lie
+    /// after a prune (finding: `prune_keep_last_n` previously reset them to
+    /// "now"). Assumes `survivors` is non-empty.
+    fn rebuild_survivor_chain(&self, survivors: &[Snapshot]) -> io::Result<()> {
         let mut prev_sha: Option<String> = None;
-
-        for i in (0..keep).rev() {
-            let s = &snapshots[i];
+        for s in survivors.iter().rev() {
             let tree = run_git(
                 &self.git_dir,
                 &self.work_tree,
@@ -743,14 +724,7 @@ impl SnapshotRepo {
                 args.push(p.clone());
             }
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            let newc = run_git(&self.git_dir, &self.work_tree, &arg_refs)?;
-            if !newc.status.success() {
-                return Err(io_other(format!(
-                    "commit-tree failed: {}",
-                    String::from_utf8_lossy(&newc.stderr).trim()
-                )));
-            }
-            let new_sha = String::from_utf8_lossy(&newc.stdout).trim().to_string();
+            let new_sha = self.commit_tree_preserving_date(&arg_refs, s.timestamp)?;
             prev_sha = Some(new_sha);
         }
 
@@ -767,6 +741,52 @@ impl SnapshotRepo {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Run a `commit-tree` invocation with the author/committer dates pinned
+    /// to `timestamp` (Unix seconds), so a rebuilt survivor keeps its real
+    /// age instead of stamping "now".
+    fn commit_tree_preserving_date(&self, args: &[&str], timestamp: i64) -> io::Result<String> {
+        let date = format!("{timestamp} +0000");
+        let out = crate::dependencies::Git::command()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .arg("--work-tree")
+            .arg(&self.work_tree)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .args(args)
+            .output()?;
+        if !out.status.success() {
+            return Err(io_other(format!(
+                "commit-tree failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// Keep only the latest `max_count` snapshots, dropping older ones.
+    ///
+    /// Uses `commit-tree` with no `-p` to create a true orphan commit at
+    /// the eldest survivor's tree, preserving its label.  The old chain
+    /// has zero refs after gc and is physically reclaimed.
+    /// Keep only the latest `max_count` snapshots by rebuilding the
+    /// survivor chain as orphan commits.  Each survivor's tree and label
+    /// are preserved — only the parent chain to older snapshots is cut.
+    /// Old objects become unreachable and gc reclaims them.
+    pub fn prune_keep_last_n(&self, max_count: usize) -> io::Result<usize> {
+        let snapshots = self.list(usize::MAX)?;
+        if snapshots.len() <= max_count {
+            return Ok(0);
+        }
+        let keep = max_count;
+        let removed = snapshots.len() - keep;
+        // snapshots are newest-first: [0..keep] are the survivors. Rebuild
+        // them as an orphan chain so the older tail is reclaimed.
+        self.rebuild_survivor_chain(&snapshots[..keep])?;
         let _ = run_git(
             &self.git_dir,
             &self.work_tree,
@@ -1241,6 +1261,57 @@ mod tests {
         let list = repo.list(10).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].label, "turn:1");
+    }
+
+    /// The 2026-08-04 regression: with a cut in the MIDDLE of history,
+    /// `prune_older_than` used to `update-ref HEAD <oldest survivor>`, which
+    /// orphaned (and gc destroyed) the NEWEST snapshots while keeping the
+    /// old ones as ancestors — the inverse of the intent, firing on every
+    /// boot. This pins the correct partial-cut behavior.
+    #[test]
+    fn prune_older_than_keeps_the_newest_and_drops_only_the_old_tail() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+
+        // Two "old" snapshots, then a pause, then two "new" ones.
+        for i in 0..2 {
+            std::fs::write(repo.work_tree().join("f.txt"), format!("old{i}")).unwrap();
+            repo.snapshot(&format!("old:{i}")).unwrap();
+            std::thread::sleep(Duration::from_millis(1100));
+        }
+        // A wide gap so git's whole-second commit timestamps land the cut
+        // unambiguously between the old and new pairs.
+        std::thread::sleep(Duration::from_secs(5));
+        for i in 0..2 {
+            std::fs::write(repo.work_tree().join("f.txt"), format!("new{i}")).unwrap();
+            repo.snapshot(&format!("new:{i}")).unwrap();
+            std::thread::sleep(Duration::from_millis(1100));
+        }
+        assert_eq!(repo.list(usize::MAX).unwrap().len(), 4);
+
+        // Cut 3s back: the two old snapshots (≥5s old) drop, the two new ones survive.
+        let removed = repo.prune_older_than(Duration::from_secs(3)).unwrap();
+        assert_eq!(removed, 2, "only the old tail should be removed");
+
+        let remaining = repo.list(usize::MAX).unwrap();
+        assert_eq!(remaining.len(), 2, "the two newest must survive");
+        assert_eq!(
+            remaining[0].label, "new:1",
+            "newest survives (was destroyed before)"
+        );
+        assert_eq!(remaining[1].label, "new:0");
+        assert!(
+            !remaining.iter().any(|s| s.label.starts_with("old:")),
+            "old snapshots must be gone, not kept as ancestors: {:?}",
+            remaining.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
+
+        // The survivors' contents are intact and restorable.
+        repo.restore(&remaining[0].id).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.work_tree().join("f.txt")).unwrap(),
+            "new1"
+        );
     }
 
     #[test]
