@@ -679,6 +679,73 @@ tokens but `0.0` cost. Added in v0.8.10 (#564).
 }
 ```
 
+## Provider and model selection
+
+These three routes are how a GUI renders a model picker whose contents are true
+for *this* runtime instead of guessed from a version snapshot. They were
+undocumented until 2026-08-04, which cost a desktop integration a day: the
+client probed `/v1/models`, `/v1/runtime/models`, and `/v1/runtime/providers`
+(all correctly 404) and concluded the capability did not exist.
+
+### `GET /v1/providers`
+
+```json
+{
+  "current": "modelstudio-token-plan",
+  "providers": [
+    {
+      "id": "modelstudio-token-plan",
+      "display_name": "Alibaba Cloud Model Studio",
+      "default_base_url": "https://…/compatible-mode/v1",
+      "default_model": "qwen3.8-max",
+      "has_model_catalog": true,
+      "env_vars": ["MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"]
+    }
+  ]
+}
+```
+
+`current` is the active provider id. Treat `default_base_url` and `env_vars` as
+runtime-local detail: they are endpoint and credential *names*, and a browser
+layer has no use for either. Project only `id`, `display_name`,
+`default_model`, and `has_model_catalog` across a UI bridge.
+
+There is deliberately no credential-presence field yet — this route reports what
+the runtime can *represent*, not what it can currently serve. A client that
+needs "is this route usable here" can call the models route below and treat an
+empty list as unusable, at the cost of one request per provider.
+
+### `GET /v1/providers/{id}/models`
+
+```json
+{ "provider": "modelstudio-token-plan", "models": [{ "id": "qwen3.8-max" }] }
+```
+
+The catalog for one provider. Returns `400` for an unknown id, and for the
+legacy `deepseek-cn` alias, which has no provider metadata — use `deepseek`.
+An empty `models` array means the provider is not configured on this machine
+(no credential), not that the provider has no models.
+
+The ids returned here are exactly the values accepted by `POST /v1/threads`'s
+`model` field and by the switch route below.
+
+### `POST /v1/providers/{id}/switch`
+
+```json
+// request  (model is optional; omit to take the provider default)
+{ "model": "qwen3.8-max" }
+
+// response
+{ "provider": "modelstudio-token-plan", "model": "qwen3.8-max",
+  "message": "…", "persisted": true }
+```
+
+**Use this rather than simulating a switch with repeated `POST /v1/config`
+writes plus a reload.** Provider and model move together here, the change is
+validated against the provider's catalog before it is applied, and `persisted`
+reports whether it was written to config or applied to the live session only.
+Rejects an unknown provider id and the `deepseek-cn` alias with `400`.
+
 ## Runtime data model
 
 The runtime uses a durable Thread/Turn/Item lifecycle.
