@@ -659,26 +659,28 @@ fn migrate_sidebar_settings_to_rail(s: &mut Settings) {
         }
         panel @ ("pinned" | "work" | "plan" | "todos" | "tasks" | "activity" | "live"
         | "running" | "agents" | "subagents" | "sub-agents" | "context" | "session"
-        | "auto") => {
-            // `rail_panel == "tasks"` is the default, so only treat it as
-            // unset when the document did not name the key explicitly.
-            if s.rail_panel == "tasks" && !s.rail_panel_explicit {
-                s.rail_panel = match panel {
-                    // `auto` is the shipped *default* for `sidebar_focus`, so
-                    // this arm runs for anyone who has a settings.toml at all
-                    // — even one that only sets `theme`. Auto-collapse meant
-                    // "show work when there is work", which is exactly the
-                    // Tasks panel (it auto-fits, and an empty projection
-                    // reserves no rows). Folding it into the always-on Pinned
-                    // strip inverted the intent and made a 4-row band the
-                    // effective default for every upgrading user.
-                    "tasks" | "activity" | "live" | "running" | "auto" => "tasks",
-                    "agents" | "subagents" | "sub-agents" => "agents",
-                    "context" | "session" => "context",
-                    _ => "pinned",
-                }
-                .to_string();
+        // `rail_panel == "tasks"` is the default, so only treat it as unset
+        // when the document did not name the key explicitly. Failing the
+        // guard falls through to the no-op arm below, which is exactly what
+        // the old nested `if` did.
+        | "auto")
+            if s.rail_panel == "tasks" && !s.rail_panel_explicit =>
+        {
+            s.rail_panel = match panel {
+                // `auto` is the shipped *default* for `sidebar_focus`, so
+                // this arm runs for anyone who has a settings.toml at all
+                // — even one that only sets `theme`. Auto-collapse meant
+                // "show work when there is work", which is exactly the
+                // Tasks panel (it auto-fits, and an empty projection
+                // reserves no rows). Folding it into the always-on Pinned
+                // strip inverted the intent and made a 4-row band the
+                // effective default for every upgrading user.
+                "tasks" | "activity" | "live" | "running" | "auto" => "tasks",
+                "agents" | "subagents" | "sub-agents" => "agents",
+                "context" | "session" => "context",
+                _ => "pinned",
             }
+            .to_string();
         }
         _ => {}
     }

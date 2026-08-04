@@ -2691,8 +2691,8 @@ mod tests {
     use crate::tools::todo::TodoStatus;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
-        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App, AppMode,
-        HuntVerdict, SidebarHoverSection, SidebarHoverState, SidebarRowAction, TaskPanelEntry,
+        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App, HuntVerdict,
+        SidebarHoverSection, SidebarHoverState, SidebarRowAction, TaskPanelEntry,
         TaskPanelEntryKind, TuiOptions,
     };
     use crate::tui::history::{
@@ -2703,7 +2703,7 @@ mod tests {
         BRAILLE_SPINNER_FRAME_MS, BRAILLE_SPINNER_STILL_FRAME, LIVE_MARKER_DELAY_MS,
         LIVE_STATIC_MARKER,
     };
-    use ratatui::{Terminal, backend::TestBackend, text::Line};
+    use ratatui::text::Line;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 

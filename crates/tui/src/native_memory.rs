@@ -243,7 +243,7 @@ impl NativeMemoryStore {
         // Markdown stays authoritative, but the freshness check runs under
         // a shared read lock; only a real tree change escalates to the
         // write-locked reindex (#5173).
-        self.with_fresh_index(|conn| self.query_hits(conn, &query, limit, None))
+        self.with_fresh_index(|conn| self.query_hits(conn, query, limit, None))
     }
 
     /// Search global memory plus the current repository's origin-scoped
@@ -263,7 +263,7 @@ impl NativeMemoryStore {
         self.with_fresh_index(|conn| {
             self.query_hits(
                 conn,
-                &query,
+                query,
                 limit,
                 Some((&global, workspace_path.as_deref())),
             )
@@ -427,7 +427,7 @@ impl NativeMemoryStore {
             .read(true)
             .write(true)
             .open(&lock_path)?;
-        let mut lock = fd_lock::RwLock::new(lock_file);
+        let lock = fd_lock::RwLock::new(lock_file);
         let _guard = lock
             .read()
             .with_context(|| format!("read-lock native memory at {}", self.root.display()))?;
