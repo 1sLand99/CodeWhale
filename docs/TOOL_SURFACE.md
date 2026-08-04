@@ -1,7 +1,9 @@
 # Tool surface
 
-This document describes the current model-facing tool contract in the v0.9.1
-source candidate. The registry remains larger than the first-turn catalog so
+This document describes the current model-facing tool contract. The v0.9.1
+cutover that produced it is recorded in `docs/RUNTIME_SIMPLIFICATION_DESIGN.md`;
+read the workspace version from `Cargo.toml`, not from this line. The registry
+remains larger than the first-turn catalog so
 saved transcripts can replay and uncommon capabilities can be loaded on demand.
 The model should learn one canonical name for each common operation.
 
@@ -36,11 +38,18 @@ once present, it stays eager so a model can capture a durable preference without
 first discovering the tool. A memory-disabled runtime omits that registration and
 therefore exposes eight of the nine policy names.
 
-`update_plan` is **not** default-active. It is registered
-(`crates/tui/src/tools/plan.rs:401`) but reachable only through `tool_search`, so
-it does not appear in the first-turn catalog. Plan mode narrows the active set
-further: `Bash` and `Run` drop out, leaving `File`, `Git`, `agent`, `tasks`,
-`work_update`, and `tool_search`.
+`update_plan` is **not** reachable by a model at all. It is registered
+(`crates/tui/src/tools/plan.rs:401`) but `model_visible()` returns `false`
+(`plan.rs:408-413`), and `build_api_tools` filters on that (`registry.rs:235`),
+so it never enters the API tool list — which is what `tool_search` indexes.
+`tool_search` cannot surface it either. Its own description calls it a "Legacy
+compatibility tool for loading older Plan artifacts", and
+`update_plan_is_hidden_replay_compatibility` (`plan.rs:598-605`) pins that.
+
+Plan mode narrows the active set: `Bash` and `Run` drop out, leaving `File`,
+`Git`, `agent`, `tasks`, `work_update`, `tool_search`, and — when memory is
+enabled — `remember` (`should_register_remember_tool`,
+`crates/tui/src/core/engine/tool_setup.rs:113-118`).
 
 The surface is action-based. A model calls one stable tool name and selects the
 operation through its `action` field instead of choosing among many synonymous
@@ -73,7 +82,7 @@ by the former spellings remain in force.
 | `agent` | Dispatch one focused sub-agent run and return an id, compact receipt, and transcript handle. |
 | `remember` | Append one terse durable preference or convention when the user has enabled built-in memory. |
 | `tasks` | Create, list, read, cancel, gate, and inspect durable task work through one action family. |
-| `update_plan` | Publish optional high-level strategy, phases, constraints, verification, and handoff context. Reachable through `tool_search` only — see the default-active contract above. |
+| `update_plan` | Registered but not model-visible; replays older Plan artifacts only. New work uses `work_update` plus a normal Plan-mode response. |
 | `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
 | `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
@@ -93,7 +102,7 @@ emits no block at all.
 
 `Web` is a conditional, deferred action tool with `search`, `fetch`, and `wait`
 actions. It is discoverable through `tool_search` only when the active network
-policy and runtime backend permit it; it is not one of the ten default-active
+policy and runtime backend permit it; it is not one of the nine default-active
 names.
 
 The durable `github`, `automation`, and `rlm` action families are also deferred
@@ -167,23 +176,33 @@ registry.rs:2066-2088 (`"{retired} must stay removed"` /
 
 ## Replay-only aliases
 
-These legacy names *are* still registered so saved transcripts, sessions, and
-recorded automation replay without migration. They are hidden from the model
-catalog and from `tool_search`; new prompts and docs must use the canonical
-action tools.
+There is exactly one: `apply_patch`.
 
-| Replay-only spellings | Canonical action |
+| Replay-only spelling | Canonical action |
 |---|---|
 | `apply_patch` | `File`: `patch` (also DeepSeek Responses' one custom tool) |
-| `task_create`, `task_list`, `task_read` | `tasks`: matching action |
-| `github_issue_context`, `github_pr_context`, `github_comment` | `github`: matching action |
-| `automation_*` | `automation`: matching action |
-| `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` | `rlm`: `open`, `eval`, `configure`, `close` |
-| `checklist_*`, `todo_*` | `work_update` |
 
-Replay compatibility does not make an alias a supported spelling for new model
-calls. Alias execution must stay behaviorally equivalent to its canonical
-action and must not add the alias back to the advertised catalog.
+It is registered as a `FileTool::alias` (registry.rs:831) and hidden from the
+advertised catalog — `registry.rs:2092-2093` asserts both halves: `contains`
+is true, and no API tool carries the name.
+
+Every other legacy spelling that used to be listed here is **removed, not
+hidden**. Calling one hard-errors as an unknown tool; there is no replay
+compatibility for them. Tests pin the removals:
+
+| Removed spellings | Use instead | Pinned by |
+|---|---|---|
+| `task_create`, `task_list`, `task_read`, `task_cancel`, `task_gate_run` | `tasks` | `runtime_task_families_expose_only_canonical_tools`, registry.rs:2337-2371 |
+| `pr_attempt_*` | `tasks` | same test |
+| `github_issue_context`, `github_pr_context`, `github_comment`, `github_close_issue`, `github_close_pr` | `github` | same test |
+| `automation_create/list/read/update/pause/resume/delete/run` | `automation` | same test |
+| `rlm_session_objects`, `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` | `rlm` | `rlm_is_the_only_registered_session_surface`, registry.rs:1519-1538 |
+| `checklist_write/add/update/list`, `todo_write/add/update/list` | `work_update` | registry.rs:1476-1490 |
+
+This matches the "Removed spellings" section above rather than contradicting
+it. Replay compatibility does not make an alias a supported spelling for new
+model calls; `apply_patch` execution must stay behaviorally equivalent to
+`File`: `patch` and must not be added back to the advertised catalog.
 
 ## Long-running work
 
