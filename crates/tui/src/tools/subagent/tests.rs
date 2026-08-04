@@ -9718,7 +9718,17 @@ fn subagent_rejects_interactive_shell_terminal_takeover() {
     .expect_err("sub-agents must not inherit the parent terminal");
 
     let msg = err.to_string();
-    assert!(msg.contains("cannot use exec_shell with interactive=true"));
+    // The refusal must name the tool the model can actually call. It used to
+    // say `exec_shell`, retired in 0.9.4 — the one part of the message the
+    // model must get right to recover was the wrong part (2026-08-04 audit).
+    assert!(
+        msg.contains("cannot use Bash with interactive=true"),
+        "refusal must name the live tool: {msg}"
+    );
+    assert!(
+        !msg.contains("exec_shell"),
+        "refusal must not teach the retired name: {msg}"
+    );
     assert!(msg.contains("parent TUI terminal"));
 
     reject_subagent_terminal_takeover(

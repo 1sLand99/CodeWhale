@@ -12903,9 +12903,10 @@ fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {
             .unwrap_or(false);
     if wants_interactive_shell {
         return Err(anyhow!(
-            "Sub-agents run in the background and cannot use exec_shell with interactive=true \
-             because that would take over the parent TUI terminal. Use non-interactive \
-             exec_shell, background=true, tty=true, or task_shell_start instead."
+            "Sub-agents run in the background and cannot use Bash with interactive=true \
+             because that would take over the parent TUI terminal. Use Bash without \
+             interactive, or with background=true / tty=true, or task_shell_start \
+             instead."
         ));
     }
     Ok(())

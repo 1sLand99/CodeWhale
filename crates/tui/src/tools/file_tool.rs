@@ -328,7 +328,7 @@ impl ToolSpec for FileTool {
         }
         if action == "patch" && !self.allow_patch {
             return Err(ToolError::not_available(format!(
-                "File action=\"patch\" is unavailable because the patch feature is disabled; nothing was written. Available actions here: {}. Use action=\"edit\" for a single exact replacement, or action=\"write\" to replace the whole file.",
+                "File action=\"patch\" is unavailable because the patch feature is disabled; nothing was written. Available actions here: {}. When writes are available in this mode, action=\"edit\" replaces a single exact match and action=\"write\" replaces the whole file.",
                 self.available_actions().join(", ")
             )));
         }

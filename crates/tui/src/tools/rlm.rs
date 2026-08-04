@@ -49,12 +49,16 @@ fn rlm_kernel_error_result(
     usage: &crate::models::Usage,
 ) -> ToolResult {
     let mut metadata = json!({
-        "tool": "rlm_eval",
+        // The registered tool is `rlm`; `eval` is its action. Naming a
+        // retired `rlm_eval` tool here taught the model a call it cannot
+        // make (2026-08-04 audit).
+        "tool": "rlm",
+        "action": "eval",
         "duration_ms": elapsed.as_millis() as u64,
         "kernel_error": true,
     });
     crate::cost_status::attach_child_usage_metadata(&mut metadata, route, usage);
-    ToolResult::error(format!("rlm_eval: {error}")).with_metadata(metadata)
+    ToolResult::error(format!("rlm action='eval': {error}")).with_metadata(metadata)
 }
 
 /// Unified RLM session tool.
@@ -325,7 +329,8 @@ impl RlmTool {
         ToolResult::json(&json!({
             "objects": snapshot.object_cards(),
             "open_with": {
-                "tool": "rlm_open",
+                "tool": "rlm",
+                "action": "open",
                 "field": "session_object",
                 "example": {
                     "name": "active_prompt",
@@ -363,7 +368,7 @@ impl RlmTool {
                 .collect();
                 if !seen.is_empty() {
                     msg.push_str(&format!(
-                        ". Saw {seen:?} — did you mean file_path/content/url/session_object? (to evaluate against an existing context, pass its name to rlm_eval, or use `session_object`)"
+                        ". Saw {seen:?} — did you mean file_path/content/url/session_object? (to evaluate against an existing context, pass its name to rlm action='eval', or use `session_object`)"
                     ));
                 }
             }
@@ -799,7 +804,9 @@ async fn get_session(
 ) -> Result<Arc<tokio::sync::Mutex<RlmSession>>, ToolError> {
     let sessions = context.runtime.rlm_sessions.lock().await;
     sessions.get(name).cloned().ok_or_else(|| {
-        ToolError::invalid_input(format!("unknown RLM context `{name}`; call rlm_open first"))
+        ToolError::invalid_input(format!(
+            "unknown RLM context `{name}`; open it first with rlm action='open'"
+        ))
     })
 }
 
