@@ -45,6 +45,17 @@ fn attach(app: &mut App, arg: Option<&str>) -> CommandResult {
         );
     };
 
+    // Validate an image here, not only at send time. The extension check above
+    // trusts the filename; this reads the bytes, so a mislabelled, oversized or
+    // corrupt file is refused while the user is still looking at the command
+    // that caused it — rather than becoming a notice buried in a turn they have
+    // already sent.
+    if kind == "image"
+        && let Err(error) = crate::image_attach::attach_image_from_path(&path)
+    {
+        return CommandResult::error(error.to_string());
+    }
+
     app.insert_media_attachment(kind, &path, None);
     CommandResult::message(format!("Attached {kind}: {}", path.display()))
 }
@@ -102,11 +113,21 @@ mod tests {
         )
     }
 
+    /// A 1x1 PNG. `/attach` now reads the bytes, so the fixture has to be a
+    /// real image rather than a plausible filename.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
     #[test]
     fn attach_inserts_image_reference() {
         let tmpdir = TempDir::new().expect("tempdir");
         let image_path = tmpdir.path().join("photo.png");
-        std::fs::write(&image_path, b"not actually decoded").expect("write image fixture");
+        std::fs::write(&image_path, PNG_1X1).expect("write image fixture");
         let mut app = app_with_workspace(&tmpdir);
 
         let result = attach(&mut app, Some("photo.png"));
@@ -115,6 +136,44 @@ mod tests {
         assert!(app.input.contains("[Attached image:"));
         let canonical_path = image_path.canonicalize().expect("canonical image path");
         assert!(app.input.contains(&canonical_path.display().to_string()));
+    }
+
+    #[test]
+    fn attach_rejects_a_png_that_is_not_actually_an_image() {
+        // The failure this guards against is a user attaching a file that
+        // looks right, the turn going out, and the model reporting it cannot
+        // see anything — with no clue why.
+        let tmpdir = TempDir::new().expect("tempdir");
+        std::fs::write(tmpdir.path().join("photo.png"), b"not actually decoded")
+            .expect("write fixture");
+        let mut app = app_with_workspace(&tmpdir);
+
+        let result = attach(&mut app, Some("photo.png"));
+
+        let message = result.message.expect("message");
+        assert!(
+            message.contains("not a PNG, JPEG, GIF or WebP"),
+            "{message}"
+        );
+        assert!(
+            app.input.is_empty(),
+            "a refused attachment must not reach the composer"
+        );
+    }
+
+    #[test]
+    fn attach_rejects_an_image_over_the_size_limit() {
+        let tmpdir = TempDir::new().expect("tempdir");
+        let mut oversized = PNG_1X1.to_vec();
+        oversized.resize(crate::image_attach::MAX_IMAGE_BYTES + 1, 0);
+        std::fs::write(tmpdir.path().join("huge.png"), &oversized).expect("write fixture");
+        let mut app = app_with_workspace(&tmpdir);
+
+        let result = attach(&mut app, Some("huge.png"));
+
+        let message = result.message.expect("message");
+        assert!(message.contains("per-image limit"), "{message}");
+        assert!(app.input.is_empty());
     }
 
     #[test]

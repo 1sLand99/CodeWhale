@@ -974,3 +974,43 @@ fn responses_function_tool_leaves_description_unchanged_without_constraint_note(
 
     assert_eq!(payload["description"], "Lookup");
 }
+
+/// The Responses API projection of [`ContentBlock::ImageUrl`].
+///
+/// Responses is the odd one out: the image part carries `image_url` as a bare
+/// string rather than the nested object Chat Completions uses. Getting that
+/// wrong produces a schema error from OpenAI rather than anything that names
+/// the image, so it is worth pinning explicitly.
+#[test]
+fn user_image_becomes_an_input_image_item() {
+    const DATA_URL: &str = "data:image/png;base64,QUJD";
+
+    let mut request = minimal_responses_request();
+    request.messages[0].content.push(ContentBlock::ImageUrl {
+        image_url: crate::models::ImageUrlContent {
+            url: DATA_URL.to_string(),
+        },
+    });
+
+    let items = convert_messages_to_responses_input(&request, false);
+
+    let user = items
+        .iter()
+        .find(|item| item["role"] == "user")
+        .expect("a user item");
+    let content = user["content"].as_array().expect("content items");
+
+    let image = content
+        .iter()
+        .find(|part| part["type"] == "input_image")
+        .expect("an input_image part");
+    assert_eq!(
+        image["image_url"], DATA_URL,
+        "Responses takes image_url as a bare string, not a nested object: {image}"
+    );
+
+    assert!(
+        content.iter().any(|part| part["type"] == "input_text"),
+        "the accompanying question must survive: {user}"
+    );
+}

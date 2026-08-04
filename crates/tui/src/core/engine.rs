@@ -2904,6 +2904,36 @@ impl Engine {
         }
     }
 
+    /// Assemble the content blocks of a user turn.
+    ///
+    /// The text comes first and the turn metadata last — both positions are
+    /// load-bearing for prompt caching (see
+    /// [`Self::turn_metadata_block`]), so resolved images are inserted between
+    /// them rather than at either end.
+    ///
+    /// The composer stores an attachment as a `[Attached image: …]` text line
+    /// and the bytes are read here, once, on the way to the wire. That keeps
+    /// multi-megabyte payloads out of session state and undo history, and it
+    /// means deleting the line deletes the attachment for free. Anything that
+    /// cannot be attached becomes a visible notice instead of vanishing.
+    fn user_content_blocks(&self, text: String, routed_model: &str) -> Vec<ContentBlock> {
+        let expanded = crate::image_attach::expand_attachment_blocks(
+            &text,
+            self.active_route_capabilities.image_input,
+            routed_model,
+        );
+        let mut content = Vec::with_capacity(2 + expanded.blocks.len());
+        content.push(ContentBlock::Text {
+            text,
+            cache_control: None,
+        });
+        content.extend(expanded.blocks);
+        if let Some(notice) = crate::image_attach::notice_block(&expanded.notices) {
+            content.push(notice);
+        }
+        content
+    }
+
     /// The user message a turn would build, from an explicit state snapshot.
     ///
     /// Same block order and same constructor as
@@ -2930,15 +2960,11 @@ impl Engine {
             &text,
             snapshot,
         );
+        let mut content = self.user_content_blocks(text, routed_model);
+        content.push(turn_metadata);
         Message {
             role: "user".to_string(),
-            content: vec![
-                ContentBlock::Text {
-                    text,
-                    cache_control: None,
-                },
-                turn_metadata,
-            ],
+            content,
         }
     }
 
@@ -3011,15 +3037,11 @@ impl Engine {
             &text,
             self.last_policy_narrowing.as_ref(),
         );
+        let mut content = self.user_content_blocks(text, routed_model);
+        content.push(turn_metadata);
         Message {
             role: "user".to_string(),
-            content: vec![
-                ContentBlock::Text {
-                    text,
-                    cache_control: None,
-                },
-                turn_metadata,
-            ],
+            content,
         }
     }
 

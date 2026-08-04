@@ -569,6 +569,38 @@ fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
     }))
 }
 
+/// Project the shared `ImageUrl` block onto Anthropic's tagged image source.
+///
+/// The OpenAI dialects carry an image as a single URL string, so that is what
+/// [`ContentBlock::ImageUrl`] stores. Anthropic instead models the source as a
+/// tagged union, and — this is the part that used to be wrong here — it does
+/// **not** accept a `data:` URL under `{"type":"url"}`. Sending a local
+/// screenshot that way earns an opaque provider-side 400, which is exactly the
+/// confusing failure this whole path exists to avoid, so the data URL is taken
+/// back apart into `{"type":"base64", media_type, data}`.
+fn anthropic_image_block(url: &str) -> Value {
+    if let Some((media_type, data)) = crate::image_attach::parse_data_url(url) {
+        return json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": media_type, "data": data },
+        });
+    }
+    if crate::image_attach::is_remote_image_url(url) {
+        return json!({
+            "type": "image",
+            "source": { "type": "url", "url": url },
+        });
+    }
+    // Anything else (a bare path, a `file://`, a truncated data URL) has no
+    // Anthropic representation. Degrade to visible text rather than emitting a
+    // source the API will reject: the turn survives and the model can see that
+    // something was meant to be here.
+    json!({
+        "type": "text",
+        "text": format!("[unsupported image reference: {url}]"),
+    })
+}
+
 fn content_block_to_anthropic(block: &ContentBlock) -> Option<Value> {
     match block {
         ContentBlock::Text {
@@ -621,10 +653,7 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             }
             Some(value)
         }
-        ContentBlock::ImageUrl { image_url } => Some(json!({
-            "type": "image",
-            "source": { "type": "url", "url": image_url.url },
-        })),
+        ContentBlock::ImageUrl { image_url } => Some(anthropic_image_block(&image_url.url)),
         // Server-tool block types are DeepSeek/internal concepts with no
         // Anthropic client-side wire equivalent.
         ContentBlock::ServerToolUse { .. }
@@ -1667,6 +1696,64 @@ mod tests {
         let (error_type, message) = parse_anthropic_error_envelope("upstream blew up");
         assert_eq!(error_type, "unknown");
         assert_eq!(message, "upstream blew up");
+    }
+
+    #[test]
+    fn data_url_image_becomes_a_base64_source_not_a_url_source() {
+        // Anthropic rejects a `data:` URL under `{"type":"url"}`. This is the
+        // whole reason the projection exists; if it regresses, every locally
+        // attached screenshot 400s on the native route.
+        let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
+            image_url: crate::models::ImageUrlContent {
+                url: "data:image/png;base64,QUJD".to_string(),
+            },
+        })
+        .expect("image block");
+
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "base64");
+        assert_eq!(block["source"]["media_type"], "image/png");
+        assert_eq!(block["source"]["data"], "QUJD");
+        assert!(
+            block["source"].get("url").is_none(),
+            "base64 sources must not carry a url field: {block}"
+        );
+    }
+
+    #[test]
+    fn remote_image_url_stays_a_url_source() {
+        let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
+            image_url: crate::models::ImageUrlContent {
+                url: "https://example.com/shot.png".to_string(),
+            },
+        })
+        .expect("image block");
+
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "url");
+        assert_eq!(block["source"]["url"], "https://example.com/shot.png");
+    }
+
+    #[test]
+    fn unrepresentable_image_reference_degrades_to_visible_text() {
+        for url in [
+            "file:///tmp/shot.png",
+            "/tmp/shot.png",
+            "data:image/png,QUJD",
+        ] {
+            let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
+                image_url: crate::models::ImageUrlContent {
+                    url: url.to_string(),
+                },
+            })
+            .expect("block");
+
+            assert_eq!(block["type"], "text", "{url} should degrade: {block}");
+            assert!(
+                block["text"].as_str().expect("text").contains(url),
+                "the degraded text should name the reference: {block}"
+            );
+        }
     }
 
     #[test]

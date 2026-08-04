@@ -6235,3 +6235,115 @@ mod alias_thinking_detection_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod image_block_wire_tests {
+    //! The OpenAI-compatible projection of [`ContentBlock::ImageUrl`].
+    //!
+    //! Chat Completions is the wire format behind the large majority of
+    //! CodeWhale's provider routes, so a regression here is a regression for
+    //! most of them at once. The shape is fixed by OpenAI's spec: a `user`
+    //! message whose `content` is an array of parts, with the image as
+    //! `{"type":"image_url","image_url":{"url":…}}`.
+    use super::{ApiProvider, build_chat_wire_body};
+    use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
+
+    const DATA_URL: &str = "data:image/png;base64,QUJD";
+
+    fn request_with_image() -> MessageRequest {
+        MessageRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "what is in this screenshot?".to_string(),
+                        cache_control: None,
+                    },
+                    ContentBlock::ImageUrl {
+                        image_url: ImageUrlContent {
+                            url: DATA_URL.to_string(),
+                        },
+                    },
+                ],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn user_image_becomes_a_multimodal_parts_array() {
+        let body = build_chat_wire_body(
+            &request_with_image(),
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("wire body");
+
+        let messages = body.body["messages"].as_array().expect("messages");
+        let user = messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("a user message");
+        let parts = user["content"]
+            .as_array()
+            .expect("content must be a parts array once an image is present, not a bare string");
+
+        let image = parts
+            .iter()
+            .find(|part| part["type"] == "image_url")
+            .expect("an image_url part");
+        assert_eq!(image["image_url"]["url"], DATA_URL);
+
+        let text = parts
+            .iter()
+            .find(|part| part["type"] == "text")
+            .expect("the accompanying text part");
+        assert!(
+            text["text"]
+                .as_str()
+                .expect("text")
+                .contains("what is in this screenshot?"),
+            "the question must survive alongside the image: {user}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_image_keeps_its_plain_string_content() {
+        // Promoting every user turn to a parts array would change the request
+        // bytes for every text-only route, and with them the prompt-cache
+        // prefix. Images must be the only thing that triggers the array form.
+        let mut request = request_with_image();
+        request.messages[0]
+            .content
+            .retain(|block| !matches!(block, ContentBlock::ImageUrl { .. }));
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("wire body");
+
+        let messages = body.body["messages"].as_array().expect("messages");
+        let user = messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("a user message");
+        assert!(
+            user["content"].is_string(),
+            "text-only turns must stay a plain string: {user}"
+        );
+    }
+}
