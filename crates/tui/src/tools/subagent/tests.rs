@@ -1093,11 +1093,12 @@ fn coordination_detail_projection_reports_process_lock_ownership() {
     let note = missing
         .process_lock_note
         .expect("unavailable projection carries a note");
+    // Both managers live in this test process, so the truthful
+    // classification is a same-process handover — never a claim that
+    // "another Codewhale process" owns the flock (2026-08-04).
     assert!(
-        note.contains("another Codewhale process")
-            || note.contains("timed out")
-            || note.contains("lock"),
-        "note names the contention: {note}"
+        note.contains(COORDINATION_SAME_PROCESS_HANDOVER),
+        "note names the same-process contention: {note}"
     );
 }
 
@@ -15907,4 +15908,45 @@ fn validate_resume_from_source(
     }
 
     Ok(source_id)
+}
+
+/// Owner report 2026-08-04: a model/provider switch spawns the new engine's
+/// manager while the old engine still holds the workspace coordination flock
+/// in this same process. That losing acquisition must classify itself as a
+/// same-process handover (not "another Codewhale process"), and must
+/// self-heal via the projection retry once the previous owner drops.
+#[test]
+fn coordination_lock_loss_to_own_process_reads_as_handover_and_self_heals() {
+    let tmp = tempdir().expect("tempdir");
+    let first =
+        SubAgentManager::new(tmp.path().to_path_buf(), 1).require_coordination_process_lock();
+    assert!(
+        first.holds_coordination_process_lock(),
+        "first manager must own the flock"
+    );
+
+    let second =
+        SubAgentManager::new(tmp.path().to_path_buf(), 1).require_coordination_process_lock();
+    assert!(
+        !second.holds_coordination_process_lock(),
+        "second manager in the same process must lose the flock race"
+    );
+    let note = second
+        .coordination_process_lock_status()
+        .expect_err("losing acquisition must explain itself");
+    assert!(
+        note.contains(COORDINATION_SAME_PROCESS_HANDOVER),
+        "same-process loss must not blame another process: {note}"
+    );
+    assert!(
+        !note.contains("another Codewhale process"),
+        "same-process loss must not blame another process: {note}"
+    );
+
+    drop(first);
+    assert!(
+        second.coordination_process_lock_status().is_ok(),
+        "retry must acquire once the previous engine dropped the flock"
+    );
+    assert!(second.holds_coordination_process_lock());
 }

@@ -7561,11 +7561,20 @@ fn apply_coordination_detail_projection(
     // say so on the sticky status strip. A silent "running (543s)" row on a
     // settled turn is a lie; surface the lock loss the same way we surface
     // other session hazards.
+    //
+    // Exception: a same-process handover. A model/provider switch spawns the
+    // new engine before the old engine's manager has dropped the flock, and
+    // flock treats the second fd in this same process as a conflict. That
+    // state self-heals on the next projection retry (#5036), and a 30-second
+    // warning blaming "another Codewhale process" would be false (owner
+    // report, 2026-08-04) — so it stays off the sticky strip.
     if !projection.process_lock_held {
         let note = projection
             .process_lock_note
             .as_deref()
             .unwrap_or("another Codewhale process owns delegated coordination for this workspace");
+        let same_process_handover =
+            note.contains(crate::tools::subagent::COORDINATION_SAME_PROCESS_HANDOVER);
         let message = format!(
             "Delegated coordination unavailable — {note}. Job rows still settle locally; durable fleet state is owned elsewhere."
         );
@@ -7573,7 +7582,7 @@ fn apply_coordination_detail_projection(
             .sticky_status
             .as_ref()
             .is_some_and(|toast| toast.text.contains("Delegated coordination unavailable"));
-        if !already {
+        if !already && !same_process_handover {
             app.set_sticky_status(
                 message,
                 crate::tui::app::StatusToastLevel::Warning,

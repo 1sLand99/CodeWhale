@@ -780,6 +780,75 @@ fn coordination_event_projection_is_retained_as_typed_app_state() {
     assert_eq!(app.coordination_detail, Some(projection));
 }
 
+/// Owner report 2026-08-04: switching model/provider mid-session raced the
+/// new engine against its predecessor for the coordination flock and fired a
+/// 30-second sticky warning blaming "another Codewhale process" that does
+/// not exist. A same-process handover self-heals and stays off the sticky
+/// strip; a genuinely different process still warns.
+#[test]
+fn coordination_handover_within_this_process_does_not_toast() {
+    use crate::tools::subagent::CoordinationDetailProjection;
+    use crate::tools::subagent::coord::CoordinationDetailMetrics;
+
+    let base = CoordinationDetailProjection {
+        schema_version: 1,
+        sequence: 1,
+        decisions: Vec::new(),
+        write_claims: Vec::new(),
+        reconciliations: Vec::new(),
+        context_projections: Vec::new(),
+        contentions: Vec::new(),
+        metrics: CoordinationDetailMetrics {
+            hottest_paths: Vec::new(),
+            package_or_module_growth: None,
+            route_or_cost: None,
+            note: "No authoritative metric source".to_string(),
+        },
+        bounded: true,
+        limit: 24,
+        process_lock_held: false,
+        process_lock_note: None,
+    };
+
+    let mut handover_app = create_test_app();
+    apply_coordination_detail_projection(
+        &mut handover_app,
+        CoordinationDetailProjection {
+            process_lock_note: Some(format!(
+                "{} for /ws: lock is busy",
+                crate::tools::subagent::COORDINATION_SAME_PROCESS_HANDOVER
+            )),
+            ..base.clone()
+        },
+    );
+    assert!(
+        handover_app.sticky_status.is_none(),
+        "same-process handover is transient and must not fire the sticky warning: {:?}",
+        handover_app.sticky_status
+    );
+
+    let mut foreign_app = create_test_app();
+    apply_coordination_detail_projection(
+        &mut foreign_app,
+        CoordinationDetailProjection {
+            process_lock_note: Some(
+                "another Codewhale process (pid 4242) owns delegated coordination for /ws: busy"
+                    .to_string(),
+            ),
+            ..base
+        },
+    );
+    let toast = foreign_app
+        .sticky_status
+        .as_ref()
+        .expect("a genuinely foreign owner still warns");
+    assert!(
+        toast.text.contains("Delegated coordination unavailable"),
+        "{}",
+        toast.text
+    );
+}
+
 #[test]
 fn approval_mouse_wheel_reviews_transcript_without_closing_card() {
     let mut app = create_test_app();

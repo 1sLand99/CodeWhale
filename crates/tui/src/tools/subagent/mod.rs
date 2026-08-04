@@ -2746,6 +2746,16 @@ struct CoordinationProcessLock {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Marker prefix for a coordination-lock failure whose holder is THIS
+/// process: an engine swap (model/provider switch) constructs the new
+/// engine's manager while the old engine still holds the flock on its own
+/// fd, and flock treats a second descriptor in the same process as a
+/// conflict. This is a transient handover that self-heals on the next
+/// projection retry (#5036) — UI surfaces must not present it as "another
+/// Codewhale process" (owner report, 2026-08-04).
+pub const COORDINATION_SAME_PROCESS_HANDOVER: &str =
+    "handing delegated coordination between engines in this process";
+
 impl CoordinationProcessLock {
     fn acquire(workspace: &Path) -> Result<Self> {
         let lock_path = normalize_subagent_workspace(workspace)
@@ -2767,7 +2777,19 @@ impl CoordinationProcessLock {
         let thread = std::thread::spawn(move || {
             let mut lock = fd_lock::RwLock::new(lock_file);
             match lock.try_write() {
-                Ok(_guard) => {
+                Ok(mut guard) => {
+                    // Stamp the holder pid while the flock is held, so a
+                    // losing acquisition can tell same-process handover from
+                    // a genuinely different process. Best-effort: the lock is
+                    // the flock, not the contents.
+                    {
+                        use std::io::{Seek, Write};
+                        let file: &mut std::fs::File = &mut guard;
+                        let _ = file.set_len(0);
+                        let _ = file.seek(std::io::SeekFrom::Start(0));
+                        let _ = file.write_all(std::process::id().to_string().as_bytes());
+                        let _ = file.flush();
+                    }
                     let _ = ready_tx.send(Ok::<(), String>(()));
                     let _ = release_rx.recv();
                 }
@@ -2783,10 +2805,23 @@ impl CoordinationProcessLock {
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
-                Err(anyhow!(
-                    "another Codewhale process owns delegated coordination for {}: {error}",
-                    workspace.display()
-                ))
+                let holder_pid = std::fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|contents| contents.trim().parse::<u32>().ok());
+                if holder_pid == Some(std::process::id()) {
+                    Err(anyhow!(
+                        "{COORDINATION_SAME_PROCESS_HANDOVER} for {}: {error}",
+                        workspace.display()
+                    ))
+                } else {
+                    Err(anyhow!(
+                        "another Codewhale process{} owns delegated coordination for {}: {error}",
+                        holder_pid
+                            .map(|pid| format!(" (pid {pid})"))
+                            .unwrap_or_default(),
+                        workspace.display()
+                    ))
+                }
             }
             Err(error) => {
                 drop(release_tx);
