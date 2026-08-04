@@ -1847,7 +1847,24 @@ fn run() -> Result<()> {
             cloud::reject_inline_api_key(cli.api_key.as_deref())?;
             cloud::run(args, cli.profile.as_deref(), &store)
         }
-        Some(Commands::McpServer) => run_mcp_server_command(&mut store),
+        Some(Commands::McpServer) => {
+            // `codewhale serve --mcp` delegates to the TUI and arms there, so
+            // without this the same user action reported differently depending
+            // on which spelling they typed — and `mcp-server`, a surface the
+            // schema documents as emitting, could only ever read zero. A
+            // structural zero a maintainer mistakes for an adoption zero is
+            // the thing the "which surfaces emit" section exists to prevent.
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
+            let session = start_cli_telemetry(
+                &resolved_runtime,
+                Some(store.path().to_path_buf()),
+                Surface::McpServer,
+            );
+            let outcome = run_mcp_server_command(&mut store);
+            finish_cli_telemetry(session, &outcome);
+            outcome
+        }
         Some(Commands::Config(args)) => {
             let resolved_runtime =
                 resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
