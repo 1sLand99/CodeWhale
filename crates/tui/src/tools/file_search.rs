@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tools::search::matches_glob;
 
+use super::file::{PATH_ALIASES, SEARCH_NAME_ALIASES, SEARCH_NAME_PARAMS, apply_param_aliases};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_str, optional_u64, required_str,
@@ -82,6 +83,11 @@ impl ToolSpec for FileSearchTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File search_name")?;
+        apply_param_aliases(&mut input, SEARCH_NAME_ALIASES, "File search_name")?;
+        SEARCH_NAME_PARAMS.reject_unknown(&input)?;
+
         let query = required_str(&input, "query")?.trim();
         if query.is_empty() {
             return Err(ToolError::invalid_input("query cannot be empty"));

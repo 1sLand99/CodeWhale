@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use super::diff_format::make_unified_diff;
+use super::file::{PATCH_PARAMS, PATH_ALIASES, apply_param_aliases};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     lsp_diagnostics_for_paths, optional_bool, optional_str, optional_u64,
@@ -385,6 +386,11 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File patch")?;
+        PATCH_PARAMS.reject_unknown(&input)?;
+        let input = input;
+
         let fuzz = optional_u64(&input, "fuzz", DEFAULT_FUZZ as u64)?.min(MAX_FUZZ as u64);
         let fuzz = usize::try_from(fuzz).unwrap_or(DEFAULT_FUZZ);
         let normalized = normalize_apply_patch_input(&input)?;

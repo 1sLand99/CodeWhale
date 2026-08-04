@@ -167,6 +167,7 @@ impl ToolSpec for FileTool {
         let content_search = GrepFilesTool.input_schema();
         let write = WriteFileTool.input_schema();
         let edit = EditFileTool.input_schema();
+        let patch = ApplyPatchTool.input_schema();
         json!({
             "type": "object",
             "properties": {
@@ -209,11 +210,8 @@ impl ToolSpec for FileTool {
                     ]
                 },
                 "fuzz": {
-                    "oneOf": [{ "type": "boolean" }, { "type": "integer" }],
-                    "description": format!(
-                        "{} Integer: max fuzz for action=patch.",
-                        borrowed(&edit, "fuzz"),
-                    )
+                    "type": "integer",
+                    "description": describe(&patch, "fuzz", "action=patch")
                 },
                 "query": {
                     "type": "string",
@@ -334,35 +332,19 @@ impl ToolSpec for FileTool {
                 self.available_actions().join(", ")
             )));
         }
-        let mut input = self.strip_action(input)?;
+        let input = self.strip_action(input)?;
 
         match action.as_str() {
             "read" => ReadFileTool.execute(input, context).await,
             "list" => ListDirTool.execute(input, context).await,
-            "search_name" => {
-                if let Some(obj) = input.as_object_mut()
-                    && !obj.contains_key("limit")
-                    && let Some(max) = obj.get("max_results").cloned()
-                {
-                    obj.insert("limit".to_string(), max);
-                }
-                FileSearchTool.execute(input, context).await
-            }
-            "search_content" => {
-                if let Some(obj) = input.as_object_mut() {
-                    if !obj.contains_key("pattern")
-                        && let Some(query) = obj.get("query").cloned()
-                    {
-                        obj.insert("pattern".to_string(), query);
-                    }
-                    if !obj.contains_key("max_results")
-                        && let Some(limit) = obj.get("limit").cloned()
-                    {
-                        obj.insert("max_results".to_string(), limit);
-                    }
-                }
-                GrepFilesTool.execute(input, context).await
-            }
+            // The cross-action spellings the wrapper advertises
+            // (`max_results` on search_name, `query`/`limit` on
+            // search_content) used to be copied here. They are alias-table
+            // entries on the implementing tools now — one mechanism, applied
+            // before the same unknown-parameter check every other action runs,
+            // and a direct call to the inner tool behaves identically.
+            "search_name" => FileSearchTool.execute(input, context).await,
+            "search_content" => GrepFilesTool.execute(input, context).await,
             "write" => WriteFileTool.execute(input, context).await,
             "edit" => EditFileTool.execute(input, context).await,
             "patch" => ApplyPatchTool.execute(input, context).await,
@@ -474,7 +456,7 @@ mod tests {
         let schema = tool().input_schema();
         let properties = schema["properties"].as_object().expect("properties");
         for (name, property) in properties {
-            let text = if name == "replace" || name == "fuzz" {
+            let text = if name == "replace" {
                 property.to_string()
             } else {
                 property["description"]
@@ -513,21 +495,28 @@ mod tests {
         );
     }
 
-    /// `fuzz` is ignored by `edit`. Advertising it as an edit-time fuzzy
-    /// switch is a capability claim the code does not honor.
+    /// `fuzz` belongs to `patch` alone. `edit` read it into a discarded
+    /// binding while the schema kept advertising it, and a live model read
+    /// that as "an optional fuzzy-matching flag for the search" — a
+    /// capability claim no code honored. The advertisement is gone; what
+    /// remains must describe only the integer `patch` really uses.
     #[test]
-    fn fuzz_does_not_claim_edit_time_fuzzy_matching() {
+    fn fuzz_is_advertised_only_for_patch() {
         let schema = tool().input_schema();
+        assert_eq!(schema["properties"]["fuzz"]["type"], "integer");
         let fuzz = schema["properties"]["fuzz"]["description"]
             .as_str()
             .expect("fuzz description");
+        assert!(fuzz.contains("action=patch"), "{fuzz}");
         assert!(
-            fuzz.contains("Deprecated") || fuzz.contains("ignored"),
-            "must say the edit-side flag is inert: {fuzz}"
+            !fuzz.contains("action=edit"),
+            "edit no longer accepts fuzz: {fuzz}"
         );
         assert!(
-            fuzz.contains("patch"),
-            "must keep the patch meaning: {fuzz}"
+            EditFileTool.input_schema()["properties"]
+                .get("fuzz")
+                .is_none(),
+            "edit must not advertise a parameter it does not implement"
         );
     }
 
@@ -555,6 +544,313 @@ mod tests {
             "File schema is {total} bytes against a {BUDGET_BYTES} budget; \
              trim explanation, keep instruction. Breakdown: {rows:?}"
         );
+    }
+
+    // === Per-action parameter validation ===
+    //
+    // #5209 taught `edit` to refuse a parameter it does not implement. Only
+    // `edit` learned it, so every other action still dropped unknown keys and
+    // answered anyway: a misspelled `start_line` on `read` returned the head
+    // of the file with nothing in the response admitting the requested window
+    // was never honored. These cover the refusal on every action, and — the
+    // half that keeps a refusal honest — that each action still accepts its
+    // full legitimate parameter set, optional names and aliases included.
+
+    /// A workspace with one file, already read, so `edit` and `patch` are
+    /// past their freshness precondition and reach parameter validation.
+    async fn workspace() -> (tempfile::TempDir, ToolContext) {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("doc.txt"), "alpha\nbeta\ngamma\n").expect("write");
+        tool()
+            .execute(json!({"action": "read", "path": "doc.txt"}), &ctx)
+            .await
+            .expect("seed read");
+        (tmp, ctx)
+    }
+
+    /// The minimal call that dispatches for each action, in schema order.
+    fn minimal_calls() -> Vec<(&'static str, Value)> {
+        vec![
+            ("read", json!({"action": "read", "path": "doc.txt"})),
+            ("list", json!({"action": "list"})),
+            (
+                "search_name",
+                json!({"action": "search_name", "query": "doc"}),
+            ),
+            (
+                "search_content",
+                json!({"action": "search_content", "pattern": "alpha"}),
+            ),
+            (
+                "write",
+                json!({"action": "write", "path": "new.txt", "content": "x\n"}),
+            ),
+            (
+                "edit",
+                json!({"action": "edit", "path": "doc.txt", "search": "alpha", "replace": "delta"}),
+            ),
+            (
+                "patch",
+                json!({"action": "patch", "path": "doc.txt", "patch": "@@ -1,1 +1,1 @@\n-alpha\n+delta\n"}),
+            ),
+        ]
+    }
+
+    fn with_key(mut input: Value, key: &str, value: Value) -> Value {
+        input
+            .as_object_mut()
+            .expect("object")
+            .insert(key.to_string(), value);
+        input
+    }
+
+    /// The gap this closes. A parameter with no known meaning is refused by
+    /// every action, not just `edit`, and the refusal carries the same four
+    /// facts everywhere: what was wrong, what is allowed, what is required,
+    /// and that nothing was done.
+    #[tokio::test]
+    async fn every_action_refuses_an_unknown_parameter() {
+        for (action, call) in minimal_calls() {
+            let (_tmp, ctx) = workspace().await;
+            let message = tool()
+                .execute(with_key(call, "bogus_param", json!(true)), &ctx)
+                .await
+                .expect_err("an unknown parameter must be refused")
+                .to_string();
+            assert!(
+                message.contains("bogus_param"),
+                "{action} must name the offending parameter: {message}"
+            );
+            assert!(
+                message.contains(&format!("unexpected File {action} parameter")),
+                "{action} must name the action it refused: {message}"
+            );
+            assert!(
+                message.contains("Allowed parameters are"),
+                "{action} must name the allowed set: {message}"
+            );
+            assert!(
+                message.contains("Required:"),
+                "{action} must name the required set: {message}"
+            );
+            assert!(
+                message.contains(&format!("The {action} was not performed")),
+                "{action} must deny having done the work: {message}"
+            );
+        }
+    }
+
+    /// The specific silent wrong answer that motivated this: a misspelled
+    /// read window used to be dropped, and the head of the file came back
+    /// under a success receipt as if it were the requested range.
+    #[tokio::test]
+    async fn a_misspelled_read_window_is_refused_rather_than_answered_with_the_head() {
+        let (_tmp, ctx) = workspace().await;
+        let message = tool()
+            .execute(
+                json!({"action": "read", "path": "doc.txt", "start_lien": 2}),
+                &ctx,
+            )
+            .await
+            .expect_err("a misspelled window must not silently return the head")
+            .to_string();
+        assert!(message.contains("start_lien"), "{message}");
+        assert!(message.contains("`start_line`"), "{message}");
+    }
+
+    /// A refusal is only worth having if the legitimate call still lands.
+    /// Every action's full parameter set — every optional name included —
+    /// must survive validation.
+    #[tokio::test]
+    async fn every_action_accepts_its_full_legitimate_parameter_set() {
+        let full: Vec<(&str, Value)> = vec![
+            (
+                "read",
+                json!({"action": "read", "path": "doc.txt", "start_line": 1, "max_lines": 2, "pages": "1"}),
+            ),
+            ("list", json!({"action": "list", "path": "."})),
+            (
+                "search_name",
+                json!({"action": "search_name", "query": "doc", "path": ".", "limit": 5,
+                       "extensions": ["txt"], "exclude": ["target/**"]}),
+            ),
+            (
+                "search_content",
+                json!({"action": "search_content", "pattern": "alpha", "path": ".",
+                       "include": ["*.txt"], "exclude": ["target/**"], "context_lines": 1,
+                       "case_insensitive": true, "max_results": 5}),
+            ),
+            (
+                "write",
+                json!({"action": "write", "path": "new.txt", "content": "x\n"}),
+            ),
+            (
+                "edit",
+                json!({"action": "edit", "path": "doc.txt", "search": "alpha", "replace": "delta"}),
+            ),
+            (
+                "patch",
+                json!({"action": "patch", "path": "doc.txt",
+                       "patch": "@@ -1,1 +1,1 @@\n-alpha\n+delta\n",
+                       "fuzz": 3, "create_if_missing": false}),
+            ),
+        ];
+
+        for (action, call) in full {
+            let (_tmp, ctx) = workspace().await;
+            let result = tool()
+                .execute(call, &ctx)
+                .await
+                .unwrap_or_else(|error| panic!("{action} must accept its own parameters: {error}"));
+            assert!(result.success, "{action}: {}", result.content);
+        }
+    }
+
+    /// Validation runs *after* alias translation, so every cross-harness
+    /// spelling the alias lane folds must still reach the action it names.
+    /// A refusal that fired first would undo #5209's fix.
+    #[tokio::test]
+    async fn every_alias_survives_validation() {
+        let aliased: Vec<(&str, Value)> = vec![
+            // Path spellings, on every action that takes a path.
+            ("read", json!({"action": "read", "file_path": "doc.txt"})),
+            ("read", json!({"action": "read", "filePath": "doc.txt"})),
+            ("list", json!({"action": "list", "file_path": "."})),
+            (
+                "search_name",
+                json!({"action": "search_name", "query": "doc", "file_path": "."}),
+            ),
+            (
+                "search_content",
+                json!({"action": "search_content", "pattern": "alpha", "file_path": "."}),
+            ),
+            (
+                "write",
+                json!({"action": "write", "file_path": "new.txt", "content": "x\n"}),
+            ),
+            // Read-window spellings.
+            (
+                "read",
+                json!({"action": "read", "path": "doc.txt", "offset": 2, "limit": 1}),
+            ),
+            (
+                "read",
+                json!({"action": "read", "path": "doc.txt", "line_offset": 2, "n_lines": 1}),
+            ),
+            (
+                "read",
+                json!({"action": "read", "path": "doc.txt", "num_lines": 1}),
+            ),
+            // Search spellings the wrapper advertises across both actions.
+            (
+                "search_name",
+                json!({"action": "search_name", "query": "doc", "max_results": 5}),
+            ),
+            (
+                "search_content",
+                json!({"action": "search_content", "query": "alpha", "limit": 5}),
+            ),
+        ];
+
+        for (action, call) in aliased {
+            let (_tmp, ctx) = workspace().await;
+            let result = tool()
+                .execute(call.clone(), &ctx)
+                .await
+                .unwrap_or_else(|error| panic!("{action} must accept {call}: {error}"));
+            assert!(result.success, "{action} / {call}: {}", result.content);
+        }
+
+        // Edit spellings need their own loop: each one mutates the file.
+        for (search, replace) in [
+            ("old_string", "new_string"),
+            ("old_str", "new_str"),
+            ("oldText", "newText"),
+            ("old_text", "new_text"),
+        ] {
+            let (_tmp, ctx) = workspace().await;
+            let result = tool()
+                .execute(
+                    json!({"action": "edit", "path": "doc.txt",
+                           search: "alpha", replace: "delta"}),
+                    &ctx,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("edit must accept {search}/{replace}: {error}"));
+            assert!(result.success, "{search}/{replace}: {}", result.content);
+        }
+        let (_tmp, ctx) = workspace().await;
+        let result = tool()
+            .execute(
+                json!({"action": "edit", "path": "doc.txt", "search": "alpha", "replacement": "delta"}),
+                &ctx,
+            )
+            .await
+            .expect("edit must accept `replacement`");
+        assert!(result.success, "{}", result.content);
+    }
+
+    /// A parameter that belongs to a *different* action is still unknown to
+    /// this one. Silently dropping it is how a model learns a call worked
+    /// when the argument it cared about was discarded.
+    #[tokio::test]
+    async fn parameters_do_not_leak_between_actions() {
+        for (action, call) in [
+            (
+                "read",
+                json!({"action": "read", "path": "doc.txt", "case_insensitive": true}),
+            ),
+            (
+                "write",
+                json!({"action": "write", "path": "new.txt", "content": "x\n", "start_line": 2}),
+            ),
+            (
+                "list",
+                json!({"action": "list", "path": ".", "context_lines": 3}),
+            ),
+            (
+                "search_name",
+                json!({"action": "search_name", "query": "doc", "context_lines": 3}),
+            ),
+            (
+                "search_content",
+                json!({"action": "search_content", "pattern": "alpha", "extensions": ["txt"]}),
+            ),
+        ] {
+            let (_tmp, ctx) = workspace().await;
+            let message = tool()
+                .execute(call, &ctx)
+                .await
+                .expect_err("another action's parameter must be refused")
+                .to_string();
+            assert!(
+                message.contains(&format!("The {action} was not performed")),
+                "{action}: {message}"
+            );
+        }
+    }
+
+    /// Every action's required names must be names it also allows, or a
+    /// refusal would tell the model to pass something the action rejects.
+    #[test]
+    fn every_required_parameter_is_also_an_allowed_one() {
+        use crate::tools::file::{
+            EDIT_PARAMS, LIST_PARAMS, PATCH_PARAMS, READ_PARAMS, SEARCH_CONTENT_PARAMS,
+            SEARCH_NAME_PARAMS, WRITE_PARAMS,
+        };
+
+        for params in [
+            READ_PARAMS,
+            WRITE_PARAMS,
+            EDIT_PARAMS,
+            LIST_PARAMS,
+            SEARCH_NAME_PARAMS,
+            SEARCH_CONTENT_PARAMS,
+            PATCH_PARAMS,
+        ] {
+            params.assert_required_is_allowed();
+        }
     }
 
     #[test]

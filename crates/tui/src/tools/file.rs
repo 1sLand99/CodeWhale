@@ -10,7 +10,7 @@
 use super::diff_format::make_unified_diff;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    lsp_diagnostics_for_paths, optional_bool, optional_str, required_str,
+    lsp_diagnostics_for_paths, optional_str, required_str,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 /// value is an error rather than a coin flip, and any parameter that is not a
 /// known synonym still fails validation. The #5209 guarantee — no fabricated
 /// "Replaced 1 occurrence" for an edit that never landed — is unchanged.
-struct ParamAlias {
+pub(super) struct ParamAlias {
     /// Spelling a model might emit.
     alias: &'static str,
     /// Parameter this tool implements.
@@ -54,7 +54,8 @@ const fn alias(alias: &'static str, canonical: &'static str) -> ParamAlias {
 /// Path spellings shared by every file action. `path` is CodeWhale's
 /// canonical name and the most common one in the field, but `file_path` is
 /// widespread enough in training data to be worth accepting everywhere.
-const PATH_ALIASES: &[ParamAlias] = &[alias("file_path", "path"), alias("filePath", "path")];
+pub(super) const PATH_ALIASES: &[ParamAlias] =
+    &[alias("file_path", "path"), alias("filePath", "path")];
 
 /// Edit-specific spellings. Ordered most- to least-common.
 const EDIT_ALIASES: &[ParamAlias] = &[
@@ -82,13 +83,28 @@ const READ_ALIASES: &[ParamAlias] = &[
     alias("num_lines", "max_lines"),
 ];
 
+/// `search_name` spellings. The `File` wrapper advertises `max_results` for
+/// both search actions, but only `search_content` implements that name; on
+/// `search_name` the same number is spelled `limit`. Folding it here (rather
+/// than copying it inside the wrapper) keeps one alias mechanism, so the
+/// result-count cap a model asks for is the cap it gets whichever name it
+/// reaches for, and a direct `file_search` call behaves the same way.
+pub(super) const SEARCH_NAME_ALIASES: &[ParamAlias] = &[alias("max_results", "limit")];
+
+/// `search_content` spellings, mirroring `SEARCH_NAME_ALIASES` in the other
+/// direction: the wrapper advertises `query` and `limit` on the name-search
+/// side, and a model that carries them across to a content search means
+/// `pattern` and `max_results`.
+pub(super) const SEARCH_CONTENT_ALIASES: &[ParamAlias] =
+    &[alias("query", "pattern"), alias("limit", "max_results")];
+
 /// Apply `aliases` to `input`, in place.
 ///
 /// An alias is consumed only when the canonical key is absent. When both are
 /// present and *equal* the alias is dropped as a harmless duplicate; when both
 /// are present and disagree the call fails, because guessing which one the
 /// model meant is exactly the fabrication this path exists to prevent.
-fn apply_param_aliases(
+pub(super) fn apply_param_aliases(
     input: &mut Value,
     aliases: &[ParamAlias],
     tool_label: &str,
@@ -115,6 +131,163 @@ fn apply_param_aliases(
     }
 
     Ok(())
+}
+
+// === Per-action parameter contracts ===
+
+/// The parameter contract for one `File` action.
+///
+/// #5209 taught `edit` to refuse a parameter it does not implement instead of
+/// dropping it and returning a success-shaped receipt. Only `edit` learned it.
+/// Every other action kept silently discarding unknown keys, and for a reader
+/// that is the same failure wearing a quieter costume: a misspelled
+/// `start_line` on `read` is dropped, the head of the file comes back, and
+/// nothing in the response says the requested window was never honored — a
+/// wrong answer shaped like a right one.
+///
+/// One table, one error shape, every action.
+pub(super) struct ActionParams {
+    /// Action name as the model spells it on `File` (`read`, `write`, …).
+    action: &'static str,
+    /// Every parameter the action implements, canonical spellings only.
+    /// Aliases are folded onto these by [`apply_param_aliases`] before
+    /// validation runs, so they must not be listed here.
+    allowed: &'static [&'static str],
+    /// Parameters the action cannot run without.
+    required: &'static [&'static str],
+    /// `true` when exactly one of `required` is needed rather than all of
+    /// them — `patch` accepts `patch`, `replace`, or `changes`.
+    required_is_choice: bool,
+}
+
+const fn params(
+    action: &'static str,
+    allowed: &'static [&'static str],
+    required: &'static [&'static str],
+) -> ActionParams {
+    ActionParams {
+        action,
+        allowed,
+        required,
+        required_is_choice: false,
+    }
+}
+
+pub(super) const READ_PARAMS: ActionParams = params(
+    "read",
+    &["path", "start_line", "max_lines", "pages"],
+    &["path"],
+);
+
+pub(super) const WRITE_PARAMS: ActionParams =
+    params("write", &["path", "content"], &["path", "content"]);
+
+pub(super) const EDIT_PARAMS: ActionParams = params(
+    "edit",
+    &["path", "search", "replace"],
+    &["path", "search", "replace"],
+);
+
+pub(super) const LIST_PARAMS: ActionParams = params("list", &["path"], &[]);
+
+pub(super) const SEARCH_NAME_PARAMS: ActionParams = params(
+    "search_name",
+    &["query", "path", "limit", "extensions", "exclude"],
+    &["query"],
+);
+
+pub(super) const SEARCH_CONTENT_PARAMS: ActionParams = params(
+    "search_content",
+    &[
+        "pattern",
+        "path",
+        "include",
+        "exclude",
+        "context_lines",
+        "case_insensitive",
+        "max_results",
+    ],
+    &["pattern"],
+);
+
+pub(super) const PATCH_PARAMS: ActionParams = ActionParams {
+    action: "patch",
+    allowed: &[
+        "path",
+        "patch",
+        "replace",
+        "changes",
+        "fuzz",
+        "create_if_missing",
+    ],
+    required: &["patch", "replace", "changes"],
+    required_is_choice: true,
+};
+
+/// Render `names` as a backticked, comma-separated English list.
+fn quoted_list(names: &[&str], conjunction: &str) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    match quoted.as_slice() {
+        [] => "none".to_string(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} {conjunction} {second}"),
+        [head @ .., last] => format!("{}, {conjunction} {last}", head.join(", ")),
+    }
+}
+
+impl ActionParams {
+    /// Reject parameter names this action does not implement.
+    ///
+    /// Must run *after* [`apply_param_aliases`], exactly as the `edit` path
+    /// does. The alias lane's reasoning stands: translating an unambiguous
+    /// synonym is better than refusing it, so by the time this runs every
+    /// spelling with a known meaning has already been folded onto its
+    /// canonical name. What is left is a name with no known meaning, where
+    /// continuing would mean guessing which argument was intended — so it
+    /// hard-errors rather than dropping the argument and reporting success.
+    pub(super) fn reject_unknown(&self, input: &Value) -> Result<(), ToolError> {
+        let action = self.action;
+        let required = if self.required_is_choice {
+            format!("one of {}", quoted_list(self.required, "or"))
+        } else {
+            quoted_list(self.required, "and")
+        };
+
+        let Some(obj) = input.as_object() else {
+            return Err(ToolError::invalid_input(format!(
+                "File {action} input must be an object. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                quoted_list(self.allowed, "and"),
+            )));
+        };
+
+        let unexpected: Vec<&str> = obj
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !self.allowed.contains(key))
+            .collect();
+        if !unexpected.is_empty() {
+            return Err(ToolError::invalid_input(format!(
+                "unexpected File {action} parameter(s): {}. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                unexpected.join(", "),
+                quoted_list(self.allowed, "and"),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// A required parameter that is not also allowed would make the refusal
+    /// self-contradicting: it would name an argument the same check rejects.
+    #[cfg(test)]
+    pub(super) fn assert_required_is_allowed(&self) {
+        for name in self.required {
+            assert!(
+                self.allowed.contains(name),
+                "File {} requires `{name}` but does not allow it",
+                self.action
+            );
+        }
+    }
 }
 
 // === ReadFileTool ===
@@ -238,6 +411,7 @@ impl ToolSpec for ReadFileTool {
         let mut input = input;
         apply_param_aliases(&mut input, PATH_ALIASES, "File read")?;
         apply_param_aliases(&mut input, READ_ALIASES, "File read")?;
+        READ_PARAMS.reject_unknown(&input)?;
 
         let path_str = required_str(&input, "path")?;
         let file_path = context.resolve_path(path_str)?;
@@ -735,6 +909,7 @@ impl ToolSpec for WriteFileTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let mut input = input;
         apply_param_aliases(&mut input, PATH_ALIASES, "File write")?;
+        WRITE_PARAMS.reject_unknown(&input)?;
 
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
@@ -818,7 +993,7 @@ impl ToolSpec for EditFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. The optional `fuzz` parameter is accepted for backward compatibility and is no longer needed. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
     }
 
     fn input_schema(&self) -> Value {
@@ -836,10 +1011,6 @@ impl ToolSpec for EditFileTool {
                 "replace": {
                     "type": "string",
                     "description": "Text to replace with. Aliases: `new_string`, `new_str`, `newText`"
-                },
-                "fuzz": {
-                    "type": "boolean",
-                    "description": "Deprecated: fuzzy fallback is now automatic. Accepted for backward compatibility but ignored."
                 }
             },
             "required": ["path", "search", "replace"]
@@ -868,12 +1039,11 @@ impl ToolSpec for EditFileTool {
         let mut input = input;
         apply_param_aliases(&mut input, PATH_ALIASES, "File edit")?;
         apply_param_aliases(&mut input, EDIT_ALIASES, "File edit")?;
-        validate_edit_file_params(&input)?;
+        EDIT_PARAMS.reject_unknown(&input)?;
 
         let path_str = required_str(&input, "path")?;
         let search = required_str(&input, "search")?;
         let replace = required_str(&input, "replace")?;
-        let _fuzz = optional_bool(&input, "fuzz", false)?;
 
         if search == replace {
             // #5003 — long-text edits repeatedly failed here because the model
@@ -1073,39 +1243,6 @@ impl ToolSpec for EditFileTool {
             }
         })))
     }
-}
-
-/// Reject parameter names for File/`edit_file` that this tool does not
-/// implement, before any mutation or success-shaped receipt is produced
-/// (#5209).
-///
-/// Runs *after* [`apply_param_aliases`], so the cross-harness spellings a
-/// model is most likely to reach for have already been folded onto
-/// `search`/`replace`/`path` and are not seen here. What remains is a name
-/// with no known meaning, where continuing would mean guessing — so this
-/// still hard-errors rather than dropping the argument and reporting success.
-fn validate_edit_file_params(input: &Value) -> Result<(), ToolError> {
-    let Some(obj) = input.as_object() else {
-        return Err(ToolError::invalid_input(
-            "File edit input must be an object with `path`, `search`, and `replace`",
-        ));
-    };
-
-    const ALLOWED: &[&str] = &["path", "search", "replace", "fuzz"];
-
-    let unexpected: Vec<&str> = obj
-        .keys()
-        .map(String::as_str)
-        .filter(|key| !ALLOWED.contains(key))
-        .collect();
-    if !unexpected.is_empty() {
-        return Err(ToolError::invalid_input(format!(
-            "unexpected File edit parameter(s): {}. Allowed parameters are `path`, `search`, `replace`, and optional `fuzz`. Required: `path`, `search`, `replace`. The edit was not applied.",
-            unexpected.join(", ")
-        )));
-    }
-
-    Ok(())
 }
 
 /// Detect catastrophic argument corruption of brace-structured edits.
@@ -1534,6 +1671,10 @@ impl ToolSpec for ListDirTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File list")?;
+        LIST_PARAMS.reject_unknown(&input)?;
+
         let path_str = optional_str(&input, "path")?.unwrap_or(".");
         let dir_path = context.resolve_path(path_str)?;
 

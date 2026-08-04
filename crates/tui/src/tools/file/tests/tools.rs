@@ -1205,40 +1205,43 @@ async fn edit_file_rejects_non_unique_exact_match() {
     assert_eq!(unchanged, "hello world hello");
 }
 
+/// `fuzz` on `edit` was an advertised parameter with no implementation: it
+/// was parsed into `let _fuzz` and thrown away, and a live model read the
+/// schema as offering "an optional fuzzy-matching flag for the search". The
+/// advertisement is gone, so the name now means nothing to `edit` and is
+/// refused like any other name with no known meaning — the fuzzy fallbacks it
+/// appeared to control run unconditionally either way.
 #[tokio::test]
-async fn test_edit_file_accepts_omitted_and_explicit_fuzz() {
+async fn edit_file_refuses_the_retired_fuzz_parameter() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());
-    let tool = EditFileTool;
+    let test_file = tmp.path().join("fuzz_retired.txt");
+    fs::write(&test_file, "hello world").expect("write");
+    read_before_edit(&ctx, "fuzz_retired.txt").await;
 
-    for (file_name, fuzz) in [
-        ("fuzz_omitted.txt", None),
-        ("fuzz_false.txt", Some(false)),
-        ("fuzz_true.txt", Some(true)),
-    ] {
-        let test_file = tmp.path().join(file_name);
-        fs::write(&test_file, "hello world").expect("write");
-        read_before_edit(&ctx, file_name).await;
-
-        let mut input = serde_json::Map::from_iter([
-            ("path".to_string(), json!(file_name)),
-            ("search".to_string(), json!("hello")),
-            ("replace".to_string(), json!("hi")),
-        ]);
-        if let Some(fuzz) = fuzz {
-            input.insert("fuzz".to_string(), json!(fuzz));
-        }
-
-        let result = tool
-            .execute(Value::Object(input), &ctx)
-            .await
-            .expect("execute");
-
-        assert!(result.success, "{file_name}: {}", result.content);
-        assert!(result.content.contains("Replaced 1 occurrence"));
-        let edited = fs::read_to_string(&test_file).expect("read");
-        assert_eq!(edited, "hi world");
-    }
+    let err = EditFileTool
+        .execute(
+            json!({
+                "path": "fuzz_retired.txt",
+                "search": "hello",
+                "replace": "hi",
+                "fuzz": true,
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("a parameter edit does not implement must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("fuzz"), "must name the parameter: {msg}");
+    assert!(
+        msg.contains("was not performed"),
+        "must deny having edited: {msg}"
+    );
+    assert_eq!(
+        fs::read_to_string(&test_file).expect("read"),
+        "hello world",
+        "a refused edit must not touch the file"
+    );
 }
 
 #[tokio::test]
@@ -1283,8 +1286,7 @@ async fn test_edit_file_fuzz_tolerates_leading_whitespace() {
             json!({
                 "path": "fuzzy.txt",
                 "search": "if true {\n    let value = 1;\n}",
-                "replace": "    if true {\n        let value = 2;\n    }",
-                "fuzz": true
+                "replace": "    if true {\n        let value = 2;\n    }"
             }),
             &ctx,
         )
@@ -1315,8 +1317,7 @@ async fn test_edit_file_fuzz_tolerates_leading_whitespace_after_multibyte_start(
             json!({
                 "path": "fuzzy_cjk.txt",
                 "search": "    数据",
-                "replace": "记录",
-                "fuzz": true
+                "replace": "记录"
             }),
             &ctx,
         )
@@ -1348,8 +1349,7 @@ async fn test_edit_file_fuzz_tolerates_smart_quote_substitution() {
                 "path": "smart.rs",
                 // \u{201C} \u{201D} are the curly double-quote pair.
                 "search": "let s = \u{201C}hello world\u{201D};",
-                "replace": "let s = \"hello universe\";",
-                "fuzz": true
+                "replace": "let s = \"hello universe\";"
             }),
             &ctx,
         )
@@ -1381,8 +1381,7 @@ async fn test_edit_file_fuzz_tolerates_smart_quote_after_multibyte_start() {
             json!({
                 "path": "smart_cjk.md",
                 "search": "数据 \u{201C}x\u{201D}",
-                "replace": "数据 y",
-                "fuzz": true
+                "replace": "数据 y"
             }),
             &ctx,
         )
@@ -1413,8 +1412,7 @@ async fn test_edit_file_fuzz_tolerates_em_dash_and_nbsp() {
                 // Search uses em-dash + NBSP, common after a copy-paste
                 // from a styled document.
                 "search": "alpha\u{00A0}\u{2014}\u{00A0}beta",
-                "replace": "alpha - gamma",
-                "fuzz": true
+                "replace": "alpha - gamma"
             }),
             &ctx,
         )
@@ -2091,10 +2089,10 @@ fn test_input_schemas() {
     let required_fields: Vec<_> = required.iter().filter_map(|value| value.as_str()).collect();
     assert_eq!(required_fields, vec!["path", "search", "replace"]);
     assert!(!required_fields.contains(&"fuzz"));
-    assert_eq!(
-        edit_schema["properties"]["fuzz"]["type"].as_str(),
-        Some("boolean")
-    );
+    // `fuzz` was never read by `edit` — it was parsed into a discarded
+    // binding while the schema advertised it. An unimplemented parameter has
+    // no place in a schema the model is asked to trust.
+    assert!(edit_schema["properties"].get("fuzz").is_none());
     let search_desc = edit_schema["properties"]["search"]["description"]
         .as_str()
         .expect("search description");

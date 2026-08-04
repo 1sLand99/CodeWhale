@@ -3,6 +3,9 @@
 //! These tools provide powerful code search capabilities within the workspace,
 //! similar to ripgrep/grep functionality.
 
+use super::file::{
+    PATH_ALIASES, SEARCH_CONTENT_ALIASES, SEARCH_CONTENT_PARAMS, apply_param_aliases,
+};
 use super::spec::{
     ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_bool, optional_str,
     optional_u64, required_str,
@@ -104,6 +107,11 @@ impl ToolSpec for GrepFilesTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let mut input = input;
+        apply_param_aliases(&mut input, PATH_ALIASES, "File search_content")?;
+        apply_param_aliases(&mut input, SEARCH_CONTENT_ALIASES, "File search_content")?;
+        SEARCH_CONTENT_PARAMS.reject_unknown(&input)?;
+
         let pattern_str = required_str(&input, "pattern")?;
         let path_str = optional_str(&input, "path")?.unwrap_or(".");
         let context_lines = usize::try_from(optional_u64(&input, "context_lines", 2)?)

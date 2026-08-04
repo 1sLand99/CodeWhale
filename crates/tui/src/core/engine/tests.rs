@@ -6316,9 +6316,11 @@ fn agent_catalog_keeps_canonical_file_tool_loaded() {
             .any(|field| field.as_str() == Some("action"))
     );
     assert!(!required.iter().any(|field| field.as_str() == Some("fuzz")));
+    // `fuzz` is `patch`'s integer fuzz factor and nothing else; the boolean
+    // half of the old `oneOf` existed only for the inert `edit` flag.
     assert_eq!(
-        file.input_schema["properties"]["fuzz"]["oneOf"][0]["type"].as_str(),
-        Some("boolean"),
+        file.input_schema["properties"]["fuzz"]["type"].as_str(),
+        Some("integer"),
     );
 
     let active_at_batch_start = initial_active_tools(&catalog);
