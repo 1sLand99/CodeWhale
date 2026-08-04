@@ -2061,13 +2061,10 @@ impl HookExecutor {
                     .is_some_and(|n| Self::tool_name_matches_condition(n, name))
             }
             Some(HookCondition::ToolCategory { category }) => {
-                // Map tool names to categories
-                let tool_category = context.tool_name.as_ref().map(|name| match name.as_str() {
-                    "exec_shell" => "shell",
-                    "write_file" | "edit_file" | "apply_patch" => "file_write",
-                    "read_file" | "list_dir" | "grep_files" => "safe",
-                    _ => "other",
-                });
+                let tool_category = context
+                    .tool_name
+                    .as_deref()
+                    .map(|name| tool_category_for(name, context.tool_args.as_deref()));
                 tool_category.is_some_and(|c| c == category.as_str())
             }
             Some(HookCondition::Mode { mode }) => context
@@ -2420,6 +2417,53 @@ impl HookExecutor {
     /// `docs/HOOKS.md`.
     fn effective_timeout_secs(&self, hook: &Hook) -> u64 {
         self.config.effective_timeout_secs(hook)
+    }
+}
+
+/// Classify a tool call for `condition = { type = "tool_category", … }`.
+///
+/// Categories are `shell`, `file_write`, `safe`, and `other`, as documented in
+/// `docs/HOOKS.md`. This must be kept in step with the names the registry
+/// actually registers: before 2026-08-04 the map knew only the retired
+/// `exec_shell`/`write_file`/`read_file` spellings, so EVERY live call fell
+/// through to `other` and a `tool_category` **deny** hook silently never
+/// fired — the exact failure `docs/HOOKS.md` warns about ("a deny gate the
+/// operator believes is armed").
+///
+/// `File`, `Git`, and `Run` are multi-action, so the action decides the
+/// category: a `File` read is `safe` while a `File` write is `file_write`.
+/// An unparseable or absent argument blob is treated as the tool's most
+/// dangerous action, because a gate that cannot see the action must not
+/// assume the harmless one.
+fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
+    let action = tool_args
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase)
+        });
+
+    match tool_name {
+        // The shell surface. `exec_shell` is retired but kept here because
+        // `shell.rs` still stamps it for the `shell_env` hook event.
+        "Bash" | "exec_shell" => "shell",
+        "File" | "file" => match action.as_deref() {
+            Some("read" | "list" | "search_name" | "search_content") => "safe",
+            // write/edit/patch, and the unknown-action case, are writes.
+            _ => "file_write",
+        },
+        "apply_patch" => "file_write",
+        "Git" | "git" => match action.as_deref() {
+            // Every shipped Git action is read-only today; classify by action
+            // anyway so adding a mutating one cannot silently inherit `safe`.
+            Some("status" | "diff" | "log" | "show" | "blame") => "safe",
+            _ => "other",
+        },
+        // `Run` executes test/verifier commands — closer to shell than safe.
+        "Run" | "run" => "shell",
+        _ => "other",
     }
 }
 
@@ -5535,5 +5579,45 @@ command = "echo project"
             .with_tool_name("exec_shell")
             .with_tool_result("crashed", false, Some(3_221_225_477));
         assert!(executor.matches_condition(&hook, &context));
+    }
+
+    /// 2026-08-04: the category map knew only retired tool names, so every
+    /// live call fell through to `other` and a `tool_category` deny hook —
+    /// the security control `docs/HOOKS.md` documents — silently never fired.
+    #[test]
+    fn tool_category_classifies_the_names_the_registry_actually_registers() {
+        use super::tool_category_for;
+
+        // The shell surface.
+        assert_eq!(tool_category_for("Bash", None), "shell");
+        // Retained: shell.rs stamps this for the shell_env event.
+        assert_eq!(tool_category_for("exec_shell", None), "shell");
+        // Run executes commands, so it gates with shell rather than safe.
+        assert_eq!(tool_category_for("Run", None), "shell");
+
+        // File is multi-action: the action decides.
+        let read = r#"{"action":"read","path":"a.rs"}"#;
+        let write = r#"{"action":"write","path":"a.rs","content":"x"}"#;
+        assert_eq!(tool_category_for("File", Some(read)), "safe");
+        assert_eq!(tool_category_for("File", Some(write)), "file_write");
+        assert_eq!(
+            tool_category_for("File", Some(r#"{"action":"edit"}"#)),
+            "file_write"
+        );
+        assert_eq!(
+            tool_category_for("File", Some(r#"{"action":"search_content"}"#)),
+            "safe"
+        );
+
+        // A gate that cannot see the action must assume the dangerous one.
+        assert_eq!(tool_category_for("File", None), "file_write");
+        assert_eq!(tool_category_for("File", Some("not json")), "file_write");
+
+        assert_eq!(tool_category_for("apply_patch", None), "file_write");
+        assert_eq!(
+            tool_category_for("Git", Some(r#"{"action":"log"}"#)),
+            "safe"
+        );
+        assert_eq!(tool_category_for("web.run", None), "other");
     }
 }
