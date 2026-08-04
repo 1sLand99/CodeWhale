@@ -18,6 +18,14 @@
 //! velocity by construction. Direction may only change while the school is
 //! fully off-screen.
 //!
+//! Two clocks feed this module and neither is a token counter. Positions ride
+//! `App::sample_ambient_clock_ms`, which advances by real elapsed time clamped
+//! to `App::AMBIENT_MAX_STEP_MS` per draw, so drift speed is identical at 16 ms
+//! and 33 ms frames and a stalled-then-resumed frame cannot jump a creature.
+//! Sideways *placement*, by contrast, is a function of the transcript text
+//! under the silhouette — which does change with token throughput — so it is
+//! bounded by [`JELLY_MAX_TEXT_DODGE_COLS`].
+//!
 //! Under reduced motion, entities remain visible but static.
 //!
 //! `render_ambient_life` returns per-frame budget counters
@@ -532,6 +540,24 @@ const JELLY_DOME_SKIRT_COMPACT: &[&str] = &["\\_/", "(_)"];
 /// a phase offset so the trio lags instead of strobing in sync.
 const JELLY_TENTACLE_FRAMES: &[&str] = &["|", "/", "|", "\\"];
 
+/// How far sideways a jellyfish may dodge to clear transcript text before it
+/// is withheld for the frame instead.
+///
+/// Placement is a pure function of the text under the silhouette, so during a
+/// fast stream it is effectively a function of token throughput: a growing
+/// line pushes the anchor one column per character, and a wrap or a scroll
+/// collapses that row's occupied bounds and snaps the anchor back tens of
+/// columns in a single frame. On screen that reads as teleporting, and it only
+/// shows up on models fast enough to change those bounds every frame — which
+/// is why slow providers never surfaced it.
+///
+/// Bounding the dodge keeps the behavior the silhouette was actually given
+/// (ease around a word that happens to brush its lane) and turns everything
+/// larger into the same quiet withhold the fish already use. Worst-case
+/// frame-to-frame movement is therefore `2 * JELLY_MAX_TEXT_DODGE_COLS`, at
+/// the single moment a left-hand candidate overtakes a right-hand one.
+const JELLY_MAX_TEXT_DODGE_COLS: u16 = 3;
+
 const JELLY_PULSE_MS: u128 = 2_900;
 /// The tentacles repeat the dome pulse this much later.
 const JELLY_TENTACLE_LAG_MS: u128 = 350;
@@ -681,6 +707,13 @@ fn paint_marks(
             let Ok(candidate) = u16::try_from(candidate) else {
                 return;
             };
+            // Bounded dodge. Anything further than the cap is a relocation
+            // rather than a drift, so it is refused here and the silhouette
+            // is withheld instead — see [`JELLY_MAX_TEXT_DODGE_COLS`].
+            let dodge = candidate.abs_diff(original);
+            if dodge > JELLY_MAX_TEXT_DODGE_COLS {
+                return;
+            }
             let fits = candidate <= right_edge
                 && marks().all(|mark| {
                     let x = candidate.saturating_add(mark.x.saturating_sub(original));
@@ -696,7 +729,7 @@ fn paint_marks(
                         })
                 });
             if fits {
-                let ranked = (candidate.abs_diff(original), candidate);
+                let ranked = (dodge, candidate);
                 if best.is_none_or(|current| ranked < current) {
                     best = Some(ranked);
                 }

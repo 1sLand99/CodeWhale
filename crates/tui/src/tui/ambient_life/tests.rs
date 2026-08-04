@@ -541,20 +541,60 @@ fn jellyfish_relocates_as_one_nearest_silhouette() {
 }
 
 #[test]
-fn jellyfish_uses_the_nearest_protected_edge_at_x33() {
+fn jellyfish_hides_rather_than_vaulting_past_a_long_line() {
+    // This used to place the silhouette at x=33 — a 17-column vault from its
+    // lane, chosen purely from the width of the text on that row. Under a
+    // fast stream that width changes every frame, so the vault was the
+    // teleport users saw. Past the dodge cap the jelly is withheld instead,
+    // which is the same quiet outcome the fish already have.
     let area = Rect::new(0, 0, 100, 8);
     let mut lines = vec![Line::default(); usize::from(area.height)];
     lines[2] = Line::from(Span::raw("X".repeat(32)));
-    let (buf, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(16, 2));
+    let (_, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(16, 2));
 
-    assert_eq!(buf[(31, 2)].symbol(), "X");
-    assert_eq!(buf[(32, 2)].symbol(), " ");
-    assert_eq!(buf[(33, 2)].symbol(), ".");
-    assert_eq!(buf[(33, 3)].symbol(), "\\");
-    assert_eq!(buf[(34, 4)].symbol(), "|");
-    assert_eq!(stats.marks_painted, 5);
-    assert_eq!(stats.marks_skipped_text, 0);
+    assert_eq!(stats.marks_painted, 0);
+    assert_eq!(stats.marks_skipped_text, 5);
     assert_eq!(stats.marks_clipped, 0);
+}
+
+#[test]
+fn jellyfish_never_teleports_while_a_line_streams_across_its_lane() {
+    // Regression for the DeepSeek-V4-Flash report: replay a line growing
+    // straight through the silhouette's lane and assert the painted anchor
+    // never jumps. The clock is held fixed, so the only moving input is the
+    // transcript text — the coupling that actually scaled with token
+    // throughput.
+    //
+    // The burst size is the whole point. A slow provider adds about a
+    // character per frame and the old unbounded dodge slid along with it,
+    // which is why this never looked broken on slow models. A fast one adds a
+    // burst per frame, and the dodge moved by the whole burst at once.
+    const STREAM_BURST_CHARS: usize = 9;
+    let area = Rect::new(0, 0, 100, 8);
+    let lane = 40u16;
+    let mut previous: Option<u16> = None;
+    for chars in (0..80usize).step_by(STREAM_BURST_CHARS) {
+        let mut lines = vec![Line::default(); usize::from(area.height)];
+        lines[2] = Line::from(Span::raw("X".repeat(chars)));
+        lines[3] = Line::from(Span::raw("X".repeat(chars.saturating_sub(3))));
+        let (buf, _) = paint_fixture(area, &lines, &full_jellyfish_frame(lane, 2));
+        let anchor = (0..area.width).find(|x| buf[(*x, 2)].symbol() == ".");
+        if let (Some(anchor), Some(previous)) = (anchor, previous) {
+            assert!(
+                anchor.abs_diff(previous) <= 2 * JELLY_MAX_TEXT_DODGE_COLS,
+                "jellyfish teleported {} columns at {chars} streamed chars",
+                anchor.abs_diff(previous)
+            );
+        }
+        if let Some(anchor) = anchor {
+            assert!(
+                anchor.abs_diff(lane) <= JELLY_MAX_TEXT_DODGE_COLS,
+                "jellyfish left its lane by {} columns",
+                anchor.abs_diff(lane)
+            );
+        }
+        previous = anchor;
+    }
 }
 
 #[test]
