@@ -1,3 +1,14 @@
+//! Painting the work surface, and the two files it leans on.
+//!
+//! - [`layout`] answers *where and how tall* — placement fallback, the height
+//!   and cap arithmetic, and the side-rail split.
+//! - [`rows`] answers *what one row says* — the sub-agent column layout, its
+//!   degradation tiers, and row styling.
+//!
+//! What stays here is the paint itself: the Top strip, the side-rail panel,
+//! the divider and scrollbar chrome, and the strip header content (goal title,
+//! to-do receipt) that height and paint must both agree on.
+
 use std::collections::HashMap;
 
 use ratatui::{
@@ -15,253 +26,18 @@ use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
 
 use super::model::{
-    AgentRowFacts, RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project_visible,
+    RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project_visible,
 };
 
-const SIDE_RAIL_MIN_HOST_WIDTH: u16 = 72;
-const SIDE_RAIL_MIN_CHAT_WIDTH: u16 = 40;
+mod layout;
+mod rows;
 
-fn effective_placement(configured: WorkSurfacePlacement, host_width: u16) -> WorkSurfacePlacement {
-    if configured == WorkSurfacePlacement::Off {
-        return WorkSurfacePlacement::Off;
-    }
-    if host_width < SIDE_RAIL_MIN_HOST_WIDTH {
-        WorkSurfacePlacement::Top
-    } else {
-        configured
-    }
-}
+pub use layout::{height, split_chat};
 
-/// Responsive work-surface height.
-///
-/// `rail_budget` is the caller's answer to "how many rows can the transcript
-/// actually spare this frame" — terminal height minus fixed chrome minus the
-/// transcript's own floor. See [`crate::tui::ui::rail_row_budget`]. The rail
-/// takes spare rows; it never takes rows the transcript needs.
-///
-/// Every Top panel auto-fits its content the same way: content rows + optional
-/// goal title + the divider, capped by `top_height` and ambient room. A
-/// two-item checklist is two rows; eight agents grow to show eight. The only
-/// Top title is an active goal — never panel chrome ("Pinned"). Side rails
-/// keep a muted panel name because a full-height column needs naming.
-pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16) -> u16 {
-    app.work_surface.effective_placement = effective_placement(app.work_surface.placement, width);
-    // Off hides the rail outright: no strip, no side reservation, no stale
-    // interaction state.
-    if app.work_surface.effective_placement == WorkSurfacePlacement::Off {
-        collapse_strip(app);
-        return 0;
-    }
-    // Non-Tasks panels on Top auto-fit like Tasks. Empty projections collapse
-    // to zero — an empty panel is not a panel. Side placements reserve via
-    // `split_chat` and take no top strip.
-    if app.work_surface.panel != RailPanel::Tasks {
-        if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
-            return 0;
-        }
-        if !super::panels::panel_has_useful_content(app, app.work_surface.panel) {
-            collapse_strip(app);
-            return 0;
-        }
-        let cap = top_cap(app, terminal_height, rail_budget);
-        if cap < super::model::TOP_HEIGHT_MIN {
-            collapse_strip(app);
-            return 0;
-        }
-        let goal_rows = u16::from(top_goal_title(app).is_some());
-        let content_width = usize::from(width.saturating_sub(2).max(1));
-        // When the goal is the strip title, omit it from Pinned body rows so
-        // height and paint agree.
-        let content_rows = super::panels::panel_content_row_count(
-            app,
-            app.work_surface.panel,
-            content_width,
-            goal_rows > 0,
-        );
-        if content_rows == 0 && goal_rows == 0 {
-            collapse_strip(app);
-            return 0;
-        }
-        let desired = u16::try_from(content_rows)
-            .unwrap_or(u16::MAX)
-            .saturating_add(goal_rows)
-            .saturating_add(1); // divider
-        return desired.clamp(super::model::TOP_HEIGHT_MIN, cap);
-    }
-
-    let rows = project_visible(app);
-    let goal_rows = u16::from(
-        app.work_surface.effective_placement == WorkSurfacePlacement::Top
-            && top_goal_title(app).is_some(),
-    );
-    if rows.is_empty() {
-        // A live goal alone still deserves a strip: title + divider.
-        if goal_rows == 0 {
-            collapse_strip(app);
-            app.work_surface.latest_rows.clear();
-            app.work_surface.visible_rows = 0;
-            app.work_surface.total_rows = 0;
-            app.work_surface.scroll_offset = 0;
-            return 0;
-        }
-        if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
-            return 0;
-        }
-        let cap = top_cap(app, terminal_height, rail_budget);
-        if cap < super::model::TOP_HEIGHT_MIN {
-            collapse_strip(app);
-            return 0;
-        }
-        return (goal_rows.saturating_add(1)).clamp(super::model::TOP_HEIGHT_MIN, cap);
-    }
-    if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
-        return 0;
-    }
-    // The strip auto-fits its content: the literal selectable list plus the
-    // optional goal title, the pinned progress receipt, and the divider row,
-    // bounded by `top_cap`.
-    let cap = top_cap(app, terminal_height, rail_budget);
-    if cap < super::model::TOP_HEIGHT_MIN {
-        collapse_strip(app);
-        return 0;
-    }
-    // Count every painted row: selectable work + group headers (Subagents N).
-    // Progress receipt and goal title are layered above in render.
-    let list_rows = rows
-        .iter()
-        .filter(|row| row.selectable || row.id.0.starts_with("section:"))
-        .count();
-    let progress = u16::from(
-        top_todo_progress(app, &rows).is_some() && !progress_shares_goal_row(width, goal_rows > 0),
-    );
-    let desired = u16::try_from(list_rows)
-        .unwrap_or(u16::MAX)
-        .saturating_add(progress)
-        .saturating_add(goal_rows)
-        .saturating_add(1);
-    desired.clamp(super::model::TOP_HEIGHT_MIN, cap)
-}
-
-/// The ceilings the *terminal* imposes, independent of anything the user
-/// asked for, smallest wins:
-///
-/// - half the terminal: proportional restraint, so a tall rail on a short
-///   terminal still reads as a strip over a transcript.
-/// - `rail_budget`: the rows the transcript can actually spare. This is the
-///   only one that knows the transcript has a floor, and it is the one that
-///   lets decorative water outrank a panel nobody is watching.
-///
-/// Kept separate from [`top_cap`] because the collapse cliff must be charged
-/// against ambient room alone. Both are monotone non-decreasing in terminal
-/// height, which is what keeps the strip from blinking across a resize.
-fn ambient_cap(terminal_height: u16, rail_budget: u16) -> u16 {
-    terminal_height
-        .saturating_div(2)
-        .clamp(super::model::TOP_HEIGHT_MIN, super::model::TOP_HEIGHT_MAX)
-        .min(rail_budget)
-}
-
-/// [`ambient_cap`] plus `top_height` — what the user asked for via
-/// drag-resize / settings. This is the ceiling on how *tall* a strip may
-/// grow; it is deliberately not the quantity a collapse threshold is
-/// compared against.
-fn top_cap(app: &App, terminal_height: u16, rail_budget: u16) -> u16 {
-    app.work_surface
-        .top_height
-        .min(ambient_cap(terminal_height, rail_budget))
-}
-
-/// Drop the interaction state that only means anything while a strip is on
-/// screen. Every path reporting "no strip this frame" must run this: hitboxes
-/// outlive the rows they described, so a strip that yielded its rows would
-/// still swallow clicks landing on the transcript that replaced it.
-fn collapse_strip(app: &mut App) {
-    app.work_surface.last_area = None;
-    app.work_surface.hitboxes.clear();
-    app.work_surface.focused = false;
-    app.work_surface.selected = None;
-    app.work_surface.opened = None;
-    app.work_surface.hovered = None;
-    app.work_surface.resizing = false;
-    app.work_surface.divider_hovered = false;
-}
-
-/// Split the transcript slot for a side rail. Top placement consumes its own
-/// vertical row before this point, so it returns the chat area unchanged.
-///
-/// Placement and auto-fit are orthogonal but share one rule: **empty work is
-/// not a rail**. Top expresses that as `height() == 0`. Left/Right express it
-/// here — no column is reserved when the selected panel has nothing to say.
-/// When there *is* content, the rail takes the full chat height at the
-/// configured `side_width` (width is the ceiling, the way `top_height` is the
-/// ceiling on Top). Narrow terminals that cannot fit the rail fall back to
-/// Top, where height auto-fit takes over.
-///
-/// `min_chat_width` is the column-axis twin of `height`'s `rail_budget`: the
-/// columns the transcript must keep. When the idle ocean is on screen that is
-/// the ambient floor, and a rail that cannot fit beside it hides rather than
-/// squeezing the water into a strip too narrow to draw.
-pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Option<Rect>) {
-    let placement = effective_placement(app.work_surface.placement, area.width);
-    app.work_surface.effective_placement = placement;
-    if placement == WorkSurfacePlacement::Top || placement == WorkSurfacePlacement::Off {
-        return (area, None);
-    }
-    // Same empty-collapse rule as Top: a panel with nothing to show does not
-    // spend columns on a blank (or "No agents") column.
-    if !side_rail_has_content(app) {
-        return (area, None);
-    }
-
-    let min_chat_width = min_chat_width.max(SIDE_RAIL_MIN_CHAT_WIDTH);
-    let rail_width = app
-        .work_surface
-        .side_width
-        .clamp(super::model::SIDE_WIDTH_MIN, super::model::SIDE_WIDTH_MAX)
-        .min(area.width.saturating_sub(min_chat_width));
-    if rail_width < super::model::SIDE_WIDTH_MIN {
-        // Too narrow for a side column — fall back to Top. The caller will
-        // re-ask height() with effective_placement Top so content auto-fits
-        // as a strip instead of vanishing.
-        app.work_surface.effective_placement = WorkSurfacePlacement::Top;
-        return (area, None);
-    }
-
-    let chat_width = area.width.saturating_sub(rail_width);
-    match placement {
-        WorkSurfacePlacement::Left => (
-            Rect {
-                x: area.x.saturating_add(rail_width),
-                width: chat_width,
-                ..area
-            },
-            Some(Rect {
-                width: rail_width,
-                ..area
-            }),
-        ),
-        WorkSurfacePlacement::Right => (
-            Rect {
-                width: chat_width,
-                ..area
-            },
-            Some(Rect {
-                x: area.x.saturating_add(chat_width),
-                width: rail_width,
-                ..area
-            }),
-        ),
-        WorkSurfacePlacement::Top | WorkSurfacePlacement::Off => (area, None),
-    }
-}
-
-/// Whether a Left/Right rail should reserve columns this frame.
-fn side_rail_has_content(app: &mut App) -> bool {
-    match app.work_surface.panel {
-        RailPanel::Tasks => !project_visible(app).is_empty(),
-        panel => super::panels::panel_has_useful_content(app, panel),
-    }
-}
+use rows::{
+    AGENT_ROLE_GUTTER, AgentRowTier, agent_identity, agent_identity_cap, agent_identity_column,
+    agent_receipt, agent_row_styles, layout_agent_row, row_style,
+};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
@@ -722,7 +498,7 @@ fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
 /// paused/active/terminal resolution as the ocean header chip so a goal set
 /// via `create_goal` is either visible everywhere or nowhere. Returns
 /// `None` when no live goal exists — Top then paints no title row at all.
-fn top_goal_title(app: &App) -> Option<(String, Style)> {
+pub(super) fn top_goal_title(app: &App) -> Option<(String, Style)> {
     let (objective, paused) = crate::tui::footer_ui::active_goal_chip_state(app)?;
     let flat = objective.trim().replace(['\n', '\r'], " ");
     if flat.is_empty() {
@@ -763,11 +539,11 @@ const PROGRESS_FOLD_MIN_WIDTH: u16 = 72;
 /// [`height`] and [`render`] must agree on this or the strip paints into a row
 /// it did not reserve, so the rule is a pure function of the strip width and
 /// whether there is a goal title to share with.
-fn progress_shares_goal_row(width: u16, has_goal_title: bool) -> bool {
+pub(super) fn progress_shares_goal_row(width: u16, has_goal_title: bool) -> bool {
     has_goal_title && width >= PROGRESS_FOLD_MIN_WIDTH
 }
 
-fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
+pub(super) fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
     let todos = rows
         .iter()
         .filter(|row| row.id.0.starts_with("graph:"))
@@ -789,237 +565,6 @@ fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
             .replace("{total}", &total.to_string())
             .replace("{remaining}", &remaining.to_string()),
     )
-}
-
-/// Gap between the agent-type column and the objective.
-const AGENT_ROLE_GUTTER: usize = 2;
-/// Minimum gap between the objective and the right-aligned receipt.
-const AGENT_RECEIPT_GUTTER: usize = 2;
-/// Columns the objective must keep before an optional column may stay. Below
-/// this the objective is a shrug — "Streaming d…" answers nothing — so the
-/// optional column loses instead.
-const AGENT_OBJECTIVE_MIN: usize = 24;
-
-/// How much of a sub-agent row survives at the current width.
-///
-/// Degradation order, widest to narrowest: the token figure goes first, then
-/// the elapsed time, then the agent-type column. The objective is the last
-/// thing to go — a fleet row that cannot say what the agent is doing has
-/// stopped being worth a row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentRowTier {
-    /// Type, objective, elapsed, tokens.
-    Full,
-    /// Type, objective, elapsed.
-    NoTokens,
-    /// Type, objective.
-    NoReceipt,
-    /// Objective only.
-    ObjectiveOnly,
-}
-
-const AGENT_ROW_TIERS: [AgentRowTier; 4] = [
-    AgentRowTier::Full,
-    AgentRowTier::NoTokens,
-    AgentRowTier::NoReceipt,
-    AgentRowTier::ObjectiveOnly,
-];
-
-/// A sub-agent row resolved to painted columns.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct AgentRowText {
-    /// Agent-type column, padded to the shared width. Empty once dropped.
-    role: String,
-    objective: String,
-    /// `12m 33s · ↓ 111.9k tokens`. Empty once dropped.
-    receipt: String,
-    /// Spaces separating the objective from the receipt.
-    gap: usize,
-}
-
-/// The right-aligned receipt at a given tier. A figure the runtime never
-/// reported is absent, never zero: an agent with no usage envelope shows no
-/// token count at all.
-fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String {
-    let elapsed = facts
-        .elapsed_secs
-        .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
-        .map(crate::elapsed::format_elapsed_secs);
-    let tokens = facts
-        .tokens
-        .filter(|_| tier == AgentRowTier::Full)
-        .map(|tokens| {
-            format!(
-                "↓ {} tokens",
-                crate::tui::footer_ui::format_token_count_compact(tokens)
-            )
-        });
-    match (elapsed, tokens) {
-        (Some(elapsed), Some(tokens)) => format!("{elapsed} · {tokens}"),
-        (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => String::new(),
-    }
-}
-
-/// Ceiling on the shared identity column, as a fraction of the row. The
-/// column is shared, so without a cap a single long nickname would widen it
-/// for every row and starve every objective on the surface. An identity wider
-/// than this is dropped for *that* row only.
-const AGENT_IDENTITY_CAP_NUMERATOR: usize = 2;
-const AGENT_IDENTITY_CAP_DENOMINATOR: usize = 5;
-
-/// Widest identity the shared column will carry at this row width.
-fn agent_identity_cap(width: usize) -> usize {
-    width
-        .saturating_mul(AGENT_IDENTITY_CAP_NUMERATOR)
-        .saturating_div(AGENT_IDENTITY_CAP_DENOMINATOR)
-}
-
-/// Which spelling of a sub-agent's identity fits the column: its nickname
-/// first, then its fleet role, then nothing.
-///
-/// Identities are never truncated, only dropped. `Fluke the Deep…` and
-/// `general-purpo…` both misidentify an agent, and roles that share a prefix
-/// would become indistinguishable.
-fn agent_identity(row: &WorkRow, cap: usize) -> &str {
-    let Some(facts) = row.agent.as_ref() else {
-        return "";
-    };
-    for candidate in [row.label.as_str(), facts.role_label.as_str()] {
-        if !candidate.is_empty() && UnicodeWidthStr::width(candidate) <= cap {
-            return candidate;
-        }
-    }
-    ""
-}
-
-/// Shared width of the identity column across the rows painted this frame, so
-/// the objectives line up the way a fleet listing should read. Rows whose
-/// identity exceeded the cap contribute nothing, so one outlier cannot widen
-/// the column for everyone else.
-fn agent_identity_column(rows: &[&WorkRow], cap: usize) -> usize {
-    rows.iter()
-        .filter(|row| row.agent.is_some())
-        .map(|row| UnicodeWidthStr::width(agent_identity(row, cap)))
-        .max()
-        .unwrap_or(0)
-}
-
-/// Fit one sub-agent row into `width`, dropping optional columns in
-/// [`AGENT_ROW_TIERS`] order until the objective has room to say something.
-/// Every column truncates; nothing ever wraps.
-fn layout_agent_row(
-    width: usize,
-    prefix_width: usize,
-    identity: &str,
-    identity_column: usize,
-    facts: &AgentRowFacts,
-) -> AgentRowText {
-    for tier in AGENT_ROW_TIERS {
-        let receipt = agent_receipt(facts, tier);
-        let role = if tier == AgentRowTier::ObjectiveOnly || identity_column == 0 {
-            String::new()
-        } else {
-            // A row whose own identity was dropped still reserves the column,
-            // so every objective on the surface stays on the same axis.
-            let pad = identity_column.saturating_sub(UnicodeWidthStr::width(identity));
-            format!("{identity}{}", " ".repeat(pad))
-        };
-        let role_cost = if role.is_empty() {
-            0
-        } else {
-            UnicodeWidthStr::width(role.as_str()).saturating_add(AGENT_ROLE_GUTTER)
-        };
-        let receipt_cost = if receipt.is_empty() {
-            0
-        } else {
-            UnicodeWidthStr::width(receipt.as_str()).saturating_add(AGENT_RECEIPT_GUTTER)
-        };
-        let budget = width
-            .saturating_sub(prefix_width)
-            .saturating_sub(role_cost)
-            .saturating_sub(receipt_cost);
-        if budget < AGENT_OBJECTIVE_MIN && tier != AgentRowTier::ObjectiveOnly {
-            continue;
-        }
-        let objective = truncate_line_to_width(&facts.objective, budget);
-        let gap = width
-            .saturating_sub(prefix_width)
-            .saturating_sub(role_cost)
-            .saturating_sub(UnicodeWidthStr::width(objective.as_str()))
-            .saturating_sub(UnicodeWidthStr::width(receipt.as_str()));
-        return AgentRowText {
-            role,
-            objective,
-            receipt,
-            gap,
-        };
-    }
-    AgentRowText::default()
-}
-
-/// Normal-text and muted styles for one sub-agent row.
-///
-/// Three colour roles and no more: the objective is normal text, every
-/// secondary figure (type, `(+N)`, elapsed, tokens) is muted, and
-/// `accent_primary` means "this is the row you have selected" and nothing
-/// else. Status is carried by the glyph, never by colour.
-fn agent_row_styles(app: &App, selected: bool, hovered: bool, opened: bool) -> (Style, Style) {
-    let bg = if selected {
-        app.ui_theme.selection_bg
-    } else if hovered {
-        app.ui_theme.elevated_bg
-    } else {
-        app.ui_theme.surface_bg
-    };
-    let mut normal = Style::default().fg(app.ui_theme.text_body).bg(bg);
-    let mut muted = Style::default().fg(app.ui_theme.text_muted).bg(bg);
-    if selected || opened {
-        normal = normal.fg(app.ui_theme.accent_primary);
-        muted = muted.fg(app.ui_theme.accent_primary);
-    }
-    if selected {
-        normal = normal.add_modifier(Modifier::BOLD);
-        muted = muted.add_modifier(Modifier::BOLD);
-    }
-    if opened {
-        normal = normal.add_modifier(Modifier::UNDERLINED);
-        muted = muted.add_modifier(Modifier::UNDERLINED);
-    }
-    (normal, muted)
-}
-
-fn row_style(app: &App, row: &WorkRow, selected: bool, hovered: bool, opened: bool) -> Style {
-    // Headings (group headers like `▾ Subagents 2`) are muted structure, not
-    // interaction — accent_primary is reserved for selection/focus. GrokBuild
-    // uses the same gray-on-header treatment.
-    let fg = match row.tone {
-        WorkTone::Heading => app.ui_theme.text_muted,
-        WorkTone::Live => app.ui_theme.status_working,
-        WorkTone::Attention => app.ui_theme.error_fg,
-        WorkTone::Success => app.ui_theme.success,
-        WorkTone::Muted => app.ui_theme.text_muted,
-    };
-    let mut style = Style::default().fg(fg).bg(app.ui_theme.surface_bg);
-    if row.tone == WorkTone::Heading {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if !row.selectable {
-        return style;
-    }
-    if opened {
-        style = style
-            .fg(app.ui_theme.accent_primary)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    }
-    if selected {
-        style = style
-            .bg(app.ui_theme.selection_bg)
-            .add_modifier(Modifier::BOLD);
-    } else if hovered {
-        style = style.bg(app.ui_theme.elevated_bg);
-    }
-    style
 }
 
 fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement, app: &App) {
