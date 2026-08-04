@@ -2792,6 +2792,17 @@ impl CoordinationProcessLock {
                     }
                     let _ = ready_tx.send(Ok::<(), String>(()));
                     let _ = release_rx.recv();
+                    // Clear the stamp while still holding the flock, so a
+                    // stale pid never outlives its holder's tenure. A reader
+                    // that races the next winner's stamp then sees an empty
+                    // file, parses no pid, and classifies the loss as a
+                    // foreign process — which WARNS. Misclassification, when
+                    // it can happen at all, must fall on the side that tells
+                    // the user, never the side that suppresses the warning.
+                    {
+                        let file: &mut std::fs::File = &mut guard;
+                        let _ = file.set_len(0);
+                    }
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error.to_string()));

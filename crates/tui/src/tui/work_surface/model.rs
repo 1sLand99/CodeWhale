@@ -976,10 +976,27 @@ fn ordered_rows(
         return Vec::new();
     }
 
+    // The live heading must count the rows the live list actually shows.
+    // Once transient recent rows are suppressed, quoting the unfiltered
+    // `recent` total would claim receipts the reader cannot see — the
+    // catalog heading keeps the full count because the catalog keeps the
+    // full rows.
+    let live_heading = if suppress_transient_recent {
+        let live_recent = ranked
+            .iter()
+            .filter(|item| item.bucket == WorkBucket::Recent && is_durable(item))
+            .count();
+        format!(
+            "Work · {active} active · {attention} needs input · {ready} ready · {live_recent} recent{source}"
+        )
+    } else {
+        heading_label.clone()
+    };
+
     // Full ordered children remain in the projection for side rails, inspector
     // selection, and durable recent visibility. Live Top height is capped in
     // render (#4690). Recent-only *summary* lifetime is handled above (#4688).
-    let mut live = vec![section_heading("work", &heading_label, &detail)];
+    let mut live = vec![section_heading("work", &live_heading, &detail)];
     for item in ranked {
         if item.row.id.0 == "activity:aggregate" && !show_activity {
             continue;
@@ -2341,6 +2358,64 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    /// After the recent-only TTL suppresses transient receipts, the live
+    /// heading must count only the recent rows the live list still shows —
+    /// quoting the unfiltered total would claim receipts the reader cannot
+    /// see (2026-08-04 adversarial review of the durable-row exemption).
+    #[test]
+    fn suppressed_transients_leave_the_live_heading_count_honest() {
+        let mut plan_step = operation(NodeState::Completed, "shipped-step");
+        plan_step.kind = NodeKind::PlanStep;
+        plan_step.binding = None;
+        let mut transient = operation(NodeState::Completed, "settled-op");
+        transient.binding.as_mut().expect("binding").durable = true;
+        let mut snapshot = WorkGraphSnapshot::new();
+        snapshot.nodes = vec![plan_step, transient];
+
+        let mut surface = surface();
+        surface.set_presentation_now_ms(0);
+        let _ = graph_rows(
+            &mut surface,
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        );
+        surface.set_presentation_now_ms(RECENT_ONLY_TTL_MS + 1);
+        let rows = graph_rows(
+            &mut surface,
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        );
+        let heading = &rows[0];
+        assert!(
+            heading.label.contains("1 recent"),
+            "live heading counts only the surviving durable row: {}",
+            heading.label
+        );
+        assert!(
+            rows.iter().any(|row| row.label.contains("shipped-step")),
+            "durable to-do row survives: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.label.contains("settled-op")),
+            "transient receipt is suppressed: {rows:?}"
+        );
+        // The catalog keeps the full rows, so it keeps the full count.
+        assert!(
+            surface
+                .catalog_rows
+                .first()
+                .is_some_and(|row| row.label.contains("2 recent")),
+            "catalog heading keeps the unfiltered count: {:?}",
+            surface.catalog_rows.first()
+        );
     }
 
     #[test]
