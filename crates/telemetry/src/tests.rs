@@ -591,7 +591,10 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::ForcedOff
     ));
 
-    // Row: on and accepted, no endpoint. The shipped default.
+    // Row: on and accepted, no endpoint — the dry-run sink, which resolution
+    // reaches from an explicitly empty `telemetry_endpoint`. (The *shipped*
+    // default is `DEFAULT_TELEMETRY_ENDPOINT`; this predicate never sees it,
+    // because it reads an already-resolved value.)
     let decision = decide_in_home(
         Some(path),
         &resolved(true, false, None),

@@ -8452,9 +8452,12 @@ model = "qwen-2.5-7b"
 
         let cli = parse_ok(&["codewhale", "exec", "hi"]);
 
-        // The shipped default is unset, and unset must stay unset: naming the
-        // variable with an empty value would look like a configured endpoint to
-        // anything that only checks for presence.
+        // A resolved `None` is the dry-run sink — the user configured an empty
+        // endpoint — and it must not be forwarded as an empty variable, which
+        // would look like a configured endpoint to anything that only checks
+        // for presence. Not forwarding is safe because the child re-resolves
+        // from the same config file and the same inherited environment, so it
+        // reaches the same `None`.
         let resolved = telemetry_test_resolved();
         assert_eq!(resolved.telemetry_endpoint, None);
         let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");

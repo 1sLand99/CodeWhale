@@ -709,8 +709,12 @@ pub struct ConfigToml {
     pub telemetry: Option<bool>,
     /// Where telemetry batches are sent, when telemetry is enabled at all.
     ///
-    /// Unset by default, and unset is not a placeholder for a built-in URL:
-    /// with no endpoint configured nothing is ever sent over a network.
+    /// Unset here means "take the shipped default",
+    /// [`DEFAULT_TELEMETRY_ENDPOINT`] — not "send nowhere". Setting it to the
+    /// empty string is the way to say send nowhere: that resolves to no
+    /// endpoint, which appends batches to `dryrun.jsonl` and constructs no HTTP
+    /// client. Either way nothing is sent until telemetry is enabled *and* the
+    /// first-run notice has been answered with Enable.
     ///
     /// Kept as a scalar sibling of `telemetry` rather than folded into a
     /// `[telemetry]` table. `telemetry` is already a scalar and every section
@@ -3342,11 +3346,25 @@ impl ConfigToml {
         // answer would also make the default state indistinguishable from a
         // revocation.
         let telemetry_explicit_off = telemetry_persisted_off;
-        let telemetry_endpoint = env
+        // The shipped default is [`DEFAULT_TELEMETRY_ENDPOINT`], and it is a
+        // default rather than a floor: an explicit value in the environment or
+        // the config file wins outright. An explicit *empty* value is not a
+        // missing value — it is the local dry-run sink, and it stays reachable
+        // by resolving to `None` instead of falling through to the default.
+        //
+        // None of this is a consent decision. A session only reaches an
+        // endpoint after `telemetry` above resolved true, which requires the
+        // first-run notice to have been answered with Enable; the kill switches
+        // are all upstream of this line.
+        let telemetry_endpoint = match env
             .telemetry_endpoint
             .clone()
             .or_else(|| self.telemetry_endpoint.clone())
-            .filter(|value| !value.trim().is_empty());
+        {
+            Some(configured) if configured.trim().is_empty() => None,
+            Some(configured) => Some(configured),
+            None => Some(DEFAULT_TELEMETRY_ENDPOINT.to_string()),
+        };
         let approval_policy = cli
             .approval_policy
             .clone()
@@ -3393,6 +3411,25 @@ fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &Provi
         target.model = source.model.clone();
     }
 }
+
+/// Where an enabled session's batches go when nobody has said otherwise.
+///
+/// The first-party ingest service — a Cloudflare Worker that appends to Workers
+/// Analytics Engine and stores nothing else. See `docs/TELEMETRY.md` for what a
+/// batch contains and `telemetry-ingest/` for the handler.
+///
+/// This is a *default*, not a floor, and it changes nothing about consent: it is
+/// only ever consulted for a session that is already enabled, which requires the
+/// first-run notice to have been answered with Enable. `CODEWHALE_TELEMETRY=0`,
+/// `telemetry = false`, and a recorded decline all stop the session long before
+/// an endpoint is read.
+///
+/// An explicit value — `CODEWHALE_TELEMETRY_ENDPOINT` or `telemetry_endpoint` in
+/// the config file — wins outright, and an explicit *empty* value resolves to no
+/// endpoint at all, which is the local dry-run sink: batches are serialized
+/// exactly as a server would see them and appended to
+/// `$CODEWHALE_HOME/telemetry/dryrun.jsonl`, and no HTTP client is constructed.
+pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.codewhale.net/v1/telemetry";
 
 /// The dispatcher's statement to the TUI child about *why* telemetry is off.
 ///
@@ -4754,8 +4791,9 @@ pub struct ResolvedRuntimeOptions {
     pub telemetry_explicit_off: bool,
     /// Where a telemetry batch would be sent, if telemetry were on.
     ///
-    /// Unset is the shipped default and is not a placeholder for a built-in
-    /// URL: with no endpoint configured there is nowhere for a batch to go.
+    /// Already resolved: [`DEFAULT_TELEMETRY_ENDPOINT`] when nobody configured
+    /// one, the configured value when somebody did, and `None` when somebody
+    /// configured an empty one — which means the dry-run sink, not "unset".
     /// Which schemes are actually contactable is decided where a batch would be
     /// sent, not here — a user must be able to stage a value.
     pub telemetry_endpoint: Option<String>,
@@ -6553,10 +6591,15 @@ impl EnvRuntimeOverrides {
             telemetry,
             telemetry_env_invalid,
             telemetry_floor,
+            // Empty is kept, not discarded. Since the config file's *absent*
+            // endpoint now resolves to `DEFAULT_TELEMETRY_ENDPOINT`, dropping
+            // an explicitly emptied variable here would make
+            // `CODEWHALE_TELEMETRY_ENDPOINT=` select the shipped endpoint —
+            // the opposite of what anyone typing it means. Resolution reads an
+            // empty override as "contact nobody, write the dry-run file".
             telemetry_endpoint: std::env::var("CODEWHALE_TELEMETRY_ENDPOINT")
                 .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY_ENDPOINT"))
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
+                .ok(),
             approval_policy: std::env::var("CODEWHALE_APPROVAL_POLICY")
                 .or_else(|_| std::env::var("DEEPSEEK_APPROVAL_POLICY"))
                 .ok(),

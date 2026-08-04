@@ -7919,6 +7919,8 @@ struct TelemetryEnvGuard {
     codewhale: Option<OsString>,
     deepseek: Option<OsString>,
     floor: Option<OsString>,
+    codewhale_endpoint: Option<OsString>,
+    deepseek_endpoint: Option<OsString>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -7929,6 +7931,12 @@ impl TelemetryEnvGuard {
             codewhale: env::var_os("CODEWHALE_TELEMETRY"),
             deepseek: env::var_os("DEEPSEEK_TELEMETRY"),
             floor: env::var_os(TELEMETRY_FLOOR_ENV),
+            // The endpoint variables are cleared too. Resolution now has a
+            // shipped default, so an ambient endpoint in the developer's or
+            // CI's environment is the difference between pinning the default
+            // and pinning whatever that machine happened to export.
+            codewhale_endpoint: env::var_os("CODEWHALE_TELEMETRY_ENDPOINT"),
+            deepseek_endpoint: env::var_os("DEEPSEEK_TELEMETRY_ENDPOINT"),
             _lock: lock,
         };
         // Safety: test-only environment mutation guarded by the module mutex.
@@ -7936,6 +7944,8 @@ impl TelemetryEnvGuard {
             env::remove_var("CODEWHALE_TELEMETRY");
             env::remove_var("DEEPSEEK_TELEMETRY");
             env::remove_var(TELEMETRY_FLOOR_ENV);
+            env::remove_var("CODEWHALE_TELEMETRY_ENDPOINT");
+            env::remove_var("DEEPSEEK_TELEMETRY_ENDPOINT");
         }
         guard
     }
@@ -7944,6 +7954,13 @@ impl TelemetryEnvGuard {
         // Safety: test-only environment mutation guarded by the module mutex.
         unsafe {
             env::set_var("CODEWHALE_TELEMETRY", value);
+        }
+    }
+
+    fn set_endpoint(&self, value: &str) {
+        // Safety: test-only environment mutation guarded by the module mutex.
+        unsafe {
+            env::set_var("CODEWHALE_TELEMETRY_ENDPOINT", value);
         }
     }
 
@@ -7979,6 +7996,14 @@ impl Drop for TelemetryEnvGuard {
             match self.floor.take() {
                 Some(value) => env::set_var(TELEMETRY_FLOOR_ENV, value),
                 None => env::remove_var(TELEMETRY_FLOOR_ENV),
+            }
+            match self.codewhale_endpoint.take() {
+                Some(value) => env::set_var("CODEWHALE_TELEMETRY_ENDPOINT", value),
+                None => env::remove_var("CODEWHALE_TELEMETRY_ENDPOINT"),
+            }
+            match self.deepseek_endpoint.take() {
+                Some(value) => env::set_var("DEEPSEEK_TELEMETRY_ENDPOINT", value),
+                None => env::remove_var("DEEPSEEK_TELEMETRY_ENDPOINT"),
             }
         }
     }
@@ -8191,6 +8216,128 @@ fn telemetry_explicit_off_distinguishes_an_answer_from_the_default() {
     let resolved = ConfigToml::default().resolve_runtime_options(&cli);
     assert!(!resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
+}
+
+/// The shipped default endpoint, pinned by value.
+///
+/// A default nobody asserts is a default that drifts, and this one decides
+/// which host an enabled session contacts. The literal is repeated here on
+/// purpose: comparing the constant to itself would pass against any edit.
+#[test]
+fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
+    let _guard = TelemetryEnvGuard::take();
+
+    assert_eq!(
+        DEFAULT_TELEMETRY_ENDPOINT,
+        "https://telemetry.codewhale.net/v1/telemetry"
+    );
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(
+        resolved.telemetry_endpoint.as_deref(),
+        Some(DEFAULT_TELEMETRY_ENDPOINT),
+        "an unconfigured endpoint must resolve to the shipped default"
+    );
+
+    // …and it decides only *where*, never *whether*. The default endpoint must
+    // not have made an unconfigured install start collecting: telemetry is
+    // still off, and still not an answer anyone gave.
+    assert!(!resolved.telemetry);
+    assert!(!resolved.telemetry_explicit_off);
+}
+
+/// A user-set endpoint beats the shipped default, from either source, and an
+/// explicitly *empty* one is the dry-run sink rather than a missing value.
+#[test]
+fn a_configured_endpoint_beats_the_shipped_default() {
+    let guard = TelemetryEnvGuard::take();
+
+    let config = ConfigToml {
+        telemetry_endpoint: Some("https://collector.internal/v1/batch".to_string()),
+        ..ConfigToml::default()
+    };
+    assert_eq!(
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint
+            .as_deref(),
+        Some("https://collector.internal/v1/batch"),
+        "the config file must outrank the shipped default"
+    );
+
+    // The environment outranks the file, which outranks the default.
+    guard.set_endpoint("https://collector.env.internal/v1/batch");
+    assert_eq!(
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint
+            .as_deref(),
+        Some("https://collector.env.internal/v1/batch")
+    );
+    assert_eq!(
+        ConfigToml::default()
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint
+            .as_deref(),
+        Some("https://collector.env.internal/v1/batch")
+    );
+}
+
+/// An empty endpoint means "contact nobody", not "use the default".
+///
+/// `None` at the resolved layer is what `codewhale-telemetry`'s client reads as
+/// the dry-run sink: batches are serialized exactly as a server would see them
+/// and appended to `dryrun.jsonl`, and no HTTP client is constructed. With a
+/// shipped default in place that path is only reachable through an explicit
+/// empty value, so both ways of writing one are pinned here.
+#[test]
+fn an_empty_endpoint_keeps_the_dry_run_sink_reachable() {
+    let guard = TelemetryEnvGuard::take();
+
+    let config = ConfigToml {
+        telemetry_endpoint: Some(String::new()),
+        ..ConfigToml::default()
+    };
+    assert_eq!(
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint,
+        None,
+        "`telemetry_endpoint = \"\"` must resolve to the dry-run sink"
+    );
+
+    // Whitespace is the same statement typed less carefully.
+    let config = ConfigToml {
+        telemetry_endpoint: Some("   ".to_string()),
+        ..ConfigToml::default()
+    };
+    assert_eq!(
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint,
+        None
+    );
+
+    // An emptied environment variable says it too, and it says it over a
+    // config file that names a real host — otherwise the documented one-shot
+    // `CODEWHALE_TELEMETRY_ENDPOINT= codewhale …` would silently keep sending.
+    let config = ConfigToml {
+        telemetry_endpoint: Some("https://collector.internal/v1/batch".to_string()),
+        ..ConfigToml::default()
+    };
+    guard.set_endpoint("");
+    assert_eq!(
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint,
+        None
+    );
+    assert_eq!(
+        ConfigToml::default()
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .telemetry_endpoint,
+        None,
+        "an emptied environment variable must not fall through to the default"
+    );
 }
 
 #[test]

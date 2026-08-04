@@ -1,10 +1,15 @@
-//! Transport. One POST, or — by default — a local file.
+//! Transport. One POST, or — with no endpoint — a local file.
 //!
-//! **No production endpoint is approved, and the shipped default is unset.**
-//! Unset means the dry-run sink: batches are serialized with the same serializer
-//! a real endpoint would see and appended to `dryrun.jsonl`, and no HTTP client
-//! is ever constructed. That is the dogfood gate as the *default configuration*
-//! rather than a separate mode — you read your own payloads by reading the file.
+//! The shipped default endpoint is `codewhale_config::DEFAULT_TELEMETRY_ENDPOINT`,
+//! the first-party ingest service documented in `docs/TELEMETRY.md`. That
+//! default decides only *where* a batch goes, never *whether* one exists: this
+//! module is reached only by a session that resolved telemetry on, which
+//! requires the first-run notice to have been answered with Enable.
+//!
+//! `None` here is the dry-run sink, reachable by configuring an empty endpoint:
+//! batches are serialized with the same serializer a real endpoint would see and
+//! appended to `dryrun.jsonl`, and no HTTP client is ever constructed. That is
+//! how you read your own payloads — by reading the file.
 
 use std::path::Path;
 use std::time::Duration;

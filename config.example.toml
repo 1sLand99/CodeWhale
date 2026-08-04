@@ -212,13 +212,30 @@ memory_path = "~/.codewhale/memory.md"
 # repository cannot turn your telemetry on or aim it at a host of their choosing.
 # telemetry = false
 
-# Where batches are POSTed. 0.9.4 ships with this UNSET, and unset means the
-# dry-run sink: batches are serialized exactly as a real endpoint would see
-# them, appended to `$CODEWHALE_HOME/telemetry/dryrun.jsonl`, and no HTTP
-# client is ever constructed. Read that file to see precisely what would have
-# been sent. `https://` is required; plain `http://` is accepted only for
-# loopback, and no environment variable overrides that refusal.
-# telemetry_endpoint = "https://telemetry.example/v1/batch"
+# Where batches are POSTed. Leaving this unset selects the shipped default,
+# the first-party ingest service:
+#
+#   https://telemetry.codewhale.net/v1/telemetry
+#
+# That default is only ever consulted for a session that is already enabled —
+# it decides where a batch goes, never whether one exists. Nothing is sent
+# until `telemetry` is on AND the first-run notice was answered with Enable.
+#
+# Two overrides, both of which beat the default:
+#
+#   telemetry_endpoint = "https://collector.internal/v1/batch"  # your own sink
+#   telemetry_endpoint = ""                                     # contact nobody
+#
+# The empty string is the local dry-run sink: batches are serialized exactly as
+# a real endpoint would see them, appended to
+# `$CODEWHALE_HOME/telemetry/dryrun.jsonl`, and no HTTP client is ever
+# constructed. Read that file to see precisely what would have been sent.
+# `CODEWHALE_TELEMETRY_ENDPOINT` overrides this file, and setting it to the
+# empty string means the same "contact nobody".
+#
+# `https://` is required; plain `http://` is accepted only for loopback, and no
+# environment variable overrides that refusal.
+# telemetry_endpoint = "https://telemetry.codewhale.net/v1/telemetry"
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Security
