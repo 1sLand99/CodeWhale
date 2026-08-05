@@ -15,6 +15,8 @@ release_crates=(
   codewhale-hooks
   codewhale-tools
   codewhale-config
+  # Path+version dependency of cli/tui — must publish before those crates.
+  codewhale-telemetry
   codewhale-lane
   codewhale-agent
   codewhale-tui
