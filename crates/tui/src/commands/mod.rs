@@ -6,6 +6,7 @@
 //! module keeps registry construction, user-command precedence, and the
 //! fall-through behaviour.
 
+pub mod discovery;
 mod groups;
 pub mod traits;
 pub mod user_commands;
