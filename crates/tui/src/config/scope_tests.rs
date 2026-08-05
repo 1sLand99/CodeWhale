@@ -191,15 +191,8 @@ fn explicit_workspace_config_selects_its_route_without_locking_user_global() {
     );
 }
 
-#[test]
-fn nested_repo_and_symlinked_worktree_do_not_change_readiness() {
-    let _lock = crate::test_support::lock_test_env();
-    let base = tempfile::TempDir::new().expect("temp base");
-
-    // A nested repository inside a parent checkout, plus a symlinked
-    // worktree of it — both loaded with the explicit workspace config.
-    let parent = base.path().join("parent-repo");
-    let nested = parent.join("nested-repo");
+fn write_nested_zai_config(base: &std::path::Path) -> std::path::PathBuf {
+    let nested = base.join("parent-repo").join("nested-repo");
     std::fs::create_dir_all(nested.join(".codewhale")).expect("nested dir");
     std::fs::write(
         nested.join(".codewhale").join("config.toml"),
@@ -209,24 +202,38 @@ fn nested_repo_and_symlinked_worktree_do_not_change_readiness() {
 "#,
     )
     .expect("nested config");
+    nested
+}
 
+fn assert_user_global_survives_workspace(label: &str, config_path: std::path::PathBuf) {
+    let _home = sealed_env(Some(&config_path));
+    let config = Config::load(Some(config_path.clone()), None)
+        .unwrap_or_else(|err| panic!("load from {label}: {err}"));
+    let deepseek = deepseek_readiness(&config);
+    assert!(
+        deepseek.can_attempt(),
+        "{label}: user-global authorization must survive: {}",
+        deepseek.label()
+    );
+}
+
+#[test]
+fn nested_repo_does_not_change_readiness() {
+    let _lock = crate::test_support::lock_test_env();
+    let base = tempfile::TempDir::new().expect("temp base");
+    let nested = write_nested_zai_config(base.path());
+    assert_user_global_survives_workspace("nested", nested.join(".codewhale/config.toml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_worktree_does_not_change_readiness() {
+    let _lock = crate::test_support::lock_test_env();
+    let base = tempfile::TempDir::new().expect("temp base");
+    let nested = write_nested_zai_config(base.path());
     let symlinked = base.path().join("symlink-worktree");
     std::os::unix::fs::symlink(&nested, &symlinked).expect("symlink");
-
-    for (label, config_path) in [
-        ("nested", nested.join(".codewhale/config.toml")),
-        ("symlinked", symlinked.join(".codewhale/config.toml")),
-    ] {
-        let _home = sealed_env(Some(&config_path));
-        let config = Config::load(Some(config_path.clone()), None)
-            .unwrap_or_else(|err| panic!("load from {label}: {err}"));
-        let deepseek = deepseek_readiness(&config);
-        assert!(
-            deepseek.can_attempt(),
-            "{label}: user-global authorization must survive: {}",
-            deepseek.label()
-        );
-    }
+    assert_user_global_survives_workspace("symlinked", symlinked.join(".codewhale/config.toml"));
 }
 
 #[test]
