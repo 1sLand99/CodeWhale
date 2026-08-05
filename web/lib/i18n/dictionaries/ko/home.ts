@@ -16,13 +16,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — 깊은 바다로 대신 잠수하고, 당신은 잠수하지 않아도 됩니다.",
   metaDescription:
-    "Codewhale이 대신 깊이 잠수하므로 당신은 잠수하지 않아도 됩니다. 평범한 사람도 LLM의 힘을 지렛대 삼아 무언가를 만들 수 있게 하는 터미널 에이전트입니다. 당신의 머신에서 실행되며, Rust로 작성한 MIT 라이선스 오픈소스입니다.",
+    "Codewhale이 대신 깊이 잠수하므로 당신은 잠수하지 않아도 됩니다 — LLM의 힘을 손에 닿는 곳에 두는 터미널 에이전트. 당신의 머신에서 실행. Rust, MIT.",
 
   kicker: "오픈 소스 · 어떤 모델이든 · 터미널에서 실행",
   heroTitleA: "깊은 바다로 대신 잠수하고,",
   heroTitleB: "당신은 잠수하지 않아도 됩니다.",
   heroIntro:
-    "{brand}은 평범한 사람도 LLM의 힘을 지렛대 삼아 무언가를 만들 수 있게 합니다. 터미널에서 저장소를 읽고, 파일을 고치고, 검사를 실행하고, 기록을 남깁니다 — 당신이 이미 코드를 안다고 전제하지 않습니다. 당신의 머신에서 실행되며, 모델은 제품이 아니라 언제든 바꿔 끼울 수 있는 구성 요소입니다.",
+    "{brand}은 평범한 사람도 LLM의 힘을 지렛대 삼아 무언가를 만들 수 있게 합니다. 터미널에서 저장소를 읽고, 파일을 고치고, 검사를 실행하고, 기록을 남깁니다 — 코드를 안다고 전제하지 않습니다. 당신의 머신에서 실행되며, 모델은 골라 끼우는 구성 요소입니다.",
   install: "설치",
   docs: "문서",
   copy: "복사",
@@ -47,13 +47,13 @@ export const home: HomeDict = {
 
   proofHeading: "수중 터미널 셸. 모델 중립. 로컬 우선.",
   proofBody:
-    "이미 쓰고 있는 호스팅형, 게이트웨이, 로컬 모델을 그대로 가져오세요. Codewhale은 당신의 머신에서 실행되며, 모델을 제품이 아니라 골라 끼우는 구성 요소로 다룹니다. Plan / Act / Operate와 명시적인 권한 상태가 깊은 잠수를 당신의 통제 아래 둡니다.",
+    "이미 쓰는 호스팅형, 게이트웨이, 로컬 모델을 그대로. Plan / Act / Operate와 명시적인 권한 상태가 잠수를 당신의 통제 아래 둡니다.",
 
   sealDecides: "法",
   decidesEyebrow: "판단 과정 보기",
   decidesHeading: "추론 기록에서 확인되는 규칙",
   decidesLede:
-    "실제 세션에서 그대로 가져온 발췌입니다 — 우선순위가 매겨진 프로젝트 규칙은 랜딩 페이지의 주장이 아니라 모델의 추론 속에서 드러납니다.",
+    "실제 세션 발췌 — 우선순위가 매겨진 프로젝트 규칙이 랜딩 페이지 주장이 아니라 모델 추론 속에서 드러납니다.",
 
   sealWorkflow: "行",
   workflowHeading: "작업에서 검증된 변경까지.",
@@ -71,7 +71,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "Codewhale이 처음인가요? 네 단계면 끝입니다.",
   startLede:
-    "설치 → 키 없이 시작하는 첫 세션 → 프로바이더 연결 → 첫 Fleet 워크플로. 각 용어의 뜻은 용어 페이지에 정리되어 있습니다.",
+    "설치 → 키 없는 첫 세션 → 프로바이더 연결 → 첫 Fleet 워크플로. 용어는 용어 페이지에.",
   startGuideLink: "시작 가이드 읽기 →",
   startVocabularyLink: "제품 용어 보기 →",
 

@@ -10,13 +10,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — 潜入数据与代码的深海，让你不必亲自下潜",
   metaDescription:
-    "数据与代码如海。Codewhale 是给你杠杆的终端智能体——读取、修改、验证，让普通人也能用 LLM 把东西做出来。运行在你自己的机器上；Rust 编写，MIT 许可。",
+    "Codewhale 潜入深海，让你不必亲自下潜——终端智能体，把 LLM 杠杆交到你手上。运行在你自己的机器上；Rust 编写，MIT 许可。",
 
   kicker: "开源 · 任意模型 · 运行在你的终端",
   heroTitleA: "潜入深海，",
   heroTitleB: "你不必亲自下潜。",
   heroIntro:
-    "{brand} 把大模型的杠杆交给普通人：在你的终端里读取仓库、修改文件、运行检查、留下收据。不必已经是程序员，也能把东西做出来——运行在你自己的机器上，模型只是可替换的组件。",
+    "{brand} 把 LLM 的杠杆交给普通人来把东西做出来。在终端里读取仓库、修改文件、运行检查、留下收据——不必已经是程序员。运行在你自己的机器上；模型只是可替换的组件。",
   install: "安装",
   docs: "文档",
   copy: "复制",
@@ -40,13 +40,13 @@ export const home: HomeDict = {
 
   proofHeading: "终端原生的水下壳。模型与提供商中立。本地优先。",
   proofBody:
-    "连接你已有的托管、网关或本地模型。Codewhale 在你的机器上运行；模型是可选择的组件，不是产品本身。Plan / Act / Operate 与明确的审批边界，让深潜也保持可控。",
+    "接入你已有的托管、网关或本地模型。Plan / Act / Operate 与明确的权限姿态，让深潜保持可控。",
 
   sealDecides: "法",
   decidesEyebrow: "看它如何裁决",
   decidesHeading: "推理里看得见的规则",
   decidesLede:
-    "摘自真实会话的忠实片段——嵌套宪法可以在模型的推理里被直接观察到，而不是落地页上的一句宣称。",
+    "真实会话摘录——嵌套宪法在模型推理里可见，不只是落地页上的一句宣称。",
 
   sealWorkflow: "行",
   workflowHeading: "从任务到经过验证的改动。",
@@ -64,7 +64,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "第一次使用？四步走完。",
   startLede:
-    "安装 → 无需密钥的首次会话 → 连接提供商 → 第一个 Fleet Workflow。名词含义见产品名词页。",
+    "安装 → 无需密钥的首次会话 → 连接提供商 → 第一个 Fleet Workflow。名词见产品名词页。",
   startGuideLink: "阅读新手指引 →",
   startVocabularyLink: "查看产品名词 →",
 

@@ -3,13 +3,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — Mergulhe nas profundezas para que você não precise.",
   metaDescription:
-    "O Codewhale mergulha nas profundezas para que você não precise — um agente de terminal que coloca a força dos LLMs nas mãos de quem quer construir coisas. Roda na sua máquina. Rust, licença MIT.",
+    "O Codewhale mergulha nas profundezas para que você não precise — um agente de terminal que coloca a força dos LLMs ao alcance. Na sua máquina. Rust, MIT.",
 
   kicker: "Código aberto · Qualquer modelo · Roda no seu terminal",
   heroTitleA: "Mergulhe nas profundezas",
   heroTitleB: "para que você não precise.",
   heroIntro:
-    "O {brand} coloca a força dos LLMs nas mãos de quem quer construir coisas. No seu terminal, ele lê o repositório, edita arquivos, executa verificações e deixa um recibo — sem supor que você já fale a língua do código. Roda na sua máquina; o modelo é um componente selecionável, não o produto.",
+    "O {brand} coloca a força dos LLMs nas mãos de quem quer construir coisas. No terminal lê o repositório, edita arquivos, executa verificações e deixa um recibo — sem supor que você já fale código. Na sua máquina; o modelo é um componente que você escolhe.",
   install: "Instalar",
   docs: "Documentação",
   copy: "Copiar",
@@ -34,13 +34,13 @@ export const home: HomeDict = {
 
   proofHeading: "Um terminal submarino. Neutro quanto ao modelo. Local primeiro.",
   proofBody:
-    "Traga o modelo hospedado, de gateway ou local que você já usa. O Codewhale roda na sua máquina e trata o modelo como um componente selecionável — não o produto. Plan / Act / Operate e posturas de permissão explícitas mantêm o mergulho sob seu controle.",
+    "Traga o modelo que já usa — hospedado, de gateway ou local. Plan / Act / Operate e posturas de permissão explícitas mantêm o mergulho sob seu controle.",
 
   sealDecides: "法",
   decidesEyebrow: "Veja como ele decide",
   decidesHeading: "Regras que você acompanha no rastro",
   decidesLede:
-    "Trechos fiéis de uma sessão real — a hierarquia de regras do projeto é observável no raciocínio do modelo, não uma afirmação numa landing page.",
+    "Trechos de uma sessão real — a hierarquia de regras é observável no raciocínio do modelo, não só numa landing page.",
 
   sealWorkflow: "行",
   workflowHeading: "Da tarefa à mudança verificada.",
@@ -58,7 +58,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "Novo no Codewhale? Quatro passos de ponta a ponta.",
   startLede:
-    "Instalar → uma primeira sessão sem chaves → conexão com o provedor → um primeiro Workflow da Fleet. Os termos estão definidos na página de vocabulário.",
+    "Instalar → primeira sessão sem chaves → conexão com o provedor → primeiro Workflow da Fleet. Termos na página de vocabulário.",
   startGuideLink: "Ler o guia de primeiros passos →",
   startVocabularyLink: "Ver o vocabulário do produto →",
 

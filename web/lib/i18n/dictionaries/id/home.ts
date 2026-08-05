@@ -15,13 +15,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — Menyelam ke laut dalam agar Anda tidak perlu melakukannya.",
   metaDescription:
-    "Codewhale menyelam ke laut dalam agar Anda tidak perlu melakukannya — agen terminal yang memberi orang biasa daya ungkit LLM untuk membangun sesuatu. Berjalan di mesin Anda. Ditulis dengan Rust, lisensi MIT.",
+    "Codewhale menyelam ke laut dalam agar Anda tidak perlu — agen terminal yang menempatkan daya ungkit LLM dalam jangkauan. Di mesin Anda. Rust, MIT.",
 
   kicker: "Sumber terbuka · Model apa pun · Berjalan di terminal Anda",
   heroTitleA: "Menyelam ke laut dalam",
   heroTitleB: "agar Anda tidak perlu melakukannya.",
   heroIntro:
-    "{brand} memberi orang biasa daya ungkit LLM untuk membangun sesuatu. Di terminal Anda, ia membaca repositori, mengedit berkas, menjalankan pemeriksaan, dan meninggalkan tanda terima — tanpa mengandaikan Anda sudah fasih berkode. Semuanya berjalan di mesin Anda; model adalah komponen yang dapat dipilih, bukan produknya.",
+    "{brand} memberi orang biasa daya ungkit LLM untuk membangun sesuatu. Di terminal membaca repositori, mengedit berkas, menjalankan pemeriksaan, dan meninggalkan tanda terima — tanpa mengandaikan Anda sudah fasih berkode. Di mesin Anda; model adalah komponen yang dapat dipilih.",
   install: "Instal",
   docs: "Dokumentasi",
   copy: "Salin",
@@ -46,13 +46,13 @@ export const home: HomeDict = {
 
   proofHeading: "Shell terminal bawah laut. Netral terhadap model. Mengutamakan lokal.",
   proofBody:
-    "Bawa model di-host, gateway, atau lokal yang sudah Anda pakai. Codewhale berjalan di mesin Anda dan memperlakukan model sebagai komponen yang dapat dipilih—bukan sebagai produk. Mode Plan / Act / Operate dan postur izin yang eksplisit menjaga penyelaman mendalam tetap dalam kendali Anda.",
+    "Bawa model yang sudah Anda pakai — di-host, gateway, atau lokal. Plan / Act / Operate dan postur izin eksplisit menjaga penyelaman tetap dalam kendali Anda.",
 
   sealDecides: "法",
   decidesEyebrow: "Lihat bagaimana ia memutuskan",
   decidesHeading: "Aturan yang bisa Anda amati langsung di jejak",
   decidesLede:
-    "Cuplikan setia dari sesi nyata — aturan proyek yang berjenjang dapat diamati di dalam penalaran model, bukan sekadar klaim di halaman depan.",
+    "Cuplikan sesi nyata — aturan proyek yang berjenjang terlihat di penalaran model, bukan sekadar klaim di halaman depan.",
 
   sealWorkflow: "行",
   workflowHeading: "Dari tugas hingga perubahan terverifikasi.",
@@ -70,7 +70,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "Baru mengenal Codewhale? Empat langkah dari awal sampai akhir.",
   startLede:
-    "Instalasi → sesi pertama tanpa kunci → koneksi penyedia → workflow Fleet pertama. Semua istilahnya dijelaskan di halaman kosakata.",
+    "Instalasi → sesi pertama tanpa kunci → koneksi penyedia → workflow Fleet pertama. Istilah di halaman kosakata.",
   startGuideLink: "Baca panduan memulai →",
   startVocabularyLink: "Lihat kosakata produk →",
 

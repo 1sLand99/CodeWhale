@@ -34,8 +34,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "install",
     title: { en: "Install Codewhale", zh: "安装 Codewhale" },
     body: {
-      en: "One npm command installs the dispatcher and the terminal runtime. Cargo, prebuilt archives, Docker, Nix, and China mirrors are documented alternatives; every channel serves published releases only.",
-      zh: "一条 npm 命令即可安装调度器和终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像是有文档的备选渠道；所有渠道只提供已发布版本。",
+      en: "One npm command installs the dispatcher and terminal runtime. Cargo, archives, Docker, Nix, and China mirrors are documented alternatives — published releases only.",
+      zh: "一条 npm 命令即可安装调度器和终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像是有文档的备选渠道——只提供已发布版本。",
     },
     commands: ["npm install -g codewhale", "codewhale doctor"],
     link: {
@@ -47,8 +47,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "first-session",
     title: { en: "Open a first session — no key needed", zh: "打开第一个会话——无需密钥" },
     body: {
-      en: "The runtime launches without any API key: a short constitution-first setup (language, provider readiness, runtime posture, your constitution), then the full interface. Explore in Plan mode — it is always read-only. Model replies need a provider; that is the next step.",
-      zh: "运行时无需任何 API 密钥即可启动：先走过一段简短的宪法优先设置（语言、提供商就绪情况、运行姿态、你的宪法），然后进入完整界面。在 Plan 模式中探索——它始终只读。模型回复需要提供商；这正是下一步。",
+      en: "Launches without any API key: short constitution-first setup, then the full interface. Explore in Plan mode — always read-only. Model replies need a provider; that's the next step.",
+      zh: "无需任何 API 密钥即可启动：简短的宪法优先设置，然后进入完整界面。在 Plan 模式中探索——始终只读。模型回复需要提供商；这正是下一步。",
     },
     commands: ["codewhale"],
     link: {
@@ -60,8 +60,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "connect-provider",
     title: { en: "Connect a provider", zh: "连接提供商" },
     body: {
-      en: "Pick any supported route — a hosted key, a gateway, or a keyless local runtime such as Ollama, vLLM, or SGLang for fully local inference. Provider and model stay explicit; requested and effective reasoning plus routing source are separate provenance fields, and unavailable values stay unavailable.",
-      zh: "任选一条受支持的路由——托管密钥、网关，或 Ollama、vLLM、SGLang 等免密钥本地运行时（推理完全在本地）。Provider 与模型始终明确；请求与实际思考档位及路由来源是分开的来源字段，暂不可用的值保持暂不可用。",
+      en: "Pick a supported route — hosted key, gateway, or keyless local runtime (Ollama, vLLM, SGLang). Provider and model stay explicit; reasoning and routing provenance stay separate, and unavailable values stay unavailable.",
+      zh: "任选受支持的路由——托管密钥、网关，或 Ollama、vLLM、SGLang 等免密钥本地运行时。Provider 与模型始终明确；思考档位与路由来源分开记录，暂不可用的值保持暂不可用。",
     },
     commands: ["codewhale auth set --provider deepseek"],
     link: {
@@ -73,8 +73,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "fleet-workflow",
     title: { en: "Run a first Fleet workflow", zh: "运行第一个 Fleet Workflow" },
     body: {
-      en: "When work needs durable workers, ordered phases, or receipts, author a reusable agent-team profile and launch a run. Fleet state lives in the workspace ledger and survives restarts; ordinary single tasks need none of this.",
-      zh: "当工作需要持久 worker、有序阶段或收据时，编写可复用的 agent 团队档案并启动运行。Fleet 状态保存在工作区台账中，重启后依然存活；普通的单一任务不需要这些。",
+      en: "For durable workers, ordered phases, or receipts, author a reusable agent-team profile and launch a run. Fleet state lives in the workspace ledger; ordinary single tasks need none of this.",
+      zh: "工作需要持久 worker、有序阶段或收据时，编写可复用的 agent 团队档案并启动运行。Fleet 状态保存在工作区台账中；普通单一任务不需要这些。",
     },
     commands: ["codewhale fleet init", "codewhale fleet run tasks.json --max-workers 4"],
     link: {

@@ -15,13 +15,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — Lặn xuống biển sâu, để bạn khỏi phải lặn.",
   metaDescription:
-    "Codewhale lặn xuống biển sâu để bạn khỏi phải lặn — một tác nhân chạy trong terminal, trao cho người bình thường đòn bẩy của LLM để tự làm ra thứ mình cần. Chạy trên máy của bạn. Viết bằng Rust, giấy phép MIT.",
+    "Codewhale lặn xuống biển sâu để bạn khỏi phải lặn — tác nhân terminal đặt đòn bẩy LLM trong tầm tay. Chạy trên máy của bạn. Rust, MIT.",
 
   kicker: "Nguồn mở · Mọi mô hình · Chạy trong terminal của bạn",
   heroTitleA: "Lặn xuống biển sâu,",
   heroTitleB: "để bạn khỏi phải lặn.",
   heroIntro:
-    "{brand} trao cho người bình thường đòn bẩy của LLM để tự làm ra thứ mình cần. Ngay trong terminal, nó đọc kho mã, sửa tệp, chạy kiểm tra và để lại biên nhận — mà không đòi hỏi bạn phải biết code từ trước. Nó chạy trên máy của bạn; mô hình chỉ là một thành phần bạn chọn được, không phải sản phẩm.",
+    "{brand} trao cho người bình thường đòn bẩy LLM để tự làm ra thứ mình cần. Trong terminal, nó đọc kho mã, sửa tệp, chạy kiểm tra và để lại biên nhận — không đòi hỏi bạn phải biết code. Chạy trên máy của bạn; mô hình là thành phần bạn chọn.",
   install: "Cài đặt",
   docs: "Tài liệu",
   copy: "Sao chép",
@@ -46,13 +46,13 @@ export const home: HomeDict = {
 
   proofHeading: "Một lớp vỏ terminal dưới lòng biển. Trung lập về mô hình. Ưu tiên cục bộ.",
   proofBody:
-    "Mang theo mô hình hosted, gateway hoặc cục bộ mà bạn đang dùng. Codewhale chạy trên máy của bạn và xem mô hình là một thành phần bạn chọn được — không phải sản phẩm. Plan / Act / Operate cùng quyền hạn khai báo rõ ràng giữ cho cuộc lặn sâu nằm trong tầm kiểm soát của bạn.",
+    "Mang theo mô hình bạn đang dùng — hosted, gateway hoặc cục bộ. Plan / Act / Operate cùng quyền hạn khai báo rõ giữ cuộc lặn trong tầm kiểm soát.",
 
   sealDecides: "法",
   decidesEyebrow: "Xem cách nó quyết định",
   decidesHeading: "Luật lệ bạn quan sát được ngay trong mạch suy luận",
   decidesLede:
-    "Những trích đoạn trung thực từ một phiên làm việc thật — thứ bậc luật lệ của dự án quan sát được trong suy luận của mô hình, chứ không phải một lời quảng cáo trên trang chủ.",
+    "Trích đoạn từ phiên thật — thứ bậc luật lệ của dự án thấy được trong suy luận của mô hình, không chỉ là lời quảng cáo trên trang chủ.",
 
   sealWorkflow: "行",
   workflowHeading: "Từ nhiệm vụ đến thay đổi đã kiểm chứng.",
@@ -70,7 +70,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "Mới dùng Codewhale? Bốn bước từ đầu đến cuối.",
   startLede:
-    "Cài đặt → phiên đầu tiên không cần khóa → kết nối nhà cung cấp → Workflow Fleet đầu tiên. Các thuật ngữ được định nghĩa ở trang thuật ngữ.",
+    "Cài đặt → phiên đầu không cần khóa → kết nối nhà cung cấp → Workflow Fleet đầu tiên. Thuật ngữ ở trang thuật ngữ.",
   startGuideLink: "Đọc hướng dẫn bắt đầu →",
   startVocabularyLink: "Xem thuật ngữ sản phẩm →",
 

@@ -12,13 +12,13 @@ import type { HomeDict } from "../types";
 export const home: HomeDict = {
   metaTitle: "Codewhale — Dive into the deep so you don't have to.",
   metaDescription:
-    "Codewhale dives into the deep so you don't have to — a terminal agent that gives ordinary people the leverage of LLMs to build things. Runs on your machine. Rust, MIT.",
+    "Codewhale dives into the deep so you don't have to — a terminal agent that puts LLM leverage within reach. Runs on your machine. Rust, MIT.",
 
   kicker: "Open source · Any model · Runs in your terminal",
   heroTitleA: "Dive into the deep",
   heroTitleB: "so you don't have to.",
   heroIntro:
-    "{brand} gives ordinary people the leverage of LLMs to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — without assuming you already speak code. It runs on your machine; the model is a selectable component, not the product.",
+    "{brand} gives ordinary people LLM leverage to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — no coding fluency assumed. Runs on your machine; the model is a component you pick, not the product.",
   install: "Install",
   docs: "Docs",
   copy: "Copy",
@@ -43,13 +43,13 @@ export const home: HomeDict = {
 
   proofHeading: "An underwater terminal shell. Model-neutral. Local-first.",
   proofBody:
-    "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product. Plan / Act / Operate and explicit permission postures keep the deep dive under your control.",
+    "Bring the model you already use — hosted, gateway, or local. Plan / Act / Operate and explicit permission postures keep the dive under your control.",
 
   sealDecides: "法",
   decidesEyebrow: "See how it decides",
   decidesHeading: "Law you can watch in the trace",
   decidesLede:
-    "Faithful excerpts from a real session — ranked project law is observable in the model's reasoning, not a claim on a landing page.",
+    "Real session excerpts — ranked project law visible in the model's reasoning, not just a landing-page claim.",
 
   sealWorkflow: "行",
   workflowHeading: "From task to verified change.",
@@ -67,7 +67,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "New to Codewhale? Four steps end to end.",
   startLede:
-    "Install → a first keyless session → provider connection → a first Fleet workflow. The nouns are defined on the vocabulary page.",
+    "Install → keyless first session → connect a provider → first Fleet workflow. Nouns defined on the vocabulary page.",
   startGuideLink: "Read the getting-started guide →",
   startVocabularyLink: "See the product vocabulary →",
 
