@@ -37,19 +37,19 @@ Then select the package as a Verifiers v1 harness:
 ```bash
 uv run eval <taskset> \
   --harness.id codewhale-harness \
-  --harness.version 0.9.1 \
+  --harness.version 0.9.4 \
   --harness.runtime.type docker
 ```
 
 The default setup downloads all three release runtime companions from
 the pinned Codewhale tag and verifies each byte against the release checksum
-manifest. Before v0.9.1 is published, use an installed candidate for a local
+manifest. Before v0.9.4 is published, use an installed candidate for a local
 subprocess rollout:
 
 ```bash
 uv run eval <taskset> \
   --harness.id codewhale-harness \
-  --harness.version 0.9.1 \
+  --harness.version 0.9.4 \
   --harness.binary-path /absolute/path/to/codewhale \
   --harness.runtime.type subprocess
 ```
