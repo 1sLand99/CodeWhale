@@ -2562,21 +2562,38 @@ fn declared_workspace_policy_worktree_materializes_a_worktree_request() {
 }
 
 #[test]
-fn builder_or_worker_plus_read_only_authority_fails_closed() {
-    // #5123: never launch a labeled builder/worker that will only get recon tools.
-    for role in ["builder", "worker"] {
+fn builder_plus_read_only_authority_fails_closed() {
+    // #5123: never launch a labeled builder that will only get recon tools.
+    // `implementer` is the legacy alias and must fail the same way.
+    for spelling in ["builder", "implementer"] {
         let err = parse_spawn_request(&json!({
             "prompt": "ship the gate",
-            "type": role,
+            "type": spelling,
             "write_authority": "read_only",
         }))
-        .expect_err("write role + read_only must fail closed");
+        .expect_err("builder + read_only must fail closed");
         let message = err.to_string();
         assert!(
-            message.contains("contradiction") && message.contains(role),
-            "{role}: {message}"
+            message.contains("contradiction") && message.contains("builder"),
+            "{spelling}: {message}"
         );
     }
+}
+
+#[test]
+fn read_only_worker_is_an_ordinary_general_child() {
+    // Worker is the unnamed default (it renders as "general"); its capability
+    // comes from authority, not from its name. The release QA contract calls
+    // worker/scout/reviewer/verifier the four canonical read-only Fleet roles,
+    // so narrowing a worker to read_only must not read as a #5123 contradiction.
+    let request = parse_spawn_request(&json!({
+        "prompt": "role-probe-worker",
+        "type": "worker",
+        "write_authority": "read_only",
+    }))
+    .expect("a read-only worker is canonical, not a contradiction");
+    assert_eq!(request.agent_type, FleetRole::Worker);
+    assert_eq!(request.write_authority, Some(SpawnWriteAuthority::ReadOnly));
 }
 
 #[test]

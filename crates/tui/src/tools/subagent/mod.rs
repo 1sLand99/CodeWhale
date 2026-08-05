@@ -10790,28 +10790,34 @@ fn validate_spawn_write_contract(
             request.agent_type.as_str()
         )));
     }
-    // #5123: a named write-capable role plus read_only authority used to parse,
-    // then silently clamp write/shell off — the child self-BLOCKED as a
-    // "builder" with only recon tools. Fail closed at spawn instead. A
-    // prompt-only general (Worker, type not named) may still declare read_only
-    // without that lie.
+    // #5123: `type=builder` plus read_only authority used to parse, then
+    // silently clamp write/shell off — the child self-BLOCKED as a "builder"
+    // holding only recon tools, after burning a turn discovering it. Fail
+    // closed at spawn instead.
     //
-    // Only the caller writing `type` counts as the lie. `role` does not:
+    // Two narrowings keep this to the actual lie:
     //
-    // - `role: "release_lead"` is a roster id, copied into `profile` purely as
-    //   a lookup key. The member is not resolved until `apply_spawn_profile`,
-    //   so here `agent_type` is still the default Worker and the role says
-    //   nothing about write capability.
-    // - `role: "implementer"` is a type alias, but it is still an identity —
-    //   a Fleet role and its authority posture are independent, and an
-    //   acceptance workflow must be able to resolve `implementer` to its saved
-    //   profile while narrowing that child to the read-only tool set.
+    // 1. Only `type` counts, not `role`. `role: "release_lead"` is a roster id
+    //    copied into `profile` as a lookup key, and the member is not resolved
+    //    until `apply_spawn_profile`, so the role says nothing here about write
+    //    capability. `role: "implementer"` is a type alias but still an
+    //    identity — a Fleet role and its authority posture are independent, and
+    //    an acceptance workflow must be able to resolve `implementer` to its
+    //    saved profile while narrowing that child to the read-only tool set.
     //
-    // Keying this on `agent_type_explicit` rejected both, which broke every
-    // read-only Workflow leaf that names a role.
-    let named_write_role = request.agent_type_named;
-    if named_write_role
-        && matches!(request.agent_type, FleetRole::Builder | FleetRole::Worker)
+    // 2. Only `builder` counts, not `worker`. Builder is the explicitly
+    //    write-capable role, and it is the one the #5123 transcript shows
+    //    BLOCKED — the worker in that same transcript ran fine. Worker is the
+    //    unnamed default (it renders as "general") whose capability comes from
+    //    authority rather than from its name, so a read-only worker is an
+    //    ordinary general-purpose child, not a contradiction. The release QA
+    //    contract calls exactly that set — worker, scout, reviewer, verifier —
+    //    the four canonical read-only Fleet roles.
+    //
+    // Widening past either narrowing rejected every read-only Workflow leaf and
+    // the canonical read-only worker along with it.
+    if request.agent_type_named
+        && request.agent_type == FleetRole::Builder
         && request.write_authority == Some(SpawnWriteAuthority::ReadOnly)
     {
         return Err(ToolError::invalid_input(format!(

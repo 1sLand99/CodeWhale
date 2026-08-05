@@ -156,14 +156,21 @@ File edits, terminal width, and Windows installation.
 
 ### Fixed
 
-- An explicit `type=builder`/`worker` plus `write_authority=read_only` now fails
-  closed at spawn instead of launching a labeled write role that silently had
-  only recon tools (#5123). `type` is the capability claim, so only it can
-  contradict authority; `role` is an identity for roster resolution and may
-  still be narrowed to read-only work — that is how an acceptance Workflow
-  resolves `implementer` to its saved profile while scoping the child to
-  verification. Callers that spelled the narrowing as `type: "implementer"`
-  (an alias of `builder`) should move it to `role: "implementer"`.
+- An explicit `type=builder` (or its `implementer` alias) plus
+  `write_authority=read_only` now fails closed at spawn instead of launching a
+  labeled write role that silently had only recon tools and then self-BLOCKED
+  after burning a turn (#5123). The check is deliberately narrow, because two
+  neighbouring combinations are legitimate and stay legal:
+  - `type=worker` + `read_only` — worker is the unnamed default (it renders as
+    `general`) and takes its capability from authority, not from its name, so a
+    read-only worker is an ordinary general-purpose child. Worker, scout,
+    reviewer, and verifier remain the four canonical read-only Fleet roles.
+  - any `role` + `read_only` — `role` is an identity for roster resolution, not
+    a capability claim, so an acceptance Workflow can still resolve
+    `implementer` to its saved profile while scoping that child to verification.
+
+  Callers that spelled a read-only narrowing as `type: "implementer"` should
+  move it to `role: "implementer"`.
 - User-global credentials survive an explicit workspace `CODEWHALE_CONFIG_PATH`
   that selects a route with no local key — readiness probes the user-global
   provider table before concluding a key is missing.
