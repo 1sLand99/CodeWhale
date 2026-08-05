@@ -618,11 +618,7 @@ fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
         // reported usage shows no number instead of a zero.
         let turn_total =
             u64::from(usage.input_tokens).saturating_add(u64::from(usage.output_tokens));
-        meta.received_tokens = Some(
-            meta.received_tokens
-                .unwrap_or(0)
-                .saturating_add(turn_total),
-        );
+        meta.received_tokens = Some(meta.received_tokens.unwrap_or(0).saturating_add(turn_total));
         meta.resolved_provider = Some(route.provider.as_str().to_string());
         meta.resolved_model = Some(bound_agent_activity_text(
             &crate::cost_status::sanitize_persisted_route_label(&route.model),
@@ -630,10 +626,20 @@ fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
         .filter(|model| !model.trim().is_empty());
         return;
     }
-    if matches!(message, MailboxMessage::WorkState { .. }) {
+    if let MailboxMessage::WorkState { todo, .. } = message {
         // Work state is a separate fact from what the agent is doing right
-        // now. Publishing a ledger update must not invent an activity
-        // transition or overwrite the current one.
+        // now — publishing a ledger update must not invent an activity
+        // transition. It does update the remaining-to-do chip for the strip.
+        if todo.is_empty() {
+            meta.todos_remaining = None;
+        } else {
+            let remaining = todo
+                .items
+                .iter()
+                .filter(|item| !item.status.is_settled())
+                .count();
+            meta.todos_remaining = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
+        }
         return;
     }
     if let MailboxMessage::ToolCallCompleted {
@@ -1769,6 +1775,72 @@ mod tests {
 
     /// Work state is a ledger fact, not an activity transition: it must not
     /// invent or overwrite what the agent is currently doing.
+    #[test]
+    fn work_state_updates_todos_remaining_without_rewriting_activity() {
+        use crate::tools::todo::{TodoItem, TodoListSnapshot, TodoStatus};
+
+        let mut app = App::new(test_options(), &Config::default());
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            1,
+            &MailboxMessage::started("agent_todos", FleetRole::Worker),
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            2,
+            &MailboxMessage::ToolCallStarted {
+                agent_id: "agent_todos".to_string(),
+                tool_name: "read_file".to_string(),
+                step: 1,
+            },
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            3,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_todos".to_string(),
+                todo: TodoListSnapshot {
+                    items: vec![
+                        TodoItem {
+                            id: 1,
+                            content: "done already".to_string(),
+                            status: TodoStatus::Completed,
+                        },
+                        TodoItem {
+                            id: 2,
+                            content: "still cooking".to_string(),
+                            status: TodoStatus::InProgress,
+                        },
+                        TodoItem {
+                            id: 3,
+                            content: "not yet".to_string(),
+                            status: TodoStatus::Pending,
+                        },
+                    ],
+                    completion_pct: 33,
+                    in_progress_id: Some(2),
+                },
+            },
+        ));
+
+        let meta = &app.agent_progress_meta["agent_todos"];
+        assert_eq!(meta.todos_remaining, Some(2));
+        let activity = meta.current_activity.as_ref().expect("activity");
+        assert_eq!(activity.status, AgentCurrentActivityStatus::RunningTool);
+        assert_eq!(activity.current_tool.as_deref(), Some("read_file"));
+
+        // Empty publish clears the chip source (no list → no figure).
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            4,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_todos".to_string(),
+                todo: TodoListSnapshot::default(),
+            },
+        ));
+        assert_eq!(app.agent_progress_meta["agent_todos"].todos_remaining, None);
+    }
+
     #[test]
     fn work_state_envelope_does_not_rewrite_current_activity() {
         let mut app = App::new(test_options(), &Config::default());

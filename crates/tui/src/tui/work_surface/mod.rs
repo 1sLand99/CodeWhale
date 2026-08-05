@@ -1263,6 +1263,47 @@ mod tests {
     }
 
     #[test]
+    fn fleet_row_shows_remaining_todos_only_when_the_ledger_has_unsettled_work() {
+        let mut app = fleet_app(Some(1_200));
+        app.agent_progress_meta
+            .get_mut("agent_stream")
+            .expect("meta")
+            .todos_remaining = Some(3);
+
+        let with_left = fleet_row(&render_rows(&mut app, 100, 4));
+        assert!(
+            with_left.contains("3 left"),
+            "unsettled ledger must surface on the receipt: {with_left}"
+        );
+        assert!(
+            with_left.contains("↓") && with_left.contains("tokens"),
+            "tokens stay alongside the remaining chip: {with_left}"
+        );
+
+        // Fully settled list → quiet (no fabricated zero chip).
+        app.agent_progress_meta
+            .get_mut("agent_stream")
+            .expect("meta")
+            .todos_remaining = Some(0);
+        let settled = fleet_row(&render_rows(&mut app, 100, 4));
+        assert!(
+            !settled.contains("left"),
+            "zero remaining must not paint a chip: {settled}"
+        );
+
+        // No ledger published → quiet.
+        app.agent_progress_meta
+            .get_mut("agent_stream")
+            .expect("meta")
+            .todos_remaining = None;
+        let absent = fleet_row(&render_rows(&mut app, 100, 4));
+        assert!(
+            !absent.contains("left"),
+            "missing ledger must not invent a chip: {absent}"
+        );
+    }
+
+    #[test]
     fn fleet_identity_prefers_the_nickname_and_falls_back_to_the_role() {
         // Nicknames are CodeWhale identity, so they lead. An agent that has
         // none falls back to its fleet role rather than showing a blank or a

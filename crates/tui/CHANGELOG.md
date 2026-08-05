@@ -165,6 +165,9 @@ File edits, terminal width, and Windows installation.
 - Sub-agent token figures on the work bar accumulate input+output (the same
   total the worker budget uses) instead of completion tokens alone; elapsed
   time still freezes when the child settles.
+- Live work-bar rows for sub-agents show how many to-dos they still have
+  left (`N left`) when the child's own ledger has unsettled items — never a
+  fabricated zero when no list exists.
 
 - Surfaces no longer claim an OS sandbox on platforms that cannot enforce one.
   The policy resolver takes no platform input, so on default Linux (bubblewrap

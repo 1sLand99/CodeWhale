@@ -153,6 +153,10 @@ pub(super) struct AgentRowFacts {
     /// Tokens received from the provider. `None` means *genuinely unknown* —
     /// the row then renders no token figure rather than claiming zero.
     pub tokens: Option<u64>,
+    /// Unsettled items on this child's to-do list. `None` when no list has
+    /// been published; `Some(0)` means the list exists and is fully settled
+    /// (the strip still hides a zero chip — see `agent_receipt`).
+    pub todos_remaining: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1421,6 +1425,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                                 agent_elapsed_ms(app, &agent.agent_id, agent.duration_ms) / 1_000,
                             ),
                             tokens: meta.and_then(|meta| meta.received_tokens),
+                            todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                         }),
                     },
                 },
@@ -1503,6 +1508,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                                 // nothing rather than as `0s` / `0 tokens`.
                                 elapsed_secs: None,
                                 tokens: meta.and_then(|meta| meta.received_tokens),
+                                todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                             }),
                         },
                     },

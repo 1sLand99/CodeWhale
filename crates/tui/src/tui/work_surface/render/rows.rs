@@ -76,11 +76,19 @@ pub(super) fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String
                 crate::tui::footer_ui::format_token_count_compact(tokens)
             )
         });
-    match (elapsed, tokens) {
-        (Some(elapsed), Some(tokens)) => format!("{elapsed} · {tokens}"),
-        (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => String::new(),
-    }
+    // Only paint a remaining chip when a real ledger reported unsettled
+    // work. `None` (no list) and `Some(0)` (list fully settled) stay quiet —
+    // a fabricated `0 left` is strip noise.
+    let todos_left = facts
+        .todos_remaining
+        .filter(|n| *n > 0)
+        .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
+        .map(|n| format!("{n} left"));
+    [elapsed, tokens, todos_left]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Ceiling on the shared identity column, as a fraction of the row. The
