@@ -4955,6 +4955,16 @@ impl RuntimeThreadManager {
     }
 
     pub async fn start_turn(&self, thread_id: &str, req: StartTurnRequest) -> Result<TurnRecord> {
+        // Heap-allocate the turn-start state machine. Its future holds two full
+        // Config clones plus ThreadRecord/EngineHandle/TurnRecord/TurnItemRecord
+        // and the Op::SendMessage, and inlines the large ensure_engine_loaded
+        // sub-future (which builds a full EngineConfig), all across ~8 sequential
+        // .awaits. On Windows the runtime thread stack is ~1 MiB and this
+        // monolithic frame overflowed it (test
+        // start_turn_accepts_dynamic_tools_and_environment_id on windows-latest,
+        // STATUS_STACK_OVERFLOW). Box::pin moves the whole frame to the heap so
+        // no caller's stack carries it; behavior is unchanged.
+        Box::pin(async move {
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("prompt is required");
@@ -5228,6 +5238,8 @@ impl RuntimeThreadManager {
             .await
             .map_err(|_| anyhow!("Turn lifecycle task ended before acknowledgement"))?
             .map_err(anyhow::Error::msg)
+        })
+        .await
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<TurnRecord> {
