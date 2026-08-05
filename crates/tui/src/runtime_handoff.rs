@@ -35,7 +35,11 @@ const WAITING_EVENT_SUFFIX: &str = concat!(
     "agent(action=\"status\"). Do NOT use sleep or any shell blocking primitive as a ",
     "waiting strategy. The runtime will deliver <codewhale:subagent.done> sentinels ",
     "automatically when each child finishes — polling will never make that happen ",
-    "sooner. Stop immediately: emit zero tool calls and end the turn.\n",
+    "sooner. You may continue independent work that does not depend on a running ",
+    "child's result: read-only investigation, unrelated edits that cannot conflict ",
+    "with a child's worktree, answering the user, or any other non-dependent action. ",
+    "Do not start work that waits on a child's outcome. When you have nothing ",
+    "independent to do, emit zero tool calls and end the turn.\n",
     "</codewhale:runtime_event>",
 );
 const CHILD_COMPLETION_EVENT_OPEN: &str =
@@ -706,6 +710,26 @@ mod tests {
     }
 
     #[test]
+    fn waiting_directions_forbid_polling_but_allow_independent_work() {
+        let raw = waiting_for_subagents_runtime_message(2);
+        let text = raw
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("waiting message has text");
+        assert!(text.contains("Do NOT poll"));
+        assert!(text.contains("Do NOT use sleep"));
+        assert!(text.contains("independent work"));
+        assert!(
+            !text.contains("Stop immediately: emit zero tool calls"),
+            "waiting must not freeze the parent mid-turn: {text}"
+        );
+    }
+
+    #[test]
     fn restore_projection_replaces_stale_waiting_directions_with_historical_state() {
         let raw = waiting_for_subagents_runtime_message(2);
         let projected = project_messages_for_restore(&[raw]);
@@ -714,7 +738,8 @@ mod tests {
         assert!(display.contains("Status at save: running (2 child jobs)"));
         assert!(display.contains("prior worker processes are not assumed active"));
         assert!(!display.contains("Do NOT poll"));
-        assert!(!display.contains("Stop immediately"));
+        assert!(!display.contains("independent work"));
+        assert!(!display.contains("emit zero tool calls"));
         assert!(!display.contains("<codewhale:runtime_event"));
     }
 
