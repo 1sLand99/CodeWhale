@@ -7,94 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Surfaces no longer claim an OS sandbox on platforms that cannot enforce one.
-  The policy resolver takes no platform input, so on default Linux (bubblewrap
-  is opt-in) and on all Windows the header chip read `files: workspace` and
-  `/status` read `sandbox workspace-write` while nothing was restricted. Both
-  now resolve the real backend and say `(unenforced)`.
-- `tool_category` hook conditions matched only retired tool names, so a
-  `category = "shell"` **deny** hook — the security control `docs/HOOKS.md`
-  documents — silently never fired. Categories now use the registered names,
-  and multi-action tools classify by action.
-- A `Retry-After` header of `-5`, `nan`, or `1e300` crashed the request task
-  (`Duration::from_secs_f64` panics on a negative). Parsing is now guarded and
-  bounded to one hour.
-- Bearer tokens no longer leak into operator-visible receipts. `Authorization:
-  Bearer <jwt>` split into two tokens and the JWT matched no redaction rule;
-  prefix matching was also case-sensitive, so `SK-live-…` survived.
-- `prune_older_than` destroyed the NEWEST rollback snapshots and kept the old
-  ones — on every boot, for any workspace with snapshots spanning the retention
-  window. Both prune paths now share one orphan-chain rebuild and preserve each
-  survivor's real timestamp.
-- An absolute or relative command path no longer defeats every execpolicy deny
-  rule (`/bin/rm -rf /` did not match a `rm -rf /` rule), and a typed `Allow`
-  rule no longer auto-approves a chained suffix such as `git log ; curl … | sh`.
-- Wrong types on `File` read range params and `Bash` stdin/cwd/task_id are now
-  errors instead of silent defaults — a `start_line:"1200"` string used to
-  return the head of the file, and a non-string `stdin` ran the command with no
-  stdin and reported success.
-- Multibyte tool ids no longer panic the context inspector, wide (CJK) text no
-  longer overflows the decision card, and a hostname like `127.evil.example.com`
-  is no longer treated as loopback.
-- Refusals name calls the model can actually make (`rlm action='open'` rather
-  than a retired `rlm_open`; `Bash` rather than `exec_shell`).
-
-- Sub-agent dispatch no longer aborts the process. The Tokio runtime was built
-  by `#[tokio::main]`, leaving every worker thread on the 2 MiB default while
-  only the owner thread received the explicit 16 MiB stack — and the engine runs
-  on a worker. A debug-build `agent` dispatch exceeded that stack and raised
-  SIGABRT, which is not a panic and so could not be caught; the process died
-  mid-spawn with no child request ever issued. Release builds were unaffected.
-- Fleet profiles that pin a provider no longer leak a bare model id onto the
-  session route. `model_overrides` exported each role's model while dropping its
-  provider, so a scout pinned to another provider's model was dispatched against
-  the active client and denied at the wire — visible as an instant auth failure
-  on the first sub-agent of a fan-out.
-- The rail's Pinned panel no longer spends four rows saying "No active work".
-  An empty panel now collapses like the Tasks panel always has, and the settings
-  migration no longer folds the default `sidebar_focus = "auto"` into a pinned
-  always-on strip, which had silently handed that panel to every user who had a
-  settings file at all. (An *empty* panel collapses; a panel holding settled
-  to-dos or finished workers is not empty — see the standing-register entry
-  below.)
-- The work bar is a standing register again: settled to-dos and finished
-  sub-agents keep their rows for the rest of the session instead of being
-  evicted four seconds after the work settles (or on the next user turn), the
-  active goal title stays up with them, to-do rows say their state in words
-  (pending / in progress / completed / cancelled), and sub-agent rows carry a
-  status-word column next to the type. Every work row is a door in every rail
-  panel and placement: to-dos and sub-agents in the Agents and Pinned panels
-  now route through the same row machinery as Tasks, so click and Enter open
-  the row's world (work inspector / agent details — finished agents included)
-  instead of doing nothing. A click after the detail pager closed itself
-  reopens the detail rather than being swallowed by a stale toggle.
-- The rail strip yields its rows to the transcript when the terminal cannot
-  seat both, so the idle ocean survives at 24 rows instead of being evicted.
-- `code_execution` and `js_execution` no longer describe themselves to the model
-  as sandboxed. Both are ordinary local subprocesses with no seccomp, jail, or
-  container (PR #5221 by @h3c-hexin and @asto18089).
-- Model Studio reasoning controls now fail closed on the host rather than on the
-  provider enum, so a custom `base_url` no longer receives Alibaba-specific
-  `enable_thinking` fields, and `qwen3.8-max` is no longer sent a thinking
-  switch it does not accept (PR #5233 by @Inference1, closing #5203).
-- `config.example.toml` no longer claims Shift+Tab cycles the reasoning tier.
-  Shift+Tab cycles the permission posture; Ctrl+T cycles reasoning
-  (found by @vFONGv, PR #5229).
-
-- Alibaba Model Studio reasoning controls are now route- and model-scoped
-  instead of provider-wide (#5203, harvested from #5233 by
-  [@Inference1](https://github.com/Inference1)). Codewhale sends
-  `enable_thinking` / `preserve_thinking` / `reasoning_effort` only when the
-  configured `base_url` is a verified Alibaba Chat Completions host, so
-  pointing a `modelstudio-*` provider ID at a custom gateway no longer injects
-  DashScope's dialect into it. `qwen3.8-max` and `qwen3.8-max-preview` are
-  thinking-only and no longer receive an `enable_thinking: false` they cannot
-  honor; `preserve_thinking` is sent for the models documented to accept it, so
-  their reasoning trace survives into the next turn; and `deepseek-v4*` /
-  `glm-5.x` map the reasoning tier onto the documented `high` / `max` ladder.
+## [0.9.4] - 2026-08-04
+Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
+roster/setup face with a clear operator-leader and user/folder scope, a
+work strip that keeps actionable agents instead of a permanent archive,
+waiting policy that forbids polling without freezing independent work,
+calmer tool output and session recovery, account/Workflow-search/
+automation/handoff surfaces, a shorter translation-ready website, and
+release-blocker fixes across permissions, DeepSeek Responses, SQLite,
+File edits, terminal width, and Windows installation.
 
 ### Added
+
+- Named Fleet store v2: one self-contained TOML Fleet per configuration
+  (`schema = "fleet"`), with scope-explicit selection (user-global default vs
+  folder override), migration receipts from legacy role profiles, and atomic
+  saves that refuse to clobber a different Fleet on the same slug.
+- Scout replaces the user-facing "faster" control: catalog-verified fast
+  siblings only, never a guessed model name; pinned Scout survives operator
+  changes.
+- Truthful model-picker rows: vision/tools/limits chips only when the catalog
+  knows, with provider → family → exact model grouping.
 
 - **Opt-in product telemetry, off by default.** A first-run notice asks once, on
   a terminal, with declining pre-selected — Enter declines. Nothing is collected
@@ -150,18 +83,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenCode Zen, OpenCode Go, Alibaba Model Studio, and TelecomJS publish no
   glm-5.3 entry, so Codewhale advertises none.
 
-## [0.9.4] - Unreleased candidate
-
-This is the Codewhale v0.9.4 source candidate. It is not a published release
-until the matching tag, packages, checksums, and release assets exist.
-
-This candidate makes tool output and session recovery calmer, adds account,
-Workflow-search, automation, handoff, and math-rendering surfaces, and closes
-release blockers across permissions, DeepSeek Responses, SQLite, File edits,
-terminal width, and Windows installation.
-
-### Added
-
 - Managed Codewhale account commands (`account login`, `status`, `logout`, and
   `keys`) with browser device flow, profile- and origin-scoped secure sessions,
   refresh/revocation, redacted BYOK-vault management, and a token-free Runtime
@@ -188,6 +109,19 @@ terminal width, and Windows installation.
   (PR #4992).
 
 ### Changed
+
+- `/fleet` is the familiar roster/setup face again. The operator row is the
+  Fleet leader (session model); the header names the selected saved Fleet and
+  whether it is user-global or folder-scoped. Named-Fleet switching lives under
+  `/fleet fleets` (Enter selects in the row's own scope). Session route changes
+  stay temporary until `/fleet save`, `/fleet save-as`, or `/model save-default`.
+- Waiting-for-subagents directions forbid peek/status polling and sleep-as-wait,
+  but allow independent work that does not depend on a child's result — the
+  parent no longer freezes mid-turn with useful non-conflicting work available.
+- `workflow run` no longer requires `--fleet`; a saved Fleet is an optional pin
+  layer over roles + the session route.
+- Homepage and getting-started copy is shorter and scannable across locales,
+  with dictionary key and `{brand}` token parity preserved.
 
 - Tool results now render as ordinary bounded previews with real expansion;
   storage, retention-ledger, and internal evidence language no longer leak into
@@ -221,6 +155,102 @@ terminal width, and Windows installation.
   event-listener 5.4.2 fix for RUSTSEC-2026-0221.
 
 ### Fixed
+
+- An explicit `type=builder`/`worker` plus `write_authority=read_only` now fails
+  closed at spawn instead of launching a labeled write role that silently had
+  only recon tools (#5123).
+- User-global credentials survive an explicit workspace `CODEWHALE_CONFIG_PATH`
+  that selects a route with no local key — readiness probes the user-global
+  provider table before concluding a key is missing.
+- Sub-agent token figures on the work bar accumulate input+output (the same
+  total the worker budget uses) instead of completion tokens alone; elapsed
+  time still freezes when the child settles.
+
+- Surfaces no longer claim an OS sandbox on platforms that cannot enforce one.
+  The policy resolver takes no platform input, so on default Linux (bubblewrap
+  is opt-in) and on all Windows the header chip read `files: workspace` and
+  `/status` read `sandbox workspace-write` while nothing was restricted. Both
+  now resolve the real backend and say `(unenforced)`.
+- `tool_category` hook conditions matched only retired tool names, so a
+  `category = "shell"` **deny** hook — the security control `docs/HOOKS.md`
+  documents — silently never fired. Categories now use the registered names,
+  and multi-action tools classify by action.
+- A `Retry-After` header of `-5`, `nan`, or `1e300` crashed the request task
+  (`Duration::from_secs_f64` panics on a negative). Parsing is now guarded and
+  bounded to one hour.
+- Bearer tokens no longer leak into operator-visible receipts. `Authorization:
+  Bearer <jwt>` split into two tokens and the JWT matched no redaction rule;
+  prefix matching was also case-sensitive, so `SK-live-…` survived.
+- `prune_older_than` destroyed the NEWEST rollback snapshots and kept the old
+  ones — on every boot, for any workspace with snapshots spanning the retention
+  window. Both prune paths now share one orphan-chain rebuild and preserve each
+  survivor's real timestamp.
+- An absolute or relative command path no longer defeats every execpolicy deny
+  rule (`/bin/rm -rf /` did not match a `rm -rf /` rule), and a typed `Allow`
+  rule no longer auto-approves a chained suffix such as `git log ; curl … | sh`.
+- Wrong types on `File` read range params and `Bash` stdin/cwd/task_id are now
+  errors instead of silent defaults — a `start_line:"1200"` string used to
+  return the head of the file, and a non-string `stdin` ran the command with no
+  stdin and reported success.
+- Multibyte tool ids no longer panic the context inspector, wide (CJK) text no
+  longer overflows the decision card, and a hostname like `127.evil.example.com`
+  is no longer treated as loopback.
+- Refusals name calls the model can actually make (`rlm action='open'` rather
+  than a retired `rlm_open`; `Bash` rather than `exec_shell`).
+
+- Sub-agent dispatch no longer aborts the process. The Tokio runtime was built
+  by `#[tokio::main]`, leaving every worker thread on the 2 MiB default while
+  only the owner thread received the explicit 16 MiB stack — and the engine runs
+  on a worker. A debug-build `agent` dispatch exceeded that stack and raised
+  SIGABRT, which is not a panic and so could not be caught; the process died
+  mid-spawn with no child request ever issued. Release builds were unaffected.
+- Fleet profiles that pin a provider no longer leak a bare model id onto the
+  session route. `model_overrides` exported each role's model while dropping its
+  provider, so a scout pinned to another provider's model was dispatched against
+  the active client and denied at the wire — visible as an instant auth failure
+  on the first sub-agent of a fan-out.
+- The rail's Pinned panel no longer spends four rows saying "No active work".
+  An empty panel now collapses like the Tasks panel always has, and the settings
+  migration no longer folds the default `sidebar_focus = "auto"` into a pinned
+  always-on strip, which had silently handed that panel to every user who had a
+  settings file at all. (An *empty* panel collapses; a panel holding settled
+  to-dos or finished workers is not empty — see the standing-register entry
+  below.)
+- The work bar keeps settled to-dos and an honest Subagents header, while
+  completed/cancelled workers collapse out of the Top strip so fan-outs do not
+  permanently eat the transcript. Failed or interrupted workers stay visible
+  (they still need attention). Settled agents remain reachable through the
+  Agents panel and catalog. To-do rows say their state in words (pending /
+  in progress / completed / cancelled), and sub-agent rows carry type,
+  objective, elapsed, and input+output tokens. Every work row is a door in
+  every rail panel and placement: click and Enter open the row's world
+  (work inspector / agent details — finished agents included) instead of
+  doing nothing. A click after the detail pager closed itself reopens the
+  detail rather than being swallowed by a stale toggle.
+- The rail strip yields its rows to the transcript when the terminal cannot
+  seat both, so the idle ocean survives at 24 rows instead of being evicted.
+- `code_execution` and `js_execution` no longer describe themselves to the model
+  as sandboxed. Both are ordinary local subprocesses with no seccomp, jail, or
+  container (PR #5221 by @h3c-hexin and @asto18089).
+- Model Studio reasoning controls now fail closed on the host rather than on the
+  provider enum, so a custom `base_url` no longer receives Alibaba-specific
+  `enable_thinking` fields, and `qwen3.8-max` is no longer sent a thinking
+  switch it does not accept (PR #5233 by @Inference1, closing #5203).
+- `config.example.toml` no longer claims Shift+Tab cycles the reasoning tier.
+  Shift+Tab cycles the permission posture; Ctrl+T cycles reasoning
+  (found by @vFONGv, PR #5229).
+
+- Alibaba Model Studio reasoning controls are now route- and model-scoped
+  instead of provider-wide (#5203, harvested from #5233 by
+  [@Inference1](https://github.com/Inference1)). Codewhale sends
+  `enable_thinking` / `preserve_thinking` / `reasoning_effort` only when the
+  configured `base_url` is a verified Alibaba Chat Completions host, so
+  pointing a `modelstudio-*` provider ID at a custom gateway no longer injects
+  DashScope's dialect into it. `qwen3.8-max` and `qwen3.8-max-preview` are
+  thinking-only and no longer receive an `enable_thinking: false` they cannot
+  honor; `preserve_thinking` is sent for the models documented to accept it, so
+  their reasoning trace survives into the next turn; and `deepseek-v4*` /
+  `glm-5.x` map the reasoning tier onto the documented `high` / `max` ladder.
 
 - xAI device login now recovers from a config that points at a missing
   Codewhale-owned credential generation instead of failing every attempt
@@ -4955,8 +4985,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...HEAD
-[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
