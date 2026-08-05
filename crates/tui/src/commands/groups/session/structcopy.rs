@@ -877,7 +877,7 @@ fn next_absolute_path_start(text: &str, from: usize) -> Option<usize> {
                 && bytes[index - 1] == b':'
                 && bytes[index + 1] == b'/';
             let posix = bytes[index] == b'/'
-                && !(index > 0 && bytes[index - 1] == b'/')
+                && (index == 0 || bytes[index - 1] != b'/')
                 && !url_separator
                 && !labelled_root;
             let drive = index + 2 < bytes.len()

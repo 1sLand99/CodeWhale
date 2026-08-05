@@ -234,7 +234,7 @@ where
         }
     }
     // Last row
-    if !current.is_empty() || true {
+    if !current.is_empty() {
         row_fn(parse_row_cells(&current));
     }
 }
@@ -1730,5 +1730,20 @@ mod tests {
         let result = render_latex_to_string(input);
         assert!(result.contains("x\u{00b2}"));
         assert!(result.contains("ln"));
+    }
+
+    #[test]
+    fn test_parse_rows_trailing_separator_does_not_emit_empty_last_row() {
+        // A trailing `\\` separator must not produce an extra empty row
+        // (regression for the `|| true` always-true last-row guard).
+        let mut rows = Vec::new();
+        parse_rows(r"a & b \\ c & d \\", |cells| rows.push(cells));
+        assert_eq!(
+            rows.len(),
+            2,
+            "trailing separator must not add an empty row"
+        );
+        assert_eq!(rows[0], vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(rows[1], vec!["c".to_string(), "d".to_string()]);
     }
 }
