@@ -2560,6 +2560,24 @@ fn declared_workspace_policy_worktree_materializes_a_worktree_request() {
 }
 
 #[test]
+fn builder_or_worker_plus_read_only_authority_fails_closed() {
+    // #5123: never launch a labeled builder/worker that will only get recon tools.
+    for role in ["builder", "worker"] {
+        let err = parse_spawn_request(&json!({
+            "prompt": "ship the gate",
+            "type": role,
+            "write_authority": "read_only",
+        }))
+        .expect_err("write role + read_only must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("contradiction") && message.contains(role),
+            "{role}: {message}"
+        );
+    }
+}
+
+#[test]
 fn declared_write_authority_parses_and_worktree_write_requires_isolation() {
     let read_only = parse_spawn_request(&json!({
         "prompt": "look around",

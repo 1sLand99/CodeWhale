@@ -10782,6 +10782,23 @@ fn validate_spawn_write_contract(
             request.agent_type.as_str()
         )));
     }
+    // #5123: a named write-capable role plus read_only authority used to parse,
+    // then silently clamp write/shell off — the child self-BLOCKED as a
+    // "builder" with only recon tools. Fail closed at spawn instead. A
+    // prompt-only general (Worker, type not named, no profile) may still
+    // declare read_only without that lie.
+    let named_write_role = request.agent_type_explicit || request.profile.is_some();
+    if named_write_role
+        && matches!(request.agent_type, FleetRole::Builder | FleetRole::Worker)
+        && request.write_authority == Some(SpawnWriteAuthority::ReadOnly)
+    {
+        return Err(ToolError::invalid_input(format!(
+            "{} implies write capability; write_authority=read_only is a contradiction. \
+             Use type=scout (or another read-only role), or set write_authority to \
+             workspace_write / worktree_write.",
+            request.agent_type.as_str()
+        )));
+    }
     let declares_scope = !request.write_roots.is_empty()
         || !request.exact_files.is_empty()
         || !request.coordination_contracts.is_empty();
