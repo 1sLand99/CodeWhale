@@ -17,6 +17,19 @@
 | 用哪个模型？ | 默认 auto：简单任务自动用 flash（便宜快），复杂自动升 pro |
 | 对话能导出吗？ | 能：`/export file 文件名.md` |
 
+**操作问题速查**
+
+| 操作问题 | 解决办法 |
+|---|---|
+| 双击运行提示找不到 VCRUNTIME140_1.dll | 装 VC++ 运行库（见 2.4 节） |
+| 终端里输入 codewhale 提示"不是命令" | 环境变量没配好或终端没重开（见 2.3 节） |
+| 提示"禁止运行脚本" | 执行一次 PowerShell 执行策略命令（见第 3 节） |
+| 配置了 pro 却显示在用 flash | auto 路由正常现象，不是 bug（见 7.2 节） |
+| 界面停在奇怪的模式 | 按 `Tab` 切回，或输入 `/mode act` |
+| 改完配置突然连不上 | 检查 `provider` 和 `base_url` 是否被改坏，改回默认 |
+| cmd 里运行显示异常或崩溃 | 改用 Windows Terminal（见 2.5 节） |
+| GitHub 打不开/下载失败 | 需要配置系统代理后重试 |
+
 ---
 
 ## 1. 先理解 3 个核心概念
@@ -141,11 +154,13 @@ codewhale auth set --provider moonshot --api-key "你的中国区Kimi API key"
 | `kimi-k2.7-code` | 编程版，默认稳定，推荐先用这个 |
 | `kimi-k2.6` | 更轻量 |
 
+> 注："k3"是 Kimi Code 平台对 `kimi-k3` 的简写，本文档使用全称 `kimi-k3`。
+
 **注意事项**
 
 - **不要用 `/model auto`**：Kimi 没有便宜的"flash 档"，auto 只会落在默认模型上，直接固定模型更实在
 - **deepseek 不受影响**：切回用 `/provider deepseek` + `/model deepseek-v4-pro`，随时可换
-- **Kimi Code 会员模型别混用**：`k3` / `kimi-for-coding` 是会员专属（另一个入口 `api.kimi.com/coding/v1`），普通中国区 API key 不要用这些 ID
+- **Kimi Code 会员模型别混用**："k3"（即 `kimi-k3` 的简写）/ `kimi-for-coding` 是 Kimi Code 会员平台专属模型（入口 `api.kimi.com/coding/v1`），与普通 API 入口的 `kimi-k3` 不同，普通中国区 API key 不要用这些 ID
 - **改动 base_url 后要重启 Codewhale** 才生效
 
 ### 1.3 工作区（workspace）概念
@@ -176,7 +191,7 @@ https://github.com/Hmbown/CodeWhale/releases
   - `codewhale-tui.exe` — 界面程序
   - `codew.exe` — 辅助命令
 
-文件名带 **arm64** 的是给 ARM 架构设备用的，普通电脑不要选。如果你更习惯传统安装方式，也可以选 `codewhale-windows-x64.exe`（双击安装，会自动加入环境变量，但会弹 Windows SmartScreen 提示，因为安装包未签名）。
+文件名带 **arm64** 的是给 ARM 架构设备用的，普通电脑不要选。如果你更习惯传统安装方式，也可以下载 **`CodeWhaleSetup.exe`**（Windows 安装器）：它会安装到 `%LOCALAPPDATA%\Programs\CodeWhale\bin` 并自动加入用户 PATH，无需手动配置环境变量；因为安装包未签名，双击会弹 Windows SmartScreen 提示，点"更多信息 → 仍要运行"即可。注意：发布页里的 `codewhale-windows-x64.exe` 是**纯命令行程序，不是安装器**，双击只会闪一下命令行窗口，不要把它当成安装包。
 
 ![GitHub 发布页，选择 windows-x64 版本](images/github-release-page.png)
 
@@ -184,7 +199,7 @@ https://github.com/Hmbown/CodeWhale/releases
 
 把便携版 zip 解压后的文件夹放到一个固定位置，比如 `D:\codewhale`（解压后里面就是 `codewhale.exe`、`codewhale-tui.exe`、`codew.exe` 三个文件，完整路径为 `D:\codewhale\codewhale.exe`）。放好后**不要再移动它**，否则下面的环境变量会失效。
 
-> 升级方法：以后出新版本，下载新版 portable zip，解压后**覆盖**这 3 个文件即可，配置和对话记录都保留。
+> 升级方法：以后出新版本，在终端运行 `codewhale update` 即可（想先看有没有新版：`codewhale update --check`），它会自动下载、校验并替换程序文件，完成后重启 Codewhale。配置和对话记录都保留。网络受限时也可以下载新版 portable zip 解压覆盖这 3 个文件。
 
 ### 2.3 第三步：加入环境变量
 
@@ -214,7 +229,7 @@ https://github.com/Hmbown/CodeWhale/releases
 
 ### 2.5 第五步：安装 Windows Terminal（不要用 cmd）
 
-Codewhale 需要在终端里运行。**不要用系统自带的 cmd，容易崩溃**，请安装微软官方的 Windows Terminal：
+Codewhale 需要在终端里运行。**建议使用 Windows Terminal（即"终端"），不要用系统自带的 cmd（命令提示符）**。Codewhale 是 TUI（终端用户界面）软件，依赖终端渲染能力——cmd 功能有限，可能出现显示异常或崩溃；Windows Terminal 支持更多颜色、Unicode 字符和 GPU 渲染，运行 Codewhale 更稳定流畅：
 
 ```
 https://learn.microsoft.com/zh-cn/windows/terminal/install
@@ -309,7 +324,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
 
 你可能发现：配置里明明写的是 pro，会话里却在用 flash——这是因为处于 **auto 路由模式**：
 
-- auto 模式每一轮由一个小分类器判断任务难度
+- auto 模式下，根据内置的算法（基于请求复杂度的启发式路由）自动判断任务复杂度
 - 简单任务 → 派 flash（省钱）；复杂任务 → 升级到 pro
 - 会话顶部显示的 `Auto model route: deepseek-v4-flash` 就是这个结果，**不是 bug**
 
@@ -450,18 +465,3 @@ default_text_model = "deepseek-v4-pro"
 - 类密钥内容（如 API key）和带凭据的 URL **自动打码**，分享前仍建议检查一遍
 - 导出是只读操作，不影响当前会话
 - 想省 token 而不是导出时，用 `/compact` 压缩上下文（见第 9 节）
-
----
-
-## 11. 常见问题速查
-
-| 问题 | 解决办法 |
-|---|---|
-| 双击运行提示找不到 VCRUNTIME140_1.dll | 装 VC++ 运行库（见 2.4 节） |
-| 终端里输入 codewhale 提示"不是命令" | 环境变量没配好或终端没重开（见 2.3 节） |
-| 提示"禁止运行脚本" | 执行一次 PowerShell 执行策略命令（见第 3 节） |
-| 配置了 pro 却显示在用 flash | auto 路由正常现象，不是 bug（见 7.2 节） |
-| 界面停在奇怪的模式 | 按 `Tab` 切回，或输入 `/mode act` |
-| 改完配置突然连不上 | 检查 `provider` 和 `base_url` 是否被改坏，改回默认 |
-| cmd 里运行容易崩溃 | 改用 Windows Terminal（见 2.5 节） |
-| GitHub 打不开/下载失败 | 需要配置系统代理后重试 |
