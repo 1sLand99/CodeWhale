@@ -12,12 +12,6 @@
 //!
 //! The functions are pure: they consume immutable built-in metadata and
 //! accepted user-command metadata and never persist or cache registry state.
-//!
-//! NOTE: the three public predicates below temporarily carry
-//! `#[allow(dead_code)]` because FEAT-012 Phase 2 lands the shared module and
-//! its tests first; Phase 3 (command palette) and Phase 4 (slash completion)
-//! rewire their consumers onto these predicates and the attribute MUST be
-//! removed there. See `planning-analysis-report.md` for the phase contract.
 
 use super::traits::CommandInfo;
 use super::user_registry::UserCommandMetadata;
@@ -27,7 +21,6 @@ use super::user_registry::UserCommandMetadata;
 ///
 /// Hidden user commands retain token ownership even though they are excluded
 /// from discovery output rows.
-#[allow(dead_code)] // consumed by Phase 3 (palette) and Phase 4 (completion)
 pub fn user_command_shadows_builtin_canonical(
     builtin: &CommandInfo,
     user_commands: &[&UserCommandMetadata],
@@ -39,7 +32,6 @@ pub fn user_command_shadows_builtin_canonical(
 
 /// Returns true when any user command claims the given built-in alias token,
 /// either through its canonical name or through an accepted alias.
-#[allow(dead_code)] // consumed by Phase 3 (palette) and Phase 4 (completion)
 pub fn user_command_shadows_builtin_alias(
     builtin_alias: &str,
     user_commands: &[&UserCommandMetadata],
@@ -54,7 +46,6 @@ pub fn user_command_shadows_builtin_alias(
 ///
 /// The built-in canonical token itself is not part of this projection; callers
 /// decide canonical visibility through [`user_command_shadows_builtin_canonical`].
-#[allow(dead_code)] // consumed by Phase 3 (palette) and Phase 4 (completion)
 pub fn unshadowed_builtin_aliases<'a>(
     builtin: &'a CommandInfo,
     user_commands: &[&UserCommandMetadata],
