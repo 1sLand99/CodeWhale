@@ -529,10 +529,12 @@ async fn work_bar_shows_a_running_subagent_under_the_pinned_rail_panel() -> Resu
     Ok(())
 }
 
-/// A finished agent must stay in the bar and stay clickable — quiet
-/// completion, not eviction.
+/// A finished agent collapses out of the Top strip (so fan-outs do not
+/// permanently eat the transcript) but stays counted in the header. The
+/// Agents panel remains the standing register — see
+/// `agents_panel_click_opens_details_even_for_finished_agents`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn work_bar_keeps_a_finished_subagent_clickable() -> Result<()> {
+async fn work_bar_collapses_a_finished_subagent_into_the_header() -> Result<()> {
     let _guard = WORK_BAR_PTY_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_models(&server).await;
@@ -561,22 +563,16 @@ async fn work_bar_keeps_a_finished_subagent_clickable() -> Result<()> {
     tui.wait_for_idle(Duration::from_millis(300), Duration::from_secs(10))?;
 
     let strip = work_bar_text(&mut tui);
-    let worker = work_bar_worker_row(&mut tui);
     assert!(
-        worker.is_some(),
-        "a finished sub-agent disappeared from the top work bar; the strip \
-         painted only:\n{strip}\n---full---\n{}",
+        strip.contains("completed"),
+        "settled workers must remain counted in the Subagents header; strip:\n{strip}\n---full---\n{}",
         tui.debug_dump()
     );
-    let (row, col) = worker.expect("checked above");
-    tui.send(keys::mouse::click(row, col))?;
-    tui.wait_for_text("Agent Details", Duration::from_secs(5))
-        .map_err(|_| {
-            anyhow!(
-                "a finished sub-agent row is no longer a door\n{}",
-                tui.debug_dump()
-            )
-        })?;
+    assert!(
+        work_bar_worker_row(&mut tui).is_none(),
+        "a finished sub-agent must leave the Top strip rows; strip:\n{strip}\n---full---\n{}",
+        tui.debug_dump()
+    );
 
     let _ = tui.shutdown();
     Ok(())

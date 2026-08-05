@@ -2727,6 +2727,61 @@ mod tests {
         assert!(text.contains("pending"), "{text}");
     }
 
+    /// Top strip collapses completed/cancelled workers into the header count
+    /// while keeping live (and failed) workers as rows. Agents panel still
+    /// lists every worker — see the click test below.
+    #[test]
+    fn top_strip_collapses_settled_subagents_into_header() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-live",
+            "scout",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+        app.subagent_cache.push(cached_worker(
+            "agent-done",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Completed,
+        ));
+        app.subagent_cache.push(cached_worker(
+            "agent-failed",
+            "verifier",
+            None,
+            None,
+            SubAgentStatus::Failed("boom".to_string()),
+        ));
+
+        let rows = super::model::project_visible(&mut app);
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.0.as_str()).collect();
+
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("2 running") && label.contains("1 completed")),
+            "header counts live (running+failed) vs settled: {labels:?}"
+        );
+        assert!(
+            ids.contains(&"worker:agent-live"),
+            "running worker stays in the strip: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"worker:agent-failed"),
+            "failed worker stays (needs attention): {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"worker:agent-done"),
+            "completed worker must leave the strip: {ids:?}"
+        );
+    }
+
     /// Acceptance for owner regression A2: an agent row is a door in the
     /// Agents panel too, and a FINISHED agent's world still opens — the
     /// panel is a standing register, not a live-only view.

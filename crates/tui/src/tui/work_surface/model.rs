@@ -534,17 +534,13 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
 /// sub-agents, then plan-step to-dos. Tool operations, coordination receipts,
 /// file activity, and generic graph headings never enter this list.
 ///
-/// "Persistent" is a lifetime promise, not decoration: to-do and sub-agent
-/// rows survive their own completion and stay on the surface for the rest of
-/// the session — a completed-only list is still a list, and the strip is a
-/// standing register of the session's work (GrokBuild's tasks pane), not a
-/// live-only view. Completion is quiet (glyph, tone, frozen receipt), never
-/// an eviction. `ordered_rows` enforces the same rule for side placements.
-///
-/// On Top, the list is GrokBuild-shaped without losing CodeWhale identity: a
-/// `▾ Subagents N` group header (when any workers are present), the workers,
-/// then the selectable to-dos. To-do density still uses the pinned progress
-/// receipt in `render` rather than a second "To-do" section title.
+/// On Top, the strip is actionable work only: running / queued / needs-input
+/// agents, plus plan-step to-dos. Quietly completed or cancelled workers
+/// collapse out of the strip into the group header count (e.g.
+/// `▾ Subagents 2 running · 6 completed`) so fan-outs do not permanently eat
+/// the transcript. Settled agents stay reachable through the Agents panel and
+/// the work catalog — never deleted. Failed / interrupted workers stay in the
+/// strip because they still need attention.
 ///
 /// **The sub-agent group outranks the to-do list for strip rows.** The strip
 /// is a fixed-height viewport over this list (`top_height`, 2..=16 rows) and
@@ -568,28 +564,67 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
 
     let todo_ids = plan_step_row_ids(app);
     let mut todos = Vec::new();
-    let mut agents = Vec::new();
+    let mut live_agents = Vec::new();
+    let mut settled_agents = 0usize;
     for row in rows {
         if todo_ids.contains(&row.id.0) {
             todos.push(row);
         } else if row.id.0.starts_with("worker:") {
-            agents.push(row);
+            if agent_row_is_strip_settled(&row) {
+                settled_agents += 1;
+            } else {
+                live_agents.push(row);
+            }
         }
     }
 
-    let mut out = Vec::with_capacity(todos.len() + agents.len() + 1);
-    if !agents.is_empty() {
-        // GrokBuild: `▾ Subagents 2` — count in the header, not a panel name.
-        out.push(section_heading(
-            "agents",
-            &format!("Subagents {}", agents.len()),
-            "",
-        ));
-        out.extend(agents);
+    let mut out = Vec::with_capacity(todos.len() + live_agents.len() + 1);
+    if !live_agents.is_empty() || settled_agents > 0 {
+        // Honest live/settled split — failed/interrupted stay as strip rows
+        // (needs attention) and are never counted as "running".
+        let attention = live_agents
+            .iter()
+            .filter(|row| agent_row_needs_attention(row))
+            .count();
+        let running = live_agents.len().saturating_sub(attention);
+        let header = match (running, attention, settled_agents) {
+            (0, 0, settled) => format!("Subagents {settled} completed"),
+            (live, 0, 0) => format!("Subagents {live}"),
+            (live, 0, settled) => format!("Subagents {live} running · {settled} completed"),
+            (0, blocked, 0) => format!("Subagents {blocked} needs input"),
+            (0, blocked, settled) => {
+                format!("Subagents {blocked} needs input · {settled} completed")
+            }
+            (live, blocked, 0) => format!("Subagents {live} running · {blocked} needs input"),
+            (live, blocked, settled) => {
+                format!(
+                    "Subagents {live} running · {blocked} needs input · {settled} completed"
+                )
+            }
+        };
+        out.push(section_heading("agents", &header, ""));
+        out.extend(live_agents);
     }
     out.extend(todos);
     app.work_surface.latest_rows = out.clone();
     out
+}
+
+/// Completed/cancelled workers leave the Top strip; failed/interrupted stay
+/// because they still need attention. Paths to receipts remain via Agents.
+fn agent_row_is_strip_settled(row: &WorkRow) -> bool {
+    row.agent.as_ref().is_some_and(|facts| {
+        matches!(facts.status.as_str(), "completed" | "cancelled")
+    })
+}
+
+fn agent_row_needs_attention(row: &WorkRow) -> bool {
+    row.agent.as_ref().is_some_and(|facts| {
+        matches!(
+            facts.status.as_str(),
+            "failed" | "interrupted" | "needs_input" | "blocked"
+        )
+    })
 }
 
 /// Row ids of the plan-step (to-do) nodes in the cached graph.
