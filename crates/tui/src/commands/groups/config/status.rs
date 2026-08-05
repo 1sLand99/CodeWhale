@@ -373,11 +373,20 @@ mod tests {
     fn status_report_surfaces_effective_safety_policy() {
         let tmpdir = TempDir::new().expect("temp dir");
         let mut app = create_test_app(tmpdir.path().to_path_buf());
+        // `/status` is honest about enforcement: on a platform with no OS
+        // sandbox (e.g. Windows) it reports "<policy> requested, not enforced"
+        // instead of the enforced string. The test must hold on both, so it
+        // branches on the same signal `safety_summary` uses (`sandbox_backend`).
+        let unenforced = app.sandbox_backend.is_none();
 
         app.mode = AppMode::Agent;
         let agent = format_status(&app);
         assert!(agent.contains("Safety:"));
-        assert!(agent.contains("sandbox workspace-write, network on"));
+        if unenforced {
+            assert!(agent.contains("workspace-write requested, not enforced"));
+        } else {
+            assert!(agent.contains("sandbox workspace-write, network on"));
+        }
 
         app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
         let full_access = format_status(&app);
@@ -385,11 +394,19 @@ mod tests {
 
         app.configured_sandbox_mode = Some("workspace-write".to_string());
         let clamped = format_status(&app);
-        assert!(clamped.contains("sandbox workspace-write, network on"));
+        if unenforced {
+            assert!(clamped.contains("workspace-write requested, not enforced"));
+        } else {
+            assert!(clamped.contains("sandbox workspace-write, network on"));
+        }
 
         app.mode = AppMode::Plan;
         let plan = format_status(&app);
-        assert!(plan.contains("sandbox read-only, network off"));
+        if unenforced {
+            assert!(plan.contains("read-only requested, not enforced"));
+        } else {
+            assert!(plan.contains("sandbox read-only, network off"));
+        }
 
         app.configured_sandbox_mode = None;
         app.mode = AppMode::Yolo;
