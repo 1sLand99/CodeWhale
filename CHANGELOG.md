@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.4] - 2026-08-04
+## [0.9.4] - 2026-08-05
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
 roster/setup face with a clear operator-leader and user/folder scope, a
 work strip that keeps actionable agents instead of a permanent archive,
@@ -158,7 +158,12 @@ File edits, terminal width, and Windows installation.
 
 - An explicit `type=builder`/`worker` plus `write_authority=read_only` now fails
   closed at spawn instead of launching a labeled write role that silently had
-  only recon tools (#5123).
+  only recon tools (#5123). `type` is the capability claim, so only it can
+  contradict authority; `role` is an identity for roster resolution and may
+  still be narrowed to read-only work — that is how an acceptance Workflow
+  resolves `implementer` to its saved profile while scoping the child to
+  verification. Callers that spelled the narrowing as `type: "implementer"`
+  (an alias of `builder`) should move it to `role: "implementer"`.
 - User-global credentials survive an explicit workspace `CODEWHALE_CONFIG_PATH`
   that selects a route with no local key — readiness probes the user-global
   provider table before concluding a key is missing.

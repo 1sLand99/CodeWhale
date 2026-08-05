@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.4] - 2026-08-04
+## [0.9.4] - 2026-08-05
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
 roster/setup face with a clear operator-leader and user/folder scope, a
 work strip that keeps actionable agents instead of a permanent archive,
