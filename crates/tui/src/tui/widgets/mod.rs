@@ -3905,44 +3905,51 @@ fn layout_input_with_scroll_and_char_indices(
 }
 
 fn cursor_row_col(input: &str, cursor: usize, width: usize) -> (usize, usize) {
+    // Derive the cursor's row/col from the SAME wrapped lines the renderer
+    // draws. An earlier version recomputed wrapping here with hard margin
+    // breaks while wrap_text broke on word boundaries, so the two disagreed on
+    // row count: a long paste landed one row short of its marker, and the
+    // caret drifted behind fast typing. Walking the actual wrapped lines makes
+    // a desync impossible by construction (regression introduced in ff97641b7).
+    let (_, lines_with_indices) = wrap_input_lines_internal(input, width.max(1));
+    cursor_row_col_in_lines(&lines_with_indices, cursor)
+}
+
+/// Map a char-index cursor onto wrapped lines tagged with their starting char
+/// index, as produced by wrap_input_lines_internal. The row is the line whose
+/// char range contains the cursor; the column is the display width of that
+/// line up to the cursor. Because wrap_text emits a trailing empty line when a
+/// line fills exactly to the width, a cursor at the end of a full line lands
+/// on that empty line (row+1, col 0), the display convention callers rely on,
+/// without any special case here.
+fn cursor_row_col_in_lines(
+    lines_with_indices: &[(usize, String)],
+    cursor: usize,
+) -> (usize, usize) {
     let mut row = 0usize;
-    let mut col = 0usize;
-    let mut char_idx = 0usize;
-
-    for grapheme in input.graphemes(true) {
-        if char_idx >= cursor {
+    let mut line_start = 0usize;
+    let mut line: &str = "";
+    let mut found = false;
+    for (i, (start, l)) in lines_with_indices.iter().enumerate() {
+        if *start <= cursor {
+            row = i;
+            line_start = *start;
+            line = l.as_str();
+            found = true;
+        } else {
             break;
         }
-        let grapheme_chars = grapheme.chars().count();
-        let next_char_idx = char_idx.saturating_add(grapheme_chars);
-        let cursor_inside = cursor < next_char_idx;
-
-        if grapheme == "\n" {
-            row += 1;
-            col = 0;
-            char_idx = next_char_idx;
-            if cursor_inside {
-                break;
-            }
-            continue;
-        }
-
-        let grapheme_width = grapheme.width();
-        if col + grapheme_width > width && col != 0 {
-            row += 1;
-            col = 0;
-        }
-        col += grapheme_width;
-        if col >= width {
-            row += 1;
-            col = 0;
-        }
-        if cursor_inside {
-            break;
-        }
-        char_idx = next_char_idx;
     }
-
+    if !found {
+        return (0, 0);
+    }
+    let offset = cursor.saturating_sub(line_start);
+    let byte_end = line
+        .char_indices()
+        .nth(offset)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len());
+    let col = line[..byte_end].width();
     (row, col)
 }
 
