@@ -255,7 +255,7 @@ fn launch_onboarding_decision(
     needs_workspace_trust: bool,
     xai_oauth_needs_reauth: bool,
 ) -> (OnboardingState, bool) {
-    let onboarding = if xai_oauth_needs_reauth {
+    let onboarding = if xai_oauth_needs_reauth && was_onboarded {
         OnboardingState::None
     } else {
         initial_onboarding_state(

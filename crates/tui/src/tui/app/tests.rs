@@ -6709,3 +6709,13 @@ fn launch_onboarding_clean_when_onboarded_with_key() {
     assert_eq!(onboarding, OnboardingState::None);
     assert!(!recovery);
 }
+
+#[test]
+fn launch_onboarding_keeps_first_run_when_not_onboarded_even_if_xai_reauth() {
+    // A NOT-yet-onboarded user still gets first-run onboarding even if their
+    // xAI OAuth credential is missing — the picker suppression is only for the
+    // onboarded missing-key-RECOVERY case, not first run.
+    let (onboarding, recovery) = launch_onboarding_decision(false, false, true, false, true);
+    assert_eq!(onboarding, OnboardingState::Welcome);
+    assert!(!recovery);
+}
