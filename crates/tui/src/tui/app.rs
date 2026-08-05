@@ -243,6 +243,33 @@ fn onboarding_is_workspace_trust_gate(
     !skip_onboarding && was_onboarded && !needs_api_key && needs_workspace_trust
 }
 
+/// Resolve the launch onboarding state and the missing-key-recovery flag in one
+/// place. When the active xAI OAuth credential is missing (`xai_oauth_needs_reauth`),
+/// the user already chose xAI and only needs to re-authenticate it — so the
+/// generic provider picker must NOT reopen (returns `OnboardingState::None` and
+/// `missing_key_recovery = false`); the caller surfaces a re-auth message (#5032).
+fn launch_onboarding_decision(
+    skip_onboarding: bool,
+    was_onboarded: bool,
+    needs_api_key: bool,
+    needs_workspace_trust: bool,
+    xai_oauth_needs_reauth: bool,
+) -> (OnboardingState, bool) {
+    let onboarding = if xai_oauth_needs_reauth {
+        OnboardingState::None
+    } else {
+        initial_onboarding_state(
+            skip_onboarding,
+            was_onboarded,
+            needs_api_key,
+            needs_workspace_trust,
+        )
+    };
+    let missing_key_recovery =
+        !skip_onboarding && was_onboarded && needs_api_key && !xai_oauth_needs_reauth;
+    (onboarding, missing_key_recovery)
+}
+
 /// One row in the per-turn cache-telemetry ring (`/cache` debug surface, #263).
 #[derive(Debug, Clone)]
 pub struct TurnCacheRecord {

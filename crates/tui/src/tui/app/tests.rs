@@ -6678,3 +6678,34 @@ fn ambient_idle_settles_after_grace_and_wakes_on_activity() {
     // …and idleness afterwards restarts the full grace period.
     assert!(!app.ambient_idle_settled(false, start + Duration::from_secs(61)));
 }
+
+#[test]
+fn launch_onboarding_skips_picker_when_xai_oauth_needs_reauth() {
+    // #5032: an onboarded user whose active xAI OAuth credential is missing
+    // must NOT be sent back to the generic provider picker every launch.
+    let (onboarding, recovery) = launch_onboarding_decision(
+        false, // skip_onboarding
+        true,  // was_onboarded
+        true,  // needs_api_key
+        false, // needs_workspace_trust
+        true,  // xai_oauth_needs_reauth
+    );
+    assert_eq!(onboarding, OnboardingState::None);
+    assert!(!recovery);
+}
+
+#[test]
+fn launch_onboarding_opens_picker_for_generic_missing_key() {
+    // A generic missing key (not the xAI-OAuth re-auth case) still reopens the
+    // provider picker for recovery.
+    let (onboarding, recovery) = launch_onboarding_decision(false, true, true, false, false);
+    assert_eq!(onboarding, OnboardingState::Provider);
+    assert!(recovery);
+}
+
+#[test]
+fn launch_onboarding_clean_when_onboarded_with_key() {
+    let (onboarding, recovery) = launch_onboarding_decision(false, true, false, false, false);
+    assert_eq!(onboarding, OnboardingState::None);
+    assert!(!recovery);
+}

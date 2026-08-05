@@ -185,30 +185,42 @@ impl App {
         // persisted config, and surface a truthful xAI-specific message. The
         // repair never blocks or aborts launch; after it the state is the
         // normal "needs auth", not a bricked loop.
-        let xai_dangling_repair_message = if provider == ApiProvider::Xai
-            && crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config)
-        {
-            match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref()) {
-                Ok(()) => {
-                    // Keep the in-memory route consistent with the repaired
-                    // persisted file so the running app never reaches for
-                    // the missing generation.
-                    effective_auth_config
-                        .provider_config_for_mut(ApiProvider::Xai)
-                        .oauth_credential_generation = None;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "codewhale::xai_oauth",
-                        error = %error,
-                        "could not clear the dangling xAI OAuth generation pointer; continuing launch"
-                    );
+        // #5032: an onboarded user whose active xAI OAuth credential is missing
+        // must be guided to re-authenticate THAT provider — not be re-run through
+        // the generic provider picker on every launch. Detect the missing-cred
+        // state (broader than a dangling pointer: it also covers a repaired
+        // pointer, an expired/revoked token, or a never-completed login), repair
+        // a stale pointer once, surface a truthful xAI message, and suppress the
+        // picker-recovery path below.
+        let xai_oauth_needs_reauth = provider == ApiProvider::Xai
+            && effective_auth_config
+                .provider_config_for(ApiProvider::Xai)
+                .and_then(|entry| entry.auth_mode.as_deref())
+                .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            && !crate::xai_oauth::credentials_present(&effective_auth_config);
+        let xai_dangling_repair_message = if xai_oauth_needs_reauth {
+            if crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config) {
+                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref()) {
+                    Ok(()) => {
+                        // Keep the in-memory route consistent with the repaired
+                        // persisted file so the running app never reaches for
+                        // the missing generation.
+                        effective_auth_config
+                            .provider_config_for_mut(ApiProvider::Xai)
+                            .oauth_credential_generation = None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "codewhale::xai_oauth",
+                            error = %error,
+                            "could not clear the dangling xAI OAuth generation pointer; continuing launch"
+                        );
+                    }
                 }
             }
             Some(
-                "⚠ xAI OAuth credentials are missing — the saved login pointer referenced a \
-                     file that no longer exists and was cleared. Re-authenticate with \
-                     `codewhale auth xai-device` or use the in-app login."
+                "⚠ xAI OAuth credentials are missing. Re-authenticate with \
+                 `codewhale auth xai-device` or the in-app login, or switch providers."
                     .to_string(),
             )
         } else {
@@ -468,13 +480,16 @@ impl App {
             preferred_mode
         };
         let needs_workspace_trust = !yolo_compat && crate::tui::onboarding::needs_trust(&workspace);
-        let onboarding = initial_onboarding_state(
+        // Suppress the missing-key provider picker for the xAI-OAuth-missing-
+        // credential case: the user already chose xAI and just needs to
+        // re-authenticate it, not re-pick a provider every launch.
+        let (onboarding, onboarding_missing_key_recovery) = launch_onboarding_decision(
             skip_onboarding,
             was_onboarded,
             needs_api_key,
             needs_workspace_trust,
+            xai_oauth_needs_reauth,
         );
-        let onboarding_missing_key_recovery = !skip_onboarding && was_onboarded && needs_api_key;
         let onboarding_workspace_trust_gate = onboarding_is_workspace_trust_gate(
             skip_onboarding,
             was_onboarded,
