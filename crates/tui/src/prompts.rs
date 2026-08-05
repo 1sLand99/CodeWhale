@@ -2391,7 +2391,7 @@ mod tests {
 
         let mut state = codewhale_config::SetupState::default();
         state.complete_constitution_checkpoint(
-            "0.8.67",
+            crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
             codewhale_config::ConstitutionChoice::Bundled,
         );
         state

@@ -50,10 +50,10 @@ pub(crate) use model_draft::draft_constitution_with_model;
 use persistence::SetupPersistenceFacts;
 use remote::SetupRemoteFacts;
 
-/// Target lane for the once-per-version constitution checkpoint. The workspace
-/// package remains 0.8.66 until release approval, so this cannot read
-/// `CARGO_PKG_VERSION` yet.
-pub const CONSTITUTION_CHECKPOINT_VERSION: &str = "0.8.67";
+/// Target lane for the once-per-version constitution checkpoint. Bumped per
+/// release when the bundled constitution materially changes, so existing users
+/// re-acknowledge it once. 0.9.4 re-ships the Fleet/operate constitution.
+pub const CONSTITUTION_CHECKPOINT_VERSION: &str = "0.9.4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupCommitKind {
