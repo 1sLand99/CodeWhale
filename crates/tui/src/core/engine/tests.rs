@@ -13106,6 +13106,10 @@ fn turn_metadata_skips_when_only_tool_results_trail() {
 
 #[test]
 fn refresh_system_prompt_is_noop_when_unchanged() {
+    // The composed prompt reads ambient process state, so a concurrent test
+    // mutating the environment between the two refreshes changes the hash and
+    // fails the no-op assertion. Serialize with the other env-sensitive tests.
+    let _lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
