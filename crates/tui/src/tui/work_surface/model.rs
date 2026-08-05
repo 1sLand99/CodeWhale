@@ -597,9 +597,7 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
             }
             (live, blocked, 0) => format!("Subagents {live} running · {blocked} needs input"),
             (live, blocked, settled) => {
-                format!(
-                    "Subagents {live} running · {blocked} needs input · {settled} completed"
-                )
+                format!("Subagents {live} running · {blocked} needs input · {settled} completed")
             }
         };
         out.push(section_heading("agents", &header, ""));
@@ -613,9 +611,9 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
 /// Completed/cancelled workers leave the Top strip; failed/interrupted stay
 /// because they still need attention. Paths to receipts remain via Agents.
 fn agent_row_is_strip_settled(row: &WorkRow) -> bool {
-    row.agent.as_ref().is_some_and(|facts| {
-        matches!(facts.status.as_str(), "completed" | "cancelled")
-    })
+    row.agent
+        .as_ref()
+        .is_some_and(|facts| matches!(facts.status.as_str(), "completed" | "cancelled"))
 }
 
 fn agent_row_needs_attention(row: &WorkRow) -> bool {
@@ -1029,12 +1027,12 @@ fn ordered_rows(
     }
     surface.catalog_rows = catalog.clone();
 
-    // Live chrome policy:
+    // Live chrome policy (Tasks/side projections — Top uses `project_visible`):
     // - actionable: heading + (optional) single activity receipt
     // - recent-only: transient receipts collapse after the TTL / next user
-    //   turn (#4688), but settled to-dos and sub-agents are DURABLE — they
-    //   keep their rows for the session. Quiet completion, not eviction
-    //   (owner regression report, 2026-08-04).
+    //   turn (#4688); settled to-dos stay as durable rows. Settled sub-agents
+    //   on Top collapse into the Subagents header (see `project_visible`) and
+    //   remain reachable via the Agents panel / catalog.
     // - empty: no heading
     let is_durable =
         |item: &RankedWorkRow| item.is_plan_step || item.row.id.0.starts_with("worker:");

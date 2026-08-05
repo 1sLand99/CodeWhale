@@ -2649,12 +2649,12 @@ mod tests {
         assert_eq!(app.work_surface.opened.as_ref(), Some(&row.id));
     }
 
-    /// The 2026-08-04 owner regression: the strip is a standing register of
-    /// the session's work. Settled to-dos and finished sub-agents keep their
-    /// rows across the recent-only TTL and across new user turns — quiet
-    /// completion, not eviction — and the strip keeps its height.
+    /// Settled to-dos keep their rows across the recent-only TTL and new user
+    /// turns. Finished sub-agents collapse into the Subagents header count
+    /// (still reachable via the Agents panel) so fan-outs do not permanently
+    /// eat the transcript.
     #[test]
-    fn settled_todos_and_workers_stay_after_ttl_and_user_turns() {
+    fn settled_todos_stay_and_finished_workers_collapse_after_ttl() {
         let mut app = app();
         app.current_session_id = Some(SESSION.to_string());
         {
@@ -2677,8 +2677,14 @@ mod tests {
             "settled to-dos must be listed: {first:?}"
         );
         assert!(
-            first.iter().any(|row| row.id.0.starts_with("worker:")),
-            "finished workers must be listed: {first:?}"
+            first
+                .iter()
+                .any(|row| { row.id.0 == "section:agents" && row.label.contains("1 completed") }),
+            "finished workers collapse into the header count: {first:?}"
+        );
+        assert!(
+            !first.iter().any(|row| row.id.0.starts_with("worker:")),
+            "finished workers must leave strip rows: {first:?}"
         );
 
         app.work_surface
@@ -2690,8 +2696,10 @@ mod tests {
             "a settled to-do must survive the TTL and the next user turn: {later:?}"
         );
         assert!(
-            later.iter().any(|row| row.id.0.starts_with("worker:")),
-            "a finished worker must survive the TTL and the next user turn: {later:?}"
+            later
+                .iter()
+                .any(|row| { row.id.0 == "section:agents" && row.label.contains("1 completed") }),
+            "header still accounts for settled workers after TTL: {later:?}"
         );
         assert!(
             super::height(&mut app, 100, 40, AMPLE_BUDGET) > 0,
@@ -2763,10 +2771,12 @@ mod tests {
         let ids: Vec<&str> = rows.iter().map(|row| row.id.0.as_str()).collect();
 
         assert!(
-            labels
-                .iter()
-                .any(|label| label.contains("2 running") && label.contains("1 completed")),
-            "header counts live (running+failed) vs settled: {labels:?}"
+            labels.iter().any(|label| {
+                label.contains("1 running")
+                    && label.contains("1 needs input")
+                    && label.contains("1 completed")
+            }),
+            "header splits running / needs-input / settled: {labels:?}"
         );
         assert!(
             ids.contains(&"worker:agent-live"),
