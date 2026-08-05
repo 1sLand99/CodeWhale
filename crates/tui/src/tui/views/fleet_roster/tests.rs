@@ -21,7 +21,7 @@ fn operator() -> OperatorInfo {
 }
 
 fn built_in_view() -> FleetRosterView {
-    FleetRosterView::from_parts(operator(), FleetRoster::built_ins_only())
+    FleetRosterView::from_parts(operator(), FleetRoster::built_ins_only(), None)
 }
 
 fn view_with_overrides() -> FleetRosterView {
@@ -44,6 +44,7 @@ fn view_with_overrides() -> FleetRosterView {
         operator: operator(),
         members,
         shadowed: Vec::new(),
+        selected_fleet: None,
         selected: 0,
         detail_scroll: 0,
         locale: Locale::En,
@@ -300,7 +301,7 @@ fn roster_loads_config_members_through_the_shared_merge() {
         profiles,
         ..codewhale_config::FleetConfigToml::default()
     };
-    let view = FleetRosterView::from_parts(operator(), FleetRoster::load(&config, tmp.path()));
+    let view = FleetRosterView::from_parts(operator(), FleetRoster::load(&config, tmp.path()), None);
     let extra = view.members.iter().find(|m| m.id == "docs-writer").unwrap();
     assert_eq!(extra.origin, ProfileOrigin::Config);
     assert_eq!(

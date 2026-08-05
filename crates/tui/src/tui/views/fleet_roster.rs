@@ -1,15 +1,18 @@
 //! `/fleet` roster — the barracks view of the saved agent party.
 //!
-//! The roster view is the read side of the Fleet profile surface. The first
-//! row is the **operator** — the live session route (your main model): when a
-//! user picks a session model they are picking the operator, and the roster
-//! is that operator's team. Below it the merged [`FleetRoster`] (built-in <
+//! The roster view is the primary `/fleet` face. The first row is the
+//! **operator** — the Fleet leader (your live session model). When a user
+//! picks a session model they are picking the operator, and every member
+//! below is that leader's team. The header names the selected saved Fleet and
+//! whether it is user-global or folder-scoped, so scope is never ambiguous.
+//! Below the operator sits the merged [`FleetRoster`] (built-in <
 //! `[fleet.profiles]` config < `$CODEWHALE_HOME/agents/*.toml` personal <
 //! `.codewhale/agents/*.toml` project members)
-//! renders as a scrollable list with a detail pane for the selected row. The
-//! view never writes anything; `s` / Enter on a member hands off to the
+//! as a scrollable list with a detail pane for the selected row. The view
+//! never writes anything; `s` / Enter on a member hands off to the
 //! `/fleet setup` wizard for authoring and overrides (the operator row is
-//! display-only — its route changes via `/model` or `/provider`).
+//! display-only — its route changes via `/model` or `/provider`). Switch
+//! named Fleets with `/fleet fleets`.
 //!
 //! NOTE: like `fleet_setup.rs`, the copy below is intentionally English for
 //! now (#3167 reworks Fleet UI localization); the command entry
@@ -92,12 +95,22 @@ impl OperatorInfo {
     }
 }
 
+/// Which named Fleet (if any) this session is using, and where that selection
+/// is pinned — user-global vs this folder only.
+#[derive(Debug, Clone)]
+struct SelectedFleetSummary {
+    name: String,
+    scope: crate::fleet::store::FleetScope,
+}
+
 pub struct FleetRosterView {
     operator: OperatorInfo,
     members: Vec<AgentProfile>,
     /// Shadow records from the roster load (#5098): which lower-precedence
     /// files the displayed members are ignoring.
     shadowed: Vec<crate::fleet::roster::ShadowedProfile>,
+    /// Selected named Fleet + scope, when one is active for this session.
+    selected_fleet: Option<SelectedFleetSummary>,
     /// Selected row: 0 is the pinned operator row, members follow at 1..
     selected: usize,
     detail_scroll: usize,
@@ -108,15 +121,25 @@ pub struct FleetRosterView {
 impl FleetRosterView {
     #[must_use]
     pub fn new(app: &App, config: &Config) -> Self {
+        let selected_fleet =
+            crate::fleet::store::selected_fleet(&app.workspace).map(|sel| SelectedFleetSummary {
+                name: sel.name,
+                scope: sel.scope,
+            });
         let mut view = Self::from_parts(
             OperatorInfo::from_app(app),
             FleetRoster::load(&config.fleet_config(), &app.workspace),
+            selected_fleet,
         );
         view.locale = app.ui_locale;
         view
     }
 
-    fn from_parts(operator: OperatorInfo, roster: FleetRoster) -> Self {
+    fn from_parts(
+        operator: OperatorInfo,
+        roster: FleetRoster,
+        selected_fleet: Option<SelectedFleetSummary>,
+    ) -> Self {
         Self {
             operator,
             // The operator is pinned as its own row 0 (the live session route),
@@ -131,6 +154,7 @@ impl FleetRosterView {
                 .cloned()
                 .collect(),
             shadowed: roster.shadowed().to_vec(),
+            selected_fleet,
             selected: 0,
             detail_scroll: 0,
             locale: Locale::En,
@@ -167,6 +191,7 @@ impl FleetRosterView {
         vec![
             ActionHint::new("↑/↓", "move"),
             ActionHint::new("s/Enter", "setup"),
+            ActionHint::new("f", "saved Fleets"),
             ActionHint::new("w", tr(self.locale, MessageId::FleetRosterWorkers)),
             ActionHint::new("PgUp/PgDn", "scroll detail"),
             ActionHint::new("Esc", "close"),
@@ -210,6 +235,9 @@ impl ModalView for FleetRosterView {
             }
             KeyCode::Char('w') => {
                 ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenWorkersRequested)
+            }
+            KeyCode::Char('f') => {
+                ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenFleetsRequested)
             }
             KeyCode::Home => {
                 self.detail_scroll = 0;
@@ -270,12 +298,16 @@ impl ModalView for FleetRosterView {
             Line::from(""),
             Line::from(vec![
                 Span::styled(
+                    format!("  {}", self.selected_fleet_line()),
+                    Style::default().fg(palette::TEXT_SECONDARY),
+                ),
+                Span::styled(
                     format!(
-                        "  {}",
+                        " · {}",
                         tr(self.locale, MessageId::FleetRosterMembersCount)
                             .replace("{count}", &(self.members.len() + 1).to_string())
                     ),
-                    Style::default().fg(palette::TEXT_SECONDARY),
+                    Style::default().fg(palette::TEXT_MUTED),
                 ),
                 Span::styled(
                     format!(
@@ -295,6 +327,14 @@ impl ModalView for FleetRosterView {
 }
 
 impl FleetRosterView {
+    /// Scope-explicit selected Fleet line. Paths stay out — receipts name them.
+    fn selected_fleet_line(&self) -> String {
+        match &self.selected_fleet {
+            Some(sel) => format!("Fleet `{}` · {}", sel.name, sel.scope.long_label()),
+            None => "no saved Fleet selected · legacy roster".to_string(),
+        }
+    }
+
     fn render_body(&self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -453,10 +493,14 @@ fn detail_field(lines: &mut Vec<Line<'static>>, label: &str, body: String) {
 }
 
 /// Detail pane for the pinned operator row: the live session route, plus the
-/// product truth that the roster is this operator's team.
+/// product truth that the operator is this Fleet's leader.
 fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    detail_field(&mut lines, "Member", "operator (session route)".to_string());
+    detail_field(
+        &mut lines,
+        "Role",
+        "operator · Fleet leader (session route)".to_string(),
+    );
     detail_field(&mut lines, "Origin", "session".to_string());
     detail_field(&mut lines, "Posture", "full session authority".to_string());
     detail_field(&mut lines, "Provider", operator.provider.clone());
@@ -474,8 +518,10 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     detail_field(
         &mut lines,
         "Description",
-        "The operator is your main session model; it dispatches Fleet workers via `agent` \
-         profile spawns and Workflow task({profile}). Change its route with /model or /provider."
+        "The operator is the Fleet leader — your main session model. Every member \
+         below works for this route. It dispatches workers via `agent` profile \
+         spawns and Workflow task({profile}). Change its route with /model or \
+         /provider; persist with /fleet save."
             .to_string(),
     );
     lines

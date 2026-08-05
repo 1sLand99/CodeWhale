@@ -14991,6 +14991,14 @@ async fn handle_view_events(
                     roster: std::sync::Arc::new(roster),
                 });
             }
+            ViewEvent::FleetRosterOpenFleetsRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::FleetList) {
+                    app.view_stack
+                        .push(crate::tui::views::fleet_list::FleetListView::new(
+                            app, config,
+                        ));
+                }
+            }
             ViewEvent::FleetRosterOpenWorkersRequested => {
                 if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
                     let agents = subagent_view_agents(app, &app.subagent_cache);

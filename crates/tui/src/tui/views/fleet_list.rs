@@ -1,11 +1,12 @@
-//! `/fleet` list — the primary Fleet surface.
+//! `/fleet fleets` — named saved-Fleet picker (secondary surface).
 //!
-//! One row per saved named Fleet, across both scopes: user-global
-//! (`$CODEWHALE_HOME/fleets/`) and folder (`.codewhale/fleets/`). Every row
-//! shows its scope and exact source; same-name Fleets in both scopes are two
-//! rows, never a silent shadow. The selected Fleet is marked and its operator
-//! route summarized. Legacy per-role profiles get one migration banner, not a
-//! pile of shadow badges.
+//! Bare `/fleet` opens the roster/setup face for the selected Fleet. This view
+//! is only for switching between named configurations. One row per saved Fleet
+//! across both scopes: user-global (`$CODEWHALE_HOME/fleets/`) and folder
+//! (`.codewhale/fleets/`). Rows show name, scope badge, and operator summary —
+//! not filesystem paths (paths belong in receipts). Same-name Fleets in both
+//! scopes are two rows, never a silent shadow. Legacy per-role profiles get
+//! one migration banner, not a pile of shadow badges.
 //!
 //! The view reads and writes the Fleet store directly (local, atomic file
 //! operations); it never touches the live session route.
@@ -102,11 +103,12 @@ impl FleetListView {
     fn footer_hints(&self) -> Vec<ActionHint> {
         let mut hints = vec![
             ActionHint::new("↑/↓", "move"),
-            ActionHint::new("Enter", "open"),
+            ActionHint::new("Enter", "select"),
         ];
         if !self.entries.is_empty() {
-            hints.push(ActionHint::new("u", "select for user"));
-            hints.push(ActionHint::new("w", "select for folder"));
+            // Explicit scope overrides; Enter selects in the row's own scope.
+            hints.push(ActionHint::new("u", "as user default"));
+            hints.push(ActionHint::new("w", "for this folder"));
             hints.push(ActionHint::new("d", "delete"));
         }
         if self.banner_visible() {
@@ -114,6 +116,29 @@ impl FleetListView {
         }
         hints.push(ActionHint::new("Esc", "close"));
         hints
+    }
+
+    /// Select the highlighted Fleet in `scope` and close with a receipt that
+    /// names the exact file written. Editing stays on `/fleet setup` / roster —
+    /// this surface is a switcher, not a file manager.
+    fn select_highlighted(&self, scope: FleetScope) -> Option<FleetListOutcome> {
+        let entry = self.selected_entry()?;
+        if entry.legacy {
+            return None;
+        }
+        match set_selected(&entry.name, scope, &self.workspace) {
+            Ok(path) => Some(FleetListOutcome::Done {
+                message: format!(
+                    "Selected Fleet `{}` ({}) — wrote {}",
+                    entry.name,
+                    scope.long_label(),
+                    path.display()
+                ),
+            }),
+            Err(err) => Some(FleetListOutcome::Done {
+                message: format!("Selection failed: {err}"),
+            }),
+        }
     }
 
     fn confirm_delete(&mut self) -> Option<FleetListOutcome> {
@@ -188,50 +213,15 @@ impl ModalView for FleetListView {
                         ),
                     });
                 }
-                ViewAction::Emit(ViewEvent::FleetListOpenDetailRequested {
-                    name: entry.name.clone(),
-                    scope: entry.scope,
-                })
+                // Enter selects in the row's own scope and returns to the
+                // roster/setup face. The list/detail editor is not the product.
+                outcome_to_action(self.select_highlighted(entry.scope))
             }
             KeyCode::Char('u') => {
-                let Some(entry) = self.selected_entry() else {
-                    return ViewAction::None;
-                };
-                if entry.legacy {
-                    return ViewAction::None;
-                }
-                match set_selected(&entry.name, FleetScope::Personal, &self.workspace) {
-                    Ok(path) => outcome_to_action(Some(FleetListOutcome::Done {
-                        message: format!(
-                            "Selected Fleet `{}` as your user-global default — wrote {}",
-                            entry.name,
-                            path.display()
-                        ),
-                    })),
-                    Err(err) => outcome_to_action(Some(FleetListOutcome::Done {
-                        message: format!("Selection failed: {err}"),
-                    })),
-                }
+                outcome_to_action(self.select_highlighted(FleetScope::Personal))
             }
             KeyCode::Char('w') => {
-                let Some(entry) = self.selected_entry() else {
-                    return ViewAction::None;
-                };
-                if entry.legacy {
-                    return ViewAction::None;
-                }
-                match set_selected(&entry.name, FleetScope::Workspace, &self.workspace) {
-                    Ok(path) => outcome_to_action(Some(FleetListOutcome::Done {
-                        message: format!(
-                            "Selected Fleet `{}` for this folder only — wrote {}",
-                            entry.name,
-                            path.display()
-                        ),
-                    })),
-                    Err(err) => outcome_to_action(Some(FleetListOutcome::Done {
-                        message: format!("Selection failed: {err}"),
-                    })),
-                }
+                outcome_to_action(self.select_highlighted(FleetScope::Workspace))
             }
             KeyCode::Char('d') => {
                 let Some(entry) = self.selected_entry() else {
@@ -339,23 +329,18 @@ impl ModalView for FleetListView {
 
         // Header: name + selected summary.
         let selected_line = match &self.selected {
-            Some(sel) => format!(
-                "Selected: `{}` ({}) — {}",
-                sel.name,
-                sel.scope.label(),
-                sel.path.display()
-            ),
+            Some(sel) => format!("Selected: `{}` ({})", sel.name, sel.scope.label()),
             None => "No Fleet selected — the session uses its own route and the legacy roster."
                 .to_string(),
         };
         let mut header = vec![
             Line::from(vec![
                 Span::styled(
-                    "─ Fleet ",
+                    "─ Saved Fleets ",
                     Style::default().fg(palette::WHALE_ACTION).bold(),
                 ),
                 Span::styled(
-                    "saved configurations · one operator, one roster, one scope",
+                    "· pick which named Fleet the session uses",
                     Style::default().fg(palette::TEXT_MUTED),
                 ),
             ]),
@@ -395,8 +380,8 @@ impl FleetListView {
                     Style::default().fg(palette::TEXT_MUTED),
                 ),
                 Span::styled(
-                    "  Select a route with /model and /provider, then save it as a Fleet from \
-                     the receipt — or press u/w to select one once it exists.",
+                    "  Select a route with /model and /provider, then /fleet save or \
+                     /fleet save-as. Editing stays on /fleet setup.",
                     Style::default().fg(palette::TEXT_DIM),
                 ),
             ]))
@@ -483,12 +468,13 @@ impl FleetListView {
 
     fn entry_summary(&self, entry: &FleetEntry) -> String {
         if entry.legacy {
-            return entry.path.display().to_string();
+            return "legacy format — open for details".to_string();
         }
         // Read the file to summarize operator + members. Parsing errors are
-        // already shown on the row.
+        // already shown on the row. Paths stay out of the primary row — they
+        // belong in receipts after an explicit write/select/delete.
         let Ok(text) = std::fs::read_to_string(&entry.path) else {
-            return entry.path.display().to_string();
+            return "unreadable".to_string();
         };
         match crate::fleet::store::FleetFile::parse(&text) {
             Ok(fleet) => {
@@ -496,13 +482,9 @@ impl FleetListView {
                     Some(op) => format!("{}/{}", op.provider, op.model),
                     None => "inherits session route".to_string(),
                 };
-                format!(
-                    "operator: {operator} · members: {} · {}",
-                    fleet.members.len(),
-                    entry.path.display()
-                )
+                format!("operator: {operator} · members: {}", fleet.members.len())
             }
-            Err(err) => format!("{} — {err}", entry.path.display()),
+            Err(err) => format!("unreadable: {err}"),
         }
     }
 }
@@ -649,7 +631,10 @@ mod tests {
         };
         assert!(message.contains("DeepSeek Flash"), "{message}");
         assert!(message.contains("user-global"), "{message}");
-        assert!(message.contains("selected"), "{message}");
+        assert!(
+            message.to_ascii_lowercase().contains("selected"),
+            "{message}"
+        );
 
         // The selection really persisted, at the personal scope. The
         // SelectedFleet path is the fleet file the marker names.
@@ -708,6 +693,42 @@ mod tests {
         };
         assert!(message.contains("Deleted Fleet `Temp Fleet`"), "{message}");
         assert!(list_fleets(ws.path()).is_empty());
+    }
+
+    #[test]
+    fn enter_selects_in_the_row_scope_without_opening_detail() {
+        let _lock = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("CODEWHALE_HOME");
+        // SAFETY: serialised by lock_test_env.
+        unsafe { std::env::set_var("CODEWHALE_HOME", sealed_home()) };
+        let ws = tempfile::TempDir::new().unwrap();
+
+        save_in(ws.path(), FleetScope::Workspace, "Folder Fleet");
+        let mut view = FleetListView::new(&app_in(ws.path().to_path_buf()), &Config::default());
+        let idx = view
+            .entries
+            .iter()
+            .position(|e| e.name == "Folder Fleet")
+            .expect("workspace fleet listed");
+        view.row = idx;
+
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::EmitAndClose(ViewEvent::FleetStoreChanged { message }) = action else {
+            panic!("Enter must select and close, not open detail: {action:?}");
+        };
+        assert!(message.contains("Folder Fleet"), "{message}");
+        assert!(message.contains("folder"), "{message}");
+        let sel = selected_fleet(ws.path()).expect("selection");
+        assert_eq!(sel.name, "Folder Fleet");
+        assert_eq!(sel.scope, FleetScope::Workspace);
+
+        // SAFETY: serialised by lock_test_env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("CODEWHALE_HOME", v),
+                None => std::env::remove_var("CODEWHALE_HOME"),
+            }
+        }
     }
 
     #[test]

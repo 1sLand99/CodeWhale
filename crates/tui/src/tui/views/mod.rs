@@ -904,6 +904,10 @@ pub enum ViewEvent {
     /// Open the live workers tab from the unified Fleet surface.
     FleetRosterOpenWorkersRequested,
 
+    /// The roster asks the host to open the secondary named-Fleet switcher
+    /// (`/fleet fleets`). Editing stays on setup; this is pick/select only.
+    FleetRosterOpenFleetsRequested,
+
     /// The Fleet list view asks the host to open a saved Fleet's detail view.
     FleetListOpenDetailRequested {
         name: String,

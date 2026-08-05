@@ -1,6 +1,9 @@
 //! `/fleet` command.
 //!
-//! Fleet = who. `/fleet roster` and `/fleet setup` are the authoring views;
+//! Fleet = who. Bare `/fleet` (and `/fleet roster`) opens the familiar roster
+//! surface for the selected Fleet; `/fleet setup` opens the authoring wizard.
+//! `/fleet fleets` (aliases: `saved`, `manage`) opens the named-Fleet picker
+//! for switching between saved configurations — never the primary face.
 //! `/fleet list|status|interrupt|resume` are control-plane verbs that run
 //! against the **durable** workspace ledger through the shared contract in
 //! `codewhale-lane`, exactly as `codewhale fleet …` does (#1888, #4022).
@@ -24,7 +27,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "fleet",
     aliases: &["loadout", "party"],
-    usage: "/fleet [roster|setup|list|status|workers|interrupt <worker-id>|resume <run-id>]",
+    usage: "/fleet [roster|setup|fleets|list|status|workers|interrupt <worker-id>|resume <run-id>]",
     description_id: MessageId::CmdFleetDescription,
 };
 
@@ -32,9 +35,10 @@ pub(in crate::commands) struct FleetCmd;
 
 fn help_text() -> String {
     let mut out = String::from(
-        "Usage: /fleet [roster|setup|list|status|workers|interrupt <worker-id>|resume <run-id>]\n\n\
+        "Usage: /fleet [roster|setup|fleets|list|status|workers|interrupt <worker-id>|resume <run-id>]\n\n\
          Fleet is who. /fleet (or /fleet roster) opens Fleet workers and orchestration state — \
-         each member's posture, routing, and origin. /fleet setup opens the authoring wizard.\n\n\
+         each member's posture, routing, and origin. /fleet setup opens the authoring wizard. \
+         /fleet fleets (or saved/manage) switches between named saved Fleets.\n\n\
          /fleet list, status, interrupt, and resume act on the durable .codewhale/fleet.jsonl \
          ledger for this workspace — the same records `codewhale fleet` reads and writes. \
          /fleet workers (and /subagents) shows sub-agents in the current TUI session only, which \
@@ -78,9 +82,10 @@ impl RegisterCommand for FleetCmd {
 
     fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
         let Some((verb, target)) = split_verb(arg) else {
-            // The primary Fleet surface is the saved-Fleet list. The legacy
-            // roster remains one subcommand away.
-            return CommandResult::action(AppAction::OpenFleetList);
+            // Primary face: the familiar roster for the selected Fleet.
+            // Named-Fleet switching lives under /fleet fleets — never between
+            // the operator and their fleet.
+            return CommandResult::action(AppAction::OpenFleetRoster);
         };
         match verb {
             "save" | "update" => {
@@ -102,18 +107,20 @@ impl RegisterCommand for FleetCmd {
         }
         match verb {
             "roster" | "party" | "loadout" | "roles" | "role" | "profiles" | "profile" => {
-                // The old per-role roster; the saved-Fleet list is /fleet.
                 CommandResult::action(AppAction::OpenFleetRoster)
             }
             "setup" | "edit" | "new" => CommandResult::action(AppAction::OpenFleetSetup),
+            // Named saved Fleets — secondary surface for multi-Fleet pick/switch.
+            // Deliberately not "list": that verb is the durable ledger (#4022).
+            "fleets" | "saved" | "manage" => CommandResult::action(AppAction::OpenFleetList),
             // The current-session sub-agent projection, named for what it is.
             "workers" | "worker" | "agents" | "subagents" => super::core::subagents(app),
             "help" | "?" => CommandResult::message(help_text()),
             other => match ControlOperation::parse_verb(ControlDomain::Fleet, other) {
                 Some(operation) => run_control(app, operation, target),
                 None => CommandResult::error(format!(
-                    "Unknown /fleet target '{other}'. Use roster, setup, list, status, workers, \
-                     interrupt <worker-id>, or resume <run-id>."
+                    "Unknown /fleet target '{other}'. Use roster, setup, fleets, list, status, \
+                     workers, interrupt <worker-id>, or resume <run-id>."
                 )),
             },
         }
@@ -144,13 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn fleet_command_opens_fleet_list_view() {
+    fn fleet_command_opens_roster_view() {
         let mut app = test_app();
 
         let result = FleetCmd::execute(&mut app, None);
 
-        assert_eq!(result.action, Some(AppAction::OpenFleetList));
+        assert_eq!(result.action, Some(AppAction::OpenFleetRoster));
         assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn fleet_fleets_args_open_named_fleet_picker() {
+        for arg in ["fleets", "saved", "manage"] {
+            let mut app = test_app();
+
+            let result = FleetCmd::execute(&mut app, Some(arg));
+
+            assert_eq!(result.action, Some(AppAction::OpenFleetList), "{arg}");
+            assert!(result.message.is_none(), "{arg}");
+        }
     }
 
     #[test]
@@ -251,7 +270,7 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.action.is_none());
         let message = result.message.as_deref().unwrap_or_default();
-        for surface in ["/fleet roster", "/fleet setup", "/fleet status"] {
+        for surface in ["/fleet roster", "/fleet setup", "/fleet fleets", "/fleet status"] {
             assert!(message.contains(surface), "help must describe {surface}");
         }
         for truth in [

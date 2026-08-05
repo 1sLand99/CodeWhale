@@ -1530,8 +1530,9 @@ base_url = "{base_url}"
     let mut tui = common_tui_builder(&ws).spawn()?;
     enter_launch_session(&mut tui)?;
 
-    // 1. /fleet shows the migration banner and no selection.
-    type_and_submit(&mut tui, "/fleet")?;
+    // 1. /fleet fleets (secondary named-Fleet picker) shows the migration
+    // banner and no selection. Bare /fleet stays on the roster face.
+    type_and_submit(&mut tui, "/fleet fleets")?;
     tui.wait_for_text("legacy role profile", INTERACTION_TIMEOUT)?;
     tui.wait_for_text("No Fleet selected", INTERACTION_TIMEOUT)?;
     // 2. m migrates with a receipt; Esc closes the pager, Esc closes the list.
@@ -1572,8 +1573,9 @@ base_url = "{base_url}"
     enter_launch_session(&mut tui)?;
     tui.wait_for_text("deepseek-v4-pro", INTERACTION_TIMEOUT)?;
 
-    // 7. The list shows the saved Fleet with its user scope and selection.
-    type_and_submit(&mut tui, "/fleet")?;
+    // 7. The named-Fleet picker shows the saved Fleet with its user scope
+    // and selection (operator summary, not a filesystem path).
+    type_and_submit(&mut tui, "/fleet fleets")?;
     tui.wait_for_text("DeepSeek", INTERACTION_TIMEOUT)?;
     tui.wait_for_text("[user]", INTERACTION_TIMEOUT)?;
     tui.wait_for_text("Selected", INTERACTION_TIMEOUT)?;
