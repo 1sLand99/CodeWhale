@@ -270,7 +270,12 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.action.is_none());
         let message = result.message.as_deref().unwrap_or_default();
-        for surface in ["/fleet roster", "/fleet setup", "/fleet fleets", "/fleet status"] {
+        for surface in [
+            "/fleet roster",
+            "/fleet setup",
+            "/fleet fleets",
+            "/fleet status",
+        ] {
             assert!(message.contains(surface), "help must describe {surface}");
         }
         for truth in [

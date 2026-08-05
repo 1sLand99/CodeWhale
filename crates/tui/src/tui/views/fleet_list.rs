@@ -217,12 +217,8 @@ impl ModalView for FleetListView {
                 // roster/setup face. The list/detail editor is not the product.
                 outcome_to_action(self.select_highlighted(entry.scope))
             }
-            KeyCode::Char('u') => {
-                outcome_to_action(self.select_highlighted(FleetScope::Personal))
-            }
-            KeyCode::Char('w') => {
-                outcome_to_action(self.select_highlighted(FleetScope::Workspace))
-            }
+            KeyCode::Char('u') => outcome_to_action(self.select_highlighted(FleetScope::Personal)),
+            KeyCode::Char('w') => outcome_to_action(self.select_highlighted(FleetScope::Workspace)),
             KeyCode::Char('d') => {
                 let Some(entry) = self.selected_entry() else {
                     return ViewAction::None;

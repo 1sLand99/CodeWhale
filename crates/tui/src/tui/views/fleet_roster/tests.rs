@@ -301,7 +301,8 @@ fn roster_loads_config_members_through_the_shared_merge() {
         profiles,
         ..codewhale_config::FleetConfigToml::default()
     };
-    let view = FleetRosterView::from_parts(operator(), FleetRoster::load(&config, tmp.path()), None);
+    let view =
+        FleetRosterView::from_parts(operator(), FleetRoster::load(&config, tmp.path()), None);
     let extra = view.members.iter().find(|m| m.id == "docs-writer").unwrap();
     assert_eq!(extra.origin, ProfileOrigin::Config);
     assert_eq!(
