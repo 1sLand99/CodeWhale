@@ -7575,13 +7575,23 @@ fn apply_coordination_detail_projection(
             .unwrap_or("another Codewhale process owns delegated coordination for this workspace");
         let same_process_handover =
             note.contains(crate::tools::subagent::COORDINATION_SAME_PROCESS_HANDOVER);
-        let message = format!(
-            "Delegated coordination unavailable — {note}. Job rows still settle locally; durable fleet state is owned elsewhere."
-        );
+        // The strip is one row. The old copy opened with the diagnosis
+        // ("Delegated coordination unavailable — ") and buried the cause
+        // behind a `{note}` carrying a pid, an absolute workspace path, and an
+        // errno, so a truncated strip showed `Delegated coordination
+        // unavailable — an…` and taught the user nothing. Lead with the fact
+        // that explains it — a second session is open here — and leave the pid
+        // and path to the coordination detail view, which already renders
+        // `process_lock_note` in full.
+        let message = if note.contains(crate::tools::subagent::COORDINATION_LOCK_TIMEOUT_MARKER) {
+            "Timed out claiming delegated coordination for this workspace — job rows still settle locally.".to_string()
+        } else {
+            "Another CodeWhale session in this workspace owns delegated coordination — job rows still settle locally.".to_string()
+        };
         let already = app
             .sticky_status
             .as_ref()
-            .is_some_and(|toast| toast.text.contains("Delegated coordination unavailable"));
+            .is_some_and(|toast| toast.text.contains("delegated coordination"));
         if !already && !same_process_handover {
             app.set_sticky_status(
                 message,

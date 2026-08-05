@@ -149,32 +149,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         ));
     }
 
-    if tier != ShellTier::Compact
-        && let Some(toast) = status_toast.filter(|toast| {
-            // Completion may land in the same event drain as an approval
-            // denial. Keep unresolved attention/error receipts visible after
-            // `done`; only routine informational completion copy yields to the
-            // stable done marker.
-            let survives_completion = matches!(
-                toast.level,
-                crate::tui::app::StatusToastLevel::Warning
-                    | crate::tui::app::StatusToastLevel::Error
-            );
-            (phase != ShellPhase::Done || survives_completion)
-                && !toast.text.trim().is_empty()
-                && toast.text.trim() != phase_label.as_ref()
-        })
-    {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
-        left.push(Span::styled(
-            truncate_to_width(toast.text.trim(), 40),
-            Style::default().fg(crate::tui::ui::status_color(toast.level)),
-        ));
-    }
-
+    // The ledger chips are built before the toast so the toast can be given
+    // whatever width is genuinely left over. They are appended after it, so
+    // the visual order is unchanged.
+    let mut tail: Vec<Span<'static>> = Vec::new();
     let chip = app.cumulative_usage_chip();
     if tier != ShellTier::Compact
         && let Some(amount) = match &chip {
@@ -185,11 +163,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             _ => None,
         }
     {
-        left.push(Span::styled(
+        tail.push(Span::styled(
             " · ",
             Style::default().fg(app.ui_theme.text_dim),
         ));
-        left.push(Span::styled(
+        tail.push(Span::styled(
             amount,
             Style::default().fg(app.ui_theme.text_muted),
         ));
@@ -199,11 +177,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         && app.status_items.contains(&crate::config::StatusItem::Cache)
         && let Some(pct) = session_cache_hit_percentage(app)
     {
-        left.push(Span::styled(
+        tail.push(Span::styled(
             " · ",
             Style::default().fg(app.ui_theme.text_dim),
         ));
-        left.push(Span::styled(
+        tail.push(Span::styled(
             format!("cache {pct}%"),
             Style::default().fg(app.ui_theme.text_muted),
         ));
@@ -237,6 +215,48 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
 
     let right_width = right_text.width();
     let available = usize::from(area.width);
+
+    if tier != ShellTier::Compact
+        && let Some(toast) = status_toast.filter(|toast| {
+            // Completion may land in the same event drain as an approval
+            // denial. Keep unresolved attention/error receipts visible after
+            // `done`; only routine informational completion copy yields to the
+            // stable done marker.
+            let survives_completion = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (phase != ShellPhase::Done || survives_completion)
+                && !toast.text.trim().is_empty()
+                && toast.text.trim() != phase_label.as_ref()
+        })
+    {
+        // The budget used to be a flat 40 columns no matter how wide the
+        // terminal was, which cut a warning whose entire job is to explain an
+        // unexpected state down to `Delegated coordination unavailable — an…`.
+        // Spend the row that actually exists: everything left after the phase
+        // marker, the ledger chips, the key hints, and a gap between them.
+        let toast_budget = available
+            .saturating_sub(
+                span_width(&left)
+                    + TOAST_SEPARATOR_WIDTH
+                    + span_width(&tail)
+                    + right_width
+                    + TOAST_RIGHT_GAP,
+            )
+            .max(TOAST_MIN_WIDTH);
+        left.push(Span::styled(
+            " · ",
+            Style::default().fg(app.ui_theme.text_dim),
+        ));
+        left.push(Span::styled(
+            truncate_to_width(toast.text.trim(), toast_budget),
+            Style::default().fg(crate::tui::ui::status_color(toast.level)),
+        ));
+    }
+    left.extend(tail);
+
     let left_width = span_width(&left);
     if right_width > 0 && left_width + right_width < available {
         left.push(Span::raw(" ".repeat(available - left_width - right_width)));
@@ -247,6 +267,16 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     }
     Paragraph::new(Line::from(left)).render(area, buf);
 }
+
+/// Width of the ` · ` separator painted before the toast.
+const TOAST_SEPARATOR_WIDTH: usize = 3;
+/// Blank columns kept between the toast and the right-aligned key hints, so
+/// the two never read as one run-on sentence.
+const TOAST_RIGHT_GAP: usize = 2;
+/// Floor for the toast budget. Below this the strip is too narrow to say
+/// anything useful either way, and clamping keeps the arithmetic from
+/// collapsing the toast to nothing on a cramped terminal.
+const TOAST_MIN_WIDTH: usize = 24;
 
 #[cfg(test)]
 mod tests {

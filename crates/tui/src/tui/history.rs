@@ -40,7 +40,7 @@ use checklist::{ChecklistChange, ChecklistItemSnapshot, ChecklistSnapshot};
 use constants::{
     ASSISTANT_GLYPH, FOREGROUND_SHELL_WAIT_HINT, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT,
     TOOL_DONE_SYMBOL, TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_LINE_LIMIT,
-    TRANSCRIPT_RAIL, USER_GLYPH,
+    TOOL_SUCCESS_OUTPUT_PREVIEW_LINES, TOOL_SUMMARY_CARD_LINES, TRANSCRIPT_RAIL, USER_GLYPH,
 };
 #[cfg(test)]
 use constants::{TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS};
@@ -386,8 +386,8 @@ impl HistoryCell {
             ),
             HistoryCell::Tool(cell) if !options.show_tool_details && !cell.is_failed() => {
                 let mut lines = cell.lines_with_motion(width, options.low_motion);
-                if lines.len() > 2 {
-                    lines.truncate(2);
+                if lines.len() > TOOL_SUMMARY_CARD_LINES {
+                    lines.truncate(TOOL_SUMMARY_CARD_LINES);
                     lines.push(details_affordance_line(
                         &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details"),
                         Style::default().fg(palette::TEXT_MUTED).italic(),
@@ -911,10 +911,14 @@ impl ExecCell {
             return wrap_card_rail(lines);
         }
 
-        // A successful shell call is rarely worth its full body — collapse it
-        // to the single header line in live mode. The bottom shell strip owns
-        // live/background detail, failures stay fully verbose so errors remain
-        // visible, and Transcript mode keeps everything for the pager/clipboard.
+        // A successful shell call does not earn its full body in live mode —
+        // failures stay fully verbose so errors remain visible, and Transcript
+        // mode keeps everything for the pager/clipboard. But it does earn a
+        // glimpse: collapsing success to the bare header meant a `run` card
+        // showed literally nothing of what the command produced, and you had
+        // to expand every single one to find out whether anything happened.
+        // `TOOL_SUCCESS_OUTPUT_PREVIEW_LINES` rows show roughly half of real
+        // successful runs in full and the opening of the rest.
         if mode == RenderMode::Live
             && self
                 .output
@@ -925,6 +929,16 @@ impl ExecCell {
             return wrap_card_rail(lines);
         }
         if mode == RenderMode::Live && self.status == ToolStatus::Success {
+            if self.interaction.is_none()
+                && let Some(output) = self.output.as_ref().or(self.live_output.as_ref())
+            {
+                lines.extend(render_exec_output_mode(
+                    output,
+                    width,
+                    TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
+                    mode,
+                ));
+            }
             if let Some(duration_ms) = self.duration_ms
                 && duration_ms >= 1000
             {

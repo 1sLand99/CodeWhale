@@ -3832,7 +3832,12 @@ fn resize_preserves_scrolled_transcript_position() {
 
     app.handle_resize(120, 40);
 
-    let meta = vec![TranscriptLineMeta::Spacer; 240];
+    let meta = vec![
+        TranscriptLineMeta::Spacer {
+            copy_prefix_width: 0
+        };
+        240
+    ];
     let (_, top) = app.viewport.transcript_scroll.resolve_top(&meta, 200);
     assert_eq!(top, 42);
     assert_eq!(app.viewport.pending_scroll_delta, 0);

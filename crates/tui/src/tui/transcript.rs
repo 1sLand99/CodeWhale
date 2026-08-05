@@ -59,6 +59,10 @@ struct CachedCell {
     /// Whether this cell's rendered output was empty (e.g. Thinking hidden).
     /// Cached so we can skip empty cells without re-rendering.
     is_empty: bool,
+    /// Whether the cell's last rendered line is blank. A cell that already
+    /// ends on a blank row must not also receive a separator row after it —
+    /// two stacked blanks look worse than none.
+    ends_blank: bool,
     /// Semantic role used by the transcript's explicit boundary matrix.
     /// Keeping the role in the cache makes spacing independent of rendered
     /// strings, theme colors, terminal depth, and animation state.
@@ -117,13 +121,27 @@ impl TranscriptBlockKind {
     }
 }
 
-/// Strength of a visible boundary. These three levels are the complete
+/// Rows a single visible block separation is worth.
+///
+/// One blank row — never two. The transcript scrolls inside a terminal
+/// viewport, so every separator row is a row of content the reader loses.
+/// One row is enough to read two blocks as two paragraphs; two rows halve
+/// the visible transcript for no extra legibility. `Turn` at `Spacious` is
+/// the sole deliberate exception, and it is opt-in.
+const BLOCK_SEPARATOR_ROWS: usize = 1;
+
+/// Strength of a visible boundary. These four levels are the complete
 /// transcript spacing vocabulary: no blanket per-cell padding is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranscriptBoundary {
-    /// Two cells are one response/activity group.
+    /// Two cells are literally continuation of one another — successive
+    /// reasoning segments, or successive prose blocks of one answer.
     Joined,
-    /// Compact transition into or out of tools, Work, or notices.
+    /// Two cells sit inside one tool-card rail group. Separated by a rail
+    /// spacer (`│`) rather than a bare blank row so the card box survives.
+    GroupedTool,
+    /// Transition between response phases, or into/out of tools, Work, or
+    /// notices.
     Activity,
     /// A human turn boundary; always visible, even at compact density.
     Turn,
@@ -384,6 +402,7 @@ impl TranscriptViewCache {
                         copy_separators: Arc::new(Vec::new()),
                         copy_prefix_widths: Arc::new(Vec::new()),
                         is_empty: true,
+                        ends_blank: false,
                         kind: TranscriptBlockKind::Answer,
                         is_tool_groupable: false,
                         incremental_markdown: Some(Box::default()),
@@ -427,6 +446,7 @@ impl TranscriptViewCache {
                 }
                 cached.revision = current_rev;
                 cached.is_empty = cached.lines.is_empty();
+                cached.ends_blank = last_line_is_blank(&cached.lines);
                 cached.kind = TranscriptBlockKind::Answer;
                 cached.is_tool_groupable = false;
                 // The hot-tail style also changes on the preceding settled
@@ -453,6 +473,7 @@ impl TranscriptViewCache {
                 copy_separators.push(rendered_line.copy_separator_after);
             }
             let is_empty = lines.is_empty();
+            let ends_blank = last_line_is_blank(&lines);
             new_per_cell.push(CachedCell {
                 revision: current_rev,
                 lines: Arc::new(lines),
@@ -460,6 +481,7 @@ impl TranscriptViewCache {
                 copy_separators: Arc::new(copy_separators),
                 copy_prefix_widths: Arc::new(copy_prefix_widths),
                 is_empty,
+                ends_blank,
                 kind: TranscriptBlockKind::for_cell(cell),
                 is_tool_groupable,
                 incremental_markdown: None,
@@ -531,7 +553,7 @@ impl TranscriptViewCache {
             .iter()
             .position(|meta| match meta {
                 TranscriptLineMeta::CellLine { cell_index, .. } => *cell_index >= first_cell,
-                TranscriptLineMeta::Spacer => false,
+                TranscriptLineMeta::Spacer { .. } => false,
             })
             .unwrap_or(self.lines.len());
         self.lines.truncate(truncate_at);
@@ -658,12 +680,18 @@ impl TranscriptViewCache {
             }
 
             if let Some(next) = next_visible_cell(&self.per_cell, cell_index) {
-                let spacer_rows = spacer_rows_between(cached, next, spacing);
-                for _ in 0..spacer_rows {
-                    self.lines.push(Line::from(""));
+                let separator = separator_between(cached, next, spacing);
+                let rail = separator
+                    .railed
+                    .then_some(crate::tui::widgets::tool_card::CardRail::Middle);
+                for _ in 0..separator.rows {
+                    let line = line_with_group_rail(&Line::from(""), rail, usize::from(self.width));
+                    let copy_prefix_width = compute_rail_prefix_width(&line);
+                    self.rail_prefix_widths.push(copy_prefix_width);
+                    self.lines.push(line);
                     self.line_links.push(Vec::new());
-                    self.line_meta.push(TranscriptLineMeta::Spacer);
-                    self.rail_prefix_widths.push(0);
+                    self.line_meta
+                        .push(TranscriptLineMeta::Spacer { copy_prefix_width });
                 }
             }
         }
@@ -721,19 +749,51 @@ fn strip_cell_local_tool_rail(line: &mut Line<'static>) {
     }
 }
 
-fn spacer_rows_between(
+/// Whether a cell's own render already ends on a visually blank row.
+fn last_line_is_blank(lines: &[Line<'static>]) -> bool {
+    lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+}
+
+/// One block separation: how many rows, and whether those rows carry the
+/// tool-card rail. Kept as one value so the flatten loop cannot emit the row
+/// count from one rule and the decoration from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockSeparator {
+    rows: usize,
+    railed: bool,
+}
+
+fn separator_between(
     current: &CachedCell,
     next: &CachedCell,
     spacing: TranscriptSpacing,
-) -> usize {
-    spacer_rows_for_boundary(
-        transcript_boundary(
-            current.kind,
-            next.kind,
-            same_tool_activity_group(current, next),
-        ),
-        spacing,
-    )
+) -> BlockSeparator {
+    let boundary = transcript_boundary(
+        current.kind,
+        next.kind,
+        same_tool_activity_group(current, next),
+    );
+    let mut rows = spacer_rows_for_boundary(boundary, spacing);
+    // Never stack two blank rows. A cell whose own render already ends on a
+    // blank line has paid for the separation; adding another on top reads as
+    // a hole, and at Spacious it would be a three-row gap.
+    if !current.ends_blank {
+        return BlockSeparator {
+            rows,
+            railed: boundary == TranscriptBoundary::GroupedTool,
+        };
+    }
+    if boundary == TranscriptBoundary::GroupedTool {
+        // A railed spacer is not a blank row — the rail must continue.
+        return BlockSeparator { rows, railed: true };
+    }
+    rows = rows.saturating_sub(1);
+    BlockSeparator {
+        rows,
+        railed: false,
+    }
 }
 
 /// Adjacent tool cells share one rail only when they represent the same kind
@@ -751,7 +811,9 @@ fn transcript_boundary(
 ) -> TranscriptBoundary {
     if same_tool_group {
         debug_assert_eq!(current, next);
-        return TranscriptBoundary::Joined;
+        // Two distinct tool calls that happen to share a rail are still two
+        // things the reader has to tell apart. Give them a rail spacer.
+        return TranscriptBoundary::GroupedTool;
     }
 
     // A user block is the only unambiguous turn delimiter available to the
@@ -762,19 +824,23 @@ fn transcript_boundary(
         return TranscriptBoundary::Turn;
     }
 
-    // Reasoning and answer prose are phases of one model response. Joining
-    // them also keeps the row budget stable when streaming reasoning settles
-    // into the final answer.
-    if matches!(
-        (current, next),
-        (
-            TranscriptBlockKind::Reasoning | TranscriptBlockKind::Answer,
+    // Successive cells of the *same* model phase are one block split across
+    // cells — consecutive reasoning segments, or an answer whose settled and
+    // streaming halves live in separate cells. Blank rows appearing between
+    // those mid-stream would jitter the row budget, so keep them joined.
+    if current == next
+        && matches!(
+            current,
             TranscriptBlockKind::Reasoning | TranscriptBlockKind::Answer
         )
-    ) {
+    {
         return TranscriptBoundary::Joined;
     }
 
+    // Everything else — including reasoning handing off to answer prose — is
+    // a boundary the reader needs to see. Reasoning running straight into the
+    // answer with no blank row was the specific density complaint this matrix
+    // exists to answer.
     TranscriptBoundary::Activity
 }
 
@@ -784,12 +850,15 @@ const fn spacer_rows_for_boundary(
 ) -> usize {
     match (boundary, spacing) {
         (TranscriptBoundary::Joined, _) => 0,
-        (TranscriptBoundary::Activity, TranscriptSpacing::Compact) => 0,
-        (TranscriptBoundary::Activity, _) => 1,
+        (
+            TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity,
+            TranscriptSpacing::Compact,
+        ) => 0,
+        (TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity, _) => BLOCK_SEPARATOR_ROWS,
         (TranscriptBoundary::Turn, TranscriptSpacing::Compact | TranscriptSpacing::Comfortable) => {
-            1
+            BLOCK_SEPARATOR_ROWS
         }
-        (TranscriptBoundary::Turn, TranscriptSpacing::Spacious) => 2,
+        (TranscriptBoundary::Turn, TranscriptSpacing::Spacious) => BLOCK_SEPARATOR_ROWS + 1,
     }
 }
 

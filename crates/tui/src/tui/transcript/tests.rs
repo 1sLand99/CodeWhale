@@ -85,9 +85,9 @@ fn spacer_rows_after_cell(cache: &TranscriptViewCache, target_cell: usize) -> us
                 saw_target = true;
                 spacer_rows = 0;
             }
-            TranscriptLineMeta::Spacer if saw_target => spacer_rows += 1,
+            TranscriptLineMeta::Spacer { .. } if saw_target => spacer_rows += 1,
             TranscriptLineMeta::CellLine { .. } if saw_target => break,
-            TranscriptLineMeta::Spacer | TranscriptLineMeta::CellLine { .. } => {}
+            TranscriptLineMeta::Spacer { .. } | TranscriptLineMeta::CellLine { .. } => {}
         }
     }
     spacer_rows
@@ -501,27 +501,41 @@ fn adjacent_tool_cells_render_as_one_railed_group() {
     );
     assert!(
         !lines.iter().any(String::is_empty),
-        "adjacent tool cells should not be separated by blank spacer rows: {lines:?}"
+        "adjacent tool cells must never be separated by a bare blank row — that \
+         would tear the card box open: {lines:?}"
+    );
+    // They are separated, though: by a rail-carrying spacer, so two distinct
+    // commands read as two blocks without the group losing its outline.
+    assert!(
+        lines.iter().any(|line| line.trim_end() == "\u{2502}"),
+        "distinct tool cells inside one rail group need a rail spacer between \
+         them: {lines:?}"
     );
 }
 
 #[test]
-fn semantic_boundary_matrix_has_three_deliberate_rhythm_levels() {
+fn semantic_boundary_matrix_has_four_deliberate_rhythm_levels() {
     use TranscriptBlockKind::{Answer, DurableWork, Notice, Reasoning, ToolAction, User};
-    use TranscriptBoundary::{Activity, Joined, Turn};
+    use TranscriptBoundary::{Activity, GroupedTool, Joined, Turn};
 
     let cases = [
         (User, Answer, false, Turn),
         (User, ToolAction, false, Turn),
         (DurableWork, User, false, Turn),
-        (Reasoning, Answer, false, Joined),
-        (Answer, Reasoning, false, Joined),
+        // Reasoning handing off to the answer is a phase change the reader
+        // has to see. Running the two together with no blank row is the
+        // density complaint this matrix exists to answer.
+        (Reasoning, Answer, false, Activity),
+        (Answer, Reasoning, false, Activity),
+        // Successive cells of the *same* phase are one block split across
+        // cells; a blank row there would jitter mid-stream.
         (Answer, Answer, false, Joined),
+        (Reasoning, Reasoning, false, Joined),
         (Answer, ToolAction, false, Activity),
         (ToolAction, Reasoning, false, Activity),
         (Notice, DurableWork, false, Activity),
-        (ToolAction, ToolAction, true, Joined),
-        (DurableWork, DurableWork, true, Joined),
+        (ToolAction, ToolAction, true, GroupedTool),
+        (DurableWork, DurableWork, true, GroupedTool),
         (ToolAction, DurableWork, false, Activity),
     ];
 
@@ -557,6 +571,46 @@ fn semantic_boundary_matrix_has_three_deliberate_rhythm_levels() {
         spacer_rows_for_boundary(Activity, TranscriptSpacing::Spacious),
         1
     );
+    assert_eq!(
+        spacer_rows_for_boundary(GroupedTool, TranscriptSpacing::Compact),
+        0,
+        "compact density buys its density by spending no separator rows"
+    );
+    assert_eq!(
+        spacer_rows_for_boundary(GroupedTool, TranscriptSpacing::Comfortable),
+        1
+    );
+    assert_eq!(
+        spacer_rows_for_boundary(GroupedTool, TranscriptSpacing::Spacious),
+        1,
+        "one row is the whole vocabulary above compact — never two"
+    );
+}
+
+/// Separation is one row or none. Nothing in the matrix may produce a
+/// double blank, because a scrolling terminal cannot afford it.
+#[test]
+fn no_boundary_ever_spends_more_than_one_row_below_spacious_turns() {
+    use TranscriptBoundary::{Activity, GroupedTool, Joined, Turn};
+
+    for boundary in [Joined, GroupedTool, Activity, Turn] {
+        for spacing in [
+            TranscriptSpacing::Compact,
+            TranscriptSpacing::Comfortable,
+            TranscriptSpacing::Spacious,
+        ] {
+            let rows = spacer_rows_for_boundary(boundary, spacing);
+            let allowed = if boundary == Turn && spacing == TranscriptSpacing::Spacious {
+                2
+            } else {
+                BLOCK_SEPARATOR_ROWS
+            };
+            assert!(
+                rows <= allowed,
+                "{boundary:?} at {spacing:?} spent {rows} rows (max {allowed})"
+            );
+        }
+    }
 }
 
 #[test]
@@ -621,7 +675,7 @@ fn durable_work_starts_a_new_activity_rail_without_wasting_compact_rows() {
                         .map(|span| span.content.as_ref())
                         .collect::<String>(),
                 ),
-                TranscriptLineMeta::Spacer | TranscriptLineMeta::CellLine { .. } => None,
+                TranscriptLineMeta::Spacer { .. } | TranscriptLineMeta::CellLine { .. } => None,
             })
             .collect::<Vec<_>>()
     };
@@ -651,7 +705,11 @@ fn durable_work_starts_a_new_activity_rail_without_wasting_compact_rows() {
             ..TranscriptRenderOptions::default()
         },
     );
-    assert_eq!(spacer_rows_after_cell(&comfortable, 0), 0);
+    assert_eq!(
+        spacer_rows_after_cell(&comfortable, 0),
+        1,
+        "two distinct commands sharing a rail still need one row between them"
+    );
     assert_eq!(
         spacer_rows_after_cell(&comfortable, 1),
         1,
@@ -791,7 +849,10 @@ fn transcript_rhythm_is_width_and_reduced_motion_invariant() {
         user_cell("Proceed to the final verification."),
     ];
     let revisions = vec![1u64; cells.len()];
-    let expected = [1, 0, 1, 1, 1, 1, 0];
+    // user | reasoning | answer | tool | work | answer | user.
+    // Every seam is one row: the reasoning→answer seam (index 1) used to be
+    // the one place the transcript ran two blocks together.
+    let expected = [1, 1, 1, 1, 1, 1, 0];
 
     for width in [40, 80, 100, 140] {
         for low_motion in [false, true] {
@@ -1281,4 +1342,40 @@ fn folded_thinking_with_collapsed_cells_uses_original_indices() {
         folded_filtered < expanded_filtered,
         "folded cell via index map should render fewer lines: folded={folded_filtered} expanded={expanded_filtered}"
     );
+}
+
+#[test]
+fn zz_dump_spacing() {
+    let cells = vec![
+        user_cell("add spacing to the transcript"),
+        HistoryCell::Thinking {
+            content: "The user wants vertical rhythm. I should look at the transcript cache first."
+                .to_string(),
+            streaming: false,
+            duration_secs: Some(3.0),
+        },
+        assistant_cell("I'll start by reading the renderer.", false),
+        exec_tool_cell_with_output(
+            "rg -n spacer crates/tui".to_string().as_str(),
+            "crates/tui/src/tui/transcript.rs:661\ncrates/tui/src/tui/transcript.rs:724"
+                .to_string(),
+        ),
+        exec_tool_cell_with_output("cargo fmt --all", "".to_string()),
+        assistant_cell(
+            "Done — spacing is centralized in the transcript cache.",
+            false,
+        ),
+    ];
+    let revisions = vec![1u64; 6];
+    let mut cache = TranscriptViewCache::new();
+    let opts = TranscriptRenderOptions {
+        low_motion: true,
+        ..TranscriptRenderOptions::default()
+    };
+    cache.ensure(&cells, &revisions, 80, opts);
+    println!("=== BEGIN DUMP (comfortable) ===");
+    for (i, l) in plain_lines(&cache).iter().enumerate() {
+        println!("{i:3} |{}|", l.trim_end());
+    }
+    println!("=== END DUMP ===");
 }

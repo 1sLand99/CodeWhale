@@ -1,3 +1,7 @@
+use super::constants::{
+    TOOL_OUTPUT_HEAD_LINES, TOOL_OUTPUT_LINE_LIMIT, TOOL_OUTPUT_TAIL_LINES,
+    TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
+};
 use super::{
     ASSISTANT_GLYPH, ExecCell, ExecSource, GenericToolCell, HistoryCell, McpToolCell,
     PlanUpdateCell, REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, TOOL_RUNNING_SYMBOLS,
@@ -2472,18 +2476,22 @@ fn completed_short_thinking_without_summary_stays_visible_in_live_view() {
 }
 
 #[test]
-fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
-    // #4146/#4148: a completed-reasoning receipt in the default (collapsed)
-    // transcript must not expose internal function names; the full body —
-    // identifiers intact — stays reachable on expand and in the transcript.
+fn completed_reasoning_receipt_shows_verbatim_body_and_expands() {
+    // The old #4146/#4148 scrub could not tell CodeWhale's identifiers from
+    // the user's, and in a coding harness the user's dominate: it rendered
+    // `short_dated_radar.py` as `….py`, `data/market_data/` as `data/…/`, and
+    // every env var and module name as a bare `…`, which made the default
+    // reasoning view unreadable. It also protected nothing — the full body
+    // was always one keypress away on Space/Ctrl+O. A reasoning receipt now
+    // shows the model's own words verbatim; only the line budget truncates.
     let cell = HistoryCell::Thinking {
         content: "I will call refresh_catalog_cache to refresh the model list.".to_string(),
         streaming: false,
         duration_secs: Some(1.0),
     };
 
-    // Default collapsed view: identifier scrubbed, prose preserved, and the
-    // expand affordance offered.
+    // Default collapsed view: the identifier is shown, not scrubbed, and a
+    // short body needs no expand affordance.
     let collapsed = cell.lines_with_options(
         80,
         TranscriptRenderOptions {
@@ -2493,21 +2501,49 @@ fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
     );
     let collapsed_text = lines_text(&collapsed);
     assert!(
-        !collapsed_text.contains("refresh_catalog_cache"),
-        "internal function name must not leak by default: {collapsed_text}"
+        collapsed_text.contains("refresh_catalog_cache"),
+        "reasoning must be verbatim in the collapsed receipt: {collapsed_text}"
     );
     assert!(
         collapsed_text.contains("refresh the model list"),
         "surrounding prose must still read: {collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("Ctrl+O:detail"),
-        "collapsed receipt must offer the expand affordance: {collapsed_text}"
+        !collapsed_text.contains("Ctrl+O:detail"),
+        "a short completed receipt fits the budget and needs no affordance: {collapsed_text}"
     );
 
-    // Expanded view (Space toggles the fold relative to the default): the full
-    // identifier is restored.
-    let expanded = cell.lines_with_options_folded(
+    // A long body truncates at the line budget and offers the expand
+    // affordance; expanding restores every line, identifiers intact.
+    let long_body = (1..=20)
+        .map(|i| format!("step {i:02}: refresh_catalog_cache iteration"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let long_cell = HistoryCell::Thinking {
+        content: long_body.clone(),
+        streaming: false,
+        duration_secs: Some(1.0),
+    };
+    let long_collapsed = long_cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+    let long_collapsed_text = lines_text(&long_collapsed);
+    assert!(
+        long_collapsed_text.contains("Space:expand · Ctrl+O:detail"),
+        "a truncated receipt must offer the expand affordance: {long_collapsed_text}"
+    );
+    assert!(
+        long_collapsed_text.contains("refresh_catalog_cache"),
+        "the shown head must keep identifiers verbatim: {long_collapsed_text}"
+    );
+
+    // Expanded view (Space toggles the fold relative to the default): every
+    // line is restored.
+    let expanded = long_cell.lines_with_options_folded(
         80,
         TranscriptRenderOptions {
             low_motion: true,
@@ -2515,22 +2551,27 @@ fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
         },
         true,
     );
-    assert!(
-        lines_text(&expanded).contains("refresh_catalog_cache"),
-        "expanded reasoning must restore the full identifier"
-    );
-
-    // Transcript / pager / clipboard keeps the full, un-redacted body.
-    assert!(
-        lines_text(&cell.transcript_lines(80)).contains("refresh_catalog_cache"),
-        "transcript must keep the full identifier"
-    );
+    let expanded_text = lines_text(&expanded);
+    for i in 1..=20 {
+        assert!(
+            expanded_text.contains(&format!("step {i:02}: refresh_catalog_cache iteration")),
+            "expanded reasoning must restore every line ({i}): {expanded_text}"
+        );
+    }
 }
 
 #[test]
 fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
+    // A 20-line body guarantees the collapsed fold actually truncates, so the
+    // Space toggle is observable: default-expanded shows everything, Space
+    // collapses to the 10-line budget with the expand affordance, and both
+    // states show the model's identifiers verbatim (no #4146/#4148 scrub).
+    let long_body = (1..=20)
+        .map(|i| format!("step {i:02}: refresh_catalog_cache iteration"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let cell = HistoryCell::Thinking {
-        content: "I will call refresh_catalog_cache to refresh the model list.".to_string(),
+        content: long_body.clone(),
         streaming: false,
         duration_secs: Some(1.0),
     };
@@ -2541,21 +2582,94 @@ fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
     };
 
     let expanded = cell.lines_with_options_folded(80, options, false);
-    assert!(
-        lines_text(&expanded).contains("refresh_catalog_cache"),
-        "the configured default must show the full reasoning body"
-    );
+    let expanded_text = lines_text(&expanded);
+    for i in 1..=20 {
+        assert!(
+            expanded_text.contains(&format!("step {i:02}: refresh_catalog_cache iteration")),
+            "the configured default must show the full reasoning body ({i}): {expanded_text}"
+        );
+    }
 
     let collapsed = cell.lines_with_options_folded(80, options, true);
     let collapsed_text = lines_text(&collapsed);
     assert!(
-        !collapsed_text.contains("refresh_catalog_cache"),
-        "Space must still collapse a default-expanded reasoning cell"
+        collapsed_text.contains("refresh_catalog_cache"),
+        "Space must still collapse a default-expanded reasoning cell, verbatim: {collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("Ctrl+O:detail"),
+        collapsed_text.contains("Space:expand · Ctrl+O:detail"),
         "the collapsed state must retain the full-reasoning affordance"
     );
+    assert!(
+        !collapsed_text.contains("step 20:"),
+        "the collapsed fold must truncate the long body"
+    );
+}
+
+/// The live card must spend the whole output budget it advertises.
+///
+/// `selected_output_indices` fills head + tail, then tops up from lines that
+/// look important (error / warning / path). Plain output — a list of names, a
+/// table, a clean build log — matches none of those, so the top-up found
+/// nothing and the card silently forfeited the rest of its budget: it showed
+/// `head + tail` rows and reported the remainder as "omitted". That is the
+/// "even truncated mode over-truncates" complaint.
+#[test]
+fn live_tool_output_spends_its_whole_line_budget_on_unremarkable_output() {
+    let total_output_lines = 40usize;
+    // Deliberately bland: no error/warning keywords, no slashes, no dots, so
+    // `output_importance_rank` returns None for every single line.
+    let output = (0..total_output_lines)
+        .map(|i| format!("row {i:02} plain content"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let cell = HistoryCell::Tool(ToolCell::Exec(ExecCell {
+        command: "list_things".to_string(),
+        status: ToolStatus::Failed,
+        output: Some(output),
+        live_output: None,
+        shell_task_id: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: Some(120),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    }));
+
+    let live = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+    let live_text = lines_text(&live);
+    let shown = (0..total_output_lines)
+        .filter(|i| live_text.contains(&format!("row {i:02} plain content")))
+        .count();
+
+    assert_eq!(
+        shown, TOOL_OUTPUT_LINE_LIMIT,
+        "a live card promising {TOOL_OUTPUT_LINE_LIMIT} output rows must show \
+         {TOOL_OUTPUT_LINE_LIMIT}, not stop at head+tail: {live_text}"
+    );
+    // The shown region stays readable: a contiguous head, then the tail.
+    for i in 0..TOOL_OUTPUT_HEAD_LINES {
+        assert!(
+            live_text.contains(&format!("row {i:02} plain content")),
+            "head row {i} missing: {live_text}"
+        );
+    }
+    for i in (total_output_lines - TOOL_OUTPUT_TAIL_LINES)..total_output_lines {
+        assert!(
+            live_text.contains(&format!("row {i:02} plain content")),
+            "tail row {i} missing: {live_text}"
+        );
+    }
 }
 
 #[test]
@@ -2624,10 +2738,12 @@ fn tool_exec_live_caps_failed_output_transcript_does_not() {
 }
 
 #[test]
-fn tool_exec_live_collapses_successful_command() {
-    // A *successful* exec is rarely interesting — live mode collapses it to
-    // the single header line (no command body, no output). Transcript mode
-    // still records everything for the pager/clipboard.
+fn tool_exec_live_previews_successful_command_without_its_full_body() {
+    // A *successful* exec does not earn its full body in live mode — no
+    // command echo, and only `TOOL_SUCCESS_OUTPUT_PREVIEW_LINES` of output.
+    // It used to collapse to the bare header, which meant a run card told you
+    // a command finished and nothing whatsoever about what it produced.
+    // Transcript mode still records everything for the pager/clipboard.
     let output = (0..30usize)
         .map(|i| format!("output line {i:02}"))
         .collect::<Vec<_>>()
@@ -2657,14 +2773,27 @@ fn tool_exec_live_collapses_successful_command() {
     ));
     let transcript_text = lines_text(&cell.transcript_lines(80));
 
-    // Live: header only — no output body, no omission marker.
-    assert!(
-        !live_text.contains("output line 00"),
-        "successful exec must not render its output body in live mode: {live_text}"
+    // Live: a bounded preview from the top of the output.
+    let previewed = (0..30usize)
+        .filter(|i| live_text.contains(&format!("output line {i:02}")))
+        .count();
+    assert_eq!(
+        previewed, TOOL_SUCCESS_OUTPUT_PREVIEW_LINES,
+        "a successful exec should preview exactly \
+         {TOOL_SUCCESS_OUTPUT_PREVIEW_LINES} output rows: {live_text}"
     );
     assert!(
-        !live_text.contains("lines omitted"),
-        "collapsed exec must not show an omission marker: {live_text}"
+        live_text.contains("output line 00"),
+        "the preview reads from the top of the output: {live_text}"
+    );
+    assert!(
+        !live_text.contains("output line 29"),
+        "a successful exec must not render its full body in live mode: {live_text}"
+    );
+    assert!(
+        !live_text.contains("command:"),
+        "a successful exec still skips the command echo; the header carries \
+         the summary: {live_text}"
     );
     // Transcript still has the full output.
     assert!(transcript_text.contains("output line 00"));

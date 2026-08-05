@@ -2202,7 +2202,7 @@ fn build_continuation_block(messages: &[Message], pinned_indices: &BTreeSet<usiz
     if let Some(contract) = first_user.as_deref() {
         let _ = write!(
             body,
-            "### Working contract (first user request, credential-redacted quote)\n\n{}\n\n",
+            "### Task, in progress\n\n{}\n\n",
             quote_verbatim(contract, CONTINUATION_CONTRACT_MAX_CHARS)
         );
     }
@@ -2212,7 +2212,7 @@ fn build_continuation_block(messages: &[Message], pinned_indices: &BTreeSet<usiz
     {
         let _ = write!(
             body,
-            "### Active intent (most recent user request, credential-redacted quote)\n\n{}\n\n",
+            "### Latest request\n\n{}\n\n",
             quote_verbatim(intent, CONTINUATION_CONTRACT_MAX_CHARS)
         );
     }
@@ -2755,11 +2755,9 @@ mod tests {
 
         // Intent: both the original working contract and the latest ask survive
         // after the credential-redaction boundary.
-        assert!(block.contains("Working contract (first user request, credential-redacted quote)"));
+        assert!(block.contains("### Task, in progress"));
         assert!(block.contains("releases are blocked until login tests pass"));
-        assert!(
-            block.contains("Active intent (most recent user request, credential-redacted quote)")
-        );
+        assert!(block.contains("### Latest request"));
         assert!(block.contains("re-run only the login tests"));
         // Decisions: the accepted approach and its rationale are carried forward.
         assert!(block.contains("Decisions already made"));

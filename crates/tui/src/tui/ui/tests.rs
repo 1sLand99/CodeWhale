@@ -842,9 +842,26 @@ fn coordination_handover_within_this_process_does_not_toast() {
         .sticky_status
         .as_ref()
         .expect("a genuinely foreign owner still warns");
+    // The strip is one row and truncates from the right, so the *opening* of
+    // the message has to carry the fact. The old copy opened with the
+    // diagnosis and buried the cause behind a pid, a path and an errno, which
+    // truncated to `Delegated coordination unavailable — an…`.
     assert!(
-        toast.text.contains("Delegated coordination unavailable"),
-        "{}",
+        toast
+            .text
+            .starts_with("Another CodeWhale session in this workspace"),
+        "the toast must lead with the fact that explains the state: {}",
+        toast.text
+    );
+    assert!(
+        !toast.text.contains("pid 4242") && !toast.text.contains("/ws"),
+        "pid and workspace path belong in the coordination detail view, not \
+         in a one-row toast: {}",
+        toast.text
+    );
+    assert!(
+        toast.text.chars().count() <= 110,
+        "a one-row toast that cannot fit the row teaches nothing: {}",
         toast.text
     );
 }

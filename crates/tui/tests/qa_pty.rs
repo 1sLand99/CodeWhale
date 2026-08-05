@@ -4824,3 +4824,447 @@ fn semantic_activity_motion_crosses_reasoning_reading_and_tool_use_in_a_real_uni
 
     Ok(())
 }
+
+/// SSE fixture for the transcript-rhythm probe: one turn that reasons, says
+/// something, and runs a shell command; then a closing turn.
+fn spawn_transcript_rhythm_fixture(
+    shell_command: String,
+) -> anyhow::Result<(String, std::thread::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+
+    let reasoning = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-rhythm",
+            "object": "chat.completion.chunk",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content":
+                    "PROBEREASONING the listing command is the one to run here."},
+                "finish_reason": null
+            }]
+        })
+    );
+    let prose = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-rhythm",
+            "object": "chat.completion.chunk",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "PROBEANSWERA Running the listing now."},
+                "finish_reason": null
+            }]
+        })
+    );
+    let call = pty_tool_call_sse(
+        "call_rhythm_probe",
+        "Bash",
+        serde_json::json!({
+            "action": "run",
+            "command": shell_command,
+            "timeout_ms": 60_000
+        }),
+    );
+    let first = format!("{reasoning}{prose}{call}");
+    let second = pty_text_sse("PROBEANSWERB That is the full listing.");
+
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut chat_index = 0usize;
+        while chat_index < 2 && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let Ok(request) = read_http_request(&mut stream) else {
+                continue;
+            };
+            let request_line = request.lines().next().unwrap_or_default();
+            if request_line.starts_with("GET ") && request_line.contains("/models") {
+                let body = serde_json::json!({
+                    "object": "list",
+                    "data": [{"id": "deepseek-v4-pro", "object": "model"}]
+                })
+                .to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.flush();
+                continue;
+            }
+            if !(request_line.starts_with("POST ") && request_line.contains("/chat/completions")) {
+                continue;
+            }
+            let body = if chat_index == 0 { &first } else { &second };
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            let _ = stream.flush();
+            chat_index += 1;
+        }
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
+/// Boot a probe session against the rhythm fixture and return the settled
+/// frame rows plus its debug dump.
+fn run_transcript_rhythm_probe(
+    show_tool_details: bool,
+    total_rows: usize,
+) -> anyhow::Result<(Vec<String>, String, Vec<String>)> {
+    let ws = make_sealed_workspace()?;
+    let shell_command = format!(
+        "for i in $(seq 0 {}); do printf 'row %02d plain content\\n' \"$i\"; done",
+        total_rows - 1
+    );
+    let (base_url, server) = spawn_transcript_rhythm_fixture(shell_command)?;
+
+    let codewhale_home = ws.home().join(".codewhale");
+    let codex_home = ws.home().join(".codex");
+    std::fs::create_dir_all(&codex_home)?;
+    std::fs::write(
+        codewhale_home.join("config.toml"),
+        "allow_shell = true\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+    )?;
+    std::fs::write(
+        codewhale_home.join("settings.toml"),
+        format!(
+            // `show_thinking = true` is the shape the complaint was made
+            // about: the owner could see the reasoning body, and it ran
+            // straight into the answer underneath it.
+            "locale = \"en\"\ndefault_mode = \"agent\"\npermission_posture = \"full-access\"\nshow_thinking = true\nshow_tool_details = {show_tool_details}\ntranscript_spacing = \"comfortable\"\ncomposer_border = true\n"
+        ),
+    )?;
+    std::fs::write(
+        codex_home.join("models_cache.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "models": [{"slug": "deepseek-v4-pro", "priority": 1}]
+        }))?,
+    )?;
+
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
+        .env(
+            "DEEPSEEK_CONFIG_PATH",
+            codewhale_home.join("config.toml").to_string_lossy(),
+        )
+        .env("CODEX_HOME", codex_home.to_string_lossy())
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", &base_url)
+        .env("CODEWHALE_BASE_URL", &base_url)
+        .env("DEEPSEEK_MODEL", "deepseek-v4-pro")
+        .env("CODEWHALE_MODEL", "deepseek-v4-pro")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+            "--yolo",
+        ])
+        // Tall enough that the whole probe turn lands on one frame; the
+        // assertions are about the rows between blocks, not about scrolling.
+        .size(64, 100)
+        .spawn()?;
+    enter_launch_session(&mut h)?;
+
+    h.paste(TRANSCRIPT_RHYTHM_PROMPT)?;
+    h.wait_for_text(TRANSCRIPT_RHYTHM_PROMPT, KEY_TIMEOUT)?;
+    h.send(keys::key::enter())?;
+    let dump = wait_for_frame_dump(
+        &mut h,
+        |frame| frame.contains("PROBEANSWERB"),
+        Duration::from_secs(30),
+    )?;
+    let frame = h.frame();
+    write_real_pty_evidence(
+        &format!("transcript-rhythm-details-{show_tool_details}"),
+        "size=64x100 spacing=comfortable show_thinking=true",
+        &frame,
+    )?;
+    if std::env::var_os("CODEWHALE_QA_PRINT_FRAME").is_some() {
+        println!("--- show_tool_details={show_tool_details}\n{dump}");
+    }
+    let rows: Vec<String> = (0..frame.rows()).map(|y| frame.row(y)).collect();
+    let painted: Vec<String> = rows.clone();
+    let _ = h.shutdown();
+    drop(server);
+    Ok((rows, dump, painted))
+}
+
+const TRANSCRIPT_RHYTHM_PROMPT: &str = "list the rows";
+
+/// Transcript vertical rhythm + live run-card budget, measured on real
+/// terminal output rather than on a renderer unit test.
+///
+/// The owner's complaint had two halves and both are properties of painted
+/// rows, so both are asserted on a parsed PTY frame:
+///
+/// * consecutive blocks ran together with no blank row — a reasoning block
+///   flowing straight into the answer that followed it;
+/// * the run cards showed so little of their output that even the truncated
+///   view could not tell you what happened. A *successful* run showed its
+///   header and nothing else at all.
+///
+/// The shell command here really runs (`--yolo`), so the card under assertion
+/// is a real one carrying real output.
+///
+/// Set `CODEWHALE_QA_EVIDENCE_DIR` to capture the frame dumps,
+/// `CODEWHALE_QA_PRINT_FRAME=1` to print them.
+#[test]
+fn transcript_blocks_are_separated_and_run_cards_show_real_output() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    // Twenty-four rows of unremarkable output: nothing an importance filter
+    // would rescue, which is the case the head/tail split served worst.
+    let total_rows = 24usize;
+
+    // Leg A — shipped defaults (`show_tool_details = false`). This is what
+    // almost every user sees, and it is the frame the complaint was about.
+    let (rows, dump, painted) = run_transcript_rhythm_probe(false, total_rows)?;
+    let painted_contains =
+        |needle: &str, rows: &[String]| rows.iter().any(|row| row.contains(needle));
+    let row_of = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle} in frame:\n{dump}"))
+    };
+    let blank_between = |a: usize, b: usize| {
+        rows[a.min(b) + 1..a.max(b)]
+            .iter()
+            .any(|row| row.trim().is_empty())
+    };
+
+    // 1. Reasoning must not run straight into the answer that follows it.
+    //    This is the specific seam the owner pointed at.
+    let reasoning = row_of("PROBEREASONING");
+    let answer_a = row_of("PROBEANSWERA");
+    assert!(
+        answer_a > reasoning,
+        "the answer should follow the reasoning:\n{dump}"
+    );
+    assert!(
+        blank_between(reasoning, answer_a),
+        "a reasoning block and the answer after it need a blank row between \
+         them:\n{dump}"
+    );
+
+    // 2. Assistant prose must not run straight into the tool card.
+    let card = row_of("row 00 plain content");
+    assert!(
+        blank_between(answer_a, card),
+        "assistant prose and the tool card below it need a blank row:\n{dump}"
+    );
+
+    // 3. The user's own turn stays a visible seam.
+    let user = row_of(TRANSCRIPT_RHYTHM_PROMPT);
+    assert!(
+        blank_between(user, reasoning),
+        "the user turn needs a visible seam:\n{dump}"
+    );
+
+    // 4. Nowhere does a second separator row stack on the first. A scrolling
+    //    terminal cannot afford a two-row gap and it reads as a hole.
+    let last = row_of("PROBEANSWERB");
+    assert!(
+        !rows[user..=last]
+            .windows(2)
+            .any(|pair| pair[0].trim().is_empty() && pair[1].trim().is_empty()),
+        "no two separator rows may stack:\n{dump}"
+    );
+
+    // 5. A *successful* run card used to paint its header and nothing else.
+    //    On shipped defaults it must now carry real output rows.
+    let shown = (0..total_rows)
+        .filter(|i| painted_contains(&format!("row {i:02} plain content"), &painted))
+        .count();
+    assert!(
+        shown >= 4,
+        "a successful run card on shipped defaults painted {shown} output \
+         rows; it used to paint none and must now show enough to tell what \
+         happened:\n{dump}"
+    );
+
+    // Leg B — `show_tool_details = true`, where the card spends the full
+    // output budget rather than the summary cap.
+    let (_rows, detail_dump, detail_painted) = run_transcript_rhythm_probe(true, total_rows)?;
+    let detailed = (0..total_rows)
+        .filter(|i| painted_contains(&format!("row {i:02} plain content"), &detail_painted))
+        .count();
+    assert!(
+        detailed > shown,
+        "show_tool_details must reveal more than the summary card \
+         ({detailed} vs {shown}):\n{detail_dump}"
+    );
+    assert!(
+        detailed >= 6,
+        "a detailed run card painted only {detailed} output rows:\n{detail_dump}"
+    );
+
+    Ok(())
+}
+
+/// Two of the owner's reported display defects, both measured on real
+/// terminal output.
+///
+/// 1. **The composer looked like it was cutting text off.** It was not losing
+///    anything — it broke lines on whatever grapheme crossed the margin, so a
+///    wrapped sentence split mid-word (`…Write the file onl` / `y after…`),
+///    which reads exactly like truncation. Assert that no wrapped composer
+///    line ends inside a word and that every word survives.
+///
+/// 2. **A one-row toast was cut to uselessness.** Opening a second CodeWhale
+///    in the same workspace loses the coordination flock and raises a sticky
+///    warning. At a flat 40-column budget it painted `Delegated coordination
+///    unavailable — an…`. Here a real second session is booted against the
+///    same workspace and the strip must actually say what happened.
+#[test]
+fn composer_wraps_between_words_and_the_lock_toast_stays_legible() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+
+    // --- Leg 1: composer wrapping.
+    let (ws, mut h) = boot_minimal()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    let typed = "Mark inferences as inferences. A short PRD where each section decides something beats a long one that merely describes. Write the file only after the outline is agreed.";
+    h.paste(typed)?;
+    h.wait_for_text("outline is agreed", KEY_TIMEOUT)?;
+    let composer_dump = h.frame().debug_dump();
+    write_real_pty_evidence_dump("composer-wrap", "size=40x140", &composer_dump)?;
+    if std::env::var_os("CODEWHALE_QA_PRINT_FRAME").is_some() {
+        println!("--- composer wrap\n{composer_dump}");
+    }
+
+    let frame = h.frame();
+    let rows: Vec<String> = (0..frame.rows()).map(|y| frame.row(y)).collect();
+    // The composer rows are the ones carrying the typed text.
+    let composer_rows: Vec<&String> = rows
+        .iter()
+        .filter(|row| {
+            typed
+                .split(' ')
+                .any(|word| word.len() > 6 && row.contains(word))
+        })
+        .collect();
+    assert!(
+        composer_rows.len() > 1,
+        "the probe text must wrap to more than one row:\n{composer_dump}"
+    );
+    // Every word of the input survives somewhere on the frame, whole.
+    for word in typed.split(' ').filter(|word| word.len() > 3) {
+        let word = word.trim_end_matches(['.', ',']);
+        assert!(
+            rows.iter().any(|row| row.contains(word)),
+            "word {word:?} was split across the wrap and no row holds it \
+             whole:\n{composer_dump}"
+        );
+    }
+    let _ = h.shutdown();
+    drop(ws);
+
+    // --- Leg 2: the one-row status toast budget.
+    //
+    // The coordination-lock warning the owner hit is one instance of a
+    // general defect: every sticky toast was truncated to a flat 40 columns
+    // no matter how wide the terminal was. A failed `/load` raises a long
+    // sticky warning through the same strip, and reproduces it in two
+    // keystrokes without needing two sessions racing a flock. The lock
+    // warning's own copy is pinned in
+    // `tui::ui::tests::coordination_lock_loss_warns_only_for_a_foreign_owner`.
+    let ws = make_sealed_workspace()?;
+    let session_path = ws.workspace().join("broken-session.json");
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": "pty-broken",
+                "title": "Broken",
+                "created_at": "2026-08-04T00:00:00Z",
+                "updated_at": "2026-08-04T00:00:00Z",
+                "message_count": 0,
+                "total_tokens": 0,
+                "model": "deepseek-v4-pro",
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": [],
+            "system_prompt": null,
+            // A non-empty legacy Work view with no graph fails validation and
+            // raises a long, explanatory warning — exactly the class of
+            // message a 40-column budget destroys.
+            "work_state": {
+                "todos": {"items": [], "completion_pct": 0, "in_progress_id": null},
+                "plan": {"objective": "", "items": []}
+            }
+        }))?,
+    )?;
+    let (_ws2, mut h) = spawn_minimal_with_env(ws, &[])?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut h)?;
+    h.send(keys::key::text(&format!(
+        "/load {}",
+        session_path.to_string_lossy()
+    )))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    let toast_dump = wait_for_frame_dump(
+        &mut h,
+        |frame| frame.contains("Failed to restore session"),
+        Duration::from_secs(10),
+    )?;
+    write_real_pty_evidence_dump("status-toast-budget", "size=40x140", &toast_dump)?;
+    if std::env::var_os("CODEWHALE_QA_PRINT_FRAME").is_some() {
+        println!("--- status toast\n{toast_dump}");
+    }
+
+    let frame = h.frame();
+    let strip = (0..frame.rows())
+        .map(|y| frame.row(y))
+        .find(|row| row.contains("Failed to restore session"))
+        .expect("the strip must carry the warning");
+    let warning = strip
+        .split_once("Failed to restore session")
+        .map(|(_, tail)| format!("Failed to restore session{tail}"))
+        .unwrap_or_default();
+    let warning = warning
+        .split("  ")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert!(
+        warning.chars().count() > 40,
+        "the strip painted {} columns of a long warning on a 140-column \
+         terminal; the flat 40-column budget was the defect:\n{toast_dump}",
+        warning.chars().count()
+    );
+    assert!(
+        warning.contains("Work Graph"),
+        "the truncated warning must still reach the part that explains it: \
+         {warning:?}\n{toast_dump}"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}

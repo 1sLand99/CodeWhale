@@ -4007,6 +4007,24 @@ pub fn wrap_input_lines_for_mouse(input: &str, width: usize) -> Vec<(usize, Stri
     lines_with_indices
 }
 
+/// Wrap composer text to `width` display columns, breaking at word boundaries
+/// where one is available.
+///
+/// This used to break strictly on the grapheme that crossed the margin, so a
+/// wrapped sentence split mid-word — `…Write the file onl` / `y after the…`.
+/// The text was never lost, but a line ending in a severed word reads exactly
+/// like content that was cut off, which is what it was reported as.
+///
+/// Two invariants the callers depend on and this must not break:
+///
+/// * **Nothing is added or removed.** Concatenating the returned lines
+///   reproduces `text` exactly. `wrap_input_lines_internal` walks the wrapped
+///   lines accumulating `chars().count()` to map cursor and mouse positions
+///   back into the raw buffer, so a dropped break character would silently
+///   desynchronise the caret. The space a line breaks on therefore stays at
+///   the end of the preceding line rather than being swallowed.
+/// * **Every line fits.** A word longer than `width` — a URL, a path, a
+///   base64 blob — has no usable break point and still breaks hard.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -4018,29 +4036,51 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_width = 0;
+    // Byte offset in `current` just past the most recent space, and the
+    // display width up to that point. `None` while the line holds no usable
+    // break point — a leading space is not one, since breaking there would
+    // emit an empty line and make no progress.
+    let mut break_at: Option<(usize, usize)> = None;
+
+    // Flush `current` up to its break point (if any), carrying the remainder
+    // onto the next line.
+    macro_rules! flush {
+        () => {{
+            match break_at.take() {
+                Some((byte, _)) if byte < current.len() => {
+                    let remainder = current.split_off(byte);
+                    lines.push(std::mem::replace(&mut current, remainder));
+                    current_width = current.width();
+                }
+                _ => {
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+            }
+        }};
+    }
 
     for grapheme in text.graphemes(true) {
         if grapheme == "\n" {
-            lines.push(current);
-            current = String::new();
+            break_at = None;
+            lines.push(std::mem::take(&mut current));
             current_width = 0;
             continue;
         }
 
         let grapheme_width = grapheme.width();
         if current_width + grapheme_width > width && current_width != 0 {
-            lines.push(current);
-            current = String::new();
-            current_width = 0;
+            flush!();
         }
 
         current.push_str(grapheme);
         current_width += grapheme_width;
+        if grapheme == " " && !current.trim_start().is_empty() {
+            break_at = Some((current.len(), current_width));
+        }
 
         if current_width >= width {
-            lines.push(current);
-            current = String::new();
-            current_width = 0;
+            flush!();
         }
     }
 
@@ -4611,6 +4651,66 @@ mod tests {
         let (row, col) = cursor_row_col("abcd中", 5, 5);
         assert_eq!(row, 1);
         assert_eq!(col, 2);
+    }
+
+    /// Composer wrapping breaks between words, not through them. A line
+    /// ending in a severed word (`…Write the file onl`) reads exactly like
+    /// content that was cut off, which is how it was reported.
+    #[test]
+    fn composer_wraps_on_word_boundaries_without_losing_a_character() {
+        let text = "Mark inferences as inferences. A short PRD where each \
+                    section decides something beats a long one.";
+        for width in [20usize, 33, 47, 60, 79] {
+            let lines = wrap_text(text, width);
+            assert_eq!(
+                lines.concat(),
+                text,
+                "wrapping must be lossless at width={width}: {lines:?}"
+            );
+            for line in &lines {
+                assert!(
+                    line.width() <= width,
+                    "line exceeds width={width}: {line:?}"
+                );
+            }
+            // No line may end in the middle of a word: either it ends the
+            // text, or it ends on whitespace.
+            for line in lines.iter().take(lines.len().saturating_sub(1)) {
+                assert!(
+                    line.is_empty() || line.ends_with(' '),
+                    "wrapped line broke mid-word at width={width}: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// A token with no break point in it still has to fit the terminal, so it
+    /// breaks hard. Losslessness holds there too.
+    #[test]
+    fn composer_hard_breaks_words_longer_than_the_line() {
+        let text = "see https://example.com/a/very/long/path/that/never/breaks?x=1 now";
+        let lines = wrap_text(text, 24);
+        assert_eq!(lines.concat(), text, "{lines:?}");
+        for line in &lines {
+            assert!(line.width() <= 24, "line exceeds width: {line:?}");
+        }
+        assert!(
+            lines.len() > 2,
+            "an unbreakable token must still be split across lines: {lines:?}"
+        );
+    }
+
+    /// Wide characters have no spaces to break on; the width accounting must
+    /// still hold. This repo patches `unicode-width` for CJK, so measure the
+    /// wrapped output rather than trusting char counts.
+    #[test]
+    fn composer_wrapping_respects_wide_character_width() {
+        let text = "中文字符串没有空格可以换行";
+        let lines = wrap_text(text, 7);
+        assert_eq!(lines.concat(), text, "{lines:?}");
+        for line in &lines {
+            assert!(line.width() <= 7, "line exceeds width: {line:?}");
+        }
     }
 
     #[test]
