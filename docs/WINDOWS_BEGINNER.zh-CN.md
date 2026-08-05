@@ -195,13 +195,13 @@ https://github.com/Hmbown/CodeWhale/releases
 
 ![GitHub 发布页，选择 windows-x64 版本](images/github-release-page.png)
 
-### 2.2 第二步：放到固定目录
+### 2.2 第二步：放到固定目录【codewhale-windows-x64-portable.zip】
 
 把便携版 zip 解压后的文件夹放到一个固定位置，比如 `D:\codewhale`（解压后里面就是 `codewhale.exe`、`codewhale-tui.exe`、`codew.exe` 三个文件，完整路径为 `D:\codewhale\codewhale.exe`）。放好后**不要再移动它**，否则下面的环境变量会失效。
 
 > 升级方法：以后出新版本，在终端运行 `codewhale update` 即可（想先看有没有新版：`codewhale update --check`），它会自动下载、校验并替换程序文件，完成后重启 Codewhale。配置和对话记录都保留。网络受限时也可以下载新版 portable zip 解压覆盖这 3 个文件。
 
-### 2.3 第三步：加入环境变量
+### 2.3 第三步：加入环境变量【codewhale-windows-x64-portable.zip】
 
 加了环境变量，才能在任何文件夹里直接输入 `codewhale` 启动它。
 
