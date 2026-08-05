@@ -38,7 +38,7 @@ once present, it stays eager so a model can capture a durable preference without
 first discovering the tool. A memory-disabled runtime omits that registration and
 therefore exposes eight of the nine policy names.
 
-`update_plan` is **not** reachable by a model at all. It is registered
+`update_plan` is **hidden from the model**. It is registered
 (`crates/tui/src/tools/plan.rs:401`) but `model_visible()` returns `false`
 (`plan.rs:408-413`), and `build_api_tools` filters on that (`registry.rs:235`),
 so it never enters the API tool list — which is what `tool_search` indexes.
