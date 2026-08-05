@@ -1031,17 +1031,6 @@ pub struct PendingRouteSave {
     pub fleet: Option<(String, crate::fleet::store::FleetScope)>,
 }
 
-impl PendingRouteSave {
-    /// The change context the decision band shows: which Fleet (if any) the
-    /// choice would update, or none. Kept for receipts/tests; the band
-    /// renders the fleet context through the pending record itself.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn fleet_label(&self) -> Option<&str> {
-        self.fleet.as_ref().map(|(name, _)| name.as_str())
-    }
-}
-
 pub struct App {
     pub mode: AppMode,
     /// Registered hotbar actions available for future slot config/render layers.
@@ -3751,15 +3740,6 @@ impl App {
     #[allow(dead_code)] // Reserved for renderers that need a unified cell count.
     pub fn virtual_cell_count(&self) -> usize {
         self.history.len() + self.active_cell.as_ref().map_or(0, ActiveCell::entry_count)
-    }
-
-    /// The next cell index a freshly-pushed entry would occupy in the virtual
-    /// transcript. Used by `register_tool_cell`-style callsites that record
-    /// cell-index metadata before the active cell flushes to history.
-    #[must_use]
-    #[allow(dead_code)] // Reserved for the eventual merged push helper.
-    pub fn next_virtual_cell_index(&self) -> usize {
-        self.virtual_cell_count()
     }
 
     #[must_use]

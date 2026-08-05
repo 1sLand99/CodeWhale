@@ -826,8 +826,6 @@ impl QueuedMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
     Quit,
-    #[allow(dead_code)] // For explicit /save command
-    SaveSession(PathBuf),
     #[allow(dead_code)] // For explicit /load command
     LoadSession(PathBuf),
     RemoteControl(crate::remote_control::RemoteControlAction),

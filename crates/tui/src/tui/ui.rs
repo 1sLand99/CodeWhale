@@ -11680,9 +11680,6 @@ async fn apply_command_result(
                 let _ = engine_handle.send(Op::Shutdown).await;
                 return Ok(true);
             }
-            AppAction::SaveSession(path) => {
-                app.status_message = Some(format!("Session saved to {}", path.display()));
-            }
             AppAction::LoadSession(path) => {
                 let session: SavedSession = match std::fs::read_to_string(&path)
                     .map_err(|err| err.to_string())
