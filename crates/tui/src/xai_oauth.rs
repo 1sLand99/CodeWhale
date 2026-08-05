@@ -232,6 +232,36 @@ fn configured_owned_auth_file_path(config: &Config) -> Result<Option<PathBuf>> {
     }
 }
 
+/// Detect the [#5032] bricked-launch state: `[providers.xai]` selects OAuth and
+/// points `oauth_credential_generation` at a Codewhale-owned credential file
+/// that no longer exists. This is a distinct, more specific failure than
+/// "unconfigured" — the pointer is present and authoritative, so
+/// [`credentials_valid`] returns false and cannot fall through to a legacy or
+/// external credential, which is exactly what bricked the dogfood machine.
+///
+/// Returns false for any other state: OAuth not selected, no generation
+/// configured, a malformed generation pointer (a different, already-fail-closed
+/// failure), or a generation whose owned file is present.
+///
+/// [#5032]: https://github.com/Hmbown/CodeWhale/issues/5032
+#[must_use]
+pub fn owned_generation_is_dangling(config: &Config) -> bool {
+    if !config
+        .provider_config_for(ApiProvider::Xai)
+        .and_then(|entry| entry.auth_mode.as_deref())
+        .is_some_and(auth_mode_uses_xai_oauth)
+    {
+        return false;
+    }
+    match configured_owned_auth_file_path(config) {
+        Ok(Some(path)) => !path.exists(),
+        // `None` => no generation configured (not a dangling pointer). `Err` =>
+        // the generation is malformed/invalid; that is a different, already
+        // fail-closed failure, not the missing-file state this detects.
+        _ => false,
+    }
+}
+
 #[must_use]
 pub fn credentials_present(config: &Config) -> bool {
     credentials_valid(config)
@@ -687,6 +717,31 @@ fn activate_device_login_locked(
         credentials,
         config_path,
         auth_path,
+    })
+}
+
+/// Best-effort repair for the [#5032] bricked-launch state: remove the stale
+/// `[providers.xai] oauth_credential_generation` pointer from the PERSISTED
+/// config file so the next launch is no longer bricked. Mirrors the document
+/// edits in [`activate_device_login_locked`] (which replaces the pointer under
+/// the config lock) and [`crate::config::clear_api_key`]'s unlocked scrub.
+///
+/// Leaves `auth_mode = "oauth"` intact: the user still wants OAuth, they simply
+/// need to re-authenticate. The launch-path caller must treat any error as
+/// non-fatal — log a warning and continue. Returns `Ok(())` when the stale
+/// pointer was removed (or was already absent).
+///
+/// [#5032]: https://github.com/Hmbown/CodeWhale/issues/5032
+pub fn clear_dangling_xai_oauth_generation(config_path: Option<&Path>) -> Result<()> {
+    let config_path = crate::config_persistence::config_toml_path(config_path)?;
+    let key_inside =
+        crate::config::provider_config_key(ApiProvider::Xai).context("xAI provider config key")?;
+    codewhale_config::mutate_config_document(&config_path, |document| {
+        codewhale_config::unset_config_document_value(
+            document,
+            &["providers", key_inside, "oauth_credential_generation"],
+        )?;
+        Ok(())
     })
 }
 
@@ -1973,6 +2028,77 @@ consent_version = 1
         );
         assert!(persisted.contains(activation.auth_path.file_name().unwrap().to_str().unwrap()));
         assert!(persisted.contains("auth_mode = \"oauth\""));
+    }
+
+    #[test]
+    fn dangling_generation_pointer_is_detected_and_repaired() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        // A valid-looking generation pointer whose credential file does not
+        // exist: the state Hunter's dogfood machine was bricked in (#5032).
+        let stale = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        fs::write(
+            &config_path,
+            format!(
+                "[providers.xai]\nauth_mode = \"oauth\"\noauth_credential_generation = \"{stale}\"\n"
+            ),
+        )
+        .unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+
+        let config = Config {
+            provider: Some(ApiProvider::Xai.as_str().to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                xai: crate::config::ProviderConfig {
+                    auth_mode: Some("oauth".to_string()),
+                    oauth_credential_generation: Some(stale.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            owned_generation_is_dangling(&config),
+            "OAuth mode pointing at a missing owned file is the #5032 bricked state"
+        );
+        // Specificity: OAuth selected but no generation configured is the normal
+        // "needs auth" state, not a dangling pointer.
+        let unconfigured = Config {
+            provider: Some(ApiProvider::Xai.as_str().to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                xai: crate::config::ProviderConfig {
+                    auth_mode: Some("oauth".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !owned_generation_is_dangling(&unconfigured),
+            "an unconfigured OAuth mode must not be reported as dangling"
+        );
+
+        clear_dangling_xai_oauth_generation(Some(&config_path))
+            .expect("best-effort repair must clear the stale pointer");
+
+        let persisted = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !persisted.contains(stale),
+            "stale generation pointer must be cleared: {persisted}"
+        );
+        assert!(
+            persisted.contains("auth_mode = \"oauth\""),
+            "the user's OAuth mode selection must be preserved: {persisted}"
+        );
     }
 
     #[test]

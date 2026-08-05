@@ -176,6 +176,44 @@ impl App {
         let provider_exact_id = provider_identity_record.exact_id;
         let mut effective_auth_config = config.clone();
         effective_auth_config.provider = Some(provider_identity.clone());
+
+        // #5032: a stale `[providers.xai] oauth_credential_generation` pointer
+        // whose owned credential file is gone makes `credentials_valid` return
+        // false with no recovery, so the generic provider picker reopened on
+        // EVERY launch (the dogfood bricked state). Detect that specific
+        // corrupted state, best-effort clear the stale pointer from the
+        // persisted config, and surface a truthful xAI-specific message. The
+        // repair never blocks or aborts launch; after it the state is the
+        // normal "needs auth", not a bricked loop.
+        let xai_dangling_repair_message = if provider == ApiProvider::Xai
+            && crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config)
+        {
+            match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref()) {
+                Ok(()) => {
+                    // Keep the in-memory route consistent with the repaired
+                    // persisted file so the running app never reaches for
+                    // the missing generation.
+                    effective_auth_config
+                        .provider_config_for_mut(ApiProvider::Xai)
+                        .oauth_credential_generation = None;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "codewhale::xai_oauth",
+                        error = %error,
+                        "could not clear the dangling xAI OAuth generation pointer; continuing launch"
+                    );
+                }
+            }
+            Some(
+                "⚠ xAI OAuth credentials are missing — the saved login pointer referenced a \
+                     file that no longer exists and was cleared. Re-authenticate with \
+                     `codewhale auth xai-device` or use the in-app login."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         let model_ids_passthrough = effective_auth_config.model_ids_pass_through();
         let provider_chain = provider
             .kind()
@@ -626,7 +664,8 @@ impl App {
             turn_error_posted: false,
             // Surface parse warnings so the user knows their config file is
             // broken instead of silently losing all settings.
-            status_message: settings_parse_warning
+            status_message: xai_dangling_repair_message
+                .or(settings_parse_warning)
                 .or(tui_prefs_warning)
                 .or(theme_warning),
             status_toasts: VecDeque::new(),
