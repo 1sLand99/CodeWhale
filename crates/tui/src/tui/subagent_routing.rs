@@ -611,14 +611,17 @@ fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
     let agent_id = message.agent_id().to_string();
     let meta = app.agent_progress_meta.entry(agent_id).or_default();
     if let MailboxMessage::TokenUsage { route, usage, .. } = message {
-        // The child's own received-token tally. `output_tokens` is what came
-        // back down from the provider, which is what the work-surface `↓`
-        // figure claims to be. Absent until a real envelope lands, so an
-        // agent with no reported usage shows no number instead of a zero.
+        // The child's own used-token tally (input + output), matching the
+        // worker budget's `usage_total_tokens`. Counting only completions made
+        // the strip look "stuck" on tiny numbers while the child was burning
+        // context. Absent until a real envelope lands, so an agent with no
+        // reported usage shows no number instead of a zero.
+        let turn_total =
+            u64::from(usage.input_tokens).saturating_add(u64::from(usage.output_tokens));
         meta.received_tokens = Some(
             meta.received_tokens
                 .unwrap_or(0)
-                .saturating_add(u64::from(usage.output_tokens)),
+                .saturating_add(turn_total),
         );
         meta.resolved_provider = Some(route.provider.as_str().to_string());
         meta.resolved_model = Some(bound_agent_activity_text(
@@ -1288,6 +1291,46 @@ mod tests {
         assert_eq!(meta.resolved_provider.as_deref(), Some("openrouter"));
         assert_eq!(meta.resolved_model.as_deref(), Some("vendor/model-real"));
         assert!(meta.current_activity.is_none());
+    }
+
+    #[test]
+    fn token_usage_accumulates_input_plus_output_across_child_turns() {
+        let mut app = App::new(test_options(), &Config::default());
+        let route = test_route(crate::config::ApiProvider::Deepseek, "deepseek-v4-flash");
+        handle_subagent_mailbox(
+            &mut app,
+            1,
+            &MailboxMessage::TokenUsage {
+                agent_id: "agent_spend".to_string(),
+                source_id: "response-1".to_string(),
+                route: route.clone(),
+                usage: crate::models::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 40,
+                    ..Default::default()
+                },
+            },
+        );
+        handle_subagent_mailbox(
+            &mut app,
+            2,
+            &MailboxMessage::TokenUsage {
+                agent_id: "agent_spend".to_string(),
+                source_id: "response-2".to_string(),
+                route,
+                usage: crate::models::Usage {
+                    input_tokens: 2_000,
+                    output_tokens: 60,
+                    ..Default::default()
+                },
+            },
+        );
+
+        assert_eq!(
+            app.agent_progress_meta["agent_spend"].received_tokens,
+            Some(3_100),
+            "work-bar tally must match worker budget total (input+output)"
+        );
     }
 
     #[test]
