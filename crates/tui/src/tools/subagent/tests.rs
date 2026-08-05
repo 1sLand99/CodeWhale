@@ -7979,12 +7979,17 @@ fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
 
 #[test]
 fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
-    let repo_root = git_repo_root(&std::env::current_dir().expect("current dir"))
-        .expect("test should run inside the checkout");
+    // Use the system temp dir rather than the checkout's parent: a checkout
+    // nested inside another repository (for example a workspace repo that
+    // contains sibling checkouts) would otherwise make the harness itself
+    // resolve to that parent repo and never exercise the no-repository path.
     let harness = TempDirBuilder::new()
         .prefix(".codewhale-no-repo-")
-        .tempdir_in(repo_root.parent().expect("repo parent"))
-        .expect("empty harness outside checkout");
+        .tempdir_in(std::env::temp_dir())
+        .expect("empty harness outside any repository");
+    // Keep the probe beyond `git_repo_root`'s parent-search limit so the walk
+    // terminates inside the temp region instead of reaching `/` (mirrors the
+    // sibling no-repo worktree test).
     let empty = harness
         .path()
         .join("isolated")
