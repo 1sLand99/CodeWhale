@@ -211,11 +211,24 @@ describe("public surface contracts", () => {
       .split("\n")
       .find((line) => line.startsWith(heading));
     expect(headingLine, `missing "${heading}" changelog heading`).toBeTruthy();
-    expect(headingLine?.slice(heading.length)).toMatch(
-      /^(?:Unreleased candidate|\d{4}-\d{2}-\d{2})$/,
-    );
-    expect(changelog).toContain(`v${FACTS.version} source candidate`);
-    expect(changelog).not.toContain(`compare/v${FACTS.version}...HEAD`);
+    const headingSuffix = headingLine?.slice(heading.length) ?? "";
+    expect(headingSuffix).toMatch(/^(?:Unreleased candidate|\d{4}-\d{2}-\d{2})$/);
+    if (headingSuffix === "Unreleased candidate") {
+      // Pre-tag candidate: notes still call it a source candidate, and the
+      // version compare link must not claim a tagged endpoint yet.
+      expect(changelog).toContain(`v${FACTS.version} source candidate`);
+      expect(changelog).not.toContain(`compare/v${FACTS.version}...HEAD`);
+    } else {
+      // Dated release: intro names the version, and the version's compare
+      // link points at a tag range (Unreleased may still use ...HEAD).
+      expect(changelog).toContain(`Codewhale v${FACTS.version}`);
+      const versionCompare = changelog
+        .split("\n")
+        .find((line) => line.startsWith(`[${FACTS.version}]: `));
+      expect(versionCompare, `missing [${FACTS.version}] compare link`).toBeTruthy();
+      expect(versionCompare).toContain(`...v${FACTS.version}`);
+      expect(versionCompare).not.toContain("...HEAD");
+    }
   });
 
   it("distinguishes two Cargo packages from the three installed commands", () => {
