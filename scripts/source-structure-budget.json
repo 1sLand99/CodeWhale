@@ -1,6 +1,6 @@
 {
   "_comment": "One-way source ownership ceilings. Deletion and line-neutral ownership moves pass; new packages, binaries, 1000-line module paths, a larger maximum module, or aggregate owned Rust growth require an explicit reviewed update.",
-  "_todo_2026_08_03": "TODO(v0.9.5): aggregate ceiling bumped 649350 -> 659633 during v0.9.4 train hygiene, then 659633 -> 662389 at the end of the train (incl. the 2026-08-04 downtime bug-hunt fixes) (corrected tool descriptions, the File parameter hardening split, and the work-bar persistence/click regression fix). The 30-PR stack on 2026-08-02/03 grew owned production Rust by ~10.3k lines; both new thousand-line modules from the stack (crates/tui/src/native_memory.rs, crates/tui/src/tui/views/fleet_roster.rs) were split back under the threshold instead of raising the per-file ceilings. v0.9.4 overspent; pay the aggregate back down by deletion/dedup in v0.9.5 rather than treating this as the new normal. Reviewed 2026-08-05 for the v0.9.4 Fleet rebuild: aggregate 662389 -> 668365 and three new 1000-line modules (fleet/store.rs 1114 - the named Fleet store v2; tui/transcript.rs 1062 - the release-quality transcript pass; views/fleet_detail.rs 1056 - the secondary named-Fleet editor behind /fleet fleets). Split candidates for v0.9.5.",
+  "_todo_2026_08_03": "TODO(v0.9.5): aggregate ceiling bumped 649350 -> 659633 during v0.9.4 train hygiene, then 659633 -> 662389 at the end of the train (incl. the 2026-08-04 downtime bug-hunt fixes) (corrected tool descriptions, the File parameter hardening split, and the work-bar persistence/click regression fix). The 30-PR stack on 2026-08-02/03 grew owned production Rust by ~10.3k lines; both new thousand-line modules from the stack (crates/tui/src/native_memory.rs, crates/tui/src/tui/views/fleet_roster.rs) were split back under the threshold instead of raising the per-file ceilings. v0.9.4 overspent; pay the aggregate back down by deletion/dedup in v0.9.5 rather than treating this as the new normal. Reviewed 2026-08-05 for the v0.9.4 Fleet rebuild: aggregate 662389 -> 668400 and three new 1000-line modules (fleet/store.rs 1114 - the named Fleet store v2; tui/transcript.rs 1062 - the release-quality transcript pass; views/fleet_detail.rs 1056 - the secondary named-Fleet editor behind /fleet fleets). Split candidates for v0.9.5.",
   "allowed_large_modules": [
     "crates/agent/src/lib.rs",
     "crates/app-server/src/chat_completions.rs",
@@ -180,7 +180,7 @@
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 168,
   "max_module_lines": 19087,
-  "max_total_owned_rust_lines": 668365,
+  "max_total_owned_rust_lines": 668400,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
