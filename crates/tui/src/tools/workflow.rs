@@ -2937,6 +2937,19 @@ fn leaf_subagent_type(spec: &LeafSpec) -> Option<&'static str> {
     if spec.mode == TaskMode::ReadOnly && spec.agent_type == AgentType::General {
         return Some("review");
     }
+    // A read_only leaf must not *name* a write-capable type. `type` is a claim
+    // about what the child can do, and claiming it while the leaf narrows the
+    // child to read-only tools is the contradiction #5123 asks the spawn path
+    // to reject. The leaf's role/profile already carries the identity roster
+    // resolution needs, so drop the redundant type and let the role speak —
+    // this is the `implementer` role narrowed to verification-only work that
+    // `validate_leaf_runtime_contract` deliberately allows.
+    if spec.mode == TaskMode::ReadOnly
+        && spec.agent_type == AgentType::Implementer
+        && (spec.role.is_some() || spec.profile.is_some())
+    {
+        return None;
+    }
     Some(agent_type_name(spec.agent_type))
 }
 

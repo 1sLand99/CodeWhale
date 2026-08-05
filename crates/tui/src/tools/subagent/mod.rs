@@ -1661,6 +1661,12 @@ struct SpawnRequest {
     /// when the caller did not, and conflicts are rejected only for explicit
     /// values.
     agent_type_explicit: bool,
+    /// True only when the caller wrote the `type` field itself. `role` also
+    /// sets `agent_type_explicit` (a role may be a type alias), but a role is
+    /// an identity for roster resolution while `type` is a claim about what
+    /// the child can do. Only the latter can contradict `write_authority`
+    /// (#5123).
+    agent_type_named: bool,
     /// Optional Fleet roster member id (trimmed, lowercased). Resolved at
     /// spawn time against the runtime roster — parsing has no runtime access.
     profile: Option<String>,
@@ -10526,6 +10532,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     }
 
     let agent_type_explicit = parsed_type.is_some() || parsed_role_type.is_some();
+    let agent_type_named = parsed_type.is_some();
     let agent_type = parsed_type
         .or(parsed_role_type)
         .unwrap_or(FleetRole::Worker);
@@ -10727,6 +10734,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         acceptance,
         agent_type,
         agent_type_explicit,
+        agent_type_named,
         profile,
         assignment: SubAgentAssignment::new(prompt, role),
         allowed_tools,
@@ -10785,9 +10793,23 @@ fn validate_spawn_write_contract(
     // #5123: a named write-capable role plus read_only authority used to parse,
     // then silently clamp write/shell off — the child self-BLOCKED as a
     // "builder" with only recon tools. Fail closed at spawn instead. A
-    // prompt-only general (Worker, type not named, no profile) may still
-    // declare read_only without that lie.
-    let named_write_role = request.agent_type_explicit || request.profile.is_some();
+    // prompt-only general (Worker, type not named) may still declare read_only
+    // without that lie.
+    //
+    // Only the caller writing `type` counts as the lie. `role` does not:
+    //
+    // - `role: "release_lead"` is a roster id, copied into `profile` purely as
+    //   a lookup key. The member is not resolved until `apply_spawn_profile`,
+    //   so here `agent_type` is still the default Worker and the role says
+    //   nothing about write capability.
+    // - `role: "implementer"` is a type alias, but it is still an identity —
+    //   a Fleet role and its authority posture are independent, and an
+    //   acceptance workflow must be able to resolve `implementer` to its saved
+    //   profile while narrowing that child to the read-only tool set.
+    //
+    // Keying this on `agent_type_explicit` rejected both, which broke every
+    // read-only Workflow leaf that names a role.
+    let named_write_role = request.agent_type_named;
     if named_write_role
         && matches!(request.agent_type, FleetRole::Builder | FleetRole::Worker)
         && request.write_authority == Some(SpawnWriteAuthority::ReadOnly)

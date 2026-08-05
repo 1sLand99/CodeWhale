@@ -516,9 +516,11 @@ fn agent_worker_profile_derives_from_parent_without_escalation() {
 fn declared_read_only_write_roles_derive_without_mutating_shell() {
     for input in [
         json!({"prompt": "inspect only"}),
+        // Identity via `role`, not `type` — see #5123 and
+        // `read_only_roles_reject_write_authority_but_implementers_can_be_narrowed`.
         json!({
             "prompt": "implementation review",
-            "type": "implementer",
+            "role": "implementer",
             "write_authority": "read_only"
         }),
     ] {
@@ -2578,6 +2580,39 @@ fn builder_or_worker_plus_read_only_authority_fails_closed() {
 }
 
 #[test]
+fn roster_role_plus_read_only_authority_still_spawns() {
+    // #5123 fail-closed must not swallow the read-only roster task. `role` is
+    // an identity, not a write-capability claim, so both a bare roster id and
+    // a type-alias role stay legal alongside read_only. This is exactly what
+    // an acceptance workflow emits for its gate children, and rejecting it
+    // broke every read-only Workflow leaf that names a role.
+    let roster_id = parse_spawn_request(&json!({
+        "prompt": "Return the terminal verdict and receipt.",
+        "role": "release_lead",
+        "write_authority": "read_only",
+    }))
+    .expect("roster role + read_only must still parse");
+    assert_eq!(
+        roster_id.write_authority,
+        Some(SpawnWriteAuthority::ReadOnly)
+    );
+    assert_eq!(roster_id.profile.as_deref(), Some("release_lead"));
+    assert!(!roster_id.agent_type_named);
+
+    let alias = parse_spawn_request(&json!({
+        "prompt": "Verify the plan against the evidence.",
+        "role": "implementer",
+        "write_authority": "read_only",
+    }))
+    .expect("type-alias role + read_only must still parse");
+    assert_eq!(alias.agent_type, FleetRole::Builder);
+    assert!(
+        alias.agent_type_explicit && !alias.agent_type_named,
+        "a role alias resolves the type without claiming write capability"
+    );
+}
+
+#[test]
 fn declared_write_authority_parses_and_worktree_write_requires_isolation() {
     let read_only = parse_spawn_request(&json!({
         "prompt": "look around",
@@ -2698,9 +2733,13 @@ fn read_only_roles_reject_write_authority_but_implementers_can_be_narrowed() {
     .to_string();
     assert!(reviewer.contains("read-only role"), "{reviewer}");
 
+    // Narrowing a write-capable identity to read-only work stays legal, but
+    // it travels through `role` (identity) rather than `type` (a claim about
+    // capability). #5123 made the `type` spelling fail closed, because that is
+    // the one that produced a child labeled "builder" holding only recon tools.
     let implementer = parse_spawn_request(&json!({
         "prompt": "implement without writes",
-        "type": "implementer",
+        "role": "implementer",
         "write_authority": "read_only"
     }))
     .expect("role identity may be narrowed to read-only authority");
