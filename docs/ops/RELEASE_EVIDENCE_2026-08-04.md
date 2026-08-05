@@ -75,19 +75,27 @@ candidate is ready for review; release PR to be opened when the owner returns.
   bounded fields, tombstone/off-switch — the GitGuardian JWT flag was a
   test fixture; signature literally decodes to "signature")
 - cargo build --release --locked -p codewhale-cli -p codewhale-tui: **exit 0**
-- cargo test --workspace --all-features --locked: **2 pre-existing failures,
-  both reproduced identically on the base without this rebuild**:
-  - `paste_matrix_lands_in_the_composer_without_autosubmitting` — boot-window
-    input starvation, already documented in-repo (the `#[ignore]` comment on
-    the related recovery-boot test);
+- cargo test --workspace --all-features --locked: **2 failures, both reproduced
+  on this candidate's base — but that base is the v0.9.4 train, NOT `main`.**
+  "Pre-existing on base" is only true relative to the unreleased train:
+  - `paste_matrix_lands_in_the_composer_without_autosubmitting` — this PASSES
+    on `main` and is a **regression against the last released line**, not
+    pre-existing. Root-caused 2026-08-05 by `git bisect` to `ff97641b7`
+    (`wrap_text` moved to word-boundary breaks while `cursor_row_col` kept
+    hard-margin breaks; the two desynchronised). Fixed by deriving the cursor
+    position from the same wrapped lines the renderer draws.
   - `work_bar_still_shows_subagents_when_todos_are_present` — the Ocean
     Tasks/Workers top rail prioritizes the to-do panel and drops the
     subagent summary when both compete. The test (committed with the P5a
     lane) is the acceptance criterion for that remaining fix.
 
-## Remaining gates (none are regressions from this rebuild)
+## Remaining gates
 
-- The two pre-existing failures above (both base-reproduced).
+- The two failures above were reproduced on the candidate's base — but that
+  base was the **v0.9.4 train, not `main`**. The paste failure PASSES on
+  `main` and is a regression against the last released line (root-caused to
+  `ff97641b7`, fixed 2026-08-05). Calling it "pre-existing on base" without
+  naming which base was wrong; corrected here.
 - The work_bar fix (subagent summary must stay visible when the to-do
   panel fills the rail) — in-repo test is the spec.
 
