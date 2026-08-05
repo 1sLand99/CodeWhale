@@ -383,7 +383,7 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "grok-build" => Some(512_000),
         "grok-composer-2.5-fast" => Some(200_000),
         "grok-4.20-0309-reasoning" | "grok-4.20-0309-non-reasoning" => Some(2_000_000),
-        "muse-spark-1.1" => Some(1_000_000),
+        "muse-spark-1.1" | "muse-spark-1.2" => Some(1_000_000),
         _ => None,
     }
 }
@@ -460,7 +460,7 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         "nvidia/nemotron-3-ultra-550b-a55b:free" => Some(65_536),
         "google/gemma-4-31b-it" => Some(16_384),
         "google/gemma-4-31b-it:free" | "google/gemma-4-26b-a4b-it:free" => Some(32_768),
-        "muse-spark-1.1" => Some(32_000),
+        "muse-spark-1.1" | "muse-spark-1.2" => Some(32_000),
         _ => None,
     }
 }
@@ -554,6 +554,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "grok-build"
             | "grok-4.20-0309-reasoning"
             | "muse-spark-1.1"
+            | "muse-spark-1.2"
     ) || is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
         || is_openai_codex_model(&lower)
@@ -940,6 +941,10 @@ mod tests {
         assert_eq!(context_window_for_model("muse-spark-1.1"), Some(1_000_000));
         assert_eq!(max_output_tokens_for_model("muse-spark-1.1"), Some(32_000));
         assert!(model_supports_reasoning("muse-spark-1.1"));
+        // Muse Spark 1.2 (same verified defaults; $1.25/$4.25 per Artificial Analysis).
+        assert_eq!(context_window_for_model("muse-spark-1.2"), Some(1_000_000));
+        assert_eq!(max_output_tokens_for_model("muse-spark-1.2"), Some(32_000));
+        assert!(model_supports_reasoning("muse-spark-1.2"));
     }
 
     #[test]

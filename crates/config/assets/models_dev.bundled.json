@@ -732,6 +732,25 @@
           "id": "muse-spark-1.1",
           "name": "Muse Spark 1.1",
           "family": "muse",
+          "default": false,
+          "attachment": true,
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": ["none", "minimal", "low", "medium", "high", "xhigh"]
+            }
+          ],
+          "tool_call": true,
+          "structured_output": true,
+          "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
+          "limit": { "context": 1000000, "output": 32000 },
+          "cost": { "input": 1.25, "output": 4.25 }
+        },
+        "muse-spark-1.2": {
+          "id": "muse-spark-1.2",
+          "name": "Muse Spark 1.2",
+          "family": "muse",
           "default": true,
           "attachment": true,
           "reasoning": true,

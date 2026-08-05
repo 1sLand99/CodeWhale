@@ -90,6 +90,15 @@
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
     },
+    "muse-spark-1.2": {
+      "id": "muse-spark-1.2",
+      "context_window": 1000000,
+      "max_output": 32000,
+      "supports_reasoning": true,
+      "modalities": ["text", "image"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
     "kimi-k3": {
       "id": "kimi-k3",
       "context_window": 1048576,
