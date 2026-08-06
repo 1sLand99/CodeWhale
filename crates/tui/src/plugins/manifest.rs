@@ -13,7 +13,7 @@ use super::path_identity::windows_file_identity;
 use crate::mcp::{McpServerConfig, is_relative_stdio_path_arg};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-const MAX_PLUGIN_NAME_CHARS: usize = 64;
+pub(crate) const MAX_PLUGIN_NAME_CHARS: usize = 64;
 const MAX_COMPONENT_PATHS: usize = 64;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_HASHED_FILES: usize = 4_096;
@@ -63,6 +63,18 @@ pub struct PluginMeta {
     pub version: String,
     #[serde(default)]
     pub author: Option<String>,
+    /// Human-facing name preserved when the published `name` had to be
+    /// slugified to satisfy the Agent Plugins name rule.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
 }
 
 /// A declarative component location. `path` preserves the original manifest
@@ -70,9 +82,9 @@ pub struct PluginMeta {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginPathSpec {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 }
 
@@ -114,23 +126,23 @@ impl PluginPathSpec {
 pub struct PluginCapabilities {
     /// Requested filesystem roots are inventory-only in v0.9.1. Declaring any
     /// keeps the bundle inactive until a later permission adapter exists.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_roots: Vec<String>,
     /// Requested hosts are inventory-only. MCP URL hosts are added to the
     /// effective capability inventory automatically.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_hosts: Vec<String>,
     /// Lifecycle mutation is inventoried but unsupported in v0.9.1.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lifecycle_mutation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginWhen {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Vec<String>>,
 }
 
@@ -246,29 +258,125 @@ pub struct ValidatedManifest {
     pub warnings: Vec<String>,
 }
 
+/// On-disk manifest encoding, detected from the file name. `plugin.json`
+/// (Agent Plugins v1.0.0) is the native format; `plugin.toml` stays readable
+/// as the legacy Codewhale format. Both parse into the same
+/// [`PluginManifest`], so nothing downstream of discovery changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestFormat {
+    Json,
+    Toml,
+}
+
+impl ManifestFormat {
+    fn from_path(path: &Path) -> Result<Self, String> {
+        match path.file_name().and_then(|name| name.to_str()) {
+            Some(super::agent_plugin::PLUGIN_JSON_NAME) => Ok(Self::Json),
+            Some(super::agent_plugin::PLUGIN_TOML_NAME) => Ok(Self::Toml),
+            _ => Err(format!(
+                "plugin manifest must be named plugin.json or plugin.toml: {}",
+                path.display()
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Json => super::agent_plugin::PLUGIN_JSON_NAME,
+            Self::Toml => super::agent_plugin::PLUGIN_TOML_NAME,
+        }
+    }
+}
+
+/// Parse manifest text in either encoding. For `plugin.json` this also reads
+/// the sibling `mcp.json` (whose bytes are returned so callers can re-read and
+/// detect mid-validation drift); Codewhale-specific data arrives through
+/// `extensions["net.codewhale"]` and unknown namespaces are ignored.
+fn parse_manifest(
+    format: ManifestFormat,
+    text: &str,
+    root: &Path,
+) -> Result<(PluginManifest, Option<Vec<u8>>), String> {
+    match format {
+        ManifestFormat::Toml => {
+            validate_nested_mcp_schema(text)?;
+            let manifest = toml::from_str(text).map_err(|error| safe_toml_parse_error(&error))?;
+            Ok((manifest, None))
+        }
+        ManifestFormat::Json => {
+            let standard = super::agent_plugin::parse_plugin_json(text)?;
+            let mcp_bytes = read_sibling_mcp_json(root)?;
+            let mcp_servers = match &mcp_bytes {
+                Some(bytes) => {
+                    let text = std::str::from_utf8(bytes)
+                        .map_err(|_| "mcp.json must be valid UTF-8".to_string())?;
+                    Some(super::agent_plugin::parse_mcp_json(text)?)
+                }
+                None => None,
+            };
+            let manifest = super::agent_plugin::standard_to_manifest(standard, mcp_servers, root)?;
+            Ok((manifest, mcp_bytes))
+        }
+    }
+}
+
+/// Read a `plugin.json` bundle's sibling `mcp.json` under the same rules as
+/// the manifest itself: a regular file, never a link, size-bounded.
+fn read_sibling_mcp_json(root: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path = root.join(super::agent_plugin::MCP_JSON_NAME);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to inspect mcp.json: {error}")),
+    };
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("mcp.json must be a regular file, not a symbolic link".to_string());
+    }
+    let file = open_bundle_file(&path)
+        .map_err(|e| format!("failed to open mcp.json without following links: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read mcp.json: {e}"))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "mcp.json exceeds the {MAX_MANIFEST_BYTES}-byte review limit"
+        ));
+    }
+    Ok(Some(bytes))
+}
+
 impl PluginManifest {
     pub fn from_path(path: &Path) -> Result<Self, String> {
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|e| format!("failed to inspect plugin.toml: {e}"))?;
+        let format = ManifestFormat::from_path(path)?;
+        let label = format.label();
+        let metadata =
+            fs::symlink_metadata(path).map_err(|e| format!("failed to inspect {label}: {e}"))?;
         if metadata_is_link_or_reparse(&metadata) {
-            return Err("plugin.toml may not be a symbolic link".to_string());
+            return Err(format!("{label} may not be a symbolic link"));
         }
-        let bytes = read_manifest_bytes(path)?;
-        let content = std::str::from_utf8(&bytes)
-            .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?;
-        validate_nested_mcp_schema(content)?;
-        toml::from_str(content).map_err(|error| safe_toml_parse_error(&error))
+        let bytes = read_manifest_bytes(path, label)?;
+        let content =
+            std::str::from_utf8(&bytes).map_err(|_| format!("{label} must be valid UTF-8"))?;
+        let root = path
+            .parent()
+            .ok_or_else(|| format!("{label} has no parent directory"))?;
+        Ok(parse_manifest(format, content, root)?.0)
     }
 
     pub fn validate_from_path(path: &Path) -> Result<ValidatedManifest, String> {
-        let manifest_metadata = fs::symlink_metadata(path)
-            .map_err(|e| format!("failed to inspect plugin.toml: {e}"))?;
+        let format = ManifestFormat::from_path(path)?;
+        let label = format.label();
+        let manifest_metadata =
+            fs::symlink_metadata(path).map_err(|e| format!("failed to inspect {label}: {e}"))?;
         if metadata_is_link_or_reparse(&manifest_metadata) || !manifest_metadata.is_file() {
-            return Err("plugin.toml must be a regular file, not a symbolic link".to_string());
+            return Err(format!(
+                "{label} must be a regular file, not a symbolic link"
+            ));
         }
         let root = path
             .parent()
-            .ok_or_else(|| "plugin.toml has no parent directory".to_string())?;
+            .ok_or_else(|| format!("{label} has no parent directory"))?;
         let root_metadata = fs::symlink_metadata(root)
             .map_err(|e| format!("failed to inspect plugin root: {e}"))?;
         if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
@@ -281,13 +389,11 @@ impl PluginManifest {
             return Err("plugin root is not a directory".to_string());
         }
 
-        let manifest_bytes = read_manifest_bytes(path)?;
+        let manifest_bytes = read_manifest_bytes(path, label)?;
         let manifest_text = std::str::from_utf8(&manifest_bytes)
-            .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?;
-        validate_nested_mcp_schema(manifest_text)?;
-        let mut manifest: Self =
-            toml::from_str(manifest_text).map_err(|error| safe_toml_parse_error(&error))?;
-        let warnings = if manifest.schema_version == 0 {
+            .map_err(|_| format!("{label} must be valid UTF-8"))?;
+        let (mut manifest, mcp_bytes) = parse_manifest(format, manifest_text, &canonical_root)?;
+        let warnings = if manifest.schema_version == 0 && format == ManifestFormat::Toml {
             let mut warnings = vec![format!(
                 "legacy manifest: add `schema_version = {CURRENT_SCHEMA_VERSION}`"
             )];
@@ -302,17 +408,22 @@ impl PluginManifest {
         } else {
             Vec::new()
         };
-        manifest.validate_metadata()?;
+        manifest.validate_metadata(format)?;
 
         let components = manifest.resolve_components(&canonical_root)?;
         manifest.validate_mcp_servers(&canonical_root)?;
         let inventory = manifest.inventory(&components)?;
-        let (content_hash, file_hashes) = hash_bundle(&canonical_root, &manifest_bytes)?;
+        let (content_hash, file_hashes) = hash_bundle(&canonical_root, &manifest_bytes, label)?;
         let capability_hash = hash_inventory(&inventory);
         let applicable = manifest.check_when();
-        if read_manifest_bytes(path)? != manifest_bytes {
+        if read_manifest_bytes(path, label)? != manifest_bytes {
+            return Err(format!(
+                "{label} changed while it was being validated; retry discovery"
+            ));
+        }
+        if format == ManifestFormat::Json && read_sibling_mcp_json(&canonical_root)? != mcp_bytes {
             return Err(
-                "plugin.toml changed while it was being validated; retry discovery".to_string(),
+                "mcp.json changed while it was being validated; retry discovery".to_string(),
             );
         }
 
@@ -329,14 +440,24 @@ impl PluginManifest {
         })
     }
 
-    fn validate_metadata(&self) -> Result<(), String> {
+    fn validate_metadata(&self, format: ManifestFormat) -> Result<(), String> {
         if self.schema_version > CURRENT_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported schema_version {}; maximum is {CURRENT_SCHEMA_VERSION}",
                 self.schema_version
             ));
         }
-        validate_plugin_name(&self.plugin.name)?;
+        match format {
+            ManifestFormat::Json => {
+                if !super::agent_plugin::is_standard_plugin_name(&self.plugin.name) {
+                    return Err(format!(
+                        "plugin name `{}` violates the Agent Plugins name rule (1-{MAX_PLUGIN_NAME_CHARS} lowercase ASCII letters, digits, or internal single hyphens or dots; never `--` or `..`)",
+                        self.plugin.name
+                    ));
+                }
+            }
+            ManifestFormat::Toml => validate_plugin_name(&self.plugin.name)?,
+        }
         Version::parse(self.plugin.version.trim()).map_err(|e| {
             format!(
                 "plugin version `{}` is not valid semantic versioning: {e}",
@@ -345,6 +466,11 @@ impl PluginManifest {
         })?;
         validate_optional_text("description", self.plugin.description.as_deref(), 1_024)?;
         validate_optional_text("author", self.plugin.author.as_deref(), 256)?;
+        validate_optional_text("display name", self.plugin.display_name.as_deref(), 128)?;
+        validate_optional_text("homepage", self.plugin.homepage.as_deref(), 2_048)?;
+        validate_optional_text("repository", self.plugin.repository.as_deref(), 2_048)?;
+        validate_optional_text("license", self.plugin.license.as_deref(), 128)?;
+        validate_unique_texts("keyword", &self.plugin.keywords, 128)?;
         validate_unique_texts("filesystem root", &self.capabilities.filesystem_roots, 512)?;
         validate_unique_texts("network host", &self.capabilities.network_hosts, 253)?;
         let declared_network_hosts = self
@@ -742,21 +868,27 @@ fn safe_toml_parse_error(error: &toml::de::Error) -> String {
     )
 }
 
-fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, String> {
+fn read_manifest_bytes(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     let file = open_bundle_file(path)
-        .map_err(|e| format!("failed to open plugin.toml without following links: {e}"))?;
+        .map_err(|e| format!("failed to open {label} without following links: {e}"))?;
     let mut bytes = Vec::new();
     file.take(MAX_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read plugin.toml: {e}"))?;
+        .map_err(|e| format!("failed to read {label}: {e}"))?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(format!(
-            "plugin.toml exceeds the {MAX_MANIFEST_BYTES}-byte review limit"
+            "{label} exceeds the {MAX_MANIFEST_BYTES}-byte review limit"
         ));
     }
     Ok(bytes)
 }
 
+/// The historical Codewhale `plugin.toml` name rule: lowercase ASCII letters,
+/// digits, and internal hyphens (including `--` runs). Kept byte-for-byte for
+/// legacy manifests; `/plugin export` slugifies names that are invalid under
+/// the Agent Plugins standard. `plugin.json` manifests are held to the
+/// standard's rule instead ([`super::agent_plugin::is_standard_plugin_name`]):
+/// it also allows internal dots but bans `--` and `..`.
 pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     let count = name.chars().count();
     let valid = count > 0
@@ -1122,12 +1254,18 @@ fn looks_windows_absolute(raw: &str) -> bool {
 fn hash_bundle(
     root: &Path,
     manifest_bytes: &[u8],
+    manifest_label: &str,
 ) -> Result<(String, BTreeMap<PathBuf, String>), String> {
     let mut hasher = Sha256::new();
     // v2 length-frames every variable-length field. The v1 delimiter-only
     // stream was structurally ambiguous across file-record boundaries.
     // Changing the domain invalidates every ambiguous v1 receipt.
-    hasher.update(b"codewhale-plugin-content-v2\0plugin.toml\0");
+    // The manifest file name is part of the domain: `plugin.toml` produces the
+    // exact v2 byte stream existing receipts bind to, while `plugin.json`
+    // starts a fresh receipt family.
+    hasher.update(b"codewhale-plugin-content-v2\0");
+    hasher.update(manifest_label.as_bytes());
+    hasher.update(b"\0");
     hasher.update((manifest_bytes.len() as u64).to_le_bytes());
     hasher.update(manifest_bytes);
     let mut budget = HashBudget::default();

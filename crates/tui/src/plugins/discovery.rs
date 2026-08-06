@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use super::agent_plugin::resolve_manifest_path;
 use super::manifest::{PluginManifest, ValidatedManifest};
 use super::path_identity::metadata_is_link_or_reparse;
 use super::registry::PluginRegistry;
@@ -11,8 +12,6 @@ use super::types::{
     LoadedPlugin, PluginDiagnostic, PluginId, PluginOrigin, PluginScope, PluginSkillSnapshot,
     PluginTrustStatus,
 };
-
-const PLUGIN_MANIFEST: &str = "plugin.toml";
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
@@ -228,10 +227,11 @@ fn scan_root(
         if !metadata.is_dir() {
             continue;
         }
-        let manifest_path = plugin_root.join(PLUGIN_MANIFEST);
-        if !manifest_path.exists() {
+        // Agent Plugins v1.0.0 `plugin.json` is preferred; a legacy
+        // `plugin.toml` in the same bundle stays readable.
+        let Some(manifest_path) = resolve_manifest_path(&plugin_root) else {
             continue;
-        }
+        };
         match load_plugin(&manifest_path, &canonical_discovery_root, scope, origin) {
             Ok(plugin) => plugins.push(plugin),
             Err(error) => diagnostics.push(PluginDiagnostic::error(
@@ -422,7 +422,9 @@ pub(crate) fn load_staged_skill_snapshots(
     expected_content_hash: &str,
     expected_capability_hash: &str,
 ) -> Result<Vec<PluginSkillSnapshot>, String> {
-    let validated = PluginManifest::validate_from_path(&staged_root.join(PLUGIN_MANIFEST))?;
+    let staged_manifest = resolve_manifest_path(staged_root)
+        .ok_or_else(|| "staged plugin has no plugin.json or plugin.toml".to_string())?;
+    let validated = PluginManifest::validate_from_path(&staged_manifest)?;
     if validated.canonical_root != staged_root
         || validated.content_hash != expected_content_hash
         || validated.capability_hash != expected_capability_hash
@@ -439,7 +441,7 @@ pub(crate) fn load_staged_skill_snapshots(
     // Parsing is explicitly bound to the first validation's file inventory;
     // a final whole-bundle pass also rejects additions/removals/config drift
     // that occurred during directory traversal.
-    let refreshed = PluginManifest::validate_from_path(&staged_root.join(PLUGIN_MANIFEST))?;
+    let refreshed = PluginManifest::validate_from_path(&staged_manifest)?;
     if refreshed.content_hash != validated.content_hash
         || refreshed.capability_hash != validated.capability_hash
         || refreshed.file_hashes != validated.file_hashes
