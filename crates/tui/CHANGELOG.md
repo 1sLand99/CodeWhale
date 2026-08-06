@@ -19,6 +19,24 @@ File edits, terminal width, and Windows installation.
 
 ### Added
 
+- Sub-agent checkpoint resume: `agents/followup` resumes an
+  `interrupted_continuable` child from its checkpoint into a fresh agent loop —
+  new agent id, original prompt plus the prior conversation tail — when a
+  runtime is attached, and otherwise keeps queue-only semantics with the
+  `continuation_handle` returned; a second followup on the same interrupted id
+  returns the existing resumed target instead of spawning a duplicate (PR #5242).
+- MCP Registry discovery with Registry-first tool selection: `registry_sync`
+  surfaces the eligible local stdio catalog as a complete model-side candidate
+  set, connect-failure messages classify early-exit and usage-help output and
+  point recovery at the next Registry candidate, and a bundled `mcp-discovery`
+  skill documents the flow (PR #5238).
+- Progressive fresh-context disclosure: fresh sessions ship a minimal
+  constitutional kernel — ground truth, user intent and scope, truthful
+  completion, guarantees in mechanism, and precedence — with procedural
+  playbooks disclosed on demand, an opt-in project context pack
+  (`project_context_pack_enabled`) counted in context reports, and `load_skill`
+  catalogue discovery via `name="list"`; the measured fresh-context budget
+  drops by roughly 40% (PR #5077).
 - Named Fleet store v2: one self-contained TOML Fleet per configuration
   (`schema = "fleet"`), with scope-explicit selection (user-global default vs
   folder override), migration receipts from legacy role profiles, and atomic
@@ -312,6 +330,12 @@ File edits, terminal width, and Windows installation.
   `--sysroot` intact through the final Rust link, and extend the no-SDK release
   guard to keep the re-quoting contract (PR #5095).
 
+- The shell tool reports the real elapsed wait time in its result content
+  instead of echoing the requested timeout (PR #5240).
+- Transcript wheel scrolling under iTerm2: xterm alternate-scroll (DECSET
+  1007) now stays off while mouse capture is active, so wheel events arrive as
+  mouse events instead of being converted into arrow keys (#5223, PR #5234).
+
 ### Removed
 
 - The default model-facing SlopLedger implementation, its storage-oriented
@@ -322,7 +346,10 @@ File edits, terminal width, and Windows installation.
 
 - [Sh1Zuku](https://github.com/SparkofSpike) (`@SparkofSpike`) contributed
   LaTeX rendering in PR #4981, completed circled-digit/keycap width handling in
-  PR #5001, and delivered actionable File-edit recovery in PR #5008.
+  PR #5001, and delivered actionable File-edit recovery in PR #5008; for this
+  train he resumed interrupted sub-agents from checkpoints in PR #5242,
+  surfaced real shell wait elapsed time in PR #5240, and kept alternate-scroll
+  off while mouse capture is active in PR #5234.
 - [XhesicaFrost](https://github.com/XhesicaFrost) (`@XhesicaFrost`) fixed long
   Windows user-PATH preservation in PR #5006.
 - [Paulo Aboim Pinto](https://github.com/aboimpinto) (`@aboimpinto`) added the
@@ -334,6 +361,8 @@ File edits, terminal width, and Windows installation.
 - [shenjackyuanjie](https://github.com/shenjackyuanjie) (`@shenjackyuanjie`)
   fixed the Windows OpenHarmony linker re-quoting for spaced SDK paths in
   PR #5095.
+- [bistack](https://github.com/bistack) (`@bistack`) contributed MCP Registry
+  discovery with Registry-first tool selection in PR #5238.
 
 ## [0.9.3] - 2026-07-31
 
