@@ -15,7 +15,7 @@
     "in_model_catalogue": "true when the skill renders as an ambient catalogue line",
     "shadowed_aliases": "aliases that collide with another canonical bundled name; the canonical skill wins resolution"
   },
-  "generation": "9",
+  "generation": "10",
   "skills": [
     {
       "name": "skill-creator",
@@ -77,6 +77,14 @@
     },
     {
       "name": "handoff",
+      "tier": "core",
+      "invocation": "model+user",
+      "aliases": [],
+      "in_model_catalogue": true,
+      "shadowed_aliases": []
+    },
+    {
+      "name": "mcp-discovery",
       "tier": "core",
       "invocation": "model+user",
       "aliases": [],

@@ -37,6 +37,7 @@ pub mod image_ocr;
 pub mod js_execution;
 pub mod large_output_router;
 pub mod lsp;
+pub mod mcp_registry;
 pub mod native_memory;
 pub mod notify;
 pub mod pandoc;

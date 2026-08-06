@@ -270,6 +270,22 @@ fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
     matches!(tool_name, "rlm_eval" | "rlm" | "start_mcp_server")
 }
 
+pub(super) fn merge_new_runtime_mcp_tools(
+    tool_catalog: &mut Vec<Tool>,
+    active_tool_names: &mut std::collections::HashSet<String>,
+    refreshed: Vec<Tool>,
+) {
+    for tool in refreshed {
+        if !tool_catalog
+            .iter()
+            .any(|existing| existing.name == tool.name)
+        {
+            active_tool_names.insert(tool.name.clone());
+            tool_catalog.push(tool);
+        }
+    }
+}
+
 impl Engine {
     pub(super) fn drain_shell_completion_events(
         &self,
@@ -435,7 +451,7 @@ impl Engine {
         let mut mode = tool_policy.mode;
         let mut questions_allowed = tool_policy.allows_questions();
         let strict_tool_mode = tool_policy.strict_tool_mode;
-        let tool_catalog = std::mem::take(&mut tool_policy.catalog);
+        let mut tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
         let tool_registry = Some(&tool_policy.registry);
         // #4415: the turn's tool-call admission counter. It lives here —
@@ -3467,6 +3483,28 @@ impl Engine {
                 }
                 match result {
                     Ok(output) => {
+                        // A runtime MCP connection changes the callable tool
+                        // surface. Merge the complete schemas into this turn's
+                        // catalog before the next model request; waiting for the
+                        // next user turn leaves the model with names it cannot
+                        // legally call through the provider API.
+                        let mcp_catalog_changed = output
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("mcp_catalog_changed"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        if output.success
+                            && mcp_catalog_changed
+                            && let Some(pool) = self.mcp_pool.as_ref().cloned()
+                        {
+                            let refreshed = pool.lock().await.to_api_tools();
+                            merge_new_runtime_mcp_tools(
+                                &mut tool_catalog,
+                                &mut active_tool_names,
+                                refreshed,
+                            );
+                        }
                         emit_tool_audit(json!({
                             "event": "tool.result",
                             "tool_id": outcome.id.clone(),

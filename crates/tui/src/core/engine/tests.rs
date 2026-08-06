@@ -3,9 +3,9 @@ use super::*;
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    registered_tool_approval_required, registered_tool_blocked_in_full_access,
-    registered_tool_forces_prompt, tool_error_degradation_runtime_hint,
-    workspace_write_carve_out_applies,
+    merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    registered_tool_blocked_in_full_access, registered_tool_forces_prompt,
+    tool_error_degradation_runtime_hint, workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
@@ -44,6 +44,33 @@ const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION
 const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";
 const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
+
+#[test]
+fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
+    let enabled = EngineConfig::default();
+    let (engine, _handle) = Engine::new(enabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+    assert!(prompt.contains("must call `registry_sync {}` before `exec_shell`"));
+
+    let mut disabled = EngineConfig::default();
+    disabled.features.disable(Feature::Mcp);
+    let (engine, _handle) = Engine::new(disabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(!prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+}
 
 #[test]
 fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
@@ -4916,6 +4943,24 @@ fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
         registered_tool_approval_required("start_mcp_server", ApprovalRequirement::Required, true),
         "start_mcp_server must require approval even when auto_approve is enabled"
     );
+    assert!(registered_tool_approval_required(
+        "start_mcp_server",
+        ApprovalRequirement::Required,
+        true
+    ));
+    // Registry launcher is host-constructed and cache-bound (no free-form
+    // command), so Full Access auto-approves it: `--auto` automation must
+    // be able to complete the discovery flow end to end. Ask still gates it.
+    assert!(!registered_tool_approval_required(
+        "start_registry_mcp_server",
+        ApprovalRequirement::Required,
+        true
+    ));
+    assert!(registered_tool_approval_required(
+        "start_registry_mcp_server",
+        ApprovalRequirement::Required,
+        false
+    ));
     assert!(registered_tool_blocked_in_full_access(
         "start_mcp_server",
         ApprovalRequirement::Required,
@@ -4926,8 +4971,17 @@ fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
         ApprovalRequirement::Required,
         true,
     ));
+    assert!(!registered_tool_blocked_in_full_access(
+        "start_registry_mcp_server",
+        ApprovalRequirement::Required,
+        true,
+    ));
     assert!(registered_tool_forces_prompt(
         "start_mcp_server",
+        ApprovalRequirement::Required,
+    ));
+    assert!(!registered_tool_forces_prompt(
+        "start_registry_mcp_server",
         ApprovalRequirement::Required,
     ));
     assert!(registered_tool_forces_prompt(
@@ -4949,6 +5003,25 @@ fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
         ApprovalRequirement::Required,
         true
     ));
+}
+
+#[test]
+fn runtime_mcp_refresh_only_activates_new_catalog_entries() {
+    let mut existing = api_tool("mcp_static_read");
+    existing.defer_loading = Some(true);
+    let mut catalog = vec![existing.clone()];
+    let mut active = HashSet::new();
+
+    merge_new_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        vec![api_tool("mcp_static_read"), api_tool("mcp_dynamic_render")],
+    );
+
+    assert_eq!(catalog.len(), 2);
+    assert!(!active.contains("mcp_static_read"));
+    assert!(active.contains("mcp_dynamic_render"));
+    assert_eq!(catalog[0].defer_loading, Some(true));
 }
 
 #[test]
@@ -6326,6 +6399,45 @@ fn model_tool_catalog_applies_native_and_mcp_deferral() {
 }
 
 #[test]
+fn registry_first_guidance_is_attached_to_the_shell_fallback_once() {
+    let mut catalog = vec![api_tool("read_file"), api_tool("exec_shell")];
+
+    apply_registry_first_shell_guidance(&mut catalog);
+    apply_registry_first_shell_guidance(&mut catalog);
+
+    let description = &catalog
+        .iter()
+        .find(|tool| tool.name == "exec_shell")
+        .expect("shell tool")
+        .description;
+    assert_eq!(description.matches("call registry_sync first").count(), 1);
+    assert!(description.contains("start_registry_mcp_server"));
+}
+
+#[test]
+fn registry_catalog_bypasses_generic_tool_result_compaction() {
+    let middle = "app.cleanor/cleanor";
+    let raw = format!(
+        "{{\"instruction\":\"compare all\",\"servers\":[{{\"name\":\"{}\"}},{{\"name\":\"{middle}\"}},{{\"name\":\"{}\"}}]}}",
+        "a".repeat(7_000),
+        "z".repeat(7_000),
+    );
+    let output = ToolResult::success(raw.clone());
+
+    let context = compact_tool_result_for_route(
+        ApiProvider::Deepseek,
+        "small-context-model",
+        None,
+        "registry_sync",
+        &output,
+    );
+
+    assert_eq!(context, raw);
+    assert!(context.contains(middle));
+    assert!(!context.contains("output compacted to protect context"));
+}
+
+#[test]
 fn capability_compact_surface_defers_nonessential_core_tools() {
     let always_load = HashSet::new();
     let catalog = build_model_tool_catalog_with_surface(
@@ -6472,6 +6584,28 @@ fn agent_catalog_keeps_canonical_file_tool_loaded() {
         "loaded File calls without fuzz should execute instead of hydrating the schema"
     );
     assert!(hydrated_this_batch.is_empty());
+}
+
+#[tokio::test]
+async fn registry_discovery_and_start_handlers_exist_in_agent_and_plan_modes() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.ensure_mcp_pool().await.expect("initialize MCP pool");
+
+    for mode in [AppMode::Agent, AppMode::Plan] {
+        let registry = engine
+            .build_turn_tool_registry_builder(
+                mode,
+                engine.config.todos.clone(),
+                engine.config.plan_state.clone(),
+            )
+            .build(engine.build_tool_context(mode, false));
+        assert!(registry.contains("registry_sync"), "missing in {mode:?}");
+        assert!(
+            registry.contains("start_registry_mcp_server"),
+            "missing in {mode:?}"
+        );
+        assert!(!registry.contains("registry_install_run_info"));
+    }
 }
 
 #[test]

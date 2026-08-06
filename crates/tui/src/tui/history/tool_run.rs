@@ -189,7 +189,9 @@ fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
     match normalized.as_str() {
         "read_file" | "list_dir" | "view_image" | "explore" | "git_status" | "git_diff"
         | "git_log" | "git_show" | "git_blame" => ToolRunActivity::File,
-        "grep_files" | "file_search" | "web_search" | "fetch_url" => ToolRunActivity::Search,
+        "grep_files" | "file_search" | "web_search" | "fetch_url" | "registry_sync" => {
+            ToolRunActivity::Search
+        }
         "shell"
         | "exec_shell"
         | "exec_shell_wait"
@@ -197,6 +199,7 @@ fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
         | "exec_shell_cancel"
         | "task_shell_start"
         | "task_shell_wait"
+        | "start_registry_mcp_server"
         | "run_tests"
         | "run_verifiers"
         | "wait_for_dev_server"

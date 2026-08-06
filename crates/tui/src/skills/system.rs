@@ -12,7 +12,9 @@ use std::path::Path;
 /// requested by @JayBeest (#4227).
 /// Generation 9 adds the `handoff` workflow skill (baton-pass for
 /// continuous operate-mode operations).
-const BUNDLED_SKILL_VERSION: &str = "9";
+/// Generation 10 adds the bundled `mcp-discovery` skill (Registry-first
+/// tool selection).
+const BUNDLED_SKILL_VERSION: &str = "10";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -58,6 +60,7 @@ const CONTRIBUTOR_ONBOARDING_BODY: &str =
 // Optional integration (not auto-installed for every user): Feishu body kept for
 // digest/migration helpers only.
 const FEISHU_BODY: &str = include_str!("../../assets/skills/feishu/SKILL.md");
+const MCP_DISCOVERY_BODY: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
 
 // Legacy v4 body retained solely for digest-based safe retirement (#4691).
 const V4_BEST_PRACTICES_BODY: &str = include_str!("../../assets/skills/v4-best-practices/SKILL.md");
@@ -243,6 +246,11 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "contributor-onboarding",
         body: CONTRIBUTOR_ONBOARDING_BODY,
         introduced_in: 8,
+    },
+    BundledSkill {
+        name: "mcp-discovery",
+        body: MCP_DISCOVERY_BODY,
+        introduced_in: 10,
     },
 ];
 

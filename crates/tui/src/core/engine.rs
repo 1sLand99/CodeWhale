@@ -109,6 +109,9 @@ fn agent_list_event(manager: &SubAgentManager) -> Event {
     }
 }
 
+const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync {}` before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. Compare the user's complete task yourself against every returned server name and description; wording need not be exact. If any server plausibly covers the core capability, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, when every Registry entry is clearly irrelevant, or after the matching server fails to start.";
+
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
 ///
@@ -1111,8 +1114,22 @@ impl Engine {
     }
 
     /// Create a new engine with the given configuration
-    pub fn new(config: EngineConfig, api_config: &Config) -> (Self, EngineHandle) {
+    pub fn new(mut config: EngineConfig, api_config: &Config) -> (Self, EngineHandle) {
         crate::tls::ensure_rustls_crypto_provider();
+
+        // Unlike a Skill body, this instruction is visible on the first model
+        // request. Keep selection semantic: the host supplies no keywords or
+        // ranking and the model compares the full user context with the full
+        // Registry catalog. Append it after configured instruction sources so
+        // the Registry-first decision sits close to the current user turn.
+        if config.features.enabled(Feature::Mcp) {
+            config
+                .instructions
+                .push(crate::prompts::InstructionSource::Inline {
+                    name: MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE.to_string(),
+                    content: MCP_REGISTRY_FIRST_INSTRUCTION.to_string(),
+                });
+        }
 
         if let Some(objective) = normalized_goal_objective(config.goal_objective.as_deref()) {
             sync_goal_state_from_host(
@@ -3688,6 +3705,8 @@ impl Engine {
         let mut always_load = self.config.tools_always_load.clone();
         if self.config.features.enabled(Feature::Mcp) {
             always_load.insert("start_mcp_server".to_string());
+            always_load.insert("registry_sync".to_string());
+            always_load.insert("start_registry_mcp_server".to_string());
         }
         let bypass = input_policy.auto_approve
             || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
@@ -3703,6 +3722,9 @@ impl Engine {
             &always_load,
             capability.tool_surface_budget,
         );
+        if self.config.features.enabled(Feature::Mcp) {
+            apply_registry_first_shell_guidance(&mut catalog);
+        }
         for tool in &mut catalog {
             if plugin_tool_names.contains(&tool.name) {
                 tool.defer_loading = Some(false);
@@ -6071,9 +6093,9 @@ use self::streaming::{
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
     REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
-    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
-    execute_code_execution_tool, execute_tool_search, is_tool_search_tool,
-    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
+    default_synthetic_catalog_tool_names, execute_code_execution_tool, execute_tool_search,
+    is_tool_search_tool, maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
 };
 #[cfg(test)]
 use self::tool_catalog::{
