@@ -1203,6 +1203,7 @@
   "BehavioralTipClearedInput": "Terhapus · {chord} memulihkan",
   "BehavioralTipMcpValidation": "{command} memulai server dan menunjukkan alasannya",
   "BehavioralTipRepeatedCommand": "{command} dapat menyematkan ini",
+  "BehavioralTipDurableStateWritten": "Tersimpan · {command} untuk melihat",
   "SettingLockedDuringTurn": "{setting} terkunci saat giliran berjalan — tekan Esc untuk menginterupsi dulu",
   "SettingSubjectMode": "Mode",
   "SettingSubjectThinking": "Thinking",

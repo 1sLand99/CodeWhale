@@ -6126,6 +6126,19 @@ impl Config {
             .or_else(default_memory_path)
             .unwrap_or_else(|| PathBuf::from("./memory.md"));
         if self.memory_backend() == MemoryBackend::Native {
+            // The configured value is historically a *legacy single-file*
+            // path (`$CODEWHALE_HOME/memory.md`), and the native store lives
+            // beside it. Deriving from the parent is therefore right for the
+            // default and for anyone still carrying the old setting.
+            //
+            // But someone who points `memory_path` at a native store — the
+            // obvious reading of the name — used to get a second one nested
+            // inside it (`…/memory/global/memory/global/MEMORY.md`), silently
+            // writing somewhere other than the file they named. Honour an
+            // already-native path as itself.
+            if crate::native_memory::NativeMemoryStore::from_global_path(&legacy_path).is_some() {
+                return legacy_path;
+            }
             return legacy_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))

@@ -12149,3 +12149,26 @@ fn remembered_model_pick_defers_to_the_configured_spelling() {
         "DeepSeek-V4-Flash"
     );
 }
+
+#[test]
+fn native_memory_path_honours_an_already_native_setting() {
+    // Pointing `memory_path` at a native store is the obvious reading of the
+    // name; it used to nest a second store inside and write to the wrong file.
+    let mut config = Config::default();
+    config.memory = Some(crate::config::MemoryConfig {
+        enabled: Some(true),
+        ..Default::default()
+    });
+    config.memory_path = Some("/tmp/cw-test/memory/global/MEMORY.md".to_string());
+    assert_eq!(
+        config.memory_path(),
+        std::path::PathBuf::from("/tmp/cw-test/memory/global/MEMORY.md")
+    );
+
+    // A legacy single-file setting still anchors the store beside it.
+    config.memory_path = Some("/tmp/cw-test/memory.md".to_string());
+    assert_eq!(
+        config.memory_path(),
+        std::path::PathBuf::from("/tmp/cw-test/memory/global/MEMORY.md")
+    );
+}
