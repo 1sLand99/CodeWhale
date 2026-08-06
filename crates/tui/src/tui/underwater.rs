@@ -1616,15 +1616,52 @@ mod tests {
         }
     }
 
+    /// An enforced-sandbox marker for this platform, or `None` where the
+    /// enum has no enforced variant. Only identity matters here: the header
+    /// reads `sandbox_backend.is_some()`, never which backend it is.
+    fn enforced_backend() -> Option<crate::sandbox::SandboxType> {
+        #[cfg(target_os = "macos")]
+        {
+            Some(crate::sandbox::SandboxType::MacosSeatbelt)
+        }
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        {
+            Some(crate::sandbox::SandboxType::LinuxBubblewrap)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Some(crate::sandbox::SandboxType::Windows)
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        )))]
+        {
+            None
+        }
+    }
+
     fn test_app() -> App {
-        App::new(
+        let mut app = App::new(
             TuiOptions {
                 model: "deepseek-v4-flash".to_string(),
                 start_in_agent_mode: true,
                 ..crate::test_support::test_tui_options(PathBuf::from("."))
             },
             &Config::default(),
-        )
+        );
+        // `filesystem_scope_label` is deliberately honest about enforcement:
+        // with no OS sandbox backend it appends " (unenforced)" (all Windows,
+        // and Linux where bubblewrap is absent — it is opt-in). That is 12
+        // extra columns in the permission chip, which both changes the exact
+        // chip text and eats the width budget the cramped-layout assertions
+        // below are calibrated against. Header rendering is not a probe of
+        // the host's sandbox availability, so pin the backend and keep these
+        // tests platform-stable; `permission_chip_says_unenforced_without_a_
+        // backend` covers the `None` rendering explicitly.
+        app.sandbox_backend = enforced_backend();
+        app
     }
 
     fn launch() -> LaunchState {
@@ -1979,6 +2016,29 @@ mod tests {
         app.mode = AppMode::Plan;
         app.configured_sandbox_mode = Some("danger-full-access".to_string());
         assert_eq!(permission_label(&app), Cow::Borrowed("read only"));
+    }
+
+    /// The other half of the chip contract: a policy is an intent, and
+    /// without a backend nothing applies it. On those platforms the chip must
+    /// say so rather than name a boundary that is not enforced (2026-08-04
+    /// audit). `DangerFullAccess` is already honest and stays unqualified.
+    #[test]
+    fn permission_chip_says_unenforced_without_a_backend() {
+        let mut app = test_app();
+        app.sandbox_backend = None;
+
+        app.approval_mode = ApprovalMode::Bypass;
+        app.configured_sandbox_mode = Some("workspace-write".to_string());
+        assert_eq!(
+            permission_label(&app),
+            Cow::Borrowed("Full Access · files: workspace (unenforced)")
+        );
+
+        app.configured_sandbox_mode = Some("danger-full-access".to_string());
+        assert_eq!(
+            permission_label(&app),
+            Cow::Borrowed("Full Access · files: full disk")
+        );
     }
 
     #[test]

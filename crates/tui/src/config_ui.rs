@@ -852,7 +852,7 @@ fn theme_setting_for_document(doc: &ConfigUiDocument) -> Result<String> {
 ///
 /// A custom DeepSeek base URL owns its own model namespace, so non-DeepSeek ids
 /// must be accepted here the same way request-time
-/// [`wire_model_for_provider_route`] preserves them. The previous provider-only
+/// `wire_model_for_provider_route` preserves them. The previous provider-only
 /// gate rejected those saves even though the live session could use them.
 fn validate_and_normalize_model(
     config: &Config,

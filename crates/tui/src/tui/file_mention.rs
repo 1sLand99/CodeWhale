@@ -910,7 +910,14 @@ fn resolve_mention_in_completion_index(
 ) -> Option<PathBuf> {
     // Absolute and home-anchored mentions name an exact location; a basename
     // lookalike elsewhere in the tree would be a different file, not a fix-up.
-    if mention.starts_with('~') || Path::new(mention).is_absolute() {
+    // A leading separator is rooted on every platform, but `Path::is_absolute`
+    // is false for `/foo` on Windows (no drive prefix), which would otherwise
+    // let a rooted miss fall through to the index and attach an unrelated
+    // same-name file. Test the root marker directly so the guard holds there.
+    // `\` is a root marker only on Windows; on Unix it is an ordinary
+    // (if unusual) leading filename character, so leave that case alone.
+    let rooted = mention.starts_with('/') || (cfg!(windows) && mention.starts_with('\\'));
+    if mention.starts_with('~') || rooted || Path::new(mention).is_absolute() {
         return None;
     }
     let needle = mention.replace('\\', "/");
@@ -953,7 +960,14 @@ fn resolve_mention_in_completion_index(
             // The index can be stale; only a path that still resolves exists.
             // Display strings are workspace- or cwd-relative, which
             // `resolve_exact` re-anchors exactly like a typed path.
-            return ws.resolve_exact(winner).ok();
+            //
+            // Rejoin the components with this platform's separator first.
+            // Index strings are `/`-separated, and `root.join("ops/f.md")`
+            // keeps that slash verbatim on Windows, yielding a mixed
+            // `C:\ws\ops/f.md` that we then hand to the model and print in
+            // the context inspector. Same path, inconsistent rendering.
+            let native: PathBuf = winner.split('/').filter(|part| !part.is_empty()).collect();
+            return ws.resolve_exact(&native.to_string_lossy()).ok();
         }
     }
     None

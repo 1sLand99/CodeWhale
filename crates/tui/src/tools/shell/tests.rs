@@ -2657,6 +2657,11 @@ async fn every_advertised_stdin_spelling_reaches_the_command() {
     let context = ToolContext::new(workspace.path().to_path_buf());
     let schema = BashTool::new("Bash").input_schema();
 
+    // `cat` is Unix-only; the dispatcher runs PowerShell or `cmd` on Windows,
+    // where it is either absent or an alias for `Get-Content`, which reads a
+    // file and not stdin. Ask for this platform's echo-stdin spelling — the
+    // same helper `test_write_stdin_streams_output` uses.
+    let echo_stdin = echo_stdin_command();
     for spelling in ["stdin", "input", "data"] {
         assert!(
             schema["properties"][spelling].is_object(),
@@ -2664,7 +2669,7 @@ async fn every_advertised_stdin_spelling_reaches_the_command() {
         );
         let result = BashTool::new("Bash")
             .execute(
-                json!({"command": "cat", spelling: "PIPED_THROUGH_ALIAS\n"}),
+                json!({"command": echo_stdin, spelling: "PIPED_THROUGH_ALIAS\n"}),
                 &context,
             )
             .await
