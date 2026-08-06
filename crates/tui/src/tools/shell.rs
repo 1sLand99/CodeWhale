@@ -3853,6 +3853,12 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
     } else {
         format!("{}\n\nSTDERR:\n{}", result.stdout, result.stderr)
     };
+    // The model cannot see metadata, so surface the real elapsed time in the
+    // visible content. Without it every wait result looks identical whether
+    // the task just started or has been running for minutes, which biases the
+    // model into busy-polling short waits and misjudging long ones.
+    output = format!("{}\n\n{output}", wait_timing_line(&result));
+
     if let Some(hint) = network_restricted_hint.as_deref() {
         output = format!("{hint}\n\n{output}");
     }
@@ -3918,6 +3924,36 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
         object.insert("macos_provenance_restricted".to_string(), json!(true));
     }
     tool_result
+}
+
+/// Human-readable elapsed time for a shell task ("450 ms", "12.3 s", "2m5s").
+fn format_elapsed_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        let secs = ms as f64 / 1_000.0;
+        format!("{secs} s")
+    } else {
+        let total_secs = ms / 1_000;
+        format!("{}m{}s", total_secs / 60, total_secs % 60)
+    }
+}
+
+/// One-line status + elapsed summary for wait/delta results, placed at the top
+/// of the visible content so the model can judge how long it actually waited.
+fn wait_timing_line(result: &ShellResult) -> String {
+    let status_phrase = match result.status {
+        ShellStatus::Running => "still running",
+        ShellStatus::Completed => "completed",
+        ShellStatus::Failed => "failed",
+        ShellStatus::Killed => "killed",
+        ShellStatus::TimedOut => "timed out",
+    };
+    let elapsed = format_elapsed_ms(result.duration_ms);
+    match result.task_id.as_deref() {
+        Some(task_id) => format!("Task {task_id} {status_phrase} after {elapsed}."),
+        None => format!("Task {status_phrase} after {elapsed}."),
+    }
 }
 
 async fn wait_for_shell_delta_cancellable(

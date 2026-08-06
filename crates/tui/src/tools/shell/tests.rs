@@ -1209,6 +1209,139 @@ fn shell_delta_result_exposes_lossless_high_exit_code_and_hex() {
 }
 
 #[test]
+fn shell_delta_result_surfaces_elapsed_time_in_content() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let mut result = failed_network_shell_result("", "");
+    result.status = ShellStatus::Running;
+    result.duration_ms = 42_500;
+    result.task_id = Some("shell-7".to_string());
+
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "cargo test --workspace".to_string(),
+            result,
+            stdout_total_len: 0,
+            stderr_total_len: 0,
+        },
+        &ctx,
+    );
+
+    assert!(
+        tool_result
+            .content
+            .starts_with("Task shell-7 still running after 42.5 s."),
+        "{}",
+        tool_result.content
+    );
+}
+
+#[test]
+fn shell_delta_timing_line_omits_task_id_when_unknown() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    // failed_network_shell_result: ShellStatus::Failed, duration_ms: 25, task_id: None.
+    let result = failed_network_shell_result("", "");
+
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "echo probe".to_string(),
+            result,
+            stdout_total_len: 0,
+            stderr_total_len: 0,
+        },
+        &ctx,
+    );
+
+    assert!(
+        tool_result.content.starts_with("Task failed after 25 ms."),
+        "{}",
+        tool_result.content
+    );
+}
+
+#[test]
+fn shell_delta_timing_line_phrases_cover_terminal_statuses() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    for (status, phrase) in [
+        (ShellStatus::Completed, "completed"),
+        (ShellStatus::Killed, "killed"),
+        (ShellStatus::TimedOut, "timed out"),
+    ] {
+        let mut result = failed_network_shell_result("", "");
+        result.status = status;
+        result.duration_ms = 5_000;
+        let tool_result = build_shell_delta_tool_result(
+            ShellDeltaResult {
+                command: "echo probe".to_string(),
+                result,
+                stdout_total_len: 0,
+                stderr_total_len: 0,
+            },
+            &ctx,
+        );
+        assert!(
+            tool_result
+                .content
+                .starts_with(&format!("Task {phrase} after 5 s.")),
+            "{}",
+            tool_result.content
+        );
+    }
+}
+
+#[test]
+fn shell_delta_timing_line_handles_zero_duration() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let mut result = failed_network_shell_result("", "");
+    result.status = ShellStatus::Completed;
+    result.duration_ms = 0;
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "echo probe".to_string(),
+            result,
+            stdout_total_len: 0,
+            stderr_total_len: 0,
+        },
+        &ctx,
+    );
+    assert!(
+        tool_result
+            .content
+            .starts_with("Task completed after 0 ms."),
+        "{}",
+        tool_result.content
+    );
+}
+
+#[test]
+fn shell_delta_timing_line_sits_below_network_hint() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = network_restricted_context(tmp.path());
+    let result = failed_network_shell_result("000", "");
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "gh issue list".to_string(),
+            result,
+            stdout_total_len: 3,
+            stderr_total_len: 0,
+        },
+        &ctx,
+    );
+    let content = tool_result.content;
+    let hint_pos = content.find("Shell command blocked").expect("hint present");
+    let timing_pos = content
+        .find("failed after 25 ms")
+        .expect("timing line present");
+    assert!(
+        hint_pos < timing_pos,
+        "hint must precede timing line: {content}"
+    );
+}
+
+#[test]
 fn shell_delta_result_includes_cargo_failure_summary() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
