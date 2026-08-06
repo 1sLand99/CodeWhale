@@ -66,7 +66,9 @@ export function InstallBinary({ copyLabel, copiedLabel, verifyHeading = "Verify 
         {(Object.keys(SNIPPETS) as Arch[]).map((a, i) => (
           <button
             key={a}
+            type="button"
             onClick={() => setArch(a)}
+            aria-pressed={arch === a}
             className={`px-3 py-1.5 font-mono text-[0.7rem] tracking-wider transition-colors ${
               i > 0 ? "hairline-l" : ""
             } ${arch === a ? "bg-ink text-paper" : "bg-paper hover:bg-paper-deep"}`}

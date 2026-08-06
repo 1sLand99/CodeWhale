@@ -112,6 +112,7 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
             links={links}
             openLabel={chrome.menuOpen}
             closeLabel={chrome.menuClose}
+            navAria={chrome.navPrimaryAria}
           />
         </div>
       </div>

@@ -141,12 +141,12 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
       <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-6">
           <Seal char="集" />
-          <div className="eyebrow">{isZh ? "集成方式" : "Integration surfaces"}</div>
+          <h2 className="eyebrow">{isZh ? "集成方式" : "Integration surfaces"}</h2>
         </div>
 
         <div className="grid sm:grid-cols-2 gap-6">
           {INTEGRATIONS.map((item) => (
-            <div key={item.name} className="hairline rounded-lg p-5 bg-panel-1 hover:bg-panel-2 transition-colors">
+            <div key={item.name} className="hairline rounded-lg p-5 bg-paper hover:bg-paper-deep transition-colors">
               <h3 className="font-semibold text-base mb-2">
                 <a href={item.href} target="_blank" rel="noopener noreferrer" className="body-link">
                   {item.name} ↗
