@@ -11,7 +11,7 @@
 //!    and `crates\\tui\\…`. An absolute path discloses the machine; a relative
 //!    one discloses the private tree's shape, which is exactly as much as the
 //!    reader of a routing summary at another provider needs to reconstruct it.
-//!    The rule is deliberately conservative — see [`looks_relative`] — because
+//!    The rule is deliberately conservative — see `looks_relative` — because
 //!    the failure it must not trade for is mangling ordinary prose or a
 //!    `provider/model` label.
 //! 3. **Secret-shaped tokens.** Provider keys, bearer tokens, and

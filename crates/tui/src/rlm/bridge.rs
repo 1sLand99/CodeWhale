@@ -26,7 +26,7 @@ use crate::utils::spawn_supervised;
 
 /// Object-safe runtime-model adapter for a working kernel.
 ///
-/// The normal turn loop owns a [`SharedModelClient`], while the original RLM
+/// The normal turn loop owns a `SharedModelClient`, while the original RLM
 /// bridge predates that boundary and accepts the concrete [`LlmClient`] trait.
 /// Keeping this small adapter here means a persistent kernel follows exactly
 /// the selected model route (including custom providers) without teaching the
