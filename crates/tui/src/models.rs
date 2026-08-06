@@ -561,18 +561,12 @@ pub fn model_supports_reasoning(model: &str) -> bool {
         || is_openai_codex_model(&lower)
 }
 
-/// Contributor tier of Muse Spark 1.2 uses the same wire model id as the
-/// standard tier (`muse-spark-1.2`) but is billed at ~12×/21× cheaper rates
-/// in exchange for training-data opt-in. CodeWhale surfaces it as a distinct
-/// selectable id (`muse-spark-1.2-contributor`) for pricing/display, but the
-/// API request must still carry the canonical wire id.
+/// Contributor tier of Muse Spark 1.2 is a distinct selectable id with
+/// its own wire model (`muse-spark-1.2-contributor`) and cheaper billing in
+/// exchange for training-data opt-in. Do not collapse it to the standard tier.
 #[must_use]
 pub fn effective_muse_wire_id(model: &str) -> &str {
-    if model.eq_ignore_ascii_case("muse-spark-1.2-contributor") {
-        "muse-spark-1.2"
-    } else {
-        model
-    }
+    model
 }
 
 #[must_use]
