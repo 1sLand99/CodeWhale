@@ -997,7 +997,7 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_registry_mcp_sync_tool(mut self) -> Self {
         self.tools
-            .push(Arc::new(super::mcp_registry::McpSyncRegistry));
+            .push(Arc::new(super::mcp_registry::McpSyncRegistry::new()));
         self
     }
 
