@@ -5561,6 +5561,15 @@ impl SubAgentManager {
                 prompt: prompt.clone(),
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
+                // The model the child was actually installed with. Read here
+                // rather than from session state so a later `/model` switch
+                // cannot rewrite a launched child's attribution.
+                model: agent.model.clone(),
+                // Route provenance is resolved on the workflow spawn seam
+                // (`WorkflowTaskSpawnMetadata`), not on this path, so it is
+                // honestly absent rather than guessed. The model — the half
+                // that determines billing — is present either way.
+                route_source: None,
             });
         }
 

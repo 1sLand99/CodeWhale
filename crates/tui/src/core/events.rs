@@ -335,6 +335,14 @@ pub enum Event {
         prompt: String,
         parent_run_id: Option<String>,
         spawn_depth: u32,
+        /// Model the child runtime was actually installed with, after route
+        /// resolution. Structured-output hosts surface this so child billing
+        /// attribution never depends on reading source or an invoice.
+        model: String,
+        /// Why the child got that route (`task.model`, `agent_profile.loadout`,
+        /// `run.model`, …). `None` for spawn paths that bypass route
+        /// resolution (checkpoint resume, engine-internal spawns).
+        route_source: Option<String>,
     },
 
     /// Sub-agent progress update
