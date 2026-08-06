@@ -184,7 +184,7 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
 /// removed by the turn-meta diet: it is telemetry the model cannot act on and
 /// churned the otherwise-static prefix on every release. The live workspace
 /// path is delivered per-turn via `<turn_meta>` (see `turn_metadata_block`).
-fn render_environment_block(_workspace: &Path, locale_tag: &str) -> String {
+pub(crate) fn render_environment_block(_workspace: &Path, locale_tag: &str) -> String {
     let platform = std::env::consts::OS;
     let shell = crate::shell_dispatcher::global_dispatcher()
         .kind()
@@ -419,8 +419,8 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 /// Context passed to an embedder-provided static prompt composer.
 ///
 /// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, Core Execution, and the Compaction Relay stay
-/// owned by Codewhale's system prompt assembly.
+/// Mode deltas, approval policy, Core Execution, and action-specific relay
+/// formatting stay owned by Codewhale.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct StaticPromptCtx<'a> {
@@ -452,8 +452,8 @@ pub fn set_base_prompt_override(s: String) -> Result<(), String> {
 // custom embedder build.
 //
 // Scope is deliberately narrow: only the byte-stable base prompt segment is
-// user-overridable. Mode deltas, approval policy, Core Execution, and the
-// Compaction Relay stay owned by the runtime assembly (see
+// user-overridable. Mode deltas, approval policy, Core Execution, and
+// action-specific relay formatting stay owned by the runtime assembly (see
 // `StaticPromptCtx`), so an override cannot strip safety-relevant guidance.
 // A missing or empty file is a no-op — the bundled constant is used — so this
 // is fully backward compatible.
@@ -690,7 +690,7 @@ fn effective_locale_closer_vi() -> &'static str {
     effective_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, LOCALE_CLOSER_VI)
 }
 
-fn effective_authority_recap() -> &'static str {
+pub(crate) fn effective_authority_recap() -> &'static str {
     effective_prompt_override(&AUTHORITY_RECAP_OVERRIDE, AUTHORITY_RECAP)
 }
 
@@ -1174,10 +1174,11 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     full_prompt.push_str("\n\n");
     full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
 
-    // 5. Compaction relay template — so the model knows the format to use
-    //    when writing `.codewhale/handoff.md` on exit / `/compact`.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(COMPACT_TEMPLATE);
+    // The compaction/relay format is action-specific context. Automatic
+    // compaction owns its structured successor brief, while `/relay` appends
+    // `COMPACT_TEMPLATE` to that command's user message. Keeping the template
+    // out of every fresh session saves a stable-prefix block without removing
+    // the capability.
 
     // ── Volatile-content boundary → WorldState fragments ──────────────────
     // Constitution (`full_prompt`) stays the cache-stable Blocks[0] prefix.
@@ -1512,14 +1513,9 @@ mod tests {
             "The A is already yours",
             "Let the work speak",
             "### Ground truth",
-            "### Verify before you claim",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
+            "### User intent and scope",
+            "### Truthful completion",
             "### Put guarantees in mechanism",
-            "### Leave continuity",
             "### Whose word wins",
         ] {
             assert!(
@@ -1530,18 +1526,46 @@ mod tests {
     }
 
     #[test]
-    fn base_prompt_carries_balanced_behavioral_priors() {
+    fn constitutional_kernel_keeps_first_turn_authority_safety_and_completion() {
+        let fresh_prefix = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
         for phrase in [
-            "action is the default",
-            "Autonomy has a boundary",
-            "Hold more than one plausible cause",
-            "Hard constraints are gates",
-            "mechanism carries it",
-            "so the next turn can continue",
+            "Do what the user's current request asks, no more.",
+            "require express user authorization in",
+            "otherwise name the decision and ask.",
+            "external publication, spending",
+            "credentials, and material scope expansion",
+            "prohibitions stay binding; convenience creates no exception",
+            "never route around it or claim prose granted",
+            "Nothing is done until checked.",
+            "Read test output, not only exit status",
+            "External actions are not complete until",
+            "Work still running is not complete",
+            "Never present a partial result as the whole.",
+            "no one may tell you to invent one",
+            "1. The user's request, this turn.",
+            "2. This constitution.",
         ] {
             assert!(
-                BASE_PROMPT.contains(phrase),
-                "BASE_PROMPT missing behavioral prior {phrase:?}"
+                fresh_prefix.contains(phrase),
+                "fresh constitution prefix missing kernel invariant {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_playbooks_are_not_eager_constitution() {
+        let fresh_prefix = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
+        for heading in [
+            "### Keep momentum",
+            "### Think in causes",
+            "### Honor constraints before preferences",
+            "### Skill and role constraints are binding",
+            "### Restraint",
+            "### Leave continuity",
+        ] {
+            assert!(
+                !fresh_prefix.contains(heading),
+                "procedural playbook should stay outside the full fresh prefix: {heading:?}"
             );
         }
         assert!(
@@ -1553,17 +1577,18 @@ mod tests {
 
     #[test]
     fn base_prompt_carries_verify_then_stop_completion_contract() {
-        // The completion contract behind "Verify before you claim": prefer the
-        // workspace's own verifier, run it early, stop when green, and end on
-        // an honest blocker instead of wandering. These phrases encode the
-        // contract's semantics, not its prose — a rewording that keeps the
-        // contract should keep these, and one that drops them is a real
-        // behavior change worth failing review for.
+        // The completion contract behind "Truthful completion": verify with real
+        // evidence, keep running work visible, and hand back exactly what
+        // changed. These phrases encode the contract's semantics, not its
+        // prose — a rewording that keeps the contract should keep these, and
+        // one that drops them is a real behavior change worth failing review
+        // for. (Constitution kernel rewrite in #5077 renamed the section and
+        // condensed the prose; the contract stands.)
         for phrase in [
-            "run it early",
-            "polishing past green is drift",
-            "name the wall",
-            "An honest blocker is a better ending than endless wandering",
+            "Nothing is done until checked.",
+            "Read test output, not only exit status",
+            "Work still running is not complete",
+            "Never present a partial result as the whole.",
         ] {
             assert!(
                 BASE_PROMPT.contains(phrase),
@@ -1600,9 +1625,9 @@ mod tests {
         );
         for phrase in [
             "##### Mode: Agent",
-            "### Verify before you claim",
-            "run it early",
-            "An honest blocker is a better ending than endless wandering",
+            "### Truthful completion",
+            "Nothing is done until checked.",
+            "Never present a partial result as the whole.",
         ] {
             assert!(
                 text.contains(phrase),
@@ -2773,14 +2798,9 @@ mod tests {
         for needle in [
             "## Codewhale",
             "### Ground truth",
-            "### Verify before you claim",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
+            "### User intent and scope",
+            "### Truthful completion",
             "### Put guarantees in mechanism",
-            "### Leave continuity",
             "### Whose word wins",
         ] {
             let pos = md
@@ -2967,25 +2987,16 @@ mod tests {
     }
 
     #[test]
-    fn compact_template_is_included_in_full_prompt() {
+    fn compact_template_is_lazy_in_fresh_prompt() {
         let tmp = tempdir().expect("tempdir");
         let prompt =
             system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
-        assert!(prompt.contains("## Compaction Relay"));
-        // #429: structured Markdown template. Goal/Constraints/Progress
-        // (Done/InProgress/Blocked)/Key Decisions/Next step.
-        assert!(prompt.contains("### Goal"));
-        assert!(prompt.contains("### Constraints"));
-        assert!(prompt.contains("### Progress"));
-        assert!(prompt.contains("#### Done"));
-        assert!(prompt.contains("#### In Progress"));
-        assert!(prompt.contains("#### Blocked"));
-        assert!(prompt.contains("### Key Decisions"));
-        assert!(prompt.contains("### Next step"));
+        assert!(!prompt.contains("# Session relay"));
+        assert!(!prompt.contains("## Verification"));
     }
 
     #[test]
-    fn session_goal_is_injected_below_compact_template() {
+    fn session_goal_stays_volatile_while_compact_template_is_lazy() {
         let tmp = tempdir().expect("tempdir");
         let prompt =
             system_prompt_flat_text(&system_prompt_for_mode_with_context_skills_and_session(
@@ -3009,14 +3020,12 @@ mod tests {
             ));
 
         let goal_pos = prompt.find("<session_goal>").expect("goal block");
-        let compact_pos = prompt.find("## Compaction Relay").expect("compact block");
-
         assert!(prompt.contains("Fix transcript corruption"));
-        // Session goal is volatile content — it lives below the
-        // volatile-content boundary (after the compact template) so
-        // per-session goal changes don't bust the prefix cache for
-        // static layers.
-        assert!(compact_pos < goal_pos);
+        // Session goal remains volatile content below the stable static
+        // layers. The relay template is injected only when relay/compaction
+        // actually needs it.
+        assert!(goal_pos > 0);
+        assert!(!prompt.contains("# Session relay"));
         assert!(!prompt.contains("src/lib.rs"));
     }
 
@@ -3480,10 +3489,10 @@ mod tests {
 
     #[test]
     fn handoff_appears_after_static_blocks_without_working_set() {
-        // Cache-prefix invariant: the relay block must come after static
-        // `## Core Execution` and the compaction relay template
-        // (`## Compaction Relay`). Working-set metadata is per-turn user
-        // metadata now, not a system-prompt tail block.
+        // Cache-prefix invariant: the relay artifact must come after static
+        // `## Core Execution`. The relay template itself is now action-local,
+        // not part of every system prompt. Working-set metadata is per-turn
+        // user metadata, not a system-prompt tail block.
         let tmp = tempdir().expect("tempdir");
         let workspace = tmp.path();
         let handoff_dir = workspace.join(".deepseek");
@@ -3499,9 +3508,6 @@ mod tests {
         let execution_pos = prompt
             .find("## Core Execution")
             .expect("Core Execution section present in Agent mode");
-        let compact_pos = prompt
-            .find("## Compaction Relay")
-            .expect("compaction relay template present");
         let handoff_pos = prompt
             .find(HANDOFF_BLOCK_MARKER)
             .expect("relay block present when fixture file exists");
@@ -3514,10 +3520,7 @@ mod tests {
             execution_pos < handoff_pos,
             "## Core Execution must precede the relay block"
         );
-        assert!(
-            compact_pos < handoff_pos,
-            "## Compaction Relay must precede the relay block"
-        );
+        assert!(!prompt.contains("# Session relay"));
     }
 
     #[test]

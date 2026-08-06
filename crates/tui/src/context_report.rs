@@ -16,7 +16,7 @@ use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens
 use crate::config::{ApiProvider, Config};
 use crate::context_budget::PressureLevel;
 use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
-use crate::prompts::{COMPACT_TEMPLATE, Personality};
+use crate::prompts::{CORE_EXECUTION_PROFILE_PROMPT, Personality};
 use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
 
@@ -167,6 +167,7 @@ pub enum SourceKind {
     ContextManagement,
     CompactionRelayTemplate,
     RuntimePolicy,
+    AuthorityRecap,
     EnvironmentBlock,
     UserMemory,
     SessionGoal,
@@ -249,7 +250,16 @@ impl ReportBuilder {
 }
 
 pub fn build_context_report(app: &App) -> PromptSourceMap {
-    let mut builder = base_source_entries(&app.model, &app.workspace, Some(&app.skills_dir));
+    let mut builder = base_source_entries(
+        &app.model,
+        &app.workspace,
+        Some(&app.skills_dir),
+        app.project_context_pack_enabled,
+        app.skills_scan_codewhale_only,
+        app.ui_locale.tag(),
+        app.mode,
+        Some(app.plugin_registry.as_ref()),
+    );
     add_app_runtime_entries(&mut builder, app);
     let active_context_estimated_tokens =
         estimate_input_tokens_conservative(&app.api_messages, app.system_prompt.as_ref());
@@ -317,7 +327,16 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
     let global_skills_dir = config.skills_dir();
     let selected_skills_dir =
         crate::tui::app::resolve_skills_dir(workspace, &global_skills_dir, config);
-    let mut builder = base_source_entries(&model, workspace, Some(&selected_skills_dir));
+    let mut builder = base_source_entries(
+        &model,
+        workspace,
+        Some(&selected_skills_dir),
+        config.project_context_pack_enabled(),
+        config.skills_config().scan_codewhale_only(),
+        "en",
+        crate::tui::app::AppMode::Agent,
+        None,
+    );
     let memory_path = config.memory_path();
     let memory_enabled = config.memory_enabled();
 
@@ -374,7 +393,17 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
     )
 }
 
-fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>) -> ReportBuilder {
+#[allow(clippy::too_many_arguments)]
+fn base_source_entries(
+    model: &str,
+    workspace: &Path,
+    skills_dir: Option<&Path>,
+    project_pack_enabled: bool,
+    skills_scan_codewhale_only: bool,
+    locale_tag: &str,
+    mode: crate::tui::app::AppMode,
+    plugin_registry: Option<&crate::plugins::PluginRegistry>,
+) -> ReportBuilder {
     let mut builder = ReportBuilder::new();
 
     let constitution = crate::prompts::compose_default_static_layers(Personality::Calm, model);
@@ -479,23 +508,44 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
         ));
     }
 
-    if let Some(pack) = crate::project_context::generate_project_context_pack(workspace) {
-        builder.push(SourceEntry::text(
+    if project_pack_enabled {
+        if let Some(pack) = crate::project_context::generate_project_context_pack(workspace) {
+            builder.push(SourceEntry::text(
+                SourceKind::ProjectContextPack,
+                "Project context pack",
+                Some(workspace.display().to_string()),
+                ActivationReason::ConfigEnabled,
+                &pack,
+                CountingConfidence::Approximate,
+                Some(5),
+            ));
+        }
+    } else {
+        builder.push(SourceEntry::omitted(
             SourceKind::ProjectContextPack,
             "Project context pack",
             Some(workspace.display().to_string()),
-            ActivationReason::RuntimeState,
-            &pack,
-            CountingConfidence::Approximate,
             Some(5),
+            "disabled; project_map provides this information on demand",
         ));
     }
 
+    let skill_discovery_mode =
+        crate::skills::SkillDiscoveryMode::from_codewhale_only(skills_scan_codewhale_only);
     let skills_block = match skills_dir {
-        Some(dir) => {
-            crate::skills::render_available_skills_context_for_workspace_and_dir(workspace, dir)
-        }
-        None => crate::skills::render_available_skills_context_for_workspace(workspace),
+        Some(dir) => crate::skills::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+            workspace,
+            dir,
+            skill_discovery_mode,
+            locale_tag,
+            plugin_registry,
+        ),
+        None => crate::skills::render_available_skills_context_for_workspace_with_mode_and_plugins(
+            workspace,
+            skill_discovery_mode,
+            locale_tag,
+            plugin_registry,
+        ),
     };
     if let Some(block) = skills_block {
         builder.push(SourceEntry::text(
@@ -517,32 +567,48 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
         ));
     }
 
-    builder.push(SourceEntry::estimate(
+    builder.push(SourceEntry::text(
         SourceKind::ContextManagement,
-        "Context management guidance",
+        format!("{} mode doctrine", mode.label()),
         None,
         ActivationReason::AlwaysOn,
-        430,
-        CountingConfidence::Approximate,
-        Some(3),
-    ));
-    builder.push(SourceEntry::text(
-        SourceKind::CompactionRelayTemplate,
-        "Compaction relay template",
-        Some("bundled in this codewhale-tui build (COMPACT_TEMPLATE, compiled in)".to_string()),
-        ActivationReason::AlwaysOn,
-        COMPACT_TEMPLATE,
+        crate::prompts::mode_doctrine(mode),
         CountingConfidence::High,
         Some(3),
     ));
-    builder.push(SourceEntry::estimate(
+    builder.push(SourceEntry::omitted(
+        SourceKind::CompactionRelayTemplate,
+        "Session relay template",
+        Some("bundled in this codewhale-tui build (COMPACT_TEMPLATE, compiled in)".to_string()),
+        Some(3),
+        "loaded only when /relay is requested; automatic compaction owns its successor brief",
+    ));
+    builder.push(SourceEntry::text(
         SourceKind::RuntimePolicy,
-        "Runtime policy reference",
+        "Core execution discipline",
         None,
         ActivationReason::AlwaysOn,
-        650,
-        CountingConfidence::Approximate,
+        CORE_EXECUTION_PROFILE_PROMPT,
+        CountingConfidence::High,
         Some(3),
+    ));
+    builder.push(SourceEntry::text(
+        SourceKind::AuthorityRecap,
+        "Authority recap",
+        None,
+        ActivationReason::AlwaysOn,
+        crate::prompts::effective_authority_recap(),
+        CountingConfidence::High,
+        Some(1),
+    ));
+    builder.push(SourceEntry::text(
+        SourceKind::EnvironmentBlock,
+        "Runtime environment",
+        Some(workspace.display().to_string()),
+        ActivationReason::AlwaysOn,
+        &crate::prompts::render_environment_block(workspace, locale_tag),
+        CountingConfidence::High,
+        Some(4),
     ));
 
     add_handoff_entry(&mut builder, workspace);
@@ -550,23 +616,6 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
 }
 
 fn add_app_runtime_entries(builder: &mut ReportBuilder, app: &App) {
-    builder.push(SourceEntry::text(
-        SourceKind::EnvironmentBlock,
-        "Runtime environment",
-        Some(app.workspace.display().to_string()),
-        ActivationReason::PerRequest,
-        &format!(
-            "workspace: {}\nmodel: {}\nprovider: {}\nmode: {}\napproval: {}",
-            app.workspace.display(),
-            app.model,
-            app.provider_identity_for_persistence(),
-            app.mode.label(),
-            app.approval_mode.permission_chip_label()
-        ),
-        CountingConfidence::Approximate,
-        Some(4),
-    ));
-
     if let Some(memory_block) =
         crate::native_memory::native_prompt_block(app.use_memory, &app.memory_path, &app.workspace)
     {
@@ -1100,6 +1149,96 @@ mod tests {
 
         assert_eq!(memory_entry.activation_reason, ActivationReason::Omitted);
         assert!(!context_report_json(&report).contains("private legacy memory"));
+    }
+
+    #[test]
+    fn headless_report_counts_project_pack_only_when_configured() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+        fs::create_dir(tmp.path().join("src")).expect("mkdir src");
+        fs::write(tmp.path().join("src/lib.rs"), "pub fn fixture() {}\n").expect("write fixture");
+
+        let default_report = build_headless_context_report(&Config::default(), tmp.path());
+        let default_pack = default_report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::ProjectContextPack)
+            .expect("project pack entry");
+        assert_eq!(default_pack.activation_reason, ActivationReason::Omitted);
+        assert_eq!(default_pack.estimated_tokens, 0);
+        assert_eq!(
+            default_pack.truncation_reason.as_deref(),
+            Some("disabled; project_map provides this information on demand")
+        );
+
+        let relay = default_report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::CompactionRelayTemplate)
+            .expect("relay template entry");
+        assert_eq!(relay.activation_reason, ActivationReason::Omitted);
+        assert_eq!(relay.estimated_tokens, 0);
+
+        let mut configured = Config::default();
+        configured.context.project_pack = Some(true);
+        let configured_report = build_headless_context_report(&configured, tmp.path());
+        let configured_pack = configured_report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::ProjectContextPack)
+            .expect("configured project pack entry");
+        assert_eq!(
+            configured_pack.activation_reason,
+            ActivationReason::ConfigEnabled
+        );
+        assert!(
+            configured_pack.estimated_tokens > 0,
+            "configured project pack must be counted"
+        );
+
+        let environment = configured_report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::EnvironmentBlock)
+            .expect("runtime environment entry");
+        assert_eq!(environment.activation_reason, ActivationReason::AlwaysOn);
+    }
+
+    #[test]
+    fn app_context_report_counts_configured_project_pack_before_first_turn() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+        fs::create_dir(tmp.path().join("src")).expect("mkdir src");
+        fs::write(tmp.path().join("src/lib.rs"), "pub fn fixture() {}\n").expect("write fixture");
+        let mut config = Config::default();
+        config.context.project_pack = Some(true);
+        let app = App::new(
+            crate::tui::app::TuiOptions {
+                use_alt_screen: false,
+                use_bracketed_paste: false,
+                notes_path: tmp.path().join("notes.txt"),
+                mcp_config_path: tmp.path().join("mcp.json"),
+                start_in_agent_mode: true,
+                ..crate::test_support::test_tui_options(tmp.path())
+            },
+            &config,
+        );
+
+        assert!(
+            app.system_prompt.is_none(),
+            "fixture must be pre-first-turn"
+        );
+        let report = build_context_report(&app);
+        let project_pack = report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::ProjectContextPack)
+            .expect("project pack entry");
+        assert_eq!(
+            project_pack.activation_reason,
+            ActivationReason::ConfigEnabled
+        );
+        assert!(project_pack.estimated_tokens > 0);
     }
 
     #[test]

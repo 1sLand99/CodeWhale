@@ -1294,6 +1294,10 @@ pub struct App {
     pub mcp_config_path: PathBuf,
     pub skills_dir: PathBuf,
     pub skills_scan_codewhale_only: bool,
+    /// Whether the optional project context pack was enabled when this
+    /// session loaded its configuration. Context diagnostics consult this
+    /// source of truth even before the first system prompt is assembled.
+    pub project_context_pack_enabled: bool,
     /// Path to the user-memory file (#489). Always populated; only
     /// consulted when `use_memory` is `true`.
     pub memory_path: PathBuf,

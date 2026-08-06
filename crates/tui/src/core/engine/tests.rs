@@ -6188,13 +6188,14 @@ fn core_native_tools_stay_loaded_in_yolo_mode() {
 }
 
 #[test]
-fn default_active_contract_keeps_remember_and_synthetic_tool_search_eager() {
-    const EXPECTED_NATIVE: [&str; 8] = [
+fn default_active_contract_keeps_discovery_and_core_tools_eager() {
+    const EXPECTED_NATIVE: [&str; 9] = [
         "Bash",
         "File",
         "Git",
         "Run",
         "agent",
+        "load_skill",
         "remember",
         "tasks",
         "work_update",
@@ -6236,6 +6237,7 @@ fn non_yolo_mode_retains_default_defer_policy() {
         assert!(!should_default_defer_tool(canonical, &always_load));
     }
     assert!(!should_default_defer_tool("agent", &always_load));
+    assert!(!should_default_defer_tool("load_skill", &always_load));
     assert!(!should_default_defer_tool("remember", &always_load));
     assert!(should_default_defer_tool(
         REQUEST_USER_INPUT_NAME,

@@ -733,6 +733,7 @@ impl App {
             mcp_config_path: mcp_config_path.clone(),
             skills_dir,
             skills_scan_codewhale_only,
+            project_context_pack_enabled: config.project_context_pack_enabled(),
             memory_path,
             use_memory,
             use_alt_screen,

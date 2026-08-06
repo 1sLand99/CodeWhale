@@ -81,14 +81,55 @@ fn render_available_skills_context_lists_paths_and_usage() {
 
     assert!(rendered.contains("## Skills"));
     assert!(rendered.contains("- test-skill: A test skill"));
-    assert!(rendered.contains("Use `load_skill` to open any skill body by name"));
-    assert!(rendered.contains("Direct file reads retain the normal workspace/trust boundary"));
+    assert!(rendered.contains("load the exact skill before applying it"));
+    assert!(rendered.contains("do not expand tool, approval, or trust authority"));
     assert!(
         rendered.contains(&expected_path),
         "expected path {expected_path:?} not in rendered output"
     );
     assert!(!rendered.contains(tmpdir.path().to_str().unwrap_or("/nonexistent")));
-    assert!(rendered.contains("### How to use skills"));
+    assert!(rendered.contains("### Usage"));
+}
+
+#[test]
+fn workspace_prompt_omits_disabled_skills_without_configured_directory() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = tmpdir.path().join("workspace");
+    let skills_root = workspace.join(".agents").join("skills");
+    std::fs::create_dir_all(&home).unwrap();
+    write_skill(
+        &skills_root,
+        "enabled-skill",
+        "Enabled skill",
+        "Instructions",
+    );
+    write_skill(
+        &skills_root,
+        "disabled-skill",
+        "Disabled skill",
+        "Instructions",
+    );
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    let mut state = crate::skill_state::SkillStateStore::load_default().unwrap();
+    state.set_enabled("disabled-skill", false).unwrap();
+    super::clear_skill_discovery_cache();
+
+    let rendered = super::render_available_skills_context_for_workspace_with_mode_and_plugins(
+        &workspace,
+        super::SkillDiscoveryMode::Compatible,
+        "en",
+        None,
+    )
+    .expect("enabled skill context");
+
+    assert!(rendered.contains("enabled-skill"));
+    assert!(!rendered.contains("disabled-skill"));
 }
 
 #[test]
@@ -141,6 +182,22 @@ fn render_available_skills_context_returns_none_when_empty() {
 }
 
 #[test]
+fn render_skills_block_surfaces_warnings_when_no_skill_loaded() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    registry
+        .warnings
+        .push("broken skill could not be parsed".to_string());
+
+    let rendered =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("warning-only block");
+
+    assert!(rendered.contains("### Skill load warnings"));
+    assert!(rendered.contains("broken skill could not be parsed"));
+    assert!(rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS);
+}
+
+#[test]
 fn render_available_skills_context_truncates_long_descriptions() {
     let tmpdir = TempDir::new().unwrap();
     let long_desc = "x".repeat(2_000);
@@ -190,13 +247,94 @@ fn render_available_skills_context_omits_overflowing_skills() {
         .expect("skill context");
 
     assert!(
-        rendered.contains("additional skills omitted from this prompt budget"),
+        rendered.contains("additional skills omitted"),
         "expected overflow notice"
     );
     assert!(
-        rendered.chars().count() < super::MAX_AVAILABLE_SKILLS_CHARS + 4_000,
-        "rendered length should stay near the budget"
+        rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS,
+        "rendered length must stay within the complete block budget"
     );
+}
+
+#[test]
+fn render_skills_block_holds_budget_with_five_digit_omission_counts() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    for i in 0..11_000 {
+        registry.skills.push(super::Skill {
+            name: format!("skill-{i:05}"),
+            description: "x".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("skill-{i:05}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+        registry.warnings.push(format!("warning {i:05}"));
+    }
+
+    let rendered =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("skill context");
+    let omitted_skills = rendered
+        .lines()
+        .find(|line| line.contains("additional skills omitted"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|count| count.parse::<usize>().ok())
+        .expect("skill omission count");
+    let omitted_warnings = rendered
+        .lines()
+        .find(|line| line.contains("additional warnings omitted"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|count| count.parse::<usize>().ok())
+        .expect("warning omission count");
+
+    assert!(omitted_skills > 9_999, "fixture must exercise five digits");
+    assert!(
+        omitted_warnings > 9_999,
+        "fixture must exercise five digits"
+    );
+    assert!(rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS);
+}
+
+#[test]
+fn explicit_only_skills_do_not_reduce_ambient_index_capacity() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    for i in 0..6 {
+        registry.skills.push(super::Skill {
+            name: format!("visible-{i:03}"),
+            description: "x".repeat(246),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("visible-{i:03}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+    }
+
+    let baseline =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("skill context");
+    assert!(!baseline.contains("additional skills omitted"));
+
+    let mut with_explicit_only = registry.clone();
+    for i in 0..10_000 {
+        with_explicit_only.skills.push(super::Skill {
+            name: format!("explicit-{i:05}"),
+            description: String::new(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ExplicitOnly,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("explicit-{i:05}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+    }
+
+    let rendered = super::render_skills_block(&with_explicit_only, "en", tmpdir.path())
+        .expect("skill context");
+    assert_eq!(rendered, baseline);
 }
 
 #[test]
@@ -245,7 +383,7 @@ fn render_skills_block_preserves_registry_precedence_under_prompt_budget() {
         "higher-precedence workspace skills must not be reordered behind globals:\n{rendered}"
     );
     assert!(
-        rendered.contains("additional skills omitted from this prompt budget"),
+        rendered.contains("additional skills omitted"),
         "fixture should exceed prompt budget"
     );
 }

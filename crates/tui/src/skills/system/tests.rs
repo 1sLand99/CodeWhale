@@ -496,3 +496,13 @@ fn end_user_pack_skills_parse_for_discovery() {
         assert!(registry.get(name).is_some(), "{name} must be discoverable");
     }
 }
+
+#[test]
+fn procedural_skill_homes_remain_bundled_and_lazy() {
+    for name in ["debug", "best-of-n", "simplify", "verify", "test", "review"] {
+        assert!(
+            is_bundled_skill_name(name),
+            "procedural skill home must remain available on demand: {name}"
+        );
+    }
+}

@@ -989,7 +989,11 @@ mod tests {
         assert!(!message.description().contains("natural resume"));
         assert!(message.description().contains("stays queued"));
         assert!(followup.description().contains("attempt to resume"));
-        assert!(followup.description().contains("resumed from their checkpoint"));
+        assert!(
+            followup
+                .description()
+                .contains("resumed from their checkpoint")
+        );
         assert!(followup.description().contains("queue-only semantics"));
     }
 

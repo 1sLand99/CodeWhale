@@ -3,12 +3,9 @@
 //!
 //! ## Why a tool when skills already surface in the system prompt?
 //!
-//! `prompts.rs::system_prompt_for_mode_with_context_and_skills` injects
-//! a one-line listing of every available skill (name + description +
-//! file path) so the model knows what's in the catalogue at the start
-//! of every turn. The full body of each skill is *not* loaded — that
-//! would blow the prompt budget the moment a user has half a dozen
-//! skills installed.
+//! `prompts.rs::system_prompt_for_mode_with_context_and_skills` injects a
+//! budgeted first page of routing metadata. The full catalogue is available
+//! through `name="list"`, and each full body is loaded only by exact name.
 //!
 //! `load_skill name=<id>` is the canonical progressive-disclosure path. It
 //! performs a name-based host lookup, so native global skills work without
@@ -40,7 +37,9 @@ impl ToolSpec for LoadSkillTool {
 
     fn description(&self) -> &'static str {
         "Load a skill (SKILL.md body + companion file list) into the next turn's context. \
-         Use this when the user names a skill or the task clearly matches a skill listed in the system prompt's `## Skills` section. Faster than File action=\"read\" plus File action=\"list\"."
+         Use name=\"list\" to discover the complete enabled catalogue, then load an exact \
+         skill when the user names it or the task clearly matches its description. Faster \
+         than File action=\"read\" plus File action=\"list\"."
     }
 
     fn input_schema(&self) -> Value {

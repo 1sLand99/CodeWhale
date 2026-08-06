@@ -5,43 +5,43 @@
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 12158,
-        "identity_sha256": "a8a4970869072d844a6afea9d836112ebc2bfad79bbfc29ec7057dd5be38197b"
+        "bytes": 6740,
+        "identity_sha256": "d88255e429527fd5e4adc5be09c57cd75c71f8cb7e3dcc7ebe69e6395465f47c"
       },
       "goal": {
-        "bytes": 14804,
+        "bytes": 8903,
         "delta_bytes": 81,
-        "identity_sha256": "922579fa818e934831c92ced5ac3a87eb5b47a844acc38f2c2974f0b3bebbb4e"
+        "identity_sha256": "ea2b56a3257c14d001aa553621d9b6fc4662e280378755c3fdc661aa50c53e2a"
       },
       "handoff": {
-        "bytes": 15192,
+        "bytes": 9291,
         "delta_bytes": 388,
-        "identity_sha256": "f26d1380492940e8796b15220773d28ddedc46ba6195193f7f4bcac59938e964"
+        "identity_sha256": "aa82137bff95eda6642820089ed1a6931394f58e65085c2ceed5d81b1b27f831"
       },
       "instructions": {
-        "bytes": 12610,
+        "bytes": 7192,
         "delta_bytes": 131,
-        "identity_sha256": "38ff677b88816942adee8728cf922a688db6071e764d2892f9f35feb07c1564d"
+        "identity_sha256": "0e4b77464c3177cb3e0a60d1d805f111b1ee8dc3ff377ad7dfb8b9615cc885df"
       },
       "memory": {
-        "bytes": 14723,
+        "bytes": 8822,
         "delta_bytes": 963,
-        "identity_sha256": "5ffb5c80c13a0490d23883dda41f5acb073f2d7ee2fa243d3b46462f1b61c08c"
+        "identity_sha256": "228a9bc9f776bb3fffff9276c2efc8faad1674b7a5fc4318ec1f9558ae37eaf3"
       },
       "project": {
-        "bytes": 12479,
+        "bytes": 7061,
         "delta_bytes": 321,
-        "identity_sha256": "039cdccdaaec2ebf3d69768f6d248992bfa6606c2acc8eba6555d82c26a84c96"
+        "identity_sha256": "bace3ab6908c66aa0393ce76b55b21d93fbb468eb5ae57797faa4e5cca802f8d"
       },
       "skill": {
-        "bytes": 13760,
-        "delta_bytes": 1150,
-        "identity_sha256": "2ec8e3a187ad0c553de8663c472e2a74c536fdc1c804a4c099e8b5ae1cfd24d3"
+        "bytes": 7859,
+        "delta_bytes": 667,
+        "identity_sha256": "c241969df355f1d1d472de7860832e5e86ec6546ad5f757d739139febfc82625"
       }
     },
     "system_prompt_blocks": 6,
-    "total_bytes": 15192,
-    "total_tokens_est": 3798
+    "total_bytes": 9291,
+    "total_tokens_est": 2323
   },
   "schema_version": 1,
   "skill_discovery": {
@@ -59,25 +59,25 @@
   "system_prompt": {
     "modes": {
       "act": {
-        "mode_instructions_bytes": 802,
-        "mode_instructions_tokens_est": 201,
+        "mode_instructions_bytes": 891,
+        "mode_instructions_tokens_est": 223,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 12158,
-        "system_prompt_tokens_est": 3040
+        "system_prompt_bytes": 6740,
+        "system_prompt_tokens_est": 1685
       },
       "operate": {
         "mode_instructions_bytes": 1671,
         "mode_instructions_tokens_est": 418,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 13027,
-        "system_prompt_tokens_est": 3257
+        "system_prompt_bytes": 7520,
+        "system_prompt_tokens_est": 1880
       },
       "plan": {
         "mode_instructions_bytes": 517,
         "mode_instructions_tokens_est": 130,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 11873,
-        "system_prompt_tokens_est": 2969
+        "system_prompt_bytes": 6366,
+        "system_prompt_tokens_est": 1592
       }
     }
   },
@@ -85,25 +85,26 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 23033,
-          "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
-          "tokens_est": 5759,
+          "bytes": 23010,
+          "identity_sha256": "d1b4a84c257b31324adc3a026b1ed56423285bd03283f159278c98b6bd7d1400",
+          "tokens_est": 5753,
           "tool_names": [
             "Bash",
             "File",
             "Git",
             "Run",
             "agent",
+            "load_skill",
             "tasks",
             "tool_search",
             "work_update"
           ],
-          "tools": 8
+          "tools": 9
         },
         "full": {
-          "bytes": 68792,
-          "identity_sha256": "34086a7e145dae6e115b5b95f35968862cedabb21257cae29c992f65732c165f",
-          "tokens_est": 17198,
+          "bytes": 67607,
+          "identity_sha256": "54e7530bfbee85550f4f90cde9c03dab6e790b84b3a4072bcb8ab906baa2b0e1",
+          "tokens_est": 16902,
           "tool_names": [
             "Bash",
             "File",
@@ -125,6 +126,7 @@
             "get_goal",
             "github",
             "handle_read",
+            "harness",
             "load_skill",
             "lsp",
             "note",
@@ -134,7 +136,6 @@
             "retrieve_tool_result",
             "revert_turn",
             "review",
-            "rlm",
             "send_later",
             "speech",
             "task_shell_start",
@@ -159,25 +160,26 @@
       },
       "operate": {
         "active": {
-          "bytes": 23033,
-          "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
-          "tokens_est": 5759,
+          "bytes": 23010,
+          "identity_sha256": "d1b4a84c257b31324adc3a026b1ed56423285bd03283f159278c98b6bd7d1400",
+          "tokens_est": 5753,
           "tool_names": [
             "Bash",
             "File",
             "Git",
             "Run",
             "agent",
+            "load_skill",
             "tasks",
             "tool_search",
             "work_update"
           ],
-          "tools": 8
+          "tools": 9
         },
         "full": {
-          "bytes": 68792,
-          "identity_sha256": "34086a7e145dae6e115b5b95f35968862cedabb21257cae29c992f65732c165f",
-          "tokens_est": 17198,
+          "bytes": 67607,
+          "identity_sha256": "54e7530bfbee85550f4f90cde9c03dab6e790b84b3a4072bcb8ab906baa2b0e1",
+          "tokens_est": 16902,
           "tool_names": [
             "Bash",
             "File",
@@ -199,6 +201,7 @@
             "get_goal",
             "github",
             "handle_read",
+            "harness",
             "load_skill",
             "lsp",
             "note",
@@ -208,7 +211,6 @@
             "retrieve_tool_result",
             "revert_turn",
             "review",
-            "rlm",
             "send_later",
             "speech",
             "task_shell_start",
@@ -233,23 +235,24 @@
       },
       "plan": {
         "active": {
-          "bytes": 17388,
-          "identity_sha256": "e1c0ec4c8caf7799e406a2352cb7caba53468abb50e50a88a8e04f52f7942200",
-          "tokens_est": 4347,
+          "bytes": 17365,
+          "identity_sha256": "6c8219db35f4279723ba77291079cf5c78a4a335acb2b3cf4b684610ada50852",
+          "tokens_est": 4342,
           "tool_names": [
             "File",
             "Git",
             "agent",
+            "load_skill",
             "tasks",
             "tool_search",
             "work_update"
           ],
-          "tools": 6
+          "tools": 7
         },
         "full": {
-          "bytes": 42539,
+          "bytes": 42087,
           "identity_sha256": "e44f5cc1c77e86a0fd5f3664441afeb3d913dc19b8a8f3b9a0385ee98f78b42e",
-          "tokens_est": 10635,
+          "tokens_est": 10522,
           "tool_names": [
             "File",
             "Git",
