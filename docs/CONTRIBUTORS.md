@@ -34,13 +34,17 @@ notes, and relevant issue/PR comments.
 
 - **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — LaTeX
   rendering in PR #4981, circled-digit and keycap width handling in PR #5001,
-  and actionable File-edit recovery in PR #5008
+  and actionable File-edit recovery in PR #5008; sub-agent checkpoint resume
+  in PR #5242, real shell wait elapsed time in PR #5240, and keeping
+  alternate-scroll off while mouse capture is active in PR #5234
 - **[XhesicaFrost](https://github.com/XhesicaFrost)** — long Windows user-PATH
   preservation in PR #5006
 - **[Paulo Aboim Pinto / aboimpinto](https://github.com/aboimpinto)** — the
   user-command dispatch acceptance contract in PR #4992
 - **[shenjackyuanjie](https://github.com/shenjackyuanjie)** — Windows
   OpenHarmony linker re-quoting for spaced SDK paths in PR #5095
+- **[bistack](https://github.com/bistack)** — MCP Registry discovery with
+  Registry-first tool selection in PR #5238
 
 **Reports, reproductions, and verification**
 
