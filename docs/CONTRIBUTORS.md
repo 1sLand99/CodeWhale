@@ -45,6 +45,8 @@ notes, and relevant issue/PR comments.
   OpenHarmony linker re-quoting for spaced SDK paths in PR #5095
 - **[bistack](https://github.com/bistack)** — MCP Registry discovery with
   Registry-first tool selection in PR #5238
+- **[vFONGv](https://github.com/vFONGv)** — the zh-CN Windows beginner guide
+  with screenshots in PR #5229
 
 **Reports, reproductions, and verification**
 

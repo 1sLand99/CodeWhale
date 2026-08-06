@@ -363,6 +363,9 @@ File edits, terminal width, and Windows installation.
   PR #5095.
 - [bistack](https://github.com/bistack) (`@bistack`) contributed MCP Registry
   discovery with Registry-first tool selection in PR #5238.
+- [vFONGv](https://github.com/vFONGv) (`@vFONGv`) wrote the zh-CN Windows
+  beginner guide with screenshots in PR #5229, harvested after its base branch
+  was accidentally deleted during maintainer cleanup.
 
 ## [0.9.3] - 2026-07-31
 
