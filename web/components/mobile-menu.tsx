@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChromeLink } from "@/lib/i18n/links";
 
 export function MobileMenu({
@@ -11,20 +11,32 @@ export function MobileMenu({
   installLabel,
   openLabel,
   closeLabel,
+  navAria,
 }: {
   links: ChromeLink[];
   installHref: string;
   installLabel: string;
   openLabel: string;
   closeLabel: string;
+  /** Accessible name for the dialog's navigation landmark. */
+  navAria: string;
 }) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    // aria-modal promises the dialog owns interaction: move focus inside on
+    // open, and hand it back to the toggle on close (Escape, link, or the
+    // toggle itself — re-focusing an already-focused button is a no-op).
+    // The toggle node is captured now: reading toggleRef.current inside the
+    // cleanup would race React clearing the ref.
+    const toggle = toggleRef.current;
+    menuRef.current?.querySelector<HTMLElement>("a, button")?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
@@ -32,12 +44,14 @@ export function MobileMenu({
     return () => {
       document.body.style.overflow = prev;
       window.removeEventListener("keydown", onKey);
+      toggle?.focus();
     };
   }, [open]);
 
   return (
     <>
       <button
+        ref={toggleRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="md:hidden inline-flex items-center justify-center w-9 h-9 hairline-t hairline-b hairline-l hairline-r hover:bg-paper-deep transition-colors"
@@ -58,11 +72,17 @@ export function MobileMenu({
 
       {open && (
         <div
+          ref={menuRef}
           id="mobile-menu"
           className="md:hidden fixed inset-x-0 top-[5.75rem] bottom-0 z-40 bg-paper hairline-t overflow-y-auto"
           role="dialog"
           aria-modal="true"
+          aria-label={navAria}
         >
+          {/* Only one nav landmark is exposed at a time (the desktop nav is
+              display:none at these widths), so the named dialog carries the
+              landmark name and the inner nav stays unlabeled — two nested
+              "Primary" landmarks would read as duplication. */}
           <nav className="px-6 py-4">
             <ul className="divide-y divide-[rgba(27,34,48,0.18)]">
               {links.map((l) => {

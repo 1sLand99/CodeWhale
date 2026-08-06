@@ -23,7 +23,11 @@ export default {
         cobalt: "#315FD8",
       },
       fontFamily: {
-        display: ['"Space Grotesk"', '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
+        // The real display face is Fraunces, loaded by next/font in
+        // app/[locale]/layout.tsx onto --font-display (globals.css .font-display
+        // resolves the same stack). Space Grotesk was never loaded — naming it
+        // here only produced a utility that silently fell back to sans-serif.
+        display: ["var(--font-display)", '"Fraunces"', '"Noto Serif SC"', "Georgia", "serif"],
         body: ['"IBM Plex Sans"', '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
         cjk: ['"Noto Serif SC"', '"Source Han Serif SC"', "serif"],
         mono: ['"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],

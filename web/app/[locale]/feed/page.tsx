@@ -59,7 +59,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
             <div className="lg:col-span-6">
               <div className="hairline-t hairline-b hairline-l hairline-r bg-paper">
                 <div className="bg-indigo text-paper px-4 py-3 flex items-baseline justify-between">
-                  <div className="font-cjk text-base tracking-wider">合并请求 · Pull Requests</div>
+                  <h2 className="font-cjk text-base tracking-wider">合并请求 · Pull Requests</h2>
                   <span className="font-mono text-[0.7rem] uppercase tabular tracking-widest">{pulls.length} 条</span>
                 </div>
                 <div className="px-4">
@@ -75,7 +75,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
             <div className="lg:col-span-6">
               <div className="hairline-t hairline-b hairline-l hairline-r bg-paper">
                 <div className="bg-ink text-paper px-4 py-3 flex items-baseline justify-between">
-                  <div className="font-cjk text-base tracking-wider">议题 · Issues</div>
+                  <h2 className="font-cjk text-base tracking-wider">议题 · Issues</h2>
                   <span className="font-mono text-[0.7rem] uppercase tabular tracking-widest">{issues.length} 条</span>
                 </div>
                 <div className="px-4">
@@ -127,7 +127,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
             <div className="lg:col-span-6">
               <div className="hairline-t hairline-b hairline-l hairline-r bg-paper">
                 <div className="bg-indigo text-paper px-4 py-3 flex items-baseline justify-between">
-                  <div className="font-cjk text-base tracking-wider">合并 · Pull Requests</div>
+                  <h2 className="font-cjk text-base tracking-wider">合并 · Pull Requests</h2>
                   <span className="font-mono text-[0.7rem] uppercase tabular tracking-widest">{pulls.length} shown</span>
                 </div>
                 <div className="px-4">
@@ -143,7 +143,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
             <div className="lg:col-span-6">
               <div className="hairline-t hairline-b hairline-l hairline-r bg-paper">
                 <div className="bg-ink text-paper px-4 py-3 flex items-baseline justify-between">
-                  <div className="font-cjk text-base tracking-wider">议题 · Issues</div>
+                  <h2 className="font-cjk text-base tracking-wider">议题 · Issues</h2>
                   <span className="font-mono text-[0.7rem] uppercase tabular tracking-widest">{issues.length} shown</span>
                 </div>
                 <div className="px-4">

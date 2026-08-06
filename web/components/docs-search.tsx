@@ -227,6 +227,7 @@ export function DocsSearch({ locale }: { locale: string }) {
           <Link
             href="https://github.com/Hmbown/CodeWhale/tree/main/docs"
             target="_blank"
+            rel="noreferrer"
             className="portal-button portal-button-secondary"
           >
             {isZh ? "GitHub 文档目录 ↗" : "GitHub docs directory ↗"}

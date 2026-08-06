@@ -12,6 +12,7 @@ import { fetchFeed } from "@/lib/github";
 import { fill, getChrome, getHome, splitToken } from "@/lib/i18n/dictionaries";
 import { REPO_ISSUES_URL, REPO_RELEASES_URL, REPO_URL, DISCORD_URL } from "@/lib/i18n/links";
 import { getEnv } from "@/lib/kv";
+import { IDENTITY_PHRASE, SITE_NAME, SITE_URL } from "@/lib/page-meta";
 import type { FeedItem } from "@/lib/types";
 
 // Revalidate against source-proven runtime facts without giving up static edge
@@ -41,6 +42,24 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   const providerCount = facts.providers.length;
   const providerRoutes = fill(d.providerRoutes, { count: providerCount });
 
+  // Structured data — every field traces to a repo-sourced fact already on
+  // the page: version/license from facts.generated.ts, platforms from the
+  // install matrix, URLs from lib/i18n/links.ts and lib/page-meta.ts.
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: SITE_NAME,
+    url: SITE_URL,
+    description: IDENTITY_PHRASE,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "macOS, Linux, Windows, Android",
+    ...(facts.version ? { softwareVersion: facts.version } : {}),
+    license: `${REPO_URL}/blob/main/LICENSE`,
+    codeRepository: REPO_URL,
+    downloadUrl: `${SITE_URL}/en/install`,
+    author: { "@type": "Organization", name: SITE_NAME, url: SITE_URL },
+  };
+
   // The lede typesets the brand in its own span. Splitting on the {brand}
   // token keeps the sentence a single translated unit — no concatenation of
   // fragments around a variable, and a locale may place the brand anywhere.
@@ -56,6 +75,10 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
   return (
     <div className="product-home paper-home">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       {/* HERO — newspaper split: claim + live terminal proof */}
       <section className="product-hero paper-hero">
         <div className="product-container product-hero-grid paper-hero-grid">

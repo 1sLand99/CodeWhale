@@ -127,7 +127,7 @@ export function FaqSearch({
           )}
         </div>
         {hasQuery && (
-          <div className="mt-2 font-mono text-[0.7rem] text-ink-mute">
+          <div className="mt-2 font-mono text-[0.7rem] text-ink-mute" aria-live="polite">
             {matched > 0
               ? isZh
                 ? `${matched} / ${total} 个问题匹配 "${query.trim()}"`

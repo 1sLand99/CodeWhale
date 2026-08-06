@@ -29,6 +29,7 @@ const OG_LOCALE: Record<string, string> = {
   uk: "uk_UA",
   es: "es_ES",
   "pt-BR": "pt_BR",
+  id: "id_ID",
 };
 
 /**

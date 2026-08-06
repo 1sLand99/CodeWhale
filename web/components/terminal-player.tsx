@@ -11,7 +11,7 @@
  * full static text with no animation.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { SCENES } from "./thinking-trace";
 
 const TICK_MS = 24;
@@ -39,6 +39,23 @@ export function TerminalPlayer({
   const isZh = locale === "zh";
   const [active, setActive] = useState(0);
   const scene = SCENES[active];
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // ARIA tabs pattern: the tablist owns arrow-key/Home/End movement with
+  // automatic activation — focus and selection stay on the same tab, so the
+  // roving tabindex below never strands keyboard users on a deselected tab.
+  const onTablistKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const last = SCENES.length - 1;
+    let next: number | null = null;
+    if (e.key === "ArrowRight") next = active === last ? 0 : active + 1;
+    else if (e.key === "ArrowLeft") next = active === 0 ? last : active - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    if (next === null) return;
+    e.preventDefault();
+    setActive(next);
+    tabRefs.current[next]?.focus();
+  };
 
   const text = useMemo(
     () => ({
@@ -109,13 +126,20 @@ export function TerminalPlayer({
         className="flex border-b border-white/10 overflow-x-auto"
         role="tablist"
         aria-label={tabsAria}
+        onKeyDown={onTablistKeyDown}
       >
         {SCENES.map((s, i) => (
           <button
             key={i}
+            ref={(el) => {
+              tabRefs.current[i] = el;
+            }}
             type="button"
             role="tab"
+            id={`tp-tab-${i}`}
             aria-selected={i === active}
+            aria-controls="tp-panel"
+            tabIndex={i === active ? 0 : -1}
             onClick={() => setActive(i)}
             className={`shrink-0 px-3 py-2 font-mono text-[0.62rem] uppercase tracking-widest transition-colors ${
               i === active
@@ -129,9 +153,15 @@ export function TerminalPlayer({
       </div>
 
       {/* body */}
-      <div className="px-4 py-4 min-h-[15rem] font-mono text-[0.8rem] leading-relaxed">
-        {/* context */}
-        <div className="text-white/45">
+      <div
+        role="tabpanel"
+        id="tp-panel"
+        aria-labelledby={`tp-tab-${active}`}
+        tabIndex={0}
+        className="px-4 py-4 min-h-[15rem] font-mono text-[0.8rem] leading-relaxed"
+      >
+        {/* context — white/55 on ink clears WCAG AA (5.75:1) at this size */}
+        <div className="text-white/55">
           {slice(text.context, contextStart)}
           {typing(contextStart, text.context.length) && <Caret />}
         </div>
