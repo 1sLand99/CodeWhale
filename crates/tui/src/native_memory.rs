@@ -16,6 +16,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 1;
+/// The in-place-edit log. Excluded from indexing — see `collect_markdown`.
+const JOURNAL_FILE: &str = "JOURNAL.md";
 const MAX_NOTE_BYTES: usize = 64 * 1024;
 const MAX_QUERY_CHARS: usize = 256;
 
@@ -236,6 +238,131 @@ impl NativeMemoryStore {
                 stale: false,
             })
         })
+    }
+
+    /// Replace one existing note in place, recording the change in the
+    /// journal. Append-only memory rots: contradictions accumulate, corrected
+    /// facts keep resurfacing, and the injected prompt block grows into noise.
+    /// Revision is what keeps it high-signal.
+    ///
+    /// `from` must match exactly one existing note. Zero matches or several
+    /// are both errors — silently editing the wrong note, or the first of
+    /// three lookalikes, is worse than refusing.
+    pub fn revise(
+        &self,
+        scope: MemoryScope,
+        workspace_id: Option<&str>,
+        from: &str,
+        to: &str,
+        evidence: &str,
+    ) -> Result<MemoryHit> {
+        let to = normalize_note(to)?;
+        let evidence = normalize_evidence(evidence)?;
+        let from_needle = normalize_note(from)?;
+        let path = self.scope_path(scope, workspace_id)?;
+        self.with_write_lock(|| {
+            let before = read_memory_source(&path)?;
+            let line_no = locate_note(&before, &from_needle)?;
+            let mut lines: Vec<String> = before.lines().map(str::to_string).collect();
+            lines[line_no] = format!("- {to}");
+            write_memory_source(&path, &lines)?;
+            self.reindex_file(&path)?;
+            self.append_journal(&path, "revise", Some(&from_needle), Some(&to), &evidence)?;
+            let line_start = line_no.saturating_add(1);
+            let id = self
+                .lookup_id(&path, line_start, line_start)?
+                .unwrap_or_default();
+            Ok(MemoryHit {
+                id,
+                text: to,
+                source: path,
+                line_start,
+                line_end: line_start,
+                stale: false,
+            })
+        })
+    }
+
+    /// Drop one existing note, recording the removal and its evidence. The
+    /// note leaves the injected prompt block but stays recoverable from the
+    /// journal — retiring memory should never be a silent deletion.
+    pub fn retire(
+        &self,
+        scope: MemoryScope,
+        workspace_id: Option<&str>,
+        target: &str,
+        evidence: &str,
+    ) -> Result<String> {
+        let evidence = normalize_evidence(evidence)?;
+        let needle = normalize_note(target)?;
+        let path = self.scope_path(scope, workspace_id)?;
+        self.with_write_lock(|| {
+            let before = read_memory_source(&path)?;
+            let line_no = locate_note(&before, &needle)?;
+            let mut lines: Vec<String> = before.lines().map(str::to_string).collect();
+            lines.remove(line_no);
+            write_memory_source(&path, &lines)?;
+            self.reindex_file(&path)?;
+            self.append_journal(&path, "retire", Some(&needle), None, &evidence)?;
+            Ok(needle.clone())
+        })
+    }
+
+    fn scope_path(&self, scope: MemoryScope, workspace_id: Option<&str>) -> Result<PathBuf> {
+        match scope {
+            MemoryScope::Global => Ok(self.global_path()),
+            MemoryScope::Workspace => self.workspace_path(
+                workspace_id.ok_or_else(|| anyhow!("workspace scope requires a workspace id"))?,
+            ),
+        }
+    }
+
+    /// Append-only edit log for everything that mutates memory in place.
+    ///
+    /// A model that revises its own durable context can drift it, and the
+    /// failure mode is silent: next session the drifted note reads like any
+    /// other fact. The journal makes that auditable after the fact — every
+    /// revision carries what changed and the evidence that justified it.
+    /// Markdown, like the memory sources themselves, so it stays readable
+    /// without tooling and is never load-bearing for the index.
+    fn append_journal(
+        &self,
+        source: &Path,
+        action: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        evidence: &str,
+    ) -> Result<()> {
+        let path = self.journal_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open memory journal {}", path.display()))?;
+        writeln!(file, "\n- **{action}** `{stamp}` {}", source.display())?;
+        if let Some(before) = before {
+            writeln!(file, "  - before: {before}")?;
+        }
+        if let Some(after) = after {
+            writeln!(file, "  - after: {after}")?;
+        }
+        writeln!(file, "  - evidence: {evidence}")?;
+        file.sync_data()?;
+        Ok(())
+    }
+
+    /// The edit log path. Deliberately outside the `global/` and `workspace/`
+    /// source directories so it is never indexed as memory and can never be
+    /// injected back into a prompt as if it were a remembered fact.
+    pub fn journal_path(&self) -> PathBuf {
+        self.root.join(JOURNAL_FILE)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
@@ -640,6 +767,62 @@ fn memory_hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryHit> {
     })
 }
 
+/// Read a memory source for in-place editing. A missing file is an error
+/// here, unlike on append: you cannot revise what was never written.
+fn read_memory_source(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("read memory source {}", path.display()))
+}
+
+/// Rewrite a memory source from its lines, preserving the trailing newline
+/// the append path maintains.
+fn write_memory_source(path: &Path, lines: &[String]) -> Result<()> {
+    let mut body = lines.join("\n");
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    fs::write(path, body).with_context(|| format!("write memory source {}", path.display()))
+}
+
+/// Find the single bullet whose text matches `needle`, comparing on the
+/// note body rather than the raw line so `- note` and indentation don't
+/// have to be reproduced by the caller.
+///
+/// Ambiguity fails closed. If a model asks to revise a note that appears
+/// twice, editing either one is a guess, and a wrong guess silently rewrites
+/// durable context.
+fn locate_note(body: &str, needle: &str) -> Result<usize> {
+    let matches: Vec<usize> = body
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| bullet_text(line).is_some_and(|text| text == needle))
+        .map(|(index, _)| index)
+        .collect();
+    match matches.as_slice() {
+        [only] => Ok(*only),
+        [] => bail!("no memory note matches `{needle}`"),
+        several => bail!(
+            "`{needle}` matches {} notes; refusing to guess which to edit",
+            several.len()
+        ),
+    }
+}
+
+/// The note body of a Markdown bullet, if the line is one.
+fn bullet_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .map(str::trim)
+}
+
+/// Evidence is required on every in-place edit and held to the same bounds
+/// as a note. An unexplained rewrite of durable context is the thing the
+/// journal exists to prevent.
+fn normalize_evidence(evidence: &str) -> Result<String> {
+    normalize_note(evidence).map_err(|_| anyhow!("memory edits require non-empty evidence"))
+}
+
 fn normalize_note(note: &str) -> Result<String> {
     let note = note.replace("\r\n", "\n").replace('\r', "\n");
     let note = note
@@ -734,6 +917,14 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
         if ty.is_dir() {
             collect_markdown(&path, out)?;
         } else if ty.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            // The edit log is Markdown living in the same tree, but it is a
+            // record *about* memory, not memory. Indexing it would put every
+            // retired note back into the searchable set under a "before:"
+            // line and re-inject the exact facts a revision just removed —
+            // making an audited memory strictly worse than an unaudited one.
+            if path.file_name().is_some_and(|name| name == JOURNAL_FILE) {
+                continue;
+            }
             out.push(path);
         }
     }
