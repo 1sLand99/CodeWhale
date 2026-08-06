@@ -428,6 +428,20 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: cargo test --workspace --all-features --locked
+        env:
+          # Give test threads the stack the product gives itself. main.rs runs
+          # the owner thread and every tokio worker at
+          # CODEWHALE_MAIN_STACK_BYTES (16 MiB) because the engine and
+          # runtime-thread futures are genuinely deep. `#[tokio::test]` builds
+          # its own runtime and never sees that, so tests ran the same code on
+          # ~2 MiB (~1 MiB on Windows) — a configuration that never ships.
+          # That gap is what aborted the whole Windows test binary with
+          # STATUS_STACK_OVERFLOW in start_turn_accepts_dynamic_tools_and_
+          # environment_id, masking every other Windows result (78afd8d3d4
+          # Box::pin'd that one frame; the mismatch itself remained). std reads
+          # this for any thread spawned without an explicit size, which covers
+          # both libtest's per-test threads and tokio's workers.
+          RUST_MIN_STACK: '16777216'
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
       # source-bound measurement on macOS so loss or growth of RSS evidence
       # fails closed instead of becoming an unsupported-field skip.
