@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    COMPLETED_AGENT_RETENTION, SharedSubAgentManager, SubAgentRuntime, SubAgentStatus,
-    parse_agent_ref, subagent_session_projection, subagent_status_name,
+    COMPLETED_AGENT_RETENTION, ParentMailReceipt, SharedSubAgentManager, SubAgentRuntime,
+    SubAgentStatus, parse_agent_ref, subagent_session_projection, subagent_status_name,
     wait_for_subagents_from_input,
 };
 use crate::tools::registry::ToolRegistryBuilder;
@@ -232,6 +232,9 @@ impl ToolSpec for AgentsMessageTool {
 pub struct AgentsFollowupTool {
     manager: SharedSubAgentManager,
     caller_agent_id: Option<String>,
+    /// Runtime for checkpoint resume. `None` (legacy/test construction)
+    /// keeps the queue-only followup behavior.
+    runtime: Option<SubAgentRuntime>,
 }
 
 impl AgentsFollowupTool {
@@ -240,7 +243,14 @@ impl AgentsFollowupTool {
         Self {
             manager,
             caller_agent_id: None,
+            runtime: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: SubAgentRuntime) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     #[must_use]
@@ -257,7 +267,7 @@ impl ToolSpec for AgentsFollowupTool {
     }
 
     fn description(&self) -> &'static str {
-        "Queue a message and deliver it live to a still-running child when its input channel is available. Interrupted children are not resumed: the message stays queued and interrupted_continuable children return their continuation_handle for re-dispatch via agent."
+        "Queue a message and attempt to resume an idle or interrupted child. Running children receive the message on their next step; interrupted_continuable children are resumed from their checkpoint into a fresh agent loop (new agent id, original prompt plus prior conversation tail) when a runtime is attached, and otherwise keep queue-only semantics with the continuation_handle returned."
     }
 
     fn input_schema(&self) -> Value {
@@ -297,8 +307,12 @@ impl ToolSpec for AgentsFollowupTool {
             .ok_or_else(|| ToolError::missing_field("message"))?
             .to_string();
 
-        let receipt = {
-            let mut manager = self.manager.write().await;
+        // Enforce the caller hierarchy, then decide between checkpoint resume
+        // (interrupted_continuable with a runtime attached) and queue-only
+        // followup while holding only the read lock. The resume path takes
+        // the write lock itself via the manager method.
+        let should_resume = {
+            let manager = self.manager.read().await;
             manager
                 .ensure_caller_controls_descendant(
                     &agent_ref,
@@ -306,6 +320,52 @@ impl ToolSpec for AgentsFollowupTool {
                     "agents/followup",
                 )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+            manager
+                .get_result_by_ref(&agent_ref)
+                .ok()
+                .is_some_and(|snapshot| {
+                    matches!(snapshot.status, SubAgentStatus::Interrupted(_))
+                        && snapshot
+                            .checkpoint
+                            .as_ref()
+                            .is_some_and(|cp| cp.continuable && !cp.messages.is_empty())
+                })
+        };
+
+        let receipt = if should_resume {
+            match self.runtime.clone() {
+                Some(runtime) => {
+                    let mut manager = self.manager.write().await;
+                    let snapshot = manager
+                        .resume_from_checkpoint(
+                            Arc::clone(&self.manager),
+                            runtime,
+                            &agent_ref,
+                            &message,
+                        )
+                        .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+                    ParentMailReceipt {
+                        agent_id: snapshot.agent_id.clone(),
+                        status: subagent_status_name(&snapshot.status).to_string(),
+                        queue_depth: 0,
+                        woke: true,
+                        continued_from_checkpoint: true,
+                        continuation_handle: None,
+                        note: format!(
+                            "resumed from checkpoint as new agent {} ({}); prior terminal record {} stays intact",
+                            snapshot.agent_id, snapshot.model, agent_ref
+                        ),
+                    }
+                }
+                None => {
+                    let mut manager = self.manager.write().await;
+                    manager
+                        .followup_child(&agent_ref, message)
+                        .map_err(|err| ToolError::invalid_input(err.to_string()))?
+                }
+            }
+        } else {
+            let mut manager = self.manager.write().await;
             manager
                 .followup_child(&agent_ref, message)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?
@@ -876,8 +936,9 @@ pub fn register_coordination_tools(
     // root registry (`None`) may control any child (TUI-DOG-017).
     let caller = runtime.parent_agent_id.clone();
     let message = AgentsMessageTool::new(Arc::clone(&manager)).with_optional_caller(caller.clone());
-    let followup =
-        AgentsFollowupTool::new(Arc::clone(&manager)).with_optional_caller(caller.clone());
+    let followup = AgentsFollowupTool::new(Arc::clone(&manager))
+        .with_optional_caller(caller.clone())
+        .with_runtime(runtime.clone());
     let interrupt =
         AgentsInterruptTool::new(Arc::clone(&manager)).with_optional_caller(caller.clone());
     let coordinate = AgentsCoordinateTool::new(Arc::clone(&manager), caller);
@@ -915,7 +976,10 @@ mod tests {
     }
 
     #[test]
-    fn coordination_descriptions_do_not_promise_unimplemented_resume_behavior() {
+    fn coordination_descriptions_match_implemented_resume_behavior() {
+        // Checkpoint resume is implemented (#5242): the descriptions must
+        // describe the real behavior, including the honest queue-only
+        // fallback when no runtime is attached.
         let manager = Arc::new(tokio::sync::RwLock::new(
             super::super::SubAgentManager::new(std::env::temp_dir(), 1),
         ));
@@ -924,12 +988,9 @@ mod tests {
 
         assert!(!message.description().contains("natural resume"));
         assert!(message.description().contains("stays queued"));
-        assert!(!followup.description().contains("attempt to resume"));
-        assert!(
-            followup
-                .description()
-                .contains("Interrupted children are not resumed")
-        );
+        assert!(followup.description().contains("attempt to resume"));
+        assert!(followup.description().contains("resumed from their checkpoint"));
+        assert!(followup.description().contains("queue-only semantics"));
     }
 
     async fn manager_with_running_child(
@@ -1459,7 +1520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn followup_interrupted_continuable_queues_honestly_without_auto_resume() {
+    async fn followup_interrupted_continuable_without_runtime_queues_honestly() {
         let tmp = tempdir().unwrap();
         let manager = Arc::new(tokio::sync::RwLock::new(
             super::super::SubAgentManager::new(tmp.path().to_path_buf(), 4),
@@ -1478,6 +1539,8 @@ mod tests {
                 }],
             )
         };
+        // No runtime attached: checkpoint resume is unavailable, so followup
+        // keeps the honest queue-only semantics with the continuation handle.
         let tool = AgentsFollowupTool::new(Arc::clone(&manager));
         let result = tool
             .execute(
@@ -1493,8 +1556,8 @@ mod tests {
         assert_eq!(body["continuation_handle"], json!(handle));
         let note = body["note"].as_str().unwrap_or_default();
         assert!(
-            note.contains("not automated") && note.contains(&handle),
-            "note must fail honestly with the continuation handle: {note}"
+            note.contains("attach a runtime") && note.contains(&handle),
+            "note must point at the resume path with the continuation handle: {note}"
         );
 
         let guard = manager.read().await;
@@ -1733,6 +1796,56 @@ mod tests {
         for mode in ["completion", "all", "activity"] {
             assert!(message.contains(mode), "{message}");
         }
+    }
+
+    #[tokio::test]
+    async fn followup_interrupted_continuable_resumes_with_runtime() {
+        let tmp = tempdir().unwrap();
+        let manager = Arc::new(tokio::sync::RwLock::new(
+            super::super::SubAgentManager::new(tmp.path().to_path_buf(), 4),
+        ));
+        let (agent_id, _handle) = {
+            let mut guard = manager.write().await;
+            guard.insert_test_interrupted_continuable_agent(
+                "paused_child",
+                tmp.path(),
+                vec![crate::models::Message {
+                    role: "user".to_string(),
+                    content: vec![crate::models::ContentBlock::Text {
+                        text: "prior work".to_string(),
+                        cache_control: None,
+                    }],
+                }],
+            )
+        };
+        let mut runtime = super::super::tests::stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        let tool = AgentsFollowupTool::new(Arc::clone(&manager)).with_runtime(runtime);
+        let result = tool
+            .execute(
+                json!({ "agent_id": agent_id, "message": "please continue" }),
+                &ToolContext::new(tmp.path()),
+            )
+            .await
+            .expect("followup ok");
+        let body: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["queued"], json!(true));
+        assert_eq!(body["woke"], json!(true));
+        assert_eq!(body["continued_from_checkpoint"], json!(true));
+        let note = body["note"].as_str().unwrap_or_default();
+        assert!(note.contains("resumed from checkpoint"), "{note}");
+        let resumed_id = body["agent_id"].as_str().unwrap_or_default();
+        assert_ne!(
+            resumed_id, agent_id,
+            "resume re-dispatches under a new agent id"
+        );
+
+        // A fresh record exists for the resumed session; the prior terminal
+        // record stays immutable (receipts are never rewritten).
+        let guard = manager.read().await;
+        guard.get_result(resumed_id).expect("resumed agent exists");
+        let prior = guard.get_result(&agent_id).expect("prior record");
+        assert!(matches!(prior.status, SubAgentStatus::Interrupted(_)));
     }
 }
 

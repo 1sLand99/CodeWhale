@@ -1519,6 +1519,12 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Source agent id this child continues, stamped into the ChildLaunchManifest
     /// for receipt traceability.
     pub resume_from_agent_id: Option<String>,
+    /// Checkpoint resume: the claim comes from the coordination ledger and is
+    /// already namespaced — skip re-namespacing in the spawn seam.
+    pub claim_pre_namespaced: bool,
+    /// Checkpoint resume: preserve the interrupted child's runtime posture
+    /// instead of rebuilding it from the caller's role.
+    pub preserve_runtime_profile: Option<WorkerRuntimeProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -2931,6 +2937,11 @@ pub struct SubAgentManager {
     /// drain. Populated by `cleanup()` when an agent record is retired; drained
     /// by async callers that hold the `HandleStore` lock (#3885).
     pending_handle_evictions: Vec<String>,
+    /// Checkpoint-resume idempotency map: interrupted agent id -> the agent
+    /// id of the session resumed from its checkpoint. A second followup on
+    /// the same interrupted id returns the existing resumed target instead of
+    /// spawning a duplicate agent loop (duplicate-resume guard).
+    resume_targets: HashMap<String, String>,
 }
 
 impl SubAgentManager {
@@ -2966,6 +2977,7 @@ impl SubAgentManager {
             queued_mail: HashMap::new(),
             woken_agents: HashMap::new(),
             pending_handle_evictions: Vec::new(),
+            resume_targets: HashMap::new(),
         }
     }
 
@@ -4686,17 +4698,17 @@ impl SubAgentManager {
                         .to_string();
             }
             SubAgentStatus::Interrupted(_) => {
-                // Honest gap: checkpoints are preserved and the continuation
-                // handle is returned, but there is no in-process
-                // `run_subagent_from_checkpoint` substrate yet. Auto-resume
-                // would require re-spawning with seeded checkpoint messages
-                // (new agent loop + runtime client), not just waking input_tx.
+                // Manager-level followup is queue-only; checkpoint resume is
+                // wired at the tool layer (`agents/followup`), which
+                // re-dispatches a fresh agent loop seeded with the checkpoint
+                // messages when a runtime is attached. This arm keeps the
+                // honest queue-only receipt for callers without a runtime.
                 receipt.woke = false;
                 receipt.continued_from_checkpoint = false;
                 receipt.continuation_handle = continuation_handle.clone();
                 receipt.note = if continuable {
                     format!(
-                        "queued; child is interrupted_continuable — live checkpoint resume is not automated (no run_subagent_from_checkpoint substrate). Re-dispatch via agent using continuation_handle={}",
+                        "queued; child is interrupted_continuable — attach a runtime to agents/followup to resume from checkpoint, or re-dispatch using continuation_handle={}",
                         continuation_handle.as_deref().unwrap_or("<missing>")
                     )
                 } else {
@@ -4722,6 +4734,148 @@ impl SubAgentManager {
             }
         }
         Ok(receipt)
+    }
+
+    /// Resume an `interrupted_continuable` child by re-dispatching a fresh
+    /// agent loop seeded with the checkpoint message tail and the follow-up
+    /// text (checkpoint-based continuation).
+    ///
+    /// The interrupted terminal record stays immutable — receipts are never
+    /// rewritten — so the resumed session runs under a new agent id, matching
+    /// the existing "re-dispatch using checkpoint {handle}" guidance. Step and
+    /// token budgets are not stored in the checkpoint and are not restored;
+    /// the resumed loop starts with the runtime's defaults.
+    ///
+    /// Callers must hold the manager write lock (same contract as
+    /// `spawn_background_with_assignment_options`); `manager_handle` is passed
+    /// through to the spawn machinery, which takes no further lock.
+    pub(crate) fn resume_from_checkpoint(
+        &mut self,
+        manager_handle: SharedSubAgentManager,
+        runtime: SubAgentRuntime,
+        agent_ref: &str,
+        followup_text: &str,
+    ) -> Result<SubAgentResult> {
+        let agent_id = self.resolve_agent_ref(agent_ref)?;
+        // Idempotency: a second resume on the same interrupted id returns the
+        // already-resumed target instead of spawning a duplicate agent loop
+        // that would concurrently write the same workspace.
+        if let Some(existing) = self.resume_targets.get(&agent_id).cloned() {
+            // Forward the follow-up to the already-resumed target (best
+            // effort; a terminal target simply cannot receive it) so a
+            // retried followup is never silently dropped.
+            let _ = self.followup_child(&existing, followup_text.to_string());
+            return self.get_result(&existing);
+        }
+        let (
+            agent_type,
+            resume_prompt,
+            assignment,
+            allowed_tools,
+            model,
+            fork_context,
+            workspace,
+            claim,
+            preserved_profile,
+        ) = {
+            let agent = self
+                .agents
+                .get(&agent_id)
+                .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+            if !matches!(agent.status, SubAgentStatus::Interrupted(_)) {
+                return Err(anyhow!(
+                    "Cannot resume agent {agent_id}: status is {} (only interrupted children are resumable)",
+                    subagent_status_name(&agent.status)
+                ));
+            }
+            let checkpoint = agent
+                .checkpoint
+                .as_ref()
+                .filter(|cp| cp.continuable && !cp.messages.is_empty())
+                .ok_or_else(|| {
+                    let continuable = agent.checkpoint.as_ref().is_some_and(|cp| cp.continuable);
+                    let messages = agent
+                        .checkpoint
+                        .as_ref()
+                        .map(|cp| cp.messages.len())
+                        .unwrap_or(0);
+                    anyhow!(
+                        "Agent {agent_id} has no continuable checkpoint to resume from (continuable={continuable}, messages={messages})"
+                    )
+                })?;
+            // Restore the interrupted child's write claim so the resumed loop
+            // stays inside the coordination ledger with the original bounded
+            // scope instead of inheriting the caller's unchecked write surface.
+            // The ledger claim is already namespaced and carries the isolation
+            // flag; both are passed through to the spawn seam.
+            let claim = self
+                .coordination
+                .write_claims
+                .iter()
+                .find(|record| record.claim.owner == agent_id)
+                .map(|record| (record.claim.clone(), record.isolated_worktree));
+            // Preserve the interrupted child's runtime posture (read_only /
+            // denied tools / shell) instead of rebuilding from the caller's
+            // role, which could widen the resumed child's authority.
+            let preserved_profile = self
+                .worker_records
+                .get(&agent_id)
+                .map(|record| record.spec.runtime_profile.clone());
+            (
+                agent.agent_type.clone(),
+                build_resume_prompt(&agent.prompt, checkpoint, followup_text),
+                agent.assignment.clone(),
+                agent.allowed_tools.clone(),
+                agent.model.clone(),
+                agent.fork_context,
+                agent.workspace.clone(),
+                claim,
+                preserved_profile,
+            )
+        };
+        // Resume runs at child depth with a detached cancellation token, the
+        // same seam a fresh spawn uses; fail closed on the depth ceiling.
+        // Checked on the parent runtime before derivation, matching the
+        // fresh-spawn order (would_exceed_depth at the spawn seam).
+        if runtime.would_exceed_depth() {
+            return Err(anyhow!(
+                "Cannot resume agent {agent_id}: sub-agent depth limit reached (current {}, max {})",
+                runtime.spawn_depth,
+                runtime.max_spawn_depth
+            ));
+        }
+        let runtime = runtime.background_runtime();
+        // Resume in the interrupted child's workspace, not the caller's
+        // (worktree/cwd children must not resume in the parent directory).
+        let mut runtime = runtime;
+        runtime.context.workspace = workspace;
+        let options = SubAgentSpawnOptions {
+            name: None, // the old session name stays owned by the terminal record
+            model: Some(model),
+            model_route: None,
+            nickname: None,
+            fork_context,
+            write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
+            isolated_worktree: claim
+                .as_ref()
+                .map(|(_, isolated)| *isolated)
+                .unwrap_or(false),
+            claim_pre_namespaced: claim.is_some(),
+            preserve_runtime_profile: preserved_profile,
+            ..Default::default()
+        };
+        let resumed = self.spawn_background_with_assignment_options(
+            manager_handle,
+            runtime,
+            agent_type,
+            resume_prompt,
+            assignment,
+            allowed_tools,
+            options,
+        )?;
+        self.resume_targets
+            .insert(agent_id, resumed.agent_id.clone());
+        Ok(resumed)
     }
 
     /// Interrupt a child, preserve checkpoint, fail closed on root/self.
@@ -5193,15 +5347,24 @@ impl SubAgentManager {
             Some(tools) => AgentWorkerToolProfile::Explicit(tools),
             None => AgentWorkerToolProfile::Inherited,
         };
-        let runtime_profile = worker_profile_for_spawn(
-            &runtime,
-            &agent_type,
-            &tool_profile,
-            &agent.model,
-            options.model_route.clone(),
-            options.write_claim.is_some(),
-        );
-        runtime.worker_profile = runtime_profile.clone();
+        let runtime_profile = match options.preserve_runtime_profile.clone() {
+            Some(preserved) => {
+                runtime.worker_profile = preserved.clone();
+                preserved
+            }
+            None => {
+                let profile = worker_profile_for_spawn(
+                    &runtime,
+                    &agent_type,
+                    &tool_profile,
+                    &agent.model,
+                    options.model_route.clone(),
+                    options.write_claim.is_some(),
+                );
+                runtime.worker_profile = profile.clone();
+                profile
+            }
+        };
         let write_capable = runtime_profile.permissions.write;
         if write_capable {
             // Isolated-worktree children mutate their own checkout, so they
@@ -5224,11 +5387,15 @@ impl SubAgentManager {
                 .clone()
                 .map(|mut claim| {
                     claim.owner = agent_id.clone();
-                    let claim = self.namespace_write_claim(
-                        &agent.workspace,
-                        options.isolated_worktree,
-                        claim,
-                    )?;
+                    let claim = if options.claim_pre_namespaced {
+                        claim
+                    } else {
+                        self.namespace_write_claim(
+                            &agent.workspace,
+                            options.isolated_worktree,
+                            claim,
+                        )?
+                    };
                     let active_owners = self.active_coordination_owners();
                     self.coordination
                         .register_claim(claim, options.isolated_worktree, |owner| {
@@ -6994,6 +7161,7 @@ impl ToolSpec for AgentTool {
             AgentToolAction::Followup => {
                 return AgentsFollowupTool::new(self.manager.clone())
                     .with_optional_caller(self.runtime.parent_agent_id.clone())
+                    .with_runtime(self.runtime.clone())
                     .execute(input, context)
                     .await;
             }
@@ -7904,6 +8072,8 @@ async fn spawn_subagent_from_input(
             isolated_worktree: spawn_request.worktree.is_some(),
             expected_artifact: spawn_request.expected_artifact.clone(),
             resume_from_agent_id: resume_from_agent_id.clone(),
+            claim_pre_namespaced: false,
+            preserve_runtime_profile: None,
         },
     );
     let result = match result {
@@ -9056,6 +9226,82 @@ async fn checkpoint_subagent_progress(
     let mut manager = runtime.manager.write().await;
     manager.update_checkpoint(agent_id, checkpoint.clone());
     checkpoint
+}
+
+/// Render a checkpoint's message tail as readable prose for re-seeding a
+/// resumed session. Text and tool blocks are shown; images and internal
+/// thinking blocks are summarized/omitted (thinking was already consumed by
+/// the interrupted model step).
+fn checkpoint_messages_to_text(messages: &[Message]) -> String {
+    let mut lines = Vec::new();
+    for message in messages {
+        let mut parts: Vec<String> = Vec::new();
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text, .. } => parts.push(text.clone()),
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => parts.push(format!("[tool use {name} (id {id}): {input}]")),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } => {
+                    let verdict = if is_error == &Some(true) {
+                        "error"
+                    } else {
+                        "ok"
+                    };
+                    parts.push(format!(
+                        "[tool result {tool_use_id} ({verdict}): {content}]"
+                    ))
+                }
+                ContentBlock::ServerToolUse {
+                    id, name, input, ..
+                } => parts.push(format!("[server tool use {name} (id {id}): {input}]")),
+                ContentBlock::ToolSearchToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => parts.push(format!("[tool search result {tool_use_id}: {content}]")),
+                ContentBlock::CodeExecutionToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => parts.push(format!("[code execution result {tool_use_id}: {content}]")),
+                ContentBlock::ImageUrl { .. } => parts.push("[image]".to_string()),
+                ContentBlock::Thinking { .. } => {}
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        lines.push(format!("[{}]\n{}", message.role, parts.join("\n")));
+    }
+    lines.join("\n\n")
+}
+
+/// Build the prompt for a resumed session: the original objective plus the
+/// checkpoint context tail and the parent's follow-up as the latest
+/// instruction.
+fn build_resume_prompt(
+    original_prompt: &str,
+    checkpoint: &SubAgentCheckpoint,
+    followup_text: &str,
+) -> String {
+    format!(
+        "{original_prompt}\n\n\
+         [RESUMED SESSION — checkpoint {}]\n\
+         This session was interrupted after {} step(s). The prior conversation tail follows; \
+         continue the work from where it left off. The parent follow-up below is the latest \
+         instruction.\n\n\
+         --- prior conversation (tail) ---\n{}\n--- end prior conversation ---\n\n\
+         Parent follow-up: {followup_text}",
+        checkpoint.checkpoint_id,
+        checkpoint.steps_taken,
+        checkpoint_messages_to_text(&checkpoint.messages),
+    )
 }
 
 fn needs_input_for_interrupted_checkpoint(
