@@ -3,9 +3,11 @@ import Image from "next/image";
 import Link from "next/link";
 import { GettingStartedSteps } from "@/components/getting-started-steps";
 import { InstallCodeBlock } from "@/components/install-code-block";
+import { RevealOnScroll } from "@/components/reveal-on-scroll";
 import { Seal } from "@/components/seal";
 import { TerminalPlayer } from "@/components/terminal-player";
 import { Ticker } from "@/components/ticker";
+import { TiltFigure } from "@/components/tilt-figure";
 import { Whale } from "@/components/whale";
 import { getFacts } from "@/lib/facts";
 import { fetchFeed } from "@/lib/github";
@@ -79,6 +81,10 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
+      {/* Entrance motion for the below-fold sections: the marks are the
+          data-reveal / data-reveal-group attributes in this tree; the
+          observer does the rest, and reduced motion skips it wholesale. */}
+      <RevealOnScroll />
       {/* HERO — newspaper split: claim + live terminal proof */}
       <section className="product-hero paper-hero">
         <div className="product-container product-hero-grid paper-hero-grid">
@@ -157,7 +163,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             </p>
           </div>
 
-          <figure className="product-shot paper-shot">
+          <TiltFigure className="product-shot paper-shot">
             <div className="product-shot-toolbar paper-shot-toolbar">
               <span>
                 <Whale size={18} />
@@ -174,7 +180,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               priority
             />
             <figcaption>{d.figcaption}</figcaption>
-          </figure>
+          </TiltFigure>
         </div>
       </section>
 
@@ -200,7 +206,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
       {/* Proof strip */}
       <section className="product-proof paper-proof">
-        <div className="product-container product-proof-grid">
+        <div className="product-container product-proof-grid" data-reveal>
           <h2 className="font-display">{d.proofHeading}</h2>
           <p>{d.proofBody}</p>
         </div>
@@ -208,7 +214,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
       {/* See how it decides — constitution traces in terminal chrome */}
       <section className="paper-decides">
-        <div className="product-container paper-decides-grid">
+        <div className="product-container paper-decides-grid" data-reveal>
           <div>
             <div className="flex items-baseline gap-4 mb-3 hairline-b pb-3">
               <Seal char={d.sealDecides} size="sm" variant="indigo" />
@@ -232,11 +238,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       {/* Workflow */}
       <section className="product-workflow paper-workflow">
         <div className="product-container">
-          <div className="flex items-baseline gap-4 mb-6 hairline-b pb-4">
+          <div className="flex items-baseline gap-4 mb-6 hairline-b pb-4" data-reveal>
             <Seal char={d.sealWorkflow} size="sm" />
             <h2 className="font-display">{d.workflowHeading}</h2>
           </div>
-          <ol className="product-workflow-steps">
+          <ol className="product-workflow-steps" data-reveal-group>
             {d.workflow.map(([title, description], index) => (
               <li key={title}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
@@ -245,7 +251,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               </li>
             ))}
           </ol>
-          <div className="product-receipt" aria-label={d.receiptAria}>
+          <div className="product-receipt" aria-label={d.receiptAria} data-reveal>
             <span>$ codewhale exec &quot;fix the failing test&quot;</span>
             <span>inspect&nbsp;&nbsp; {d.receiptInspect}</span>
             <span>act&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {d.receiptAct}</span>
@@ -258,13 +264,13 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       {/* Getting started */}
       <section className="product-start paper-start">
         <div className="product-container">
-          <div className="flex items-baseline gap-4 mb-4 hairline-b pb-4">
+          <div className="flex items-baseline gap-4 mb-4 hairline-b pb-4" data-reveal>
             <Seal char={d.sealStart} size="sm" />
             <h2 className="font-display">{d.startHeading}</h2>
           </div>
-          <p className="product-start-lede">{d.startLede}</p>
+          <p className="product-start-lede" data-reveal>{d.startLede}</p>
           <GettingStartedSteps locale={locale} />
-          <div className="product-start-links">
+          <div className="product-start-links" data-reveal>
             <Link href={`/${locale}/docs/guide`}>{d.startGuideLink}</Link>
             <Link href={`/${locale}/docs/vocabulary`}>{d.startVocabularyLink}</Link>
           </div>
@@ -274,7 +280,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       {/* Boundaries */}
       <section className="product-boundaries paper-boundaries">
         <div className="product-container product-boundaries-grid">
-          <div>
+          <div data-reveal>
             <div className="flex items-baseline gap-4 mb-4">
               <Seal char={d.sealBoundaries} size="sm" />
               <h2 className="font-display">
@@ -285,7 +291,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             </div>
             <p>{d.boundariesBody}</p>
           </div>
-          <dl className="product-boundary-list">
+          <dl className="product-boundary-list" data-reveal-group>
             <div>
               <dt>{providerRoutes}</dt>
               <dd>{d.hostedGatewayLocal}</dd>
@@ -316,11 +322,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         {/* Surfaces */}
         <section className="product-surfaces paper-surfaces">
           <div className="product-container">
-            <div className="flex items-baseline gap-4 mb-6 hairline-b pb-4">
+            <div className="flex items-baseline gap-4 mb-6 hairline-b pb-4" data-reveal>
               <Seal char={d.sealSurfaces} size="sm" />
               <h2 className="font-display">{d.surfacesHeading}</h2>
             </div>
-            <div className="product-surface-list">
+            <div className="product-surface-list" data-reveal-group>
               {d.surfaces.map(([name, description]) => (
                 <div key={name}>
                   <strong>{name}</strong>
@@ -328,13 +334,13 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 </div>
               ))}
             </div>
-            <Link href={`/${locale}/runtime`}>{d.runtimeLink}</Link>
+            <Link href={`/${locale}/runtime`} data-reveal>{d.runtimeLink}</Link>
           </div>
         </section>
 
         {/* Install band */}
         <section className="product-install-band paper-install-band">
-          <div className="product-container product-install-grid">
+          <div className="product-container product-install-grid" data-reveal-group>
             <h2 className="font-display">{d.installBandHeading}</h2>
             <div>
               {/* The composer plate. `❯` is a code-owned literal, like the
@@ -368,7 +374,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
 
         {/* Community */}
         <section className="product-community paper-community">
-          <div className="product-container product-community-grid">
+          <div className="product-container product-community-grid" data-reveal>
             <div className="product-community-illustration" aria-hidden="true">
               <Seal char={d.sealCommunity} size="lg" />
             </div>
