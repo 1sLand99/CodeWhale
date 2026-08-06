@@ -880,3 +880,351 @@ fn mutation_update_refuses_local_installs_and_foreign_scopes() {
     .unwrap_err();
     assert!(format!("{err:#}").contains("was not found"), "got: {err:#}");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent Plugins v1.0.0 (plugin.json / mcp.json) interop
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn write_json_bundle(config: &DiscoveryConfig, dir: &str, plugin_json: &str) -> PathBuf {
+    let plugin = config.user_plugins_dir.join(dir);
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), plugin_json).unwrap();
+    plugin
+}
+
+#[test]
+fn third_party_agent_plugin_with_unknown_extension_namespace_loads_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_json_bundle(
+        &config,
+        "third-party",
+        r#"{
+            "$schema": "https://agent-plugins.org/schemas/plugin.json",
+            "name": "third-party",
+            "version": "1.4.2",
+            "description": "A plugin authored for another client",
+            "author": {"name": "Other Client", "email": "plugins@other.example"},
+            "keywords": ["browser", "remote"],
+            "extensions": {
+                "com.example.client": {"anything": [1, 2, 3], "nested": {"x": true}},
+                "net.codewhale": {"capabilities": {"network_hosts": ["example.com"]}}
+            }
+        }"#,
+    );
+    fs::create_dir_all(plugin.join("skills/demo")).unwrap();
+    fs::write(
+        plugin.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\nbody\n",
+    )
+    .unwrap();
+    fs::create_dir_all(plugin.join("bin")).unwrap();
+    fs::write(
+        plugin.join("mcp.json"),
+        r#"{
+            "$schema": "https://agent-plugins.org/schemas/mcp.json",
+            "mcpServers": {
+                "local": {
+                    "type": "stdio",
+                    "command": "run.sh",
+                    "args": ["--port", "8080"],
+                    "env": {"API_KEY": "${THIRD_PARTY_API_KEY}"},
+                    "cwd": "bin"
+                },
+                "remote": {
+                    "type": "sse",
+                    "url": "https://example.com/mcp",
+                    "extensions": {
+                        "net.codewhale": {"env_headers": {"Authorization": "THIRD_PARTY_REMOTE_TOKEN"}},
+                        "com.example.client": {"polling": true}
+                    }
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    let errors: Vec<_> = registry
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.level == super::types::PluginDiagnosticLevel::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unexpected error diagnostics: {errors:?}"
+    );
+
+    let plugin = registry
+        .get("third-party")
+        .expect("third-party plugin loads");
+    assert_eq!(
+        plugin.manifest.plugin.author.as_deref(),
+        Some("Other Client <plugins@other.example>")
+    );
+    assert_eq!(plugin.manifest.plugin.keywords, vec!["browser", "remote"]);
+    assert_eq!(plugin.inventory.skills, 1);
+    assert_eq!(plugin.inventory.mcp_servers, 2);
+    assert_eq!(plugin.inventory.stdio_mcp_servers, 1);
+    assert_eq!(plugin.inventory.remote_mcp_servers, 1);
+    assert_eq!(plugin.skill_snapshots.len(), 1);
+    assert_eq!(plugin.skill_snapshots[0].name, "demo");
+
+    let servers = plugin.manifest.mcp_servers.as_ref().unwrap();
+    assert_eq!(servers["local"].command.as_deref(), Some("run.sh"));
+    assert_eq!(servers["local"].env["API_KEY"], "${THIRD_PARTY_API_KEY}");
+    assert_eq!(servers["remote"].transport.as_deref(), Some("sse"));
+    assert_eq!(
+        servers["remote"].env_headers["Authorization"],
+        "THIRD_PARTY_REMOTE_TOKEN"
+    );
+}
+
+#[test]
+fn discovery_prefers_plugin_json_over_legacy_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = config.user_plugins_dir.join("dual");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"toml-legacy\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("plugin.json"),
+        r#"{"$schema": "https://agent-plugins.org/schemas/plugin.json", "name": "json-native", "version": "1.0.0"}"#,
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    assert!(registry.get("json-native").is_some());
+    assert!(registry.get("toml-legacy").is_none());
+}
+
+#[test]
+fn legacy_toml_names_with_double_hyphens_still_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    write_named_plugin(&config, "a--b", "");
+    let registry = discover_with_config(&config);
+    assert!(
+        registry.get("a--b").is_some(),
+        "the legacy plugin.toml name rule keeps `--` runs readable"
+    );
+}
+
+#[test]
+fn plugin_json_with_reserved_mcp_env_name_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_json_bundle(
+        &config,
+        "env-bad",
+        r#"{"$schema": "https://agent-plugins.org/schemas/plugin.json", "name": "env-bad", "version": "1.0.0"}"#,
+    );
+    fs::write(
+        plugin.join("mcp.json"),
+        r#"{"mcpServers": {"x": {"command": "run", "env": {"PLUGIN_ROOT": "/tmp"}}}}"#,
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    assert!(registry.get("env-bad").is_none());
+    assert!(
+        registry.diagnostics().iter().any(|diagnostic| {
+            diagnostic.level == super::types::PluginDiagnosticLevel::Error
+                && diagnostic.message.contains("PLUGIN_ROOT")
+        }),
+        "expected a PLUGIN_ROOT diagnostic, got {:?}",
+        registry.diagnostics()
+    );
+}
+
+#[test]
+fn export_writes_spec_valid_bundle_that_rediscovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_named_plugin(
+        &config,
+        "demo",
+        "[skills]\npath = \"skills\"\n\n[mcp_servers.local]\ncommand = \"run.sh\"\n",
+    );
+    fs::create_dir_all(plugin.join("skills/hello")).unwrap();
+    fs::write(
+        plugin.join("skills/hello/SKILL.md"),
+        "---\nname: hello\ndescription: hello skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    let loaded = registry.get("demo").cloned().unwrap();
+    let target = tmp.path().join("exported/demo-export");
+    let receipt =
+        super::export::export_plugin_bundle(&loaded, &target, &Default::default()).unwrap();
+    assert_eq!(receipt.exported_name, "demo");
+    assert_eq!(receipt.display_name, None);
+    assert!(receipt.wrote_mcp_json);
+    assert!(!receipt.skills_normalized);
+
+    // The emitted documents exist, conform to the standard's shape, and the
+    // legacy manifest is not carried over.
+    let plugin_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join("plugin.json")).unwrap()).unwrap();
+    super::agent_plugin::validate_plugin_json(&plugin_json).unwrap();
+    assert_eq!(plugin_json["name"], "demo");
+    let mcp_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join("mcp.json")).unwrap()).unwrap();
+    super::agent_plugin::validate_mcp_json(&mcp_json).unwrap();
+    assert_eq!(mcp_json["mcpServers"]["local"]["type"], "stdio");
+    assert_eq!(mcp_json["mcpServers"]["local"]["command"], "run.sh");
+    assert!(target.join("skills/hello/SKILL.md").is_file());
+    assert!(!target.join("plugin.toml").exists());
+
+    // The exported bundle is itself discoverable as an Agent Plugins bundle.
+    let rediscovery = DiscoveryConfig {
+        workspace: tmp.path().join("project2"),
+        user_plugins_dir: tmp.path().join("exported"),
+        workspace_plugins_dir: tmp.path().join("workspace2"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: tmp.path().join("state2/plugin-state.json"),
+    };
+    let registry = discover_with_config(&rediscovery);
+    let exported = registry.get("demo").expect("exported bundle rediscovers");
+    assert_eq!(exported.inventory.skills, 1);
+    assert_eq!(exported.inventory.mcp_servers, 1);
+    assert_eq!(exported.inventory.stdio_mcp_servers, 1);
+    assert_eq!(exported.skill_snapshots[0].name, "hello");
+}
+
+#[test]
+fn export_slugifies_legacy_names_and_collision_is_an_error() {
+    // Two legacy plugins whose names collide once slugified: exporting the
+    // `a--b` bundle must fail, not silently rename.
+    let tmp = tempfile::tempdir().unwrap();
+    let pair_config = config(tmp.path());
+    write_named_plugin(&pair_config, "a--b", "");
+    write_named_plugin(&pair_config, "a-b", "");
+    let registry = discover_with_config(&pair_config);
+    let loaded = registry.get("a--b").cloned().unwrap();
+    let existing: std::collections::BTreeSet<String> = registry
+        .list()
+        .iter()
+        .map(|plugin| plugin.name().to_string())
+        .filter(|name| name != "a--b")
+        .collect();
+    let target = tmp.path().join("out");
+    let error = super::export::export_plugin_bundle(&loaded, &target, &existing).unwrap_err();
+    assert!(error.contains("collides"), "{error}");
+    assert!(
+        !target.exists(),
+        "a failed export leaves no directory behind"
+    );
+
+    // Without the collision, the export slugifies and preserves the original
+    // name as the display name.
+    let tmp = tempfile::tempdir().unwrap();
+    let solo_config = config(tmp.path());
+    write_named_plugin(&solo_config, "a--b", "");
+    let registry = discover_with_config(&solo_config);
+    let loaded = registry.get("a--b").cloned().unwrap();
+    let target = tmp.path().join("out");
+    let receipt =
+        super::export::export_plugin_bundle(&loaded, &target, &Default::default()).unwrap();
+    assert_eq!(receipt.exported_name, "a-b");
+    assert_eq!(receipt.display_name.as_deref(), Some("a--b"));
+    let plugin_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join("plugin.json")).unwrap()).unwrap();
+    super::agent_plugin::validate_plugin_json(&plugin_json).unwrap();
+    assert_eq!(plugin_json["name"], "a-b");
+    assert_eq!(
+        plugin_json["extensions"]["net.codewhale"]["display_name"],
+        "a--b"
+    );
+}
+
+#[test]
+fn export_moves_custom_skills_layout_to_the_standard_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = config.user_plugins_dir.join("custom-skills");
+    fs::create_dir_all(plugin.join("prompts/my-skill")).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"custom-skills\"\nversion = \"1.0.0\"\n[skills]\npath = \"prompts\"\n",
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("prompts/my-skill/SKILL.md"),
+        "---\nname: my-skill\ndescription: custom layout\n---\nbody\n",
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    let loaded = registry.get("custom-skills").cloned().unwrap();
+    assert_eq!(loaded.skill_snapshots.len(), 1);
+
+    let target = tmp.path().join("exported/custom-skills");
+    let receipt =
+        super::export::export_plugin_bundle(&loaded, &target, &Default::default()).unwrap();
+    assert!(receipt.skills_normalized);
+    assert!(target.join("skills/my-skill/SKILL.md").is_file());
+    assert!(!target.join("prompts").exists());
+    let plugin_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join("plugin.json")).unwrap()).unwrap();
+    super::agent_plugin::validate_plugin_json(&plugin_json).unwrap();
+    assert!(
+        plugin_json.get("extensions").is_none(),
+        "a standard-layout bundle emits no Codewhale extension at all: {plugin_json}"
+    );
+
+    let rediscovery = DiscoveryConfig {
+        workspace: tmp.path().join("project2"),
+        user_plugins_dir: tmp.path().join("exported"),
+        workspace_plugins_dir: tmp.path().join("workspace2"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: tmp.path().join("state2/plugin-state.json"),
+    };
+    let registry = discover_with_config(&rediscovery);
+    let exported = registry
+        .get("custom-skills")
+        .expect("normalized bundle rediscovers");
+    assert_eq!(exported.inventory.skills, 1);
+    assert_eq!(exported.skill_snapshots[0].name, "my-skill");
+}
+
+#[test]
+fn export_skills_normalization_collision_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = config.user_plugins_dir.join("colliding-skills");
+    fs::create_dir_all(plugin.join("skills/dup")).unwrap();
+    fs::create_dir_all(plugin.join("prompts/dup")).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"colliding-skills\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\npaths = [\"prompts\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("skills/dup/SKILL.md"),
+        "---\nname: first\ndescription: one\n---\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("prompts/dup/SKILL.md"),
+        "---\nname: second\ndescription: two\n---\nbody\n",
+    )
+    .unwrap();
+
+    let registry = discover_with_config(&config);
+    let loaded = registry.get("colliding-skills").cloned().unwrap();
+    assert_eq!(loaded.skill_snapshots.len(), 2);
+    let target = tmp.path().join("out");
+    let error =
+        super::export::export_plugin_bundle(&loaded, &target, &Default::default()).unwrap_err();
+    assert!(error.contains("collision"), "{error}");
+    assert!(
+        !target.exists(),
+        "a failed export removes the directory it created"
+    );
+}

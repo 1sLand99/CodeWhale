@@ -197,7 +197,7 @@ pub enum PluginInstallError {
     #[error("bundle is too large; uncompressed total would exceed {limit} bytes")]
     OversizedBundle { limit: u64 },
     #[error(
-        "archive must contain exactly one plugin.toml root; found {0} (install a single plugin bundle, not a mono-repo)"
+        "archive must contain exactly one plugin bundle root (a directory holding plugin.json or plugin.toml); found {0} (install a single plugin bundle, not a mono-repo)"
     )]
     PluginTomlRoots(usize),
     #[error("symlinks and hard links are not allowed in plugin bundles")]

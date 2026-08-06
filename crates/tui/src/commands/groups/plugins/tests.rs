@@ -339,3 +339,41 @@ fn install_update_uninstall_verbs_drive_the_guided_trust_flow() {
         );
     });
 }
+
+#[test]
+fn export_verb_writes_agent_plugins_bundle() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let codewhale_home = root.path().join("home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    write_bundle(root.path());
+    let (mut app, _temp) = create_test_app(root.path());
+
+    let usage = plugins(&mut app, Some("export"));
+    assert!(usage.is_error, "export without arguments is a usage error");
+    let missing = plugins(&mut app, Some("export nope out"));
+    assert!(missing.is_error, "exporting an unknown plugin fails");
+
+    let result = plugins(&mut app, Some("export demo exported/demo"));
+    assert!(!result.is_error, "{result:?}");
+    let message = result.message.expect("export message");
+    assert!(message.contains("Exported `demo`"), "{message}");
+    assert!(message.contains("plugin.json"), "{message}");
+
+    let bundle = root.path().join("exported/demo");
+    let plugin_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle.join("plugin.json")).unwrap()).unwrap();
+    crate::plugins::agent_plugin::validate_plugin_json(&plugin_json).unwrap();
+    assert_eq!(plugin_json["name"], "demo");
+    assert_eq!(plugin_json["description"], "Import spreadsheet data safely");
+    assert!(bundle.join("skills/hello/SKILL.md").is_file());
+    assert!(!bundle.join("plugin.toml").exists());
+    // No MCP servers declared, so no mcp.json is written.
+    assert!(!bundle.join("mcp.json").exists());
+    // The installed bundle keeps its legacy manifest and stays untouched.
+    assert!(
+        root.path()
+            .join(".codewhale/plugins/demo/plugin.toml")
+            .exists()
+    );
+}

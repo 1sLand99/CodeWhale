@@ -991,15 +991,16 @@ fn runtime_stage_path(state_path: &Path, id: &PluginId, content_hash: &str) -> P
 }
 
 fn staged_bundle_matches(root: &Path, content_hash: &str, capability_hash: &str) -> bool {
-    super::manifest::PluginManifest::validate_from_path(&root.join("plugin.toml")).is_ok_and(
-        |validated| {
-            validated.content_hash == content_hash
-                && validated.capability_hash == capability_hash
-                && root
-                    .canonicalize()
-                    .is_ok_and(|root| validated.canonical_root == root)
-        },
-    )
+    let Some(manifest_path) = super::agent_plugin::resolve_manifest_path(root) else {
+        return false;
+    };
+    super::manifest::PluginManifest::validate_from_path(&manifest_path).is_ok_and(|validated| {
+        validated.content_hash == content_hash
+            && validated.capability_hash == capability_hash
+            && root
+                .canonicalize()
+                .is_ok_and(|root| validated.canonical_root == root)
+    })
 }
 
 fn stage_bundle(state_path: &Path, plugin: &LoadedPlugin) -> Result<PathBuf, String> {

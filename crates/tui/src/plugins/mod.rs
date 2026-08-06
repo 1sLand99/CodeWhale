@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
+pub mod agent_plugin;
 pub mod context;
 pub mod discovery;
+pub mod export;
 pub mod install;
 pub mod manifest;
 pub mod mutation;

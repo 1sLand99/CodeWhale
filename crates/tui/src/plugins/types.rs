@@ -215,13 +215,20 @@ impl LoadedPlugin {
     #[must_use]
     pub fn authority(&self, state_path: PathBuf, workspace: PathBuf) -> Option<PluginAuthority> {
         let staged_root = self.staged_root.as_ref()?;
+        // The staged tree mirrors the source bundle byte-for-byte, so both
+        // share one manifest file name (`plugin.json` or legacy
+        // `plugin.toml`). Fall back to the legacy name for synthetic
+        // instances whose roots are not on disk.
+        let manifest_name = super::agent_plugin::resolve_manifest_path(&self.canonical_root)
+            .and_then(|path| path.file_name().map(|name| name.to_os_string()))
+            .unwrap_or_else(|| std::ffi::OsString::from("plugin.toml"));
         Some(PluginAuthority {
             plugin_id: self.id.clone(),
             plugin_name: self.name().to_string(),
             workspace,
             state_path,
-            source_manifest: self.canonical_root.join("plugin.toml"),
-            staged_manifest: staged_root.join("plugin.toml"),
+            source_manifest: self.canonical_root.join(&manifest_name),
+            staged_manifest: staged_root.join(&manifest_name),
             content_hash: self.content_hash.clone(),
             capability_hash: self.capability_hash.clone(),
             state_generation: self.state_generation,
