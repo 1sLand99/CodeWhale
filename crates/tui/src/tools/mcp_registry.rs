@@ -11,11 +11,11 @@
 //! Upstream contract (MCP Registry, preview — breaking changes possible):
 //!   * List operation `GET /v0.1/servers` (cursor / limit / search / version
 //!     / include_deleted params):
-//!     https://registry.modelcontextprotocol.io/docs#/operations/list-servers-v0.1
-//!     OpenAPI source: https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml
+//!     <https://registry.modelcontextprotocol.io/docs#/operations/list-servers-v0.1>
+//!     OpenAPI source: <https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml>
 //!   * Aggregator integration guide (pagination format, server status
 //!     lifecycle):
-//!     https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/registry-aggregators.mdx
+//!     <https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/registry-aggregators.mdx>
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ impl RegistryServerEntry {
     /// `deleted` entries (moderation takedowns: spam/malware/illegal) from
     /// downstream indexes, and we treat `deprecated` the same so the model
     /// is only offered servers the publisher still stands behind.
-    /// https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/registry-aggregators.mdx
+    /// <https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/registry-aggregators.mdx>
     fn lifecycle_status(&self) -> Option<&str> {
         self.meta
             .as_ref()
@@ -351,7 +351,7 @@ fn read_cache(path: &PathBuf) -> Option<McpRegistryIndex> {
 /// Status lives in registry-managed `_meta`
 /// (`ServerResponse._meta["io.modelcontextprotocol.registry/official"]
 /// .status`, enum `active | deprecated | deleted`).
-/// https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml
+/// <https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml>
 fn viable_entries(entries: Vec<RegistryServerEntry>) -> Vec<McpRegistryServerEntry> {
     entries
         .into_iter()
@@ -1018,7 +1018,7 @@ mod tests {
     /// self-consistent.
     ///
     /// Marked `#[ignore]` because it depends on:
-    ///   * network access to https://registry.modelcontextprotocol.io
+    ///   * network access to <https://registry.modelcontextprotocol.io>
     ///   * the upstream API schema matching our deserialization types
     ///   * ~14s of wall clock for the first cold-cache sync
     ///
@@ -1148,7 +1148,7 @@ mod tests {
     /// `_meta` (`io.modelcontextprotocol.registry/official`), as a
     /// SIBLING of `server` — not inside the server body — and this
     /// helper keeps the tests honest about that path.
-    /// https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml
+    /// <https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/openapi.yaml>
     fn parse_server_entry(server_json: Value, status: Option<&str>) -> RegistryServerEntry {
         let mut response = json!({ "server": server_json });
         if let Some(status) = status {

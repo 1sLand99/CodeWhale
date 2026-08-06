@@ -2475,7 +2475,7 @@ fn plan_children_to_leaves(
 /// legacy aliases so the same option value works for direct Agent dispatch and
 /// for Workflow plan children (#5035), normalized onto the workflow IR schema.
 /// Rejections use the Agent tool's error contract ("Invalid sub-agent type
-/// '<value>'. Use: ...") with field-specific guidance.
+/// `'<value>'. Use: ...`") with field-specific guidance.
 fn parse_plan_agent_type(raw: Option<&str>) -> Result<AgentType, ToolError> {
     let Some(kind) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(AgentType::General);

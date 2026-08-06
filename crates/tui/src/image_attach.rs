@@ -1,7 +1,7 @@
 //! Turning a local image file into a wire-ready image content block.
 //!
 //! CodeWhale's message model has been multimodal for a long time —
-//! [`ContentBlock::ImageUrl`](crate::models::ContentBlock::ImageUrl) round-trips
+//! [`ContentBlock::ImageUrl`] round-trips
 //! through session persistence, compaction and all three wire builders. What it
 //! never had was a *faucet*: nothing outside `#[cfg(test)]` ever constructed
 //! one, so a user who attached a screenshot got the literal text
