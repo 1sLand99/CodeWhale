@@ -41,20 +41,10 @@ sessions carry over — see [docs/REBRAND.md](docs/REBRAND.md).
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
-
-Provider authentication and Codewhale account authentication are separate.
-`codewhale auth` configures the model used by the local runtime.
-`codewhale account login` opens the system browser, completes the device flow at
-`app.codewhale.net`, and stores the resulting session in the OS credential
-manager. Use `codewhale account status`, `codewhale account logout`, and
-`codewhale account keys` to inspect the signed-in profile or manage
-account-scoped BYOK credentials; the compatibility prefix `codewhale cloud`
-remains accepted. Tokens and provider-key values are never printed.
 
 In the TUI: `/model` switches provider and model together, `/fleet` runs a team
 of workers, `/undo` reverts the last turn, and `/restore <N>` rolls the
