@@ -1016,10 +1016,15 @@ mod tests {
             panic!("expected FleetStoreChanged, got {action:?}");
         };
         assert!(message.contains("Saved Fleet `Fleet C`"), "{message}");
-        assert!(
-            message.contains(".codewhale/fleets/fleet-c.toml"),
-            "{message}"
-        );
+        // The receipt names the path as this platform writes it, so build the
+        // expected tail the same way instead of hard-coding `/` — on Windows
+        // `Path::display` renders the separators as `\`.
+        let expected_tail = std::path::Path::new(".codewhale")
+            .join("fleets")
+            .join("fleet-c.toml")
+            .display()
+            .to_string();
+        assert!(message.contains(&expected_tail), "{message}");
 
         let (loaded, _) =
             crate::fleet::store::load_fleet_in_scope("Fleet C", FleetScope::Workspace, ws.path())
