@@ -1203,6 +1203,7 @@
   "BehavioralTipClearedInput": "Geleert · {chord} stellt wieder her",
   "BehavioralTipMcpValidation": "{command} startet Server und zeigt warum",
   "BehavioralTipRepeatedCommand": "{command} kann dies anpinnen",
+  "BehavioralTipDurableStateWritten": "Gespeichert · {command} ansehen",
   "SettingLockedDuringTurn": "{setting} ist gesperrt, während ein Turn läuft — zuerst Esc zum Unterbrechen drücken",
   "SettingSubjectMode": "Modus",
   "SettingSubjectThinking": "Thinking",

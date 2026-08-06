@@ -1203,6 +1203,7 @@
   "BehavioralTipClearedInput": "Очищено · {chord} восстанавливает",
   "BehavioralTipMcpValidation": "{command} запускает серверы и показывает причину",
   "BehavioralTipRepeatedCommand": "{command} может закрепить это",
+  "BehavioralTipDurableStateWritten": "Сохранено · {command} для просмотра",
   "SettingLockedDuringTurn": "{setting} заблокировано во время выполнения хода — сначала нажмите Esc для прерывания",
   "SettingSubjectMode": "Режим",
   "SettingSubjectThinking": "Thinking",
