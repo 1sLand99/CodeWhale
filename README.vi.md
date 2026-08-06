@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a7f294018f28 -->
+<!-- source: README.md sha256:a87c9f323f35 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -43,20 +43,11 @@ session của bạn được giữ nguyên — xem [docs/REBRAND.md](docs/REBRAN
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-Xác thực provider và xác thực tài khoản Codewhale là hai thứ tách biệt.
-`codewhale auth` cấu hình model mà runtime cục bộ sử dụng. `codewhale account
-login` mở trình duyệt hệ thống, hoàn tất device flow tại `app.codewhale.net`,
-và lưu session thu được vào trình quản lý thông tin xác thực của hệ điều hành.
-Dùng `codewhale account status`, `codewhale account logout` và
-`codewhale account keys` để xem hồ sơ đã đăng nhập hoặc quản lý các thông tin
-xác thực BYOK gắn với tài khoản; tiền tố tương thích `codewhale cloud` vẫn
-được chấp nhận. Token và giá trị key của provider không bao giờ được in ra.
 
 Trong TUI: `/model` đổi provider và model cùng lúc, `/fleet` chạy một đội
 worker, `/undo` hoàn tác lượt gần nhất, và `/restore <N>` đưa workspace về một

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a7f294018f28 -->
+<!-- source: README.md sha256:a87c9f323f35 -->
 # Codewhale
 
 Агент для програмування з відкритим кодом у вашому терміналі — модель приносите ви.
@@ -45,21 +45,11 @@ Cargo, Docker, Nix, Scoop, готові архіви, Android/Termux, а так�
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-Автентифікація провайдера й автентифікація облікового запису Codewhale — це
-окремі речі. `codewhale auth` налаштовує модель, яку використовує локальне
-середовище виконання. `codewhale account login` відкриває системний браузер,
-завершує device flow на `app.codewhale.net` і зберігає отриману сесію в
-менеджері облікових даних ОС. Використовуйте `codewhale account status`,
-`codewhale account logout` і `codewhale account keys`, щоб переглянути профіль,
-під яким ви увійшли, або керувати обліковими даними BYOK у межах облікового
-запису; префікс сумісності `codewhale cloud` також приймається. Токени та
-значення ключів провайдерів ніколи не виводяться.
 
 У TUI: `/model` перемикає провайдера й модель разом, `/fleet` запускає команду
 працівників, `/undo` скасовує останній крок, а `/restore <N>` відкочує робочу

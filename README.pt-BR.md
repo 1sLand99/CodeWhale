@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a7f294018f28 -->
+<!-- source: README.md sha256:a87c9f323f35 -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -43,21 +43,11 @@ e suas sessões são preservadas — veja [docs/REBRAND.md](docs/REBRAND.md).
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-A autenticação de provedor e a autenticação de conta Codewhale são separadas.
-`codewhale auth` configura o modelo usado pelo runtime local.
-`codewhale account login` abre o navegador do sistema, completa o fluxo de
-dispositivo em `app.codewhale.net` e armazena a sessão resultante no gerenciador
-de credenciais do sistema operacional. Use `codewhale account status`,
-`codewhale account logout` e `codewhale account keys` para inspecionar o perfil
-autenticado ou gerenciar credenciais BYOK no escopo da conta; o prefixo de
-compatibilidade `codewhale cloud` continua aceito. Tokens e valores de chaves de
-provedor nunca são exibidos.
 
 Na TUI: `/model` troca provedor e modelo juntos, `/fleet` executa uma equipe
 de workers, `/undo` desfaz o último turno e `/restore <N>` reverte o workspace

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a7f294018f28 -->
+<!-- source: README.md sha256:a87c9f323f35 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -30,13 +30,11 @@ Cargo, Docker, Nix, Scoop, arsip biner pra-kemas, Android/Termux, serta mirror C
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-Autentikasi penyedia dan autentikasi akun Codewhale merupakan dua hal yang terpisah. `codewhale auth` mengonfigurasi model yang digunakan oleh runtime lokal. `codewhale account login` membuka browser sistem, menyelesaikan alur perangkat (device flow) di `app.codewhale.net`, lalu menyimpan sesi yang dihasilkan ke dalam credential manager OS. Gunakan `codewhale account status`, `codewhale account logout`, dan `codewhale account keys` untuk memeriksa profil yang sedang masuk atau mengelola kredensial BYOK berlingkup akun; prefiks kompatibilitas `codewhale cloud` tetap diterima. Token dan nilai kunci penyedia tidak pernah ditampilkan.
 
 Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalankan tim pekerja (workers), `/undo` membatalkan langkah (turn) terakhir, dan `/restore <N>` mengembalikan workspace ke snapshot sebelumnya (`/restore` tanpa argumen hanya menampilkan daftarnya). Saat composer kosong, `Tab` beralih antar mode Plan / Act / Operate; bila composer berisi teks, `Tab` justru melengkapi perintah slash dan sebutan `@`. `Shift+Tab` beralih antar postur izin Ask / Auto-Review / Full Access kapan saja. `!` menjalankan perintah shell melalui alur persetujuan normal.
 
