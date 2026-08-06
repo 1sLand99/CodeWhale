@@ -130,8 +130,6 @@ pub struct StartupDefaults {
     reasoning_effort: Option<String>,
     /// Global `settings.default_model`.
     default_model: Option<String>,
-    /// Provider-scoped model entry: `(provider_identity, model)`.
-    provider_model: Option<(String, String)>,
 }
 
 impl StartupDefaults {
@@ -174,10 +172,7 @@ impl StartupDefaults {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none()
-            && self.reasoning_effort.is_none()
-            && self.default_model.is_none()
-            && self.provider_model.is_none()
+        self.mode.is_none() && self.reasoning_effort.is_none() && self.default_model.is_none()
     }
 
     /// Which user-facing settings this update touches, as typed subjects.
@@ -196,7 +191,7 @@ impl StartupDefaults {
         if self.reasoning_effort.is_some() {
             subjects.push(StartupDefaultSubject::Thinking);
         }
-        if self.default_model.is_some() || self.provider_model.is_some() {
+        if self.default_model.is_some() {
             subjects.push(StartupDefaultSubject::Model);
         }
         subjects
@@ -221,9 +216,6 @@ impl StartupDefaults {
             }
             if let Some(model) = self.default_model.as_deref() {
                 settings.set("default_model", model)?;
-            }
-            if let Some((provider_identity, model)) = self.provider_model.as_ref() {
-                settings.set_model_for_provider(provider_identity, model);
             }
             if let Some(effort) = self.reasoning_effort.as_deref() {
                 settings.set("reasoning_effort", effort)?;
@@ -794,7 +786,6 @@ mod tests {
         assert_eq!(update.mode, Some("operate"));
         assert!(update.reasoning_effort.is_none());
         assert!(update.default_model.is_none());
-        assert!(update.provider_model.is_none());
         assert_eq!(update.subjects(), vec![StartupDefaultSubject::Mode]);
     }
 

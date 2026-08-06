@@ -552,9 +552,12 @@ pub(crate) fn resolve_auto_model_reasoning(
     match preference {
         Some(
             effort @ (ReasoningEffort::Off
+            | ReasoningEffort::Minimal
             | ReasoningEffort::Low
             | ReasoningEffort::Medium
             | ReasoningEffort::High
+            | ReasoningEffort::XHigh
+            | ReasoningEffort::Ultra
             | ReasoningEffort::Max),
         ) => (Some(effort), false),
         None | Some(ReasoningEffort::Auto) => (routed, true),

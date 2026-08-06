@@ -1005,8 +1005,14 @@ fn opencode_zen_resolver_selects_protocol_from_documented_model_catalog() {
     let automatic = resolver
         .resolve(&req(Some(ProviderKind::OpencodeZen), Some("auto")))
         .expect("OpenCode Zen auto should resolve to its documented default");
-    assert_eq!(automatic.wire_model_id().as_str(), "gpt-5.5");
+    assert_eq!(automatic.wire_model_id().as_str(), "gpt-5.6-sol");
     assert_eq!(automatic.protocol(), RequestProtocol::Responses);
+
+    let logical_gpt_5_6 = resolver
+        .resolve(&req(Some(ProviderKind::OpencodeZen), Some("gpt-5.6")))
+        .expect("the logical GPT-5.6 picker row resolves to Zen's proven Sol wire route");
+    assert_eq!(logical_gpt_5_6.wire_model_id().as_str(), "gpt-5.6-sol");
+    assert_eq!(logical_gpt_5_6.protocol(), RequestProtocol::Responses);
 }
 
 #[test]

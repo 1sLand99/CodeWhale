@@ -1,15 +1,15 @@
-//! Persistent RLM session tools.
+//! Compatibility persistent-RLM session tools.
 //!
 //! v0.8.33 replaces the old one-shot `rlm` tool with a head/hands surface:
 //! `rlm_open` creates a named Python kernel over a large context,
 //! `rlm_eval` runs bounded probes against it, `rlm_configure` adjusts runtime
 //! feedback, and `rlm_close` tears it down.
 //!
-//! Unified surface (piagent phase B): the model sees one tool, `rlm`, with an
-//! `action` parameter routing to the per-action logic. The legacy `rlm_*`
-//! names stay registered as hidden compat aliases that force the action so
-//! saved transcripts replay correctly — the pattern `BashTool` established
-//! for `exec_shell*` in #4625.
+//! The normal Agent path now owns one session-persistent `repl` kernel. This
+//! action-shaped surface stays registered for explicit compatibility and saved
+//! transcript replay, but is hidden from new model turns. Its `rlm_*` aliases
+//! force the action so old transcripts replay correctly — the pattern
+//! `BashTool` established for `exec_shell*` in #4625.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +70,9 @@ pub struct RlmTool {
     name: &'static str,
     forced_action: Option<&'static str>,
     client: Option<DeepSeekClient>,
+    /// Kept only for replay-compatible explicit RLM sessions. New normal
+    /// agent work uses the session kernel and inherits its route there.
+    root_model: String,
 }
 
 impl RlmTool {
@@ -79,7 +82,17 @@ impl RlmTool {
             name,
             forced_action: None,
             client,
+            root_model: DEFAULT_CHILD_MODEL.to_string(),
         }
+    }
+
+    /// Bind an explicit compatibility session to the active parent route.
+    /// This prevents a saved/manual RLM invocation from silently falling back
+    /// to an unrelated legacy child model.
+    #[must_use]
+    pub fn with_root_model(mut self, root_model: String) -> Self {
+        self.root_model = root_model;
+        self
     }
 
     #[cfg(test)]
@@ -89,6 +102,7 @@ impl RlmTool {
             name,
             forced_action: Some(action),
             client,
+            root_model: DEFAULT_CHILD_MODEL.to_string(),
         }
     }
 
@@ -151,7 +165,10 @@ impl ToolSpec for RlmTool {
     }
 
     fn model_visible(&self) -> bool {
-        self.forced_action.is_none()
+        // The normal Agent path owns a session-scoped `repl` kernel. Keep the
+        // old action fan-out registered for replay and explicit compatibility,
+        // but do not teach a second RLM workflow to new model turns.
+        false
     }
 
     fn description(&self) -> &'static str {
@@ -447,10 +464,10 @@ impl RlmTool {
 
         let started = Instant::now();
         let (round, child_usage, child_route) = if let Some(client) = self.client.clone() {
-            let route = client.effective_route_envelope(DEFAULT_CHILD_MODEL, chrono::Utc::now());
+            let route = client.effective_route_envelope(&self.root_model, chrono::Utc::now());
             let bridge = RlmBridge::new(
                 Arc::new(client),
-                DEFAULT_CHILD_MODEL.to_string(),
+                self.root_model.clone(),
                 config.sub_rlm_max_depth.min(HARD_SUB_RLM_DEPTH_CAP),
             );
             let usage_handle = bridge.usage_handle();
@@ -900,9 +917,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_tool_is_the_visible_surface() {
+    fn rlm_tool_is_compatibility_only_not_model_visible() {
         let canonical = RlmTool::new("rlm", None);
-        assert!(canonical.model_visible());
+        assert!(!canonical.model_visible());
         assert_eq!(canonical.name(), "rlm");
         let actions = canonical.input_schema()["properties"]["action"]["enum"]
             .as_array()
@@ -924,7 +941,7 @@ mod tests {
         ] {
             assert!(
                 !alias.model_visible(),
-                "legacy alias {} must stay hidden",
+                "compatibility alias {} must stay hidden",
                 alias.name()
             );
         }

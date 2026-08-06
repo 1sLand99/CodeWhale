@@ -696,9 +696,12 @@ pub(crate) fn reasoning_capability_for_route(
 fn tier_of(effort: ReasoningEffort) -> Option<ReasoningTier> {
     match effort {
         ReasoningEffort::Off => Some(ReasoningTier::Off),
+        ReasoningEffort::Minimal => Some(ReasoningTier::Low),
         ReasoningEffort::Low => Some(ReasoningTier::Low),
         ReasoningEffort::Medium => Some(ReasoningTier::Medium),
         ReasoningEffort::High => Some(ReasoningTier::High),
+        ReasoningEffort::XHigh => Some(ReasoningTier::Max),
+        ReasoningEffort::Ultra => Some(ReasoningTier::Max),
         ReasoningEffort::Max => Some(ReasoningTier::Max),
         ReasoningEffort::Auto => None,
     }

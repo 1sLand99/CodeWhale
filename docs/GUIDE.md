@@ -315,7 +315,8 @@ Common commands for first-time users:
 
 Toolbox commands stay searchable when you type them directly: `/models`
 fetches live endpoint IDs, `/modeldb` opens the bundled model reference, and
-`/rlm` opens a manual persistent RLM context.
+`/rlm` loads a file or block of text into a working context that stays
+available for the rest of the session.
 
 Use `/provider` when you want to switch away from the default DeepSeek route.
 Provider IDs, environment variables, model defaults, and capability notes are
@@ -437,6 +438,31 @@ Sub-agents are most useful when work can be separated cleanly. Do not use them
 for tiny edits, and do not ask multiple agents to write the same files at the
 same time.
 
+### How long work stays coherent
+
+Work that spans many turns does not rely on an ever-growing chat transcript.
+This is ordinary Agent behavior — there is nothing to turn on and no separate
+workflow to learn:
+
+- A working context stays loaded for the session. Large source material and the
+  durable transcript are held as data the agent can search and slice, and useful
+  variables and imports survive across turns.
+- Workflow composes independent `task(...)` calls and parallel fan-out.
+- `agent` messages and follow-ups coordinate active children directly.
+- Goals retain the durable objective across the work.
+
+`/rlm <file-or-text>` points that working context at a specific file or block
+of text. The historic action-shaped `rlm` tool remains registered only so older
+sessions replay, and is deliberately not taught to new model turns.
+
+Codewhale can also keep a small project-local ledger at
+`.codewhale/harness/state.json`: evidence-backed prompt notes, reusable child
+briefs, and skill-routing hints. Later turns receive it as untrusted
+supplemental guidance, never as authority or executable instructions. Reading it
+is automatic; adding or removing an entry goes through the normal approval
+receipt. It is separate from personal memory, and it must never hold secrets,
+scratch transcripts, or unverified claims.
+
 Next: [SUBAGENTS.md](SUBAGENTS.md) covers roles, lifecycle, concurrency, and
 output contracts.
 
@@ -455,9 +481,10 @@ Use skills when a task has a repeatable process:
 
 Inside the TUI, `/skill <name>` activates a skill when one is available, and
 bare `/skills` opens the Skills Manager (owned-only inventory, no network). Use
-`/skills <prefix>`, `/skills inspect`, `/skills --remote`, or `/skills sync`
-for the text/registry paths. The command palette can also surface skill entries
-alongside normal slash commands.
+`/skills <prefix>`, `/skills inspect`, `/skills --remote`, `/skills suggest <task>`,
+or `/skills sync` for the text/registry paths. Suggestions rank the remote
+catalog but never install or activate anything. The command palette can also
+surface skill entries alongside normal slash commands.
 
 Good skills are narrow. They should tell the model what workflow to follow,
 what evidence to collect, and what to avoid. They should not hide credentials

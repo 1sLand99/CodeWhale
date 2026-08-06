@@ -233,10 +233,15 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
         let provider = provider.clone();
         models.iter().map(move |model| ProviderModelOffering {
             provider: provider.clone(),
-            canonical_model: None,
+            // The bundled catalog exposes `gpt-5.6` as the user-facing
+            // logical choice and records `gpt-5.6-sol` as its proven Zen
+            // wire id. Keep the generic choice honest by resolving it to the
+            // documented concrete Responses model rather than sending an
+            // unproven generic wire id to Zen.
+            canonical_model: (*model == "gpt-5.6-sol").then(|| ModelId::from("gpt-5.6")),
             wire_model_id: WireModelId::from(*model),
             endpoint_key: endpoint_key.to_string(),
-            default_for_provider: *model == "gpt-5.5",
+            default_for_provider: *model == "gpt-5.6-sol",
             limits: RouteLimits::default(),
             capabilities: RouteCapabilities::default(),
             pricing: PricingSku::UnknownOrStale,

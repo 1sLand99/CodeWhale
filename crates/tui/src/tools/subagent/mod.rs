@@ -815,6 +815,11 @@ pub struct AgentRunUsage {
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// Priced USD subtotal from the immutable per-response route audits, in
+    /// microdollars. Absent means the worker has no authoritative USD receipt;
+    /// it never means the worker was free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microusd: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -971,6 +976,7 @@ fn default_agent_run_usage() -> AgentRunUsage {
         input_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        cost_microusd: None,
         token_budget: None,
         budget_spent_tokens: None,
         budget_remaining_tokens: None,
@@ -985,6 +991,21 @@ fn positive_token_budget(budget: Option<u64>) -> Option<u64> {
 
 fn usage_total_tokens(usage: &Usage) -> u64 {
     u64::from(usage.input_tokens).saturating_add(u64::from(usage.output_tokens))
+}
+
+/// Convert an authoritative USD audit into the workflow IR's integer
+/// microdollar receipt. Route coverage stays on the cost-status path; this
+/// narrow projection deliberately preserves only a priced subtotal.
+fn priced_usd_microusd(audit: &crate::pricing::TurnCostAudit) -> Option<u64> {
+    if !audit.usd_priced {
+        return None;
+    }
+    let usd = audit.estimate?.usd;
+    let microusd = usd * 1_000_000.0;
+    if !microusd.is_finite() || !(0.0..=(u64::MAX as f64)).contains(&microusd) {
+        return None;
+    }
+    Some(microusd.round() as u64)
 }
 
 fn refresh_usage_note(usage: &mut AgentRunUsage) {
@@ -2792,34 +2813,21 @@ impl CoordinationProcessLock {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let thread = std::thread::spawn(move || {
-            let mut lock = fd_lock::RwLock::new(lock_file);
-            match lock.try_write() {
-                Ok(mut guard) => {
-                    // Stamp the holder pid while the flock is held, so a
-                    // losing acquisition can tell same-process handover from
-                    // a genuinely different process. Best-effort: the lock is
-                    // the flock, not the contents.
-                    {
-                        use std::io::{Seek, Write};
-                        let file: &mut std::fs::File = &mut guard;
-                        let _ = file.set_len(0);
-                        let _ = file.seek(std::io::SeekFrom::Start(0));
-                        let _ = file.write_all(std::process::id().to_string().as_bytes());
-                        let _ = file.flush();
-                    }
+            let lock = fd_lock::RwLock::new(lock_file);
+            // Changed from try_write (exclusive) to try_read (shared) so two
+            // sessions in the same workspace can coexist without a sticky
+            // error — job rows still settle via atomic rename + sequence guard.
+            // Matches user intent: "no reason to have a lock like that".
+            match lock.try_read() {
+                Ok(guard) => {
+                    // Shared lock: multiple sessions coexist, no pid stamping needed.
+                    // The exclusive pid dance was for telling same-process handover
+                    // from foreign owner — with shared locks every holder is equal
+                    // and job rows settle via atomic rename, so we just hold the
+                    // shared flock for the session lifetime.
+                    let _guard = guard;
                     let _ = ready_tx.send(Ok::<(), String>(()));
                     let _ = release_rx.recv();
-                    // Clear the stamp while still holding the flock, so a
-                    // stale pid never outlives its holder's tenure. A reader
-                    // that races the next winner's stamp then sees an empty
-                    // file, parses no pid, and classifies the loss as a
-                    // foreign process — which WARNS. Misclassification, when
-                    // it can happen at all, must fall on the side that tells
-                    // the user, never the side that suppresses the warning.
-                    {
-                        let file: &mut std::fs::File = &mut guard;
-                        let _ = file.set_len(0);
-                    }
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error.to_string()));
@@ -4333,7 +4341,12 @@ impl SubAgentManager {
         }
     }
 
-    fn record_worker_usage(&mut self, worker_id: &str, usage: &Usage) {
+    fn record_worker_usage(
+        &mut self,
+        worker_id: &str,
+        usage: &Usage,
+        priced_cost_microusd: Option<u64>,
+    ) {
         let now_ms = epoch_millis_now();
         let total_delta = usage_total_tokens(usage);
         let Some(record) = self.worker_records.get_mut(worker_id) else {
@@ -4361,6 +4374,15 @@ impl SubAgentManager {
                 .unwrap_or(0)
                 .saturating_add(total_delta),
         );
+        if let Some(cost_microusd) = priced_cost_microusd {
+            record.usage.cost_microusd = Some(
+                record
+                    .usage
+                    .cost_microusd
+                    .unwrap_or(0)
+                    .saturating_add(cost_microusd),
+            );
+        }
         let scope_id = record.usage.budget_scope.clone();
         refresh_usage_note(&mut record.usage);
         if let Some(scope_id) = scope_id {
@@ -9813,6 +9835,7 @@ async fn run_subagent(
         // Runtime-owned children persist directly before best-effort UI
         // delivery. The owner lease outlives the parent mailbox when a top-
         // level child remains active after the parent turn terminates.
+        let priced_cost_microusd = priced_usd_microusd(&usage_route.audit(&response.usage));
         if let Some(lease) = runtime.runtime_usage_lease.as_ref() {
             crate::cost_status::report_effective_route_for_runtime(
                 crate::cost_status::scope_token(),
@@ -9845,7 +9868,7 @@ async fn run_subagent(
         }
         {
             let mut manager = runtime.manager.write().await;
-            manager.record_worker_usage(&agent_id, &response.usage);
+            manager.record_worker_usage(&agent_id, &response.usage, priced_cost_microusd);
         }
 
         // Per-worker token-budget enforcement (#3321): stop a single runaway

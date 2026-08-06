@@ -1940,6 +1940,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            cost_microusd: None,
             token_budget: None,
             budget_spent_tokens: None,
             budget_remaining_tokens: None,

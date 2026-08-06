@@ -24,6 +24,23 @@ use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, Syst
 use crate::repl::runtime::{BatchResp, RpcDispatcher, RpcRequest, RpcResponse, SingleResp};
 use crate::utils::spawn_supervised;
 
+/// Object-safe runtime-model adapter for a working kernel.
+///
+/// The normal turn loop owns a [`SharedModelClient`], while the original RLM
+/// bridge predates that boundary and accepts the concrete [`LlmClient`] trait.
+/// Keeping this small adapter here means a persistent kernel follows exactly
+/// the selected model route (including custom providers) without teaching the
+/// kernel about provider transports or falling back to a side channel.
+pub(crate) struct ModelClientRlmAdapter {
+    client: crate::core::model_client::SharedModelClient,
+}
+
+impl ModelClientRlmAdapter {
+    pub(crate) fn new(client: crate::core::model_client::SharedModelClient) -> Self {
+        Self { client }
+    }
+}
+
 /// Per-child completion timeout — same as the previous sidecar default.
 const CHILD_TIMEOUT_SECS: u64 = 120;
 /// Default `max_tokens` for one-shot child completions.
@@ -41,6 +58,16 @@ pub(crate) trait RlmLlmClient: Send + Sync {
         &self,
         request: MessageRequest,
     ) -> Pin<Box<dyn Future<Output = Result<MessageResponse>> + Send + '_>>;
+}
+
+impl RlmLlmClient for ModelClientRlmAdapter {
+    fn create_message_boxed(
+        &self,
+        request: MessageRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<MessageResponse>> + Send + '_>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move { client.create_message(request).await })
+    }
 }
 
 impl<T> RlmLlmClient for T

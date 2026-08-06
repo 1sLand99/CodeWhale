@@ -2475,7 +2475,7 @@ mod tests {
                 .expect("dispatch reasoning under auto model"),
             HotbarDispatch::AppAction(AppAction::UpdateCompaction(_))
         ));
-        assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::XHigh);
     }
 
     #[test]

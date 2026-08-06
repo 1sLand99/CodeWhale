@@ -738,14 +738,14 @@
           "reasoning_options": [
             {
               "type": "effort",
-              "values": ["none", "minimal", "low", "medium", "high", "xhigh"]
+              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
             }
           ],
           "tool_call": true,
           "structured_output": true,
           "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
           "limit": { "context": 1000000, "output": 32000 },
-          "cost": { "input": 1.25, "output": 4.25 }
+          "cost": { "input": 1.25, "output": 4.25, "cache_read": 0.15 }
         },
         "muse-spark-1.2": {
           "id": "muse-spark-1.2",
@@ -757,14 +757,33 @@
           "reasoning_options": [
             {
               "type": "effort",
-              "values": ["none", "minimal", "low", "medium", "high", "xhigh"]
+              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
             }
           ],
           "tool_call": true,
           "structured_output": true,
           "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
           "limit": { "context": 1000000, "output": 32000 },
-          "cost": { "input": 1.25, "output": 4.25 }
+          "cost": { "input": 1.25, "output": 4.25, "cache_read": 0.15 }
+        },
+        "muse-spark-1.2-contributor": {
+          "id": "muse-spark-1.2-contributor",
+          "name": "Muse Spark 1.2 (Contributor)",
+          "family": "muse",
+          "default": false,
+          "attachment": true,
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
+            }
+          ],
+          "tool_call": true,
+          "structured_output": true,
+          "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
+          "limit": { "context": 1000000, "output": 32000 },
+          "cost": { "input": 0.10, "output": 0.20, "cache_read": 0.002 }
         }
       }
     },

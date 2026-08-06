@@ -707,11 +707,13 @@ pub enum ViewEvent {
         session_id: String,
         title: String,
     },
-    /// Emitted by the `/model` picker on Enter — carries both the chosen
-    /// model id and reasoning effort tier so the UI handler can update App
-    /// state, persist via `Settings`, and forward `Op::SetModel` to the
-    /// running engine. `previous_*` fields let the handler skip work when
-    /// nothing changed and craft a clear status message.
+    /// Emitted by the `/model` picker on Enter or Shift+D. Carries both the
+    /// chosen model id and reasoning effort tier so the UI handler can update
+    /// App state and forward `Op::SetModel` to the running engine.
+    /// `save_as_startup_default` is true only for the explicit Shift+D action;
+    /// ordinary Enter remains a session-local route change. `previous_*`
+    /// fields let the handler skip work when nothing changed and craft a clear
+    /// status message.
     ModelPickerApplied {
         model: String,
         provider: Option<crate::config::ApiProvider>,
@@ -721,6 +723,7 @@ pub enum ViewEvent {
         effort: crate::tui::app::ReasoningEffort,
         previous_model: String,
         previous_effort: crate::tui::app::ReasoningEffort,
+        save_as_startup_default: bool,
     },
     /// Emitted by the `/model` picker on Esc so the next open can restore
     /// the browsing context — view mode and highlighted row (#4109 / #4115).

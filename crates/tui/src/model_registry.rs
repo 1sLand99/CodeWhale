@@ -187,6 +187,8 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("mimo-v2.5", ModelProvider::XiaomiMimo),
     // --- Meta Model API (config DEFAULT_META_MODEL) ---
     ("muse-spark-1.1", ModelProvider::Meta),
+    ("muse-spark-1.2", ModelProvider::Meta),
+    ("muse-spark-1.2-contributor", ModelProvider::Meta),
     // --- xAI / Grok (config DEFAULT_XAI_MODEL) ---
     ("grok-4.5", ModelProvider::Xai),
     ("grok-4.3", ModelProvider::Xai),
@@ -294,6 +296,8 @@ mod tests {
             ("mimo-v2.5-pro-ultraspeed", Some(1_000_000)),
             ("mimo-v2.5", Some(1_000_000)),
             ("muse-spark-1.1", Some(1_000_000)),
+            ("muse-spark-1.2", Some(1_000_000)),
+            ("muse-spark-1.2-contributor", Some(1_000_000)),
             ("grok-4.5", Some(500_000)),
             ("grok-4.3", Some(1_000_000)),
             ("grok-4.20-0309-reasoning", Some(2_000_000)),
@@ -368,6 +372,12 @@ mod tests {
         assert_eq!(meta.context_window, Some(1_000_000));
         assert_eq!(meta.max_output, Some(32_000));
         assert!(meta.supports_reasoning);
+        for id in ["muse-spark-1.2", "muse-spark-1.2-contributor"] {
+            let m = lookup(id).unwrap_or_else(|| panic!("{id} should be seeded"));
+            assert_eq!(m.provider, ModelProvider::Meta);
+            assert_eq!(m.context_window, Some(1_000_000));
+            assert!(m.supports_reasoning);
+        }
     }
 
     #[test]

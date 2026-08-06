@@ -52,7 +52,12 @@ pub fn activate_primary(
     }
     app.work_surface.selected = Some(row_id.clone());
     let action = primary?;
-    app.work_surface.opened = Some(row_id.clone());
+    // A group heading changes the visible panel but does not open a modal.
+    // Keep `opened` reserved for a real detail owner, otherwise a later
+    // activation treats the still-visible heading as a stale pager toggle.
+    if !matches!(action, SidebarRowAction::ShowSubagentsPanel) {
+        app.work_surface.opened = Some(row_id.clone());
+    }
     Some(action)
 }
 

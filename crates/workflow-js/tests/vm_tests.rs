@@ -371,6 +371,22 @@ async fn task_accepts_prompt_and_type_aliases() {
 }
 
 #[tokio::test]
+async fn task_title_alias_routes_to_description() {
+    let driver = Arc::new(FakeDriver::new());
+    run(
+        &driver,
+        r#"return await task({ title: "inspect the release candidate", type: "verifier" });"#,
+        json!(null),
+    )
+    .await
+    .expect("title is accepted as the task description");
+
+    let request = &driver.requests()[0];
+    assert_eq!(request.description, "inspect the release candidate");
+    assert_eq!(request.subagent_type.as_deref(), Some("verifier"));
+}
+
+#[tokio::test]
 async fn task_prompt_takes_precedence_over_short_description() {
     let driver = Arc::new(FakeDriver::new());
     run(

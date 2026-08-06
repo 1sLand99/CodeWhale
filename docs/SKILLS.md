@@ -53,6 +53,7 @@ project/global roots only.
 | `/skills <prefix>` | Text list filtered by name prefix. |
 | `/skills inspect` | Text discovery mode, searched directories, and source paths. |
 | `/skills --remote` | Explicit registry listing (network). |
+| `/skills suggest <task>` | Rank up to three remote skills for a task, with matching evidence and an explicit install command (network; no install). |
 | `/skills sync` | Explicit registry → local cache sync (network). |
 | `/skill <name>` | Activate a skill for the next turn. |
 | `/skill install [--project\|--global] <spec>` | Install via mutation controller. |
@@ -66,6 +67,10 @@ Notes:
   compatible roots) or `/skills inspect` for discovery details.
 - Bare `/skill install <spec>` (no scope flag) installs into the CodeWhale
   **global** owned root.
+- `/skills suggest` only reads the curated registry through the existing
+  network policy. It never downloads, trusts, enables, or activates a skill;
+  each result gives a separate `/skill install <name>` command for the user to
+  choose.
 - If the same name exists in both project and global owned roots, update /
   uninstall / trust require `--project` or `--global`.
 - If a name exists only under a compatible external root, writes are refused;

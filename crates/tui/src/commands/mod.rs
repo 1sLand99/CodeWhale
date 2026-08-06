@@ -537,13 +537,31 @@ mod tests {
         let mut app = create_test_app();
         let result = execute("/rlm 2 inspect this long corpus", &mut app);
         assert!(!result.is_error);
-        assert!(result.message.as_deref().unwrap_or("").contains("depth 2"));
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("persistent working context")
+        );
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected SendMessage action");
         };
-        assert!(message.contains("rlm_open"));
-        assert!(message.contains("rlm_configure"));
-        assert!(message.contains("sub_rlm_max_depth: 2"));
+        assert!(message.contains("session-persistent working context"));
+        assert!(message.contains("Do not use legacy `rlm` tool actions"));
+    }
+
+    /// `/kernel` was briefly introduced by an in-flight change and rejected:
+    /// the persistent working context is ordinary Agent behavior, not a
+    /// control surface users have to learn.
+    #[test]
+    fn kernel_is_not_a_command() {
+        let mut app = create_test_app();
+        let result = execute("/kernel inspect the fresh corpus", &mut app);
+        assert!(
+            result.is_error,
+            "/kernel must not resolve to a registered command"
+        );
     }
 
     #[test]
@@ -1397,8 +1415,8 @@ mod tests {
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected /rlm to send a model instruction");
         };
-        assert!(message.contains(r#"content: "inspect   this   corpus""#));
-        assert!(message.contains("sub_rlm_max_depth: 3"));
+        assert!(message.contains(r#"this text: "inspect   this   corpus""#));
+        assert!(message.contains("session-persistent working context"));
     }
 
     #[test]

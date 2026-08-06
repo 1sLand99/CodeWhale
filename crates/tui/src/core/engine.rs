@@ -330,8 +330,8 @@ pub struct EngineConfig {
     pub goal_status: GoalStatus,
     /// Safety backstop on automatic goal continuation passes (#5052).
     /// Resolved from `[goal] max_continuations` in config.toml; `0` disables
-    /// the backstop so only completion/blocked or token/time budget
-    /// exhaustion stop an operate-mode goal run.
+    /// the backstop so only completion, blocked state, or the continuation
+    /// limit stops an operate-mode goal run.
     pub goal_max_continuations: u32,
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
@@ -577,6 +577,10 @@ pub struct Engine {
     deepseek_client_error: Option<String>,
     api_key_env_only_recovery: Option<String>,
     session: Session,
+    /// One lazy, session-scoped working kernel for inline `repl` blocks.
+    /// Its context is refreshed before each run, while user-created Python
+    /// state stays alive across model turns.
+    repl_kernel: Option<crate::repl::PythonRuntime>,
     subagent_manager: SharedSubAgentManager,
     shell_manager: SharedShellManager,
     /// Read-before-edit snapshots live for the session, not for one turn's
@@ -1285,6 +1289,7 @@ impl Engine {
             deepseek_client_error,
             api_key_env_only_recovery,
             session,
+            repl_kernel: None,
             subagent_manager,
             shell_manager,
             file_read_tracker,
@@ -3151,12 +3156,12 @@ impl Engine {
     /// Handle a send message operation
     #[allow(clippy::too_many_arguments)]
     /// After a turn completes, decide whether an active goal should keep going.
-    /// Returns a continuation to dispatch, an explicit terminal budget stop,
-    /// or `Inactive` when no follow-up turn belongs in the queue.
+    /// Returns a continuation to dispatch, an explicit terminal backstop stop,
+    /// or Inactive when no follow-up turn belongs in the queue.
     ///
-    /// A goal runs until the model self-reports done/blocked, the user pauses
-    /// or clears, or an optional token/time budget is exhausted. The loop is
-    /// "until done," not "until N turns" (#5052); a configurable safety
+    /// A goal runs until the model self-reports done/blocked or the user pauses
+    /// or clears. Token/time accounting remains telemetry. The loop is "until
+    /// done," not "until N turns" (#5052); a configurable safety
     /// backstop (`[goal] max_continuations`, `0` = unlimited) still halts a
     /// pathological loop that never emits a terminal signal.
     fn goal_continuation_if_active(&self) -> GoalContinuationAction {
@@ -3188,11 +3193,11 @@ impl Engine {
                 time_used_seconds: snapshot.time_used_seconds,
                 continuations: snapshot.continuation_count,
             },
-            crate::goal_loop::GoalBudget {
-                token_budget: snapshot.token_budget.map(u64::from),
-                time_budget_seconds: None,
-                max_continuations: self.config.goal_max_continuations,
-            },
+            // Unbounded like grokbuild (agent-call cap) and kimicode swarm
+            // (turnBudget per-task, resumable): token/time are telemetry only,
+            // only Completed/Blocked/ContinuationLimit pause the loop.
+            crate::goal_loop::GoalBudget::unbounded()
+                .with_max_continuations(self.config.goal_max_continuations),
         );
 
         match decision {
@@ -3214,21 +3219,6 @@ impl Engine {
             crate::goal_loop::ContinuationDecision::Stop(reason) => {
                 tracing::info!(?reason, "goal continuation stopped");
                 let (message, pause_reason) = match reason {
-                    crate::goal_loop::StopReason::TokenBudget => (
-                        format!(
-                            "Goal token budget reached ({} / {} tokens); automatic continuation paused. Raise the budget, then resume the goal.",
-                            snapshot.tokens_used,
-                            snapshot.token_budget.unwrap_or_default(),
-                        ),
-                        GoalPauseReason::BudgetLimit,
-                    ),
-                    crate::goal_loop::StopReason::TimeBudget => (
-                        format!(
-                            "Goal time budget reached ({} seconds); automatic continuation paused.",
-                            snapshot.time_used_seconds,
-                        ),
-                        GoalPauseReason::BudgetLimit,
-                    ),
                     crate::goal_loop::StopReason::ContinuationLimit => (
                         format!(
                             "Goal paused after {} automatic continuations without a terminal result (safety backstop; raise or disable via [goal] max_continuations); inspect progress, then resume if useful.",

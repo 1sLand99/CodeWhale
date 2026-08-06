@@ -1299,6 +1299,9 @@ impl From<ReasoningEffort> for ReasoningEffortValue {
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
             ReasoningEffort::Auto => Self::Auto,
+            ReasoningEffort::Minimal => Self::Low,
+            ReasoningEffort::XHigh => Self::Max,
+            ReasoningEffort::Ultra => Self::Max,
             ReasoningEffort::Max => Self::Max,
         }
     }
@@ -1312,6 +1315,9 @@ impl ReasoningEffortValue {
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
             ReasoningEffort::Auto => Self::Auto,
+            ReasoningEffort::Minimal => Self::Low,
+            ReasoningEffort::XHigh => Self::Max,
+            ReasoningEffort::Ultra => Self::Max,
             ReasoningEffort::Max => Self::Max,
         }
     }

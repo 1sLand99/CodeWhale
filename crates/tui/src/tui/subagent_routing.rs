@@ -20,7 +20,10 @@ use crate::tui::widgets::agent_card::{
 };
 use crate::tui::workspace_context;
 
-const SUBAGENT_TERMINAL_CARD_TTL: Duration = Duration::from_secs(5 * 60);
+/// Keep settled cards visible briefly, then archive them from the compact
+/// live projection. Their transcript card and persisted agent record remain
+/// reachable through the Agents register.
+const SUBAGENT_TERMINAL_CARD_TTL: Duration = Duration::from_secs(45);
 const SUBAGENT_TERMINAL_CARD_MAX_RETAINED: usize = 24;
 
 pub(super) fn running_agent_count(app: &App) -> usize {
@@ -1559,6 +1562,44 @@ mod tests {
                 .as_ref()
                 .map(|activity| activity.status),
             Some(AgentCurrentActivityStatus::Done)
+        );
+    }
+
+    #[test]
+    fn terminal_cards_archive_after_forty_five_seconds_without_losing_history() {
+        let mut app = App::new(test_options(), &Config::default());
+        let agent_id = "agent_archive";
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            1,
+            &MailboxMessage::started(agent_id, FleetRole::Worker),
+        ));
+        app.subagent_cache
+            .push(subagent_result(agent_id, SubAgentStatus::Completed));
+
+        let observed = Instant::now();
+        reconcile_subagent_activity_state_at(&mut app, observed);
+        reconcile_subagent_activity_state_at(&mut app, observed + SUBAGENT_TERMINAL_CARD_TTL);
+        assert!(
+            app.subagent_cache
+                .iter()
+                .any(|agent| agent.agent_id == agent_id),
+            "the terminal card stays visible through its full 45-second grace period"
+        );
+
+        reconcile_subagent_activity_state_at(
+            &mut app,
+            observed + SUBAGENT_TERMINAL_CARD_TTL + Duration::from_millis(1),
+        );
+        assert!(
+            !app.subagent_cache
+                .iter()
+                .any(|agent| agent.agent_id == agent_id),
+            "the compact live cache must archive the settled card after the grace period"
+        );
+        assert!(
+            app.subagent_card_index.contains_key(agent_id),
+            "archiving a compact card must not delete its transcript record"
         );
     }
 

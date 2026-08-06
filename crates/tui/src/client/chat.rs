@@ -84,7 +84,11 @@ fn apply_openai_reasoning_effort(
         provider == ApiProvider::Openai && is_openai_gpt_56_api_model(model_lower.as_str());
     let is_openai_reasoning =
         provider == ApiProvider::Openai && model_is_openai_reasoning_family(model);
-    let is_muse_spark = provider == ApiProvider::Meta && model_lower == "muse-spark-1.1";
+    let is_muse_spark = provider == ApiProvider::Meta
+        && matches!(
+            model_lower.as_str(),
+            "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
+        );
     if !is_openai_reasoning && !is_muse_spark {
         return;
     }
@@ -627,7 +631,10 @@ pub(crate) fn build_chat_wire_body(
 ) -> Result<ChatWireBody> {
     let messages =
         build_chat_messages_for_request_and_provider_and_route(request, provider, base_url);
-    let model = wire_model_for_provider_route(provider, base_url, &request.model);
+    let model = {
+        let wire = wire_model_for_provider_route(provider, base_url, &request.model);
+        crate::models::effective_muse_wire_id(&wire).to_string()
+    };
     let mut body = if stream {
         json!({
             "model": model.clone(),

@@ -880,6 +880,11 @@ pub enum SidebarRowAction {
     ToggleAgentDetails {
         agent_id: String,
     },
+    /// Select the persistent Agents panel. This is deliberately a navigation
+    /// action rather than a modal: the Subagents summary is a group door, so
+    /// it should reveal the standing register instead of fabricating a detail
+    /// page for the count itself.
+    ShowSubagentsPanel,
     /// Open the child's bounded, safe status projection. Exact transcript
     /// evidence is a separate explicit action (#2889).
     OpenAgentDetail {
@@ -909,6 +914,7 @@ impl SidebarRowAction {
             Self::Command(command) => Some(command.as_str()),
             Self::PrefillCommand(_)
             | Self::ToggleAgentDetails { .. }
+            | Self::ShowSubagentsPanel
             | Self::OpenAgentDetail { .. }
             | Self::OpenAgentTranscript { .. }
             | Self::CancelAgent { .. }
@@ -1056,6 +1062,32 @@ pub struct PendingRouteSave {
     pub model: String,
     /// The selected Fleet at change time, when one exists.
     pub fleet: Option<(String, crate::fleet::store::FleetScope)>,
+}
+
+/// Write `provider_identity`/`model` to `settings.toml` as the route the next
+/// launch should open with, and return the line to show the operator.
+///
+/// `default_provider` is what `App::new` consults first, so pinning it is the
+/// half that actually survives a restart; the provider-scoped entry carries the
+/// model. `default_model` is a DeepSeek-only legacy key and is written only for
+/// those providers, matching how startup reads it back.
+fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
+    let route = format!("{provider_identity}/{model}");
+    match crate::settings::Settings::transact(|settings| {
+        settings.default_provider = Some(provider_identity.to_string());
+        settings.set_model_for_provider(provider_identity, model);
+        if matches!(
+            crate::config::ApiProvider::parse(provider_identity),
+            Some(crate::config::ApiProvider::Deepseek)
+                | Some(crate::config::ApiProvider::DeepseekCN)
+        ) {
+            settings.set("default_model", model)?;
+        }
+        Ok(())
+    }) {
+        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+        Err(err) => format!("Save failed: {err}"),
+    }
 }
 
 pub struct App {
@@ -2041,26 +2073,36 @@ impl App {
                 }
             }
             RouteSaveChoice::SaveAsDefault => {
-                match crate::settings::Settings::transact(|settings| {
-                    settings.default_provider = Some(pending.provider_identity.clone());
-                    settings.set_model_for_provider(&pending.provider_identity, &pending.model);
-                    if matches!(
-                        crate::config::ApiProvider::parse(&pending.provider_identity),
-                        Some(crate::config::ApiProvider::Deepseek)
-                            | Some(crate::config::ApiProvider::DeepseekCN)
-                    ) {
-                        settings.set("default_model", &pending.model)?;
-                    }
-                    Ok(())
-                }) {
-                    Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
-                    Err(err) => format!("Save failed: {err}"),
-                }
+                persist_route_as_startup_default(&pending.provider_identity, &pending.model)
             }
             RouteSaveChoice::SessionOnly => {
                 format!("Route {route} kept for this session only — nothing was written.")
             }
         }
+    }
+
+    /// Persist the route this session is *actually* running as the startup
+    /// default.
+    ///
+    /// This reads the live route rather than [`Self::pending_route_save`] on
+    /// purpose. The pending record is bookkeeping for the save *prompt*, and it
+    /// is written by several different paths (same-provider apply, cross-
+    /// provider `switch_provider`, `/model`). Cross-checking it before an
+    /// explicit "make this my default" action meant that any ordering
+    /// disagreement dropped the write with no error shown — the user saw a
+    /// normal "Model: x → y" line and reasonably assumed it had stuck, then the
+    /// next launch reopened the old route. An explicit request now always
+    /// reports what it did.
+    pub fn save_live_route_as_startup_default(&mut self) -> String {
+        let provider_identity = self.provider_identity_for_persistence().to_string();
+        let model = if self.auto_model {
+            "auto".to_string()
+        } else {
+            self.model.clone()
+        };
+        // This explicit decision resolves the pending prompt.
+        self.pending_route_save = None;
+        persist_route_as_startup_default(&provider_identity, &model)
     }
 
     /// Record that the live session route changed to `provider_identity` /

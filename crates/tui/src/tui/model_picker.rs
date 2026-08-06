@@ -290,10 +290,20 @@ impl ModelPickerView {
             .into_iter()
             .filter(|provider| *provider != app.api_provider)
             .collect();
-        let default_visible_rows: Vec<_> = model_rows
+        let mut default_visible_rows: Vec<_> = model_rows
             .iter()
             .filter(|row| model_row_visible_in_view(row, ModelListView::Configured))
             .collect();
+        // Selection indices must be calculated in the same order that the
+        // configured view renders. Pinned rows are sorted to the top by
+        // `visible_model_rows`; using the unsorted construction order here
+        // made the cursor land on a different row (or look unselected) after
+        // a pin reordered the list.
+        sort_model_rows_for_view(
+            &mut default_visible_rows,
+            ModelListView::Configured,
+            &app.pinned_models,
+        );
         let mut selected_model_idx = default_visible_rows.iter().position(|row| {
             row.id == initial_model
                 && (row.provider.is_none() || row.provider == Some(app.api_provider))
@@ -715,6 +725,10 @@ impl ModelPickerView {
     }
 
     fn build_event(&self) -> ViewEvent {
+        self.build_event_with_startup_default(false)
+    }
+
+    fn build_event_with_startup_default(&self, save_as_startup_default: bool) -> ViewEvent {
         let resolved_provider = self.resolved_provider().unwrap_or(self.initial_provider);
         let provider = (resolved_provider != self.initial_provider).then_some(resolved_provider);
         let provider_id = (resolved_provider == ApiProvider::Custom)
@@ -726,6 +740,7 @@ impl ModelPickerView {
             effort: self.selected_effort_request,
             previous_model: self.previous_model.clone(),
             previous_effort: self.initial_effort,
+            save_as_startup_default,
         }
     }
 
@@ -2354,6 +2369,22 @@ impl ModalView for ModelPickerView {
                 self.explain_unselectable_selection()
             }
             KeyCode::Enter => ViewAction::EmitAndClose(self.build_event()),
+            // Shift+D makes the visible provider/model pair the startup
+            // default. Plain Enter deliberately stays session-local, so a
+            // one-off route comparison cannot silently change the next launch.
+            KeyCode::Char(ch)
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.query.is_empty()
+                    && ch.eq_ignore_ascii_case(&'d')
+                    && self.selected_model_is_selectable() =>
+            {
+                ViewAction::EmitAndClose(self.build_event_with_startup_default(true))
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.contains(KeyModifiers::SHIFT) && ch.eq_ignore_ascii_case(&'d') =>
+            {
+                self.explain_unselectable_selection()
+            }
             KeyCode::Char('p') if key.modifiers.is_empty() && self.query.is_empty() => {
                 let rows = self.visible_model_rows();
                 let Some(row) = rows.get(self.selected_model_idx) else {
@@ -2551,6 +2582,10 @@ impl ModelPickerView {
                     tr(self.locale, MessageId::RouteActionSearchAnyModel),
                 ),
                 ActionHint::new("Enter", tr(self.locale, MessageId::PickerActionApply)),
+                ActionHint::new(
+                    "⇧D",
+                    tr(self.locale, MessageId::PickerActionSetStartupDefault),
+                ),
                 ActionHint::new("A", view_action),
                 ActionHint::new("Esc", tr(self.locale, MessageId::PickerActionCancel)),
             ],
@@ -2683,9 +2718,12 @@ impl ModelPickerView {
                 let hint = match effort {
                     ReasoningEffort::Auto => "choose per turn".to_string(),
                     ReasoningEffort::Off => "no extra reasoning".to_string(),
+                    ReasoningEffort::Minimal => "minimal reasoning".to_string(),
                     ReasoningEffort::Low => "lighter reasoning".to_string(),
                     ReasoningEffort::Medium => "balanced reasoning".to_string(),
                     ReasoningEffort::High => "deeper reasoning".to_string(),
+                    ReasoningEffort::XHigh => "extra-high reasoning".to_string(),
+                    ReasoningEffort::Ultra => "ultra reasoning".to_string(),
                     ReasoningEffort::Max => {
                         if effort_provider == ApiProvider::OpenaiCodex {
                             "extra-high reasoning".to_string()
@@ -2711,7 +2749,7 @@ impl ModelPickerView {
     }
 }
 
-fn picker_efforts_for_route(
+pub(crate) fn picker_efforts_for_route(
     provider: ApiProvider,
     base_url: &str,
     wire_model: &str,
@@ -2793,14 +2831,17 @@ fn catalog_picker_efforts(provider: ApiProvider, wire_model: &str) -> Option<Vec
 
 fn catalog_effort_value(raw: &str) -> Option<ReasoningEffort> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "off" | "disabled" | "none" | "false" => Some(ReasoningEffort::Off),
-        "low" | "minimum" | "minimal" | "light" => Some(ReasoningEffort::Low),
+        "off" | "disabled" | "false" => Some(ReasoningEffort::Off),
+        "none" => Some(ReasoningEffort::Off), // Muse "none" maps to Off in our enum but display as "none"
+        "minimal" | "minimum" => Some(ReasoningEffort::Minimal),
+        "low" | "light" => Some(ReasoningEffort::Low),
         "medium" | "mid" => Some(ReasoningEffort::Medium),
         "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::XHigh),
+        "ultra" | "ultracode" => Some(ReasoningEffort::Ultra),
+        "max" | "maximum" => Some(ReasoningEffort::Max),
         "auto" | "automatic" | "adaptive" => Some(ReasoningEffort::Auto),
-        "max" | "maximum" | "xhigh" | "ultra" | "ultracode" | "always_on" | "always-on" => {
-            Some(ReasoningEffort::Max)
-        }
+        "always_on" | "always-on" => Some(ReasoningEffort::Max),
         _ => None,
     }
 }
@@ -3461,11 +3502,16 @@ mod tests {
     #[test]
     fn cross_provider_codex_row_previews_destination_route_truth() {
         let (app, config, _lock) = create_test_app();
+        let codex_home = tempfile::tempdir().expect("Codex home");
+        let _codex_home = crate::test_support::EnvVarGuard::set("CODEX_HOME", codex_home.path());
         let view = ModelPickerView::new(&app, &config);
         let row = view
             .model_rows
             .iter()
-            .find(|row| row.provider == Some(ApiProvider::OpenaiCodex) && row.id == "gpt-5.5")
+            .find(|row| {
+                row.provider == Some(ApiProvider::OpenaiCodex)
+                    && row.id == crate::config::DEFAULT_OPENAI_CODEX_MODEL
+            })
             .expect("Codex fallback row");
 
         assert!(
@@ -3892,6 +3938,29 @@ mod tests {
         let view = ModelPickerView::new(&app, &config);
         assert_eq!(view.resolved_model(), "deepseek-v4-flash");
         assert_eq!(view.resolved_effort(), ReasoningEffort::Max);
+    }
+
+    #[test]
+    fn picker_keeps_active_model_selected_after_pinned_row_reordering() {
+        let (mut app, config, _lock) = create_test_app();
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+        app.enable_provider_model(ApiProvider::Deepseek.as_str(), "deepseek-v4-flash");
+        app.pinned_models = vec![PinnedModel {
+            provider: ApiProvider::Deepseek.as_str().to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            label: None,
+        }];
+
+        let view = ModelPickerView::new(&app, &config);
+
+        assert!(!view.show_custom_model_row);
+        assert_eq!(view.resolved_model(), "deepseek-v4-pro");
+        assert_eq!(
+            view.visible_model_rows()[view.selected_model_idx].id,
+            "deepseek-v4-pro",
+            "the visible highlight must stay on the active model after pins reorder rows"
+        );
     }
 
     #[test]
@@ -5192,6 +5261,25 @@ mod tests {
     }
 
     #[test]
+    fn shift_d_emits_an_explicit_startup_default_save() {
+        let (mut app, mut config, _lock) = create_test_app();
+        config.api_key = Some("deepseek-picker-test-key".to_string());
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+        let mut view = ModelPickerView::new(&app, &config);
+
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ModelPickerApplied {
+                save_as_startup_default: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn deepseek_provider_uses_neutral_two_pane_selection() {
         let (mut app, config, _lock) = create_test_app();
         app.model = "deepseek-v4-flash".to_string();
@@ -5619,12 +5707,15 @@ mod tests {
     #[test]
     fn catalog_effort_values_map_provider_vocabularies() {
         assert_eq!(catalog_effort_value("none"), Some(ReasoningEffort::Off));
-        assert_eq!(catalog_effort_value("minimal"), Some(ReasoningEffort::Low));
+        assert_eq!(
+            catalog_effort_value("minimal"),
+            Some(ReasoningEffort::Minimal)
+        );
         assert_eq!(
             catalog_effort_value("adaptive"),
             Some(ReasoningEffort::Auto)
         );
-        assert_eq!(catalog_effort_value("xhigh"), Some(ReasoningEffort::Max));
+        assert_eq!(catalog_effort_value("xhigh"), Some(ReasoningEffort::XHigh));
         assert_eq!(
             catalog_effort_value("always_on"),
             Some(ReasoningEffort::Max)

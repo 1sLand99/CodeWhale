@@ -509,6 +509,8 @@ impl Engine {
             // GoalState remains untouched here: the outer turn bookkeeping
             // records this usage once, then the normal cross-turn reconciler
             // publishes the terminal Blocked projection.
+            // Token budget is advisory (unbounded) — surface telemetry but don't break.
+            // Like grokbuild/kimicode, only verifier completion/block or backstop ends the run.
             if let Some(snapshot) = self.goal_snapshot_with_current_turn_usage(&turn.usage)
                 && let Some(budget) = snapshot.token_budget
                 && snapshot.tokens_used >= u64::from(budget)
@@ -516,11 +518,10 @@ impl Engine {
                 let _ = self
                     .tx_event
                     .send(Event::status(format!(
-                        "Goal token budget reached ({} / {budget} tokens); ending turn before another provider request.",
+                        "Goal over token budget ({} / {budget} tokens) — continuing (unbounded); verify or /goal clear when done.",
                         snapshot.tokens_used
                     )))
                     .await;
-                break;
             }
 
             let compaction_pins = self
@@ -1738,24 +1739,71 @@ impl Engine {
                     continue;
                 }
 
-                // Inline ```repl execution — paper-spec RLM integration.
+                // Inline ```repl execution — the normal Agent working kernel.
+                // The kernel is session-scoped: refresh its inspectable context
+                // for this model step, but preserve Python variables/imports
+                // from earlier steps. That keeps the simple `repl` route useful
+                // for sustained work instead of forcing the model through a
+                // separate open/eval/configure control surface.
                 if has_sendable_assistant_content
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
                 {
                     let repl_blocks =
                         crate::repl::sandbox::extract_repl_blocks(&current_text_visible);
-                    let mut runtime = match crate::repl::runtime::PythonRuntime::new().await {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            let _ = self
-                                .tx_event
-                                .send(Event::status(format!("REPL init failed: {e}")))
-                                .await;
-                            break;
-                        }
-                    };
+                    if self.repl_kernel.is_none() {
+                        self.repl_kernel = match crate::repl::runtime::PythonRuntime::new().await {
+                            Ok(runtime) => Some(runtime),
+                            Err(e) => {
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::status(format!("REPL init failed: {e}")))
+                                    .await;
+                                break;
+                            }
+                        };
+                    }
+
+                    let kernel_context = self.repl_kernel_context();
+                    let refresh_result = self
+                        .repl_kernel
+                        .as_mut()
+                        .expect("REPL kernel initialized above")
+                        .replace_context(&kernel_context)
+                        .await;
+                    if let Err(e) = refresh_result {
+                        // A broken subprocess cannot be trusted to retain
+                        // state. Drop it so a later model step gets a clean,
+                        // freshly bootstrapped kernel instead of repeating a
+                        // hidden failure.
+                        self.repl_kernel = None;
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!("REPL context refresh failed: {e}")))
+                            .await;
+                        break;
+                    }
+
+                    // Child queries use the same object-safe client as the
+                    // root turn. This follows the user-selected provider and
+                    // lets deterministic/injected hosts exercise the exact
+                    // same kernel contract, rather than quietly dropping
+                    // programmatic recursion outside the legacy DeepSeek
+                    // client path.
+                    let bridge = self.model_client.as_ref().map(|client| {
+                        crate::rlm::RlmBridge::new(
+                            std::sync::Arc::new(crate::rlm::ModelClientRlmAdapter::new(
+                                std::sync::Arc::clone(client),
+                            )),
+                            self.session.model.clone(),
+                            1,
+                        )
+                    });
+                    let bridge_usage_handle =
+                        bridge.as_ref().map(crate::rlm::RlmBridge::usage_handle);
+                    let repl_started = Instant::now();
 
                     let mut final_result: Option<String> = None;
+                    let mut kernel_failed = false;
                     for (i, block) in repl_blocks.iter().enumerate() {
                         let round_num = i + 1;
                         let _ = self
@@ -1765,7 +1813,24 @@ impl Engine {
                             )))
                             .await;
 
-                        match runtime.execute(&block.code).await {
+                        let round_result = match bridge.as_ref() {
+                            Some(bridge) => {
+                                self.repl_kernel
+                                    .as_mut()
+                                    .expect("REPL kernel stays alive during a round")
+                                    .run(&block.code, Some(bridge))
+                                    .await
+                            }
+                            None => {
+                                self.repl_kernel
+                                    .as_mut()
+                                    .expect("REPL kernel stays alive during a round")
+                                    .execute(&block.code)
+                                    .await
+                            }
+                        };
+
+                        match round_result {
                             Ok(round) => {
                                 if let Some(val) = &round.final_value {
                                     let _ = self
@@ -1785,7 +1850,10 @@ impl Engine {
                                         round.stdout, round.stderr
                                     )
                                 } else {
-                                    format!("[REPL round {round_num} output]\n{}", round.stdout)
+                                    format!(
+                                        "[REPL round {round_num} output; {} child query RPC(s)]\n{}",
+                                        round.rpc_count, round.stdout
+                                    )
                                 };
                                 self.add_session_message(
                                     self.runtime_text_message_with_turn_metadata(
@@ -1809,7 +1877,37 @@ impl Engine {
                                     ),
                                 )
                                 .await;
+                                // A transport error or timeout means Python
+                                // may still be executing unknown code. Do not
+                                // send another block into that process or
+                                // pretend its state is trustworthy.
+                                kernel_failed = true;
+                                break;
                             }
+                        }
+                    }
+
+                    if kernel_failed {
+                        self.repl_kernel = None;
+                    }
+
+                    // Programmatic child calls are real provider work, not
+                    // implementation detail. Fold their authoritative usage
+                    // into the parent turn exactly once, including failures
+                    // after a partial fan-out, so `/cost`, goals, and the
+                    // final receipt cannot undercount the working kernel.
+                    if let Some(usage_handle) = bridge_usage_handle {
+                        let child_usage = usage_handle.lock().await.clone();
+                        turn.add_usage(&child_usage);
+                        if usage_has_reported_data(&child_usage) {
+                            let _ = self
+                                .tx_event
+                                .send(Event::TurnUsage {
+                                    usage: child_usage,
+                                    duration_ms: u64::try_from(repl_started.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                })
+                                .await;
                         }
                     }
 
@@ -3624,9 +3722,9 @@ impl Engine {
         }
 
         // Route the continuation decision through the goal-loop decision core.
-        // A goal runs until complete/blocked, paused, or an optional
-        // token/time budget is exhausted (#5052); the configurable run-level
-        // backstop (`[goal] max_continuations`) only halts a pathological
+        // A goal runs until complete/blocked or the user pauses it; token/time
+        // accounting is telemetry (#5052). The configurable run-level backstop
+        // ([goal] max_continuations) only halts a pathological
         // loop. The per-turn guard (`per_turn_max`) only bounds how many
         // continuation passes happen *within* a single turn before yielding
         // back to the engine.
@@ -3644,14 +3742,7 @@ impl Engine {
             },
         );
         if let crate::goal_loop::ContinuationDecision::Stop(reason) = decision {
-            let message = match reason {
-                crate::goal_loop::StopReason::TokenBudget => format!(
-                    "Goal token budget reached ({} / {} tokens); ending continuation.",
-                    snapshot.tokens_used,
-                    snapshot.token_budget.unwrap_or_default()
-                ),
-                other => format!("Goal continuation stopped: {other:?}."),
-            };
+            let message = format!("Goal continuation stopped: {reason:?}.");
             let _ = self.tx_event.send(Event::status(message)).await;
             return None;
         }
@@ -3683,6 +3774,29 @@ impl Engine {
 
     pub(super) fn messages_with_turn_metadata(&self) -> Vec<Message> {
         self.session.messages.clone().into()
+    }
+
+    /// The persistent working kernel gets the full durable transcript as data,
+    /// not as another prompt. Python helpers can search and chunk it without
+    /// reinflating the model's visible context, while ordinary variables stay
+    /// in the same kernel across steps and user turns.
+    fn repl_kernel_context(&self) -> String {
+        let payload = serde_json::json!({
+            "schema": "codewhale.persistent_kernel_context.v1",
+            "session": {
+                "id": self.session.id,
+                "workspace": self.session.workspace,
+                "model": self.session.model,
+                "message_count": self.session.messages.len(),
+            },
+            "messages": self.messages_with_turn_metadata(),
+        });
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|error| {
+            format!(
+                "{{\"schema\":\"codewhale.persistent_kernel_context.v1\",\"serialization_error\":{}}}",
+                serde_json::Value::String(error.to_string())
+            )
+        })
     }
 
     /// This session's authoritative Work state (#3983).

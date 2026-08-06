@@ -1605,7 +1605,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
 }
 
 #[tokio::test]
-async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
+async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let budget_turn = vec![
@@ -1623,7 +1623,10 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
         ),
         canned::message_stop(),
     ];
-    let model = std::sync::Arc::new(MockLlmClient::new(vec![budget_turn]));
+    let model = std::sync::Arc::new(MockLlmClient::new(vec![
+        budget_turn,
+        canned::simple_text_turn("the cross-turn continuation runs past the exhausted budget"),
+    ]));
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
     let engine_config = EngineConfig {
@@ -1666,11 +1669,9 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
         .expect("send budgeted goal turn");
 
     let mut starts = 0;
-    let mut saw_turn_complete = false;
-    let mut saw_terminal_goal = false;
-    let mut saw_prompt_refresh = false;
-    let mut saw_budget_status = false;
-    while !(saw_terminal_goal && saw_prompt_refresh && saw_budget_status) {
+    let mut completed_turns = 0;
+    let mut saw_blocked_goal = false;
+    while completed_turns < 2 || !saw_blocked_goal {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
@@ -1680,71 +1681,50 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
         match event {
             Event::TurnStarted { .. } => starts += 1,
             Event::TurnComplete { status, error, .. } => {
-                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-                saw_turn_complete = true;
-            }
-            Event::SessionUpdated {
-                system_prompt: Some(system_prompt),
-                ..
-            } if saw_turn_complete => {
-                let prompt = match system_prompt {
-                    SystemPrompt::Text(text) => text,
-                    SystemPrompt::Blocks(blocks) => blocks
-                        .into_iter()
-                        .map(|block| block.text)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                };
-                assert!(
-                    !prompt.contains("<session_goal>"),
-                    "paused budget goal must leave the active system prompt: {prompt}"
-                );
-                saw_prompt_refresh = true;
+                if status == TurnOutcomeStatus::Completed {
+                    completed_turns += 1;
+                } else {
+                    // The fixture mock is exhausted after the continuation
+                    // turns; that provider failure blocks the goal (a
+                    // legitimate terminal) — it is not a budget pause.
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("no canned turn queued")),
+                        "unexpected non-completed turn: {status:?} {error:?}"
+                    );
+                }
             }
             Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
-                assert_eq!(snapshot.objective.as_deref(), Some("finish within budget"));
-                assert_eq!(snapshot.token_budget, Some(10));
-                assert_eq!(snapshot.tokens_used, 11);
-                assert_eq!(
-                    snapshot.pause_reason,
-                    Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+                panic!(
+                    "budgets are telemetry-only in unbounded goal mode; the goal must not \
+                     pause on budget (pause_reason={:?})",
+                    snapshot.pause_reason
                 );
-                assert!(snapshot.blocker.is_none(), "{snapshot:?}");
-                saw_terminal_goal = true;
             }
-            Event::Status { message } if message.contains("automatic continuation paused") => {
-                assert!(message.contains("11 / 10 tokens"), "{message}");
-                assert!(message.contains("Raise the budget"), "{message}");
-                saw_budget_status = true;
+            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+                saw_blocked_goal = true;
             }
             _ => {}
         }
     }
 
-    let session = handle
-        .get_session_snapshot()
-        .await
-        .expect("post-budget session snapshot");
-    let prompt = match session.system_prompt.expect("post-budget system prompt") {
-        SystemPrompt::Text(text) => text,
-        SystemPrompt::Blocks(blocks) => blocks
-            .into_iter()
-            .map(|block| block.text)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    assert!(!prompt.contains("<session_goal>"), "{prompt}");
     let snapshot = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(snapshot.status, "paused");
+    assert_eq!(snapshot.status, "blocked");
     assert_eq!(
-        snapshot.pause_reason,
-        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+        snapshot.pause_reason, None,
+        "budget must never be the pause reason in unbounded goal mode"
     );
-    assert_eq!(starts, 1, "budget stop must not start another turn");
-    assert_eq!(
-        model.call_count(),
-        1,
-        "budget stop must not call the model again"
+    assert_eq!(snapshot.tokens_used, 11);
+    assert_eq!(snapshot.token_budget, Some(10));
+    assert!(
+        starts >= 2,
+        "budget exhaustion must not stop the cross-turn continuation (starts={starts})"
+    );
+    assert!(
+        model.call_count() >= 2,
+        "the continuation must issue a second provider call (calls={})",
+        model.call_count()
     );
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -1752,7 +1732,7 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
 }
 
 #[tokio::test]
-async fn current_turn_usage_stops_budgeted_goal_after_one_provider_call() {
+async fn current_turn_usage_does_not_stop_budgeted_goal_after_one_provider_call() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let objective = "stop before an intra-turn budget overspend";
@@ -1771,7 +1751,10 @@ async fn current_turn_usage_stops_budgeted_goal_after_one_provider_call() {
         ),
         canned::message_stop(),
     ];
-    let model = std::sync::Arc::new(MockLlmClient::new(vec![budget_turn]));
+    let model = std::sync::Arc::new(MockLlmClient::new(vec![
+        budget_turn,
+        canned::simple_text_turn("the continuation runs past the exhausted budget"),
+    ]));
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = goal_custom_route_config();
     let (engine, handle) = Engine::new_with_model_client(
@@ -1799,48 +1782,65 @@ async fn current_turn_usage_stops_budgeted_goal_after_one_provider_call() {
         ))
         .await
         .expect("send budgeted goal turn");
-    let mut saw_terminal_goal = false;
-    while !saw_terminal_goal {
+    let mut starts = 0;
+    let mut saw_blocked_goal = false;
+    while !saw_blocked_goal {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
         .await
-        .expect("current-turn budget stop did not settle")
+        .expect("current-turn budget continuation did not settle")
         .expect("current-turn budget event");
-        if let Event::GoalUpdated { snapshot } = event
-            && snapshot.status == "paused"
-        {
-            saw_terminal_goal = true;
+        match event {
+            Event::TurnStarted { .. } => starts += 1,
+            Event::TurnComplete { status, error, .. } => {
+                if status != TurnOutcomeStatus::Completed {
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("no canned turn queued")),
+                        "unexpected non-completed turn: {status:?} {error:?}"
+                    );
+                }
+            }
+            Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
+                panic!(
+                    "budgets are telemetry-only in unbounded goal mode; the goal must not \
+                     pause on budget (pause_reason={:?})",
+                    snapshot.pause_reason
+                );
+            }
+            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+                saw_blocked_goal = true;
+            }
+            _ => {}
         }
     }
-    let session = handle
-        .get_session_snapshot()
-        .await
-        .expect("post-budget session snapshot");
-
-    assert_eq!(
-        model.call_count(),
-        1,
-        "current-turn usage must stop all additional provider calls"
+    assert!(
+        model.call_count() >= 2,
+        "current-turn usage must not stop additional provider calls (calls={})",
+        model.call_count()
     );
     assert_eq!(model.remaining_turns(), 0);
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.status, "paused");
+    assert_eq!(goal.status, "blocked");
+    assert_eq!(
+        goal.pause_reason, None,
+        "budget must never be the pause reason in unbounded goal mode"
+    );
     assert_eq!(goal.tokens_used, 11);
     assert_eq!(goal.token_budget, Some(10));
-    assert_eq!(
-        goal.pause_reason,
-        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+    assert!(
+        starts >= 1,
+        "the initial goal turn must start before its intra-turn continuation (starts={starts})"
     );
-    let prompt = system_prompt_text(session.system_prompt.expect("paused system prompt"));
-    assert!(!prompt.contains("<session_goal>"), "{prompt}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
 }
 
 #[tokio::test]
-async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_request() {
+async fn tool_response_crossing_goal_budget_issues_second_provider_request() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let objective = "stop after a budget-crossing goal tool response";
@@ -1861,7 +1861,9 @@ async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_reque
     ];
     let model = std::sync::Arc::new(MockLlmClient::new(vec![
         budget_tool_turn,
-        canned::simple_text_turn("this second provider response must remain unused"),
+        canned::simple_text_turn(
+            "this second provider response is issued past the exhausted budget",
+        ),
     ]));
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = goal_custom_route_config();
@@ -1892,8 +1894,8 @@ async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_reque
         .expect("send budgeted goal tool turn");
 
     let mut saw_get_goal = false;
-    let mut saw_terminal_goal = false;
-    while !saw_terminal_goal {
+    let mut saw_blocked_goal = false;
+    while !saw_blocked_goal {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
@@ -1905,38 +1907,45 @@ async fn tool_response_crossing_goal_budget_does_not_issue_second_provider_reque
                 assert!(result.expect("get_goal result").success);
                 saw_get_goal = true;
             }
+            Event::TurnComplete { status, error, .. } => {
+                if status != TurnOutcomeStatus::Completed {
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("no canned turn queued")),
+                        "unexpected non-completed turn: {status:?} {error:?}"
+                    );
+                }
+            }
             Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
-                saw_terminal_goal = true;
+                panic!(
+                    "budgets are telemetry-only in unbounded goal mode; the goal must not \
+                     pause on budget (pause_reason={:?})",
+                    snapshot.pause_reason
+                );
+            }
+            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
+                saw_blocked_goal = true;
             }
             _ => {}
         }
     }
 
     assert!(saw_get_goal, "the first response's goal tool must execute");
-    assert_eq!(
-        model.call_count(),
-        1,
-        "the provider-request boundary must stop the second model call"
+    assert!(
+        model.call_count() >= 2,
+        "the provider-request boundary must not stop the second model call (calls={})",
+        model.call_count()
     );
-    assert_eq!(
-        model.remaining_turns(),
-        1,
-        "the second canned response must remain unused"
-    );
+    assert_eq!(model.remaining_turns(), 0);
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.status, "paused");
+    assert_eq!(goal.status, "blocked");
     assert_eq!(goal.tokens_used, 11, "usage must be durably recorded once");
     assert_eq!(goal.token_budget, Some(10));
     assert_eq!(
-        goal.pause_reason,
-        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+        goal.pause_reason, None,
+        "budget must never be the pause reason in unbounded goal mode"
     );
-    let session = handle
-        .get_session_snapshot()
-        .await
-        .expect("post-budget tool session snapshot");
-    let prompt = system_prompt_text(session.system_prompt.expect("paused system prompt"));
-    assert!(!prompt.contains("<session_goal>"), "{prompt}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
@@ -2075,7 +2084,7 @@ fn without_named_custom_route(mut config: Config) -> Config {
 }
 
 #[tokio::test]
-async fn exhausted_goal_pauses_before_invalid_route_resolution() {
+async fn exhausted_goal_reaches_route_failure_without_budget_pause() {
     let config = goal_custom_route_config();
     let engine_config = EngineConfig {
         model: "local-model".to_string(),
@@ -2106,9 +2115,9 @@ async fn exhausted_goal_pauses_before_invalid_route_resolution() {
         .await
         .expect("queue exhausted continuation");
 
-    let mut saw_paused_goal = false;
-    let mut saw_budget_status = false;
-    while !(saw_paused_goal && saw_budget_status) {
+    let mut saw_route_error = false;
+    let mut saw_blocked_goal = false;
+    while !(saw_route_error && saw_blocked_goal) {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
@@ -2117,45 +2126,39 @@ async fn exhausted_goal_pauses_before_invalid_route_resolution() {
         .expect("budget terminal event");
         match event {
             Event::TurnStarted { .. } => {
-                panic!("an exhausted goal must not attempt an invalid route")
+                panic!("an exhausted goal must not start a turn before route resolution")
             }
             Event::Error { envelope, .. } => {
-                panic!("budget decision must precede route failure: {envelope:?}")
+                assert!(
+                    envelope.message.contains("route is no longer valid"),
+                    "the exhausted goal must reach the invalid-route failure, got: {envelope:?}"
+                );
+                saw_route_error = true;
             }
             Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
+                panic!(
+                    "budgets are telemetry-only in unbounded goal mode; the goal must not                      pause on budget (pause_reason={:?})",
+                    snapshot.pause_reason
+                );
+            }
+            Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
                 assert_eq!(snapshot.tokens_used, 11);
                 assert_eq!(snapshot.token_budget, Some(10));
                 assert_eq!(
-                    snapshot.pause_reason,
-                    Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+                    snapshot.pause_reason, None,
+                    "budget must never be the pause reason in unbounded goal mode"
                 );
-                saw_paused_goal = true;
-            }
-            Event::Status { message } if message.contains("Goal token budget reached") => {
-                assert!(message.contains("11 / 10 tokens"), "{message}");
-                saw_budget_status = true;
+                saw_blocked_goal = true;
             }
             _ => {}
         }
     }
 
-    let session = handle
-        .get_session_snapshot()
-        .await
-        .expect("post-budget session snapshot");
-    let prompt = match session.system_prompt.expect("post-budget system prompt") {
-        SystemPrompt::Text(text) => text,
-        SystemPrompt::Blocks(blocks) => blocks
-            .into_iter()
-            .map(|block| block.text)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    assert!(!prompt.contains("<session_goal>"), "{prompt}");
-    assert_eq!(
-        goal_state.lock().expect("goal lock").snapshot().status,
-        "paused"
-    );
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.status, "blocked");
+    assert_eq!(snapshot.tokens_used, 11);
+    assert_eq!(snapshot.token_budget, Some(10));
+    assert_eq!(snapshot.pause_reason, None);
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
@@ -3976,6 +3979,130 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     assert_eq!(snapshot.turn_id.value, turn.id);
     assert_eq!(snapshot.step, 0);
     assert!(snapshot.delivery_status.starts_with("unknown"));
+}
+
+#[tokio::test]
+async fn normal_repl_kernel_persists_across_user_turns() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::models::{ContentBlock, Message, MessageResponse, Usage};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn(
+            "```repl\nchild_verdict = sub_query('Return exactly: child route works')\nproof_from_first_turn = f'kernel state survives; {child_verdict}'\nprint('kernel primed', child_verdict)\n```",
+        ),
+        canned::simple_text_turn("First turn complete."),
+        canned::simple_text_turn(
+            "```repl\nprint(proof_from_first_turn)\nfinalize('persistent kernel verified')\n```",
+        ),
+    ]));
+    mock.push_message_response(MessageResponse {
+        id: "kernel-child".to_string(),
+        r#type: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "child route works".to_string(),
+            cache_control: None,
+        }],
+        model: "mock-model".to_string(),
+        stop_reason: Some("end_turn".to_string()),
+        stop_sequence: None,
+        container: None,
+        usage: Usage {
+            input_tokens: 7,
+            output_tokens: 11,
+            ..Usage::default()
+        },
+    });
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let selected_model = engine.session.model.clone();
+
+    engine.session.add_message(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "Prime the working kernel.".to_string(),
+            cache_control: None,
+        }],
+    });
+    let first_registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let first_policy = test_tool_surface(&engine, first_registry, None, AppMode::Agent);
+    let mut first_turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine
+        .handle_deepseek_turn(&mut first_turn, first_policy, None)
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(first_turn.usage.input_tokens, 7);
+    assert_eq!(first_turn.usage.output_tokens, 11);
+    let child_usage_event = {
+        let mut events = handle.rx_event.write().await;
+        std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+            Event::TurnUsage { usage, .. }
+                if usage.input_tokens == 7 && usage.output_tokens == 11 =>
+            {
+                Some(usage)
+            }
+            _ => None,
+        })
+    }
+    .expect("kernel child usage must be visible to the cost UI");
+    assert_eq!(child_usage_event.input_tokens, 7);
+    assert_eq!(child_usage_event.output_tokens, 11);
+
+    engine.session.add_message(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "Use the state from the prior turn.".to_string(),
+            cache_control: None,
+        }],
+    });
+    let second_registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let second_policy = test_tool_surface(&engine, second_registry, None, AppMode::Agent);
+    let mut second_turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine
+        .handle_deepseek_turn(&mut second_turn, second_policy, None)
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let kernel = engine.repl_kernel.as_ref().expect("persistent kernel");
+    assert!(
+        kernel.round_count() >= 4,
+        "each REPL call should refresh context and then execute code"
+    );
+    let final_text = engine
+        .session
+        .messages
+        .last()
+        .and_then(|message| {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+        })
+        .expect("final assistant text");
+    assert_eq!(final_text, "persistent kernel verified");
+
+    let child_request = mock
+        .captured_requests()
+        .into_iter()
+        .find(|request| request.stream == Some(false))
+        .expect("the injected model client must service a kernel child query");
+    assert_eq!(child_request.model, selected_model);
+    assert_eq!(
+        child_request.messages[0].content,
+        vec![ContentBlock::Text {
+            text: "Return exactly: child route works".to_string(),
+            cache_control: None,
+        }]
+    );
 }
 
 async fn snapshot_for_catalog(
@@ -7465,7 +7592,7 @@ fn hidden_edit_alias_bypasses_deferred_model_catalog_preflight() {
 }
 
 #[test]
-fn deferred_tool_preflight_guides_rlm_open_misnamed_source_fields() {
+fn legacy_rlm_actions_are_not_advertised_to_new_model_turns() {
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let registry = engine
         .build_turn_tool_registry_builder(
@@ -7475,62 +7602,29 @@ fn deferred_tool_preflight_guides_rlm_open_misnamed_source_fields() {
         )
         .build(engine.build_tool_context(AppMode::Agent, false));
     let always_load = HashSet::new();
-    let mut catalog = build_model_tool_catalog(
+    let catalog = build_model_tool_catalog(
         registry.to_api_tools_with_cache(true),
         vec![],
         AppMode::Agent,
         &always_load,
     );
-    // Piagent phase B: the model-facing tool is the unified `rlm`; legacy
-    // `rlm_open` is a hidden compat alias and must not appear in the catalog.
-    assert!(
-        !catalog.iter().any(|tool| tool.name == "rlm_open"),
-        "rlm_open must stay a hidden alias outside the model catalog"
-    );
-    catalog
-        .iter_mut()
-        .find(|tool| tool.name == "rlm")
-        .expect("rlm registered")
-        .defer_loading = Some(true);
-    let mut active = initial_active_tools(&catalog);
-    assert!(!active.contains("rlm"));
-
-    let result = preflight_requested_deferred_tool(
+    // The session-persistent kernel is now the normal RLM path. These tools
+    // stay registered solely for saved-transcript replay and an explicitly
+    // named compatibility call; letting a fresh model discover them would
+    // recreate the old action-by-action workflow.
+    for legacy_name in [
         "rlm",
-        &json!({
-            "action": "open",
-            "name": "active_prompt",
-            "prompt": "inspect this",
-            "path": "src/lib.rs"
-        }),
-        &catalog,
-        &mut active,
-    )
-    .expect("deferred rlm should preflight");
-
-    assert!(active.contains("rlm"));
-    assert!(result.success);
-    assert!(result.content.contains("Tool `rlm` was deferred"));
-    assert!(result.content.contains("The tool was not executed"));
-    assert!(result.content.contains("session_object: string"));
-    assert!(
-        result.content.contains(
-            "prompt -> file_path (local file), content (inline text), url, or session_object"
-        ),
-        "prompt correction includes session_object: {}",
-        result.content
-    );
-    assert!(
-        result.content.contains(
-            "path -> file_path (local file), content (inline text), url, or session_object"
-        ),
-        "path correction includes session_object: {}",
-        result.content
-    );
-    assert_eq!(
-        result.metadata.as_ref().unwrap()["deferred_tool_loaded"],
-        json!(true)
-    );
+        "rlm_session_objects",
+        "rlm_open",
+        "rlm_eval",
+        "rlm_configure",
+        "rlm_close",
+    ] {
+        assert!(
+            !catalog.iter().any(|tool| tool.name == legacy_name),
+            "{legacy_name} must remain outside the new-turn model catalog"
+        );
+    }
 }
 
 #[test]

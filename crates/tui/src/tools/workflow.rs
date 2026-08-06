@@ -425,6 +425,10 @@ struct WorkflowTaskUsage {
     output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     total_tokens: Option<u64>,
+    /// Priced USD subtotal carried from the worker's immutable route audits,
+    /// in microdollars. Absence is unknown, never a zero-cost claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_microusd: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +459,8 @@ struct WorkflowRunUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     total_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_microusd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_calls: Option<u64>,
     /// Number of completed tasks that contributed telemetry.
     #[serde(default)]
@@ -467,6 +473,7 @@ impl WorkflowRunUsage {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
+            cost_microusd: usage.cost_microusd,
             tool_calls: usage.tool_calls.map(u64::from),
             tasks_reported: 1,
         }
@@ -476,14 +483,18 @@ impl WorkflowRunUsage {
         self.input_tokens = sum_optional_usage(self.input_tokens, usage.input_tokens);
         self.output_tokens = sum_optional_usage(self.output_tokens, usage.output_tokens);
         self.total_tokens = sum_optional_usage(self.total_tokens, usage.total_tokens);
+        self.cost_microusd = sum_optional_usage(self.cost_microusd, usage.cost_microusd);
         self.tool_calls = sum_optional_usage(self.tool_calls, usage.tool_calls.map(u64::from));
         self.tasks_reported = self.tasks_reported.saturating_add(1);
     }
 }
 
 fn sum_optional_usage(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    left.zip(right)
-        .map(|(left, right)| left.saturating_add(right))
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3364,8 +3375,14 @@ impl SubAgentWorkflowDriver {
         } else {
             false
         };
+        let event = WorkflowUiEvent::new(budget_event_kind(snapshot));
         if changed {
-            self.record_run_event(WorkflowUiEvent::new(budget_event_kind(snapshot)));
+            self.record_run_event(event);
+        } else {
+            // The VM polls the budget before it can admit its first child.
+            // Keep that live path warm even when no token value changed, but
+            // do not journal an unbounded stream of identical snapshots.
+            self.emit_ui_event(&event);
         }
     }
 
@@ -4114,8 +4131,7 @@ fn workflow_usage_from_task(usage: &WorkflowTaskUsage) -> WorkflowUsage {
     WorkflowUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
-        // The worker ledger currently carries no provider cost receipt.
-        cost_microusd: None,
+        cost_microusd: usage.cost_microusd,
     }
 }
 
@@ -4483,6 +4499,7 @@ fn task_usage_from_manager(
         input_tokens: reported.then_some(input_tokens).flatten(),
         output_tokens: reported.then_some(output_tokens).flatten(),
         total_tokens: reported.then_some(total_tokens).flatten(),
+        cost_microusd: usage.and_then(|usage| usage.cost_microusd),
         tool_calls: Some(snapshot.steps_taken),
         duration_ms: Some(snapshot.duration_ms),
         result_ref,
@@ -9439,6 +9456,7 @@ FINAL RECEIPT
             input_tokens: Some(total / 2),
             output_tokens: Some(total - total / 2),
             total_tokens: Some(total),
+            cost_microusd: Some(total),
             tool_calls: Some(calls),
             duration_ms: Some(7),
             result_ref: None,
@@ -9460,6 +9478,7 @@ FINAL RECEIPT
         ];
         let totals = run_usage_totals(&records).expect("totals");
         assert_eq!(totals.total_tokens, Some(160));
+        assert_eq!(totals.cost_microusd, Some(160));
         assert_eq!(totals.input_tokens, Some(80));
         assert_eq!(totals.output_tokens, Some(80));
         assert_eq!(totals.tool_calls, Some(3));
@@ -9489,6 +9508,7 @@ FINAL RECEIPT
             input_tokens: Some(0),
             output_tokens: Some(0),
             total_tokens: Some(0),
+            cost_microusd: Some(0),
             tool_calls: Some(0),
             duration_ms: Some(0),
             token_source: Some(WorkflowTokenSource::ProviderReported),
@@ -9507,6 +9527,7 @@ FINAL RECEIPT
         assert_eq!(zero_totals.input_tokens, Some(0));
         assert_eq!(zero_totals.output_tokens, Some(0));
         assert_eq!(zero_totals.total_tokens, Some(0));
+        assert_eq!(zero_totals.cost_microusd, Some(0));
         assert_eq!(zero_totals.tool_calls, Some(0));
 
         let unknown_ir = workflow_usage_from_task(&unknown);
@@ -9516,16 +9537,18 @@ FINAL RECEIPT
         let zero_ir = workflow_usage_from_task(&reported_zero);
         assert_eq!(zero_ir.input_tokens, Some(0));
         assert_eq!(zero_ir.output_tokens, Some(0));
-        assert_eq!(zero_ir.cost_microusd, None);
+        assert_eq!(zero_ir.cost_microusd, Some(0));
 
         let mixed = run_usage_totals(&[record("zero", reported_zero), record("unknown", unknown)])
             .expect("mixed receipts");
         assert_eq!(
-            mixed.total_tokens, None,
-            "one unknown contributor taints total"
+            mixed.total_tokens,
+            Some(0),
+            "a missing contributor keeps the observed subtotal"
         );
-        assert_eq!(mixed.input_tokens, None);
-        assert_eq!(mixed.output_tokens, None);
+        assert_eq!(mixed.input_tokens, Some(0));
+        assert_eq!(mixed.output_tokens, Some(0));
+        assert_eq!(mixed.cost_microusd, Some(0));
         assert_eq!(mixed.tool_calls, Some(1));
     }
 
@@ -9540,6 +9563,7 @@ FINAL RECEIPT
                     input_tokens: Some(128),
                     output_tokens: Some(32),
                     total_tokens: Some(160),
+                    cost_microusd: Some(42),
                     tool_calls: Some(2),
                     duration_ms: Some(42),
                     result_ref: Some("agent:child-1".to_string()),
@@ -9555,6 +9579,7 @@ FINAL RECEIPT
                 usage: Some(usage), ..
             } => {
                 assert_eq!(usage.total_tokens, Some(160));
+                assert_eq!(usage.cost_microusd, Some(42));
                 assert_eq!(usage.tool_calls, Some(2));
                 assert_eq!(usage.duration_ms, Some(42));
             }
@@ -9943,6 +9968,66 @@ FINAL RECEIPT
         assert_eq!(payload["result"]["spent"], 2);
         assert_eq!(payload["result"]["total"], 1000);
         assert_eq!(payload["result"]["remaining"], 998);
+    }
+
+    #[tokio::test]
+    async fn identical_budget_snapshots_emit_a_live_heartbeat_without_journal_duplication() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx,
+            true,
+            Some(event_tx),
+            manager.clone(),
+        );
+        let state = WorkflowWorkspaceState::open(tmp.path());
+        let run_id = "workflow_budget_heartbeat".to_string();
+        state.runs.lock().expect("runs").insert(
+            run_id.clone(),
+            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+        );
+        let driver = SubAgentWorkflowDriver::new(
+            run_id.clone(),
+            manager,
+            runtime,
+            state.clone(),
+            Some(1_000),
+            WorkflowFleetBinding::None,
+            Vec::new(),
+        );
+        let snapshot = BudgetSnapshot {
+            total: Some(1_000),
+            spent: 0,
+        };
+
+        driver.record_budget_snapshot(snapshot);
+        driver.record_budget_snapshot(snapshot);
+
+        let mut streamed = 0;
+        while let Ok(Event::WorkflowUi { event, .. }) = event_rx.try_recv() {
+            if event["type"] == "budget_updated" {
+                streamed += 1;
+            }
+        }
+        assert_eq!(
+            streamed, 2,
+            "unchanged budget still refreshes the live panel"
+        );
+        let recorded = state
+            .runs
+            .lock()
+            .expect("runs")
+            .get(&run_id)
+            .expect("run")
+            .events
+            .iter()
+            .filter(|event| event.event_type() == "budget_updated")
+            .count();
+        assert_eq!(recorded, 1, "heartbeat must not grow the durable journal");
     }
 
     fn stub_client() -> DeepSeekClient {

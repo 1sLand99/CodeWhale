@@ -29,6 +29,7 @@ pub mod prompt;
 pub mod session;
 pub mod turn;
 
+pub(crate) use bridge::ModelClientRlmAdapter;
 pub use bridge::RlmBridge;
 pub use prompt::rlm_system_prompt;
 pub use turn::{RlmTermination, RlmTurnResult, run_rlm_turn, run_rlm_turn_with_root};

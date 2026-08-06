@@ -42,6 +42,53 @@ pub fn visible_slash_menu_entries(app: &App, limit: usize) -> Vec<SlashMenuEntry
     } else {
         Vec::new()
     };
+    // Effort completions are per-model: only show levels the current model supports
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("/effort ") || lower.starts_with("/thinking ") {
+        let arg_prefix = if lower.starts_with("/effort ") {
+            trimmed[8..].trim_start()
+        } else {
+            trimmed[10..].trim_start()
+        };
+        let provider = app.api_provider;
+        let base_url = app.active_route_base_url.clone();
+        let wire_model = app.model.clone();
+        let available = crate::tui::model_picker::picker_efforts_for_route(
+            provider,
+            &base_url,
+            &wire_model,
+            app.auto_model,
+        );
+        let mut effort_entries: Vec<SlashMenuEntry> = Vec::new();
+        for eff in available {
+            let label = eff.display_label_for_provider(provider).to_string();
+            if label
+                .to_ascii_lowercase()
+                .starts_with(&arg_prefix.to_ascii_lowercase())
+                || arg_prefix.is_empty()
+            {
+                effort_entries.push(SlashMenuEntry {
+                    name: format!("/effort {}", label),
+                    description: match eff {
+                        crate::tui::app::ReasoningEffort::Auto => "choose per turn".into(),
+                        crate::tui::app::ReasoningEffort::Off => "no extra reasoning".into(),
+                        crate::tui::app::ReasoningEffort::Minimal => "minimal reasoning".into(),
+                        crate::tui::app::ReasoningEffort::Low => "lighter reasoning".into(),
+                        crate::tui::app::ReasoningEffort::Medium => "balanced reasoning".into(),
+                        crate::tui::app::ReasoningEffort::High => "deeper reasoning".into(),
+                        crate::tui::app::ReasoningEffort::XHigh => "extra-high reasoning".into(),
+                        crate::tui::app::ReasoningEffort::Ultra => "ultra reasoning".into(),
+                        crate::tui::app::ReasoningEffort::Max => "maximum reasoning".into(),
+                    },
+                    is_skill: false,
+                    alias_hint: None,
+                });
+            }
+        }
+        if !effort_entries.is_empty() {
+            return effort_entries.into_iter().take(limit).collect();
+        }
+    }
     slash_completion_hints_with_model_candidates(
         &app.input,
         limit,

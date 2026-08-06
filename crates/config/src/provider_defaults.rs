@@ -13,7 +13,7 @@ pub(crate) const DEFAULT_OPENAI_MODEL: &str = "deepseek-v4-pro";
 pub(crate) const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/beta";
 pub(crate) const DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 pub(crate) const DEFAULT_NVIDIA_NIM_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
-pub(crate) const DEFAULT_OPENAI_CODEX_MODEL: &str = "gpt-5.5";
+pub(crate) const DEFAULT_OPENAI_CODEX_MODEL: &str = "gpt-5.6";
 pub(crate) const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 pub(crate) const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 pub(crate) const DEFAULT_OPENMODEL_MODEL: &str = "deepseek-v4-flash";
@@ -159,10 +159,10 @@ pub(crate) const OPENCODE_GO_MIMO_V2_5_PRO_MODEL: &str = "mimo-v2.5-pro";
 // OpenCode Zen is a model-aware gateway. The default is a documented
 // Responses model, but every executable route must still obtain its protocol
 // from a provider-scoped catalog offering.
-pub(crate) const DEFAULT_OPENCODE_ZEN_MODEL: &str = "gpt-5.5";
+pub(crate) const DEFAULT_OPENCODE_ZEN_MODEL: &str = "gpt-5.6";
 pub(crate) const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
 // Meta Model API / Muse Spark defaults
-pub(crate) const DEFAULT_META_MODEL: &str = "muse-spark-1.1";
+pub(crate) const DEFAULT_META_MODEL: &str = "muse-spark-1.2";
 pub(crate) const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
 // xAI / Grok API-key route defaults
 pub(crate) const DEFAULT_XAI_MODEL: &str = "grok-4.5";

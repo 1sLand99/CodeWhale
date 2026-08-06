@@ -2142,10 +2142,20 @@ mod tests {
 
         adapter.start_worker(request).expect("start worker");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::time::Instant::now() < deadline && !receipt.exists() {
+        let mut dumped = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(&receipt)
+                && contents.contains("CODEWHALE_TELEMETRY=")
+                && contents.contains("DEEPSEEK_TELEMETRY=")
+            {
+                dumped = Some(contents);
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let dumped = std::fs::read_to_string(&receipt).expect("worker must dump its environment");
+        let dumped = dumped.unwrap_or_else(|| {
+            std::fs::read_to_string(&receipt).expect("worker must dump its environment")
+        });
 
         let value = |key: &str| {
             dumped

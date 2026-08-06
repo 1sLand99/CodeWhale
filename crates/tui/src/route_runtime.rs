@@ -166,6 +166,20 @@ fn format_provider_route_preflight_error(
 
 fn classify_provider_route_preflight_next_step(identity_key: &str, reason: &str) -> Option<String> {
     let lower = reason.to_ascii_lowercase();
+    if lower
+        .contains("codex oauth credentials are only available on the official openai codex route")
+    {
+        return Some(format!(
+            "Run /provider setup {identity_key} and remove its custom base URL; Codex OAuth only works on the official route."
+        ));
+    }
+    if lower.contains("openai codex oauth credentials are unavailable")
+        || lower.contains("codex access token")
+    {
+        return Some(format!(
+            "Run `codex login`, then retry {identity_key}; Codewhale reads that official CLI login without modifying it."
+        ));
+    }
     if lower.contains("api key not found")
         || lower.contains("access token")
         || (lower.contains("credential")
@@ -650,6 +664,25 @@ mod tests {
         assert!(formatted.contains("Failed to configure provider route lm-studio / local-model."));
         assert!(formatted.contains(
             "Next step: Run /auth or /provider setup lm-studio to configure credentials."
+        ));
+    }
+
+    #[test]
+    fn provider_route_preflight_codex_oauth_errors_surface_the_right_next_step() {
+        let missing = anyhow::anyhow!("OpenAI Codex OAuth credentials are unavailable.");
+        let missing_formatted =
+            format_provider_route_preflight_error("openai-codex", "gpt-5.6-sol", &missing);
+        assert!(missing_formatted.contains(
+            "Next step: Run `codex login`, then retry openai-codex; Codewhale reads that official CLI login without modifying it."
+        ));
+
+        let custom = anyhow::anyhow!(
+            "Codex OAuth credentials are only available on the official OpenAI Codex route"
+        );
+        let custom_formatted =
+            format_provider_route_preflight_error("openai-codex", "gpt-5.6-sol", &custom);
+        assert!(custom_formatted.contains(
+            "Next step: Run /provider setup openai-codex and remove its custom base URL; Codex OAuth only works on the official route."
         ));
     }
 

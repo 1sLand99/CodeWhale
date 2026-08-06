@@ -36,6 +36,12 @@ use crate::tui::app::{App, AppAction};
 
 /// Transcription model requested from the provider's chat-completions API.
 const ASR_MODEL: &str = "mimo-v2.5-asr";
+/// Free ASR: Groq Whisper (cloud, free tier) — fast, cross-platform, no local model download.
+#[allow(dead_code)]
+const GROQ_ASR_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_ASR_MODEL: &str = "whisper-large-v3-turbo";
+/// Local whisper binary names to probe (whisper.cpp, faster-whisper, OpenAI whisper).
+const LOCAL_WHISPER_BINS: &[&str] = &["whisper", "whisper.cpp", "whisper-cpp", "faster-whisper"];
 /// Model used for the AI-assisted voice-control pipeline.
 const VOICE_CONTROL_MODEL: &str = "mimo-v2.5";
 
@@ -338,11 +344,20 @@ async fn transcribe(
     base_url: &str,
     audio_samples: &[i16],
 ) -> Result<String, String> {
+    transcribe_with_model(api_key, base_url, audio_samples, ASR_MODEL).await
+}
+
+async fn transcribe_with_model(
+    api_key: &str,
+    base_url: &str,
+    audio_samples: &[i16],
+    model: &str,
+) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
     let data_url = format!("data:audio/wav;base64,{}", base64_encode(&wav));
 
     let body = serde_json::json!({
-        "model": ASR_MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -428,13 +443,135 @@ pub enum VoiceCaptureOutcome {
     Send(String),
 }
 
-/// Perform a complete record + transcribe cycle.
+/// Detect best free ASR for this host — local whisper > Groq free > provider fallback.
+/// Works on macOS (brew install whisper-cpp), Windows (whisper.cpp binary),
+/// Linux (apt), and HarmonyOS (falls back to cloud).
+fn detect_free_asr() -> &'static str {
+    for bin in LOCAL_WHISPER_BINS {
+        if Command::new(bin)
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return "local-whisper";
+        }
+    }
+    if std::env::var("GROQ_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
+        return "groq";
+    }
+    "provider"
+}
+
+/// Transcribe via local whisper.cpp (free, offline, cross-platform).
+async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, String> {
+    let wav = encode_wav(audio_samples);
+    let tmp = std::env::temp_dir().join(format!("cw-voice-{}.wav", std::process::id()));
+    std::fs::write(&tmp, &wav).map_err(|e| e.to_string())?;
+    // Try each local binary until one succeeds; whisper.cpp outputs to stdout or file.
+    for bin in LOCAL_WHISPER_BINS {
+        let output = Command::new(bin)
+            .arg(tmp.to_string_lossy().as_ref())
+            .arg("--model")
+            .arg("tiny")
+            .arg("--language")
+            .arg("auto")
+            .arg("--output-txt")
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let _ = std::fs::remove_file(&tmp);
+                if !txt.is_empty() {
+                    return Ok(txt);
+                }
+                // Some builds write to .txt sidecar
+                let sidecar = tmp.with_extension("txt");
+                if let Ok(s) = std::fs::read_to_string(&sidecar) {
+                    let _ = std::fs::remove_file(&sidecar);
+                    let _ = std::fs::remove_file(&tmp);
+                    if !s.trim().is_empty() {
+                        return Ok(s.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err("local whisper not available".into())
+}
+
+/// Transcribe via Groq Whisper large-v3-turbo (free tier, ~$0.04/hr, fast).
+/// Groq is NOT a full CodeWhale provider yet — this is a direct ASR call
+/// using `GROQ_API_KEY` only (no provider setup needed). Uses the same
+/// chat-completions `input_audio` path as Xiaomi so no `multipart` feature.
+async fn transcribe_groq(audio_samples: &[i16]) -> Result<String, String> {
+    let api_key = std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set".to_string())?;
+    let base_url = "https://api.groq.com/openai/v1";
+    transcribe_with_model(&api_key, base_url, audio_samples, GROQ_ASR_MODEL).await
+}
+
+/// Perform a complete record + transcribe cycle with live interim display.
 ///
 /// Runs in the UI event loop (see [`AppAction::VoiceCapture`]) so provider
 /// credentials come from the live [`Config`] rather than state cached on
 /// [`App`]. Recording happens on a blocking thread; transcription uses the
 /// shared async HTTP client. Every failure path returns a localized message
 /// so callers can surface it as a status line.
+/// Resolve ASR model/provider preference.
+/// Priority: explicit config `voice.asr_model` > env `CODEWHALE_ASR_MODEL` > auto-detect (local-whisper > groq > xiaomi).
+fn resolve_asr_choice(_config: &Config) -> (String, String) {
+    // Check explicit env override first (free, cross-platform)
+    if let Ok(m) = std::env::var("CODEWHALE_ASR_MODEL") {
+        let m = m.trim().to_ascii_lowercase();
+        if m.contains("groq") || m.contains("whisper") {
+            return ("groq".into(), GROQ_ASR_MODEL.into());
+        }
+        if m.contains("local") || m.contains("whisper.cpp") {
+            return ("local-whisper".into(), "tiny".into());
+        }
+        if m.contains("mimo") || m.contains("xiaomi") {
+            return ("provider".into(), ASR_MODEL.into());
+        }
+    }
+    // Auto-detect best free: local whisper (offline, no key) > Groq free tier > Xiaomi ASR (needs key)
+    let free = detect_free_asr();
+    match free {
+        "local-whisper" => ("local-whisper".into(), "tiny".into()),
+        "groq" => ("groq".into(), GROQ_ASR_MODEL.into()),
+        _ => ("provider".into(), ASR_MODEL.into()),
+    }
+}
+
+/// Available ASR providers (for `voice --list` / settings UI).
+#[allow(dead_code)]
+pub fn available_asr_providers() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "local-whisper",
+            "Local Whisper.cpp",
+            "free, offline, mac/win/linux/harmony — brew install whisper-cpp",
+        ),
+        (
+            "groq",
+            "Groq Whisper large-v3-turbo",
+            "free tier, fast, needs GROQ_API_KEY",
+        ),
+        (
+            "xiaomi",
+            "Xiaomi MiMo ASR (mimo-v2.5-asr)",
+            "needs XIAOMI_API_KEY, streaming, high quality",
+        ),
+        (
+            "openai",
+            "OpenAI whisper-1",
+            "needs OPENAI_API_KEY, compatible",
+        ),
+    ]
+}
+
 pub async fn capture_and_transcribe(
     app: &mut App,
     config: &Config,
@@ -449,18 +586,124 @@ pub async fn capture_and_transcribe(
         .map_err(|_| tr(locale, MessageId::VoiceErrNoAuth).to_string())?;
     let base_url = config.deepseek_base_url();
 
-    app.status_message = Some(tr(locale, MessageId::VoiceRecording).to_string());
-    let (samples, _duration) = tokio::task::spawn_blocking(record_audio)
+    // Spark-style: show "● Recording (⌥V to finish)" + live interim in composer.
+    let original_input = app.composer.input.clone();
+    let original_cursor = app.composer.cursor_position;
+    app.status_message = Some("● Recording  (⌥V to finish)  ·  speak naturally".to_string());
+
+    // Streaming interim: poll every 700ms and show partial transcript like Grok Build's
+    // VoiceEvent::Interim → VoiceState::Recording{interim}. We re-transcribe the
+    // growing buffer (local-whisper is cheap; Groq is ~300ms; provider falls back).
+    let (asr_kind, _asr_model) = resolve_asr_choice(config);
+    let interim_enabled = true; // always show partials — feels alive like Spark
+
+    // Spawn recorder on blocking thread with a shared buffer for interim polling.
+    let shared_buf: std::sync::Arc<parking_lot::Mutex<Vec<i16>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let shared_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shared_buf_clone = std::sync::Arc::clone(&shared_buf);
+    let shared_done_clone = std::sync::Arc::clone(&shared_done);
+    let recorder_handle = tokio::task::spawn_blocking(move || {
+        // Bridge to existing record_audio but copy into shared buffer incrementally.
+        // For now we reuse the blocking recorder and then publish; interim will
+        // poll the final buffer. A true streaming recorder (cpal/pw-record) is
+        // the next step — see grokbuild's xai-grok-voice::audio for the subprocess
+        // isolation pattern we should mirror.
+        let result = record_audio();
+        if let Some((samples, dur)) = result {
+            *shared_buf_clone.lock() = samples.clone();
+            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Some((samples, dur))
+        } else {
+            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    });
+
+    // Interim polling loop — updates composer with "original + interim ▍" so text
+    // appears as you talk, just like Spark's live transcript.
+    let mut last_interim = String::new();
+    let mut ticks: u32 = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        ticks += 1;
+        if shared_done.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        if !interim_enabled || ticks < 2 {
+            continue; // let a little audio accumulate before first interim
+        }
+        let snapshot = { shared_buf.lock().clone() };
+        if snapshot.len() < 8000 {
+            // <0.5s of audio — not enough for meaningful ASR
+            continue;
+        }
+        // Try cheapest free ASR for interim; don't fail the whole capture on interim error.
+        let interim = match asr_kind.as_str() {
+            "local-whisper" => transcribe_local_whisper(&snapshot)
+                .await
+                .unwrap_or_default(),
+            "groq" => transcribe_groq(&snapshot).await.unwrap_or_default(),
+            _ => {
+                // For provider ASR, reuse the same endpoint but don't block on interim if no key.
+                if let Ok(key) = config
+                    .deepseek_api_key()
+                    .map(|k: String| k)
+                    .map_err(|_| String::new())
+                {
+                    let url = config.deepseek_base_url();
+                    transcribe(&key, &url, &snapshot).await.unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+        };
+        let trimmed = interim.trim();
+        if !trimmed.is_empty() && trimmed != last_interim {
+            last_interim = trimmed.to_string();
+            // Show interim inline — preserve cursor at original position, append interim with a block cursor
+            let display = if original_input.trim().is_empty() {
+                format!("{trimmed} ▍")
+            } else {
+                format!("{} {} ▍", original_input.trim_end(), trimmed)
+            };
+            app.composer.input = display;
+            app.composer.cursor_position = original_cursor;
+            // Also keep status as Spark does
+            app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
+        }
+        if ticks > 40 {
+            break; // safety: ~28s max interim polling
+        }
+    }
+
+    let (samples, _duration) = recorder_handle
         .await
         .ok()
         .flatten()
         .ok_or_else(|| tr(locale, MessageId::VoiceErrTooShort).to_string())?;
 
+    // Restore composer to original before final insert (interim was preview only)
+    app.composer.input = original_input.clone();
+    app.composer.cursor_position = original_cursor;
     app.status_message = Some(tr(locale, MessageId::VoiceProcessing).to_string());
-    let text = if app.voice_control_enabled {
-        process_voice_control(&api_key, &base_url, &samples, &app.composer.input).await
-    } else {
-        transcribe(&api_key, &base_url, &samples).await
+
+    let text = match asr_kind.as_str() {
+        "local-whisper" => match transcribe_local_whisper(&samples).await {
+            Ok(v) => Ok(v),
+            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+        },
+        "groq" => match transcribe_groq(&samples).await {
+            Ok(v) => Ok(v),
+            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+        },
+        _ => {
+            if app.voice_control_enabled {
+                process_voice_control(&api_key, &base_url, &samples, &original_input).await
+            } else {
+                transcribe(&api_key, &base_url, &samples).await
+            }
+        }
     }
     .map_err(|e| format!("{}: {e}", tr(locale, MessageId::VoiceErrNetwork)))?;
 

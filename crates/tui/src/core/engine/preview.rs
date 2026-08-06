@@ -183,12 +183,9 @@ impl Engine {
     ) -> RequestManifest {
         let session = self.preview_session_facts(&inputs);
 
-        // An automatic goal continuation has a terminal gate before route
-        // dispatch. Mirror it before doing any request construction: an
-        // exhausted active goal has no eligible next outbound request. Usage
-        // is deliberately retained when a goal is resumed or its budget is
-        // changed, so lowering a budget below already-consumed usage also
-        // closes this gate.
+        // Mirror terminal continuation gates before request construction.
+        // Token budgets are telemetry-only in unbounded goal mode, so an
+        // active goal remains previewable after crossing or lowering a budget.
         let goal_budget_exhausted = match self.config.goal_state.lock() {
             Ok(state) => {
                 let snapshot = state.snapshot();
@@ -806,13 +803,6 @@ fn standard_and_full_collapse(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn assert_unavailable_reason<T>(availability: &Availability<T>, expected: UnavailableReason) {
-        let Availability::Unavailable(unavailable) = availability else {
-            panic!("expected typed unavailable state");
-        };
-        assert_eq!(unavailable.reason, expected);
-    }
 
     fn tool(name: &str, deferred: bool) -> Tool {
         Tool {
@@ -1627,7 +1617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exhausted_active_goal_has_no_exact_outbound_request() {
+    async fn exhausted_active_goal_remains_previewable() {
         let config = deepseek_config();
         let identity = deepseek_identity();
         let (mut engine, _handle, _tmp) = preview_engine(&config);
@@ -1650,9 +1640,9 @@ mod tests {
         let manifest = engine
             .build_request_manifest(inputs(false, Some(planned), prompt))
             .await;
-        assert_unavailable_reason(&manifest.route, UnavailableReason::GoalTokenBudgetExhausted);
-        assert_unavailable_reason(&manifest.tools, UnavailableReason::GoalTokenBudgetExhausted);
-        assert_unavailable_reason(&manifest.body, UnavailableReason::GoalTokenBudgetExhausted);
+        assert!(manifest.route.exact().is_some());
+        assert!(manifest.tools.exact().is_some());
+        assert!(manifest.body.exact().is_some());
     }
 
     #[tokio::test]
@@ -1690,7 +1680,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lowering_active_goal_budget_below_used_tokens_closes_preview_gate() {
+    async fn lowering_active_goal_budget_below_used_tokens_keeps_preview_open() {
         let config = deepseek_config();
         let identity = deepseek_identity();
         let (mut engine, _handle, _tmp) = preview_engine(&config);
@@ -1719,13 +1709,9 @@ mod tests {
         let manifest = engine
             .build_request_manifest(inputs(false, Some(planned), prompt))
             .await;
-        let Availability::Unavailable(unavailable) = manifest.body else {
-            panic!("lowering the budget below usage must close the outbound gate");
-        };
-        assert_eq!(
-            unavailable.reason,
-            UnavailableReason::GoalTokenBudgetExhausted
-        );
+        assert!(manifest.route.exact().is_some());
+        assert!(manifest.tools.exact().is_some());
+        assert!(manifest.body.exact().is_some());
     }
 
     #[tokio::test]

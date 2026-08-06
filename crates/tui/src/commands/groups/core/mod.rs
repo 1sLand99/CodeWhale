@@ -13,6 +13,7 @@ mod constitution;
 // migration scaffolding; see docs/architecture/command-dispatch.md.
 #[allow(clippy::module_inception)]
 mod core;
+mod effort;
 mod exit;
 mod feedback;
 mod fleet;
@@ -172,6 +173,7 @@ impl CommandGroup for CoreCommands {
                 voice::VoiceCmd::info(),
                 voice::VoiceCmd::execute,
             )),
+            Box::new(FunctionCommand::new(&effort::EFFORT_INFO, effort::effort,)),
             Box::new(FunctionCommand::new(
                 voice::VoiceSendCmd::info(),
                 voice::VoiceSendCmd::execute,

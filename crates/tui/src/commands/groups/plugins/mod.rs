@@ -17,6 +17,7 @@
 //! * [`legacy`] — the separate `[tools].plugin_dir` executable inventory,
 //!   which shares no trust state with declarative bundles.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::commands::CommandResult;
@@ -52,7 +53,7 @@ impl CommandGroup for PluginsCommands {
 pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
     name: "plugin",
     aliases: &["plugins"],
-    usage: "/plugin [list|show|validate|install|update|uninstall|trust|enable|disable|revoke|reload|tools]",
+    usage: "/plugin [list|show|suggest|validate|install|update|uninstall|trust|enable|disable|revoke|reload|tools]",
     description_id: MessageId::CmdPluginDescription,
 };
 
@@ -77,6 +78,8 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
         [] | ["list"] => list_bundles_and_legacy_tools(app),
         ["help"] => CommandResult::message(tr(app.ui_locale, MessageId::CmdPluginBundleUsage)),
         ["show", selector] => show_bundle(app, selector),
+        ["suggest"] | ["recommend"] => CommandResult::error("Usage: /plugin suggest <task>"),
+        ["suggest", task @ ..] | ["recommend", task @ ..] => suggest_bundles(app, &task.join(" ")),
         ["validate"] => validate_bundles(app, None),
         ["validate", selector] => validate_bundles(app, Some(selector)),
         ["install"] => CommandResult::error(tr(app.ui_locale, MessageId::CmdPluginBundleUsage)),
@@ -115,6 +118,100 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
         }
         _ => CommandResult::error(tr(app.ui_locale, MessageId::CmdPluginBundleUsage)),
     }
+}
+
+/// Rank already installed bundle metadata for a task without changing trust,
+/// enablement, disk state, or network state. A full remote plugin marketplace
+/// needs separately curated publisher/provenance policy; the existing plugin
+/// registry is intentionally local-only for this release.
+fn suggest_bundles(app: &App, task: &str) -> CommandResult {
+    let task = task.trim();
+    if task.chars().count() < 3 {
+        return CommandResult::error("Usage: /plugin suggest <task of at least 3 characters>");
+    }
+
+    let mut skills = BTreeMap::new();
+    for plugin in app.plugin_registry.list() {
+        let mut description_parts = plugin
+            .manifest
+            .plugin
+            .description
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut keywords = Vec::new();
+        for skill in &plugin.skill_snapshots {
+            description_parts.push(skill.name.clone());
+            description_parts.push(skill.description.clone());
+            keywords.push(skill.name.clone());
+            keywords.extend(skill.aliases.iter().cloned());
+        }
+        skills.insert(
+            plugin.name().to_string(),
+            crate::skills::RegistryEntry {
+                source: plugin.id.as_str().to_string(),
+                description: (!description_parts.is_empty()).then(|| description_parts.join(" ")),
+                keywords,
+                domains: plugin.inventory.network_hosts.clone(),
+            },
+        );
+    }
+
+    let index = crate::skills::RegistryDocument { skills };
+    let recommendations = crate::skills::recommend::recommend_remote_skills(task, &index, 3);
+    if recommendations.is_empty() {
+        return CommandResult::message(format!(
+            "No installed plugin bundles matched `{}`.\n\nInstall a reviewed bundle with /plugin install <source>. Nothing was installed, trusted, or enabled.",
+            escape_review_text(task)
+        ));
+    }
+
+    let mut output = format!(
+        "Suggested installed plugins for `{}`:\n",
+        escape_review_text(task)
+    );
+    output.push_str("─────────────────────────────\n");
+    for recommendation in recommendations {
+        let Some(plugin) = app.plugin_registry.get(&recommendation.entry.source) else {
+            continue;
+        };
+        let description = plugin
+            .manifest
+            .plugin
+            .description
+            .as_deref()
+            .filter(|description| !description.trim().is_empty())
+            .unwrap_or("No description provided.");
+        let why = recommendation
+            .matched_terms
+            .iter()
+            .map(|term| escape_review_text(term))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let next_step = if plugin.active() {
+            format!("Already active: /plugin show {}", plugin.name())
+        } else if !plugin.trusted() {
+            format!("Review before enabling: /plugin trust {}", plugin.name())
+        } else if !plugin.enabled {
+            format!(
+                "Enable if that review still applies: /plugin enable {}",
+                plugin.name()
+            )
+        } else {
+            format!("Inspect its inactive state: /plugin show {}", plugin.name())
+        };
+        let _ = writeln!(
+            output,
+            "  {} — {} · {}",
+            escape_review_text(plugin.name()),
+            plugin.state_label(),
+            escape_review_text(description)
+        );
+        let _ = writeln!(output, "    Why: {why}");
+        let _ = writeln!(output, "    {next_step}");
+    }
+    output.push_str("\nNothing was installed, trusted, or enabled.");
+    CommandResult::message(output)
 }
 
 fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {

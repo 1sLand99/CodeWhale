@@ -1929,8 +1929,8 @@ If you are upgrading from older releases:
   `skills_dir` override. The Skills Manager can still toggle a local compatible
   audit scan independently of this runtime knob — see [SKILLS.md](SKILLS.md).
 - `[skills].registry_url` / `[skills].max_install_size_bytes` (optional): used by
-  `/skills --remote`, `/skills sync`, and `/skill install|update`. The default
-  manager open path does not contact the registry.
+  `/skills --remote`, `/skills suggest <task>`, `/skills sync`, and `/skill
+  install|update`. The default manager open path does not contact the registry.
 - `[verifier].enabled` (bool, default `false`): enables automatic
   claim-of-done verifier preview once that runtime trigger is active. The
   manual `run_verifiers` tool is still available when this is false.

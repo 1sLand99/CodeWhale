@@ -203,9 +203,12 @@ fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
 
     for expected in [
         ReasoningEffort::Off,
+        ReasoningEffort::Minimal,
         ReasoningEffort::Low,
         ReasoningEffort::Medium,
         ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Ultra,
         ReasoningEffort::Max,
         ReasoningEffort::Auto,
     ] {
@@ -826,6 +829,14 @@ fn coordination_handover_within_this_process_does_not_toast() {
         "same-process handover is transient and must not fire the sticky warning: {:?}",
         handover_app.sticky_status
     );
+    assert!(
+        !handover_app
+            .status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("delegated coordination")),
+        "same-process handover is transient and must not push a delegated coordination toast: {:?}",
+        handover_app.status_toasts
+    );
 
     let mut foreign_app = create_test_app();
     apply_coordination_detail_projection(
@@ -839,9 +850,11 @@ fn coordination_handover_within_this_process_does_not_toast() {
         },
     );
     let toast = foreign_app
-        .sticky_status
-        .as_ref()
-        .expect("a genuinely foreign owner still warns");
+        .status_toasts
+        .back()
+        .expect("a genuinely foreign owner still warns via transient toast");
+    assert_eq!(toast.level, crate::tui::app::StatusToastLevel::Info);
+    assert_eq!(toast.ttl_ms, Some(5_000));
     // The strip is one row and truncates from the right, so the *opening* of
     // the message has to carry the fact. The old copy opened with the
     // diagnosis and buried the cause behind a pid, a path and an errno, which
@@ -9186,11 +9199,11 @@ fn hotbar_bound_reasoning_action_updates_auto_model_preference() {
         dispatch_hotbar_slot(&mut app, &config, 1).expect("reasoning slot dispatch"),
         Some(HotbarDispatch::AppAction(AppAction::UpdateCompaction(_)))
     ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Minimal);
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("Reasoning effort: low"))
+            .is_some_and(|message| message.contains("Reasoning effort: minimal"))
     );
     assert!(app.needs_redraw);
 }
@@ -15386,7 +15399,7 @@ fn app_new_auto_model_ignores_reasoning_inferred_from_legacy_alias() {
 }
 
 #[tokio::test]
-async fn model_picker_persists_model_and_reasoning_effort() {
+async fn model_picker_apply_is_session_local_until_startup_default_is_requested() {
     let _guard = SettingsHomeGuard::new();
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
@@ -15407,12 +15420,20 @@ async fn model_picker_persists_model_and_reasoning_effort() {
         ReasoningEffort::High,
         "auto".to_string(),
         ReasoningEffort::Auto,
+        false,
     )
     .await;
 
     let settings = crate::settings::Settings::load().expect("load settings");
     assert_eq!(settings.default_model.as_deref(), None);
-    assert_eq!(settings.provider_models, None);
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("deepseek"))
+            .map(String::as_str),
+        None
+    );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
@@ -15422,7 +15443,8 @@ async fn model_picker_persists_model_and_reasoning_effort() {
         .expect("setup state");
     assert_eq!(
         state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Verified
+        codewhale_config::StepStatus::Verified,
+        "the local setup receipt records a live selection, not a startup-default write"
     );
     let provider_model_result = state
         .steps
@@ -15434,6 +15456,94 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(provider_model_result.contains("auth=key saved · not checked"));
     assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
+}
+
+/// An explicit startup default must override a provider/model seed in
+/// config.toml. This is the exact regression reported with xAI: the picker
+/// could choose DeepSeek Flash for a live session, but the next launch still
+/// reopened the xAI-configured `grok-4.5` route.
+#[tokio::test]
+async fn model_picker_startup_default_overrides_configured_xai_route_after_restart() {
+    let _guard = SettingsHomeGuard::new();
+    let xai_config = Config {
+        provider: Some("xai".to_string()),
+        providers: Some(ProvidersConfig {
+            xai: ProviderConfig {
+                api_key: Some("xai-test-key".to_string()),
+                model: Some("grok-4.5".to_string()),
+                ..ProviderConfig::default()
+            },
+            deepseek: ProviderConfig {
+                api_key: Some("deepseek-test-key".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let mut config = xai_config.clone();
+    let initial_options = TuiOptions {
+        model: config.default_model(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+    let mut app = App::new(initial_options, &config);
+    assert_eq!(app.api_provider, ApiProvider::Xai);
+    assert_eq!(app.model, "grok-4.5");
+    let previous_effort = app.reasoning_effort;
+    let mut engine = mock_engine_handle();
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "deepseek-v4-flash".to_string(),
+        Some(ApiProvider::Deepseek),
+        None,
+        previous_effort,
+        "grok-4.5".to_string(),
+        previous_effort,
+        // Exactly what Shift+D in the picker sends. This is a cross-provider
+        // switch, which returns early from a different exit than a same-
+        // provider model change — the path where the save used to be dropped.
+        true,
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.model, "deepseek-v4-flash");
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("startup default")),
+        "the explicit save must report what it wrote: {:?}",
+        app.status_message
+    );
+    let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("deepseek"))
+            .map(String::as_str),
+        Some("deepseek-v4-flash")
+    );
+
+    let restart_options = TuiOptions {
+        model: xai_config.default_model(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+    let restarted = App::new(restart_options, &xai_config);
+    assert_eq!(restarted.api_provider, ApiProvider::Deepseek);
+    assert_eq!(
+        restarted.model, "deepseek-v4-flash",
+        "the explicit startup default must outrank config's xAI seed"
+    );
 }
 
 #[tokio::test]
@@ -15459,6 +15569,7 @@ async fn model_picker_auto_commits_visible_implicit_fixed_model_thinking() {
         ReasoningEffort::Max,
         "deepseek-v4-pro".to_string(),
         ReasoningEffort::Auto,
+        false,
     )
     .await;
 
@@ -15501,6 +15612,7 @@ async fn model_picker_auto_restores_raw_preference_after_fixed_normalization() {
         ReasoningEffort::Low,
         "deepseek-v4-pro".to_string(),
         ReasoningEffort::Low,
+        false,
     )
     .await;
 
@@ -15547,12 +15659,9 @@ async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
     );
 }
 
-/// Re-picking the already-live model is a real, completed provider/model
-/// choice: after a session restore the live route routinely differs from the
-/// persisted defaults, so this is exactly how a user makes the restored route
-/// durable. It must persist *and* record setup progress — gating the receipt on
-/// "the model changed" made the setup step depend on what the session happened
-/// to be restored to.
+/// Re-picking the already-live model remains session-local until the operator
+/// explicitly presses Shift+D. It still records a local setup receipt because
+/// the live route was successfully selected.
 #[tokio::test]
 async fn reselecting_live_model_and_thinking_is_session_local() {
     let _guard = SettingsHomeGuard::new();
@@ -15582,23 +15691,31 @@ async fn reselecting_live_model_and_thinking_is_session_local() {
         ReasoningEffort::High,
         "deepseek-v4-pro".to_string(),
         ReasoningEffort::High,
+        false,
     )
     .await;
 
-    // Reselecting the live pair is session-local too: nothing reached
-    // settings, and the save decision is pending for the route-save prompt.
+    // Reselecting the live pair changes no startup setting.
     let settings = crate::settings::Settings::load().expect("load settings");
     assert_eq!(settings.default_model.as_deref(), None);
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("deepseek"))
+            .map(String::as_str),
+        None
+    );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
     assert!(app.pending_route_save.is_some());
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("saved as startup default"))
+            .is_some_and(|message| message.contains("Model unchanged"))
     );
     let state = codewhale_config::SetupState::load()
         .expect("read setup state")
-        .expect("a persisted concrete model selection must record setup progress");
+        .expect("a concrete live model selection must record setup progress");
     assert!(
         state
             .steps
@@ -15683,6 +15800,7 @@ async fn model_picker_switches_between_exact_named_custom_routes() {
         ReasoningEffort::High,
         "model-a".to_string(),
         previous_effort,
+        false,
     )
     .await;
 
@@ -15738,6 +15856,7 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
         ReasoningEffort::Low,
         "model-a".to_string(),
         previous_effort,
+        false,
     )
     .await;
 
@@ -15783,7 +15902,7 @@ fn dismissing_named_custom_model_picker_restores_app_owned_config_route() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
+async fn model_picker_startup_default_reports_settings_write_failure() {
     let _lock = crate::test_support::lock_test_env();
     let tmp = TempDir::new().expect("settings tempdir");
     let bad_home = tmp.path().join("codewhale-home-file");
@@ -15816,21 +15935,26 @@ async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
         ReasoningEffort::High,
         "auto".to_string(),
         ReasoningEffort::Auto,
+        false,
     )
     .await;
 
-    // Nothing is persisted on a picker apply, so an unwritable home cannot
-    // fail the picker, and no receipt claims a persistence that never ran.
+    // Ordinary Enter remains a live session change even when settings are
+    // unavailable; it must not imply an invisible startup write.
     assert!(
         app.status_message
             .as_deref()
-            .is_none_or(|message| !message.contains("not persisted"))
+            .is_some_and(|message| message.contains("Model:"))
     );
     let pending = app.pending_route_save.as_ref().expect("pending save");
     assert_eq!(pending.model, "deepseek-v4-pro");
+    let saved = app.apply_route_save_choice(
+        crate::tui::views::route_save_prompt::RouteSaveChoice::SaveAsDefault,
+    );
+    assert!(saved.starts_with("Save failed:"), "{saved}");
     // The fixture's CODEWHALE_HOME is a file, so no setup-state root can
     // exist: the receipt is honestly absent, and the picker still applied
-    // the choice without claiming persistence.
+    // the live choice without claiming persistence.
     assert!(
         codewhale_config::SetupState::load()
             .expect("load setup state")
@@ -20692,4 +20816,69 @@ mod work_surface {
             "at the ambient width floor the mark can draw, so the budget must shrink"
         );
     }
+}
+
+/// A refused route change must not pin the *old* route as the startup default,
+/// and must say so. Reporting nothing is what made the original sticky-default
+/// report so hard to diagnose: the user saw an ordinary apply summary and had
+/// no way to tell that the default had not moved.
+#[tokio::test]
+async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
+    let _guard = SettingsHomeGuard::new();
+    let mut config = Config {
+        provider: Some("xai".to_string()),
+        providers: Some(ProvidersConfig {
+            xai: ProviderConfig {
+                api_key: Some("xai-test-key".to_string()),
+                model: Some("grok-4.5".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let options = TuiOptions {
+        model: config.default_model(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+    let mut app = App::new(options, &config);
+    let previous_effort = app.reasoning_effort;
+    let mut engine = mock_engine_handle();
+    // A busy session refuses model/thinking changes outright.
+    app.is_loading = true;
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "deepseek-v4-flash".to_string(),
+        Some(ApiProvider::Deepseek),
+        None,
+        previous_effort,
+        "grok-4.5".to_string(),
+        previous_effort,
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        app.api_provider,
+        ApiProvider::Xai,
+        "the refused switch must leave the live route alone"
+    );
+    let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(
+        settings.default_provider.as_deref(),
+        None,
+        "a refused change must never pin the route the user tried to leave"
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Startup default unchanged")),
+        "the operator must be told the default did not move: {:?}",
+        app.status_message
+    );
 }

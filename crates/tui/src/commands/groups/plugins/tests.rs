@@ -48,7 +48,7 @@ fn write_bundle(root: &Path) {
     fs::create_dir_all(bundle.join("skills/hello")).unwrap();
     fs::write(
         bundle.join("plugin.toml"),
-        "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n",
+        "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\ndescription = \"Import spreadsheet data safely\"\n[skills]\npath = \"skills\"\n",
     )
     .unwrap();
     fs::write(
@@ -122,6 +122,36 @@ fn list_show_validate_are_read_only_and_label_legacy_tools() {
     assert!(list.contains("Plugin bundles (1)"));
     assert!(list.contains("disabled"));
     assert!(list.contains("Legacy executable plugin tools (1)"));
+}
+
+#[test]
+fn suggest_ranks_installed_plugins_without_trusting_or_enabling_them() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let codewhale_home = root.path().join("home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    write_bundle(root.path());
+    let (mut app, _temp) = create_test_app(root.path());
+
+    for arg in ["suggest", "suggest go"] {
+        let result = plugins(&mut app, Some(arg));
+        assert!(
+            result.is_error,
+            "expected usage error for {arg}: {result:?}"
+        );
+    }
+
+    let result = plugins(&mut app, Some("suggest spreadsheet import"));
+    assert!(!result.is_error, "{result:?}");
+    let message = result.message.expect("suggestion message");
+    assert!(message.contains("Suggested installed plugins"), "{message}");
+    assert!(message.contains("demo — disabled"), "{message}");
+    assert!(message.contains("Why:"), "{message}");
+    assert!(message.contains("/plugin trust demo"), "{message}");
+    assert!(message.contains("Nothing was installed, trusted, or enabled."));
+    assert!(!codewhale_home.join("plugins/state.json").exists());
+    let plugin = app.plugin_registry.get("demo").expect("demo plugin");
+    assert!(!plugin.enabled && !plugin.trusted());
 }
 
 #[test]

@@ -32,6 +32,7 @@ pub mod git_tool;
 pub mod github;
 pub mod goal;
 pub mod handle;
+pub mod harness;
 pub mod image_ocr;
 pub mod js_execution;
 pub mod large_output_router;

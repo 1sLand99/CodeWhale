@@ -579,7 +579,11 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         }
         "openai/gpt-5.6-terra" | "gpt-5.6-terra" => Some(usd_only_pricing(0.25, 2.50, 15.00)),
         "openai/gpt-5.6-luna" | "gpt-5.6-luna" => Some(usd_only_pricing(0.10, 1.00, 6.00)),
-        "meta/muse-spark-1.1" | "muse-spark-1.1" => Some(usd_only_pricing(1.25, 1.25, 4.25)),
+        "meta/muse-spark-1.1" | "muse-spark-1.1" => Some(usd_only_pricing(0.15, 1.25, 4.25)),
+        "meta/muse-spark-1.2" | "muse-spark-1.2" => Some(usd_only_pricing(0.15, 1.25, 4.25)),
+        "meta/muse-spark-1.2-contributor" | "muse-spark-1.2-contributor" => {
+            Some(usd_only_pricing(0.002, 0.10, 0.20))
+        }
         // Anthropic first-party rates including the published cache-read
         // discounts and 5-minute cache-write rates (2026-07-09 audit,
         // https://platform.claude.com/docs/en/about-claude/pricing). These sit
@@ -1631,7 +1635,14 @@ fn provider_owned_hand_pricing_at(
             matches!(model_lower.as_str(), "minimax-m3" | "minimax-m2.7")
         }
         ApiProvider::Arcee => model_lower == "trinity-large-thinking",
-        ApiProvider::Meta => model_lower == "muse-spark-1.1",
+        // 1.2 and its contributor tier own hand-written rows the same way 1.1
+        // does (see `pricing_for_model_at`). 1.2 is now `DEFAULT_META_MODEL`,
+        // so omitting them here left the default Meta route without a
+        // provider-owned fallback row.
+        ApiProvider::Meta => matches!(
+            model_lower.as_str(),
+            "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
+        ),
         _ => false,
     };
     provider_owns_row
@@ -2877,7 +2888,9 @@ mod tests {
             ("gpt-5-codex", 0.125, 1.25, 10.00),
             ("gpt-5.3-codex", 0.175, 1.75, 14.00),
             ("qwen/qwen3.7-plus", 0.064, 0.32, 1.28),
-            ("muse-spark-1.1", 1.25, 1.25, 4.25),
+            ("muse-spark-1.1", 0.15, 1.25, 4.25),
+            ("muse-spark-1.2", 0.15, 1.25, 4.25),
+            ("muse-spark-1.2-contributor", 0.002, 0.10, 0.20),
         ] {
             let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
             assert_eq!(pricing.usd.input_cache_hit_per_million, hit);

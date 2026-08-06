@@ -2691,7 +2691,7 @@ mod tests {
     }
 
     /// Settled to-dos keep their rows across the recent-only TTL and new user
-    /// turns. Finished sub-agents collapse into the Subagents header count
+    /// turns. Finished sub-agents collapse into the Subagents Archived count
     /// (still reachable via the Agents panel) so fan-outs do not permanently
     /// eat the transcript.
     #[test]
@@ -2720,7 +2720,7 @@ mod tests {
         assert!(
             first
                 .iter()
-                .any(|row| { row.id.0 == "section:agents" && row.label.contains("1 completed") }),
+                .any(|row| { row.id.0 == "section:agents" && row.label.contains("Archived 1") }),
             "finished workers collapse into the header count: {first:?}"
         );
         assert!(
@@ -2739,7 +2739,7 @@ mod tests {
         assert!(
             later
                 .iter()
-                .any(|row| { row.id.0 == "section:agents" && row.label.contains("1 completed") }),
+                .any(|row| { row.id.0 == "section:agents" && row.label.contains("Archived 1") }),
             "header still accounts for settled workers after TTL: {later:?}"
         );
         assert!(
@@ -2776,7 +2776,7 @@ mod tests {
         assert!(text.contains("pending"), "{text}");
     }
 
-    /// Top strip collapses completed/cancelled workers into the header count
+    /// Top strip collapses completed/cancelled workers into an Archived count
     /// while keeping live (and failed) workers as rows. Agents panel still
     /// lists every worker — see the click test below.
     #[test]
@@ -2815,7 +2815,7 @@ mod tests {
             labels.iter().any(|label| {
                 label.contains("1 running")
                     && label.contains("1 needs input")
-                    && label.contains("1 completed")
+                    && label.contains("Archived 1")
             }),
             "header splits running / needs-input / settled: {labels:?}"
         );
@@ -2830,6 +2830,51 @@ mod tests {
         assert!(
             !ids.contains(&"worker:agent-done"),
             "completed worker must leave the strip: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn subagent_header_opens_the_full_agents_register() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-archived",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Completed,
+        ));
+
+        let top = render_text(&mut app, 100, 4);
+        assert!(top.contains("Archived 1"), "{top}");
+        let header_y = app
+            .work_surface
+            .hitboxes
+            .iter()
+            .find(|hit| hit.id.0 == "section:agents")
+            .expect("subagent header must be a real hit target")
+            .row_y;
+        let action = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: header_y,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .action
+        .expect("subagent header must dispatch its primary action");
+        assert_eq!(action, SidebarRowAction::ShowSubagentsPanel);
+        assert!(crate::tui::mouse_ui::apply_sidebar_row_action(&mut app, action).is_empty());
+        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+
+        let agents = render_text(&mut app, 100, 6);
+        assert!(
+            agents.contains("agent-archived") || agents.contains("builder"),
+            "the full Agents register keeps the archived worker reachable: {agents}"
         );
     }
 

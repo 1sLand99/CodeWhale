@@ -1460,7 +1460,7 @@ fn settings_default_provider_auth_check_uses_provider_scoped_key() {
 }
 
 #[test]
-fn explicit_config_provider_wins_over_saved_default_provider() {
+fn saved_startup_provider_overrides_config_file_provider() {
     let _lock = lock_test_env();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
@@ -1474,6 +1474,54 @@ fn explicit_config_provider_wins_over_saved_default_provider() {
     let config = Config {
         provider: Some("xiaomi-mimo".to_string()),
         providers: Some(ProvidersConfig {
+            deepseek: ProviderConfig {
+                api_key: Some("deepseek-config-key".to_string()),
+                model: Some("deepseek-v4-pro".to_string()),
+                ..ProviderConfig::default()
+            },
+            xiaomi_mimo: ProviderConfig {
+                api_key: Some("mimo-config-key".to_string()),
+                model: Some("mimo-v2.5-pro".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    let mut options = test_options(false);
+    options.model = "mimo-v2.5-pro".to_string();
+    let app = App::new(options, &config);
+
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.model, "deepseek-v4-pro");
+    assert!(
+        !app.onboarding_needs_api_key,
+        "the saved startup provider's config key should satisfy startup auth"
+    );
+}
+
+#[test]
+fn explicit_launch_provider_overrides_saved_startup_provider() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        tmp.path().join("settings.toml"),
+        "default_provider = \"deepseek\"\ndefault_model = \"deepseek-v4-pro\"\n",
+    )
+    .expect("settings");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let _provider = EnvVarGuard::set("CODEWHALE_PROVIDER", "xiaomi-mimo");
+
+    let config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        providers: Some(ProvidersConfig {
+            deepseek: ProviderConfig {
+                api_key: Some("deepseek-config-key".to_string()),
+                model: Some("deepseek-v4-pro".to_string()),
+                ..ProviderConfig::default()
+            },
             xiaomi_mimo: ProviderConfig {
                 api_key: Some("mimo-config-key".to_string()),
                 model: Some("mimo-v2.5-pro".to_string()),
@@ -1490,10 +1538,6 @@ fn explicit_config_provider_wins_over_saved_default_provider() {
 
     assert_eq!(app.api_provider, ApiProvider::XiaomiMimo);
     assert_eq!(app.model, "mimo-v2.5-pro");
-    assert!(
-        !app.onboarding_needs_api_key,
-        "Xiaomi MiMo provider config key should satisfy startup auth"
-    );
 }
 
 #[test]
@@ -5271,13 +5315,21 @@ fn word_selection_extends_by_word_and_replaces_on_type() {
 // === #2574: capability-aware fallback eligibility ===============================
 
 /// Build an `App` whose fallback chain is `[active, fallbacks...]` with each
-/// provider's auth controlled via `config.providers` keys. Env-var keys for the
-/// providers under test are cleared so readiness is driven solely by config.
+/// provider's auth controlled via `config.providers` keys. The startup-default
+/// settings home is isolated too: an intentional saved default from a previous
+/// test or a developer's real profile must not replace the chain primary.
 fn app_with_fallback_chain(
     active: ApiProvider,
     fallbacks: &[codewhale_config::ProviderKind],
     keyed: &[ApiProvider],
 ) -> App {
+    let settings_home = tempfile::tempdir().expect("isolated fallback settings home");
+    let _home = EnvVarGuard::set("HOME", settings_home.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", settings_home.path());
+    let _codewhale_home =
+        EnvVarGuard::set("CODEWHALE_HOME", settings_home.path().join(".codewhale"));
+    let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
     let mut providers = ProvidersConfig::default();
     for provider in keyed {
         let entry = ProviderConfig {

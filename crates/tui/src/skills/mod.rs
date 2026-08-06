@@ -7,6 +7,7 @@ mod catalog_matrix;
 pub mod install;
 pub mod mutation;
 mod package_digest;
+pub mod recommend;
 pub mod roots;
 mod system;
 // Re-exports kept for documentation parity and downstream consumers; the
@@ -1416,6 +1417,7 @@ reviewed plugin snapshots must be opened with `load_skill`.\n\n",
         "\n### How to use skills\n\
 - Use `load_skill` to open any skill body by name. This is required for reviewed plugin snapshots and is the preferred path for native skills, including global skills outside the workspace. Direct file reads retain the normal workspace/trust boundary.\n\
 - Trigger rules: use a skill when the user names it (`$SkillName`, `/skill <name>`, or plain text) or the task clearly matches its description. Do not carry skills across turns unless re-mentioned.\n\
+- When no installed skill fits, ask the user to run `/skills suggest <task>` for ranked remote-catalog suggestions. Suggestions do not install, trust, or enable anything.\n\
 - Missing/blocked: if a named skill is missing or cannot be read, say so briefly and continue with the best fallback.\n\
 - Safety: do not execute scripts from a community skill unless the user explicitly asks or the skill has been trusted for script use.\n",
     );

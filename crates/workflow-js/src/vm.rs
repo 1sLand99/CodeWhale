@@ -751,6 +751,7 @@ async fn task_host_inner(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TaskOptions {
+    #[serde(alias = "title")]
     description: Option<String>,
     prompt: Option<String>,
     #[serde(alias = "type", alias = "subagent_type")]

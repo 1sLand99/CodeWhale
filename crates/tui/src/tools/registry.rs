@@ -859,9 +859,18 @@ impl ToolRegistryBuilder {
 
     /// Include the canonical persistent RLM session tool.
     #[must_use]
-    pub fn with_rlm_tool(self, client: Option<DeepSeekClient>, _root_model: String) -> Self {
+    pub fn with_rlm_tool(self, client: Option<DeepSeekClient>, root_model: String) -> Self {
         use super::rlm::RlmTool;
-        self.with_tool(Arc::new(RlmTool::new("rlm", client)))
+        self.with_tool(Arc::new(
+            RlmTool::new("rlm", client).with_root_model(root_model),
+        ))
+    }
+
+    /// Include the persistent, project-scoped continual-harness controller.
+    #[must_use]
+    pub fn with_harness_tool(self) -> Self {
+        use super::harness::HarnessTool;
+        self.with_tool(Arc::new(HarnessTool))
     }
 
     /// Include `handle_read`, the bounded projection reader for symbolic
@@ -1034,6 +1043,7 @@ impl ToolRegistryBuilder {
             .with_plan_tool(plan_state)
             .with_review_tool(client.clone(), model.clone())
             .with_rlm_tool(client.clone(), model.clone())
+            .with_harness_tool()
             .with_fim_tool(client, model)
             .with_speech_tools(speech_client, options.speech_output_dir.clone());
 
@@ -1522,9 +1532,14 @@ mod tests {
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let registry = ToolRegistryBuilder::new()
             .with_rlm_tool(None, "test-model".to_string())
+            .with_harness_tool()
             .build(ctx);
 
         assert!(registry.contains("rlm"));
+        assert!(
+            registry.contains("harness"),
+            "the durable continual harness must accompany the persistent RLM surface"
+        );
         for retired in [
             "rlm_session_objects",
             "rlm_open",
@@ -2452,7 +2467,7 @@ mod tests {
         }
     }
 
-    /// The unified `rlm` tool is the only registered RLM surface.
+    /// The action-shaped RLM family is registered only for compatibility.
     #[test]
     fn rlm_family_removes_legacy_aliases() {
         let tmp = tempdir().expect("tempdir");
@@ -2477,8 +2492,8 @@ mod tests {
             .map(|tool| tool.name)
             .collect();
         assert!(
-            api_names.iter().any(|n| n == "rlm"),
-            "rlm should be model-visible"
+            api_names.iter().all(|n| n != "rlm"),
+            "the compatibility RLM surface must not be advertised to new model turns"
         );
         for retired in [
             "rlm_session_objects",

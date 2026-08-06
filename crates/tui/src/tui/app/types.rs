@@ -58,7 +58,7 @@ pub enum AppMode {
 
 /// Reasoning-effort tier, mirrored across DeepSeek and Codex effort pickers.
 ///
-/// The config file accepts all six string values for forward-compat with
+/// The config file accepts every supported string value for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
 /// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
 /// `Off` to `Low` and displays/sends `Max` as `xhigh` at the provider
@@ -70,9 +70,12 @@ pub enum AppMode {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
     Off,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
+    Ultra,
     Auto,
     #[default]
     Max,
@@ -158,9 +161,12 @@ impl From<ReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     fn from(value: ReasoningEffort) -> Self {
         match value {
             ReasoningEffort::Off => Self::Off,
+            ReasoningEffort::Minimal => Self::Low,
             ReasoningEffort::Low => Self::Low,
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::Max,
+            ReasoningEffort::Ultra => Self::Max,
             ReasoningEffort::Auto => Self::Auto,
             ReasoningEffort::Max => Self::Max,
         }
@@ -209,9 +215,12 @@ impl ReasoningEffort {
     pub fn as_setting(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Ultra => "ultra",
             Self::Auto => "auto",
             Self::Max => "max",
         }
@@ -222,9 +231,12 @@ impl ReasoningEffort {
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "med",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Ultra => "ultra",
             Self::Auto => "auto",
             Self::Max => "max",
         }
@@ -234,10 +246,11 @@ impl ReasoningEffort {
     #[must_use]
     pub fn display_label_for_provider(self, provider: ApiProvider) -> &'static str {
         match (provider, self.normalize_for_provider(provider)) {
+            (ApiProvider::OpenaiCodex, Self::Minimal) => "low",
             (ApiProvider::OpenaiCodex, Self::Low) => "low",
             (ApiProvider::OpenaiCodex, Self::Medium) => "medium",
             (ApiProvider::OpenaiCodex, Self::High) => "high",
-            (ApiProvider::OpenaiCodex, Self::Max) => "xhigh",
+            (ApiProvider::OpenaiCodex, Self::XHigh | Self::Ultra | Self::Max) => "xhigh",
             (_, effort) => effort.short_label(),
         }
     }
@@ -319,9 +332,12 @@ impl ReasoningEffort {
             return self.api_value();
         }
         Some(match self.normalize_for_provider(provider) {
+            Self::Minimal => "low",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Ultra => "xhigh",
             Self::Max => "xhigh",
             Self::Off => "low",
             Self::Auto => "medium",
@@ -364,7 +380,9 @@ impl ReasoningEffort {
         match self {
             Self::Off => Self::High,
             Self::Auto => Self::Off,
-            Self::Low | Self::Medium | Self::High => Self::Max,
+            Self::Minimal | Self::Low | Self::Medium | Self::High | Self::XHigh | Self::Ultra => {
+                Self::Max
+            }
             Self::Max => Self::Off,
         }
     }
@@ -375,9 +393,12 @@ impl ReasoningEffort {
             return self.cycle_next();
         }
         match self.normalize_for_provider(provider) {
+            Self::Minimal => Self::Low,
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
             Self::High => Self::Max,
+            Self::XHigh => Self::Low,
+            Self::Ultra => Self::Low,
             Self::Max => Self::Low,
             Self::Off | Self::Auto => Self::Low,
         }
@@ -389,10 +410,13 @@ impl ReasoningEffort {
     pub fn cycle_next_for_auto_model(self) -> Self {
         match self {
             Self::Auto => Self::Off,
-            Self::Off => Self::Low,
+            Self::Off => Self::Minimal,
+            Self::Minimal => Self::Low,
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
-            Self::High => Self::Max,
+            Self::High => Self::XHigh,
+            Self::XHigh => Self::Ultra,
+            Self::Ultra => Self::Max,
             Self::Max => Self::Auto,
         }
     }

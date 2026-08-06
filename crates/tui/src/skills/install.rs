@@ -948,8 +948,8 @@ pub struct RegistryDocument {
     pub skills: std::collections::BTreeMap<String, RegistryEntry>,
 }
 
-/// One row in the curated registry. `description` is optional so old indices
-/// keep parsing.
+/// One row in the curated registry. Descriptive matching metadata is optional
+/// so old indices keep parsing and new registries can publish it gradually.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryEntry {
     /// Source spec (e.g. `github:owner/repo`).
@@ -957,6 +957,12 @@ pub struct RegistryEntry {
     /// Optional human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+    /// Task phrases that should rank this skill above description fallbacks.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Relevant web domains, optionally written as full URLs by the registry.
+    #[serde(default)]
+    pub domains: Vec<String>,
 }
 
 /// Successful registry fetch result. Same shape as [`InstallOutcome`] for the

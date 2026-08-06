@@ -144,3 +144,6 @@ CODEWHALE_0_9_0_CUTOVER.md
 
 # Hepha project metadata (local only, not upstream)
 .hepha/
+
+# Ralph agent scratch (local only)
+.ralph/

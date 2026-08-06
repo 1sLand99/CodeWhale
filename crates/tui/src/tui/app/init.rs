@@ -145,13 +145,11 @@ impl App {
 
         let mut provider = config.api_provider();
 
-        // Let settings preserve runtime switches only when config/CLI did not
-        // explicitly select a provider. A configured provider must not be
-        // pushed back to a stale saved setting on restart.
-        let config_explicitly_selects_provider = config
-            .provider
-            .as_deref()
-            .is_some_and(|provider| !provider.trim().is_empty());
+        // A startup route saved explicitly from `/model` is a user choice and
+        // must win over a provider merely seeded in config.toml. A one-launch
+        // CLI/environment provider override still wins so scripts can pin
+        // their route without changing the user's next interactive launch.
+        let explicit_launch_provider = crate::config::explicit_launch_provider_override().is_some();
         let mut provider_identity_record = config
             .active_provider_identity(provider)
             .unwrap_or_else(|_| {
@@ -165,7 +163,7 @@ impl App {
                     exact_id,
                 }
             });
-        if !config_explicitly_selects_provider
+        if !explicit_launch_provider
             && let Some(ref provider_str) = settings.default_provider
             && let Ok(resolved) = config.resolve_provider_identity(provider_str)
         {
@@ -200,7 +198,8 @@ impl App {
             && !crate::xai_oauth::credentials_present(&effective_auth_config);
         let xai_dangling_repair_message = if xai_oauth_needs_reauth {
             if crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config) {
-                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref()) {
+                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref())
+                {
                     Ok(()) => {
                         // Keep the in-memory route consistent with the repaired
                         // persisted file so the running app never reaches for

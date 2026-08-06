@@ -5287,7 +5287,9 @@ impl Config {
             })
         };
         // Root `base_url` is normally the legacy DeepSeek field. Xiaomi MiMo
-        // and OpenAI Codex also read it when their table has no endpoint.
+        // also reads it when its table has no endpoint. OpenAI Codex must not:
+        // a legacy DeepSeek endpoint would otherwise turn a normal Codex OAuth
+        // switch into a custom route and make the saved Codex CLI login unusable.
         // NvidiaNim has a back-compat sniff (integrate.api.nvidia.com), and the
         // literal `provider = "custom"` legacy shape retains its root endpoint.
         // Named custom providers always read their own `[providers.<name>]`
@@ -5296,12 +5298,10 @@ impl Config {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
                 self.route_owned_root_base_url(provider, identity)
             }
-            // Xiaomi MiMo and OpenAI Codex honour a root `base_url` when the
-            // per-provider table has none — otherwise a minimal top-level
-            // config silently fell back to the official host.
-            ApiProvider::XiaomiMimo | ApiProvider::OpenaiCodex => {
-                self.route_owned_root_base_url(provider, identity)
-            }
+            // Xiaomi MiMo honours a root `base_url` when the per-provider table
+            // has none — otherwise a minimal top-level config silently falls
+            // back to the official host.
+            ApiProvider::XiaomiMimo => self.route_owned_root_base_url(provider, identity),
             ApiProvider::DeepseekAnthropic => None,
             ApiProvider::NvidiaNim => self
                 .route_owned_root_base_url(provider, identity)
@@ -5312,6 +5312,7 @@ impl Config {
             | ApiProvider::Atlascloud
             | ApiProvider::WanjieArk
             | ApiProvider::Openrouter
+            | ApiProvider::OpenaiCodex
             | ApiProvider::Novita
             | ApiProvider::Fireworks
             | ApiProvider::Siliconflow
@@ -5586,17 +5587,15 @@ impl Config {
     /// The legacy root field is read through
     /// [`Config::route_owned_root_base_url`] so an environment write addressed
     /// to one identity is not mistaken for the sibling identity's configured
-    /// endpoint. DeepSeek, Xiaomi MiMo, and OpenAI Codex all honour root
-    /// `base_url` when their per-provider table has none.
+    /// endpoint. DeepSeek and Xiaomi MiMo honour root `base_url` when their
+    /// per-provider table has none. OpenAI Codex does not: its OAuth login is
+    /// valid only for the official route, not an inherited legacy endpoint.
     fn configured_base_url_for_provider(&self, provider: ApiProvider) -> Option<String> {
         let identity = self.provider_identity_for(provider);
         let provider_base = self
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
         match provider {
-            ApiProvider::Deepseek
-            | ApiProvider::DeepseekCN
-            | ApiProvider::XiaomiMimo
-            | ApiProvider::OpenaiCodex => {
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::XiaomiMimo => {
                 provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
             }
             ApiProvider::NvidiaNim => provider_base.or_else(|| {
@@ -10965,6 +10964,18 @@ fn warn_on_config_api_key_shadowing(config: &Config, provider: ApiProvider, conf
 /// (v0.9.1 kimi-k3 dogfood report).
 pub(crate) fn explicit_launch_model_override() -> Option<String> {
     codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The provider this launch was explicitly asked for, if any.
+///
+/// An environment/CLI override is a one-run instruction and must outrank the
+/// user's saved startup default. A provider merely named in config.toml is a
+/// seed instead: the user can deliberately replace that seed from `/model`.
+pub(crate) fn explicit_launch_provider_override() -> Option<String> {
+    codewhale_env_var("CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

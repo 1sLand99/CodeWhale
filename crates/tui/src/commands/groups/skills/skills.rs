@@ -150,7 +150,9 @@ fn inspect_skills(app: &mut App) -> CommandResult {
 }
 
 /// List all available skills. Pass `--remote` (or `remote`) to fetch the
-/// curated registry instead of scanning the local skills directory.
+/// curated registry instead of scanning the local skills directory. Pass
+/// `suggest <task>` to rank remote catalog entries for a task without
+/// installing anything.
 /// Pass `sync` to pull the registry index and download all skills to the
 /// local cache (`~/.codewhale/cache/skills/`). Pass `inspect` to show local
 /// discovery mode, searched directories, and skill source paths.
@@ -167,6 +169,15 @@ fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
         if trimmed == "inspect" || trimmed == "--inspect" {
             return inspect_skills(app);
         }
+        if trimmed == "suggest" || trimmed == "recommend" {
+            return CommandResult::error("Usage: /skills suggest <task>");
+        }
+        if let Some(task) = trimmed
+            .strip_prefix("suggest ")
+            .or_else(|| trimmed.strip_prefix("recommend "))
+        {
+            return suggest_remote_skills(app, task);
+        }
         if !trimmed.is_empty() {
             // Anything else is treated as a name-prefix filter (#1318).
             // Reject obviously malformed args (whitespace inside the
@@ -175,7 +186,7 @@ fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
             // `-` aren't allowed by the loader so this is safe.
             if trimmed.starts_with('-') || trimmed.split_whitespace().count() > 1 {
                 return CommandResult::error(
-                    "Usage: /skills [--remote|sync|inspect|<name-prefix>]",
+                    "Usage: /skills [--remote|sync|inspect|suggest <task>|<name-prefix>]",
                 );
             }
             prefix = Some(trimmed.to_ascii_lowercase());
@@ -720,6 +731,58 @@ fn list_remote_skills(app: &mut App) -> CommandResult {
     }
 }
 
+// ─── /skills suggest ──────────────────────────────────────────────────────
+
+/// Recommend a small set of remote skills for a task. This performs the same
+/// network-policy-gated registry read as `/skills --remote`, but it cannot
+/// download, trust, enable, or activate a skill.
+fn suggest_remote_skills(app: &mut App, task: &str) -> CommandResult {
+    let task = task.trim();
+    if task.chars().count() < 3 {
+        return CommandResult::error("Usage: /skills suggest <task of at least 3 characters>");
+    }
+
+    let (network, _max_size, registry_url) = installer_settings(app);
+    let registry = run_async(async move { install::fetch_registry(&network, &registry_url).await });
+    match registry {
+        Ok(RegistryFetchResult::Loaded(doc)) => {
+            let recommendations = crate::skills::recommend::recommend_remote_skills(task, &doc, 3);
+            if recommendations.is_empty() {
+                return CommandResult::message(format!(
+                    "No curated remote skills matched `{task}`.\n\nBrowse the catalog with /skills --remote. Nothing was installed, trusted, or enabled."
+                ));
+            }
+
+            let mut out = format!("Suggested remote skills for `{task}`:\n");
+            out.push_str("─────────────────────────────\n");
+            for recommendation in recommendations {
+                let description = recommendation
+                    .entry
+                    .description
+                    .as_deref()
+                    .filter(|description| !description.trim().is_empty())
+                    .unwrap_or("No description provided.");
+                let _ = writeln!(out, "  {} — {description}", recommendation.name);
+                let _ = writeln!(out, "    Why: {}", recommendation.matched_terms.join(", "));
+                let _ = writeln!(
+                    out,
+                    "    Install if you want it: /skill install {}",
+                    recommendation.name
+                );
+            }
+            out.push_str("\nNothing was installed, trusted, or enabled.");
+            CommandResult::message(out)
+        }
+        Ok(RegistryFetchResult::NeedsApproval(host)) => {
+            CommandResult::error(needs_approval_message(&host))
+        }
+        Ok(RegistryFetchResult::Denied(host)) => {
+            CommandResult::error(network_denied_message(&host))
+        }
+        Err(err) => CommandResult::error(format_registry_error("Failed to fetch registry", &err)),
+    }
+}
+
 // ─── /skills sync ──────────────────────────────────────────────────────────
 
 /// Fetch the remote registry index and download every listed skill into the
@@ -916,7 +979,7 @@ pub(in crate::commands) const SKILLS_INFO: crate::commands::traits::CommandInfo 
     crate::commands::traits::CommandInfo {
         name: "skills",
         aliases: &["jinengliebiao"],
-        usage: "/skills [--remote|sync|inspect|<prefix>]  (bare opens manager)",
+        usage: "/skills [--remote|sync|inspect|suggest <task>|<prefix>]  (bare opens manager)",
         description_id: crate::localization::MessageId::CmdSkillsDescription,
     };
 
@@ -1238,6 +1301,28 @@ mod tests {
                 .is_some_and(|m| m.contains("name-prefix")),
             "expected --bogus error message to mention name-prefix, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_list_skills_suggest_requires_a_meaningful_task_before_network_access() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+
+        for arg in ["suggest", "recommend", "suggest go"] {
+            let result = list_skills(&mut app, Some(arg));
+            assert!(
+                result.is_error,
+                "expected usage error for {arg}: {result:?}"
+            );
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("/skills suggest <task")),
+                "expected suggestion usage for {arg}: {result:?}"
+            );
+        }
     }
 
     #[test]

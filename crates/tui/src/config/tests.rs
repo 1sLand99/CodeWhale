@@ -7054,10 +7054,13 @@ fn xiaomi_mimo_provider_drops_stale_deepseek_root_default_model() -> Result<()> 
 }
 
 #[test]
-fn openai_codex_provider_honours_root_default_model_and_base_url() -> Result<()> {
+fn openai_codex_provider_ignores_legacy_root_base_url() -> Result<()> {
     let config = Config {
         provider: Some("openai-codex".to_string()),
-        base_url: Some("https://chatgpt.example.test/backend-api".to_string()),
+        // `base_url` is the legacy DeepSeek setting in a normal multi-provider
+        // config. Switching to Codex must not inherit it and make the official
+        // CLI OAuth login ineligible.
+        base_url: Some("https://api.deepseek.com".to_string()),
         default_text_model: Some("gpt-5.5".to_string()),
         ..Default::default()
     };
@@ -7065,10 +7068,8 @@ fn openai_codex_provider_honours_root_default_model_and_base_url() -> Result<()>
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::OpenaiCodex);
     assert_eq!(config.default_model(), "gpt-5.5");
-    assert_eq!(
-        config.deepseek_base_url(),
-        "https://chatgpt.example.test/backend-api"
-    );
+    assert_eq!(config.deepseek_base_url(), DEFAULT_OPENAI_CODEX_BASE_URL);
+    assert!(!config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex));
     Ok(())
 }
 

@@ -1195,6 +1195,9 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     {
         workspace_parts.push(format!("{memory_block}\n\n{MEMORY_GUIDANCE}"));
     }
+    if let Some(harness_block) = crate::continual_harness::prompt_block(workspace) {
+        workspace_parts.push(harness_block);
+    }
     if let Some(goal_objective) = session_context.goal_objective
         && !goal_objective.trim().is_empty()
     {
@@ -1481,10 +1484,13 @@ mod tests {
         for phrase in [
             "Execute the user's task autonomously",
             "Keep `work_update` current",
-            "when it is present",
-            "If it is absent",
+            "present; otherwise",
             "verify load-bearing child",
             "never manufacture completion sentinels",
+            "For substantial work",
+            "session-persistent `repl` blocks",
+            "retain source/transcript\nas data",
+            "`workflow`, `agent`, goals, `harness`",
         ] {
             assert!(
                 AGENT_MODE.contains(phrase),
@@ -2525,6 +2531,47 @@ mod tests {
     }
 
     #[test]
+    fn continual_harness_is_injected_as_untrusted_world_state() {
+        let tmp = tempdir().expect("tempdir");
+        crate::continual_harness::refine(
+            tmp.path(),
+            crate::continual_harness::HarnessRefinement {
+                kind: crate::continual_harness::HarnessEntryKind::PromptNote,
+                title: "Verify release claims from direct evidence".to_string(),
+                content: "Retain exact current command output for each release gate.".to_string(),
+                evidence:
+                    "A prior release report mixed stale hosted CI with newer local test output."
+                        .to_string(),
+            },
+        )
+        .expect("persist harness state");
+
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context_skills_and_session(
+                tmp.path(),
+                None,
+                None,
+                None,
+                PromptSessionContext {
+                    user_memory_block: None,
+                    goal_objective: None,
+                    project_context_pack_enabled: false,
+                    locale_tag: "en",
+                    translation_enabled: false,
+                    model_id: "codewhale",
+                    context_window_override: None,
+                    verbosity: None,
+                    skills_scan_codewhale_only: false,
+                    plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
+                },
+            ));
+        assert!(prompt.contains("<continual_harness trust=\"untrusted\">"));
+        assert!(prompt.contains("supplemental working guidance"));
+        assert!(prompt.contains("Verify release claims from direct evidence"));
+    }
+
+    #[test]
     fn memory_guidance_does_not_state_precedence() {
         // #4777: only BASE_PROMPT § Whose word wins states ranks. Memory
         // hygiene keeps the imperative→preference rule and drops the
@@ -3127,7 +3174,7 @@ mod tests {
     }
 
     #[test]
-    fn rlm_specialty_tool_guidance_present() {
+    fn legacy_rlm_compatibility_descriptions_remain_available() {
         assert!(!AGENT_MODE.contains("Large Context Tools"));
 
         let descriptions = [
@@ -3152,8 +3199,8 @@ mod tests {
             "RLM tool descriptions present: expected >= 5 mentions of 'rlm', got {rlm_count}"
         );
         assert!(
-            !AGENT_MODE.contains("When NOT to use RLM"),
-            "RLM guidance should explain fit and verification without telling the model to avoid the tool"
+            !AGENT_MODE.contains("`rlm`"),
+            "the normal Agent prompt should not teach the retired RLM control surface"
         );
     }
 
@@ -3188,11 +3235,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_single_agent_and_rlm_surface() {
+    fn prompt_uses_the_single_agent_kernel_surface() {
         for tool in ["rlm_open", "rlm_eval", "rlm_configure", "rlm_close"] {
             assert!(!AGENT_MODE.contains(tool));
         }
         assert!(AGENT_MODE.contains("sub-agent"));
+        assert!(AGENT_MODE.contains("session-persistent `repl` blocks"));
     }
 
     #[test]

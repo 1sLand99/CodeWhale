@@ -41,6 +41,7 @@ mod config_persistence;
 mod config_ui;
 mod context_budget;
 mod context_report;
+mod continual_harness;
 mod core;
 mod cost_status;
 mod deepseek_theme;

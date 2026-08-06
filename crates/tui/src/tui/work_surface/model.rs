@@ -541,7 +541,7 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
 /// On Top, the strip is actionable work only: running / queued / needs-input
 /// agents, plus plan-step to-dos. Quietly completed or cancelled workers
 /// collapse out of the strip into the group header count (e.g.
-/// `▾ Subagents 2 running · 6 completed`) so fan-outs do not permanently eat
+/// `▾ Subagents 2 running · Archived 6`) so fan-outs do not permanently eat
 /// the transcript. Settled agents stay reachable through the Agents panel and
 /// the work catalog — never deleted. Failed / interrupted workers stay in the
 /// strip because they still need attention.
@@ -592,19 +592,19 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
             .count();
         let running = live_agents.len().saturating_sub(attention);
         let header = match (running, attention, settled_agents) {
-            (0, 0, settled) => format!("Subagents {settled} completed"),
+            (0, 0, settled) => format!("Subagents · Archived {settled}"),
             (live, 0, 0) => format!("Subagents {live}"),
-            (live, 0, settled) => format!("Subagents {live} running · {settled} completed"),
+            (live, 0, settled) => format!("Subagents {live} running · Archived {settled}"),
             (0, blocked, 0) => format!("Subagents {blocked} needs input"),
             (0, blocked, settled) => {
-                format!("Subagents {blocked} needs input · {settled} completed")
+                format!("Subagents {blocked} needs input · Archived {settled}")
             }
             (live, blocked, 0) => format!("Subagents {live} running · {blocked} needs input"),
             (live, blocked, settled) => {
-                format!("Subagents {live} running · {blocked} needs input · {settled} completed")
+                format!("Subagents {live} running · {blocked} needs input · Archived {settled}")
             }
         };
-        out.push(section_heading("agents", &header, ""));
+        out.push(agents_section_heading(&header));
         out.extend(live_agents);
     }
     out.extend(todos);
@@ -679,11 +679,10 @@ pub(super) fn visible_rows_for_panel(app: &mut App) -> Vec<WorkRow> {
                 .collect();
             let mut out = Vec::with_capacity(agents.len() + 1);
             if !agents.is_empty() {
-                out.push(section_heading(
-                    "agents",
-                    &format!("Subagents {}", agents.len()),
-                    "",
-                ));
+                out.push(agents_section_heading(&format!(
+                    "Subagents {}",
+                    agents.len()
+                )));
                 out.extend(agents);
             }
             app.work_surface.latest_rows = out.clone();
@@ -723,11 +722,10 @@ pub(super) fn visible_rows_for_panel(app: &mut App) -> Vec<WorkRow> {
             // seated before the unbounded to-do list that keeps a pinned
             // receipt. See [`project_visible`].
             if !agents.is_empty() {
-                out.push(section_heading(
-                    "agents",
-                    &format!("Subagents {}", agents.len()),
-                    "",
-                ));
+                out.push(agents_section_heading(&format!(
+                    "Subagents {}",
+                    agents.len()
+                )));
                 out.extend(agents);
             }
             out.extend(todos);
@@ -1958,6 +1956,22 @@ fn section_heading(id: &str, label: &str, detail: &str) -> WorkRow {
         tone: WorkTone::Heading,
         selectable: false,
         primary_action: None,
+        agent: None,
+    }
+}
+
+/// The sub-agent heading is a real group door: selecting it reveals the full
+/// Agents panel, including settled workers whose exact transcripts remain
+/// available after the compact strip archives them.
+fn agents_section_heading(label: &str) -> WorkRow {
+    WorkRow {
+        id: WorkRowId("section:agents".to_string()),
+        mark: "▾",
+        label: label.to_string(),
+        detail: "Open the full subagent register".to_string(),
+        tone: WorkTone::Heading,
+        selectable: true,
+        primary_action: Some(SidebarRowAction::ShowSubagentsPanel),
         agent: None,
     }
 }

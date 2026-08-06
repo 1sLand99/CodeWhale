@@ -629,6 +629,13 @@ pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) 
             app.needs_redraw = true;
             Vec::new()
         }
+        SidebarRowAction::ShowSubagentsPanel => {
+            app.work_surface.panel = crate::tui::work_surface::RailPanel::Agents;
+            app.work_surface.focused = true;
+            app.status_message = Some("Showing subagents".to_string());
+            app.needs_redraw = true;
+            Vec::new()
+        }
         SidebarRowAction::OpenAgentDetail { agent_id } => {
             if !crate::tui::agent_details::open_agent_details(app, &agent_id) {
                 crate::tui::work_surface::agent_details_closed(app, &agent_id);

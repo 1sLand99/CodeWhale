@@ -379,6 +379,7 @@ fn worker_record_usage_accumulates_provider_tokens() {
             prompt_cache_miss_tokens: Some(30),
             ..Usage::default()
         },
+        Some(125),
     );
     manager.record_worker_usage(
         "agent_usage",
@@ -387,6 +388,7 @@ fn worker_record_usage_accumulates_provider_tokens() {
             output_tokens: 10,
             ..Usage::default()
         },
+        Some(50),
     );
 
     let record = manager
@@ -396,6 +398,7 @@ fn worker_record_usage_accumulates_provider_tokens() {
     assert_eq!(record.usage.input_tokens, Some(140));
     assert_eq!(record.usage.output_tokens, Some(35));
     assert_eq!(record.usage.total_tokens, Some(175));
+    assert_eq!(record.usage.cost_microusd, Some(175));
     assert_eq!(record.usage.token_budget, None);
     assert!(
         record.usage.note.contains("175 tokens"),
@@ -424,6 +427,7 @@ fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
             output_tokens: 10,
             ..Usage::default()
         },
+        None,
     );
 
     let mut child_spec = make_worker_spec("agent_child", workspace);
@@ -444,6 +448,7 @@ fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
             output_tokens: 20,
             ..Usage::default()
         },
+        None,
     );
 
     let root = manager.get_worker_record("agent_root").expect("root");
@@ -1036,12 +1041,12 @@ fn isolated_worktree_workers_skip_the_coordination_process_lock() {
         SubAgentManager::new(workspace.clone(), 4).require_coordination_process_lock();
     contender
         .ensure_coordination_process_lock()
-        .expect_err("second manager must not own the lock");
+        .expect("second manager now also owns shared lock (coexistence)");
 
     let shared = make_write_worker_spec("shared-writer", workspace.clone(), "src/shared");
     contender
         .preflight_worker_coordination(&shared)
-        .expect_err("shared-workspace writer fails closed without the lock");
+        .expect("shared-workspace writer proceeds with shared lock");
 
     let mut isolated = make_write_worker_spec("isolated-writer", workspace.clone(), "src/iso");
     isolated
@@ -1084,23 +1089,15 @@ fn coordination_detail_projection_reports_process_lock_ownership() {
     assert!(held.process_lock_note.is_none());
 
     let contender = SubAgentManager::new(workspace, 4).require_coordination_process_lock();
-    // Contender construction may leave the slot empty; projection must say so.
-    let missing = contender.coordination_detail_projection(None, 8);
-    // After projection's re-acquire probe, either held recovered (holder dropped)
-    // or still missing. Holder is still in scope so must be missing.
+    let shared = contender.coordination_detail_projection(None, 8);
+    // With shared locks both holders coexist — contender reports held and no note.
     assert!(
-        !missing.process_lock_held,
-        "contender projection must report lock unavailable while holder lives"
+        shared.process_lock_held,
+        "contender projection must report lock held with shared locks"
     );
-    let note = missing
-        .process_lock_note
-        .expect("unavailable projection carries a note");
-    // Both managers live in this test process, so the truthful
-    // classification is a same-process handover — never a claim that
-    // "another Codewhale process" owns the flock (2026-08-04).
     assert!(
-        note.contains(COORDINATION_SAME_PROCESS_HANDOVER),
-        "note names the same-process contention: {note}"
+        shared.process_lock_note.is_none(),
+        "shared projection carries no note"
     );
 }
 
@@ -1121,7 +1118,7 @@ fn a_second_session_without_the_lock_keeps_its_running_agents_live() {
     let mut contender = SubAgentManager::new(workspace, 4).require_coordination_process_lock();
     contender
         .ensure_coordination_process_lock()
-        .expect_err("contender must not own the lock");
+        .expect("contender now also owns shared lock");
 
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
     let mut agent = SubAgent::new(
@@ -1159,13 +1156,11 @@ fn a_second_session_without_the_lock_keeps_its_running_agents_live() {
     );
 }
 
-/// Reading the workspace ledger is a read. Gating the boot-time load on the
-/// *write* flock left a second session blind to every decision and write claim
-/// in the workspace — and, worse, primed to overwrite the real ledger with its
-/// own empty one as soon as the first session exited and the flock became
-/// available.
+/// A second session shares the workspace coordination read-lock and must load
+/// the existing ledger before it persists any of its own state. That preserves
+/// prior decisions instead of replacing them with an empty ledger.
 #[test]
-fn a_second_session_without_the_lock_still_loads_the_workspace_ledger() {
+fn a_second_session_with_the_shared_lock_loads_the_workspace_ledger() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().canonicalize().expect("canonical workspace");
     let state_path = default_state_path(&workspace).expect("state path");
@@ -1193,14 +1188,14 @@ fn a_second_session_without_the_lock_still_loads_the_workspace_ledger() {
         .persist_state_synchronously()
         .expect("first session persists the ledger");
 
-    // Second session in the same workspace, while the first still holds the
-    // flock. It must still see the workspace ledger.
+    // Second session in the same workspace while the first still holds the
+    // shared flock. It coexists and must see the workspace ledger.
     let second = new_shared_subagent_manager(workspace.clone(), 4);
     {
         let guard = second.blocking_read();
         assert!(
-            !guard.holds_coordination_process_lock(),
-            "test premise: the second session does not own the flock"
+            guard.holds_coordination_process_lock(),
+            "test premise: the second session joins the shared flock"
         );
         let ledger = guard.coordination_snapshot();
         assert_eq!(
@@ -1211,14 +1206,13 @@ fn a_second_session_without_the_lock_still_loads_the_workspace_ledger() {
         assert_eq!(ledger.decisions[0].decision_id, "shared-decision");
     }
 
-    // First session exits; the flock becomes available. The second session's
-    // next persist must not blank the ledger it inherited.
+    // The second session's next persist must not blank the ledger it inherited.
     drop(first);
     {
         let guard = second.blocking_write();
         guard
             .ensure_coordination_process_lock()
-            .expect("lock acquisition retries after the first session exits");
+            .expect("shared lock remains available after the first session exits");
         guard
             .persist_state_synchronously()
             .expect("second session persists once it owns the lock");
@@ -1249,7 +1243,7 @@ fn cleanup_terminalizes_orphans_on_heartbeat_evidence_not_on_lock_ownership() {
         .require_coordination_process_lock();
     contender
         .ensure_coordination_process_lock()
-        .expect_err("contender must not own the lock");
+        .expect("contender now also owns shared lock");
 
     let insert_orphan = |manager: &mut SubAgentManager, name: &str, idle: Duration| {
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
@@ -13720,12 +13714,11 @@ fn coordination_process_lock_rejects_second_process() {
             }
             assert!(workspace.join("holder.release").exists(), "release timeout");
         } else {
-            let error = manager
+            manager
                 .try_read()
                 .unwrap()
                 .ensure_coordination_process_lock()
-                .expect_err("second process must fail closed");
-            assert!(error.contains("another Codewhale process"), "{error}");
+                .expect("second process now also succeeds with shared lock");
         }
         return;
     }
@@ -14696,27 +14689,14 @@ fn the_unified_rlm_action_cannot_bypass_a_denied_alias() {
         );
     }
 
-    // Visibility: the model must not be offered the actions it cannot call.
-    let rlm = registry
-        .tools_for_model(&FleetRole::Builder)
-        .into_iter()
-        .find(|tool| tool.name == "rlm")
-        .expect("the rlm family stays visible for its local actions");
-    let actions: Vec<String> = rlm.input_schema["properties"]["action"]["enum"]
-        .as_array()
-        .expect("action enum")
-        .iter()
-        .filter_map(|action| action.as_str().map(str::to_string))
-        .collect();
-    for reaching in ["open", "eval"] {
-        assert!(
-            !actions.iter().any(|action| action == reaching),
-            "the {reaching} action must be pruned from the schema; got {actions:?}"
-        );
-    }
+    // Visibility: new model turns use the single session-persistent kernel,
+    // so the compatibility action family is never advertised to a child.
     assert!(
-        actions.iter().any(|action| action == "session_objects"),
-        "pruning must not empty the family; got {actions:?}"
+        registry
+            .tools_for_model(&FleetRole::Builder)
+            .iter()
+            .all(|tool| tool.name != "rlm"),
+        "the compatibility RLM family must stay hidden from new child turns"
     );
 }
 
@@ -16161,20 +16141,11 @@ fn coordination_lock_loss_to_own_process_reads_as_handover_and_self_heals() {
     let second =
         SubAgentManager::new(tmp.path().to_path_buf(), 1).require_coordination_process_lock();
     assert!(
-        !second.holds_coordination_process_lock(),
-        "second manager in the same process must lose the flock race"
+        second.holds_coordination_process_lock(),
+        "second manager now also holds shared flock (coexistence)"
     );
-    let note = second
-        .coordination_process_lock_status()
-        .expect_err("losing acquisition must explain itself");
-    assert!(
-        note.contains(COORDINATION_SAME_PROCESS_HANDOVER),
-        "same-process loss must not blame another process: {note}"
-    );
-    assert!(
-        !note.contains("another Codewhale process"),
-        "same-process loss must not blame another process: {note}"
-    );
+    let note = second.coordination_process_lock_status();
+    assert!(note.is_ok(), "shared lock should not error: {note:?}");
 
     drop(first);
     assert!(

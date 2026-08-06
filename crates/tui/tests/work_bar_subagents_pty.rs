@@ -123,6 +123,25 @@ fn json_response(value: Value) -> ResponseTemplate {
         .set_body_json(value)
 }
 
+/// Sub-agents intentionally use the non-streaming Chat Completions boundary:
+/// their result must be complete before the worker can decide whether to make
+/// another tool call. The parent TUI turn remains an SSE request. Keep the
+/// probe faithful to both real wire shapes instead of making a valid worker
+/// reject its fixture as malformed JSON.
+fn chat_message_response(text: &str) -> ResponseTemplate {
+    json_response(json!({
+        "id": "chatcmpl-workbar-child",
+        "object": "chat.completion",
+        "model": MODEL,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+    }))
+}
+
 async fn mount_models(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/v1/models"))
@@ -153,7 +172,7 @@ impl Respond for ProbeResponder {
 
         if raw.contains(CHILD_MARKER) && !raw.contains(PARENT_PROMPT) {
             self.child_requests.fetch_add(1, Ordering::SeqCst);
-            return sse_response(text_sse("workbar child receipt")).set_delay(self.child_hold);
+            return chat_message_response("workbar child receipt").set_delay(self.child_hold);
         }
         if raw.contains(PARENT_PROMPT) {
             if self.parent_turns.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -564,8 +583,8 @@ async fn work_bar_collapses_a_finished_subagent_into_the_header() -> Result<()> 
 
     let strip = work_bar_text(&mut tui);
     assert!(
-        strip.contains("completed"),
-        "settled workers must remain counted in the Subagents header; strip:\n{strip}\n---full---\n{}",
+        strip.contains("Archived 1"),
+        "settled workers must remain counted in the Subagents Archived header; strip:\n{strip}\n---full---\n{}",
         tui.debug_dump()
     );
     assert!(
