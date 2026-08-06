@@ -14,7 +14,10 @@ export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
   const isZh = locale === "zh";
 
   return (
-    <ol className="gs-steps">
+    // data-reveal-group: the homepage's <RevealOnScroll> settles the four
+    // steps in sequence. On /docs/guide no observer is mounted and the
+    // attribute is inert — the list renders complete and static, as before.
+    <ol className="gs-steps" data-reveal-group>
       {GETTING_STARTED_STEPS.map((step, index) => (
         <li key={step.id} data-step-id={step.id}>
           <span className="gs-step-index" aria-hidden="true">

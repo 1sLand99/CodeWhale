@@ -40,6 +40,8 @@ export function TerminalPlayer({
   const [active, setActive] = useState(0);
   const scene = SCENES[active];
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const firstScene = useRef(true);
 
   // ARIA tabs pattern: the tablist owns arrow-key/Home/End movement with
   // automatic activation — focus and selection stay on the same tab, so the
@@ -102,12 +104,31 @@ export function TerminalPlayer({
     return () => window.clearInterval(id);
   }, [active, total, isZh]);
 
+  // Tab switches get a beat of physicality: the new scene settles in as the
+  // typing restarts. A WAAPI one-shot, transform/opacity only — skipped on
+  // first mount (the section's own reveal covers arrival) and for reduced
+  // motion (the trace simply appears complete, as ever).
+  useEffect(() => {
+    if (firstScene.current) {
+      firstScene.current = false;
+      return;
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    panelRef.current?.animate(
+      [
+        { opacity: 0, transform: "translateY(5px)" },
+        { opacity: 1, transform: "translateY(0)" },
+      ],
+      { duration: 190, easing: "cubic-bezier(0.25, 0.46, 0.45, 0.94)" }
+    );
+  }, [active]);
+
   const slice = (t: string, start: number) => t.slice(0, Math.max(0, shown - start));
   const typing = (start: number, len: number) => shown > start && shown < start + len;
   const done = shown >= total;
 
   return (
-    <div className="hairline-t hairline-b hairline-l hairline-r bg-ink overflow-hidden">
+    <div className="terminal-frame hairline-t hairline-b hairline-l hairline-r bg-ink overflow-hidden">
       {/* title bar */}
       <div className="px-4 py-2.5 flex items-center justify-between border-b border-white/10">
         <div className="flex items-center gap-1.5">
@@ -156,6 +177,7 @@ export function TerminalPlayer({
       <div
         role="tabpanel"
         id="tp-panel"
+        ref={panelRef}
         aria-labelledby={`tp-tab-${active}`}
         tabIndex={0}
         className="px-4 py-4 min-h-[15rem] font-mono text-[0.8rem] leading-relaxed"

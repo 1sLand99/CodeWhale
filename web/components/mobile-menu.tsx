@@ -22,9 +22,44 @@ export function MobileMenu({
   navAria: string;
 }) {
   const [open, setOpen] = useState(false);
+  // `closing` holds the panel mounted for a short exit fade; the unmount —
+  // and the focus hand-back in the effect below — then happens on the
+  // timeout, not on the click.
+  const [closing, setClosing] = useState(false);
+  const closeTimer = useRef<number | null>(null);
   const pathname = usePathname();
   const toggleRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const close = () => {
+    // Reduced motion keeps the original instant mount/unmount.
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setOpen(false);
+      return;
+    }
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    setClosing(true);
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      setOpen(false);
+      setClosing(false);
+    }, 180);
+  };
+
+  const onToggle = () => {
+    if (!open) {
+      setOpen(true);
+      return;
+    }
+    if (closing) {
+      // Re-open mid-exit: cancel the pending unmount and stay open.
+      window.clearTimeout(closeTimer.current ?? undefined);
+      closeTimer.current = null;
+      setClosing(false);
+      return;
+    }
+    close();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -38,7 +73,7 @@ export function MobileMenu({
     const toggle = toggleRef.current;
     menuRef.current?.querySelector<HTMLElement>("a, button")?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -48,12 +83,20 @@ export function MobileMenu({
     };
   }, [open]);
 
+  // A pending exit timer must not outlive the component (locale switches
+  // remount the nav).
+  useEffect(() => {
+    return () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    };
+  }, []);
+
   return (
     <>
       <button
         ref={toggleRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggle}
         className="md:hidden inline-flex items-center justify-center w-9 h-9 hairline-t hairline-b hairline-l hairline-r hover:bg-paper-deep transition-colors"
         aria-label={open ? closeLabel : openLabel}
         aria-expanded={open}
@@ -74,7 +117,7 @@ export function MobileMenu({
         <div
           ref={menuRef}
           id="mobile-menu"
-          className="md:hidden fixed inset-x-0 top-[5.75rem] bottom-0 z-40 bg-paper hairline-t overflow-y-auto"
+          className={`mm-panel md:hidden fixed inset-x-0 top-[5.75rem] bottom-0 z-40 bg-paper hairline-t overflow-y-auto${closing ? " mm-closing" : ""}`}
           role="dialog"
           aria-modal="true"
           aria-label={navAria}
