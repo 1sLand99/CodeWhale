@@ -14,6 +14,8 @@ use std::time::Duration;
 use anyhow::Result;
 use reqwest::Client;
 
+use crate::llm_client::LlmError;
+
 /// Default bounded wait for SSE response headers. Intentionally shorter than
 /// the per-chunk idle timeout: it covers connection setup and upstream header
 /// return only, never model thinking time after streaming has started.
@@ -138,26 +140,33 @@ where
                 );
                 match tokio::time::timeout(h1_req.open_timeout, attempt(h1_req.policy)).await {
                     Ok(Ok(response)) => Ok(response),
-                    Ok(Err(err)) => Err(anyhow::anyhow!(
+                    Ok(Err(err)) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
                         "SSE stream request failed after HTTP/1.1 fallback: {err}. \
                          `codewhale doctor` can still pass when non-streaming requests work; \
                          on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`."
-                    )),
-                    Err(_elapsed) => Err(anyhow::anyhow!(
+                    )))),
+                    // Typed, not a bare string: a header stall is a transport
+                    // failure, and `LlmError::NetworkError` is what the shared
+                    // retry layer recognizes as retryable. As an untyped
+                    // anyhow error this killed the whole turn — sub-agents
+                    // survived it only because they text-match the message in
+                    // their own classifier, so a root turn lost all its work
+                    // while a child would have retried.
+                    Err(_elapsed) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
                         "SSE stream request did not receive response headers after {}s \
                          (HTTP/2 and HTTP/1.1). `codewhale doctor` can still pass when \
                          non-streaming requests work; try `CODEWHALE_FORCE_HTTP1=1` and \
                          rerun `codewhale`.",
                         open_req.open_timeout.as_secs()
-                    )),
+                    )))),
                 }
             } else {
-                Err(anyhow::anyhow!(
+                Err(anyhow::Error::new(LlmError::NetworkError(format!(
                     "SSE stream request did not receive response headers after {}s. \
                      `codewhale doctor` can still pass when non-streaming requests work; \
                      on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
                     open_req.open_timeout.as_secs()
-                ))
+                ))))
             }
         }
     }
@@ -289,6 +298,18 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry when pinned");
         let text = err.to_string();
         assert!(text.contains("did not receive response headers"), "{text}");
+        // The whole point of the typed error: a header stall must reach the
+        // shared retry layer as retryable. As an untyped anyhow error it
+        // killed the turn outright, so a long root run lost all its work while
+        // a sub-agent — which text-matches the same message in its own
+        // classifier — would have retried and continued.
+        let classified = err
+            .downcast_ref::<crate::llm_client::LlmError>()
+            .expect("header stall must be a typed LlmError");
+        assert!(
+            classified.is_retryable(),
+            "header stall must be retryable: {classified:?}"
+        );
         assert!(text.contains("CODEWHALE_FORCE_HTTP1=1"), "{text}");
         assert!(
             !text.contains("HTTP/2 and HTTP/1.1"),
