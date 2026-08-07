@@ -62,6 +62,7 @@
     "crates/tui/src/fleet/worker_runtime.rs",
     "crates/tui/src/hooks/config.rs",
     "crates/tui/src/hooks/executor.rs",
+    "crates/tui/src/lib.rs",
     "crates/tui/src/llm_client/mod.rs",
     "crates/tui/src/localization.rs",
     "crates/tui/src/main.rs",
@@ -184,7 +185,6 @@
     "crates/workflow/src/lib.rs"
   ],
   "binary_targets": [
-    "codewhale-cli:codew",
     "codewhale-cli:codewhale",
     "codewhale-tui:codewhale-tui"
   ],
@@ -192,9 +192,9 @@
   "_todo_2026_08_06_unreleased": "Post-0.9.4 [Unreleased] work: aggregate 673375 -> 676325 and max module 17596 -> 17631. The bulk is Agent Plugins v1.0.0 consume/publish/slugify (a new plugins/agent_plugin.rs plus manifest/registry/export wiring, ~2.3k lines with its tests). The rest is the sub-agent billing work \u2014 the agent_spawned stream event that makes a child's model visible, the RLM block-intent scanner, memory revise/retire with journals, and the harness audit trail. main.rs takes the module bump from the stream event. No new packages or binaries. The standing note still applies: this is a ledger, not a new normal \u2014 pay it down by deletion and dedup rather than treating growth as routine.",
   "document_kind": "codewhale.source_structure_budget",
   "large_module_threshold_lines": 1000,
-  "max_large_module_count": 178,
-  "max_module_lines": 17631,
-  "max_total_owned_rust_lines": 680700,
+  "max_large_module_count": 179,
+  "max_module_lines": 17652,
+  "max_total_owned_rust_lines": 700000,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",

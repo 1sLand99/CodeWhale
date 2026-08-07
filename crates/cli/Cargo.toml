@@ -11,15 +11,11 @@ description = "Agentic terminal facade for open-source and open-weight coding mo
 name = "codewhale"
 path = "src/main.rs"
 
-# Short-form convenience alias — forwards to `codewhale` silently.
-[[bin]]
-name = "codew"
-path = "src/bin/codew.rs"
-
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+codewhale-tui = { path = "../tui", version = "0.9.4" }
 codewhale-agent = { path = "../agent", version = "0.9.4" }
 codewhale-app-server = { path = "../app-server", version = "0.9.4" }
 codewhale-config = { path = "../config", version = "0.9.4" }
