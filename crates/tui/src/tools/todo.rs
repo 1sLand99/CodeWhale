@@ -246,20 +246,33 @@ const DURABLE_WORK_OWNER: &str = "fleet_workflow_ledger";
 
 /// Tool for writing and updating the todo list
 pub struct TodoWriteTool {
+    name: &'static str,
     todo_list: SharedTodoList,
 }
 
 impl TodoWriteTool {
     /// Canonical model-facing progress surface (#4132).
     pub fn work_update(todo_list: SharedTodoList) -> Self {
-        Self { todo_list }
+        Self {
+            name: CANONICAL_PROGRESS_TOOL,
+            todo_list,
+        }
+    }
+
+    /// Hidden compat alias for `work_update` — same handler, not model-visible.
+    pub fn alias(name: &'static str, todo_list: SharedTodoList) -> Self {
+        Self { name, todo_list }
     }
 }
 
 #[async_trait]
 impl ToolSpec for TodoWriteTool {
     fn name(&self) -> &'static str {
-        CANONICAL_PROGRESS_TOOL
+        self.name
+    }
+
+    fn model_visible(&self) -> bool {
+        self.name == CANONICAL_PROGRESS_TOOL
     }
 
     fn description(&self) -> &'static str {

@@ -1115,7 +1115,24 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_todo_tool(self, todo_list: super::todo::SharedTodoList) -> Self {
         use super::todo::TodoWriteTool;
-        self.with_tool(Arc::new(TodoWriteTool::work_update(todo_list)))
+        self.with_tool(Arc::new(TodoWriteTool::work_update(todo_list.clone())))
+            .with_tool(Arc::new(TodoWriteTool::alias(
+                "TodoWrite",
+                todo_list.clone(),
+            )))
+            .with_tool(Arc::new(TodoWriteTool::alias(
+                "todo_write",
+                todo_list.clone(),
+            )))
+            .with_tool(Arc::new(TodoWriteTool::alias("todo", todo_list.clone())))
+            .with_tool(Arc::new(TodoWriteTool::alias(
+                "checklist_write",
+                todo_list.clone(),
+            )))
+            .with_tool(Arc::new(TodoWriteTool::alias(
+                "checklist_update",
+                todo_list,
+            )))
     }
 
     /// Include the plan tool with a shared `PlanState`.
@@ -1506,23 +1523,20 @@ mod tests {
             .with_todo_tool(crate::tools::todo::new_shared_todo_list())
             .build(ctx);
 
+        // Canonical tool must be present and aliases must resolve to it.
         assert!(registry.contains("work_update"));
-        for retired in [
-            "checklist_write",
-            "checklist_add",
-            "checklist_update",
-            "checklist_list",
-            "todo_write",
-            "todo_add",
-            "todo_update",
-            "todo_list",
-        ] {
+        for alias in ["TodoWrite", "todo_write", "todo"] {
             assert!(
-                !registry.contains(retired),
-                "{retired} must no longer be callable"
+                registry.contains(alias),
+                "{alias} compat alias must be registered"
+            );
+            assert_eq!(
+                registry.resolve(alias),
+                Some("work_update"),
+                "{alias} must resolve to canonical work_update via registry ladder"
             );
         }
-
+        // Hidden compat aliases must stay registered but not model-visible.
         let api_names = registry
             .to_api_tools()
             .into_iter()
@@ -1533,21 +1547,31 @@ mod tests {
             api_names.iter().any(|name| name == "work_update"),
             "work_update should be the sole model-visible progress surface"
         );
-        for retired in [
-            "checklist_write",
-            "checklist_add",
-            "checklist_update",
-            "checklist_list",
+        assert_eq!(
+            api_names.iter().filter(|n| *n == "work_update").count(),
+            1,
+            "canonical work_update must appear exactly once in model catalog"
+        );
+        for hidden in [
+            "TodoWrite",
             "todo_write",
+            "todo",
+            "checklist_write",
+            "checklist_update",
+            "checklist_add",
+            "checklist_list",
             "todo_add",
             "todo_update",
             "todo_list",
         ] {
             assert!(
-                api_names.iter().all(|name| name != retired),
-                "{retired} must not appear in the model catalog"
+                api_names.iter().all(|name| name != hidden),
+                "{hidden} must not appear in the model catalog"
             );
         }
+        // But hidden aliases still execute via registry dispatch.
+        assert!(registry.contains("checklist_write"));
+        assert!(registry.contains("checklist_update"));
     }
 
     #[test]

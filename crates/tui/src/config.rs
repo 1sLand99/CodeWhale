@@ -1485,7 +1485,11 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::LongCat => vec![DEFAULT_LONGCAT_MODEL],
         ApiProvider::OpencodeGo => OPENCODE_GO_CHAT_MODELS.to_vec(),
         ApiProvider::OpencodeZen => vec![DEFAULT_OPENCODE_ZEN_MODEL],
-        ApiProvider::Meta => vec![DEFAULT_META_MODEL],
+        ApiProvider::Meta => vec![
+            DEFAULT_META_MODEL,
+            "muse-spark-1.1",
+            "muse-spark-1.2-contributor",
+        ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
             XAI_GROK_4_3_MODEL,

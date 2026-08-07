@@ -51,7 +51,6 @@ mod resource_admission;
 pub mod revert_turn;
 pub mod review;
 pub mod rlm;
-pub mod rlm_block_intent;
 pub mod run_tool;
 pub mod runtime_mcp;
 pub mod schema_canonicalize;

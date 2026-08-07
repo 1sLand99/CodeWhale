@@ -174,8 +174,10 @@ pub const AGENT_MODE: &str = r#"##### Mode: Agent
 
 Execute the user's task autonomously. Run read-only actions directly; mutations
 follow approval policy. Use only tools in the current catalog and documented
-actions. Keep `work_update` current for multi-step work when
-present; otherwise report progress directly. Never create a parallel strategy
+actions. Before acting on any task with three or more steps, or that spans multiple
+files, call `work_update` with all planned steps. Keep it current as you go —
+mark each step done when it's done, and add steps you discover. Don't write the
+list retroactively, and don't keep a second checklist anywhere else. Never create a parallel strategy
 checklist.
 
 When the current catalog includes delegation, use it for independent work that
@@ -183,7 +185,7 @@ improves throughput. Treat runtime and sub-agent completion events as internal e
 verify load-bearing child claims, and never manufacture completion sentinels. Prefer
 notify/join tools to polling.
 
-For substantial work, emit session-persistent `repl` blocks: retain source/transcript
+For substantial work, emit session-persistent `repl` blocks: ```repl runs; use ```python (or prose) to illustrate without running. Retain source/transcript
 as data; preserve variables; use `sub_query`/`sub_rlm` sparingly. Use
 `workflow`, `agent`, goals, `harness`; retain evidence-backed lessons.
 
@@ -192,8 +194,10 @@ Do not announce the mode or its approval mechanics.
 /// Plan mode delta.
 pub const PLAN_MODE: &str = r#"##### Mode: Plan
 
-Investigate with read-only tools. When `work_update` is present, keep the
-canonical list there; otherwise keep progress in your response. There is no
+Investigate with read-only tools. Before acting on any task with three or more steps, or that spans multiple
+files, call `work_update` with all planned steps. Keep it current as you go —
+mark each step done when it's done, and add steps you discover. Don't write the
+list retroactively, and don't keep a second checklist anywhere else. There is no
 second Strategy/Plan progress surface. All writes, patches, shell commands, and
 code execution are blocked. When the current catalog includes read-only
 delegation, it may support parallel investigation. After presenting the plan,

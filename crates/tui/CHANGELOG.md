@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.4] - 2026-08-07
+Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
+roster/setup face with a clear operator-leader and user/folder scope, a
+work strip that keeps actionable agents instead of a permanent archive,
+waiting policy that forbids polling without freezing independent work,
+calmer tool output and session recovery, account/Workflow-search/
+automation/handoff surfaces, a shorter translation-ready website, and
+release-blocker fixes across permissions, DeepSeek Responses, SQLite,
+File edits, terminal width, and Windows installation.
 
 ### Added
 
@@ -25,32 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   durable it points at `/memory`, translated into all fifteen complete
   locale packs. This state shaped later sessions and nothing ever mentioned
   it existed.
-
-### Fixed
-
-- The memory journal is no longer indexed as memory. It is Markdown in the
-  memory tree, so the source walk collected it and every retired note
-  re-entered the searchable set under its `before:` line — putting the
-  exact facts a revision had just removed back into the prompt.
-- `memory_path` pointed at an already-native store no longer derives a
-  second store nested inside it, which silently wrote somewhere other than
-  the file the user named.
-- `muse` and `muse-spark` resolved to `muse-spark-1.1` in the agent
-  registry while config had defaulted to `muse-spark-1.2`, so the CLI and
-  app-server routed those aliases somewhere the configured default never
-  pointed. The registry now carries 1.2 and the contributor variant.
-
-## [0.9.4] - 2026-08-05
-Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
-roster/setup face with a clear operator-leader and user/folder scope, a
-work strip that keeps actionable agents instead of a permanent archive,
-waiting policy that forbids polling without freezing independent work,
-calmer tool output and session recovery, account/Workflow-search/
-automation/handoff surfaces, a shorter translation-ready website, and
-release-blocker fixes across permissions, DeepSeek Responses, SQLite,
-File edits, terminal width, and Windows installation.
-
-### Added
 
 - Sub-agent checkpoint resume: `agents/followup` resumes an
   `interrupted_continuable` child from its checkpoint into a fresh agent loop —
@@ -206,6 +188,18 @@ File edits, terminal width, and Windows installation.
   event-listener 5.4.2 fix for RUSTSEC-2026-0221.
 
 ### Fixed
+
+- The memory journal is no longer indexed as memory. It is Markdown in the
+  memory tree, so the source walk collected it and every retired note
+  re-entered the searchable set under its `before:` line — putting the
+  exact facts a revision had just removed back into the prompt.
+- `memory_path` pointed at an already-native store no longer derives a
+  second store nested inside it, which silently wrote somewhere other than
+  the file the user named.
+- `muse` and `muse-spark` resolved to `muse-spark-1.1` in the agent
+  registry while config had defaulted to `muse-spark-1.2`, so the CLI and
+  app-server routed those aliases somewhere the configured default never
+  pointed. The registry now carries 1.2 and the contributor variant.
 
 - An explicit `type=builder` (or its `implementer` alias) plus
   `write_authority=read_only` now fails closed at spawn instead of launching a
@@ -399,6 +393,8 @@ File edits, terminal width, and Windows installation.
 - [vFONGv](https://github.com/vFONGv) (`@vFONGv`) wrote the zh-CN Windows
   beginner guide with screenshots in PR #5229, harvested after its base branch
   was accidentally deleted during maintainer cleanup.
+- [mky](https://github.com/mky) (`@mky`) fixed the FreeBSD build (PR #5254, `rquickjs` `bindgen` on FreeBSD).
+- [cacdcaecawae](https://github.com/cacdcaecawae) (`@cacdcaecawae`) contributed embedder-owned sub-agent state roots (PR #5252).
 
 ## [0.9.3] - 2026-07-31
 
