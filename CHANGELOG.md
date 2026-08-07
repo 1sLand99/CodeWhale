@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`model = "auto"` for prompt-based tier selection**: When set, the
+  dispatcher analyses the user's prompt before delegating to the TUI and
+  selects `deepseek-v4-pro` for complex tasks (debugging, refactoring,
+  architecture, code generation) or `deepseek-v4-flash` for simple tasks
+  (lookups, formatting, Q&A). The classifier uses a lightweight rule-based
+  scoring system with keywords, length heuristics, and code-block detection.
+  Supported via `codewhale model set auto` or `model = "auto"` in config
+  (PR #5257).
+
 ## [0.9.4] - 2026-08-05
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
 roster/setup face with a clear operator-leader and user/folder scope, a
