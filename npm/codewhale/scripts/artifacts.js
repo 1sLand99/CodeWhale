@@ -8,7 +8,6 @@ const WINDOWS_INSTALLER_ASSET = "CodeWhaleSetup.exe";
 const CNB_BINARY_ASSET_NAMES = [
   "codewhale-linux-x64",
   "codew-linux-x64",
-  "codewhale-tui-linux-x64",
 ];
 const CNB_RELEASE_ASSET_NAMES = [
   ...CNB_BINARY_ASSET_NAMES,
@@ -29,19 +28,19 @@ const BUNDLE_ASSET_NAMES = [
 
 const ASSET_MATRIX = {
   linux: {
-    x64: ["codewhale-linux-x64", "codewhale-tui-linux-x64", "codew-linux-x64"],
-    arm64: ["codewhale-linux-arm64", "codewhale-tui-linux-arm64", "codew-linux-arm64"],
+    x64: ["codewhale-linux-x64", "codew-linux-x64"],
+    arm64: ["codewhale-linux-arm64", "codew-linux-arm64"],
   },
   android: {
-    arm64: ["codewhale-android-arm64", "codewhale-tui-android-arm64", "codew-android-arm64"],
+    arm64: ["codewhale-android-arm64", "codew-android-arm64"],
   },
   darwin: {
-    x64: ["codewhale-macos-x64", "codewhale-tui-macos-x64", "codew-macos-x64"],
-    arm64: ["codewhale-macos-arm64", "codewhale-tui-macos-arm64", "codew-macos-arm64"],
+    x64: ["codewhale-macos-x64", "codew-macos-x64"],
+    arm64: ["codewhale-macos-arm64", "codew-macos-arm64"],
   },
   win32: {
-    x64: ["codewhale-windows-x64.exe", "codewhale-tui-windows-x64.exe", "codew-windows-x64.exe", "codewhale.bat"],
-    arm64: ["codewhale-windows-arm64.exe", "codewhale-tui-windows-arm64.exe", "codew-windows-arm64.exe"],
+    x64: ["codewhale-windows-x64.exe", "codew-windows-x64.exe", "codewhale.bat"],
+    arm64: ["codewhale-windows-arm64.exe", "codew-windows-arm64.exe"],
   },
 };
 
@@ -77,8 +76,7 @@ function detectBinaryNames() {
     platform,
     arch,
     codewhale: pair[0],
-    tui: pair[1],
-    codew: pair[2],
+    codew: pair[1],
   };
 }
 
@@ -89,7 +87,7 @@ function unsupportedBuildHint() {
     "",
     "  # Requires Rust 1.88+ (https://rustup.rs)",
     "  cargo install codewhale-cli --locked   # provides `codewhale` and `codew`",
-    "  cargo install codewhale-tui --locked   # provides `codewhale-tui`",
+    "  cargo install codewhale --locked   # provides `codewhale`",
     "",
     "Or build from a checkout:",
     "",
