@@ -58,10 +58,10 @@ function makeIntermediateArtifacts(root) {
   );
 }
 
-test("authoritative release inventory contains seven targets and 34 assets", () => {
+test("authoritative release inventory contains seven targets and 27 assets (single binary)", () => {
   const assets = allReleaseAssetNames();
-  assert.equal(assets.length, 34);
-  assert.equal(checksummedReleaseAssetNames().length, 33);
+  assert.equal(assets.length, 27);
+  assert.equal(checksummedReleaseAssetNames().length, 26);
   for (const required of [
     "codewhale-android-arm64",
     "codew-android-arm64",
@@ -111,7 +111,7 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
   try {
     fs.mkdirSync(input, { recursive: true });
     for (const name of allReleaseAssetNames().filter((asset) =>
-      /^(codewhale|codew|codewhale-tui)-(linux|android|macos|windows)-/.test(asset) &&
+      /^(codewhale|codew)-(linux|android|macos|windows)-/.test(asset) &&
       !asset.endsWith(".tar.gz") &&
       !asset.endsWith(".zip"),
     )) {
@@ -159,7 +159,7 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
       ["-tzf", path.join(output, "codewhale-linux-x64.tar.gz")],
       { encoding: "utf8" },
     );
-    for (const entry of ["codewhale", "codew", "codewhale-tui", "install.sh"]) {
+    for (const entry of ["codewhale", "codew", "install.sh"]) {
       assert.match(linuxEntries, new RegExp(`codewhale-linux-x64/${entry}\\n`));
     }
     const extracted = path.join(tempRoot, "extracted");
@@ -169,7 +169,7 @@ test("bundle helper creates the exact nine archives and checksum manifest", () =
       ["-xzf", path.join(output, "codewhale-linux-x64.tar.gz"), "-C", extracted],
       { stdio: "pipe" },
     );
-    for (const entry of ["codewhale", "codew", "codewhale-tui", "install.sh"]) {
+    for (const entry of ["codewhale", "codew", "install.sh"]) {
       const mode = fs.statSync(path.join(extracted, "codewhale-linux-x64", entry)).mode & 0o777;
       assert.equal(mode, 0o755, `${entry} should remain executable after artifact transport`);
     }

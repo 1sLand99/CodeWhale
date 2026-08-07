@@ -35,8 +35,7 @@
   "type": "commonjs",
   "bin": {
     "codewhale": "bin/codewhale.js",
-    "codew": "bin/codew.js",
-    "codewhale-tui": "bin/codewhale-tui.js"
+    "codew": "bin/codew.js"
   },
   "scripts": {
     "release:check": "node scripts/verify-release-assets.js",

@@ -25,8 +25,8 @@ test("openharmony x64 resolves to linux x64 binaries", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-linux-x64");
-    assert.equal(result.tui, "codewhale-tui-linux-x64");
     assert.equal(result.codew, "codew-linux-x64");
+    assert.equal(result.tui, undefined);
   });
 });
 
@@ -35,7 +35,6 @@ test("openharmony arm64 resolves to linux arm64 binaries", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-linux-arm64");
-    assert.equal(result.tui, "codewhale-tui-linux-arm64");
     assert.equal(result.codew, "codew-linux-arm64");
   });
 });
@@ -45,7 +44,6 @@ test("android arm64 resolves to Termux-native Android assets", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
     const result = detectBinaryNames();
     assert.equal(result.codewhale, "codewhale-android-arm64");
-    assert.equal(result.tui, "codewhale-tui-android-arm64");
     assert.equal(result.codew, "codew-android-arm64");
   });
 });
@@ -85,7 +83,6 @@ test("Windows arm64 resolves the complete native binary family", () => {
       platform: "win32",
       arch: "arm64",
       codewhale: "codewhale-windows-arm64.exe",
-      tui: "codewhale-tui-windows-arm64.exe",
       codew: "codew-windows-arm64.exe",
     });
   });
@@ -119,15 +116,15 @@ test("release asset inventory includes binaries, archives, installer, and manife
   const assetNames = allAssetNames();
   const releaseAssetNames = allReleaseAssetNames();
   assert.ok(assetNames.includes("codewhale-windows-x64.exe"));
-  assert.ok(assetNames.includes("codewhale-tui-windows-x64.exe"));
   assert.ok(assetNames.includes("codew-windows-x64.exe"));
   assert.ok(assetNames.includes("codewhale.bat"));
   assert.ok(assetNames.includes("codewhale-windows-arm64.exe"));
-  assert.ok(assetNames.includes("codewhale-tui-windows-arm64.exe"));
   assert.ok(assetNames.includes("codew-windows-arm64.exe"));
   assert.ok(assetNames.includes("codewhale-android-arm64"));
-  assert.ok(assetNames.includes("codewhale-tui-android-arm64"));
   assert.ok(assetNames.includes("codew-android-arm64"));
+  assert.ok(!assetNames.includes("codewhale-tui-windows-x64.exe"));
+  assert.ok(!assetNames.includes("codewhale-tui-windows-arm64.exe"));
+  assert.ok(!assetNames.includes("codewhale-tui-android-arm64"));
   assert.ok(!assetNames.includes("codewhale-linux-riscv64"));
   assert.ok(releaseAssetNames.includes("codew-windows-x64.exe"));
   assert.ok(releaseAssetNames.includes("codewhale.bat"));
@@ -165,7 +162,6 @@ test("CNB mirror URLs use the repository that publishes release assets", () => {
       assert.deepEqual(CNB_RELEASE_ASSET_NAMES, [
         "codewhale-linux-x64",
         "codew-linux-x64",
-        "codewhale-tui-linux-x64",
         "codewhale-artifacts-sha256.txt",
       ]);
       assert.equal(

@@ -29,6 +29,9 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.platform }}
+    # FreeBSD is a source-build target validated via `cargo check --target x86_64-unknown-freebsd -p codewhale-cli --locked`
+    # (see packaging/freebsd/README.md and docs/INSTALL.md#freebsd). The 7×1 prebuilt matrix stays 7 targets;
+    # FreeBSD has no prebuilt asset, no npm binary, and no matrix bloat — it builds from source.
     strategy:
       fail-fast: false
       matrix:
@@ -324,7 +327,7 @@ jobs:
         with:
           name: codewhale-release-assets
           path: release-assets
-      - name: Verify 34-asset inventory and checksum manifests
+      - name: Verify 27-asset inventory and checksum manifests (single binary)
         run: node scripts/release/assemble-release-assets.js --verify release-assets
       - name: Test release inventory contracts
         run: |
@@ -342,6 +345,6 @@ jobs:
             echo ""
             echo "- Source: \`${{ inputs.source_sha }}\`"
             echo "- Version metadata: \`${{ inputs.version }}\`"
-            echo "- Inventory: 7 targets / 34 files"
+            echo "- Inventory: 7 targets / 27 files (single binary)"
             echo "- Publication: none (Actions artifact \`codewhale-release-assets\` only)"
           } >> "${GITHUB_STEP_SUMMARY}"

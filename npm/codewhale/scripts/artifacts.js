@@ -83,21 +83,19 @@ function detectBinaryNames() {
 function unsupportedBuildHint() {
   return [
     "No prebuilt binary is available for this platform/architecture combo.",
-    "You can still run codewhale by building from source with Cargo:",
+    "You can still run codewhale by building from source with Cargo (single binary):",
     "",
     "  # Requires Rust 1.88+ (https://rustup.rs)",
     "  cargo install codewhale-cli --locked   # provides `codewhale` and `codew`",
-    "  cargo install codewhale --locked   # provides `codewhale`",
     "",
     "Or build from a checkout:",
     "",
     "  git clone https://github.com/Hmbown/CodeWhale.git",
     "  cd CodeWhale",
-    "  cargo install --path crates/cli --locked",
-    "  cargo install --path crates/tui --locked",
+    "  cargo install --path crates/cli --locked   # single binary",
     "",
     "See https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md",
-    "for cross-compilation, mirror, and Linux ARM64 specifics.",
+    "for cross-compilation, mirror, Linux ARM64, FreeBSD, and winget specifics.",
   ].join("\n");
 }
 

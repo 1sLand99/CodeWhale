@@ -60,12 +60,11 @@
         set -eu
         # The release profile uses full LTO and one codegen unit. Bound Cargo's
         # parallelism so the final links cannot exhaust a shared CNB runner.
-        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
+        cargo build --jobs 2 --release --locked -p codewhale-cli
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
         ./target/release/codew --version
-        ./target/release/codewhale-tui --version
 
 .linux_release_preflight: &linux_release_preflight
   name: linux release preflight
@@ -100,12 +99,11 @@
         set -eu
         # Keep the production release profile intact while avoiding a burst of
         # concurrent rustc/linker processes on the shared release runner.
-        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
+        cargo build --jobs 2 --release --locked -p codewhale-cli
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
         ./target/release/codew --version
-        ./target/release/codewhale-tui --version
 
 main:
   push:
@@ -141,17 +139,15 @@ $:
             ./scripts/release/check-ohos-deps.sh
             cargo build --jobs 2 --release --locked \
               --target x86_64-unknown-linux-musl \
-              -p codewhale-cli -p codewhale-tui
+              -p codewhale-cli   # single binary
 
             mkdir -p target/cnb-release
             BIN_DIR="target/x86_64-unknown-linux-musl/release"
             cp "$BIN_DIR/codewhale" target/cnb-release/codewhale-linux-x64
             cp "$BIN_DIR/codew" target/cnb-release/codew-linux-x64
-            cp "$BIN_DIR/codewhale-tui" target/cnb-release/codewhale-tui-linux-x64
             strip \
               target/cnb-release/codewhale-linux-x64 \
               target/cnb-release/codew-linux-x64 \
-              target/cnb-release/codewhale-tui-linux-x64 \
               || true
 
             (
@@ -159,7 +155,6 @@ $:
               sha256sum \
                 codewhale-linux-x64 \
                 codew-linux-x64 \
-                codewhale-tui-linux-x64 \
                 > codewhale-artifacts-sha256.txt
             )
 
@@ -188,7 +183,6 @@ $:
               echo "Assets:"
               echo "- codewhale-linux-x64"
               echo "- codew-linux-x64"
-              echo "- codewhale-tui-linux-x64"
               echo "- codewhale-artifacts-sha256.txt"
             } > target/cnb-release/CNB_RELEASE.md
 
@@ -204,5 +198,4 @@ $:
             attachments:
               - target/cnb-release/codewhale-linux-x64
               - target/cnb-release/codew-linux-x64
-              - target/cnb-release/codewhale-tui-linux-x64
               - target/cnb-release/codewhale-artifacts-sha256.txt
