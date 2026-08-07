@@ -184,39 +184,29 @@ pub(crate) fn validate_pdf_response(
 }
 
 fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
-    let parsed_url = reqwest::Url::parse(url)
+    let _parsed_url = reqwest::Url::parse(url)
         .map_err(|err| ToolError::invalid_input(format!("invalid URL: {err}")))?;
     let original_title = html_title(html);
-    let mut input = html.as_bytes();
-    let readable = readability::extractor::extract(&mut input, &parsed_url).ok();
 
-    let readable_html = readable
-        .as_ref()
-        .map(|product| product.content.trim())
-        .filter(|content| meaningful_html(content))
-        .map(ToOwned::to_owned);
-    let cleaned_html = readable_html
-        .or_else(|| fallback_main_html(html))
-        .ok_or_else(|| js_required_error(url))?;
+    // Readability-based extraction was removed to consolidate the HTML
+    // pipeline onto a single stack (htmd 0.5 + html5ever 0.38). The
+    // previous dual-stack (readability 0.3 / html5ever 0.26 + htmd / 0.38)
+    // compiled two incompatible html5ever/markup5ever trees. The fallback
+    // main-content regex retains the meaningful-content signal used by the
+    // tests (≥32 non-whitespace chars, ≥5 words) without the duplicate tree.
+    let cleaned_html = fallback_main_html(html).ok_or_else(|| js_required_error(url))?;
     let markdown = htmd::convert(&cleaned_html).map_err(|err| {
         ToolError::execution_failed(format!(
             "Failed to convert readable HTML to Markdown: {err}"
         ))
     })?;
-    let text = readable
-        .as_ref()
-        .map(|product| normalize_text(&product.text))
-        .filter(|content| meaningful_text(content))
-        .unwrap_or_else(|| html_to_plain_text(&cleaned_html));
+    let text = html_to_plain_text(&cleaned_html);
 
     if !meaningful_text(&text) && !meaningful_text(&markdown) {
         return Err(js_required_error(url));
     }
 
-    let title = readable
-        .map(|product| normalize_text(&product.title))
-        .filter(|value| !value.is_empty())
-        .or(original_title);
+    let title = original_title;
 
     Ok(ExtractedDocument {
         kind: DocumentKind::Html,

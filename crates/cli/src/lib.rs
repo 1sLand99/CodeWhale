@@ -1726,7 +1726,7 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
             delegate_to_tui(&cli, &resolved_runtime, args.args).map(|r| {
-                auto_resolved.map(|_| std::env::remove_var("CODEWHALE_MODEL"));
+                auto_resolved.map(|_| unsafe { std::env::remove_var("CODEWHALE_MODEL") });
                 r
             })
         }
@@ -1782,7 +1782,7 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
             delegate_to_tui(&cli, &resolved_runtime, tui_args("exec", args)).map(|r| {
-                auto_resolved.map(|_| std::env::remove_var("CODEWHALE_MODEL"));
+                auto_resolved.map(|_| unsafe { std::env::remove_var("CODEWHALE_MODEL") });
                 r
             })
         }
@@ -2140,7 +2140,7 @@ fn try_auto_resolve_model(
         prompt_args.join(" ")
     };
     let resolved = codewhale_config::auto_model::classify(&prompt);
-    std::env::set_var("CODEWHALE_MODEL", resolved);
+    unsafe { std::env::set_var("CODEWHALE_MODEL", resolved); }
     Some(())
 }
 
@@ -5120,9 +5120,9 @@ mod tests {
             // Safety: tests using this helper serialize with env_lock().
             unsafe {
                 if let Some(previous) = self.previous.take() {
-                    std::env::set_var(self.name, previous);
+                    unsafe { std::env::set_var(self.name.clone(), previous.clone()); }
                 } else {
-                    std::env::remove_var(self.name);
+                    unsafe { std::env::remove_var(self.name.clone()); }
                 }
             }
         }

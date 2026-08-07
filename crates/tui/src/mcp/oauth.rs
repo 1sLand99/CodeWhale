@@ -13,7 +13,8 @@ use rmcp::transport::AuthorizationSession;
 use rmcp::transport::auth::{AuthError, OAuthClientConfig, OAuthState, OAuthTokenResponse};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tiny_http::{Response, Server};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -745,13 +746,16 @@ fn token_needs_refresh(expires_at: Option<u64>) -> bool {
     now.saturating_add(REFRESH_SKEW_MILLIS) >= expires_at
 }
 
+#[allow(dead_code)]
 struct CallbackServerGuard {
-    server: Arc<Server>,
+    #[allow(dead_code)]
+    listener: Arc<TcpListener>,
 }
 
 impl Drop for CallbackServerGuard {
     fn drop(&mut self) {
-        self.server.unblock();
+        // TcpListener is closed on drop; the accept loop will exit when the
+        // listener is dropped. No explicit unblock needed.
     }
 }
 
@@ -783,17 +787,21 @@ impl OauthLoginFlow {
             Some(port) => format!("{bind_host}:{port}"),
             None => format!("{bind_host}:0"),
         };
-        let server = Arc::new(Server::http(&bind_addr).map_err(|err| anyhow!(err))?);
+        let listener = Arc::new(
+            TcpListener::bind(&bind_addr)
+                .await
+                .map_err(|err| anyhow!(err))?,
+        );
         let guard = CallbackServerGuard {
-            server: Arc::clone(&server),
+            listener: Arc::clone(&listener),
         };
-        let redirect_uri = resolve_redirect_uri(&server, callback_url)?;
+        let redirect_uri = resolve_redirect_uri(&listener, callback_url)?;
         let callback_id = callback_id_from_server_url(server_url)?;
         let redirect_uri = append_callback_id_to_redirect_uri(&redirect_uri, &callback_id)?;
         let callback_path = callback_path_from_redirect_uri(&redirect_uri)?;
 
         let (tx, rx) = oneshot::channel();
-        spawn_callback_server(server, tx, callback_path);
+        spawn_callback_server(Arc::clone(&listener), tx, callback_path);
 
         let headers = build_default_headers(&http_headers, &env_headers)?;
         let client = apply_default_headers(crate::tls::reqwest_client_builder(), &headers)
@@ -910,36 +918,100 @@ async fn start_authorization(
 }
 
 fn spawn_callback_server(
-    server: Arc<Server>,
+    #[allow(dead_code)]
+    listener: Arc<TcpListener>,
     tx: oneshot::Sender<CallbackResult>,
     expected_callback_path: String,
 ) {
-    tokio::task::spawn_blocking(move || {
-        while let Ok(request) = server.recv() {
-            let path = request.url().to_string();
+    tokio::spawn(async move {
+        // The sender is wrapped in Option so we can take it on success/error
+        let mut tx_opt = Some(tx);
+        loop {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let path = match read_http_path(&mut stream).await {
+                Some(p) => p,
+                None => {
+                    let _ = write_http_response(&mut stream, 400, "Invalid OAuth callback").await;
+                    continue;
+                }
+            };
             match parse_oauth_callback(&path, &expected_callback_path) {
                 CallbackOutcome::Success(callback) => {
-                    let response = Response::from_string(
+                    let _ = write_http_response(
+                        &mut stream,
+                        200,
                         "Authentication complete. You may close this window.",
-                    );
-                    let _ = request.respond(response);
-                    let _ = tx.send(CallbackResult::Success(callback));
+                    )
+                    .await;
+                    if let Some(tx) = tx_opt.take() {
+                        let _ = tx.send(CallbackResult::Success(callback));
+                    }
                     break;
                 }
                 CallbackOutcome::Error(error) => {
-                    let response = Response::from_string(error.to_string()).with_status_code(400);
-                    let _ = request.respond(response);
-                    let _ = tx.send(CallbackResult::Error(error));
+                    let msg = error.to_string();
+                    let _ = write_http_response(&mut stream, 400, &msg).await;
+                    if let Some(tx) = tx_opt.take() {
+                        let _ = tx.send(CallbackResult::Error(error));
+                    }
                     break;
                 }
                 CallbackOutcome::Invalid => {
-                    let response =
-                        Response::from_string("Invalid OAuth callback").with_status_code(400);
-                    let _ = request.respond(response);
+                    let _ = write_http_response(&mut stream, 400, "Invalid OAuth callback").await;
                 }
             }
         }
     });
+}
+
+async fn read_http_path(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    // Read until we have \r\n\r\n or exceed limit
+    loop {
+        match stream.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 8192 {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    let request = String::from_utf8_lossy(&buf);
+    let first_line = request.lines().next()?;
+    // Expected: GET /callback?code=... HTTP/1.1
+    let mut parts = first_line.split_whitespace();
+    let _method = parts.next()?;
+    let path = parts.next()?.to_string();
+    Some(path)
+}
+
+async fn write_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    body: &str,
+) -> std::io::Result<()> {
+    let status_text = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        _ => "OK",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -998,22 +1070,21 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
     CallbackOutcome::Invalid
 }
 
-fn local_redirect_uri(server: &Server) -> Result<String> {
-    match server.server_addr() {
-        tiny_http::ListenAddr::IP(std::net::SocketAddr::V4(addr)) => {
-            Ok(format!("http://{}:{}/callback", addr.ip(), addr.port()))
+fn local_redirect_uri(listener: &TcpListener) -> Result<String> {
+    let addr = listener.local_addr()?;
+    match addr {
+        std::net::SocketAddr::V4(v4) => {
+            Ok(format!("http://{}:{}/callback", v4.ip(), v4.port()))
         }
-        tiny_http::ListenAddr::IP(std::net::SocketAddr::V6(addr)) => {
-            Ok(format!("http://[{}]:{}/callback", addr.ip(), addr.port()))
+        std::net::SocketAddr::V6(v6) => {
+            Ok(format!("http://[{}]:{}/callback", v6.ip(), v6.port()))
         }
-        #[cfg(not(target_os = "windows"))]
-        _ => Err(anyhow!("unable to determine callback address")),
     }
 }
 
-fn resolve_redirect_uri(server: &Server, callback_url: Option<&str>) -> Result<String> {
+fn resolve_redirect_uri(listener: &TcpListener, callback_url: Option<&str>) -> Result<String> {
     let Some(callback_url) = callback_url else {
-        return local_redirect_uri(server);
+        return local_redirect_uri(listener);
     };
     Url::parse(callback_url)
         .with_context(|| format!("invalid MCP OAuth callback URL '{callback_url}'"))?;
