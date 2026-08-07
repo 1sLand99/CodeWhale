@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:49ee31cdd79e -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -45,7 +45,7 @@ codewhale web                            # local browser client on 127.0.0.1
 - **任意模型,任意 provider——也可以任意混搭。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider,以及你自己的 vLLM、SGLang、Ollama——无需 key——全都跑在同一套运行时和同一套工具之上。保存下来的角色会显式记录它的 `provider`、`model` 和推理档位,所以一个 Fleet 可以在同一次运行里跨越多家厂商,角色的路由也不会取决于当时恰好激活的是哪个 provider。上下文预算与价格取自真实路由;价格未知时显示未知,而不是 $0。
 - **由你亲手写就的 harness。** 角色就是你能读、能改的文件——每个角色一个模型、一套工具姿态和一份常驻指令——放在项目里让团队共享,或放在你的个人设置旁边,跟着你在不同仓库之间走。constitution 记录你希望 agent 在每一次会话中如何行事,让这套 harness 贴合你的做法,而不是我们的。
 - **默认只读,放开权限才更进一步。** Plan 模式不改动文件,审批把关每一次高风险命令。只有当命令确实被 OS 沙箱包装时,Codewhale 才会如实标明:macOS 上是可用时启用的 Seatbelt,Linux 上是需显式启用的 bubblewrap。仓库的 `constitution.json` 会编译成写入拦截,连 Full Access 也无法跳过。
-- **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续——包括哪个角色跑在哪个模型上。
+- **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。
 
 ## 了解更多
 

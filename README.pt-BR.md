@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:49ee31cdd79e -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -85,7 +85,7 @@ executa um comando de shell pelo caminho normal de aprovação.
   que nem o Full Access consegue pular.
 - **Trabalho que você pode retomar.** Um fleet registra cada passo em um
   livro-razão de apenas inclusão, então `fleet resume` retoma de onde você
-  parou — inclusive qual papel rodou em qual modelo.
+  parou.
 
 ## Saiba mais
 

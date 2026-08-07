@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:49ee31cdd79e -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -81,7 +81,7 @@ shell qua đường phê duyệt bình thường.
   tùy chọn trên Linux. `constitution.json` của repo được biên dịch thành các
   chốt chặn ghi mà ngay cả Full Access cũng không thể bỏ qua.
 - **Công việc bạn có thể tiếp tục.** Fleet ghi lại từng bước vào sổ cái chỉ ghi
-  thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng — kể cả vai trò nào đã chạy trên model nào.
+  thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng.
 
 ## Tìm hiểu thêm
 

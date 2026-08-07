@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:49ee31cdd79e -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 Un agente de programación de código abierto para tu terminal — trae tu propio modelo.
@@ -85,7 +85,7 @@ aprobación.
   `constitution.json` de un repo se compila en bloqueos de escritura que ni
   siquiera Full Access puede saltarse.
 - **Trabajo que puedes retomar.** Un fleet registra cada paso en un libro mayor
-  de solo agregado, así que `fleet resume` retoma donde te detuviste — incluido qué rol corrió en qué modelo.
+  de solo agregado, así que `fleet resume` retoma donde te detuviste.
 
 ## Para saber más
 

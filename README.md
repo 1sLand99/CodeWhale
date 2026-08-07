@@ -82,8 +82,7 @@ shell command through the normal approval path.
   Linux. A repo's `constitution.json` compiles into write holds that even Full
   Access can't skip.
 - **Work you can resume.** A fleet records every step to an append-only ledger,
-  so `fleet resume` picks up where you left off — including which role ran on
-  which model.
+  so `fleet resume` picks up where you left off.
 
 ## Learn more
 
