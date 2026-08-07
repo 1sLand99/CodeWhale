@@ -207,7 +207,7 @@ remaining work belongs to later releases:
 4. **Fleet/Workflow convergence residuals** — live tmux/verifier-gate dogfood
    closing #4175/#4177/#4178/#4179; Fleet consuming canonical AgentProfiles;
    Conductor/topology (#4010, #4012) as stretch.
-5. **TTC_DESIGN implementation** — approved and now unblocked after v0.9.0.
+5. **TTC design implementation** (design doc in `codewhale-ops`) — approved and now unblocked after v0.9.0.
 6. **HarnessProfile completion** — the status/UX display lane
    (`docs/rfcs/HARNESS_PROFILE_CUTLINE.md`).
 7. **File decomposition, re-scoped** — `ui.rs` (~19.1k lines) and `main.rs`

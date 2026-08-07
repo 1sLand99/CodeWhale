@@ -328,7 +328,7 @@ reopened, ask the contributor to resubmit after the allowlist PR is merged.
 
 Codewhale is allowed to help improve Codewhale, but the contribution still has
 to be shaped for human review. The recommended workflow is the
-[recursive self-improvement prompt](docs/RECURSIVE_SELF_IMPROVEMENT.md): run it
+[recursive self-improvement prompt](the `codewhale-ops` repo): run it
 from a fresh fork or branch, let the agent find exactly one small friction point,
 and stop after one patch. DeepSeek V4 Pro is the reference path for this loop
 today, but any configured provider works — the review shape matters more than

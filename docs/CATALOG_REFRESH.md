@@ -253,4 +253,4 @@ subscription OAuth or Claude Code identity headers.
 - Live Models.dev layer: #4187
 - Bundled seed demoted (not competing truth): #4188
 - Catalog automation script (validate / dry-run): #4117
-- Deeper metadata inventory and drift list: `docs/MODEL_PROVIDER_AUDIT.md`
+- Deeper metadata inventory and drift list: the `codewhale-ops` repo
