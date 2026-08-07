@@ -1724,7 +1724,11 @@ fn run() -> Result<()> {
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, args.args)
+            let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
+            delegate_to_tui(&cli, &resolved_runtime, args.args).map(|r| {
+                auto_resolved.map(|_| std::env::remove_var("CODEWHALE_MODEL"));
+                r
+            })
         }
         Some(Commands::Doctor(args)) => {
             let resolved_runtime =
@@ -1776,7 +1780,11 @@ fn run() -> Result<()> {
         Some(Commands::Exec(args)) => {
             reject_exec_global_flags(&args.args)?;
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            delegate_to_tui(&cli, &resolved_runtime, tui_args("exec", args))
+            let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
+            delegate_to_tui(&cli, &resolved_runtime, tui_args("exec", args)).map(|r| {
+                auto_resolved.map(|_| std::env::remove_var("CODEWHALE_MODEL"));
+                r
+            })
         }
         Some(Commands::Fleet(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2109,6 +2117,31 @@ fn reject_exec_global_flags(args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// If the resolved model is `"auto"`, analyse the prompt and set
+/// `CODEWHALE_MODEL` to the resolved tier (`deepseek-v4-pro` or
+/// `deepseek-v4-flash`). Returns `Some(())` when auto-resolution was applied,
+/// so the caller can clean up the env var afterwards.
+///
+/// The prompt is extracted from the passthrough args (the text after
+/// `codewhale run` or `codewhale exec`).
+fn try_auto_resolve_model(
+    resolved_runtime: &codewhale_config::ResolvedRuntimeOptions,
+    prompt_args: &[String],
+) -> Option<()> {
+    if resolved_runtime.model != "auto" {
+        return None;
+    }
+    let prompt = if prompt_args.is_empty() {
+        // No prompt provided — nothing to analyse, leave as default.
+        return None;
+    } else {
+        prompt_args.join(" ")
+    };
+    let resolved = codewhale_config::auto_model::classify(&prompt);
+    std::env::set_var("CODEWHALE_MODEL", resolved);
+    Some(())
 }
 
 fn run_login_command(store: &mut ConfigStore, args: LoginArgs) -> Result<()> {
@@ -4039,6 +4072,7 @@ fn run_model_command(
             let canonical = match trimmed.to_ascii_lowercase().as_str() {
                 "pro" | "deepseek-v4pro" => "deepseek-v4-pro",
                 "flash" | "deepseek-v4flash" => "deepseek-v4-flash",
+                "auto" => "auto",
                 _ => trimmed,
             };
             store.config.default_text_model = Some(canonical.to_string());

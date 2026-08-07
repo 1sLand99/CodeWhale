@@ -1,4 +1,5 @@
 pub mod auth_source;
+pub mod auto_model;
 pub mod catalog;
 mod config_document;
 pub mod external_credentials;
