@@ -1746,6 +1746,10 @@ impl Engine {
                 // from earlier steps. That keeps the simple `repl` route useful
                 // for sustained work instead of forcing the model through a
                 // separate open/eval/configure control surface.
+                // No-tool step: reset tool-error streak (10) — only true
+                // consecutive tool batches should be counted.
+                consecutive_tool_error_steps = 0;
+
                 if has_sendable_assistant_content
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
                 {
@@ -1759,6 +1763,7 @@ impl Engine {
                                     .tx_event
                                     .send(Event::status(format!("REPL init failed: {e}")))
                                     .await;
+                                turn_error = Some(format!("REPL init failed: {e}"));
                                 break;
                             }
                         };
@@ -1781,6 +1786,7 @@ impl Engine {
                             .tx_event
                             .send(Event::status(format!("REPL context refresh failed: {e}")))
                             .await;
+                        turn_error = Some(format!("REPL context refresh failed: {e}"));
                         break;
                     }
 
@@ -3792,6 +3798,22 @@ impl Engine {
                 consecutive_tool_error_steps = 0;
             }
 
+            // Tool stepping (4d): one line why we're continuing without user input.
+            // This is the fourth resume kind alongside subagent/goal/REPL.
+            no_user_input_continues = no_user_input_continues.saturating_add(1);
+            if no_user_input_continues >= 12 {
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                    ))
+                    .await;
+                break;
+            }
+            let _ = self
+                .tx_event
+                .send(Event::status("Continuing — tool results".to_string()))
+                .await;
             turn.next_step();
         }
 
