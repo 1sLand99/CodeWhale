@@ -9048,7 +9048,7 @@ fn strip_evidence_block(text: &str) -> String {
 /// telemetry, but it is volatile and not useful for model coordination.
 ///
 /// `truncated` reflects whether the previous-line summary was length-gated by
-/// [`stamp_subagent_summary`] (issue #2652); it surfaces as `summary_kind` so
+/// `stamp_subagent_summary` (issue #2652); it surfaces as `summary_kind` so
 /// the parent model can tell a complete self-report from a clipped one and
 /// verify material claims accordingly.
 fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult, truncated: bool) -> String {

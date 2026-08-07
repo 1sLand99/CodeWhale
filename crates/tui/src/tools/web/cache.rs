@@ -181,6 +181,17 @@ pub(crate) fn reset_search() {
 mod tests {
     use super::*;
 
+    /// `FETCH_CACHE` is process-global and `reset()` empties it for every
+    /// thread, so the tests that reset it cannot run concurrently: one test's
+    /// `reset` landing between another's `insert` and its assertion takes the
+    /// entry out from under it, and the failure reads as a cache-scoping bug
+    /// rather than the test collision it is. Serializing the resetters is
+    /// cheaper than teaching the cache about tests.
+    fn fetch_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn payload(bytes: &[u8], truncated: bool) -> CachedFetch {
         CachedFetch {
             url: "https://example.com/doc".to_string(),
@@ -228,6 +239,7 @@ mod tests {
 
     #[test]
     fn truncated_entry_refetches_only_when_request_asks_for_more() {
+        let _guard = fetch_cache_test_guard();
         reset();
         let url = reqwest::Url::parse("https://example.com/doc#fragment").unwrap();
         insert("cache-unit", &url, "text/plain", payload(b"12345", true));
@@ -242,6 +254,7 @@ mod tests {
 
     #[test]
     fn cache_is_scoped_by_session_and_accept_header() {
+        let _guard = fetch_cache_test_guard();
         reset();
         let url = reqwest::Url::parse("https://example.com/doc").unwrap();
         insert("session-a", &url, "text/html", payload(b"body", false));
