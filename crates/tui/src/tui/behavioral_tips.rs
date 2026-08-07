@@ -16,12 +16,14 @@ const MAX_LIFETIME_IMPRESSIONS: u8 = 2;
 const MAX_TRACKED_MANUAL_COMMANDS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum BehavioralTip {
     PlanningMode,
     BackgroundJobReceipt,
     ClearedInputRestore,
     McpValidation,
     RepeatedCommandHotbar,
+    DurableStateWritten,
 }
 
 impl BehavioralTip {
@@ -32,6 +34,7 @@ impl BehavioralTip {
             Self::ClearedInputRestore => "cleared_input_restore",
             Self::McpValidation => "mcp_validation",
             Self::RepeatedCommandHotbar => "repeated_command_hotbar",
+            Self::DurableStateWritten => "durable_state_written",
         }
     }
 
@@ -42,6 +45,7 @@ impl BehavioralTip {
             Self::ClearedInputRestore => MessageId::BehavioralTipClearedInput,
             Self::McpValidation => MessageId::BehavioralTipMcpValidation,
             Self::RepeatedCommandHotbar => MessageId::BehavioralTipRepeatedCommand,
+            Self::DurableStateWritten => MessageId::BehavioralTipDurableStateWritten,
         }
     }
 
@@ -53,6 +57,7 @@ impl BehavioralTip {
             Self::ClearedInputRestore => template.replace("{chord}", "Ctrl+Z"),
             Self::McpValidation => template.replace("{command}", "codewhale mcp validate"),
             Self::RepeatedCommandHotbar => template.replace("{command}", "/hotbar"),
+            Self::DurableStateWritten => template.replace("{command}", "/memory"),
         }
     }
 }
@@ -237,6 +242,7 @@ mod tests {
             BehavioralTip::ClearedInputRestore,
             BehavioralTip::McpValidation,
             BehavioralTip::RepeatedCommandHotbar,
+            BehavioralTip::DurableStateWritten,
         ];
         for locale in Locale::shipped_complete() {
             for tip in tips {
@@ -264,6 +270,10 @@ mod tests {
         assert_eq!(
             BehavioralTip::RepeatedCommandHotbar.message(Locale::En),
             "/hotbar can pin this"
+        );
+        assert_eq!(
+            BehavioralTip::DurableStateWritten.message(Locale::En),
+            "Saved · /memory to inspect"
         );
     }
 }

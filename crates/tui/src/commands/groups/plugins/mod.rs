@@ -17,8 +17,9 @@
 //! * [`legacy`] — the separate `[tools].plugin_dir` executable inventory,
 //!   which shares no trust state with declarative bundles.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use crate::commands::CommandResult;
 use crate::commands::traits::{
@@ -53,7 +54,7 @@ impl CommandGroup for PluginsCommands {
 pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
     name: "plugin",
     aliases: &["plugins"],
-    usage: "/plugin [list|show|suggest|validate|install|update|uninstall|trust|enable|disable|revoke|reload|tools]",
+    usage: "/plugin [list|show|suggest|validate|export|install|update|uninstall|trust|enable|disable|revoke|reload|tools]",
     description_id: MessageId::CmdPluginDescription,
 };
 
@@ -82,6 +83,8 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
         ["suggest", task @ ..] | ["recommend", task @ ..] => suggest_bundles(app, &task.join(" ")),
         ["validate"] => validate_bundles(app, None),
         ["validate", selector] => validate_bundles(app, Some(selector)),
+        ["export"] => CommandResult::error("Usage: /plugin export <name> <target-dir>"),
+        ["export", selector, target @ ..] => export_bundle(app, selector, &target.join(" ")),
         ["install"] => CommandResult::error(tr(app.ui_locale, MessageId::CmdPluginBundleUsage)),
         ["install", rest @ ..] => install_bundle(app, &rest.join(" ")),
         ["update"] | ["uninstall"] => {
@@ -271,6 +274,73 @@ fn show_bundle(app: &App, selector: &str) -> CommandResult {
         );
     };
     CommandResult::message(render_bundle_detail(app, &plugin, true))
+}
+
+/// `/plugin export <name> <target-dir>` — publish a loaded bundle as a
+/// spec-valid Agent Plugins v1.0.0 directory (`plugin.json`, `mcp.json` when
+/// servers exist, and the `skills/` tree). The installed bundle is never
+/// modified; a relative target resolves against the workspace.
+fn export_bundle(app: &App, selector: &str, target: &str) -> CommandResult {
+    let Some(plugin) = app.plugin_registry.get(selector).cloned() else {
+        return CommandResult::error(
+            tr(app.ui_locale, MessageId::CmdPluginBundleNotFound).replace("{name}", selector),
+        );
+    };
+    let target = target.trim();
+    if target.is_empty() {
+        return CommandResult::error("Usage: /plugin export <name> <target-dir>");
+    }
+    let target = PathBuf::from(target);
+    let target = if target.is_absolute() {
+        target
+    } else {
+        app.workspace.join(target)
+    };
+    let existing_names: BTreeSet<String> = app
+        .plugin_registry
+        .list()
+        .iter()
+        .map(|other| other.name().to_string())
+        .filter(|name| name != plugin.name())
+        .collect();
+    match crate::plugins::export::export_plugin_bundle(&plugin, &target, &existing_names) {
+        Ok(receipt) => {
+            let mut output = format!(
+                "Exported `{}` as an Agent Plugins v1.0.0 bundle:\n  {}\n",
+                escape_review_text(&receipt.exported_name),
+                escape_review_path(&receipt.target),
+            );
+            if let Some(display_name) = &receipt.display_name {
+                let _ = writeln!(
+                    output,
+                    "  Published under a slugified name; `{}` is preserved as the display name.",
+                    escape_review_text(display_name)
+                );
+            }
+            let _ = writeln!(
+                output,
+                "  plugin.json{} · {} file(s) copied{}",
+                if receipt.wrote_mcp_json {
+                    " + mcp.json"
+                } else {
+                    ""
+                },
+                receipt.files_copied,
+                if receipt.skills_normalized {
+                    " · skills moved to the standard skills/ layout"
+                } else {
+                    ""
+                }
+            );
+            output.push_str("The installed bundle was not modified.");
+            CommandResult::message(output)
+        }
+        Err(error) => CommandResult::error(format!(
+            "Export of `{}` failed: {}",
+            escape_review_text(plugin.name()),
+            escape_review_text(&error)
+        )),
+    }
 }
 
 fn review_bundle(app: &App, selector: &str) -> CommandResult {

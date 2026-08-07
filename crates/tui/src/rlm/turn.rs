@@ -238,6 +238,7 @@ async fn run_rlm_turn_impl(
     )];
 
     let mut consecutive_no_code: u32 = 0;
+    let mut consecutive_empty_rounds: u32 = 0;
     let mut last_response_text = String::new();
 
     let result = 'turn: {
@@ -465,6 +466,91 @@ async fn run_rlm_turn_impl(
                 };
             }
 
+            // 4e+. Empty/no-op guard — same contract as the normal Agent REPL path.
+            // If the block produced no stdout, no RPC, and no finalize(), tell the
+            // model plainly and count consecutive empties to avoid an infinite loop.
+            let is_empty_round = !round.has_error
+                && round.stdout.trim().is_empty()
+                && round.stderr.trim().is_empty()
+                && round.rpc_count == 0
+                && round.final_value.is_none();
+            if is_empty_round {
+                consecutive_empty_rounds = consecutive_empty_rounds.saturating_add(1);
+                let empty_feedback = if consecutive_empty_rounds >= MAX_CONSECUTIVE_NO_CODE {
+                    format!(
+                        "Your emitted ```repl block (round {}) result: no observable output — print something, call a helper, or stop emitting REPL blocks and answer. No output for {consecutive_empty_rounds} consecutive rounds; stopping empty loop.",
+                        iteration + 1
+                    )
+                } else {
+                    format!(
+                        "Your emitted ```repl block (round {}) result: no observable output — print something, call a helper, or stop emitting REPL blocks and answer",
+                        iteration + 1
+                    )
+                };
+                messages.push(Message {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: format!("```repl\n{code_to_run}\n```"),
+                        cache_control: None,
+                    }],
+                });
+                messages.push(build_metadata_message(
+                    &prompt,
+                    root_prompt.as_deref(),
+                    iteration + 1,
+                    Some(&code_to_run),
+                    Some(&empty_feedback),
+                ));
+                if consecutive_empty_rounds >= MAX_CONSECUTIVE_NO_CODE {
+                    break 'turn RlmTurnResult {
+                        answer: last_response_text.clone(),
+                        iterations: iteration + 1,
+                        duration: start.elapsed(),
+                        error: Some(format!(
+                            "RLM: {MAX_CONSECUTIVE_NO_CODE} consecutive empty REPL rounds"
+                        )),
+                        usage: total_usage,
+                        termination: RlmTermination::NoCode,
+                        trace: trace.clone(),
+                        total_rpcs,
+                    };
+                }
+                if messages.len() > MAX_HISTORY_MESSAGES {
+                    let drop_from = messages.len() - MAX_HISTORY_MESSAGES + 1;
+                    let mut kept = vec![messages[0].clone()];
+                    kept.extend(messages.drain(drop_from..));
+                    messages = kept;
+                }
+                continue;
+            } else {
+                consecutive_empty_rounds = 0;
+            }
+
+            // Provenance: make round feedback unambiguous — it is always the
+            // assistant's own emitted block, never the user's.
+            let provenance_prefix = format!(
+                "Your emitted ```repl block (round {}) result:",
+                iteration + 1
+            );
+            let stdout_for_feedback = if round.has_error {
+                format!(
+                    "{provenance_prefix} error\nstdout:\n{}\nstderr:\n{}",
+                    round.stdout, round.stderr
+                )
+            } else if round.stdout.trim().is_empty() && round.rpc_count == 0 {
+                format!(
+                    "{provenance_prefix} no output — block produced no observable output — print something, call a helper, or stop emitting REPL blocks and answer\nstdout:\n{}\n[{} child query RPC(s)]",
+                    round.stdout, round.rpc_count
+                )
+            } else {
+                format!(
+                    "{provenance_prefix}\n[{} child query RPC(s)]\n{}",
+                    round.rpc_count, round.stdout
+                )
+            };
+            let stdout_preview_for_next =
+                truncate_text(stdout_for_feedback.trim(), STDOUT_METADATA_PREVIEW_LEN);
+
             // 4f. Build metadata for next iteration.
             messages.push(Message {
                 role: "assistant".to_string(),
@@ -478,7 +564,7 @@ async fn run_rlm_turn_impl(
                 root_prompt.as_deref(),
                 iteration + 1,
                 Some(&code_to_run),
-                Some(&stdout_preview),
+                Some(&stdout_preview_for_next),
             ));
 
             if messages.len() > MAX_HISTORY_MESSAGES {

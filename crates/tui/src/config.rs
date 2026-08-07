@@ -1485,7 +1485,11 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::LongCat => vec![DEFAULT_LONGCAT_MODEL],
         ApiProvider::OpencodeGo => OPENCODE_GO_CHAT_MODELS.to_vec(),
         ApiProvider::OpencodeZen => vec![DEFAULT_OPENCODE_ZEN_MODEL],
-        ApiProvider::Meta => vec![DEFAULT_META_MODEL],
+        ApiProvider::Meta => vec![
+            DEFAULT_META_MODEL,
+            "muse-spark-1.1",
+            "muse-spark-1.2-contributor",
+        ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
             XAI_GROK_4_3_MODEL,
@@ -6126,6 +6130,19 @@ impl Config {
             .or_else(default_memory_path)
             .unwrap_or_else(|| PathBuf::from("./memory.md"));
         if self.memory_backend() == MemoryBackend::Native {
+            // The configured value is historically a *legacy single-file*
+            // path (`$CODEWHALE_HOME/memory.md`), and the native store lives
+            // beside it. Deriving from the parent is therefore right for the
+            // default and for anyone still carrying the old setting.
+            //
+            // But someone who points `memory_path` at a native store — the
+            // obvious reading of the name — used to get a second one nested
+            // inside it (`…/memory/global/memory/global/MEMORY.md`), silently
+            // writing somewhere other than the file they named. Honour an
+            // already-native path as itself.
+            if crate::native_memory::NativeMemoryStore::from_global_path(&legacy_path).is_some() {
+                return legacy_path;
+            }
             return legacy_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))

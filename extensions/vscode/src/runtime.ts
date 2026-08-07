@@ -81,6 +81,18 @@ export async function checkRuntime(config: RuntimeConfig): Promise<RuntimeState>
     return { kind: "auth-required", baseUrl, detail: "Runtime info requires a token." };
   }
 
+  // `/health` and `/v1/runtime/info` are intentionally unauthenticated, so a
+  // token-protected runtime answers both with HTTP 200. The info body carries
+  // the real signal: `auth_required`. Without it we would report "Connected"
+  // while every `/v1/*` data fetch then fails with 401.
+  if (readAuthRequired(info.body) && !config.token) {
+    return {
+      kind: "auth-required",
+      baseUrl,
+      detail: "Runtime requires a bearer token. Set codewhale.runtimeToken to connect.",
+    };
+  }
+
   const version = readVersion(info.body);
   return {
     kind: "connected",
@@ -204,6 +216,13 @@ function readVersion(value: unknown): string | undefined {
   }
   const version = (value as { version?: unknown }).version;
   return typeof version === "string" ? version : undefined;
+}
+
+function readAuthRequired(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return (value as { auth_required?: unknown }).auth_required === true;
 }
 
 function readThreadSummaries(value: unknown): ThreadSummary[] {

@@ -8,7 +8,7 @@
 //! data, never as a new authority layer.
 
 use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -123,6 +123,9 @@ pub fn refine(workspace: &Path, refinement: HarnessRefinement) -> Result<Harness
         state.schema_version = SCHEMA_VERSION;
         state.entries.push(entry.clone());
         save_state(&path, &state)?;
+        // Journalled after the state is durable: a logged edit that never
+        // landed would be worse than an unlogged one.
+        append_journal(&path, "refine", &entry)?;
         Ok(entry)
     })
 }
@@ -145,6 +148,9 @@ pub fn remove(workspace: &Path, id: &str) -> Result<HarnessEntry> {
         let removed = state.entries.remove(index);
         state.schema_version = SCHEMA_VERSION;
         save_state(&path, &state)?;
+        // Removal is the edit most worth recording: the entry is gone from
+        // state, so the journal is the only place its content survives.
+        append_journal(&path, "remove", &removed)?;
         Ok(removed)
     })
 }
@@ -179,6 +185,47 @@ pub fn prompt_block(workspace: &Path) -> Option<String> {
 fn state_path_for_read(workspace: &Path) -> Result<PathBuf> {
     let (_, dir) = codewhale_config::resolve_project_state_dir(workspace, "harness")?;
     Ok(dir.join("state.json"))
+}
+
+/// Append-only record of every change to harness state.
+///
+/// `refine` and `remove` are the model editing the prompt notes, sub-agent
+/// briefs, and skill hints it will read back next session. Without a record,
+/// a retired entry is simply gone and a drifting ledger looks identical to a
+/// correct one. The journal makes the edits reviewable after the fact.
+///
+/// Markdown next to `state.json` so it is readable without tooling, and
+/// deliberately not part of the state file so a corrupt or future-version
+/// state — which `prompt_block` already refuses to render — can never take
+/// the history down with it.
+fn append_journal(state_path: &Path, action: &str, entry: &HarnessEntry) -> Result<()> {
+    let path = journal_path(state_path);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open harness journal {}", path.display()))?;
+    writeln!(
+        file,
+        "\n- **{action}** `{stamp}` {} `{}`",
+        entry.kind.as_str(),
+        entry.id
+    )?;
+    writeln!(file, "  - title: {}", entry.title)?;
+    writeln!(file, "  - content: {}", entry.content)?;
+    writeln!(file, "  - evidence: {}", entry.evidence)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+/// The journal beside a given harness state file.
+#[must_use]
+pub fn journal_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("JOURNAL.md")
 }
 
 fn state_path_for_write(workspace: &Path) -> Result<PathBuf> {
@@ -429,5 +476,43 @@ mod tests {
                     .any(|entry| entry.title == format!("Concurrent refinement {index}"))
             );
         }
+    }
+
+    /// Removal drops the entry from state, so the journal is the only place
+    /// its content and evidence survive. Without it a retired prompt note is
+    /// unrecoverable and the edit is invisible in review.
+    #[test]
+    fn removal_survives_in_the_journal() {
+        let tmp = tempdir().expect("tempdir");
+        let entry = refine(
+            tmp.path(),
+            HarnessRefinement {
+                kind: HarnessEntryKind::PromptNote,
+                title: "Prefer receipts".to_string(),
+                content: "State the command that produced the evidence".to_string(),
+                evidence: "reviewer asked for provenance twice".to_string(),
+            },
+        )
+        .expect("refine");
+
+        remove(tmp.path(), &entry.id).expect("remove");
+
+        let overview = overview(tmp.path()).expect("overview");
+        assert!(
+            overview.entries.is_empty(),
+            "entry must leave state: {overview:?}"
+        );
+
+        let journal = fs::read_to_string(journal_path(&overview.path)).expect("journal");
+        assert!(journal.contains("**refine**"), "{journal}");
+        assert!(journal.contains("**remove**"), "{journal}");
+        assert!(
+            journal.contains("State the command that produced"),
+            "{journal}"
+        );
+        assert!(
+            journal.contains("reviewer asked for provenance twice"),
+            "{journal}"
+        );
     }
 }

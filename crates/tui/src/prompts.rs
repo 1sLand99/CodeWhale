@@ -1484,8 +1484,8 @@ mod tests {
     fn agent_mode_carries_execution_discipline_block() {
         for phrase in [
             "Execute the user's task autonomously",
-            "Keep `work_update` current",
-            "present; otherwise",
+            "call `todo_write` with all planned steps",
+            "Keep it current as you go",
             "verify load-bearing child",
             "never manufacture completion sentinels",
             "For substantial work",
@@ -1969,10 +1969,9 @@ mod tests {
     #[test]
     fn plan_mode_prompt_uses_one_progress_surface() {
         assert!(
-            PLAN_MODE.contains("When `work_update` is present")
-                && PLAN_MODE.contains("canonical list there")
-                && PLAN_MODE.contains("otherwise keep progress in your response"),
-            "Plan mode must condition progress guidance on the live catalog"
+            PLAN_MODE.contains("call `todo_write` with all planned steps")
+                && PLAN_MODE.contains("There is no second Strategy/Plan progress surface"),
+            "Plan mode must carry §3d todo_write wording and single-surface note"
         );
         assert!(!PLAN_MODE.contains("call `update_plan`"));
         assert!(
@@ -2890,7 +2889,7 @@ mod tests {
         for must in [
             "autonomously",
             "tools in the current catalog",
-            "work_update",
+            "todo_write",
             "current catalog includes delegation",
             "Do not announce the mode",
         ] {
@@ -2926,8 +2925,9 @@ mod tests {
                 crate::compaction::estimate_text_tokens_conservative(&normalized);
             // 2026-07-21: mode deltas contain permissions and durable behavior
             // only. Action recipes belong to the canonical tool schemas.
-            let max_words = 120;
-            let max_tokens = 320;
+            // 2026-08-06: §3d expanded Agent/Plan with work_update wording (165 words).
+            let max_words = 180;
+            let max_tokens = 400;
 
             assert!(
                 word_count <= max_words,

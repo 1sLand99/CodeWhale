@@ -1106,11 +1106,22 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
-            // Meta Model API / Muse Spark.
+            // Meta Model API / Muse Spark. Keep these in step with
+            // `DEFAULT_META_MODEL` in config's provider_defaults and with the
+            // bundled models.dev catalog: this registry resolves the `muse`
+            // aliases for the CLI and app-server, so a stale id here silently
+            // routes them somewhere the configured default never points.
             ModelInfo {
-                id: "muse-spark-1.1".to_string(),
+                id: "muse-spark-1.2".to_string(),
                 provider: ProviderKind::Meta,
                 aliases: vec!["muse-spark".to_string(), "muse".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
+                id: "muse-spark-1.2-contributor".to_string(),
+                provider: ProviderKind::Meta,
+                aliases: vec!["muse-spark-contributor".to_string()],
                 supports_tools: true,
                 supports_reasoning: true,
             },
@@ -1900,7 +1911,7 @@ mod tests {
             (ProviderKind::Minimax, "MiniMax-M2.1"),
             (ProviderKind::MinimaxAnthropic, "MiniMax-M3"),
             (ProviderKind::Openmodel, "deepseek-v4-flash"),
-            (ProviderKind::Meta, "muse-spark-1.1"),
+            (ProviderKind::Meta, "muse-spark-1.2"),
             (ProviderKind::Xai, "grok-4.5"),
         ] {
             assert!(
@@ -2004,14 +2015,14 @@ mod tests {
 
         let default = registry.resolve(None, Some(ProviderKind::Meta));
         assert_eq!(default.resolved.provider, ProviderKind::Meta);
-        assert_eq!(default.resolved.id, "muse-spark-1.1");
+        assert_eq!(default.resolved.id, "muse-spark-1.2");
         assert!(default.used_fallback);
 
         let alias = registry.resolve(Some("muse-spark"), Some(ProviderKind::Meta));
         assert_eq!(alias.resolved.provider, ProviderKind::Meta);
-        assert_eq!(alias.resolved.id, "muse-spark-1.1");
+        assert_eq!(alias.resolved.id, "muse-spark-1.2");
         assert!(!alias.used_fallback);
-        assert_eq!(model_family("muse-spark-1.1"), ModelFamily::Meta);
+        assert_eq!(model_family("muse-spark-1.2"), ModelFamily::Meta);
     }
 
     #[test]

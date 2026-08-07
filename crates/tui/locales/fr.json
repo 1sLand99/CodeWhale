@@ -1203,6 +1203,7 @@
   "BehavioralTipClearedInput": "Effacé · {chord} restaure",
   "BehavioralTipMcpValidation": "{command} démarre les serveurs et montre pourquoi",
   "BehavioralTipRepeatedCommand": "{command} peut épingler ceci",
+  "BehavioralTipDurableStateWritten": "Enregistré · {command} pour voir",
   "SettingLockedDuringTurn": "{setting} est verrouillé pendant qu'un tour est en cours — appuyez d'abord sur Esc pour interrompre",
   "SettingSubjectMode": "Le mode",
   "SettingSubjectThinking": "Le raisonnement",

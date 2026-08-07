@@ -9847,6 +9847,24 @@ enum ExecStreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         result_metadata: Option<serde_json::Value>,
     },
+    /// A sub-agent was launched, and the model it was launched on.
+    ///
+    /// Without this, a delegated child is invisible to anything reading the
+    /// stream: a parent turn on one route could spawn children billed on
+    /// another and the only place it surfaced was the invoice. That is not
+    /// hypothetical — the `Fast` loadout re-priced scout children onto a
+    /// cheaper sibling until it was fixed, and nothing in the output said so.
+    #[serde(rename = "agent_spawned")]
+    AgentSpawned {
+        id: String,
+        model: String,
+        spawn_depth: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
+        /// Why the child got this route, when the spawn path resolved one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        route_source: Option<String>,
+    },
     #[serde(rename = "sandbox_denied")]
     SandboxDenied {
         tool_id: String,
@@ -10883,6 +10901,7 @@ async fn run_exec_agent(
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        subagent_state_root: None,
         plugin_registry: Some(engine_plugin_registry),
         allow_shell: !fleet_authority_active && (auto_approve || execution_config.allow_shell()),
         trust_mode,
@@ -11262,6 +11281,22 @@ async fn run_exec_agent(
                     "sub-agent {id} completed: {}",
                     summarize_tool_output(&result)
                 );
+            }
+            Event::AgentSpawned {
+                id,
+                parent_run_id,
+                spawn_depth,
+                model,
+                route_source,
+                ..
+            } if output_format == ExecOutputFormat::StreamJson => {
+                emit_exec_stream_event(&ExecStreamEvent::AgentSpawned {
+                    id,
+                    model,
+                    spawn_depth,
+                    parent_run_id,
+                    route_source,
+                })?;
             }
             Event::AgentSpawned { .. }
             | Event::AgentProgress { .. }

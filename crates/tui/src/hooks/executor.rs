@@ -5612,7 +5612,7 @@ command = "echo project"
             ("load_skill", "other"),
             ("remember", "other"),
             ("tasks", "other"),
-            ("work_update", "other"),
+            ("todo_write", "other"),
         ];
         for name in crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS {
             let expected = EXPECTED.iter().find(|(n, _)| n == name).map(|(_, c)| *c);

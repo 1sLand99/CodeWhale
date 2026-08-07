@@ -673,7 +673,9 @@ mark.search-highlight {
  *
  * The TUI's ambient life — fish, jellyfish, bubbles, the whale cameo — stays
  * out of scope. This page quotes the product's restraint doctrine in its own
- * copy. Four keyframes on the whole site, and this is two of them.
+ * copy. The standing loops on the whole site are four — ticker, caret, and
+ * these two. Entrances are transitions, and the one-shot settles live in the
+ * Motion section below under the same no-preference gate.
  */
 
 /* M1 — the column breath. Opacity only, on a 90s cycle: the TUI's authored
@@ -709,6 +711,179 @@ mark.search-highlight {
   .codewhale-caustic {
     animation: cw-caustic 4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Motion — entrances, considered hovers, and one-shot settles        */
+/* ------------------------------------------------------------------ */
+/*
+ * Grammar: content settles into place the way type is laid on the sheet —
+ * a short rise, an ease-out, and done; groups that read as groups arrive in
+ * sequence. Everything in this section animates transform and/or opacity
+ * only: nothing here can trigger layout, and the moving rules are gated on
+ * `no-preference`, so reduced motion is the *absence* of motion rather than
+ * an override fighting it.
+ *
+ * Arming is a JS concern (components/reveal-on-scroll.tsx): [data-reveal]
+ * elements and [data-reveal-group] children are hidden only once the observer
+ * has confirmed they are below the fold. Without JS, without
+ * IntersectionObserver, or with reduced motion, the marks are inert and the
+ * page is complete and static.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  [data-reveal].reveal-armed,
+  [data-reveal-group] > .reveal-armed {
+    opacity: 0;
+    transform: translateY(var(--reveal-rise, 14px));
+    transition:
+      opacity 340ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
+      transform 340ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    transition-delay: var(--reveal-delay, 0ms);
+  }
+
+  /* Group children arrive in sequence; a tighter rise keeps the queue reading
+     as one gesture rather than as separate hops. */
+  [data-reveal-group] > .reveal-armed {
+    --reveal-rise: 10px;
+  }
+
+  [data-reveal].reveal-armed.reveal-in,
+  [data-reveal-group] > .reveal-armed.reveal-in {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* A print or a reader-mode capture taken mid-scroll must not lose sections to
+   an armed-but-never-revealed state. */
+@media print {
+  [data-reveal].reveal-armed,
+  [data-reveal-group] > .reveal-armed {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The nav-link underline draw, extended to the other mono-voice links. Hover
+   draws the rule; the transition is the whole effect, so reduced motion keeps
+   the existing colour change and simply skips the draw. */
+.product-start-links a,
+.gs-step-link,
+.product-surfaces > .product-container > a,
+.product-community nav a {
+  position: relative;
+}
+
+.product-start-links a::after,
+.gs-step-link::after,
+.product-surfaces > .product-container > a::after,
+.product-community nav a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 180ms ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .product-start-links a:hover::after,
+  .gs-step-link:hover::after,
+  .product-surfaces > .product-container > a:hover::after,
+  .product-community nav a:hover::after {
+    transform: scaleX(1);
+  }
+}
+
+/* The primary-button arrow leans into the direction it points. */
+.product-button > span[aria-hidden="true"] {
+  display: inline-block;
+  transition: transform 150ms ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .product-button:hover > span[aria-hidden="true"],
+  .product-button:focus-visible > span[aria-hidden="true"] {
+    transform: translateX(2px);
+  }
+}
+
+/* Copy-to-clipboard: the press is a stamp, the confirmation a jade seal —
+   the wire's merge verb colour, borrowed for one beat. The colour change is
+   unconditional (it is the confirmation); only the motion is gated. */
+.copy-btn[data-copied="true"] {
+  background: var(--jade);
+  color: var(--paper);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .copy-btn {
+    transition: background-color 150ms ease, color 150ms ease, transform 120ms ease;
+  }
+
+  .copy-btn:active {
+    transform: scale(0.95);
+  }
+
+  .copy-btn[data-copied="true"] {
+    animation: copy-settle 300ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  }
+}
+
+@keyframes copy-settle {
+  0% { transform: scale(1); }
+  35% { transform: scale(0.93); }
+  70% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+
+/* Mobile menu: the sheet drops a few points while its items settle in
+   sequence; exit is a short fade. The exit is driven by a delayed unmount in
+   components/mobile-menu.tsx — with reduced motion the menu mounts and
+   unmounts instantly, exactly as before. */
+@media (prefers-reduced-motion: no-preference) {
+  .mm-panel {
+    animation: mm-in 240ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  }
+
+  .mm-panel.mm-closing {
+    animation: mm-out 170ms cubic-bezier(0.4, 0, 0.8, 0.4) both;
+    pointer-events: none;
+  }
+
+  .mm-panel li,
+  .mm-panel nav > a {
+    animation: mm-rise 280ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  }
+
+  .mm-panel li:nth-child(1) { animation-delay: 34ms; }
+  .mm-panel li:nth-child(2) { animation-delay: 58ms; }
+  .mm-panel li:nth-child(3) { animation-delay: 82ms; }
+  .mm-panel li:nth-child(4) { animation-delay: 106ms; }
+  .mm-panel li:nth-child(5) { animation-delay: 130ms; }
+  .mm-panel li:nth-child(6) { animation-delay: 154ms; }
+  .mm-panel li:nth-child(7) { animation-delay: 178ms; }
+  .mm-panel li:nth-child(8) { animation-delay: 202ms; }
+  .mm-panel nav > a { animation-delay: 226ms; }
+}
+
+@keyframes mm-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mm-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-6px); }
+}
+
+@keyframes mm-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------- decorative big CJK in margin ---------- */
@@ -1598,6 +1773,13 @@ body:has(.product-home) .site-github-link {
   line-height: 1.7;
 }
 
+/* The trace plate lifts off the paper-deep band the way the hero capture
+   lifts off the sheet. Depth as hierarchy: ocean objects cast, paper objects
+   stay flat — the ivory cards keep their no-shadow rule. */
+.terminal-frame {
+  box-shadow: 0 14px 36px rgba(3, 7, 13, 0.16);
+}
+
 .paper-start {
   border-bottom: 1px solid var(--hairline);
   background: var(--paper);
@@ -1701,6 +1883,8 @@ body:has(.product-home) .site-github-link {
   font-family: var(--font-mono), "JetBrains Mono", monospace;
   font-size: clamp(0.68rem, 1.2vw, 0.8rem);
   line-height: 1.45;
+  /* An ocean plate resting on the sheet — the same lift as the trace pane. */
+  box-shadow: 0 14px 34px rgba(3, 7, 13, 0.12);
 }
 
 .product-receipt span:first-child {
@@ -2142,6 +2326,13 @@ html[lang="ko"] .ocean-column h2 {
   border-bottom: 1px solid var(--stage-line);
   color: var(--action-on-dark);
   font-size: 0.82rem;
+  transition: border-color 150ms ease;
+}
+
+/* The underline is already there; hover just sharpens it to the link's own
+   blue. No draw needed where a hairline already sits. */
+.product-install-band a:hover {
+  border-color: var(--action-on-dark);
 }
 
 .product-community {

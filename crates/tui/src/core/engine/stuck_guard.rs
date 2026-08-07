@@ -45,6 +45,7 @@ impl StepFingerprint {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn waiting_for_subagents(running: usize) -> Self {
         Self::WaitingForSubagents { running }
     }
@@ -259,12 +260,11 @@ impl StuckGuard {
         self.repeated_actions = 0;
         self.repeated_pairs = 0;
         self.no_progress_messages = 0;
-        // step_history and alternation_repeats deliberately survive: the
-        // alternation detector's A-B-A-B window spans the category switches
-        // an episode reset represents, so clearing here would starve it.
-        self.warned = false;
-        self.repeats_after_warning = 0;
-        self.last_reason = None;
+        // step_history, alternation_repeats, and the Warn/Stop escalation
+        // deliberately survive: the alternation detector's A-B-A-B window
+        // spans the category switches an episode reset represents, so
+        // clearing here would starve it. Mixed assistant↔tool cycles must
+        // still escalate Warn→Stop (see NOTE-turn-loop-wrongness § Must-fix 1).
     }
 }
 

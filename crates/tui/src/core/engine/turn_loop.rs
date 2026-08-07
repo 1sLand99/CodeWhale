@@ -460,6 +460,14 @@ impl Engine {
         // (no declared budget) leaves the gate below inert.
         let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
         let mut goal_continuations_this_turn = 0u32;
+        // Turn-scoped empty REPL guard (NOTE-turn-loop-wrongness §2): persists
+        // across model steps so 3 consecutive empty blocks end the turn, not
+        // just 3 blocks inside one message.
+        let mut consecutive_empty_repl_rounds: u32 = 0;
+        // Combined no-user-input resume backstop (NOTE §5): ends runaway
+        // resumes well before max_steps (1000). Each continue without user
+        // input bumps this; threshold is honest and observable.
+        let mut no_user_input_continues: u32 = 0;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3), the host slept mid-turn (#2990), or a headless host hit
@@ -1664,7 +1672,12 @@ impl Engine {
             }
 
             // If no tool uses, check for inline REPL blocks (paper §2) or
-            // finish the turn.
+            // finish the turn. Honest ladder (NOTE-turn-loop-wrongness §3):
+            // 1) pending steers → resume, 2) queued subagent completions →
+            // resume, 3) REPL fences → run (empty cap may end), 4) goal
+            // continuation if under cap → resume, 5) else end (only then
+            // "background children" status if running>0). No status claims
+            // "ending" before step 5.
             if tool_uses.is_empty() {
                 if !pending_steers.is_empty() {
                     for steer in pending_steers.drain(..) {
@@ -1674,6 +1687,20 @@ impl Engine {
                         self.add_session_message(self.user_text_message_with_turn_metadata(steer))
                             .await;
                     }
+                    no_user_input_continues = no_user_input_continues.saturating_add(1);
+                    if no_user_input_continues >= 12 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                            ))
+                            .await;
+                        break;
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::status("Continuing — queued steer input".to_string()))
+                        .await;
                     turn.next_step();
                     continue;
                 }
@@ -1687,70 +1714,28 @@ impl Engine {
                     }
                 }
 
-                // Sub-agent completion handoff (issue #756). The model finished
-                // streaming with no tool calls — but if it has direct children
-                // still running (or completions queued from children that
-                // finished while we were inferring), surface their
-                // `<codewhale:subagent.done>` sentinels into the transcript and
-                // resume instead of ending the turn. This fulfils the contract
-                // already documented in the constitution (`prompts/text.rs`,
-                // `BASE_PROMPT`): the parent is promised it'll see the sentinel
-                // when a child finishes.
+                // Sub-agent completion handoff (issue #756). Resuming when
+                // queued completions exist is correct; #3216 says do NOT
+                // barrier on running children. Running children are background
+                // work; results return via sentinel on a later turn.
                 let subagent_completions = self.drain_subagent_completion_events("").await;
-                if subagent_completions == 0 {
-                    // #3216: do NOT barrier the parent on running children.
-                    // Launching a sub-agent is not the same as joining it — the
-                    // parent ends its turn and stays responsive. Running children
-                    // are background work; their results return via the
-                    // completion sentinel on a later turn. Stale children are filtered out of
-                    // `running_count` by the manager's heartbeat, so they neither
-                    // block nor inflate the surfaced count. (Previously the parent
-                    // waited in a select! loop here until a completion or the
-                    // heartbeat timeout, which read as a hard TUI freeze.)
-                    // Cancellation and steering are handled at the top of the step
-                    // loop; stale-agent cleanup is the manager's responsibility.
-                    let running = {
-                        let mgr = self.subagent_manager.read().await;
-                        mgr.running_count()
-                    };
-                    if running > 0 {
-                        if let Some(signal) =
-                            stuck_guard.observe(StepFingerprint::waiting_for_subagents(running))
-                        {
-                            match signal {
-                                StuckSignal::Warn { reason } => {
-                                    let started = no_progress_warning_started_at
-                                        .get_or_insert_with(Instant::now);
-                                    let status =
-                                        no_progress_status_message(&reason, started.elapsed());
-                                    let _ = self.tx_event.send(Event::status(status)).await;
-                                }
-                                StuckSignal::Stop { reason } => {
-                                    let elapsed = no_progress_warning_started_at
-                                        .get_or_insert_with(Instant::now)
-                                        .elapsed();
-                                    let status = no_progress_status_message(&reason, elapsed);
-                                    crate::logging::warn(compact_no_progress_diagnostic(
-                                        &reason, elapsed,
-                                    ));
-                                    let _ = self.tx_event.send(Event::status(status.clone())).await;
-                                    return (TurnOutcomeStatus::Failed, Some(status));
-                                }
-                            }
-                        }
+                if subagent_completions > 0 {
+                    no_user_input_continues = no_user_input_continues.saturating_add(1);
+                    if no_user_input_continues >= 12 {
                         let _ = self
                             .tx_event
-                            .send(Event::status(format!(
-                                "Turn ending with {running} sub-agent(s) still running in the background; they'll report when done."
-                            )))
+                            .send(Event::status(
+                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                            ))
                             .await;
-                        // Inject a waiting hint so the model does not poll
-                        // with peek/status/sleep on the next turn (issue #4097).
-                        self.add_session_message(waiting_for_subagents_runtime_message(running))
-                            .await;
+                        break;
                     }
-                }
-                if subagent_completions > 0 {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Continuing — {subagent_completions} sub-agent(s) completed"
+                        )))
+                        .await;
                     turn.next_step();
                     continue;
                 }
@@ -1761,6 +1746,10 @@ impl Engine {
                 // from earlier steps. That keeps the simple `repl` route useful
                 // for sustained work instead of forcing the model through a
                 // separate open/eval/configure control surface.
+                // No-tool step: reset tool-error streak (10) — only true
+                // consecutive tool batches should be counted.
+                consecutive_tool_error_steps = 0;
+
                 if has_sendable_assistant_content
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
                 {
@@ -1774,6 +1763,7 @@ impl Engine {
                                     .tx_event
                                     .send(Event::status(format!("REPL init failed: {e}")))
                                     .await;
+                                turn_error = Some(format!("REPL init failed: {e}"));
                                 break;
                             }
                         };
@@ -1796,6 +1786,7 @@ impl Engine {
                             .tx_event
                             .send(Event::status(format!("REPL context refresh failed: {e}")))
                             .await;
+                        turn_error = Some(format!("REPL context refresh failed: {e}"));
                         break;
                     }
 
@@ -1820,6 +1811,7 @@ impl Engine {
 
                     let mut final_result: Option<String> = None;
                     let mut kernel_failed = false;
+                    let mut empty_cap_hit = false;
                     for (i, block) in repl_blocks.iter().enumerate() {
                         let round_num = i + 1;
                         let _ = self
@@ -1859,25 +1851,65 @@ impl Engine {
                                     break;
                                 }
 
-                                // No FINAL — feed truncated stdout back as user metadata.
-                                let feedback = if round.has_error {
-                                    format!(
-                                        "[REPL round {round_num} error]\nstdout:\n{}\nstderr:\n{}",
-                                        round.stdout, round.stderr
+                                // Empty-round guard + provenance (PROMPT-repl-fence-fix.md parts 2 & 3).
+                                // Detection stays prompt-only (has_repl_block unchanged) to preserve
+                                // saved-transcript replay (tools/rlm.rs kept). Provenance makes clear
+                                // the block was the assistant's own; empty rounds get guidance + a
+                                // consecutive cap so the model cannot loop forever.
+                                let is_empty_round = !round.has_error
+                                    && round.stdout.trim().is_empty()
+                                    && round.stderr.trim().is_empty()
+                                    && round.rpc_count == 0;
+                                if is_empty_round {
+                                    consecutive_empty_repl_rounds =
+                                        consecutive_empty_repl_rounds.saturating_add(1);
+                                    let hit_cap = consecutive_empty_repl_rounds >= 3;
+                                    let feedback = if hit_cap {
+                                        format!(
+                                            "[Your emitted ```repl block (round {round_num}) produced no observable output — print something, call a helper, or stop emitting REPL blocks and answer. No output for {consecutive_empty_repl_rounds} consecutive rounds; stopping empty loop]\n[0 child query RPC(s)]"
+                                        )
+                                    } else {
+                                        format!(
+                                            "[Your emitted ```repl block (round {round_num}) produced no observable output — print something, call a helper, or stop emitting REPL blocks and answer]\n[0 child query RPC(s)]"
+                                        )
+                                    };
+                                    self.add_session_message(
+                                        self.runtime_text_message_with_turn_metadata(
+                                            feedback,
+                                            UserInputProvenance::Runtime,
+                                        ),
                                     )
+                                    .await;
+                                    if hit_cap {
+                                        empty_cap_hit = true;
+                                        // Honest stop: do not continue the turn with a lying
+                                        // "stopping" string. The cap is real.
+                                        break;
+                                    }
                                 } else {
-                                    format!(
-                                        "[REPL round {round_num} output; {} child query RPC(s)]\n{}",
-                                        round.rpc_count, round.stdout
+                                    consecutive_empty_repl_rounds = 0;
+                                    let provenance_prefix = format!(
+                                        "Your emitted ```repl block (round {round_num}) result:"
+                                    );
+                                    let feedback = if round.has_error {
+                                        format!(
+                                            "{provenance_prefix} error\nstdout:\n{}\nstderr:\n{}",
+                                            round.stdout, round.stderr
+                                        )
+                                    } else {
+                                        format!(
+                                            "{provenance_prefix}\n[{} child query RPC(s)]\n{}",
+                                            round.rpc_count, round.stdout
+                                        )
+                                    };
+                                    self.add_session_message(
+                                        self.runtime_text_message_with_turn_metadata(
+                                            feedback,
+                                            UserInputProvenance::Runtime,
+                                        ),
                                     )
-                                };
-                                self.add_session_message(
-                                    self.runtime_text_message_with_turn_metadata(
-                                        feedback,
-                                        UserInputProvenance::Runtime,
-                                    ),
-                                )
-                                .await;
+                                    .await;
+                                }
                             }
                             Err(e) => {
                                 let _ = self
@@ -1943,7 +1975,32 @@ impl Engine {
                         break;
                     }
 
+                    if empty_cap_hit {
+                        // Empty cap already fed back with honest "stopping" text
+                        // inside the round loop. End the turn now instead of
+                        // letting the outer ladder synthesize another provider
+                        // request.
+                        break;
+                    }
+
                     // No FINAL — let the model iterate with the feedback.
+                    // Count toward the combined no-user-input backstop.
+                    no_user_input_continues = no_user_input_continues.saturating_add(1);
+                    if no_user_input_continues >= 12 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Turn ending: no-user-input resume backstop hit (12 consecutive continuations)".to_string(),
+                            ))
+                            .await;
+                        break;
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Continuing — REPL round feedback (consecutive_empty={consecutive_empty_repl_rounds})"
+                        )))
+                        .await;
                     turn.next_step();
                     continue;
                 }
@@ -1976,6 +2033,22 @@ impl Engine {
                 }
 
                 if self.drain_subagent_completion_events("late").await > 0 {
+                    no_user_input_continues = no_user_input_continues.saturating_add(1);
+                    if no_user_input_continues >= 12 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                            ))
+                            .await;
+                        break;
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(
+                            "Continuing — late sub-agent completion".to_string(),
+                        ))
+                        .await;
                     turn.next_step();
                     continue;
                 }
@@ -1993,30 +2066,59 @@ impl Engine {
                         UserInputProvenance::Runtime,
                     ))
                     .await;
+                    no_user_input_continues = no_user_input_continues.saturating_add(1);
+                    if no_user_input_continues >= 12 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(
+                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                            ))
+                            .await;
+                        break;
+                    }
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Continuing — goal still active ({}/{})",
+                            goal_continuations_this_turn, 3
+                        )))
+                        .await;
                     turn.next_step();
                     continue;
                 }
 
-                if thinking_only_no_sendable {
-                    let holding_for_subagents = {
-                        let running = {
-                            let mgr = self.subagent_manager.read().await;
-                            mgr.running_count()
-                        };
-                        should_hold_turn_for_subagents(0, running)
-                    };
-                    if should_emit_thinking_only_status(
+                if thinking_only_no_sendable
+                    && should_emit_thinking_only_status(
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
                         !pending_steers.is_empty(),
-                        holding_for_subagents,
-                    ) {
-                        let message = "Model returned reasoning but no answer or tool call; \
-                                       turn ended without output. Send a follow-up to retry."
-                            .to_string();
-                        crate::logging::warn(&message);
-                        let _ = self.tx_event.send(Event::status(message)).await;
+                        false,
+                    )
+                {
+                    let message = "Model returned reasoning but no answer or tool call; \
+                                   turn ended without output. Send a follow-up to retry."
+                        .to_string();
+                    crate::logging::warn(&message);
+                    let _ = self.tx_event.send(Event::status(message)).await;
+                }
+
+                // Honest exit: only now, after every resume check has failed,
+                // may we claim the turn is ending with background children.
+                {
+                    let running = {
+                        let mgr = self.subagent_manager.read().await;
+                        mgr.running_count()
+                    };
+                    if running > 0 {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Turn ending with {running} sub-agent(s) still running in the background; they'll report when done."
+                            )))
+                            .await;
+                        self.add_session_message(waiting_for_subagents_runtime_message(running))
+                            .await;
                     }
                 }
 
@@ -3696,6 +3798,22 @@ impl Engine {
                 consecutive_tool_error_steps = 0;
             }
 
+            // Tool stepping (4d): one line why we're continuing without user input.
+            // This is the fourth resume kind alongside subagent/goal/REPL.
+            no_user_input_continues = no_user_input_continues.saturating_add(1);
+            if no_user_input_continues >= 12 {
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                    ))
+                    .await;
+                break;
+            }
+            let _ = self
+                .tx_event
+                .send(Event::status("Continuing — tool results".to_string()))
+                .await;
             turn.next_step();
         }
 
@@ -3984,6 +4102,7 @@ fn truncate_runtime_status_field(text: &str, max_chars: usize) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn should_hold_turn_for_subagents(queued_completions: usize, running_children: usize) -> bool {
     // #3216: launching sub-agents must NOT barrier the parent turn. Only queued
     // completions (work already finished that must be surfaced into the

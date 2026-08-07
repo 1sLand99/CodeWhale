@@ -1226,6 +1226,7 @@
   "BehavioralTipClearedInput": "Borrado · {chord} restaura",
   "BehavioralTipMcpValidation": "{command} inicia los servidores y muestra el motivo",
   "BehavioralTipRepeatedCommand": "{command} puede fijar esto",
+  "BehavioralTipDurableStateWritten": "Guardado · {command} para ver",
   "SettingLockedDuringTurn": "{setting} está bloqueado mientras se ejecuta un turno: presiona Esc para interrumpir primero",
   "SettingSubjectMode": "El modo",
   "SettingSubjectThinking": "El razonamiento",

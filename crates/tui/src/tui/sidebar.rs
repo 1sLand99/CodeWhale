@@ -1924,6 +1924,7 @@ mod tests {
             checkpoint: None,
             needs_input: None,
             duration_ms: 100,
+            started_at: None,
             from_prior_session: false,
         }
     }

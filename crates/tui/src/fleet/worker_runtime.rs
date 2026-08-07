@@ -1080,7 +1080,19 @@ pub(crate) fn fleet_model_route_for_loadout(
     }
     match loadout {
         codewhale_config::FleetLoadout::Inherit => ModelRoute::Inherit,
-        codewhale_config::FleetLoadout::Fast => ModelRoute::Faster,
+        // `Fast` used to mean "cheap sibling" — silently route the child to a
+        // different, cheaper model than the parent turn. That is a routing
+        // decision the operator never made and cannot see: the child's model
+        // is not reported in exec's structured output, so a parent running a
+        // specifically-priced route (e.g. `muse-spark-1.2-contributor`) would
+        // spawn a scout billed as something else, and the only place it
+        // surfaced was the invoice.
+        //
+        // A loadout is a statement about how much work a role should do, not
+        // authority to re-price it. `Fast` now inherits the parent's route
+        // like every other default; a genuinely different model stays
+        // available, but only when someone pins it explicitly.
+        codewhale_config::FleetLoadout::Fast => ModelRoute::Inherit,
         codewhale_config::FleetLoadout::Custom(_) => ModelRoute::Auto,
     }
 }
@@ -1693,7 +1705,7 @@ mod tests {
         assert_eq!(route.role.as_deref(), Some("builder"));
         assert_eq!(route.loadout.as_deref(), Some("fast"));
         assert_eq!(route.model_class, None);
-        assert_eq!(route.model_route.as_deref(), Some("faster"));
+        assert_eq!(route.model_route.as_deref(), Some("inherit"));
         assert_eq!(route.reasoning_effort, None);
         assert_eq!(route.role_source.as_deref(), Some("task.role"));
         assert_eq!(route.loadout_source.as_deref(), Some("task.loadout"));
@@ -3093,7 +3105,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(role_default.model, run_model);
-        assert_eq!(role_default.runtime_profile.model, ModelRoute::Faster);
+        assert_eq!(role_default.runtime_profile.model, ModelRoute::Inherit);
 
         let inherited = fleet_task_to_worker_spec_with_profiles(
             "worker-inherit",
@@ -3164,7 +3176,7 @@ mod tests {
             spec.runtime_profile.tools,
             ToolScope::Explicit(vec!["read_file".to_string()])
         );
-        assert_eq!(spec.runtime_profile.model, ModelRoute::Faster);
+        assert_eq!(spec.runtime_profile.model, ModelRoute::Inherit);
         assert_eq!(spec.max_spawn_depth, 1);
 
         let permissions = fleet_effective_permissions_from_worker_spec(&spec);
@@ -3385,12 +3397,12 @@ mod tests {
         use crate::model_routing::{RouterCandidates, provider_router_candidates};
 
         // Fleet emits the SAME `ModelRoute` seam the sub-agent assignment path
-        // consumes (`SubAgentModelStrength::model_route`: fast -> Faster,
-        // same/inherit -> Inherit). No fleet-specific provider/model table is
-        // involved — only the shared enum.
+        // consumes. `Fast` no longer re-prices the child onto a cheaper
+        // sibling: a loadout says how much work a role should do, not which
+        // model it is billed as, so it inherits like every other default.
         assert_eq!(
             fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Fast),
-            ModelRoute::Faster,
+            ModelRoute::Inherit,
         );
         assert_eq!(
             fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Inherit),
@@ -3417,8 +3429,11 @@ mod tests {
         //   Fixed(m)      -> m
         //   Faster | Auto -> candidates.cheap (else parent)
         //   Inherit       -> parent
-        // A fleet worker hands its `ModelRoute` to that same resolution, so a
-        // fleet "fast" loadout lands on the provider's cheap sibling.
+        // A fleet worker hands its `ModelRoute` to that same resolution. A
+        // fleet "fast" loadout no longer lands on the provider's cheap
+        // sibling — it inherits the parent route, so the child is billed as
+        // the model the operator actually chose. `Auto` still resolves to the
+        // cheap sibling, which is the remaining way to opt into one.
         let parent = "deepseek-v4-pro";
         let resolve = |route: &ModelRoute, candidates: &RouterCandidates| match route {
             ModelRoute::Fixed(model) => model.clone(),
@@ -3435,7 +3450,7 @@ mod tests {
                 &fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Fast),
                 &deepseek,
             ),
-            "deepseek-v4-flash",
+            parent,
             "fleet fast loadout resolves to the provider cheap sibling via the shared router",
         );
 

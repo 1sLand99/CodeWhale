@@ -82,6 +82,7 @@
   "BehavioralTipMcpValidation": "{command} 會啟動伺服器並顯示原因",
   "BehavioralTipPlanning": "在規劃？按 {key} 可切換到 Plan 模式",
   "BehavioralTipRepeatedCommand": "{command} 可以固定此命令",
+  "BehavioralTipDurableStateWritten": "已儲存 · {command} 可檢視",
   "ChipModeAct": "act",
   "ChipModeOperate": "operate",
   "ChipModePlan": "plan",

@@ -6271,7 +6271,7 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         "load_skill",
         "remember",
         "tasks",
-        "work_update",
+        "todo_write",
     ];
     assert_eq!(
         default_active_native_tool_names(),
@@ -7765,7 +7765,7 @@ fn legacy_rlm_actions_are_not_advertised_to_new_model_turns() {
 
 #[test]
 fn model_catalog_exposes_work_update_as_sole_progress_surface() {
-    // #4132: ordinary progress is one model-visible and executable tool.
+    // #4132: ordinary progress is one model-visible and executable tool (todo_write).
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let registry = engine
         .build_turn_tool_registry_builder(
@@ -7785,35 +7785,64 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
     let catalog_names: HashSet<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
 
     assert!(
-        catalog_names.contains("work_update"),
-        "work_update must be model-visible"
+        catalog_names.contains("todo_write"),
+        "todo_write must be model-visible"
     );
     assert!(
-        active.contains("work_update"),
-        "work_update should load with the default active native set"
+        active.contains("todo_write"),
+        "todo_write should load with the default active native set"
     );
     assert!(
         !catalog_names.contains("update_plan"),
         "retired Strategy/Plan must stay replay-only"
     );
+    // Actually registered hidden aliases (work_update family + checklist_write/update)
+    // remain callable via registry but hidden from catalog. Others were never
+    // registered and must stay not callable.
     for retired in [
+        "work_update",
+        "TodoWrite",
+        "todo",
         "checklist_write",
-        "checklist_add",
         "checklist_update",
+    ] {
+        assert!(
+            registry.contains(retired),
+            "{retired} hidden alias must remain callable"
+        );
+        assert!(
+            !catalog_names.contains(retired),
+            "{retired} must not appear in the model catalog"
+        );
+    }
+    for retired in [
+        "checklist_add",
         "checklist_list",
-        "todo_write",
         "todo_add",
         "todo_update",
         "todo_list",
     ] {
         assert!(
             !registry.contains(retired),
-            "{retired} must no longer be callable"
+            "{retired} must not be callable"
         );
         assert!(
             !catalog_names.contains(retired),
             "{retired} must not appear in the model catalog"
         );
+    }
+    for retired in [
+        "checklist_write",
+        "checklist_add",
+        "checklist_update",
+        "checklist_list",
+        "work_update",
+        "TodoWrite",
+        "todo",
+        "todo_add",
+        "todo_update",
+        "todo_list",
+    ] {
         assert!(
             preflight_requested_deferred_tool(
                 retired,
@@ -9509,6 +9538,8 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
     assert!(!registry.contains("task_list"));
     assert!(!registry.contains("task_read"));
     assert!(registry.contains("handle_read"));
+    // Hidden todo aliases are read-only progress surface (not writes/exec)
+    // but must be filtered from the write-check alongside canonical tools.
     let plan_state_tools = [
         "checklist_add",
         "checklist_update",
@@ -9517,6 +9548,8 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
         "todo_update",
         "todo_write",
         "work_update",
+        "TodoWrite",
+        "todo",
         "update_plan",
     ];
     let mut write_or_exec_tools: Vec<String> = registry
@@ -13884,7 +13917,7 @@ fn missing_tool_error_message_redirects_checklist_item_miscalls() {
 
     for tool_name in ["item", "items", "todo", "checklist_item"] {
         let message = missing_tool_error_message(tool_name, &catalog);
-        assert!(message.contains("work_update"), "{tool_name}: {message}");
+        assert!(message.contains("todo_write"), "{tool_name}: {message}");
         assert!(
             !message.contains("Did you mean"),
             "fuzzy suggestions are misleading for checklist mis-calls: {message}"

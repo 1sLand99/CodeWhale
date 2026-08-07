@@ -1203,6 +1203,7 @@
   "BehavioralTipClearedInput": "Esborrat · {chord} restaura",
   "BehavioralTipMcpValidation": "{command} inicia els servidors i mostra per què",
   "BehavioralTipRepeatedCommand": "{command} ho pot fixar",
+  "BehavioralTipDurableStateWritten": "Desat · {command} per revisar",
   "SettingLockedDuringTurn": "{setting} està blocat mentre s'executa un torn — prem Esc per interrompre primer",
   "SettingSubjectMode": "Mode",
   "SettingSubjectThinking": "Raonament",

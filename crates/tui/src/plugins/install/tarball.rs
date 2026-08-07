@@ -2,10 +2,12 @@
 //!
 //! Pass one ([`scan_tarball`]) writes nothing: it rejects traversal and
 //! absolute paths, enforces the uncompressed size cap from the headers, and
-//! locates the single `plugin.toml` whose directory becomes the bundle root.
-//! Pass two ([`extract_into`]) extracts only entries under that root, so a
-//! mono-repo's symlinks elsewhere in the archive are never materialized.
+//! locates the single bundle root — the directory holding the bundle's
+//! manifest (`plugin.json`, or the legacy `plugin.toml`). Pass two
+//! ([`extract_into`]) extracts only entries under that root, so a mono-repo's
+//! symlinks elsewhere in the archive are never materialized.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -44,13 +46,13 @@ pub(super) fn stage_tarball(
 
 #[derive(Debug)]
 pub(super) struct TarballScan {
-    /// Archive-relative directory containing the single `plugin.toml`
-    /// (`""` when the manifest sits at the archive root).
+    /// Archive-relative directory containing the bundle's manifest (`""` when
+    /// the manifest sits at the archive root).
     plugin_root: String,
 }
 
 /// First pass: validate entry paths, enforce the uncompressed size cap, and
-/// locate the single `plugin.toml`. Nothing is written in this pass.
+/// locate the single bundle root. Nothing is written in this pass.
 pub(super) fn scan_tarball(bytes: &[u8], max_size: u64) -> Result<TarballScan> {
     let cursor = std::io::Cursor::new(bytes);
     let gz = GzDecoder::new(cursor);
@@ -80,22 +82,31 @@ pub(super) fn scan_tarball(bytes: &[u8], max_size: u64) -> Result<TarballScan> {
             }
         }
         if header.entry_type().is_file()
-            && path
-                .file_name()
-                .is_some_and(|name| name == std::ffi::OsStr::new("plugin.toml"))
+            && path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(crate::plugins::agent_plugin::PLUGIN_JSON_NAME)
+                    || name == std::ffi::OsStr::new(crate::plugins::agent_plugin::PLUGIN_TOML_NAME)
+            })
         {
             manifest_paths.push(path_str);
         }
     }
 
-    if manifest_paths.len() != 1 {
-        return Err(PluginInstallError::PluginTomlRoots(manifest_paths.len()).into());
+    // A dual-published bundle carries `plugin.json` and `plugin.toml` in the
+    // same directory; that is one root, not two. Manifests in different
+    // directories stay an ambiguous mono-repo and are rejected.
+    let roots: BTreeSet<String> = manifest_paths
+        .iter()
+        .map(|manifest| {
+            manifest
+                .rsplit_once('/')
+                .map(|(dir, _)| dir.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    if roots.len() != 1 {
+        return Err(PluginInstallError::PluginTomlRoots(roots.len()).into());
     }
-    let manifest = &manifest_paths[0];
-    let plugin_root = manifest
-        .rsplit_once('/')
-        .map(|(dir, _)| dir.to_string())
-        .unwrap_or_default();
+    let plugin_root = roots.into_iter().next().unwrap_or_default();
     Ok(TarballScan { plugin_root })
 }
 

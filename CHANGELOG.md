@@ -5,9 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-## [0.9.4] - 2026-08-05
+## [0.9.4] - 2026-08-07
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
 roster/setup face with a clear operator-leader and user/folder scope, a
 work strip that keeps actionable agents instead of a permanent archive,
@@ -18,6 +16,23 @@ release-blocker fixes across permissions, DeepSeek Responses, SQLite,
 File edits, terminal width, and Windows installation.
 
 ### Added
+
+- Memory maintenance: `remember` gains `revise` and `retire` beside the
+  default `append`. Both name the exact note they target and both require
+  the evidence for the change. Append-only memory decays — a correction
+  sits behind the note it contradicts and both keep reaching the model —
+  so the model can now keep its own durable notes true instead of only
+  adding to them.
+- An audit trail for durable state the model writes about you. Every
+  in-place memory edit is journalled to `memory/JOURNAL.md`, and every
+  continual-harness `refine` / `remove` to a `JOURNAL.md` beside its state,
+  each with before, after, and evidence. Harness removal previously left no
+  record at all even though the entry leaves state entirely, so the journal
+  is now the only place its content survives.
+- A first-run tip that says so: the first time Codewhale saves something
+  durable it points at `/memory`, translated into all fifteen complete
+  locale packs. This state shaped later sessions and nothing ever mentioned
+  it existed.
 
 - Sub-agent checkpoint resume: `agents/followup` resumes an
   `interrupted_continuable` child from its checkpoint into a fresh agent loop —
@@ -173,6 +188,18 @@ File edits, terminal width, and Windows installation.
   event-listener 5.4.2 fix for RUSTSEC-2026-0221.
 
 ### Fixed
+
+- The memory journal is no longer indexed as memory. It is Markdown in the
+  memory tree, so the source walk collected it and every retired note
+  re-entered the searchable set under its `before:` line — putting the
+  exact facts a revision had just removed back into the prompt.
+- `memory_path` pointed at an already-native store no longer derives a
+  second store nested inside it, which silently wrote somewhere other than
+  the file the user named.
+- `muse` and `muse-spark` resolved to `muse-spark-1.1` in the agent
+  registry while config had defaulted to `muse-spark-1.2`, so the CLI and
+  app-server routed those aliases somewhere the configured default never
+  pointed. The registry now carries 1.2 and the contributor variant.
 
 - An explicit `type=builder` (or its `implementer` alias) plus
   `write_authority=read_only` now fails closed at spawn instead of launching a
@@ -366,6 +393,8 @@ File edits, terminal width, and Windows installation.
 - [vFONGv](https://github.com/vFONGv) (`@vFONGv`) wrote the zh-CN Windows
   beginner guide with screenshots in PR #5229, harvested after its base branch
   was accidentally deleted during maintainer cleanup.
+- [mky](https://github.com/mky) (`@mky`) fixed the FreeBSD build (PR #5254, `rquickjs` `bindgen` on FreeBSD).
+- [cacdcaecawae](https://github.com/cacdcaecawae) (`@cacdcaecawae`) contributed embedder-owned sub-agent state roots (PR #5252).
 
 ## [0.9.3] - 2026-07-31
 

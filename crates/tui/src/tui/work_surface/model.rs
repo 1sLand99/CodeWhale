@@ -1419,9 +1419,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             role_label: String::new(),
                             status: status.to_string(),
                             objective,
-                            elapsed_secs: Some(
-                                agent_elapsed_ms(app, &agent.agent_id, agent.duration_ms) / 1_000,
-                            ),
+                            elapsed_secs: Some(agent_elapsed_ms(app, agent) / 1_000),
                             tokens: meta.and_then(|meta| meta.received_tokens),
                             todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                         }),
@@ -1591,12 +1589,23 @@ fn freeze_terminal_agent_elapsed(app: &mut App) {
 }
 
 /// Frozen elapsed for a finished agent, live elapsed for a running one.
-fn agent_elapsed_ms(app: &App, agent_id: &str, duration_ms: u64) -> u64 {
+fn agent_elapsed_ms(app: &App, agent: &crate::tools::subagent::SubAgentResult) -> u64 {
+    // Live ticking (4b): derive from start timestamp at render when running,
+    // otherwise use frozen snapshot. The redraw already happens; stale cached
+    // duration is the bug.
+    if matches!(
+        agent.status,
+        crate::tools::subagent::SubAgentStatus::Running
+    ) {
+        if let Some(started_at) = agent.started_at {
+            return u64::try_from(started_at.elapsed().as_millis()).unwrap_or(agent.duration_ms);
+        }
+    }
     app.work_surface
         .frozen_agent_elapsed_ms
-        .get(agent_id)
+        .get(&agent.agent_id)
         .copied()
-        .unwrap_or(duration_ms)
+        .unwrap_or(agent.duration_ms)
 }
 
 fn current_activity_status_bucket(status: AgentCurrentActivityStatus) -> WorkBucket {
