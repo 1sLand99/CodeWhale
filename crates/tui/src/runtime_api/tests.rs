@@ -1207,260 +1207,6 @@ async fn mcp_tools_endpoint_is_passive_until_connect_requested() -> Result<()> {
 }
 
 #[tokio::test]
-async fn mcp_server_management_crud() -> Result<()> {
-    let root =
-        std::env::temp_dir().join(format!("codewhale-mcp-mgmt-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&root)?;
-
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-    let base = format!("http://{addr}/v1/apps/mcp/servers");
-
-    // 1. Create a new server.
-    let created: serde_json::Value = client
-        .post(&base)
-        .json(&serde_json::json!({
-            "name": "test-stdio",
-            "command": "echo",
-            "args": ["hello"],
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(created["name"], "test-stdio");
-    assert_eq!(created["enabled"], true);
-    assert_eq!(created["command"], "echo");
-
-    // 2. GET the server back — config should be on disk.
-    let fetched: serde_json::Value = client
-        .get(format!("{base}/test-stdio"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(fetched["name"], "test-stdio");
-    assert_eq!(fetched["command"], "echo");
-
-    // 3. Duplicate create returns 409 Conflict.
-    let conflict = client
-        .post(&base)
-        .json(&serde_json::json!({
-            "name": "test-stdio",
-            "command": "echo",
-        }))
-        .send()
-        .await?;
-    assert_eq!(conflict.status(), 409);
-
-    // 4. PATCH (update) the server.
-    let updated: serde_json::Value = client
-        .patch(format!("{base}/test-stdio"))
-        .json(&serde_json::json!({
-            "args": ["updated"],
-            "required": true,
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(updated["required"], true);
-    assert_eq!(updated["args"][0], "updated");
-
-    // 5. Disable the server.
-    let disabled: serde_json::Value = client
-        .post(format!("{base}/test-stdio/disable"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(disabled["action"], "disabled");
-    assert_eq!(disabled["ok"], true);
-
-    // Verify disabled state via GET.
-    let after_disable: serde_json::Value = client
-        .get(format!("{base}/test-stdio"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(after_disable["enabled"], false);
-
-    // 6. Re-enable the server.
-    let enabled: serde_json::Value = client
-        .post(format!("{base}/test-stdio/enable"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(enabled["action"], "enabled");
-    assert_eq!(enabled["ok"], true);
-
-    // 7. Reconnect (schedules a reconnect — no live pool present so always succeeds).
-    let reconnected: serde_json::Value = client
-        .post(format!("{base}/test-stdio/reconnect"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(reconnected["action"], "reconnect_scheduled");
-    assert_eq!(reconnected["ok"], true);
-
-    // 8. Delete the server.
-    let deleted: serde_json::Value = client
-        .delete(format!("{base}/test-stdio"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(deleted["action"], "deleted");
-    assert_eq!(deleted["ok"], true);
-
-    // 9. GET after delete returns 404.
-    let not_found = client
-        .get(format!("{base}/test-stdio"))
-        .send()
-        .await?;
-    assert_eq!(not_found.status(), 404);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn mcp_server_management_create_requires_command_or_url() -> Result<()> {
-    let root = std::env::temp_dir().join(format!(
-        "codewhale-mcp-mgmt-validation-{}",
-        Uuid::new_v4()
-    ));
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&root)?;
-
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    // Missing both command and url → 400.
-    let resp = client
-        .post(format!("http://{addr}/v1/apps/mcp/servers"))
-        .json(&serde_json::json!({ "name": "bad-server" }))
-        .send()
-        .await?;
-    assert_eq!(resp.status(), 400);
-
-    // Missing name → 400.
-    let resp = client
-        .post(format!("http://{addr}/v1/apps/mcp/servers"))
-        .json(&serde_json::json!({ "command": "echo" }))
-        .send()
-        .await?;
-    assert_eq!(resp.status(), 400);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn mcp_server_management_redacts_credentials() -> Result<()> {
-    let root = std::env::temp_dir().join(format!(
-        "codewhale-mcp-mgmt-redact-{}",
-        Uuid::new_v4()
-    ));
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&root)?;
-
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-    let base = format!("http://{addr}/v1/apps/mcp/servers");
-
-    // Create a server with sensitive fields.
-    let created: serde_json::Value = client
-        .post(&base)
-        .json(&serde_json::json!({
-            "name": "secret-server",
-            "url": "https://example.com/mcp",
-            "env_headers": { "Authorization": "MY_SECRET_ENV_VAR" },
-            "bearer_token_env_var": "MY_BEARER_ENV",
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    // The response must NOT contain the actual header value or env variable value.
-    assert!(
-        !created.to_string().contains("MY_SECRET_ENV_VAR_VALUE"),
-        "credential values must be redacted from API responses"
-    );
-    // env_header_keys should list the header name (not the env-var value).
-    assert_eq!(
-        created["env_header_keys"]
-            .as_array()
-            .map(|a| a.iter().any(|v| v.as_str() == Some("Authorization"))),
-        Some(true),
-        "env_header_keys should list header names"
-    );
-    // has_bearer_token_env_var should be true, not the env var name.
-    assert_eq!(created["has_bearer_token_env_var"], true);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn runtime_info_advertises_mcp_server_management() -> Result<()> {
-    let root = std::env::temp_dir().join(format!(
-        "codewhale-mcp-capability-{}",
-        Uuid::new_v4()
-    ));
-    let sessions_dir = root.join("sessions");
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root(root, sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    let info: serde_json::Value = client
-        .get(format!("http://{addr}/v1/runtime/info"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    assert_eq!(
-        info["capabilities"]["mcp_server_management"],
-        true,
-        "runtime/info must advertise mcp_server_management capability"
-    );
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
 async fn runtime_token_guard_protects_v1_routes() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-runtime-api-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");
@@ -7685,10 +7431,6 @@ async fn cors_layer_advertises_exact_supported_headers_and_never_an_extra() -> R
 
 #[tokio::test]
 async fn thread_goal_crud_and_invalid_transition() -> Result<()> {
-// ── Memory API tests ──
-
-#[tokio::test]
-async fn memory_info_capability_is_advertised() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
     };
@@ -7819,6 +7561,102 @@ async fn memory_info_capability_is_advertised() -> Result<()> {
 #[tokio::test]
 async fn thread_goal_block_transition() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let thread: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = thread["id"].as_str().expect("thread id").to_string();
+
+    // Create an active goal.
+    client
+        .put(format!("http://{addr}/v1/threads/{thread_id}/goal"))
+        .json(&json!({"objective": "block me"}))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Block it.
+    let blocked: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads/{thread_id}/goal/block"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(blocked["status"].as_str(), Some("blocked"));
+
+    // Can still complete from blocked state.
+    let completed: serde_json::Value = client
+        .post(format!(
+            "http://{addr}/v1/threads/{thread_id}/goal/complete"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(completed["status"].as_str(), Some("complete"));
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_goal_on_unknown_thread_returns_404() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let resp = client
+        .get(format!("http://{addr}/v1/threads/nonexistent-id/goal"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 404);
+
+    let put_resp = client
+        .put(format!("http://{addr}/v1/threads/nonexistent-id/goal"))
+        .json(&json!({"objective": "ghost"}))
+        .send()
+        .await?;
+    assert_eq!(put_resp.status(), 404);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_info_advertises_thread_goals_capability() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let info: serde_json::Value = client
+        .get(format!("http://{addr}/v1/runtime/info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        info["capabilities"]["thread_goals"].as_bool(),
+        Some(true),
+        "runtime info must advertise thread_goals capability"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
 #[test]
 fn fleet_receipt_json_pass_result_has_no_failure_fields() {
     use codewhale_protocol::fleet::{FleetReceipt, FleetRunId, FleetTaskResult};
@@ -7946,14 +7784,13 @@ fn fleet_receipt_json_receipt_artifact_sets_evidence_available() {
 #[tokio::test]
 async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
     use crate::fleet::ledger::FleetLedger;
+    use crate::fleet::task_spec::FleetTaskVerificationInput;
     use crate::fleet::task_spec::{
         FleetTaskSpecDocument, FleetTaskVerification, prepare_verification_receipt,
     };
-    use crate::fleet::task_spec::FleetTaskVerificationInput;
     use codewhale_protocol::fleet::{FleetScore, FleetTaskResult};
 
-    let root =
-        std::env::temp_dir().join(format!("codewhale-receipt-api-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("codewhale-receipt-api-{}", Uuid::new_v4()));
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace)?;
 
@@ -8031,6 +7868,661 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) =
         spawn_test_server_with_root_token_mobile_workspace(
             root.clone(),
+            sessions_dir,
+            None,
+            false,
+            workspace,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // List receipts for the run.
+    let list: serde_json::Value = client
+        .get(format!("http://{addr}/v1/fleet/runs/{}/receipts", run_id.0))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(list["run_id"], run_id.0.as_str());
+    assert_eq!(list["receipts"].as_array().map(|a| a.len()), Some(1));
+    let receipt_entry = &list["receipts"][0];
+    assert_eq!(receipt_entry["task_id"], "task-receipt");
+    assert_eq!(receipt_entry["result"], "pass");
+    assert_eq!(receipt_entry["retry_eligible"], false);
+    assert_eq!(receipt_entry["evidence_available"], true);
+
+    // Get specific receipt by task_id.
+    let detail: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt",
+            run_id.0
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["run_id"], run_id.0.as_str());
+    assert_eq!(detail["task_id"], "task-receipt");
+    assert_eq!(detail["worker_id"], "worker-1");
+    assert_eq!(detail["attempt"], 1);
+    assert_eq!(detail["result"], "pass");
+    assert!(detail["failure_kind"].is_null());
+    assert_eq!(detail["evidence_available"], true);
+
+    // Inspect evidence content.
+    let evidence: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt/evidence",
+            run_id.0
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(evidence["run_id"], run_id.0.as_str());
+    assert_eq!(evidence["task_id"], "task-receipt");
+    assert_eq!(evidence["truncated"], false);
+    assert!(
+        evidence["content"].is_object(),
+        "evidence content should parse as JSON object"
+    );
+    assert_eq!(evidence["content"]["task_id"], "task-receipt");
+
+    // Missing task returns 404.
+    let missing = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{}/receipts/no-such-task",
+            run_id.0
+        ))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), 404);
+
+    handle.abort();
+    Ok(())
+}
+
+// ── Memory API tests ──
+
+#[tokio::test]
+async fn memory_info_capability_is_advertised() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let info: serde_json::Value = client
+        .get(format!("http://{addr}/v1/runtime/info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        info["capabilities"]["memory"], true,
+        "memory capability must be advertised in runtime/info"
+    );
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_list_returns_empty_for_fresh_store() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-list-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root, sessions_dir).await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let body: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(body["entries"].as_array().map(Vec::len), Some(0));
+    assert_eq!(body["total"], 0);
+
+    // scope=global should also be empty.
+    let global: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory?scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(global["total"], 0);
+
+    // Invalid scope returns 400.
+    let bad = client
+        .get(format!("http://{addr}/v1/memory?scope=invalid"))
+        .send()
+        .await?;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    // limit=0 returns 400.
+    let bad_limit = client
+        .get(format!("http://{addr}/v1/memory?limit=0"))
+        .send()
+        .await?;
+    assert_eq!(bad_limit.status(), StatusCode::BAD_REQUEST);
+
+    // limit above max returns 400.
+    let over_limit = client
+        .get(format!("http://{addr}/v1/memory?limit=201"))
+        .send()
+        .await?;
+    assert_eq!(over_limit.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_create_list_and_get_entry() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-create-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Create a global memory entry.
+    let create_resp = client
+        .post(format!("http://{addr}/v1/memory"))
+        .json(&json!({ "text": "prefer snake_case for identifiers", "scope": "global" }))
+        .send()
+        .await?;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_resp.json().await?;
+    assert_eq!(created["entry"]["scope"], "global");
+    assert_eq!(created["entry"]["status"], "active");
+    assert!(created["entry"]["id"].is_number());
+    assert!(
+        created["entry"]["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("snake_case"),
+        "summary must include the note text"
+    );
+
+    let entry_id = created["entry"]["id"].as_i64().unwrap();
+
+    // GET /v1/memory lists the entry.
+    let list: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory?scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(list["total"], 1);
+    assert_eq!(list["entries"][0]["id"], entry_id);
+    assert_eq!(list["entries"][0]["scope"], "global");
+    // workspace_id must be absent for global entries.
+    assert!(list["entries"][0]["workspace_id"].is_null());
+
+    // GET /v1/memory/{id} returns the entry.
+    let single: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory/{entry_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(single["entry"]["id"], entry_id);
+    assert_eq!(single["entry"]["scope"], "global");
+    assert!(single["entry"]["stale"].is_boolean());
+
+    // GET /v1/memory/{id} for a missing id returns 404.
+    let missing = client
+        .get(format!("http://{addr}/v1/memory/999999"))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_summary_is_redacted_to_max_chars() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-redact-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let long_note = "x".repeat(350);
+    let create_resp = client
+        .post(format!("http://{addr}/v1/memory"))
+        .json(&json!({ "text": long_note, "scope": "global" }))
+        .send()
+        .await?;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_resp.json().await?;
+    let summary = created["entry"]["summary"].as_str().unwrap_or("");
+    // Summary must be bounded: at most 300 chars + 3 for the "…" suffix.
+    assert!(
+        summary.chars().count() <= 303,
+        "summary must be bounded; got {} chars",
+        summary.chars().count()
+    );
+    assert!(
+        summary.ends_with("…") || summary.chars().count() <= 300,
+        "overlong text must be truncated with an ellipsis"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_clear_removes_global_scope() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-clear-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Seed two entries.
+    for note in ["first note", "second note"] {
+        client
+            .post(format!("http://{addr}/v1/memory"))
+            .json(&json!({ "text": note, "scope": "global" }))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+
+    let before: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory?scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        before["total"], 2,
+        "seed entries must be present before clear"
+    );
+
+    // Clear global scope.
+    let clear: serde_json::Value = client
+        .delete(format!("http://{addr}/v1/memory?scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(clear["cleared"], true);
+
+    let after: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory?scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(after["total"], 0, "global scope must be empty after clear");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_create_rejects_empty_text_and_bad_scope() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-invalid-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Empty text must be rejected with 400.
+    let empty = client
+        .post(format!("http://{addr}/v1/memory"))
+        .json(&json!({ "text": "", "scope": "global" }))
+        .send()
+        .await?;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    // An unknown scope must be rejected with 400.
+    let bad_scope = client
+        .post(format!("http://{addr}/v1/memory"))
+        .json(&json!({ "text": "valid note", "scope": "thread" }))
+        .send()
+        .await?;
+    assert_eq!(bad_scope.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_search_query_filters_results() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("cw-memory-search-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let _lock = lock_test_env();
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Seed two entries with distinct text.
+    for note in ["prefer functional style", "always use snake_case"] {
+        client
+            .post(format!("http://{addr}/v1/memory"))
+            .json(&json!({ "text": note, "scope": "global" }))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+
+    // Searching for "functional" returns only the matching entry.
+    let resp: serde_json::Value = client
+        .get(format!("http://{addr}/v1/memory?q=functional&scope=global"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(resp["total"], 1);
+    let summary = resp["entries"][0]["summary"].as_str().unwrap_or("");
+    assert!(
+        summary.contains("functional"),
+        "search must return the matching entry"
+    );
+
+    // An empty q must be rejected with 400.
+    let empty_q = client
+        .get(format!("http://{addr}/v1/memory?q="))
+        .send()
+        .await?;
+    assert_eq!(empty_q.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_management_crud() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-mcp-mgmt-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&root)?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp/servers");
+
+    // 1. Create a new server.
+    let created: serde_json::Value = client
+        .post(&base)
+        .json(&serde_json::json!({
+            "name": "test-stdio",
+            "command": "echo",
+            "args": ["hello"],
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(created["name"], "test-stdio");
+    assert_eq!(created["enabled"], true);
+    assert_eq!(created["command"], "echo");
+
+    // 2. GET the server back — config should be on disk.
+    let fetched: serde_json::Value = client
+        .get(format!("{base}/test-stdio"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(fetched["name"], "test-stdio");
+    assert_eq!(fetched["command"], "echo");
+
+    // 3. Duplicate create returns 409 Conflict.
+    let conflict = client
+        .post(&base)
+        .json(&serde_json::json!({
+            "name": "test-stdio",
+            "command": "echo",
+        }))
+        .send()
+        .await?;
+    assert_eq!(conflict.status(), 409);
+
+    // 4. PATCH (update) the server.
+    let updated: serde_json::Value = client
+        .patch(format!("{base}/test-stdio"))
+        .json(&serde_json::json!({
+            "args": ["updated"],
+            "required": true,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(updated["required"], true);
+    assert_eq!(updated["args"][0], "updated");
+
+    // 5. Disable the server.
+    let disabled: serde_json::Value = client
+        .post(format!("{base}/test-stdio/disable"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(disabled["action"], "disabled");
+    assert_eq!(disabled["ok"], true);
+
+    // Verify disabled state via GET.
+    let after_disable: serde_json::Value = client
+        .get(format!("{base}/test-stdio"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(after_disable["enabled"], false);
+
+    // 6. Re-enable the server.
+    let enabled: serde_json::Value = client
+        .post(format!("{base}/test-stdio/enable"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(enabled["action"], "enabled");
+    assert_eq!(enabled["ok"], true);
+
+    // 7. Reconnect (schedules a reconnect — no live pool present so always succeeds).
+    let reconnected: serde_json::Value = client
+        .post(format!("{base}/test-stdio/reconnect"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(reconnected["action"], "reconnect_scheduled");
+    assert_eq!(reconnected["ok"], true);
+
+    // 8. Delete the server.
+    let deleted: serde_json::Value = client
+        .delete(format!("{base}/test-stdio"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(deleted["action"], "deleted");
+    assert_eq!(deleted["ok"], true);
+
+    // 9. GET after delete returns 404.
+    let not_found = client.get(format!("{base}/test-stdio")).send().await?;
+    assert_eq!(not_found.status(), 404);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_management_create_requires_command_or_url() -> Result<()> {
+    let root =
+        std::env::temp_dir().join(format!("codewhale-mcp-mgmt-validation-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&root)?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Missing both command and url → 400.
+    let resp = client
+        .post(format!("http://{addr}/v1/apps/mcp/servers"))
+        .json(&serde_json::json!({ "name": "bad-server" }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
+
+    // Missing name → 400.
+    let resp = client
+        .post(format!("http://{addr}/v1/apps/mcp/servers"))
+        .json(&serde_json::json!({ "command": "echo" }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_management_redacts_credentials() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-mcp-mgmt-redact-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&root)?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp/servers");
+
+    // Create a server with sensitive fields.
+    let created: serde_json::Value = client
+        .post(&base)
+        .json(&serde_json::json!({
+            "name": "secret-server",
+            "url": "https://example.com/mcp",
+            "env_headers": { "Authorization": "MY_SECRET_ENV_VAR" },
+            "bearer_token_env_var": "MY_BEARER_ENV",
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    // The response must NOT contain the actual header value or env variable value.
+    assert!(
+        !created.to_string().contains("MY_SECRET_ENV_VAR_VALUE"),
+        "credential values must be redacted from API responses"
+    );
+    // env_header_keys should list the header name (not the env-var value).
+    assert_eq!(
+        created["env_header_keys"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v.as_str() == Some("Authorization"))),
+        Some(true),
+        "env_header_keys should list header names"
+    );
+    // has_bearer_token_env_var should be true, not the env var name.
+    assert_eq!(created["has_bearer_token_env_var"], true);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_info_advertises_mcp_server_management() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-mcp-capability-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root, sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let info: serde_json::Value = client
+        .get(format!("http://{addr}/v1/runtime/info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    assert_eq!(
+        info["capabilities"]["mcp_server_management"], true,
+        "runtime/info must advertise mcp_server_management capability"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
 // ─── Skill lifecycle API tests ──────────────────────────────────────────────
 
 /// Create a minimal skill package under `root_dir/.codewhale/skills/<name>`.
@@ -8075,73 +8567,6 @@ async fn skill_lifecycle_uninstall_removes_installed_skill() -> Result<()> {
             workspace,
         )
         .await?
-    else {        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    let thread: serde_json::Value = client
-        .post(format!("http://{addr}/v1/threads"))
-        .json(&json!({}))
-    // List receipts for the run.
-    let list: serde_json::Value = client
-        .get(format!(
-            "http://{addr}/v1/fleet/runs/{}/receipts",
-            run_id.0
-        ))        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let thread_id = thread["id"].as_str().expect("thread id").to_string();
-
-    // Create an active goal.
-    client
-        .put(format!("http://{addr}/v1/threads/{thread_id}/goal"))
-        .json(&json!({"objective": "block me"}))
-        .send()
-        .await?
-        .error_for_status()?;
-
-    // Block it.
-    let blocked: serde_json::Value = client
-        .post(format!("http://{addr}/v1/threads/{thread_id}/goal/block"))
-    assert_eq!(list["run_id"], run_id.0.as_str());
-    assert_eq!(list["receipts"].as_array().map(|a| a.len()), Some(1));
-    let receipt_entry = &list["receipts"][0];
-    assert_eq!(receipt_entry["task_id"], "task-receipt");
-    assert_eq!(receipt_entry["result"], "pass");
-    assert_eq!(receipt_entry["retry_eligible"], false);
-    assert_eq!(receipt_entry["evidence_available"], true);
-
-    // Get specific receipt by task_id.
-    let detail: serde_json::Value = client
-        .get(format!(
-            "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt",
-            run_id.0
-        ))        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(blocked["status"].as_str(), Some("blocked"));
-
-    // Can still complete from blocked state.
-    let completed: serde_json::Value = client
-        .post(format!(
-            "http://{addr}/v1/threads/{thread_id}/goal/complete"
-    assert_eq!(detail["run_id"], run_id.0.as_str());
-    assert_eq!(detail["task_id"], "task-receipt");
-    assert_eq!(detail["worker_id"], "worker-1");
-    assert_eq!(detail["attempt"], 1);
-    assert_eq!(detail["result"], "pass");
-    assert!(detail["failure_kind"].is_null());
-    assert_eq!(detail["evidence_available"], true);
-
-    // Inspect evidence content.
-    let evidence: serde_json::Value = client
-        .get(format!(
-            "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt/evidence",
-            run_id.0        ))
     else {
         return Ok(());
     };
@@ -8155,7 +8580,6 @@ async fn skill_lifecycle_uninstall_removes_installed_skill() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(completed["status"].as_str(), Some("complete"));
     assert!(
         list["skills"]
             .as_array()
@@ -8179,7 +8603,6 @@ async fn skill_lifecycle_uninstall_removes_installed_skill() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_goal_on_unknown_thread_returns_404() -> Result<()> {
 async fn skill_lifecycle_uninstall_404s_for_unknown_skill() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -8187,17 +8610,6 @@ async fn skill_lifecycle_uninstall_404s_for_unknown_skill() -> Result<()> {
     let client = crate::tls::reqwest_client();
 
     let resp = client
-        .get(format!("http://{addr}/v1/threads/nonexistent-id/goal"))
-        .send()
-        .await?;
-    assert_eq!(resp.status(), 404);
-
-    let put_resp = client
-        .put(format!("http://{addr}/v1/threads/nonexistent-id/goal"))
-        .json(&json!({"objective": "ghost"}))
-        .send()
-        .await?;
-    assert_eq!(put_resp.status(), 404);
         .delete(format!("http://{addr}/v1/skills/no-such-skill"))
         .send()
         .await?;
@@ -8208,7 +8620,6 @@ async fn skill_lifecycle_uninstall_404s_for_unknown_skill() -> Result<()> {
 }
 
 #[tokio::test]
-async fn runtime_info_advertises_thread_goals_capability() -> Result<()> {
 async fn skill_lifecycle_uninstall_rejects_invalid_scope() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -8534,343 +8945,9 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
         .json()
         .await?;
     assert_eq!(
-        info["capabilities"]["thread_goals"].as_bool(),
-        Some(true),
-        "runtime info must advertise thread_goals capability"
-    );
-    assert_eq!(evidence["run_id"], run_id.0.as_str());
-    assert_eq!(evidence["task_id"], "task-receipt");
-    assert_eq!(evidence["truncated"], false);
-    assert!(
-        evidence["content"].is_object(),
-        "evidence content should parse as JSON object"
-    );
-    assert_eq!(evidence["content"]["task_id"], "task-receipt");
-
-    // Missing task returns 404.
-    let missing = client
-        .get(format!(
-            "http://{addr}/v1/fleet/runs/{}/receipts/no-such-task",
-            run_id.0
-        ))
-        .send()
-        .await?;
-    assert_eq!(missing.status(), 404);
-        info["capabilities"]["memory"], true,
-        "memory capability must be advertised in runtime/info"
-    );
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_list_returns_empty_for_fresh_store() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-list-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root, sessions_dir).await? else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    let body: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(body["entries"].as_array().map(Vec::len), Some(0));
-    assert_eq!(body["total"], 0);
-
-    // scope=global should also be empty.
-    let global: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory?scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(global["total"], 0);
-
-    // Invalid scope returns 400.
-    let bad = client
-        .get(format!("http://{addr}/v1/memory?scope=invalid"))
-        .send()
-        .await?;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-
-    // limit=0 returns 400.
-    let bad_limit = client
-        .get(format!("http://{addr}/v1/memory?limit=0"))
-        .send()
-        .await?;
-    assert_eq!(bad_limit.status(), StatusCode::BAD_REQUEST);
-
-    // limit above max returns 400.
-    let over_limit = client
-        .get(format!("http://{addr}/v1/memory?limit=201"))
-        .send()
-        .await?;
-    assert_eq!(over_limit.status(), StatusCode::BAD_REQUEST);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_create_list_and_get_entry() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-create-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    // Create a global memory entry.
-    let create_resp = client
-        .post(format!("http://{addr}/v1/memory"))
-        .json(&json!({ "text": "prefer snake_case for identifiers", "scope": "global" }))
-        .send()
-        .await?;
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-    let created: serde_json::Value = create_resp.json().await?;
-    assert_eq!(created["entry"]["scope"], "global");
-    assert_eq!(created["entry"]["status"], "active");
-    assert!(created["entry"]["id"].is_number());
-    assert!(
-        created["entry"]["summary"]
-            .as_str()
-            .unwrap_or("")
-            .contains("snake_case"),
-        "summary must include the note text"
-    );
-
-    let entry_id = created["entry"]["id"].as_i64().unwrap();
-
-    // GET /v1/memory lists the entry.
-    let list: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory?scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(list["total"], 1);
-    assert_eq!(list["entries"][0]["id"], entry_id);
-    assert_eq!(list["entries"][0]["scope"], "global");
-    // workspace_id must be absent for global entries.
-    assert!(list["entries"][0]["workspace_id"].is_null());
-
-    // GET /v1/memory/{id} returns the entry.
-    let single: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory/{entry_id}"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(single["entry"]["id"], entry_id);
-    assert_eq!(single["entry"]["scope"], "global");
-    assert!(single["entry"]["stale"].is_boolean());
-
-    // GET /v1/memory/{id} for a missing id returns 404.
-    let missing = client
-        .get(format!("http://{addr}/v1/memory/999999"))
-        .send()
-        .await?;
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_summary_is_redacted_to_max_chars() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-redact-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    let long_note = "x".repeat(350);
-    let create_resp = client
-        .post(format!("http://{addr}/v1/memory"))
-        .json(&json!({ "text": long_note, "scope": "global" }))
-        .send()
-        .await?;
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-    let created: serde_json::Value = create_resp.json().await?;
-    let summary = created["entry"]["summary"].as_str().unwrap_or("");
-    // Summary must be bounded: at most 300 chars + 3 for the "…" suffix.
-    assert!(
-        summary.chars().count() <= 303,
-        "summary must be bounded; got {} chars",
-        summary.chars().count()
-    );
-    assert!(
-        summary.ends_with("…") || summary.chars().count() <= 300,
-        "overlong text must be truncated with an ellipsis"
         info["capabilities"]["skill_lifecycle"], true,
         "runtime/info must advertise skill_lifecycle capability"
     );
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_clear_removes_global_scope() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-clear-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    // Seed two entries.
-    for note in ["first note", "second note"] {
-        client
-            .post(format!("http://{addr}/v1/memory"))
-            .json(&json!({ "text": note, "scope": "global" }))
-            .send()
-            .await?
-            .error_for_status()?;
-    }
-
-    let before: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory?scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(
-        before["total"], 2,
-        "seed entries must be present before clear"
-    );
-
-    // Clear global scope.
-    let clear: serde_json::Value = client
-        .delete(format!("http://{addr}/v1/memory?scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(clear["cleared"], true);
-
-    let after: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory?scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(after["total"], 0, "global scope must be empty after clear");
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_create_rejects_empty_text_and_bad_scope() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-invalid-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    // Empty text must be rejected with 400.
-    let empty = client
-        .post(format!("http://{addr}/v1/memory"))
-        .json(&json!({ "text": "", "scope": "global" }))
-        .send()
-        .await?;
-    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
-
-    // An unknown scope must be rejected with 400.
-    let bad_scope = client
-        .post(format!("http://{addr}/v1/memory"))
-        .json(&json!({ "text": "valid note", "scope": "thread" }))
-        .send()
-        .await?;
-    assert_eq!(bad_scope.status(), StatusCode::BAD_REQUEST);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn memory_search_query_filters_results() -> Result<()> {
-    let root = std::env::temp_dir().join(format!("cw-memory-search-{}", Uuid::new_v4()));
-    let sessions_dir = root.join("sessions");
-    let _lock = lock_test_env();
-    let home = root.join("home");
-    fs::create_dir_all(&home)?;
-    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let Some((addr, _rt, handle)) = spawn_test_server_with_root(root.clone(), sessions_dir).await?
-    else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
-
-    // Seed two entries with distinct text.
-    for note in ["prefer functional style", "always use snake_case"] {
-        client
-            .post(format!("http://{addr}/v1/memory"))
-            .json(&json!({ "text": note, "scope": "global" }))
-            .send()
-            .await?
-            .error_for_status()?;
-    }
-
-    // Searching for "functional" returns only the matching entry.
-    let resp: serde_json::Value = client
-        .get(format!("http://{addr}/v1/memory?q=functional&scope=global"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(resp["total"], 1);
-    let summary = resp["entries"][0]["summary"].as_str().unwrap_or("");
-    assert!(
-        summary.contains("functional"),
-        "search must return the matching entry"
-    );
-
-    // An empty q must be rejected with 400.
-    let empty_q = client
-        .get(format!("http://{addr}/v1/memory?q="))
-        .send()
-        .await?;
-    assert_eq!(empty_q.status(), StatusCode::BAD_REQUEST);
 
     handle.abort();
     Ok(())

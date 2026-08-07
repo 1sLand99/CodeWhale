@@ -12,7 +12,7 @@
 
 #![cfg(unix)]
 
-#[path = "support/qa_harness/mod.rs"]
+#[path = "../support/qa_harness/mod.rs"]
 mod qa_harness;
 
 use std::sync::Arc;
