@@ -16,7 +16,6 @@ const MAX_LIFETIME_IMPRESSIONS: u8 = 2;
 const MAX_TRACKED_MANUAL_COMMANDS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum BehavioralTip {
     PlanningMode,
     BackgroundJobReceipt,

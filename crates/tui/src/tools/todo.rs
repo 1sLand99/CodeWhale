@@ -252,14 +252,15 @@ pub struct TodoWriteTool {
 
 impl TodoWriteTool {
     /// Canonical model-facing progress surface (#4132).
-    pub fn work_update(todo_list: SharedTodoList) -> Self {
+    pub fn new(todo_list: SharedTodoList) -> Self {
         Self {
             name: CANONICAL_PROGRESS_TOOL,
             todo_list,
         }
     }
 
-    /// Hidden compat alias for `work_update` — same handler, not model-visible.
+    /// Hidden compat alias (`work_update`, `TodoWrite`, `todo`, …) — same
+    /// handler, not model-visible.
     pub fn alias(name: &'static str, todo_list: SharedTodoList) -> Self {
         Self { name, todo_list }
     }
@@ -424,7 +425,7 @@ mod tests {
         // 2026-07-23 user report: models wrote the list once and never
         // updated it while working. The canonical tool description must
         // carry the upkeep contract every provider sees.
-        let tool = super::TodoWriteTool::work_update(super::new_shared_todo_list());
+        let tool = super::TodoWriteTool::new(super::new_shared_todo_list());
         let description = crate::tools::spec::ToolSpec::description(&tool);
         for phrase in [
             "keep it live while you work",
@@ -462,7 +463,7 @@ mod tests {
             serde_json::json!("cancelled")
         );
 
-        let schema = TodoWriteTool::work_update(new_shared_todo_list()).input_schema();
+        let schema = TodoWriteTool::new(new_shared_todo_list()).input_schema();
         let statuses = &schema["properties"]["todos"]["items"]["properties"]["status"]["enum"];
         assert!(statuses.as_array().is_some_and(|values| {
             values
@@ -551,7 +552,7 @@ mod tests {
         // #5123-class: statuses like "blocked" / "in-progress" used to be
         // recorded as pending with a success receipt on the canonical
         // progress surface.
-        let tool = TodoWriteTool::work_update(new_shared_todo_list());
+        let tool = TodoWriteTool::new(new_shared_todo_list());
         let context = ToolContext::new(std::env::temp_dir());
         let err = tool
             .execute(
@@ -576,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn work_update_returns_canonical_task_update_metadata() {
-        let tool = TodoWriteTool::work_update(new_shared_todo_list());
+        let tool = TodoWriteTool::new(new_shared_todo_list());
         let context = ToolContext::new(std::env::temp_dir());
         let result = tool
             .execute(
@@ -622,7 +623,7 @@ mod tests {
         let mut context = ToolContext::new(std::env::temp_dir());
         context.runtime.work = Some(work.clone());
 
-        TodoWriteTool::work_update(todos.clone())
+        TodoWriteTool::new(todos.clone())
             .execute(
                 json!({"todos": [
                     {"content": "Graph-owned", "status": "completed"},

@@ -2939,7 +2939,7 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000."
+                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
                 },
                 "background": {
                     "type": "boolean",
@@ -2983,7 +2983,7 @@ impl ToolSpec for BashTool {
                 },
                 "wait": {
                     "type": "boolean",
-                    "description": "Block until task completes (action=wait, default: false)"
+                    "description": "Block until task completes or the timeout elapses (action=wait, default: false; `block` is an accepted alias)"
                 },
                 "close_stdin": {
                     "type": "boolean",
@@ -3614,8 +3614,8 @@ impl BashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let task_id = required_task_id(input)?;
-        let wait = optional_bool(input, "wait", false)?;
-        let timeout_ms = optional_u64(input, "timeout_ms", 30_000)?;
+        let wait = optional_bool(input, "wait", false)? || optional_bool(input, "block", false)?;
+        let timeout_ms = wait_timeout_ms(input)?;
 
         let (delta, wait_canceled) = if wait {
             wait_for_shell_delta_cancellable(context, task_id, timeout_ms).await?
@@ -3632,6 +3632,11 @@ impl BashTool {
 
         let status = delta.result.status.clone();
         let mut result = build_shell_delta_tool_result(delta, context);
+        if let Some(metadata) = result.metadata.as_mut()
+            && let Some(object) = metadata.as_object_mut()
+        {
+            object.insert("wait_timeout_ms".to_string(), json!(timeout_ms));
+        }
         if wait_canceled {
             if matches!(status, ShellStatus::Running) {
                 result.content = format!(
@@ -3817,6 +3822,25 @@ fn first_present_field<'a>(
         None | Some(serde_json::Value::Null) => None,
         Some(value) => Some((*name, value)),
     })
+}
+
+/// Effective `action=wait` timeout in milliseconds. `timeout_ms` is
+/// canonical; `timeout_secs` (seconds) and bare `timeout` (milliseconds) are
+/// honored so a habit formed on other wait tools gets the duration it asked
+/// for instead of silently falling back to the 30 s default.
+fn wait_timeout_ms(input: &serde_json::Value) -> Result<u64, ToolError> {
+    match first_present_field(input, &["timeout_ms", "timeout_secs", "timeout"]) {
+        None => Ok(30_000),
+        Some(("timeout_secs", value)) => {
+            let secs = value
+                .as_u64()
+                .ok_or_else(|| type_mismatch("timeout_secs", value, "an integer"))?;
+            Ok(secs.saturating_mul(1_000))
+        }
+        Some((name, value)) => value
+            .as_u64()
+            .ok_or_else(|| type_mismatch(name, value, "an integer")),
+    }
 }
 
 fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext) -> ToolResult {

@@ -480,21 +480,21 @@ async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, Strin
             .arg("auto")
             .arg("--output-txt")
             .output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let _ = std::fs::remove_file(&tmp);
+            if !txt.is_empty() {
+                return Ok(txt);
+            }
+            // Some builds write to .txt sidecar
+            let sidecar = tmp.with_extension("txt");
+            if let Ok(s) = std::fs::read_to_string(&sidecar) {
+                let _ = std::fs::remove_file(&sidecar);
                 let _ = std::fs::remove_file(&tmp);
-                if !txt.is_empty() {
-                    return Ok(txt);
-                }
-                // Some builds write to .txt sidecar
-                let sidecar = tmp.with_extension("txt");
-                if let Ok(s) = std::fs::read_to_string(&sidecar) {
-                    let _ = std::fs::remove_file(&sidecar);
-                    let _ = std::fs::remove_file(&tmp);
-                    if !s.trim().is_empty() {
-                        return Ok(s.trim().to_string());
-                    }
+                if !s.trim().is_empty() {
+                    return Ok(s.trim().to_string());
                 }
             }
         }

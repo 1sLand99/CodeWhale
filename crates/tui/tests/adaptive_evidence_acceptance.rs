@@ -60,7 +60,10 @@ async fn headless_bash_success_and_failure_are_distinct_bounded_exact_evidence()
             "model-facing truncation must name the recovery path"
         );
         assert!(
-            receipt.contains("/artifacts/"),
+            // The footer prints the artifact directory with the platform's
+            // path separator; compare on a normalized view so Windows
+            // backslashes don't fail an otherwise-correct footer.
+            receipt.replace('\\', "/").contains("/artifacts/"),
             "the footer names where the omitted bytes live on disk"
         );
         // The receipt must name a route the model can take *from this

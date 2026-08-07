@@ -1891,19 +1891,12 @@ impl Engine {
         }
     }
 
-    /// Whether the idle loop should poll for background shell completion:
-    /// only while a goal is active and a background job is running or has
-    /// finished without being claimed yet.
+    /// Whether the idle loop should poll for background shell completion: a
+    /// background job is running or has finished without being claimed yet.
+    /// Plain interactive sessions arm exactly like goal sessions — a finished
+    /// background task must reach the model without waiting for the user to
+    /// type, the same wake an idle sub-agent completion already gets.
     fn idle_shell_wake_armed(&self) -> bool {
-        let goal_active = self
-            .config
-            .goal_state
-            .lock()
-            .map(|state| state.snapshot().is_active())
-            .unwrap_or(false);
-        if !goal_active {
-            return false;
-        }
         self.shell_manager
             .lock()
             .map(|manager| manager.may_have_undelivered_completion())
@@ -1918,18 +1911,82 @@ impl Engine {
             .unwrap_or(false)
     }
 
-    /// An idle-engine wake for finished background shell work: queue a goal
-    /// continuation. The evidence itself is claimed by the boundary drain in
-    /// `handle_send_message`, so the continuation turn reads the completion
-    /// payload the same way a user-initiated turn would.
+    /// An idle-engine wake for finished background shell work. With an active
+    /// goal this queues a goal continuation; without one it starts an ordinary
+    /// runtime turn so the completion reaches the model immediately instead of
+    /// sitting unclaimed until the user types. Either way the evidence itself
+    /// is claimed by the boundary drain in `handle_send_message`, so the
+    /// follow-up turn reads the completion payload the same way a
+    /// user-initiated turn would.
     async fn handle_idle_shell_completion_wake(&mut self) {
+        let goal_active = self
+            .config
+            .goal_state
+            .lock()
+            .map(|state| state.snapshot().is_active())
+            .unwrap_or(false);
+        if goal_active {
+            let _ = self
+                .tx_event
+                .send(Event::status(
+                    "Background shell work finished; continuing the active goal".to_string(),
+                ))
+                .await;
+            self.schedule_goal_continuation(Vec::new());
+            return;
+        }
+        let route = match self.current_runtime_route() {
+            Ok(route) => route,
+            Err(err) => {
+                // No route, no turn. Claim the once-only completion now so a
+                // dead route cannot re-arm the wake into the same error every
+                // poll tick; the user sees what finished and where the output
+                // lives, and the next healthy turn proceeds normally.
+                let finished = self
+                    .shell_manager
+                    .lock()
+                    .map(|mut manager| manager.drain_finished_jobs_with_evidence().len())
+                    .unwrap_or(0);
+                let _ = self
+                    .tx_event
+                    .send(Event::error(ErrorEnvelope::fatal_auth(format!(
+                        "{finished} background shell task(s) finished, but the turn cannot resume because the provider route is no longer valid: {err}. Their output stays available via /jobs."
+                    ))))
+                    .await;
+                return;
+            }
+        };
         let _ = self
             .tx_event
             .send(Event::status(
-                "Background shell work finished; continuing the active goal".to_string(),
+                "Background shell work finished; resuming the turn".to_string(),
             ))
             .await;
-        self.schedule_goal_continuation(Vec::new());
+        let _ = self
+            .handle_send_message(
+                "[runtime] A background shell task finished; its completion evidence follows."
+                    .to_string(),
+                self.current_mode,
+                route,
+                self.config.compaction.clone(),
+                self.config.goal_objective.clone(),
+                self.config.goal_token_budget,
+                self.config.goal_status,
+                self.session.reasoning_effort.clone(),
+                self.session.reasoning_effort_auto,
+                self.session.auto_model,
+                self.session.allow_shell,
+                self.session.trust_mode,
+                self.session.auto_approve,
+                self.session.approval_mode,
+                self.config.translation_enabled,
+                self.config.allowed_tools.clone(),
+                Vec::new(),
+                self.config.hook_executor.clone(),
+                self.config.verbosity.clone(),
+                UserInputProvenance::Runtime,
+            )
+            .await;
     }
 
     /// Run the engine event loop
@@ -3544,7 +3601,7 @@ impl Engine {
             Some(SubAgentForkContext {
                 messages: self.messages_with_turn_metadata(),
                 structured_state_block: state.to_system_block(),
-                // Resolve at spawn time so a work update earlier in this turn
+                // Resolve at spawn time so a todo_write earlier in this turn
                 // reaches the child rather than freezing turn-start state.
                 work_source: Some(self.work_state_source()),
             })

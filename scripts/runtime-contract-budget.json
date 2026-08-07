@@ -1,5 +1,5 @@
 {
- "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update Re-baselined 2026-08-07 in PR #5255 to the measured provider-free contract: upstream ec5747f7d renamed work_update -> todo_write (sole progress surface) and the 0.9.4 WIP prompt tightening (b6585ea99) grew system-prompt and representative-stage identities; upstream main itself is red on this gate. Identity + numeric increases are upstream drift, not FEAT-012 changes.",
+ "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update Re-baselined 2026-08-07 in PR #5255 to the measured provider-free contract: upstream ec5747f7d renamed work_update -> todo_write (sole progress surface) and the 0.9.4 WIP prompt tightening (b6585ea99) grew system-prompt and representative-stage identities; upstream main itself is red on this gate. Identity + numeric increases are upstream drift, not FEAT-012 changes. Re-baselined 2026-08-07 after merging upstream 21ed173cf (pre-release repair batch): tool-schema bytes/tokens grew (todo_write canonical naming, shell.rs wait ergonomics, work_grounding) \u2014 identities unchanged, numeric metrics synced to the measured receipt.",
  "document_kind": "codewhale.runtime_contract_budget",
  "representative_context": {
   "fixture_id": "representative-v1",
@@ -85,9 +85,9 @@
   "modes": {
    "act": {
     "active": {
-     "bytes": 23135,
+     "bytes": 23280,
      "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
-     "tokens_est": 5784,
+     "tokens_est": 5820,
      "tool_names": [
       "Bash",
       "File",
@@ -102,9 +102,9 @@
      "tools": 9
     },
     "full": {
-     "bytes": 67732,
+     "bytes": 68080,
      "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
-     "tokens_est": 16933,
+     "tokens_est": 17020,
      "tool_names": [
       "Bash",
       "File",
@@ -160,9 +160,9 @@
    },
    "operate": {
     "active": {
-     "bytes": 23135,
+     "bytes": 23280,
      "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
-     "tokens_est": 5784,
+     "tokens_est": 5820,
      "tool_names": [
       "Bash",
       "File",
@@ -177,9 +177,9 @@
      "tools": 9
     },
     "full": {
-     "bytes": 67732,
+     "bytes": 68080,
      "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
-     "tokens_est": 16933,
+     "tokens_est": 17020,
      "tool_names": [
       "Bash",
       "File",
@@ -235,7 +235,7 @@
    },
    "plan": {
     "active": {
-     "bytes": 17490,
+     "bytes": 17489,
      "identity_sha256": "a62fe19356273d0a5b95704ae43f7570855c6e144eee148ae4c673c196b7f21b",
      "tokens_est": 4373,
      "tool_names": [
@@ -250,9 +250,9 @@
      "tools": 7
     },
     "full": {
-     "bytes": 42212,
+     "bytes": 42414,
      "identity_sha256": "a857096f86f3a044354a246b567ad7efa06dd0341fddc4da9f4d9d491f71b0bc",
-     "tokens_est": 10553,
+     "tokens_est": 10604,
      "tool_names": [
       "File",
       "Git",

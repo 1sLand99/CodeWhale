@@ -1117,7 +1117,7 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_todo_tool(self, todo_list: super::todo::SharedTodoList) -> Self {
         use super::todo::TodoWriteTool;
-        self.with_tool(Arc::new(TodoWriteTool::work_update(todo_list.clone())))
+        self.with_tool(Arc::new(TodoWriteTool::new(todo_list.clone())))
             .with_tool(Arc::new(TodoWriteTool::alias(
                 "work_update",
                 todo_list.clone(),

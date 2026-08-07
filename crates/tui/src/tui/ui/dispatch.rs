@@ -838,7 +838,7 @@ pub(crate) fn build_dispatch_success_closure(
                     PersistRequest::SaveCheckpoint { session },
                 ) {
                     app.status_message = Some(format!(
-                        "Work update is pending: turn checkpoint could not be queued ({err})"
+                        "To-do list update pending: turn checkpoint could not be queued ({err})"
                     ));
                 }
             }

@@ -353,7 +353,12 @@ impl Engine {
             manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
         };
         for result in synthesized {
-            let completion = crate::tools::subagent::subagent_completion_from_result(&result);
+            let report_ref =
+                crate::tools::subagent::spill_subagent_final_report(&self.session.id, &result);
+            let completion = crate::tools::subagent::subagent_completion_from_result_with_ref(
+                &result,
+                report_ref.as_deref(),
+            );
             if let Some(completion) = super::claim_subagent_completion(
                 &mut self.delivered_subagent_completion_ids,
                 completion,
@@ -991,6 +996,13 @@ impl Engine {
                                 }
                                 .into_envelope();
                                 crate::logging::warn(&envelope.message);
+                                // A stall is a stream error like any other:
+                                // count it so the nothing-streamed retry can
+                                // fire, and record it so an unrecovered stall
+                                // fails the turn with the real reason instead
+                                // of ending "Completed" over a frozen block.
+                                stream_errors = stream_errors.saturating_add(1);
+                                turn_error.get_or_insert(envelope.message.clone());
                                 let _ = self.tx_event.send(Event::error(envelope)).await;
                                 None
                             }
@@ -4102,7 +4114,7 @@ fn truncate_runtime_status_field(text: &str, max_chars: usize) -> String {
     out
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn should_hold_turn_for_subagents(queued_completions: usize, running_children: usize) -> bool {
     // #3216: launching sub-agents must NOT barrier the parent turn. Only queued
     // completions (work already finished that must be surfaced into the

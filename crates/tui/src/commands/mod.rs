@@ -708,7 +708,7 @@ mod tests {
 
         let mut context = crate::tools::spec::ToolContext::new(app.workspace.clone());
         context.runtime.work = Some(work);
-        crate::tools::todo::TodoWriteTool::work_update(app.todos.clone())
+        crate::tools::todo::TodoWriteTool::new(app.todos.clone())
             .execute(
                 serde_json::json!({
                     "todos": [{"content": "relay the staged graph", "status": "in_progress"}]
@@ -716,7 +716,7 @@ mod tests {
                 &context,
             )
             .await
-            .expect("graph-backed work_update");
+            .expect("graph-backed todo_write");
 
         assert!(
             app.todos.lock().await.snapshot().is_empty(),

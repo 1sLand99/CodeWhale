@@ -42,7 +42,7 @@ Make the model-facing runtime smaller, calmer, and easier for models to use by:
 | `rlm` | durable RLM family (existing; deferred by default) |
 | `agent` | sub-agent dispatch |
 | `remember` | opt-in durable user-memory capture; eager whenever registered |
-| `work_update` | progress / plan-of-work updates |
+| `todo_write` | progress / plan-of-work updates |
 | `update_plan` | plan artifact updates |
 | `tool_search` | on-demand discovery of deferred tools |
 
@@ -113,7 +113,7 @@ including opt-in `remember`:
 | Full system-prompt bytes | 15,842 | 15,368 |
 
 The final active names are `Bash`, `File`, `Git`, `Run`, `agent`, `remember`,
-`tasks`, `update_plan`, `work_update`, and `tool_search`. `remember` is present
+`tasks`, `update_plan`, `todo_write`, and `tool_search`. `remember` is present
 only when built-in memory is enabled; it is eager whenever registered. `File`
 advertises only read actions in Plan mode, and its `patch` action appears only
 when the existing apply-patch feature is enabled. Hidden aliases remain

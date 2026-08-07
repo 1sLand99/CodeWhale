@@ -1948,6 +1948,10 @@ struct SubAgentTerminalDeliveryContext {
     parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
     mailbox: Option<Mailbox>,
     event_tx: Option<mpsc::Sender<Event>>,
+    /// Shared session namespace (root session id), cloned down the spawn
+    /// tree; over-budget final reports are spilled under it so the truncation
+    /// footer can name a retrievable artifact.
+    session_id: String,
 }
 
 impl SubAgentTerminalDeliveryContext {
@@ -1957,6 +1961,7 @@ impl SubAgentTerminalDeliveryContext {
             parent_completion_tx: runtime.parent_completion_tx.clone(),
             mailbox: runtime.mailbox.clone(),
             event_tx: runtime.event_tx.clone(),
+            session_id: runtime.context.state_namespace.clone(),
         }
     }
 
@@ -1964,7 +1969,8 @@ impl SubAgentTerminalDeliveryContext {
     /// manager owns the terminal claim. The public agent/worker states remain
     /// Running until all three sends have been attempted.
     fn deliver(&self, result: &SubAgentResult) {
-        let completion = subagent_completion_from_result(result);
+        let report_ref = spill_subagent_final_report(&self.session_id, result);
+        let completion = subagent_completion_from_result_with_ref(result, report_ref.as_deref());
 
         if self.spawn_depth > 0
             && let Some(tx) = self.parent_completion_tx.as_ref()
@@ -1973,7 +1979,7 @@ impl SubAgentTerminalDeliveryContext {
         }
 
         if let Some(mailbox) = self.mailbox.as_ref() {
-            let _ = mailbox.send(terminal_mailbox_message(result));
+            let _ = mailbox.send(terminal_mailbox_message(result, report_ref.as_deref()));
         }
 
         if let Some(event_tx) = self.event_tx.as_ref() {
@@ -1985,10 +1991,11 @@ impl SubAgentTerminalDeliveryContext {
     }
 }
 
-fn terminal_mailbox_message(result: &SubAgentResult) -> MailboxMessage {
+fn terminal_mailbox_message(result: &SubAgentResult, report_ref: Option<&str>) -> MailboxMessage {
     match &result.status {
         SubAgentStatus::Completed => {
-            let (summary, _) = stamp_subagent_summary(&summarize_subagent_result(result));
+            let (summary, _) =
+                stamp_subagent_summary_with_ref(&summarize_subagent_result(result), report_ref);
             MailboxMessage::Completed {
                 agent_id: result.agent_id.clone(),
                 summary,
@@ -7055,7 +7062,7 @@ impl ToolSpec for AgentTool {
                 "timeout_secs": {
                     "type": "integer",
                     "minimum": 5,
-                    "maximum": 1800,
+                    "maximum": 120,
                     "description": "For action=wait: maximum seconds to block (default 30). Prefer ending the turn and staying reachable — results arrive automatically as <codewhale:subagent.done> sentinels — only wait when you must join before continuing."
                 },
                 "message": {
@@ -7594,7 +7601,7 @@ const SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Runtime floor is 1s (schema advertises 5) so tests can exercise the
 /// timeout path without multi-second sleeps.
 const SUBAGENT_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
-const SUBAGENT_WAIT_MAX_TIMEOUT_SECS: u64 = 1800;
+const SUBAGENT_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
 /// Internal state-check cadence while blocked. Invisible to the model — the
 /// #4097 anti-pattern is model-visible polling that burns turns and tokens,
 /// not a cheap in-process timer.
@@ -8921,7 +8928,17 @@ pub(crate) fn emit_parent_completion(
     true
 }
 
+#[cfg(test)]
 pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAgentCompletion {
+    subagent_completion_from_result_with_ref(result, None)
+}
+
+/// Completion builder that names the persisted full report in the truncation
+/// footer when `report_ref` is available; see `spill_subagent_final_report`.
+pub(crate) fn subagent_completion_from_result_with_ref(
+    result: &SubAgentResult,
+    report_ref: Option<&str>,
+) -> SubAgentCompletion {
     let raw = summarize_subagent_result(result);
     let mut evidence_truncated = false;
     let evidence_block = match &result.status {
@@ -8944,7 +8961,7 @@ pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAge
         .as_ref()
         .map(|_| strip_evidence_block(&raw))
         .unwrap_or(raw);
-    let (summary, truncated) = stamp_subagent_summary(&summary_source);
+    let (summary, truncated) = stamp_subagent_summary_with_ref(&summary_source, report_ref);
     let summary_truncated = truncated || evidence_truncated;
     let sentinel = match &result.status {
         SubAgentStatus::Failed(error) => subagent_failed_sentinel(result, error),
@@ -13472,12 +13489,12 @@ fn annotate_child_model_error(
 
 /// Char budget above which a sub-agent summary is treated as a large dump and
 /// head+tail truncated. Mirrors `TOOL_RESULT_SENT_CHAR_BUDGET` in
-/// `crates/tui/src/client/chat.rs:702` so sub-agent summaries use the same
+/// `crates/tui/src/client/chat.rs:1377` so sub-agent summaries use the same
 /// threshold as regular tool outputs. Duplicated locally to avoid coupling the
 /// sub-agent module to the wire-compaction internals.
 const SUBAGENT_SUMMARY_CHAR_BUDGET: usize = 12_000;
 /// Head/tail slice sizes when truncating; mirror the wire constants
-/// (`TOOL_RESULT_HEAD_CHARS`/`TOOL_RESULT_TAIL_CHARS`, chat.rs:703-704).
+/// (`TOOL_RESULT_HEAD_CHARS`/`TOOL_RESULT_TAIL_CHARS`, chat.rs:1378-1379).
 const SUBAGENT_SUMMARY_HEAD_CHARS: usize = 4_000;
 const SUBAGENT_SUMMARY_TAIL_CHARS: usize = 4_000;
 
@@ -13494,12 +13511,20 @@ run the relevant tests) before relying on it.]";
 ///   note and report `truncated: false`.
 /// - When it exceeds the budget, keep a head+tail slice and stamp it with the
 ///   existing `[Output truncated ...]` vocabulary (reused from tool-output
-///   truncation), adapted to be honest that the elided middle is NOT in the
-///   spillover store — there is no `retrieve_tool_result` handle for
-///   sub-agent summaries. Report `truncated: true`.
+///   truncation). When `report_ref` names the persisted full report (see
+///   `spill_subagent_final_report`), the footer points at it so the elided
+///   middle stays retrievable via `retrieve_tool_result`; with no ref the
+///   footer stays honest that the middle cannot be retrieved. Report
+///   `truncated: true` either way.
 ///
 /// Every summary therefore gets exactly one boundary marker, never both.
+#[cfg(test)]
 fn stamp_subagent_summary(raw: &str) -> (String, bool) {
+    stamp_subagent_summary_with_ref(raw, None)
+}
+
+/// The ref-aware stamper; see `stamp_subagent_summary`.
+fn stamp_subagent_summary_with_ref(raw: &str, report_ref: Option<&str>) -> (String, bool) {
     let total = raw.chars().count();
     if total <= SUBAGENT_SUMMARY_CHAR_BUDGET {
         return (format!("{raw}{SUBAGENT_SELF_REPORT_NOTE}"), false);
@@ -13513,13 +13538,45 @@ fn stamp_subagent_summary(raw: &str) -> (String, bool) {
     let omitted = total
         .saturating_sub(SUBAGENT_SUMMARY_HEAD_CHARS)
         .saturating_sub(SUBAGENT_SUMMARY_TAIL_CHARS);
+    let retrieval = match report_ref {
+        Some(reference) => format!(
+            "the full report is retained as artifact {reference} — read the elided middle ({omitted} \
+chars) with retrieve_tool_result using that ref (mode=lines/query/bytes). Re-verify material claims \
+before relying on them."
+        ),
+        None => format!(
+            "the elided middle ({omitted} chars) is not in the spillover store and cannot be \
+retrieved via retrieve_tool_result. Re-open the child or read changed files directly to verify \
+material claims."
+        ),
+    };
     let stamped = format!(
         "{head}\n\n[Sub-agent summary truncated: {SUBAGENT_SUMMARY_HEAD_CHARS} + {SUBAGENT_SUMMARY_TAIL_CHARS} of {total} \
-chars shown. This is the child's self-report; the elided middle ({omitted} chars) is not in \
-the spillover store and cannot be retrieved via retrieve_tool_result. Re-open the child or \
-read changed files directly to verify material claims.]\n\n{tail}",
+chars shown. This is the child's self-report; {retrieval}]\n\n{tail}",
     );
     (stamped, true)
+}
+
+/// Persist a final report that exceeds the summary budget so the truncated
+/// summary can name a retrievable artifact instead of dropping the elided
+/// middle. Returns the `retrieve_tool_result` ref on success; write failures
+/// degrade to no ref, mirroring `apply_spillover`'s passthrough posture. The
+/// artifact lands under the shared session root (`state_namespace`), which
+/// every agent in the spawn tree clones, so the parent and any sibling can
+/// resolve it. Same-id writes carry identical bytes, so a synthesized
+/// re-delivery of the same terminal result is idempotent.
+pub(crate) fn spill_subagent_final_report(
+    session_id: &str,
+    result: &SubAgentResult,
+) -> Option<String> {
+    let raw = summarize_subagent_result(result);
+    if raw.chars().count() <= SUBAGENT_SUMMARY_CHAR_BUDGET {
+        return None;
+    }
+    let artifact_id = format!("art_sa_{}_report", result.agent_id);
+    crate::artifacts::write_session_artifact(session_id, &artifact_id, &raw)
+        .ok()
+        .map(|_| artifact_id)
 }
 
 fn summarize_subagent_result(result: &SubAgentResult) -> String {

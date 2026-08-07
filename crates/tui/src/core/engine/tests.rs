@@ -10900,10 +10900,10 @@ async fn run_graph_backed_work_update(
     use crate::tools::spec::ToolSpec as _;
     let mut context = crate::tools::spec::ToolContext::new(std::env::temp_dir());
     context.runtime.work = Some(work.clone());
-    crate::tools::todo::TodoWriteTool::work_update(todos.clone())
+    crate::tools::todo::TodoWriteTool::new(todos.clone())
         .execute(json!({ "todos": items }), &context)
         .await
-        .expect("graph-backed work_update");
+        .expect("graph-backed todo_write");
 }
 
 /// #3983 runtime regression: a real graph-backed `work_update` stages the new
@@ -15737,13 +15737,16 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    // No active goal: the wake stays disarmed and the idle receive keeps
-    // waiting — completions belong to the next user-initiated turn.
-    let disarmed =
-        tokio::time::timeout(Duration::from_millis(300), engine.next_run_input(false)).await;
+    // No active goal: the wake still arms — a finished background task must
+    // reach the model without waiting for the user to type, the same wake an
+    // idle sub-agent completion already gets.
+    let input = tokio::time::timeout(Duration::from_secs(10), engine.next_run_input(false))
+        .await
+        .expect("idle engine must wake for finished background shell work even without a goal")
+        .expect("engine input");
     assert!(
-        disarmed.is_err(),
-        "without an active goal the engine must not start turns for shell completions"
+        matches!(input, EngineRunInput::ShellCompletionWake),
+        "wake input expected without an active goal"
     );
 
     engine
