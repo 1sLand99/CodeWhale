@@ -140,9 +140,9 @@ different head.
 `release-candidate.yml` also fails unless the selected ref resolves to the
 exact requested SHA. It invokes the same reusable artifact workflow as the
 public release, building all seven targets (including Android arm64 and native
-Windows arm64), staging `codewhale`, `codew`, and `codewhale-tui`, building the
+Windows arm64), staging `codewhale` and `codew` (single binary), building the
 NSIS installer and nine platform archives, and validating the authoritative
-34-file inventory from `npm/codewhale/scripts/artifacts.js`. It then installs
+27-file inventory from `npm/codewhale/scripts/artifacts.js`. It then installs
 the packed npm wrapper against those assembled local assets and exercises its
 delegated entrypoints. The resulting `codewhale-release-assets` bundle is a
 short-lived GitHub Actions artifact only.
