@@ -1419,7 +1419,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             role_label: String::new(),
                             status: status.to_string(),
                             objective,
-                            elapsed_secs: Some(agent_elapsed_ms(app, &agent) / 1_000),
+                            elapsed_secs: Some(agent_elapsed_ms(app, agent) / 1_000),
                             tokens: meta.and_then(|meta| meta.received_tokens),
                             todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                         }),
