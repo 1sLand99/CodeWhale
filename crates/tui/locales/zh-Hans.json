@@ -1227,6 +1227,7 @@
   "BehavioralTipMcpValidation": "{command} 会启动服务器并显示原因",
   "BehavioralTipRepeatedCommand": "{command} 可以固定此命令",
   "BehavioralTipDurableStateWritten": "已保存 · {command} 查看详情",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "回合运行期间{setting}已锁定 — 请先按 Esc 中断",
   "SettingSubjectMode": "模式",
   "SettingSubjectThinking": "思考",

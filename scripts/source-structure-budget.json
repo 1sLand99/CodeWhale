@@ -193,7 +193,7 @@
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 177,
   "max_module_lines": 17631,
-  "max_total_owned_rust_lines": 676325,
+  "max_total_owned_rust_lines": 676653,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
@@ -217,5 +217,6 @@
     "codewhale-workflow",
     "codewhale-workflow-js"
   ],
-  "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5."
+  "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5.",
+  "_todo_2026_08_07_session_title_fix": "Session title pinned at New Session fix (codex/session-title-fix bf69e7ff5): aggregate 676325 -> 676653 (+328 lines). Includes two regression tests + DEFAULT_SESSION_TITLE constant (+128 from fork) plus efcf47a1d mid-stream resume/paste/fleet (+279) already landed without ceiling update. Durable test asset, not overspend."
 }

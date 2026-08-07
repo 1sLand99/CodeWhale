@@ -83,6 +83,7 @@
   "BehavioralTipPlanning": "在規劃？按 {key} 可切換到 Plan 模式",
   "BehavioralTipRepeatedCommand": "{command} 可以固定此命令",
   "BehavioralTipDurableStateWritten": "已儲存 · {command} 可檢視",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "ChipModeAct": "act",
   "ChipModeOperate": "operate",
   "ChipModePlan": "plan",

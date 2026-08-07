@@ -1204,6 +1204,7 @@
   "BehavioralTipMcpValidation": "{command} startet Server und zeigt warum",
   "BehavioralTipRepeatedCommand": "{command} kann dies anpinnen",
   "BehavioralTipDurableStateWritten": "Gespeichert · {command} ansehen",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "{setting} ist gesperrt, während ein Turn läuft — zuerst Esc zum Unterbrechen drücken",
   "SettingSubjectMode": "Modus",
   "SettingSubjectThinking": "Thinking",

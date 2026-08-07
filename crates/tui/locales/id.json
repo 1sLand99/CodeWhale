@@ -1204,6 +1204,7 @@
   "BehavioralTipMcpValidation": "{command} memulai server dan menunjukkan alasannya",
   "BehavioralTipRepeatedCommand": "{command} dapat menyematkan ini",
   "BehavioralTipDurableStateWritten": "Tersimpan · {command} untuk melihat",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "{setting} terkunci saat giliran berjalan — tekan Esc untuk menginterupsi dulu",
   "SettingSubjectMode": "Mode",
   "SettingSubjectThinking": "Thinking",

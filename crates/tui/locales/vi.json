@@ -1227,6 +1227,7 @@
   "BehavioralTipMcpValidation": "{command} khởi động máy chủ và cho biết nguyên nhân",
   "BehavioralTipRepeatedCommand": "{command} có thể ghim lệnh này",
   "BehavioralTipDurableStateWritten": "Đã lưu · {command} để xem",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "{setting} bị khóa khi một lượt đang chạy — hãy nhấn Esc để ngắt trước",
   "SettingSubjectMode": "Chế độ",
   "SettingSubjectThinking": "Suy nghĩ",

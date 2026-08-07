@@ -1419,6 +1419,7 @@ pub enum MessageId {
     BehavioralTipMcpValidation,
     BehavioralTipRepeatedCommand,
     BehavioralTipDurableStateWritten,
+    BehavioralTipTodoWrite,
     // Live-route settings lock (#2982): refusals and startup-default receipts.
     SettingLockedDuringTurn,
     SettingSubjectMode,
@@ -2728,6 +2729,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::BehavioralTipMcpValidation,
     MessageId::BehavioralTipRepeatedCommand,
     MessageId::BehavioralTipDurableStateWritten,
+    MessageId::BehavioralTipTodoWrite,
     MessageId::SettingLockedDuringTurn,
     MessageId::SettingSubjectMode,
     MessageId::SettingSubjectThinking,

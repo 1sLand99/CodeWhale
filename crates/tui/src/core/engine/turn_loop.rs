@@ -1792,11 +1792,11 @@ impl Engine {
                             .await;
                     }
                     no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
+                    if no_user_input_continues >= 20 {
                         let _ = self
                             .tx_event
                             .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                                "Turn ending: no-user-input resume backstop hit (20)".to_string(),
                             ))
                             .await;
                         break;
@@ -1825,11 +1825,11 @@ impl Engine {
                 let subagent_completions = self.drain_subagent_completion_events("").await;
                 if subagent_completions > 0 {
                     no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
+                    if no_user_input_continues >= 20 {
                         let _ = self
                             .tx_event
                             .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                                "Turn ending: no-user-input resume backstop hit (20)".to_string(),
                             ))
                             .await;
                         break;
@@ -2090,11 +2090,11 @@ impl Engine {
                     // No FINAL — let the model iterate with the feedback.
                     // Count toward the combined no-user-input backstop.
                     no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
+                    if no_user_input_continues >= 20 {
                         let _ = self
                             .tx_event
                             .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12 consecutive continuations)".to_string(),
+                                "Turn ending: no-user-input resume backstop hit (20 consecutive continuations)".to_string(),
                             ))
                             .await;
                         break;
@@ -2138,11 +2138,11 @@ impl Engine {
 
                 if self.drain_subagent_completion_events("late").await > 0 {
                     no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
+                    if no_user_input_continues >= 20 {
                         let _ = self
                             .tx_event
                             .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                                "Turn ending: no-user-input resume backstop hit (20)".to_string(),
                             ))
                             .await;
                         break;
@@ -2171,11 +2171,11 @@ impl Engine {
                     ))
                     .await;
                     no_user_input_continues = no_user_input_continues.saturating_add(1);
-                    if no_user_input_continues >= 12 {
+                    if no_user_input_continues >= 20 {
                         let _ = self
                             .tx_event
                             .send(Event::status(
-                                "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                                "Turn ending: no-user-input resume backstop hit (20)".to_string(),
                             ))
                             .await;
                         break;
@@ -3905,11 +3905,11 @@ impl Engine {
             // Tool stepping (4d): one line why we're continuing without user input.
             // This is the fourth resume kind alongside subagent/goal/REPL.
             no_user_input_continues = no_user_input_continues.saturating_add(1);
-            if no_user_input_continues >= 12 {
+            if no_user_input_continues >= 20 {
                 let _ = self
                     .tx_event
                     .send(Event::status(
-                        "Turn ending: no-user-input resume backstop hit (12)".to_string(),
+                        "Turn ending: no-user-input resume backstop hit (20)".to_string(),
                     ))
                     .await;
                 break;

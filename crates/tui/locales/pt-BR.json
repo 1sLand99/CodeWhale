@@ -1227,6 +1227,7 @@
   "BehavioralTipMcpValidation": "{command} inicia os servidores e mostra o motivo",
   "BehavioralTipRepeatedCommand": "{command} pode fixar isto",
   "BehavioralTipDurableStateWritten": "Salvo · {command} para ver",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "{setting} está bloqueado enquanto um turno está em execução — pressione Esc para interromper primeiro",
   "SettingSubjectMode": "O modo",
   "SettingSubjectThinking": "O raciocínio",
