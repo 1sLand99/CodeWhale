@@ -38,64 +38,50 @@ jobs:
             platform: linux-x64
             cli_binary: codewhale
             shim_binary: codew
-            tui_binary: codewhale-tui
             cli_artifact: codewhale-linux-x64
             shim_artifact: codew-linux-x64
-            tui_artifact: codewhale-tui-linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64
             cli_binary: codewhale
             shim_binary: codew
-            tui_binary: codewhale-tui
             cli_artifact: codewhale-linux-arm64
             shim_artifact: codew-linux-arm64
-            tui_artifact: codewhale-tui-linux-arm64
           - os: ubuntu-latest
             target: aarch64-linux-android
             platform: android-arm64
             cli_binary: codewhale
             shim_binary: codew
-            tui_binary: codewhale-tui
             cli_artifact: codewhale-android-arm64
             shim_artifact: codew-android-arm64
-            tui_artifact: codewhale-tui-android-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos-x64
             cli_binary: codewhale
             shim_binary: codew
-            tui_binary: codewhale-tui
             cli_artifact: codewhale-macos-x64
             shim_artifact: codew-macos-x64
-            tui_artifact: codewhale-tui-macos-x64
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos-arm64
             cli_binary: codewhale
             shim_binary: codew
-            tui_binary: codewhale-tui
             cli_artifact: codewhale-macos-arm64
             shim_artifact: codew-macos-arm64
-            tui_artifact: codewhale-tui-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x64
             cli_binary: codewhale.exe
             shim_binary: codew.exe
-            tui_binary: codewhale-tui.exe
             cli_artifact: codewhale-windows-x64.exe
             shim_artifact: codew-windows-x64.exe
-            tui_artifact: codewhale-tui-windows-x64.exe
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             platform: windows-arm64
             cli_binary: codewhale.exe
             shim_binary: codew.exe
-            tui_binary: codewhale-tui.exe
             cli_artifact: codewhale-windows-arm64.exe
             shim_artifact: codew-windows-arm64.exe
-            tui_artifact: codewhale-tui-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -136,7 +122,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
           rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo build --profile dist --locked --target x86_64-unknown-linux-musl -p codewhale-cli -p codewhale-tui
+          cargo build --profile dist --locked --target x86_64-unknown-linux-musl -p codewhale-cli
       - name: Configure Android NDK linker
         if: matrix.target == 'aarch64-linux-android' && runner.os == 'Linux'
         shell: bash
@@ -186,7 +172,7 @@ jobs:
       - name: Build
         if: matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
-        run: cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli -p codewhale-tui
+        run: cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli
       - name: Smoke binaries on matching native runners
         if: >-
           matrix.target != 'aarch64-linux-android' &&
@@ -197,7 +183,6 @@ jobs:
           bin_dir="target/${{ matrix.target }}/dist"
           "${bin_dir}/${{ matrix.cli_binary }}" --version
           "${bin_dir}/${{ matrix.shim_binary }}" --version
-          "${bin_dir}/${{ matrix.tui_binary }}" --version
       - name: Stage binaries
         shell: bash
         run: |
@@ -215,7 +200,6 @@ jobs:
 
           stage_binary "${{ matrix.cli_binary }}" "${{ matrix.cli_artifact }}"
           stage_binary "${{ matrix.shim_binary }}" "${{ matrix.shim_artifact }}"
-          stage_binary "${{ matrix.tui_binary }}" "${{ matrix.tui_artifact }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.cli_artifact }}
@@ -227,13 +211,6 @@ jobs:
         with:
           name: ${{ matrix.shim_artifact }}
           path: ${{ matrix.shim_artifact }}
-          if-no-files-found: error
-          retention-days: ${{ inputs.retention_days }}
-          overwrite: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ${{ matrix.tui_artifact }}
-          path: ${{ matrix.tui_artifact }}
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
           overwrite: true
@@ -285,7 +262,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           Copy-Item "artifacts\codewhale-windows-x64.exe\codewhale-windows-x64.exe" "scripts\installer\codewhale.exe"
           Copy-Item "artifacts\codew-windows-x64.exe\codew-windows-x64.exe" "scripts\installer\codew.exe"
-          Copy-Item "artifacts\codewhale-tui-windows-x64.exe\codewhale-tui-windows-x64.exe" "scripts\installer\codewhale-tui.exe"
           $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
           if (!(Test-Path $makensis)) {
             $makensis = "${env:ProgramFiles}\NSIS\makensis.exe"
