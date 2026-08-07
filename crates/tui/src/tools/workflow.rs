@@ -7180,7 +7180,7 @@ export default workflow({
             .execute(
                 json!({
                     "action": "run",
-                    "script": "phase('dispatch'); log('starting child'); const out = await task({ description: 'say done', type: 'explore', allowedTools: [], label: 'inspect-child', model: 'deepseek-v4-flash', modelStrength: 'same', thinking: 'low' }); return { out };"
+                    "script": "phase('dispatch'); log('starting child'); const out = await task({ description: 'say done', allowedTools: [], label: 'inspect-child', model: 'deepseek-v4-flash', modelStrength: 'same', thinking: 'low' }); return { out };"
                 }),
                 &ctx,
             )

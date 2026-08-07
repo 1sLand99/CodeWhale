@@ -189,11 +189,12 @@
   ],
   "_todo_2026_08_06_windows_lane": "v0.9.4 Windows/no-sandbox test-lane repair: aggregate 673296 -> 673375 (+79 lines). The 12 failures blocking the ship were not Windows-only - 7 fail on any host with no OS sandbox backend (all Windows, Linux without bubblewrap), and release.yml's parity job runs the full suite on ubuntu-latest, so the tag itself would have failed. Growth is a pinned sandbox backend in the underwater test fixture plus one new test covering the unenforced rendering the fixture no longer exercises, the rooted-mention and native-separator fixes in file_mention, and their comments. No new modules; growth is in existing files. Pay down in v0.9.5.",
   "_todo_2026_08_06_unreleased": "Post-0.9.4 [Unreleased] work: aggregate 673375 -> 676325 and max module 17596 -> 17631. The bulk is Agent Plugins v1.0.0 consume/publish/slugify (a new plugins/agent_plugin.rs plus manifest/registry/export wiring, ~2.3k lines with its tests). The rest is the sub-agent billing work \u2014 the agent_spawned stream event that makes a child's model visible, the RLM block-intent scanner, memory revise/retire with journals, and the harness audit trail. main.rs takes the module bump from the stream event. No new packages or binaries. The standing note still applies: this is a ledger, not a new normal \u2014 pay it down by deletion and dedup rather than treating growth as routine.",
+  "_todo_2026_08_07_ship": "v0.9.4 final ship re-baseline: aggregate 676325 -> 676604 (+279 lines) for the todo_write sole progress surface, the fleet named-role model-pin contract + its tests, mid-stream network resume/paste dedup, and the release-prep runtime-contract budget rebaseline. No new 1000-line modules; growth is in existing files. Pay down in 0.9.5.",
   "document_kind": "codewhale.source_structure_budget",
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 177,
   "max_module_lines": 17631,
-  "max_total_owned_rust_lines": 677636,
+  "max_total_owned_rust_lines": 677787,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
@@ -218,5 +219,5 @@
     "codewhale-workflow-js"
   ],
   "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5.",
-  "_todo_2026_08_07_feat012": "FEAT-012 Layer 5.3 (palette/completion discovery filtering) re-baseline on top of origin/main's 676325: aggregate 676325 -> 677636 (+1311 lines; +161 from upstream 21ed173cf pre-release repair batch), measured on the merged tree incl. upstream line changes; +4 from rustfmt reflow of the footer-path test assertions). Legitimate growth from the shared discovery-shadowing contract (crates/tui/src/commands/discovery.rs, 235 lines) and the Gherkin acceptance harness (epic_discovery_acceptance.rs, 750 lines) mirroring the accepted FEAT-011 pattern. No new 1000-line modules. Pay down in v0.9.5 per the existing TODO notes."
+  "_todo_2026_08_07_feat012": "FEAT-012 Layer 5.3 (palette/completion discovery filtering) delta on top of upstream's 0.9.4 rebaseline (676604, commit 59e710271): aggregate 676604 -> 677787 (+1183 lines). Growth is the shared discovery-shadowing contract (crates/tui/src/commands/discovery.rs, 235 lines) and the Gherkin acceptance harness (epic_discovery_acceptance.rs, 750 lines) mirroring the accepted FEAT-011 pattern. No new 1000-line modules. Pay down in v0.9.5 per the existing TODO notes."
 }

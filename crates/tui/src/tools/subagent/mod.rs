@@ -11465,7 +11465,23 @@ fn apply_spawn_profile(
     request: &mut SpawnRequest,
     roster: &crate::fleet::roster::FleetRoster,
 ) -> Result<Option<crate::fleet::profile::AgentProfile>, ToolError> {
-    let Some(profile_id) = request.profile.as_deref() else {
+    // If the caller used a legacy `type`/`role` alias (e.g. `builder`) and it
+    // resolves to a saved fleet roster member, treat it as a profile so the
+    // child gets the member's pinned provider/model instead of colliding with
+    // the session provider (#4177 keeps type aliases from being promoted when
+    // they do *not* resolve to a member).
+    let mut resolved_from_role = false;
+    let profile_id = request.profile.as_deref().or_else(|| {
+        if !request.agent_type_named || request.agent_type == FleetRole::Worker {
+            return None;
+        }
+        let role = request.assignment.role.as_deref()?;
+        resolve_roster_member(roster, role).map(|member| {
+            resolved_from_role = true;
+            member.id.as_str()
+        })
+    });
+    let Some(profile_id) = profile_id else {
         return Ok(None);
     };
     let Some(member) = resolve_roster_member(roster, profile_id) else {
@@ -11492,28 +11508,43 @@ fn apply_spawn_profile(
     }
 
     // Named fleet profiles bind 1:1 to their configured route (#5046).
-    // The dispatching model cannot vary the model or model_strength for a named
-    // profile — only 'general' exposes those options. This prevents the model
-    // from composing invalid states (e.g. cloning the operator's model five
-    // times, or binding the wrong wire protocol for a profile's model).
+    // The dispatching model cannot vary the model_strength for a named
+    // profile — only 'general' exposes that option. An explicit `model` that
+    // *matches* the profile's pinned model is accepted as redundant and
+    // ignored, so a caller that used `type: "builder"` with the same model the
+    // profile already pins is helped through instead of being rejected.
     let is_general_slot = matches!(member.profile.slot, codewhale_config::FleetSlot::General);
     if !is_general_slot {
-        if request.model.is_some() {
-            return Err(ToolError::invalid_input(format!(
-                "fleet profile '{}' binds a pre-configured route; 'model' may not be set for \
-                 named fleet roles. Named agents use exactly their configured model, route, and \
-                 posture — the dispatching model cannot override them. Remove 'model', or dispatch \
-                 without a profile to use 'general' (the only role with model options).",
-                member.id
-            )));
+        if let Some(requested) = request.model.as_deref() {
+            if let Some(pinned) = member.profile.model.as_deref() {
+                if requested.trim().eq_ignore_ascii_case(pinned.trim()) {
+                    // Redundant; let the profile route win.
+                    request.model = None;
+                } else {
+                    return Err(ToolError::invalid_input(format!(
+                        "fleet profile '{}' pins model '{}', but the caller requested '{}'. \
+                         Named agents use exactly their configured model, route, and posture. \
+                         Remove 'model' to use the profile pin, or dispatch without a profile \
+                         (type: 'worker'/'general') to use 'model'.",
+                        member.id, pinned, requested
+                    )));
+                }
+            } else {
+                return Err(ToolError::invalid_input(format!(
+                    "fleet profile '{}' binds a pre-configured route; 'model' may not be set for \
+                     named fleet roles. Named agents use exactly their configured model, route, and \
+                     posture — the dispatching model cannot override them. Remove 'model', or dispatch \
+                     with type: 'worker'/'general' (the only role with model options).",
+                    member.id
+                )));
+            }
         }
         if request.model_strength_explicit {
             return Err(ToolError::invalid_input(format!(
                 "fleet profile '{}' binds a pre-configured route; 'model_strength' may not be \
                  set for named fleet roles. Named agents use exactly their configured model, \
                  route, and posture — the dispatching model cannot override them. Remove \
-                 'model_strength', or dispatch without a profile to use 'general' (the only role \
-                 with model options).",
+                 'model_strength', or dispatch with type: 'worker'/'general' (the only role with model options).",
                 member.id
             )));
         }

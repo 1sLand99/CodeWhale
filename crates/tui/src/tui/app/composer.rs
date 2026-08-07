@@ -1579,18 +1579,18 @@ impl App {
         // the consolidation in `insert_paste_text` first, so the user
         // sees the @mention in the composer before submission.
         self.consolidate_large_input_if_oversized();
-        // If consolidation created a paste file, restore the full text and
-        // append the @mention so the model can read the complete content
-        // while the composer stays editable (#3263).
-        let mut input = self
-            .oversized_paste_full_text
-            .take()
-            .unwrap_or_else(|| self.input.clone());
+        // If consolidation created a paste file, submit only the @-mention so
+        // the model reads the full content from the paste file. Sending both
+        // the inline text and the file mention duplicates the content in the
+        // request and confuses the model.
+        let mut input = self.input.clone();
         if let Some(reference) = self.pending_paste_reference.take() {
-            if !input.is_empty() && !input.ends_with('\n') {
-                input.push('\n');
-            }
-            input.push_str(&reference);
+            // Drop the oversized inline copy; the paste file is now the
+            // single source of truth for this content.
+            self.oversized_paste_full_text = None;
+            input = reference;
+        } else if let Some(full) = self.oversized_paste_full_text.take() {
+            input = full;
         }
         if !looks_like_slash_command_input(&input) {
             self.input_history.push(input.clone());
@@ -1750,8 +1750,9 @@ impl App {
         }
 
         // Keep a truncated preview in the composer so the user can still
-        // select, copy, and edit it, while the full text is stored for
-        // model submission. The @mention is appended at submit time (#3263).
+        // select, copy, and edit it. The full text is written to the paste
+        // file; at submit time the inline text is replaced by the @mention
+        // so the model reads the file instead of receiving the content twice.
         self.pending_paste_reference = Some(format!("@{rel_path}"));
         self.oversized_paste_full_text = Some(full_input.clone());
         let display_chars = char_count(&full_input).min(MAX_COMPOSER_DISPLAY_CHARS);
