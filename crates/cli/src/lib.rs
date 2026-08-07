@@ -8265,29 +8265,3 @@ mod tests {
         }
     }
 
-    /// Regression for issue #247: on Windows the dispatcher must find the
-    /// sibling `codewhale-tui.exe`, not bail out looking for an
-    /// extension-less `codewhale-tui`. The candidate resolver also accepts
-    /// the suffix-less name on Windows so users who manually renamed the
-    /// file as a workaround keep working after the upgrade.
-    #[test]
-
-    
-    #[cfg(unix)]
-    #[test]
-
-    /// Windows-only fallback: the user from #247 manually renamed the
-    /// file to drop `.exe`. After the fix lands, that workaround must
-    /// still resolve via the suffix-less fallback so they don't have to
-    /// rename it back.
-    #[cfg(windows)]
-    #[test]
-
-    /// `DEEPSEEK_TUI_BIN` overrides the discovery path. Useful for
-    /// custom Windows install layouts and CI test rigs.
-    #[test]
-
-    /// `CODEWHALE_TUI_BIN` is the canonical override name and outranks the
-    /// legacy `DEEPSEEK_TUI_BIN` alias when both are set.
-    #[test]
-}
