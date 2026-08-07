@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # CodeWhale Unix installer
-# Copies codewhale, codew, and codewhale-tui to ~/.local/bin (or $PREFIX/bin)
+# Copies codewhale and codew to ~/.local/bin (or $PREFIX/bin)
 
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="${PREFIX}/bin"
@@ -66,7 +66,7 @@ preflight_glibc() {
     local host
     if ! host="$(detect_host_glibc)" || [[ -z "$host" ]]; then
         echo "ERROR: $(basename "$bin") requires GLIBC_$required, but no GNU libc was detected." >&2
-        echo "Build from source instead: cargo install codewhale-cli --locked && cargo install codewhale-tui --locked" >&2
+        echo "Build from source instead: cargo install codewhale --locked" >&2
         echo "Set CODEWHALE_SKIP_GLIBC_CHECK=1 to bypass this check at your own risk." >&2
         return 1
     fi
@@ -74,7 +74,7 @@ preflight_glibc() {
     if [[ "$(version_code "$host")" -lt "$(version_code "$required")" ]]; then
         echo "ERROR: $(basename "$bin") requires GLIBC_$required, but this system has glibc $host." >&2
         echo "Ubuntu 22.04 ships glibc 2.35 and cannot run assets built against Ubuntu 24.04/glibc 2.39." >&2
-        echo "Build from source instead: cargo install codewhale-cli --locked && cargo install codewhale-tui --locked" >&2
+        echo "Build from source instead: cargo install codewhale --locked" >&2
         echo "Release follow-up: build Linux GNU assets against an older glibc baseline or add a musl/static asset." >&2
         echo "Set CODEWHALE_SKIP_GLIBC_CHECK=1 to bypass this check at your own risk." >&2
         return 1
@@ -95,7 +95,7 @@ install_binary() {
     mv -f "$tmp" "$dst"
 }
 
-for bin in codewhale codew codewhale-tui; do
+for bin in codewhale codew; do
     src="$SCRIPT_DIR/$bin"
     dst="$BIN_DIR/$bin"
     if [[ ! -f "$src" ]]; then
