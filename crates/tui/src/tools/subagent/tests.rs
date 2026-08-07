@@ -177,6 +177,7 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         checkpoint: None,
         needs_input: None,
         duration_ms: 0,
+        started_at: None,
         from_prior_session: false,
     }
 }

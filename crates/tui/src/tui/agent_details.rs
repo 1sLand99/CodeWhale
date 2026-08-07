@@ -520,6 +520,7 @@ mod tests {
             checkpoint: None,
             needs_input: None,
             duration_ms: 2_500,
+            started_at: None,
             from_prior_session: false,
         }
     }

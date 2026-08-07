@@ -624,6 +624,13 @@ pub struct SubAgentResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_input: Option<SubAgentNeedsInput>,
     pub duration_ms: u64,
+    /// Live start timestamp for elapsed derivation at render (4b). The
+    /// `duration_ms` above is a frozen snapshot; this `Instant` is the
+    /// source of truth for ticking rows. `None` for deserialized or
+    /// non-running agents, `Some` for live running children. Skipped in
+    /// serialization so persisted agents remain correct.
+    #[serde(skip)]
+    pub started_at: Option<std::time::Instant>,
     /// `true` when this agent was loaded from a prior-session persisted
     /// state file rather than spawned in the current session (#405).
     /// Lets listings filter out historical noise by default while
@@ -2768,6 +2775,7 @@ impl SubAgent {
             checkpoint: self.checkpoint.clone(),
             needs_input: self.needs_input.clone(),
             duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            started_at: Some(self.started_at),
             // Snapshots from the agent itself don't know the manager's
             // current boot id, so default to false. The manager fills
             // this in when it produces a snapshot via its own
@@ -5773,6 +5781,7 @@ impl SubAgentManager {
     /// matching boot id, so listing goes through here.
     fn snapshot_for_listing(&self, agent: &SubAgent) -> SubAgentResult {
         let mut snap = agent.snapshot();
+        snap.started_at = Some(agent.started_at);
         snap.from_prior_session = self.is_from_prior_session(agent);
         if let Some(record) = self.worker_records.get(&agent.id) {
             snap.worker_status = Some(record.status);
@@ -5818,10 +5827,15 @@ impl SubAgentManager {
                 if include_archived {
                     return true;
                 }
+                // Live roster: only actually running children (4a). This
+                // excludes completed/failed/cancelled and children that
+                // never started (no task_handle) or timed out — same root
+                // as the phantom watch entry. Prior-session running agents
+                // stay visible for recovery, but only if they are live.
                 if agent.status == SubAgentStatus::Running {
-                    return true;
+                    return agent.task_handle.is_some() && !self.running_heartbeat_timed_out(agent);
                 }
-                !self.is_from_prior_session(agent)
+                false
             })
             .map(|agent| self.snapshot_for_listing(agent))
             .collect()
@@ -7018,7 +7032,7 @@ impl ToolSpec for AgentTool {
                     "type": "integer",
                     "minimum": 5,
                     "maximum": 1800,
-                    "description": "For action=wait: maximum seconds to block before returning a still-running snapshot. Default 300."
+                    "description": "For action=wait: maximum seconds to block (default 30). Prefer ending the turn and staying reachable — results arrive automatically as <codewhale:subagent.done> sentinels — only wait when you must join before continuing."
                 },
                 "message": {
                     "type": "string",
@@ -7546,10 +7560,13 @@ async fn cancel_agent_from_input(
     Ok(tool_result)
 }
 
-/// Bounds for `agent(action="wait")` (#4097). The default keeps one wait call
-/// well under provider/tool timeouts while covering typical child runtimes;
-/// on expiry the model gets a still-running snapshot and can wait again.
-const SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Bounds for `agent(action="wait")` (#4097). The default is short so a
+/// `wait` does not make the session deaf: the turn is blocked for at most
+/// this long and user messages have nowhere to land. Results arrive
+/// automatically as `<codewhale:subagent.done>` sentinels, so ending the
+/// turn and staying reachable is the preferred default — only `wait` when
+/// you must join before continuing.
+const SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Runtime floor is 1s (schema advertises 5) so tests can exercise the
 /// timeout path without multi-second sleeps.
 const SUBAGENT_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
@@ -9891,6 +9908,7 @@ async fn run_subagent(
                 checkpoint: latest_checkpoint.clone(),
                 needs_input: None,
                 duration_ms,
+                started_at: Some(started_at),
                 from_prior_session: false,
             });
         }
@@ -10026,6 +10044,7 @@ async fn run_subagent(
                     checkpoint: latest_checkpoint.clone(),
                     needs_input: None,
                     duration_ms,
+                    started_at: Some(started_at),
                     from_prior_session: false,
                 });
             }
@@ -10143,6 +10162,7 @@ async fn run_subagent(
                             checkpoint: Some(checkpoint),
                             needs_input: Some(needs_input),
                             duration_ms,
+                            started_at: Some(started_at),
                             from_prior_session: false,
                         });
                     }
@@ -10282,6 +10302,7 @@ async fn run_subagent(
                 checkpoint: latest_checkpoint.clone(),
                 needs_input: None,
                 duration_ms,
+                started_at: Some(started_at),
                 from_prior_session: false,
             });
         }
@@ -10650,6 +10671,7 @@ async fn run_subagent(
         checkpoint: latest_checkpoint,
         needs_input: None,
         duration_ms,
+        started_at: Some(started_at),
         from_prior_session: false,
     })
 }
