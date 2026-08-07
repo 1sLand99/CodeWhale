@@ -190,7 +190,7 @@
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 175,
   "max_module_lines": 17596,
-  "max_total_owned_rust_lines": 673375,
+  "max_total_owned_rust_lines": 674554,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
@@ -213,5 +213,6 @@
     "codewhale-tui",
     "codewhale-workflow",
     "codewhale-workflow-js"
-  ]
+  ],
+  "_todo_2026_08_07_feat012": "FEAT-012 Layer 5.3 (palette/completion discovery filtering) re-baseline: aggregate 673375 -> 674554 (+1179 lines). Legitimate growth from the shared discovery-shadowing contract (crates/tui/src/commands/discovery.rs, 235 lines) and the Gherkin acceptance harness (epic_discovery_acceptance.rs, 750 lines) mirroring the accepted FEAT-011 pattern. No new 1000-line modules. Pay down in v0.9.5 per the existing TODO notes."
 }
