@@ -94,16 +94,16 @@ task depends on decisions, files, todos, or plan state already in the parent
 transcript.
 
 Forked state renders concrete Work progress from the To-do ledger — the sole
-canonical Work surface, written by `work_update`. The child's
+canonical Work surface, written by `todo_write`. The child's
 `<codewhale:fork_state>` block carries the same bounded body
 (`crates/tui/src/work_grounding.rs`) that the parent's own requests carry, so a
 fork continues from the parent's real progress position rather than a
 paraphrase. That Work section is resolved when the spawn happens, so a
-`work_update` earlier in the same parent turn is included.
+`todo_write` earlier in the same parent turn is included.
 
 Each agent then grounds on **its own** ledger: every sub-agent request carries
 the same transient `<codewhale:work_state>` tail rendered from that agent's
-private To-do list (#4810), refreshed after the agent's own `work_update`. It is
+private To-do list (#4810), refreshed after the agent's own `todo_write`. It is
 request-scoped — never stored in the child transcript or its system prefix — so
 a worker can never read or write a parent's or sibling's **private transient
 tail**. A deliberately forked child still receives the bounded immutable parent
@@ -129,7 +129,7 @@ longer reachable by a model: `model_visible()` returns `false`
 (`crates/tui/src/tools/plan.rs:408-413`), so it is filtered out of the API tool
 list and never appears to a child. It survives only to replay older transcripts.
 Strategy that used to go there now goes in the response body, and lifecycle
-state goes in `work_update`.
+state goes in `todo_write`.
 
 ## Worktree isolation
 
@@ -223,7 +223,7 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   likely scope, and return `path:line-range` evidence instead of a narrative
   tour. The role name to use is `scout`.
 - **`planner`** — when the parent has an objective but no executable
-  decomposition. Planners write artifacts (`work_update` items for the ledger,
+  decomposition. Planners write artifacts (`todo_write` items for the ledger,
   strategy in the response body) but don't carry them out.
 - **`reviewer`** — when there's already a change and the parent wants
   it graded. Reviewers don't patch — they describe the fix in the

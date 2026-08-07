@@ -8725,7 +8725,7 @@ async fn write_todos_as(runtime: &SubAgentRuntime, contents: &[&str]) {
         .iter()
         .map(|content| json!({"content": content, "status": "pending"}))
         .collect();
-    crate::tools::todo::TodoWriteTool::work_update(runtime.todos.clone())
+    crate::tools::todo::TodoWriteTool::new(runtime.todos.clone())
         .execute(json!({"todos": items}), &runtime.context)
         .await
         .expect("work_update must succeed against the agent's own list");
@@ -14582,7 +14582,7 @@ async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
     let empty = source.snapshot().await;
     assert!(!work_state_worth_publishing(last.as_ref(), &empty));
 
-    crate::tools::todo::TodoWriteTool::work_update(child_todos.clone())
+    crate::tools::todo::TodoWriteTool::new(child_todos.clone())
         .execute(
             serde_json::json!({"todos": [{"content": "CHILD: write the projection", "status": "in_progress"}]}),
             &context,
@@ -14608,7 +14608,7 @@ async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
     assert!(!work_state_worth_publishing(last.as_ref(), &again));
 
     // A real transition, including back to empty, is published.
-    crate::tools::todo::TodoWriteTool::work_update(child_todos.clone())
+    crate::tools::todo::TodoWriteTool::new(child_todos.clone())
         .execute(serde_json::json!({"todos": []}), &context)
         .await
         .expect("child clears its list");

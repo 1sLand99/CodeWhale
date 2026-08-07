@@ -46,8 +46,9 @@ tools** that map to the *same* implementation under different names:
   (`registry.rs:527,530`).
 - `tts` and `speech` are both `SpeechTool`
   (`registry.rs:787-792`, both deferred).
-- `work_update`, `checklist_*`, and `todo_*` are the *same*
-  `TodoWriteTool` surface, with only `work_update` visible to models.
+- `todo_write` is the single model-visible `TodoWriteTool` surface;
+  `todo_write`, `TodoWrite`, `todo`, `checklist_write`, and
+  `checklist_update` are hidden compat aliases of it.
 
 For a strong model, redundant names are harmless noise. For **weaker / smaller
 models** (the Arcee Trinity lane, `deepseek-v4-flash` child executors, and any
@@ -67,7 +68,7 @@ referenced a now-retired name.
 
 ### Canonical work-tracking surface for v0.9.1
 
-The model-visible progress surface is a single tool: `work_update` (#4132).
+The model-visible progress surface is a single tool: `todo_write` (#4132).
 Agents and Fleet workers use it for concrete To-do / Work progress under the
 active runtime thread or durable task.
 
@@ -86,21 +87,21 @@ the To-do snapshot once, hard-bounded in both item count and characters, with
 the in-progress item preserved preferentially and any elision marked. That body
 is appended to each parent turn-loop and sub-agent step request as a transient
 `<codewhale:work_state>` block — rebuilt per request, so a mid-turn
-`work_update` is visible on the next step — and is never written to session
+`todo_write` is visible on the next step — and is never written to session
 history or the stable system prefix.
 Forked agents (`<codewhale:fork_state>`) and `/relay` reuse the same body.
 
 Three properties of that seam are load-bearing:
 
 - **Authority.** The snapshot is read from the `WorkRuntime` graph projection
-  when a runtime owns that list, because `work_update` stages there and only
+  when a runtime owns that list, because `todo_write` stages there and only
   publishes into the legacy `SharedTodoList` view later. Sessions with no
   attached runtime read the list directly.
 - **Per-agent isolation.** Every sub-agent gets the same tail rendered from
   *its own* list (`#4810`), so a worker sees its own progress and never a
   parent's or sibling's. The parent's ledger reaches a forked child only as the
   immutable `<codewhale:fork_state>` Work section, resolved at the spawn seam so
-  a same-turn `work_update` is included.
+  a same-turn `todo_write` is included.
 - **Context accounting.** The parent turn-loop preflight token estimate runs
   over the tail message that request actually carries, so it cannot approve a
   request that goes over-limit once the block is appended. Offline counts stay
@@ -169,14 +170,11 @@ pub(super) const HIDDEN_COMPATIBILITY_TOOLS: &[&str] = &[
     "exec_wait",          // == exec_shell_wait  (ShellWaitTool)
     "exec_interact",      // == exec_shell_interact (ShellInteractTool)
     "tts",                // == speech (SpeechTool)
-    "checklist_write",    // == work_update (TodoWriteTool)
-    "checklist_add",      // == work_update single-item add
-    "checklist_update",   // == work_update single-item update
-    "checklist_list",     // == work_update list
-    "todo_write",         // == work_update
-    "todo_add",           // == work_update single-item add
-    "todo_update",        // == work_update single-item update
-    "todo_list",          // == work_update list
+    "work_update",        // == todo_write (TodoWriteTool)
+    "TodoWrite",          // == todo_write (TodoWriteTool)
+    "todo",               // == todo_write (TodoWriteTool)
+    "checklist_write",    // == todo_write (TodoWriteTool)
+    "checklist_update",   // == todo_write (TodoWriteTool)
 ];
 
 /// Deprecated aliases: invisible + dispatchable, with a replacement notice
@@ -188,8 +186,8 @@ pub(super) struct DeprecatedAlias {
 }
 
 pub(super) const DEPRECATED_ALIASES: &[DeprecatedAlias] = &[
-    // Empty in the #4132 work-surface cutover: checklist_* and todo_* are
-    // silent hidden-compatibility aliases of work_update for transcript replay.
+    // Empty in the #4132 work-surface cutover: the legacy names above are
+    // silent hidden-compatibility aliases of todo_write for transcript replay.
 ];
 
 #[inline]
@@ -254,17 +252,17 @@ This was the proposed manifest. Columns are the #2681 AC columns. No entry was
 | `exec_wait` | `exec_shell_wait` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
 | `exec_interact` | `exec_shell_interact` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
 | `tts` | `speech` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
-| `checklist_write` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
-| `checklist_add` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
-| `checklist_update` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
-| `checklist_list` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
-| `todo_write` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
-| `todo_add` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
-| `todo_update` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
-| `todo_list` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `checklist_write` | `todo_write` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_add` | `todo_write` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_update` | `todo_write` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_list` | `todo_write` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `todo_write` | `todo_write` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_add` | `todo_write` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_update` | `todo_write` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_list` | `todo_write` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
 
 The `todo_*` aliases first entered hidden compatibility in v0.8.53. v0.9.0
-changes their canonical replacement to `work_update`; it does not reset their
+changes their canonical replacement to `todo_write`; it does not reset their
 first-deprecated version.
 
 **Legacy subagent names — removed, no manifest entry needed.**
@@ -333,7 +331,7 @@ else or an explicit budget bump in this doc.
 |---|---|---|---|
 | **Shell wait** | `exec_shell_wait` | `exec_wait` → hidden-compat | Same `ShellWaitTool` (`registry.rs:526,529`); router already unifies (`tool_routing.rs:1139`) |
 | **Shell interact** | `exec_shell_interact` | `exec_interact` → hidden-compat | Same `ShellInteractTool` (`registry.rs:527,530`) |
-| **Work progress / checklist / todo** | `work_update` | `checklist_write/add/update/list`, `todo_write/add/update/list` → hidden-compat | Same `TodoWriteTool`; compatibility names replay old transcripts only |
+| **Work progress / checklist / todo** | `todo_write` | `checklist_write/add/update/list`, `todo_write/add/update/list` → hidden-compat | Same `TodoWriteTool`; compatibility names replay old transcripts only |
 | **Speech / tts** | `speech` | `tts` → hidden-compat | Same `SpeechTool` (`registry.rs:787-792`) |
 | **Subagent lifecycle** | `agent` | old lifecycle names and tool-agent lane removed | Single async launcher. (The "child agents are leaf workers" note here did not ship — see §7.) |
 | **Edit family** | `apply_patch`, `edit_file`, `write_file`, `fim_edit` | none — **all distinct niches** | NOT touched (per #2681 non-goals); doc-only canonical guidance |

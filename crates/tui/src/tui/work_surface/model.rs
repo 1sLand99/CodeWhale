@@ -1596,10 +1596,9 @@ fn agent_elapsed_ms(app: &App, agent: &crate::tools::subagent::SubAgentResult) -
     if matches!(
         agent.status,
         crate::tools::subagent::SubAgentStatus::Running
-    ) {
-        if let Some(started_at) = agent.started_at {
-            return u64::try_from(started_at.elapsed().as_millis()).unwrap_or(agent.duration_ms);
-        }
+    ) && let Some(started_at) = agent.started_at
+    {
+        return u64::try_from(started_at.elapsed().as_millis()).unwrap_or(agent.duration_ms);
     }
     app.work_surface
         .frozen_agent_elapsed_ms

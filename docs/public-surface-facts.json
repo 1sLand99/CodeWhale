@@ -107,7 +107,7 @@
       "agent",
       "remember",
       "tasks",
-      "work_update",
+      "todo_write",
       "tool_search"
     ],
     "actions": {

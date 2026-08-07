@@ -140,6 +140,39 @@ File edits, terminal width, and Windows installation.
 - Acceptance-level Gherkin coverage locking the existing user-command
   precedence, alias shadowing, fallback, and invalid-command error contract
   (PR #4992).
+- Agent Plugins v1.0.0: consume, publish, and slugify packaged sub-agent
+  briefs, with an install/update/uninstall on-ramp in the TUI (PR #5182). A
+  plugin bundles a prompt, posture, and routing as one shareable artifact;
+  on-disk migration of the older `plugin.toml` scaffold is deliberately out
+  of scope for this train.
+- `send_later`: a model-callable one-shot delayed continuation tool, so the
+  model can schedule a single future nudge without an operator-approved
+  durable automation (PR #5138).
+- `/advisor`: an opt-in background advisor watcher for live turns (PR #5139).
+- Notification quiet mode with per-category switches and action-first copy
+  (PR #5066).
+- Automation scheduling forms — one-shot `ONCE`, five-field cron, and honest
+  watcher modes — created through the approval-gated `automation` tool
+  (PR #5183).
+- Sub-agent `resume_from` continuation chains (PR #5142), child-result
+  diff-tainting when a claimed diff is not visible to git, per-turn usage
+  receipts on the exec stream-json stream, and spawn receipts that report
+  the model each sub-agent actually ran on.
+- Transport resilience: sub-agent exec transport retries with a 600 s
+  default (PR #5210), SSE header stalls retryable instead of fatal, and
+  headless turn resume after mid-stream network drops with an `EX_TEMPFAIL`
+  exit.
+- Session durability and control: a deterministic compaction continuation
+  contract (PR #5064), persisting interrupted output (PR #5206), stop-word
+  cancellation (PR #5207), token-counter refresh (PR #5204), deny-by-default
+  approval cards (PR #5090), and the Operate completion gate (PR #5067).
+- zh-Hant promoted to a full shipped locale with complete `en.json` parity
+  (PR #5143).
+- A persistent update-available chip in the header, with the startup update
+  check throttled and naming the right command.
+- RLM static intent extraction for code blocks (`rlm_block_intent.rs`)
+  landed as groundwork for a future code-mode approval flow; it is not yet
+  wired into the turn pipeline and ships dormant by design.
 
 ### Changed
 
@@ -186,6 +219,20 @@ File edits, terminal width, and Windows installation.
   futures-util to 0.3.33, libc to 0.2.189, actions/stale to 11.0.0, and
   docker/login-action to 4.5.2. The locked graph also includes the
   event-listener 5.4.2 fix for RUSTSEC-2026-0221.
+- The progress surface now speaks plainly everywhere: the last user-visible
+  "Work update is pending" notices say "To-do list", the tool constructor and
+  the docs name `todo_write` as the single canonical progress tool, and
+  `work_update`, `TodoWrite`, and `todo` stay registered as hidden
+  compatibility aliases so saved transcripts keep replaying.
+- Sub-agent and `agents/wait` waits stay short by default and by cap:
+  blocking waits default to 30 s and refuse to block past 120 s, because a
+  blocked wait deafens the session to typed input and settled children
+  already report back as `<codewhale:subagent.done>` sentinels.
+- `Bash` `action=wait` honors `timeout_secs` (seconds) and bare `timeout`
+  (milliseconds) alongside canonical `timeout_ms`, and `block` as an alias
+  for `wait`, so a habit formed on other wait tools gets the duration it
+  asked for instead of silently falling back to the 30 s default; the result
+  metadata reports the real `wait_timeout_ms` applied.
 
 ### Fixed
 
@@ -362,6 +409,21 @@ File edits, terminal width, and Windows installation.
 - Transcript wheel scrolling under iTerm2: xterm alternate-scroll (DECSET
   1007) now stays off while mouse capture is active, so wheel events arrive as
   mouse events instead of being converted into arrow keys (#5223, PR #5234).
+- A stalled model stream no longer ends the turn as `Completed` over a
+  frozen reasoning block: a mid-stream chunk-timeout now counts toward the
+  stream-error budget, so a stall with nothing streamed retries the request
+  transparently, and a stall that exhausts the retry budget fails the turn
+  with the real reason instead of reporting success.
+- A finished background shell task now wakes the engine even when no goal is
+  active: the idle loop starts an ordinary runtime turn so the completion
+  reaches the model immediately instead of sitting unclaimed until the user
+  types (a dead provider route claims the completion once and reports where
+  the output lives instead of re-arming the same error every tick).
+- Sub-agent final reports that exceed the summary budget are now spilled to
+  a session artifact, and the truncation footer names the
+  `retrieve_tool_result` ref for the elided middle instead of telling the
+  model the bytes are unrecoverable; write failures degrade to the honest
+  no-ref footer.
 
 ### Removed
 

@@ -26,7 +26,7 @@ The default-active policy contains exactly these nine names:
 5. `agent`
 6. `remember`
 7. `tasks`
-8. `work_update`
+8. `todo_write`
 9. `tool_search`
 
 The first eight are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
@@ -47,7 +47,7 @@ compatibility tool for loading older Plan artifacts", and
 `update_plan_is_hidden_replay_compatibility` (`plan.rs:598-605`) pins that.
 
 Plan mode narrows the active set: `Bash` and `Run` drop out, leaving `File`,
-`Git`, `agent`, `tasks`, `work_update`, `tool_search`, and — when memory is
+`Git`, `agent`, `tasks`, `todo_write`, `tool_search`, and — when memory is
 enabled — `remember` (`should_register_remember_tool`,
 `crates/tui/src/core/engine/tool_setup.rs:113-118`).
 
@@ -82,11 +82,11 @@ by the former spellings remain in force.
 | `agent` | Dispatch one focused sub-agent run and return an id, compact receipt, and transcript handle. |
 | `remember` | Append one terse durable preference or convention when the user has enabled built-in memory. |
 | `tasks` | Create, list, read, cancel, gate, and inspect durable task work through one action family. |
-| `update_plan` | Registered but not model-visible; replays older Plan artifacts only. New work uses `work_update` plus a normal Plan-mode response. |
-| `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
+| `update_plan` | Registered but not model-visible; replays older Plan artifacts only. New work uses `todo_write` plus a normal Plan-mode response. |
+| `todo_write` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
 | `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
-`work_update` writes the **sole canonical Work ledger**. `update_plan` is
+`todo_write` writes the **sole canonical Work ledger**. `update_plan` is
 conversational reasoning — strategy, constraints, and route notes that help a
 reader understand the approach. It is not a second Work surface, and plan-only
 state never becomes model-facing Work grounding.
@@ -197,7 +197,7 @@ compatibility for them. Tests pin the removals:
 | `github_issue_context`, `github_pr_context`, `github_comment`, `github_close_issue`, `github_close_pr` | `github` | same test |
 | `automation_create/list/read/update/pause/resume/delete/run` | `automation` | same test |
 | `rlm_session_objects`, `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` | `rlm` | `rlm_is_the_only_registered_session_surface`, registry.rs:1519-1538 |
-| `checklist_write/add/update/list`, `todo_write/add/update/list` | `work_update` | registry.rs:1476-1490 |
+| `todo_add/update/list`, `checklist_add/list` (removed); `work_update`, `TodoWrite`, `todo`, `checklist_write/update` (registered hidden aliases) | `todo_write` | registry alias assertions (`registry.rs`) |
 
 This matches the "Removed spellings" section above rather than contradicting
 it. Replay compatibility does not make an alias a supported spelling for new

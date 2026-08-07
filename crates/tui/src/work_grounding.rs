@@ -585,13 +585,13 @@ mod tests {
         assert!(source.is_graph_backed());
         assert!(source.tail_message().await.is_none(), "no work yet");
 
-        crate::tools::todo::TodoWriteTool::work_update(todos.clone())
+        crate::tools::todo::TodoWriteTool::new(todos.clone())
             .execute(
                 serde_json::json!({"todos": [{"content": "staged item", "status": "in_progress"}]}),
                 &context,
             )
             .await
-            .expect("work_update");
+            .expect("todo_write");
 
         assert!(
             todos.lock().await.snapshot().is_empty(),

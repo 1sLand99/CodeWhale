@@ -1200,6 +1200,15 @@ pub(crate) async fn run_event_loop(
                             );
                         }
 
+                        // Every `remember` action mutates durable memory, so a
+                        // successful call is the moment the first-run tip
+                        // points at /memory (one-shot per session, lifetime-capped).
+                        if name == "remember" && matches!(&result, Ok(output) if output.success) {
+                            let _ = app.maybe_show_behavioral_tip(
+                                crate::tui::behavioral_tips::BehavioralTip::DurableStateWritten,
+                            );
+                        }
+
                         if result.is_ok()
                             && is_work_graph_mutation_tool(&name)
                             && let Err(err) = persist_pending_work_checkpoint(app).await
@@ -1210,7 +1219,7 @@ pub(crate) async fn run_event_loop(
                                 "Work Graph checkpoint was not enqueued; projections remain unpublished"
                             );
                             app.status_message = Some(format!(
-                                "Work update is pending: checkpoint could not be queued ({err})"
+                                "To-do list update pending: checkpoint could not be queued ({err})"
                             ));
                         }
 
@@ -1701,7 +1710,7 @@ pub(crate) async fn run_event_loop(
                                 .is_some_and(|work| work.has_pending_publish())
                             {
                                 app.status_message = Some(
-                                    "Work update is pending: session snapshot could not be queued"
+                                    "To-do list update pending: session snapshot could not be queued"
                                         .to_string(),
                                 );
                             }
@@ -1880,7 +1889,7 @@ pub(crate) async fn run_event_loop(
                                     PersistRequest::SaveCheckpoint { session },
                                 ) {
                                     app.status_message = Some(format!(
-                                        "Work update is pending: checkpoint could not be queued ({err})"
+                                        "To-do list update pending: checkpoint could not be queued ({err})"
                                     ));
                                 }
                             }

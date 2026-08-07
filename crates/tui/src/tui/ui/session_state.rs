@@ -204,7 +204,7 @@ pub(crate) fn persist_recovery_snapshot(app: &mut App) {
             persist_with_pending_work_boundary(app, PersistRequest::SaveCheckpoint { session })
         {
             app.status_message = Some(format!(
-                "Work update is pending: recovery snapshot could not be queued ({err})"
+                "To-do list update pending: recovery snapshot could not be queued ({err})"
             ));
         }
     }
@@ -219,7 +219,7 @@ pub(crate) fn persist_full_reset_snapshot(app: &mut App) {
             persist_with_pending_work_boundary(app, PersistRequest::SessionSnapshot(session))
         {
             app.status_message = Some(format!(
-                "Work update is pending: reset snapshot could not be queued ({err})"
+                "To-do list update pending: reset snapshot could not be queued ({err})"
             ));
         }
     }

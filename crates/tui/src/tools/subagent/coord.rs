@@ -22,9 +22,12 @@ use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 
-const COORD_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Bounds for `agents/wait`. Short on purpose: a blocked wait makes the
+/// session deaf to typed input, and settled children already report back as
+/// `<codewhale:subagent.done>` sentinels that start a fresh turn (#4097).
+const COORD_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const COORD_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
-const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 1800;
+const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
 const COORD_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const RECENT_PROGRESS_LIMIT: usize = 8;
 pub(super) const COORDINATION_RECORD_LIMIT: usize = 128;
@@ -525,7 +528,7 @@ impl ToolSpec for AgentsWaitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Block until watched children settle or the timeout elapses. One blocking wait is the right shape; polling agents/list in a loop is not. until=all is the fan-out join: it returns only when every child running at call time has left running, with each child's outcome. until=completion (default) returns as soon as any one child settles. until=activity also returns on progress."
+        "Block briefly until watched children settle or the timeout elapses. Keep waits short: on timeout, end your turn — settled children wake you automatically as completion sentinels; polling agents/list in a loop is not the right shape either. until=all is the fan-out join: it returns only when every child running at call time has left running, with each child's outcome. until=completion (default) returns as soon as any one child settles. until=activity also returns on progress."
     }
 
     fn input_schema(&self) -> Value {
@@ -539,8 +542,8 @@ impl ToolSpec for AgentsWaitTool {
                 "timeout_secs": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 1800,
-                    "description": "Maximum seconds to block. Default 300."
+                    "maximum": 120,
+                    "description": "Maximum seconds to block. Default 30. Keep it short — on timeout, end your turn; settled children report back as completion sentinels."
                 },
                 "until": {
                     "type": "string",
