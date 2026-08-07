@@ -47,6 +47,8 @@ notes, and relevant issue/PR comments.
   Registry-first tool selection in PR #5238
 - **[vFONGv](https://github.com/vFONGv)** — the zh-CN Windows beginner guide
   with screenshots in PR #5229
+- **[mky](https://github.com/mky)** — FreeBSD build fix (`rquickjs` `bindgen` on FreeBSD, PR #5254)
+- **[cacdcaecawae](https://github.com/cacdcaecawae)** — embedder-owned sub-agent state roots (PR #5252)
 
 **Reports, reproductions, and verification**
 
