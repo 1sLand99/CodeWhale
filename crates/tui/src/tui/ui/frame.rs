@@ -357,13 +357,13 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     };
+    let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata
         .as_ref()
         .filter(|cached| cached.id == session.metadata.id)
     {
         session.metadata.created_at = cached.created_at;
-        session.metadata.title.clone_from(&cached.title);
         session
             .metadata
             .parent_session_id
@@ -375,7 +375,35 @@ pub(crate) fn build_session_snapshot(
     // Re-reading here is what makes "an archive or rename cannot be reverted
     // by autosave" true regardless of which surface applied it or when
     // (#2934 / #4397). One bounded metadata-prefix read, not a transcript scan.
-    let _ = manager.merge_persisted_lifecycle(&mut session.metadata);
+    let merged = manager.merge_persisted_lifecycle(&mut session.metadata);
+    // Title resolution, in priority order:
+    // 1. Disk, when the session already exists (#2934/#4397: a rename applied
+    //    through the session manager is persisted and must survive autosave).
+    // 2. The in-memory cache, when there is no disk record for the session
+    //    yet. (The session picker normally persists renames to disk first via
+    //    `rename_selected`; this branch covers sessions that have never been
+    //    saved, where the cache is the only title source.)
+    // 3. The title computed from the conversation (first user message).
+    //    The cache is NOT a candidate on its own: it is only refreshed at the
+    //    end of this function, so a snapshot taken before any user message
+    //    pins it to the `DEFAULT_SESSION_TITLE` placeholder, and restoring it
+    //    would prevent every later title update (the bug this block fixes).
+    if !merged
+        && let Some(cached) = app.current_session_metadata.as_ref()
+        && cached.id == session.metadata.id
+    {
+        session.metadata.title.clone_from(&cached.title);
+    }
+    if session.metadata.title == crate::session_manager::DEFAULT_SESSION_TITLE
+        && computed_title != crate::session_manager::DEFAULT_SESSION_TITLE
+    {
+        // The placeholder survived from an earlier snapshot; the conversation
+        // now has a real first user message, so let the computed title win.
+        // Known edge: a session deliberately renamed to the literal
+        // placeholder title is treated the same way and yields to the
+        // computed title on the next snapshot.
+        session.metadata.title = computed_title;
+    }
     if let Some(cached) = app.current_session_metadata.as_mut()
         && cached.id == session.metadata.id
     {

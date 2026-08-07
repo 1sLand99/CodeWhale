@@ -1316,7 +1316,11 @@ pub(crate) fn workspace_scope_matches(saved_workspace: &Path, current_workspace:
 }
 
 fn is_empty_auto_created_session(session: &SessionMetadata) -> bool {
-    session.message_count == 0 && session.title.trim().eq_ignore_ascii_case("New Session")
+    session.message_count == 0
+        && session
+            .title
+            .trim()
+            .eq_ignore_ascii_case(DEFAULT_SESSION_TITLE)
 }
 
 fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
@@ -1471,6 +1475,12 @@ pub fn create_saved_session(
     )
 }
 
+/// Placeholder title used for a session that has no first user message yet.
+/// `build_session_snapshot` (tui/ui/frame.rs) treats a title equal to this
+/// constant as an auto-generated placeholder and lets the conversation-derived
+/// title win once a user message exists. Keep this string stable on purpose.
+pub(crate) const DEFAULT_SESSION_TITLE: &str = "New Session";
+
 /// Create a new `SavedSession` from conversation state with optional mode label
 pub fn create_saved_session_with_mode(
     messages: &[Message],
@@ -1520,7 +1530,7 @@ pub fn create_saved_session_with_id_and_mode(
                 _ => None,
             })
         })
-        .unwrap_or_else(|| "New Session".to_string());
+        .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
 
     SavedSession {
         schema_version: CURRENT_SESSION_SCHEMA_VERSION,
@@ -2082,7 +2092,7 @@ mod tests {
             messages: Vec::new(),
             metadata: SessionMetadata {
                 id: id.to_string(),
-                title: "New Session".to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
                 created_at: updated_at,
                 updated_at,
                 message_count: 0,
