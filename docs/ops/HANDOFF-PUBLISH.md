@@ -106,6 +106,77 @@ against it. Treat it as very likely correct, unproven.
    `codex/rlm-bindings`, `codex/agent-plugins`, `codex/website-polish`, and the
    worktrees at `/Volumes/VIXinSSD/CW/wt-agent-plugins` and `wt-website`.
 
+## The CodeWhale desktop app (VS Code fork) — started, not finished
+
+`microsoft/vscode` is cloned shallow at `/Volumes/VIXinSSD/CW/vscode` (855M, MIT).
+Its `product.json` is already rebranded: `nameLong`/`nameShort` CodeWhale,
+`applicationName` `codewhale-app`, `dataFolderName` `.codewhale-app`,
+`urlProtocol` `codewhale`, issue/license URLs pointed at this repo.
+
+**The line that matters most is `extensionsGallery`.** It is set to Open VSX
+(`https://open-vsx.org/vscode/gallery`). The Microsoft Marketplace Terms of Use
+restrict it to Microsoft products, and a fork pointing at it is a licensing
+violation that will not fail loudly. Every fork — VSCodium, Cursor, Windsurf —
+uses Open VSX. Do not "fix" this by pointing it back.
+
+Upstream ships `product.json` as `Code - OSS` precisely because Microsoft's
+branding is applied in a separate proprietary build step that is not in the repo,
+so rebranding is the intended path, not a workaround.
+
+Still ahead, in rough order of effort: real icons (`.icns`, `.ico`, PNG set, all
+of `vscode/resources/`), the full build toolchain, macOS signing/notarization, and
+then the ongoing cost — rebasing on upstream forever. That last one is the real
+expense and is why VSCodium maintains a patch set rather than a fork. This is a
+project, not an afternoon.
+
+Do not treat the fork as a replacement for `extensions/vscode`. The extension is
+~700 lines and inherits nothing; the fork owns the whole shell and inherits
+upstream permanently. They solve different problems.
+
+## Visual identity — read before touching any surface
+
+**The mark is Signal Current.** Canonical definition:
+`web/components/whale.tsx` (`WHALE_BODY` / `WHALE_CURRENT`), described there as
+"from the managed Codewhale product contract". Colors are product tokens:
+signal gold `#F6C453` and current cyan `#48D7FF` on ink `#08111C`.
+
+The extension previously shipped a *different* slate/sky whale that existed
+nowhere else; it has been replaced. **The same two path strings now live in three
+places** — `web/app/icon.svg`, `web/components/whale.tsx`, and
+`extensions/vscode/media/codewhale.svg`. That duplication is exactly how the drift
+happened. Collapsing them to a single imported source is worth doing and would
+prevent the next one.
+
+**The VS Code extension's visuals do not match the TUI, and should.** Be
+deliberate rather than decorative here — the TUI has a real, documented palette in
+`crates/tui/src/palette/tokens.rs`, and the extension webview should read as the
+same product:
+
+| Role | Token | Hex |
+|---|---|---|
+| Deep field | `WHALE_BG_RGB` | `#03070D` |
+| Ink / chrome | `WHALE_CHROME_RGB` | `#08111C` |
+| Panel surface | `WHALE_PANEL_RGB` | `#0E1729` |
+| Raised | `WHALE_ELEVATED_RGB` | `#182742` |
+| Body text | `WHALE_TEXT_BODY_RGB` (Whale Ivory) | `#F6F2E8` |
+| Muted text | `WHALE_TEXT_MUTED_RGB` | `#93A0B8` |
+| Action (on dark) | `WHALE_ACTION_RGB` | `#6AAEF2` |
+| Structure (Ice) | `WHALE_ICE_RGB` | `#D1EBF4` |
+| Warning (Coral) | `WHALE_WARNING_RGB` | `#FF7A59` |
+
+Two cautions. First, a VS Code webview should still respect the user's chosen
+editor theme — use `var(--vscode-*)` for anything structural and reserve the
+CodeWhale palette for brand surfaces and the mark, or the panel will look broken
+inside a light theme. Second, the TUI's ambient touches (the caustic light sweep
+in `ambient_life.rs`, the idle whale) are *characterful, not decorative*; port the
+restraint, not just the effect, and give anything animated a
+`prefers-reduced-motion` path — the website work in this release already
+establishes that idiom.
+
+The same palette should also reach CWC (`crates/tui/src/remote_control.rs`, the
+`cwc-remote-control-enrollment-v1` surface) so the web remote, the extension, the
+site, and the TUI stop being four different-looking products.
+
 ## Approval-gated — never do these unprompted
 
 Production credentials, billing, DNS, deploys, customer data or comms, publishing
