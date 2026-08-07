@@ -10,6 +10,7 @@ use crate::artifacts::ArtifactRecord;
 use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
+use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
 use crate::tui::file_mention::ContextReference;
@@ -165,6 +166,8 @@ pub struct SessionMetadata {
     /// until the flag is actually set.
     #[serde(default, skip_serializing_if = "is_not_archived")]
     pub archived: bool,
+    #[serde(default)]
+    pub spawn_depth: u32,
 }
 
 fn is_not_archived(archived: &bool) -> bool {
@@ -490,6 +493,7 @@ pub(crate) struct SavedAutoRouteReceipt {
 }
 
 /// A saved session containing full conversation history
+/// Starting with v0.9.5 (#5262) the canonical history is the append-only entry journal (`journal` / `leaf_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSession {
     /// Schema version for migration compatibility
@@ -497,8 +501,12 @@ pub struct SavedSession {
     pub schema_version: u32,
     /// Session metadata
     pub metadata: SessionMetadata,
-    /// Conversation messages
+    /// Conversation messages — derived from the journal's active branch (kept for compat).
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<SessionJournal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_id: Option<String>,
     /// System prompt if any
     pub system_prompt: Option<String>,
     /// Compact linked context references for user-visible `@path` and
@@ -516,6 +524,119 @@ pub struct SavedSession {
     /// is `auto`. Optional for backward-compatible session loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_auto_route: Option<SavedAutoRouteReceipt>,
+}
+impl SavedSession {
+    pub fn ensure_journal(&mut self) {
+        if self.journal.is_some() {
+            if self.leaf_id.is_none() {
+                self.leaf_id = self.journal.as_ref().and_then(|j| j.leaf_id.clone());
+            }
+            let active = self
+                .journal
+                .as_ref()
+                .map(|j| j.to_messages())
+                .unwrap_or_default();
+            if !active.is_empty() {
+                self.messages = active;
+                self.metadata.message_count = self.messages.len();
+            }
+            return;
+        }
+        let journal =
+            SessionJournal::from_messages(self.messages.clone(), self.metadata.spawn_depth);
+        self.leaf_id = journal.leaf_id.clone();
+        self.journal = Some(journal);
+    }
+    pub fn journal_append_message(&mut self, message: Message) -> String {
+        self.ensure_journal();
+        let journal = self.journal.as_mut().expect("journal ensured");
+        let id = journal.append_message(message.clone());
+        self.leaf_id = journal.leaf_id.clone();
+        self.messages = journal.to_messages();
+        self.metadata.message_count = self.messages.len();
+        self.metadata.updated_at = Utc::now();
+        id
+    }
+    pub fn journal_branch_to(&mut self, entry_id: &str) -> Result<(), String> {
+        self.ensure_journal();
+        let journal = self.journal.as_mut().expect("journal ensured");
+        journal.branch_to(entry_id)?;
+        self.leaf_id = journal.leaf_id.clone();
+        self.messages = journal.to_messages();
+        self.metadata.updated_at = Utc::now();
+        Ok(())
+    }
+    pub fn active_entries(&self) -> Vec<SessionEntry> {
+        self.journal
+            .as_ref()
+            .map(|j| j.root_to_leaf().into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+    pub fn export_container(&self, source: &str) -> SessionImportContainer {
+        let journal = self.journal.clone().unwrap_or_else(|| {
+            SessionJournal::from_messages(self.messages.clone(), self.metadata.spawn_depth)
+        });
+        SessionImportContainer::new(
+            source.to_string(),
+            &journal,
+            serde_json::to_value(&self.metadata).ok(),
+        )
+    }
+    pub fn import_foreign(
+        container: SessionImportContainer,
+        workspace: PathBuf,
+        model: String,
+    ) -> Result<Self, String> {
+        let journal = container.into_journal()?;
+        let leaf_id = journal.leaf_id.clone();
+        let messages = journal.to_messages();
+        let now = Utc::now();
+        let spawn_depth = journal.spawn_depth.saturating_add(1);
+        let title = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .and_then(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+            })
+            .map(|s| crate::session_manager::truncate_title(s, 50))
+            .unwrap_or_else(|| crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4().to_string(),
+            title,
+            created_at: now,
+            updated_at: now,
+            message_count: messages.len(),
+            total_tokens: 0,
+            model,
+            model_provider: default_model_provider(),
+            model_provider_id: None,
+            workspace,
+            mode: None,
+            cost: SessionCostSnapshot::default(),
+            parent_session_id: None,
+            forked_from_message_count: None,
+            cumulative_turn_secs: 0,
+            archived: false,
+            spawn_depth,
+        };
+        let mut journal = journal;
+        journal.spawn_depth = spawn_depth;
+        Ok(Self {
+            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
+            metadata,
+            messages,
+            journal: Some(journal),
+            leaf_id,
+            system_prompt: None,
+            context_references: Vec::new(),
+            artifacts: Vec::new(),
+            work_state: None,
+            last_auto_route: None,
+        })
+    }
 }
 
 /// Manager for session persistence operations
@@ -980,6 +1101,8 @@ impl SessionManager {
                 "repaired persisted tool call/result history"
             );
         }
+
+        session.ensure_journal();
 
         Ok(session)
     }
@@ -1532,6 +1655,8 @@ pub fn create_saved_session_with_id_and_mode(
         })
         .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
 
+    let journal = SessionJournal::from_messages(messages.to_vec(), 0);
+    let leaf_id = journal.leaf_id.clone();
     SavedSession {
         schema_version: CURRENT_SESSION_SCHEMA_VERSION,
         metadata: SessionMetadata {
@@ -1551,8 +1676,11 @@ pub fn create_saved_session_with_id_and_mode(
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
             archived: false,
+            spawn_depth: 0,
         },
         messages: messages.to_vec(),
+        journal: Some(journal),
+        leaf_id,
         system_prompt: system_prompt_to_string(system_prompt),
         context_references: Vec::new(),
         artifacts: Vec::new(),
@@ -1569,6 +1697,42 @@ pub fn update_session(
     system_prompt: Option<&SystemPrompt>,
 ) -> SavedSession {
     session.schema_version = CURRENT_SESSION_SCHEMA_VERSION;
+    session.ensure_journal();
+    let old_len = session.messages.len();
+    let new_len = messages.len();
+    if new_len >= old_len && messages[..old_len] == session.messages[..] {
+        if let Some(journal) = session.journal.as_mut() {
+            for msg in &messages[old_len..] {
+                journal.append_message(msg.clone());
+            }
+            session.leaf_id = journal.leaf_id.clone();
+        }
+    } else if new_len != old_len || messages != session.messages.as_slice() {
+        if let Some(journal) = session.journal.as_mut() {
+            let common = messages
+                .iter()
+                .zip(session.messages.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            if common > 0 && common <= journal.entries.len() {
+                let path = journal.root_to_leaf();
+                if let Some(entry) = path.get(common - 1) {
+                    let _ = journal.branch_to(&entry.id);
+                } else {
+                    journal.leaf_id = None;
+                }
+            } else if common == 0 {
+                journal.leaf_id = journal.entries.first().and_then(|e| e.parent_id.clone());
+                if journal.leaf_id.is_none() && !journal.entries.is_empty() {
+                    journal.leaf_id = None;
+                }
+            }
+            for msg in messages.iter().skip(common) {
+                journal.append_message(msg.clone());
+            }
+            session.leaf_id = journal.leaf_id.clone();
+        }
+    }
     session.messages.clear();
     session.messages.extend_from_slice(messages);
     session.metadata.updated_at = Utc::now();

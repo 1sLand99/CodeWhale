@@ -15,6 +15,14 @@
 #![deny(clippy::print_stderr)]
 
 pub mod authority;
+// `crates/core` now owns the engine (issue #5261). The TUI's `engine`
+// re-exports the core boundary so headless and TUI share one `Op`-in /
+// `EventMsg`-out API, one `ThreadId`/`SessionId` type, and one
+// `Journal` shape. New code should import from `codewhale_core`.
+pub use codewhale_core::engine as core_engine;
+pub use codewhale_core::ids::{SessionId as CoreSessionId, ThreadId as CoreThreadId};
+pub use codewhale_core::journal::{Journal as CoreJournal, JournalEntry as CoreJournalEntry};
+pub use codewhale_core::session::{Session as CoreSession, Thread as CoreThread};
 pub mod engine;
 pub mod events;
 // The first production consumer of the staged runtime contract is the

@@ -123,6 +123,7 @@ mod session_manager;
 mod session_peek;
 mod session_projection;
 mod session_resume;
+pub mod session_tree;
 mod settings;
 mod shell_dispatcher;
 mod skill_state;
