@@ -10886,8 +10886,30 @@ fn insert_prior_session_agent(
         manager.workspace.clone(),
         boot_id.to_string(),
     );
+    let is_running = status == SubAgentStatus::Running;
     agent.status = status;
     agent.id = id.to_string();
+    // Current-session Running needs a handle to be live (4a). Prior-session
+    // Running is visible without handle for recovery, but we give both a
+    // handle when possible so sync tests can use a leaked runtime.
+    if is_running {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            agent.task_handle = Some(handle.spawn(async {
+                std::future::pending::<()>().await;
+            }));
+        } else {
+            // No ambient runtime (sync test): leak a runtime to create a live handle.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let handle = rt.spawn(async {
+                std::future::pending::<()>().await;
+            });
+            std::mem::forget(rt);
+            agent.task_handle = Some(handle);
+        }
+    }
     manager.agents.insert(id.to_string(), agent);
 }
 

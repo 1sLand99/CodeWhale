@@ -5093,6 +5093,25 @@ impl SubAgentManager {
         );
         agent.session_name = name.to_string();
         agent.status = SubAgentStatus::Running;
+        // Make the test agent live for 4a liveness (handle required, otherwise
+        // list_filtered hides it as phantom). Use try_current + leaked runtime
+        // fallback so sync tests also work.
+        let handle = if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async {
+                std::future::pending::<()>().await;
+            })
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let h = rt.spawn(async {
+                std::future::pending::<()>().await;
+            });
+            std::mem::forget(rt);
+            h
+        };
+        agent.task_handle = Some(handle);
         self.agents.insert(agent_id.clone(), agent);
         let spec = AgentWorkerSpec {
             worker_id: agent_id.clone(),
@@ -5830,12 +5849,17 @@ impl SubAgentManager {
                 // Live roster: only actually running children (4a). This
                 // excludes completed/failed/cancelled and children that
                 // never started (no task_handle) or timed out — same root
-                // as the phantom watch entry. Prior-session running agents
-                // stay visible for recovery, but only if they are live.
+                // as the phantom watch entry. Prior-session Running stays
+                // visible for recovery even without a handle (persisted
+                // without task). Current-session terminals stay visible
+                // for result fetch; prior-session terminals hide by default.
                 if agent.status == SubAgentStatus::Running {
+                    if self.is_from_prior_session(agent) {
+                        return true;
+                    }
                     return agent.task_handle.is_some() && !self.running_heartbeat_timed_out(agent);
                 }
-                false
+                !self.is_from_prior_session(agent)
             })
             .map(|agent| self.snapshot_for_listing(agent))
             .collect()

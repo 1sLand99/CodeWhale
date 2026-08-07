@@ -1112,16 +1112,18 @@ impl ToolRegistryBuilder {
     }
 
     /// Include the canonical work-progress tool with a shared `TodoList`.
+    /// Canonical is `todo_write`; `work_update`/`TodoWrite`/`todo` are hidden
+    /// compat aliases (not model-visible) for saved-transcript replay.
     #[must_use]
     pub fn with_todo_tool(self, todo_list: super::todo::SharedTodoList) -> Self {
         use super::todo::TodoWriteTool;
         self.with_tool(Arc::new(TodoWriteTool::work_update(todo_list.clone())))
             .with_tool(Arc::new(TodoWriteTool::alias(
-                "TodoWrite",
+                "work_update",
                 todo_list.clone(),
             )))
             .with_tool(Arc::new(TodoWriteTool::alias(
-                "todo_write",
+                "TodoWrite",
                 todo_list.clone(),
             )))
             .with_tool(Arc::new(TodoWriteTool::alias("todo", todo_list.clone())))
@@ -1523,20 +1525,26 @@ mod tests {
             .with_todo_tool(crate::tools::todo::new_shared_todo_list())
             .build(ctx);
 
-        // Canonical tool must be present and aliases must resolve to it.
-        assert!(registry.contains("work_update"));
-        for alias in ["TodoWrite", "todo_write", "todo"] {
+        // Canonical is todo_write; work_update/TodoWrite/todo are hidden compat aliases.
+        assert!(registry.contains("todo_write"));
+        for alias in ["work_update", "TodoWrite", "todo"] {
             assert!(
                 registry.contains(alias),
                 "{alias} compat alias must be registered"
             );
+            // Hidden aliases are distinct entries (same handler, model_visible=false).
             assert_eq!(
                 registry.resolve(alias),
-                Some("work_update"),
-                "{alias} must resolve to canonical work_update via registry ladder"
+                Some(alias),
+                "{alias} must be directly resolvable as hidden alias"
+            );
+            let tool = registry.get(alias).expect("alias tool");
+            assert!(
+                !tool.model_visible(),
+                "{alias} hidden alias must not be model-visible"
             );
         }
-        // Hidden compat aliases must stay registered but not model-visible.
+        // Only todo_write is model-visible.
         let api_names = registry
             .to_api_tools()
             .into_iter()
@@ -1544,17 +1552,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(
-            api_names.iter().any(|name| name == "work_update"),
-            "work_update should be the sole model-visible progress surface"
+            api_names.iter().any(|name| name == "todo_write"),
+            "todo_write should be the sole model-visible progress surface"
         );
         assert_eq!(
-            api_names.iter().filter(|n| *n == "work_update").count(),
+            api_names.iter().filter(|n| *n == "todo_write").count(),
             1,
-            "canonical work_update must appear exactly once in model catalog"
+            "canonical todo_write must appear exactly once in model catalog"
         );
         for hidden in [
+            "work_update",
             "TodoWrite",
-            "todo_write",
             "todo",
             "checklist_write",
             "checklist_update",

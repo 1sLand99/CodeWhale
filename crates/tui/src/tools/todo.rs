@@ -241,7 +241,7 @@ pub fn new_shared_todo_list() -> SharedTodoList {
 }
 
 const CANONICAL_WORK_SURFACE: &str = "work";
-const CANONICAL_PROGRESS_TOOL: &str = "work_update";
+const CANONICAL_PROGRESS_TOOL: &str = "todo_write";
 const DURABLE_WORK_OWNER: &str = "fleet_workflow_ledger";
 
 /// Tool for writing and updating the todo list
@@ -276,7 +276,7 @@ impl ToolSpec for TodoWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace the active thread/task To-do list (concrete current work items). This is the canonical progress surface the user watches, so keep it live while you work: mark an item in_progress before starting it (exactly one at a time), and call work_update again the moment an item finishes so it shows completed — never batch completions at the end. Durable tasks remain the real executable work object."
+        "Replace the active thread/task To-do list (concrete current work items). This is the canonical progress surface the user watches, so keep it live while you work: mark an item in_progress before starting it (exactly one at a time), and call todo_write again the moment an item finishes so it shows completed — never batch completions at the end. Durable tasks remain the real executable work object."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -593,7 +593,7 @@ mod tests {
 
         assert!(tool.model_visible());
         let metadata = result.metadata.expect("metadata");
-        assert_eq!(metadata["canonical_tool"], "work_update");
+        assert_eq!(metadata["canonical_tool"], "todo_write");
         assert_eq!(metadata["work_surface"]["canonical"], "work");
         assert_eq!(metadata["work_surface"]["model_visible"], true);
         assert_eq!(

@@ -61,7 +61,7 @@ pub(crate) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     // legacy `task_create`/`task_list`/`task_read` names it replaces are
     // hidden compat aliases and must not be default-active.
     "tasks",
-    "work_update",
+    "todo_write",
 ];
 
 const CORE_ACTION_TOOL_FALLBACKS: &[CoreActionToolFallback] = &[
@@ -837,7 +837,7 @@ pub(super) fn missing_tool_error_message(tool_name: &str, catalog: &[Tool]) -> S
         return format!(
             "Tool '{tool_name}' is not available in the current tool catalog. \
              Checklist entries are not separate tool calls — write the whole list \
-             in one `work_update` call with a `todos` array of \
+             in one `todo_write` call with a `todos` array of \
              {{content, status}} objects."
         );
     }
@@ -1123,7 +1123,7 @@ fn likely_field_corrections(
     }
     if matches!(tool_name, "checklist_update" | "todo_update") && has_received("todos") {
         corrections.push(
-            "Use work_update to replace the full list, or retry checklist_update/todo_update with id and status."
+            "Use todo_write to replace the full list, or retry checklist_update/todo_update with id and status."
                 .to_string(),
         );
     }
