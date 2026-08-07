@@ -1204,6 +1204,7 @@
   "BehavioralTipMcpValidation": "{command} запускает серверы и показывает причину",
   "BehavioralTipRepeatedCommand": "{command} может закрепить это",
   "BehavioralTipDurableStateWritten": "Сохранено · {command} для просмотра",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "{setting} заблокировано во время выполнения хода — сначала нажмите Esc для прерывания",
   "SettingSubjectMode": "Режим",
   "SettingSubjectThinking": "Thinking",

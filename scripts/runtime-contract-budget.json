@@ -5,43 +5,43 @@
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 6740,
-        "identity_sha256": "d88255e429527fd5e4adc5be09c57cd75c71f8cb7e3dcc7ebe69e6395465f47c"
+        "bytes": 7016,
+        "identity_sha256": "06217f849f9cbf02b3d8cabd2d0002dd661833381072c6fd09962a819a09a280"
       },
       "goal": {
-        "bytes": 8903,
+        "bytes": 9179,
         "delta_bytes": 81,
-        "identity_sha256": "ea2b56a3257c14d001aa553621d9b6fc4662e280378755c3fdc661aa50c53e2a"
+        "identity_sha256": "72b46052a988489a8960c27ac6b0fbb3f33825e5beb9dfc78b84ce14f22d6e39"
       },
       "handoff": {
-        "bytes": 9291,
+        "bytes": 9567,
         "delta_bytes": 388,
-        "identity_sha256": "aa82137bff95eda6642820089ed1a6931394f58e65085c2ceed5d81b1b27f831"
+        "identity_sha256": "6d331070efe45bf911005c98353a51e5ba9d15bba871eb78d962ea9617e5d7d6"
       },
       "instructions": {
-        "bytes": 7192,
+        "bytes": 7468,
         "delta_bytes": 131,
-        "identity_sha256": "0e4b77464c3177cb3e0a60d1d805f111b1ee8dc3ff377ad7dfb8b9615cc885df"
+        "identity_sha256": "02c61955d5deb6c41d35a4b8c734d81b6b413baf216ba2e0f01e679e618d9017"
       },
       "memory": {
-        "bytes": 8822,
+        "bytes": 9098,
         "delta_bytes": 963,
-        "identity_sha256": "228a9bc9f776bb3fffff9276c2efc8faad1674b7a5fc4318ec1f9558ae37eaf3"
+        "identity_sha256": "735056c348b3070d7cde81abaeca6d87faa998b97db9aa2ddf1ca60a2ea562b5"
       },
       "project": {
-        "bytes": 7061,
+        "bytes": 7337,
         "delta_bytes": 321,
-        "identity_sha256": "bace3ab6908c66aa0393ce76b55b21d93fbb468eb5ae57797faa4e5cca802f8d"
+        "identity_sha256": "c706b368622ae954b70b51c3b7708a4f0df5cb75ebda1a4d2b5b40f5b7404d3d"
       },
       "skill": {
-        "bytes": 7859,
+        "bytes": 8135,
         "delta_bytes": 667,
-        "identity_sha256": "c241969df355f1d1d472de7860832e5e86ec6546ad5f757d739139febfc82625"
+        "identity_sha256": "1818150940199974ea5dafba2b243a0b7c720ee72da1072604a1588bbb2d7310"
       }
     },
     "system_prompt_blocks": 6,
-    "total_bytes": 9291,
-    "total_tokens_est": 2323
+    "total_bytes": 9567,
+    "total_tokens_est": 2392
   },
   "schema_version": 1,
   "skill_discovery": {
@@ -59,11 +59,11 @@
   "system_prompt": {
     "modes": {
       "act": {
-        "mode_instructions_bytes": 891,
-        "mode_instructions_tokens_est": 223,
+        "mode_instructions_bytes": 1167,
+        "mode_instructions_tokens_est": 292,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 6740,
-        "system_prompt_tokens_est": 1685
+        "system_prompt_bytes": 7016,
+        "system_prompt_tokens_est": 1754
       },
       "operate": {
         "mode_instructions_bytes": 1671,
@@ -73,11 +73,11 @@
         "system_prompt_tokens_est": 1880
       },
       "plan": {
-        "mode_instructions_bytes": 517,
-        "mode_instructions_tokens_est": 130,
+        "mode_instructions_bytes": 716,
+        "mode_instructions_tokens_est": 179,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 6366,
-        "system_prompt_tokens_est": 1592
+        "system_prompt_bytes": 6565,
+        "system_prompt_tokens_est": 1642
       }
     }
   },
@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 23010,
-          "identity_sha256": "d1b4a84c257b31324adc3a026b1ed56423285bd03283f159278c98b6bd7d1400",
-          "tokens_est": 5753,
+          "bytes": 23280,
+          "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
+          "tokens_est": 5820,
           "tool_names": [
             "Bash",
             "File",
@@ -96,15 +96,15 @@
             "agent",
             "load_skill",
             "tasks",
-            "tool_search",
-            "work_update"
+            "todo_write",
+            "tool_search"
           ],
           "tools": 9
         },
         "full": {
-          "bytes": 67607,
-          "identity_sha256": "54e7530bfbee85550f4f90cde9c03dab6e790b84b3a4072bcb8ab906baa2b0e1",
-          "tokens_est": 16902,
+          "bytes": 68080,
+          "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
+          "tokens_est": 17020,
           "tool_names": [
             "Bash",
             "File",
@@ -146,13 +146,13 @@
             "terminal/run",
             "terminal/send",
             "terminal/wait",
+            "todo_write",
             "tool_search",
             "tts",
             "update_goal",
             "validate_data",
             "verify",
             "web.run",
-            "work_update",
             "workflow"
           ],
           "tools": 48
@@ -160,9 +160,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 23010,
-          "identity_sha256": "d1b4a84c257b31324adc3a026b1ed56423285bd03283f159278c98b6bd7d1400",
-          "tokens_est": 5753,
+          "bytes": 23280,
+          "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
+          "tokens_est": 5820,
           "tool_names": [
             "Bash",
             "File",
@@ -171,15 +171,15 @@
             "agent",
             "load_skill",
             "tasks",
-            "tool_search",
-            "work_update"
+            "todo_write",
+            "tool_search"
           ],
           "tools": 9
         },
         "full": {
-          "bytes": 67607,
-          "identity_sha256": "54e7530bfbee85550f4f90cde9c03dab6e790b84b3a4072bcb8ab906baa2b0e1",
-          "tokens_est": 16902,
+          "bytes": 68080,
+          "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
+          "tokens_est": 17020,
           "tool_names": [
             "Bash",
             "File",
@@ -221,13 +221,13 @@
             "terminal/run",
             "terminal/send",
             "terminal/wait",
+            "todo_write",
             "tool_search",
             "tts",
             "update_goal",
             "validate_data",
             "verify",
             "web.run",
-            "work_update",
             "workflow"
           ],
           "tools": 48
@@ -235,24 +235,24 @@
       },
       "plan": {
         "active": {
-          "bytes": 17365,
-          "identity_sha256": "6c8219db35f4279723ba77291079cf5c78a4a335acb2b3cf4b684610ada50852",
-          "tokens_est": 4342,
+          "bytes": 17489,
+          "identity_sha256": "a62fe19356273d0a5b95704ae43f7570855c6e144eee148ae4c673c196b7f21b",
+          "tokens_est": 4373,
           "tool_names": [
             "File",
             "Git",
             "agent",
             "load_skill",
             "tasks",
-            "tool_search",
-            "work_update"
+            "todo_write",
+            "tool_search"
           ],
           "tools": 7
         },
         "full": {
-          "bytes": 42087,
-          "identity_sha256": "e44f5cc1c77e86a0fd5f3664441afeb3d913dc19b8a8f3b9a0385ee98f78b42e",
-          "tokens_est": 10522,
+          "bytes": 42414,
+          "identity_sha256": "a857096f86f3a044354a246b567ad7efa06dd0341fddc4da9f4d9d491f71b0bc",
+          "tokens_est": 10604,
           "tool_names": [
             "File",
             "Git",
@@ -277,11 +277,11 @@
             "review",
             "send_later",
             "tasks",
+            "todo_write",
             "tool_search",
             "update_goal",
             "validate_data",
             "web.run",
-            "work_update",
             "workflow"
           ],
           "tools": 29

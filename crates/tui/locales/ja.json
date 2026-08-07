@@ -1227,6 +1227,7 @@
   "BehavioralTipMcpValidation": "{command} はサーバーを起動し、原因を表示します",
   "BehavioralTipRepeatedCommand": "{command} でこれを固定できます",
   "BehavioralTipDurableStateWritten": "保存しました · {command} で確認",
+  "BehavioralTipTodoWrite": "Tip: track multi-step work with todo_write — it keeps progress visible",
   "SettingLockedDuringTurn": "ターンの実行中は{setting}を変更できません。まず Esc で中断してください",
   "SettingSubjectMode": "モード",
   "SettingSubjectThinking": "思考",
