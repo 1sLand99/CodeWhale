@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a87c9f323f35 -->
+<!-- source: README.md sha256:49ee31cdd79e -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -14,6 +14,13 @@ file, chạy lệnh, kiểm tra công việc của mình, rồi dừng lại khi
 thành hoặc cần đến bạn. Đổi model giữa chừng bằng `/model`. Làm việc tương tác
 trong TUI, hoặc chạy `codewhale exec` trong script và CI. Viết bằng Rust, giấy
 phép MIT, và chạy trên máy của bạn.
+
+Điều khác biệt so với các harness khác: **bạn chọn model cho từng vai trò, và
+chúng không cần phải giống nhau.** Một fleet ghim provider, model và mức suy
+luận riêng cho từng vai trò — nên một model nhanh và rẻ có thể điều phối một
+model suy luận đắt tiền, hoặc một builder GLM có thể làm chung việc với một
+reviewer Kimi. Hãy viết vai trò của riêng bạn, constitution của riêng bạn, và
+harness đó là của bạn chứ không phải của chúng tôi.
 
 Chúng tôi luôn tìm kiếm người đóng góp và cách cải thiện. Nếu một model hay
 provider bạn dùng còn thiếu, hoặc có gì đó hỏng, báo cho chúng tôi biết là một
@@ -63,13 +70,18 @@ shell qua đường phê duyệt bình thường.
   GLM, hơn 30 provider, và vLLM, SGLang hay Ollama của riêng bạn — không cần
   key — đều chạy qua một runtime và một bộ công cụ. Ngân sách ngữ cảnh và giá
   lấy từ route thật; giá chưa rõ hiển thị là chưa rõ, chứ không phải $0.
+- **Một harness do bạn viết.** Vai trò là những tệp bạn có thể đọc và sửa — mỗi
+  vai trò một model, một tư thế công cụ và các chỉ dẫn thường trực — đặt trong dự
+  án để cả nhóm dùng chung, hoặc cạnh các thiết lập cá nhân để đi theo bạn giữa
+  các repo. Constitution ghi lại cách bạn muốn agent hành xử trong mọi phiên, để
+  harness khớp với cách làm của bạn thay vì của chúng tôi.
 - **Chỉ đọc cho tới khi bạn cho phép thêm.** Chế độ Plan không đổi file, và mọi
   lệnh rủi ro đều qua phê duyệt. Khi một sandbox của hệ điều hành thực sự bọc
   lệnh, Codewhale nói rõ điều đó: Seatbelt trên macOS khi khả dụng, bubblewrap
   tùy chọn trên Linux. `constitution.json` của repo được biên dịch thành các
   chốt chặn ghi mà ngay cả Full Access cũng không thể bỏ qua.
 - **Công việc bạn có thể tiếp tục.** Fleet ghi lại từng bước vào sổ cái chỉ ghi
-  thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng.
+  thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng — kể cả vai trò nào đã chạy trên model nào.
 
 ## Tìm hiểu thêm
 

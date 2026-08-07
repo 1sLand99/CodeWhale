@@ -13,6 +13,13 @@ you. Switch models mid-task with `/model`. Work interactively in the TUI, or run
 `codewhale exec` in scripts and CI. It's written in Rust, licensed MIT, and runs
 on your machine.
 
+The part that isn't like other harnesses: **you pick the model for each role,
+and they don't have to match.** A fleet pins a provider, a model, and a
+reasoning tier per role — so a cheap fast model can direct an expensive
+reasoning one, or a GLM builder can work the same job as a Kimi reviewer.
+Write your own roles, your own constitution, and the harness is yours rather
+than ours.
+
 We're always looking for contributors and ways to improve. If a model or
 provider you use is missing, or something breaks, telling us is one of the most
 useful things you can do — see [Contributing](#contributing).
@@ -46,9 +53,10 @@ codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-In the TUI: `/model` switches provider and model together, `/fleet` runs a team
-of workers, `/undo` reverts the last turn, and `/restore <N>` rolls the
-workspace back to an earlier snapshot (bare `/restore` lists them). `Tab`
+In the TUI: `/model` switches provider and model together, `/fleet` builds and
+runs the team — one role at a time, each with its own model — `/undo` reverts
+the last turn, and `/restore <N>` rolls the workspace back to an earlier
+snapshot (bare `/restore` lists them). `Tab`
 cycles Plan / Act / Operate when the composer is empty — with text in it, `Tab`
 completes slash commands and `@` mentions instead. `Shift+Tab` cycles the
 Ask / Auto-Review / Full Access permission posture at any time. `!` runs a
@@ -56,17 +64,26 @@ shell command through the normal approval path.
 
 ## What it does
 
-- **Any model, any provider.** DeepSeek, Claude, GPT, Kimi, GLM, and 30+
-  providers, plus your own vLLM, SGLang, or Ollama with no key — all through one
-  runtime and one toolset. Context limits and prices come from the real route,
-  and an unknown price shows as unknown rather than $0.
+- **Any model, any provider — and any mix of them.** DeepSeek, Claude, GPT,
+  Kimi, GLM, and 30+ providers, plus your own vLLM, SGLang, or Ollama with no
+  key, all through one runtime and one toolset. A saved role records its
+  `provider`, `model`, and reasoning tier explicitly, so a fleet can span
+  vendors in a single run and a role's route never depends on whichever
+  provider happens to be active. Context limits and prices come from the real
+  route, and an unknown price shows as unknown rather than $0.
+- **A harness you author.** Roles are files you can read and edit — a model, a
+  tool posture, and standing instructions per role — kept in the project so the
+  team shares them, or beside your other personal settings so they follow you
+  between repos. A constitution records how you want the agent to behave across
+  every session, so the harness matches your practice instead of ours.
 - **Read-only until you allow more.** Plan mode can't change files, and
   approvals gate risky commands. When an OS sandbox actually wraps a command,
   Codewhale says so: Seatbelt on macOS where available, opt-in bubblewrap on
   Linux. A repo's `constitution.json` compiles into write holds that even Full
   Access can't skip.
 - **Work you can resume.** A fleet records every step to an append-only ledger,
-  so `fleet resume` picks up where you left off.
+  so `fleet resume` picks up where you left off — including which role ran on
+  which model.
 
 ## Learn more
 

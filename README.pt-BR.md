@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a87c9f323f35 -->
+<!-- source: README.md sha256:49ee31cdd79e -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -14,6 +14,13 @@ arquivos, executa comandos e verifica o próprio trabalho, e para quando a taref
 termina ou quando precisa de você. Troque de modelo no meio da tarefa com
 `/model`. Trabalhe de forma interativa na TUI, ou rode `codewhale exec` em
 scripts e CI. É escrito em Rust, licenciado sob MIT, e roda na sua máquina.
+
+O que não se parece com outros harnesses: **você escolhe o modelo de cada
+papel, e eles não precisam ser iguais.** Uma fleet fixa um provedor, um modelo e
+um nível de raciocínio por papel — então um modelo barato e rápido pode dirigir
+um modelo de raciocínio caro, ou um builder GLM pode trabalhar na mesma tarefa
+que um reviewer Kimi. Escreva seus próprios papéis e sua própria constitution, e
+o harness passa a ser seu, não nosso.
 
 Estamos sempre em busca de pessoas que contribuam e de formas de melhorar. Se um
 modelo ou provedor que você usa está faltando, ou se algo quebra, nos contar é
@@ -64,6 +71,12 @@ executa um comando de shell pelo caminho normal de aprovação.
   tudo por um único runtime e um único conjunto de ferramentas. Orçamentos de
   contexto e preços vêm da rota real, e um preço desconhecido aparece como
   desconhecido em vez de $0.
+- **Um harness escrito por você.** Papéis são arquivos que você pode ler e
+  editar — um modelo, uma postura de ferramentas e instruções permanentes por
+  papel — guardados no projeto para o time compartilhar, ou ao lado das suas
+  configurações pessoais para acompanharem você entre repositórios. Uma
+  constitution registra como você quer que o agente se comporte em cada sessão,
+  para que o harness siga a sua prática, e não a nossa.
 - **Somente leitura até você permitir mais.** O modo Plan não altera arquivos,
   e as aprovações controlam os comandos arriscados. Quando um sandbox do
   sistema operacional realmente envolve um comando, o Codewhale avisa: Seatbelt
@@ -72,7 +85,7 @@ executa um comando de shell pelo caminho normal de aprovação.
   que nem o Full Access consegue pular.
 - **Trabalho que você pode retomar.** Um fleet registra cada passo em um
   livro-razão de apenas inclusão, então `fleet resume` retoma de onde você
-  parou.
+  parou — inclusive qual papel rodou em qual modelo.
 
 ## Saiba mais
 
