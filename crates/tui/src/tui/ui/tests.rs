@@ -14166,6 +14166,85 @@ fn picker_renamed_active_title_survives_automatic_snapshot() {
 }
 
 #[test]
+fn stale_cached_placeholder_title_does_not_override_generated_title() {
+    let mut app = create_test_app();
+    let manager = SessionManager::new(tempfile::tempdir().expect("tempdir").path().to_path_buf())
+        .expect("session manager");
+    app.api_messages.push(crate::models::Message {
+        role: "user".to_string(),
+        content: vec![crate::models::ContentBlock::Text {
+            text: "Please fix the login bug".to_string(),
+            cache_control: None,
+        }],
+    });
+    // Cache pinned to the placeholder title — exactly what the old behavior
+    // left behind when the first snapshot ran before any user message existed.
+    let mut cached = crate::session_manager::create_saved_session_with_id_and_mode(
+        "session-title-bug".to_string(),
+        &app.api_messages,
+        &app.model,
+        &app.workspace,
+        0,
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    )
+    .metadata;
+    cached.title = "New Session".to_string();
+    app.current_session_id = Some(cached.id.clone());
+    app.current_session_metadata = Some(cached);
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+    assert_eq!(snapshot.metadata.title, "Please fix the login bug");
+    assert_eq!(
+        app.current_session_metadata
+            .as_ref()
+            .map(|metadata| metadata.title.as_str()),
+        Some("Please fix the login bug")
+    );
+}
+
+#[test]
+fn persisted_placeholder_title_yields_to_computed_title_when_conversation_has_content() {
+    let mut app = create_test_app();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = SessionManager::new(dir.path().join("sessions")).expect("session manager");
+    // A session whose first save happened before any user message existed:
+    // the old behavior pinned its title to the "New Session" placeholder on
+    // disk, and a later snapshot must let the computed title win.
+    let stale = crate::session_manager::create_saved_session_with_id_and_mode(
+        "session-stale-title".to_string(),
+        &[],
+        &app.model,
+        &app.workspace,
+        0,
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    );
+    assert_eq!(stale.metadata.title, "New Session");
+    manager.save_session(&stale).expect("save stale session");
+    app.api_messages.push(crate::models::Message {
+        role: "user".to_string(),
+        content: vec![crate::models::ContentBlock::Text {
+            text: "fix me".to_string(),
+            cache_control: None,
+        }],
+    });
+    app.current_session_id = Some(stale.metadata.id.clone());
+    app.current_session_metadata = Some(stale.metadata.clone());
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+    assert_eq!(snapshot.metadata.title, "fix me");
+    assert_eq!(
+        app.current_session_metadata
+            .as_ref()
+            .map(|metadata| metadata.title.as_str()),
+        Some("fix me")
+    );
+}
+
+#[test]
 fn picker_rename_of_inactive_session_does_not_touch_active_metadata() {
     let mut app = create_test_app();
     let mut active = crate::session_manager::create_saved_session_with_id_and_mode(

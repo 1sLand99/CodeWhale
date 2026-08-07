@@ -228,7 +228,7 @@ pub fn new_session(app: &mut App, arg: Option<&str>) -> CommandResult {
     app.tool_evidence.clear();
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = None;
-    app.session_title = Some("New Session".to_string());
+    app.session_title = Some(crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
     app.scroll_to_bottom();
 
     CommandResult::with_message_and_action(
