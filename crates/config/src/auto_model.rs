@@ -25,50 +25,179 @@ const PRO_THRESHOLD: i32 = 2;
 /// Strong indicators of a complex task. Each match adds +3.
 const COMPLEX_STRONG: &[&str] = &[
     // Debugging & fixing
-    "debug", "bug", "fix", "error", "crash", "异常", "错误", "调试", "故障",
-    "排查", "root cause",
+    "debug",
+    "bug",
+    "fix",
+    "error",
+    "crash",
+    "异常",
+    "错误",
+    "调试",
+    "故障",
+    "排查",
+    "root cause",
     // Architecture & design
-    "refactor", "重构", "architecture", "架构", "design pattern", "系统设计",
-    "高并发", "分布式", "microservice",
+    "refactor",
+    "重构",
+    "architecture",
+    "架构",
+    "design pattern",
+    "系统设计",
+    "高并发",
+    "分布式",
+    "microservice",
     // Security
-    "security", "安全", "vulnerability", "漏洞", "渗透", "exploit",
+    "security",
+    "安全",
+    "vulnerability",
+    "漏洞",
+    "渗透",
+    "exploit",
     // Code generation
-    "implement", "实现", "generate", "生成", "create", "创建", "build", "构建",
-    "开发", "prototype",
+    "implement",
+    "实现",
+    "generate",
+    "生成",
+    "create",
+    "创建",
+    "build",
+    "构建",
+    "开发",
+    "prototype",
     // Complex analysis
-    "analyze", "分析", "review", "审查", "audit", "审计", "optimize", "优化",
-    "migrate", "迁移",
+    "analyze",
+    "分析",
+    "review",
+    "审查",
+    "audit",
+    "审计",
+    "optimize",
+    "优化",
+    "migrate",
+    "迁移",
     // Multi-file / large scale
-    "multi-file", "multiple files", "多个文件", "整个项目", "full project",
-    "重构整个", "large scale",
+    "multi-file",
+    "multiple files",
+    "多个文件",
+    "整个项目",
+    "full project",
+    "重构整个",
+    "large scale",
     // Testing
-    "unit test", "integration test", "e2e test", "测试用例", "test suite",
+    "unit test",
+    "integration test",
+    "e2e test",
+    "测试用例",
+    "test suite",
     "coverage",
     // Complex logic
-    "algorithm", "算法", "状态机", "state machine", "concurrent", "并行",
-    "异步", "async",
+    "algorithm",
+    "算法",
+    "状态机",
+    "state machine",
+    "concurrent",
+    "并行",
+    "异步",
+    "async",
     // Documentation / PRD
-    "architecture document", "设计文档", "技术方案", "prd",
+    "architecture document",
+    "设计文档",
+    "技术方案",
+    "prd",
 ];
 
 /// Medium-strength indicators. Each match adds +1.
 const COMPLEX_MEDIUM: &[&str] = &[
-    "change", "修改", "update", "更新", "add", "添加", "新增", "feature",
-    "功能", "improve", "改进", "enhance", "config", "配置", "setup", "设置",
-    "deploy", "部署", "ci/cd", "pipeline", "script", "脚本", "tool", "工具",
-    "api", "interface", "接口", "endpoint", "database", "数据库", "schema",
-    "query", "document", "文档", "readme",
+    "change",
+    "修改",
+    "update",
+    "更新",
+    "add",
+    "添加",
+    "新增",
+    "feature",
+    "功能",
+    "improve",
+    "改进",
+    "enhance",
+    "config",
+    "配置",
+    "setup",
+    "设置",
+    "deploy",
+    "部署",
+    "ci/cd",
+    "pipeline",
+    "script",
+    "脚本",
+    "tool",
+    "工具",
+    "api",
+    "interface",
+    "接口",
+    "endpoint",
+    "database",
+    "数据库",
+    "schema",
+    "query",
+    "document",
+    "文档",
+    "readme",
 ];
 
 /// Simple-task indicators. Each match subtracts -1.
 const SIMPLE: &[&str] = &[
-    "find", "查找", "search", "搜索", "look up", "查询", "what is", "什么是",
-    "explain", "解释", "tell me", "告诉我", "how to", "如何", "format", "格式化",
-    "pretty", "list", "列出", "show", "显示", "print", "rename", "重命名",
-    "move", "移动", "copy", "复制", "delete", "删除", "remove", "typo", "拼写",
-    "spelling", "grammar", "quick", "快速", "simple", "简单", "hello world",
-    "demo", "example", "示例", "translate", "翻译", "convert", "转换",
-    "short", "简短", "brief", "简要",
+    "find",
+    "查找",
+    "search",
+    "搜索",
+    "look up",
+    "查询",
+    "what is",
+    "什么是",
+    "explain",
+    "解释",
+    "tell me",
+    "告诉我",
+    "how to",
+    "如何",
+    "format",
+    "格式化",
+    "pretty",
+    "list",
+    "列出",
+    "show",
+    "显示",
+    "print",
+    "rename",
+    "重命名",
+    "move",
+    "移动",
+    "copy",
+    "复制",
+    "delete",
+    "删除",
+    "remove",
+    "typo",
+    "拼写",
+    "spelling",
+    "grammar",
+    "quick",
+    "快速",
+    "simple",
+    "简单",
+    "hello world",
+    "demo",
+    "example",
+    "示例",
+    "translate",
+    "翻译",
+    "convert",
+    "转换",
+    "short",
+    "简短",
+    "brief",
+    "简要",
 ];
 
 /// Classify a prompt and return the resolved model name.
@@ -155,12 +284,18 @@ mod tests {
 
     #[test]
     fn test_refactor_task_uses_pro() {
-        assert_eq!(classify("refactor the user module with a new architecture"), PRO_MODEL);
+        assert_eq!(
+            classify("refactor the user module with a new architecture"),
+            PRO_MODEL
+        );
     }
 
     #[test]
     fn test_security_review_uses_pro() {
-        assert_eq!(classify("review this code for security vulnerabilities"), PRO_MODEL);
+        assert_eq!(
+            classify("review this code for security vulnerabilities"),
+            PRO_MODEL
+        );
     }
 
     #[test]
@@ -206,7 +341,10 @@ mod tests {
 
     #[test]
     fn test_implement_task_uses_pro() {
-        assert_eq!(classify("implement a new feature for the user module"), PRO_MODEL);
+        assert_eq!(
+            classify("implement a new feature for the user module"),
+            PRO_MODEL
+        );
     }
 
     #[test]

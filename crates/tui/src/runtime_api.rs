@@ -980,7 +980,9 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads/{id}/events", get(stream_thread_events))
         .route(
             "/v1/threads/{id}/goal",
-            get(get_thread_goal).put(upsert_thread_goal).delete(delete_thread_goal),
+            get(get_thread_goal)
+                .put(upsert_thread_goal)
+                .delete(delete_thread_goal),
         )
         .route("/v1/threads/{id}/goal/complete", post(complete_thread_goal))
         .route("/v1/threads/{id}/goal/block", post(block_thread_goal))
@@ -994,14 +996,20 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
         .route("/v1/skills/{name}", post(set_skill_enabled))
-        .route("/v1/apps/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
+        .route(
+            "/v1/apps/mcp/servers",
+            get(list_mcp_servers).post(create_mcp_server),
+        )
         .route(
             "/v1/apps/mcp/servers/{name}",
             get(get_mcp_server)
                 .patch(update_mcp_server)
                 .delete(delete_mcp_server),
         )
-        .route("/v1/apps/mcp/servers/{name}/enable", post(enable_mcp_server))
+        .route(
+            "/v1/apps/mcp/servers/{name}/enable",
+            post(enable_mcp_server),
+        )
         .route(
             "/v1/apps/mcp/servers/{name}/disable",
             post(disable_mcp_server),
@@ -2003,14 +2011,11 @@ async fn get_fleet_run_receipt(
         .rebuild_state()
         .map_err(|err| ApiError::internal(format!("Failed to rebuild fleet state: {err}")))?;
     let key = format!("{run_id}:{task_id}");
-    let receipt = ledger_state
-        .receipts
-        .get(&key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "no receipt found for run '{run_id}' task '{task_id}'"
-            ))
-        })?;
+    let receipt = ledger_state.receipts.get(&key).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "no receipt found for run '{run_id}' task '{task_id}'"
+        ))
+    })?;
     Ok(Json(fleet_receipt_json(receipt)))
 }
 
@@ -2023,14 +2028,11 @@ async fn inspect_fleet_run_receipt_evidence(
         .rebuild_state()
         .map_err(|err| ApiError::internal(format!("Failed to rebuild fleet state: {err}")))?;
     let key = format!("{run_id}:{task_id}");
-    let receipt = ledger_state
-        .receipts
-        .get(&key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "no receipt found for run '{run_id}' task '{task_id}'"
-            ))
-        })?;
+    let receipt = ledger_state.receipts.get(&key).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "no receipt found for run '{run_id}' task '{task_id}'"
+        ))
+    })?;
     // Locate the most recent Receipt-kind artifact.
     let receipt_artifact = receipt
         .artifacts
@@ -2051,9 +2053,8 @@ async fn inspect_fleet_run_receipt_evidence(
     let truncated = size_bytes > MAX_RECEIPT_EVIDENCE_READ_BYTES;
     let raw = {
         use std::io::Read;
-        let file = std::fs::File::open(&abs_path).map_err(|err| {
-            ApiError::internal(format!("Failed to open evidence file: {err}"))
-        })?;
+        let file = std::fs::File::open(&abs_path)
+            .map_err(|err| ApiError::internal(format!("Failed to open evidence file: {err}")))?;
         let mut buf = Vec::new();
         file.take(MAX_RECEIPT_EVIDENCE_READ_BYTES)
             .read_to_end(&mut buf)
@@ -2061,9 +2062,8 @@ async fn inspect_fleet_run_receipt_evidence(
         buf
     };
     // Parse as JSON if possible; fall back to a raw string representation.
-    let content: Value = serde_json::from_slice(&raw).unwrap_or_else(|_| {
-        Value::String(String::from_utf8_lossy(&raw).into_owned())
-    });
+    let content: Value = serde_json::from_slice(&raw)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
     Ok(Json(json!({
         "run_id": run_id,
         "task_id": task_id,
@@ -2074,7 +2074,6 @@ async fn inspect_fleet_run_receipt_evidence(
         "content": content,
     })))
 }
-
 
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
     let (exec_config, fleet_config, session_model, route_config) = {
@@ -2237,25 +2236,24 @@ fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Valu
         FleetTaskResult::Skip => "skip",
         FleetTaskResult::Timeout => "timeout",
     };
-    let (failure_kind_label, failure_class, retry_eligible) =
-        match receipt.failure_kind.as_ref() {
-            Some(FleetTaskFailureKind::Transport) => (
-                Some("transport"),
-                Some("Infrastructure or network failure during task transport"),
-                true,
-            ),
-            Some(FleetTaskFailureKind::Task) => (
-                Some("task"),
-                Some("Task logic exited unsuccessfully"),
-                false,
-            ),
-            Some(FleetTaskFailureKind::Verifier) => (
-                Some("verifier"),
-                Some("Verifier rejected the task output; manual review or code change required"),
-                false,
-            ),
-            None => (None, None, false),
-        };
+    let (failure_kind_label, failure_class, retry_eligible) = match receipt.failure_kind.as_ref() {
+        Some(FleetTaskFailureKind::Transport) => (
+            Some("transport"),
+            Some("Infrastructure or network failure during task transport"),
+            true,
+        ),
+        Some(FleetTaskFailureKind::Task) => (
+            Some("task"),
+            Some("Task logic exited unsuccessfully"),
+            false,
+        ),
+        Some(FleetTaskFailureKind::Verifier) => (
+            Some("verifier"),
+            Some("Verifier rejected the task output; manual review or code change required"),
+            false,
+        ),
+        None => (None, None, false),
+    };
     let evidence_available = receipt
         .artifacts
         .iter()
@@ -2283,7 +2281,6 @@ fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Valu
         "evidence_available": evidence_available,
     })
 }
-
 
 fn fleet_event_json(event: &codewhale_protocol::fleet::FleetWorkerEvent) -> Value {
     json!({
@@ -3193,7 +3190,9 @@ async fn get_mcp_server(
         })
     };
 
-    Ok(Json(McpServerDetail::from_config(&name, server_cfg, connected)))
+    Ok(Json(McpServerDetail::from_config(
+        &name, server_cfg, connected,
+    )))
 }
 
 /// `POST /v1/apps/mcp/servers` — add a new server to the persistent config.
@@ -3293,7 +3292,11 @@ async fn update_mcp_server(
         *pool_slot = None;
     }
 
-    Ok(Json(McpServerDetail::from_config(&name, &updated_cfg, false)))
+    Ok(Json(McpServerDetail::from_config(
+        &name,
+        &updated_cfg,
+        false,
+    )))
 }
 
 /// `DELETE /v1/apps/mcp/servers/{name}` — remove a server from the persistent config.
@@ -3303,15 +3306,14 @@ async fn delete_mcp_server(
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
     let mcp_config_path = state.config.read().mcp_config_path();
 
-    crate::mcp::remove_server_config(&mcp_config_path, &name)
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                ApiError::not_found(msg)
-            } else {
-                ApiError::internal(msg)
-            }
-        })?;
+    crate::mcp::remove_server_config(&mcp_config_path, &name).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found(msg)
+        } else {
+            ApiError::internal(msg)
+        }
+    })?;
 
     // Invalidate the in-memory pool.
     {
@@ -4058,14 +4060,8 @@ async fn upsert_thread_goal(
         status: codewhale_protocol::ThreadGoalStatus::Active,
         token_budget: req.token_budget,
         tokens_used: existing.as_ref().map(|g| g.tokens_used).unwrap_or(0),
-        time_used_seconds: existing
-            .as_ref()
-            .map(|g| g.time_used_seconds)
-            .unwrap_or(0),
-        continuation_count: existing
-            .as_ref()
-            .map(|g| g.continuation_count)
-            .unwrap_or(0),
+        time_used_seconds: existing.as_ref().map(|g| g.time_used_seconds).unwrap_or(0),
+        continuation_count: existing.as_ref().map(|g| g.continuation_count).unwrap_or(0),
         created_at,
         updated_at: now,
     };
@@ -4106,10 +4102,7 @@ async fn delete_thread_goal(
     if !deleted {
         return Err(ApiError::not_found(format!("thread '{id}' has no goal")));
     }
-    let _ = state
-        .runtime_threads
-        .emit_goal_cleared_event(&id)
-        .await;
+    let _ = state.runtime_threads.emit_goal_cleared_event(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

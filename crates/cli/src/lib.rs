@@ -1279,10 +1279,7 @@ fn workflow_exec_command(spec: WorkflowExecSpec<'_>) -> Result<WorkflowProcessSp
             args.push("--profile".to_string());
             args.push(profile.clone());
         }
-        if let Some(workspace) = cli.workspace.as_deref() {
-            args.push("--workspace".to_string());
-            args.push(workspace.display().to_string());
-        }
+
         if cli.mouse_capture {
             args.push("--mouse-capture".to_string());
         }
@@ -1331,18 +1328,6 @@ fn lane_process_spec_from_argv(argv: &[String]) -> Result<WorkflowProcessSpec> {
         command: argv.to_vec(),
         environment: environment.into_iter().collect(),
     })
-}
-
-fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSpec> {
-    // Legacy helper retained for lane tests; delegates to argv version.
-    let mut argv = Vec::new();
-    argv.push(command.get_program().to_string_lossy().into_owned());
-    argv.extend(
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned()),
-    );
-    lane_process_spec_from_argv(&argv)
 }
 
 /// Flags for `codewhale remote-setup`. Forwarded to the TUI binary, which owns
@@ -2163,7 +2148,9 @@ fn try_auto_resolve_model(
         prompt_args.join(" ")
     };
     let resolved = codewhale_config::auto_model::classify(&prompt);
-    unsafe { std::env::set_var("CODEWHALE_MODEL", resolved); }
+    unsafe {
+        std::env::set_var("CODEWHALE_MODEL", resolved);
+    }
     Some(())
 }
 
@@ -3511,7 +3498,11 @@ fn run_auth_command_with_secrets_and_runtime(
                 "xai-device".to_string(),
             ];
             let code = codewhale_tui::run(argv);
-            std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 })
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            })
         }
         AuthCommand::ExternalConsent {
             provider,
@@ -4242,7 +4233,11 @@ fn run_app_server_command(
     if args.http || args.mobile {
         // Delegated runtime API listener — supervise it so the child does not
         // outlive the dispatcher (#3259).
-        return run_tui_server_in_process(cli, resolved_runtime, app_server_serve_passthrough(&args));
+        return run_tui_server_in_process(
+            cli,
+            resolved_runtime,
+            app_server_serve_passthrough(&args),
+        );
     }
 
     // Everything below runs the app-server *in this process*, which is why the
@@ -4405,7 +4400,6 @@ fn persist_mcp_server_definitions(
     store.save()
 }
 
-
 /// Delegate a long-running server command (`serve --http`/`--mobile`,
 /// `app-server --http`/`--mobile`) to the sibling TUI binary, supervising the
 /// child so its listener does not outlive the dispatcher (#3259).
@@ -4430,7 +4424,6 @@ fn persist_mcp_server_definitions(
 /// dies before it can run the graceful shutdown supervisor. This covers the
 /// hard parent-death edge of #3259 for `SIGKILL`, OOM, or abrupt process exit.
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-
 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
 
 /// Outcome of supervising a delegated server child.
@@ -4443,7 +4436,6 @@ fn persist_mcp_server_definitions(
 /// the conventional `128 + signal` exit code to propagate: Ctrl+C on every
 /// platform (130), plus SIGTERM (143) and SIGHUP (129) on Unix.
 #[cfg(unix)]
-
 #[cfg(not(unix))]
 
 /// Assign the delegated server `child` to a kill-on-job-close Job Object so the
@@ -4453,9 +4445,7 @@ fn persist_mcp_server_definitions(
 /// returns `None` if the job cannot be created or assigned. Mirrors the Job
 /// Object idiom in `crates/tui/src/tools/shell.rs`.
 #[cfg(windows)]
-
 #[cfg(windows)]
-
 // SAFETY: the wrapped value is a process-wide kernel handle; moving it across
 // threads does not invalidate it, and it is only ever closed once, on drop.
 #[cfg(windows)]
@@ -4481,7 +4471,11 @@ fn run_dispatcher_resume_picker(
     apply_tui_env(cli, resolved_runtime, &argv);
     let code = codewhale_tui::run(argv);
     if code != std::process::ExitCode::SUCCESS {
-        std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 })
+        std::process::exit(if code == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        })
     }
 
     println!();
@@ -4518,7 +4512,11 @@ fn run_tui_in_process(
     let argv = tui_argv(cli, passthrough.clone());
     apply_tui_env(cli, resolved_runtime, &passthrough);
     let code = codewhale_tui::run(argv);
-    std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 })
+    std::process::exit(if code == std::process::ExitCode::SUCCESS {
+        0
+    } else {
+        1
+    })
 }
 
 fn run_tui_server_in_process(
@@ -4529,7 +4527,11 @@ fn run_tui_server_in_process(
     let argv = tui_argv(cli, passthrough.clone());
     apply_tui_env(cli, resolved_runtime, &passthrough);
     let code = codewhale_tui::run(argv);
-    std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 })
+    std::process::exit(if code == std::process::ExitCode::SUCCESS {
+        0
+    } else {
+        1
+    })
 }
 
 fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
@@ -4563,11 +4565,7 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
     args
 }
 
-fn apply_tui_env(
-    cli: &Cli,
-    resolved_runtime: &ResolvedRuntimeOptions,
-    passthrough: &[String],
-) {
+fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrough: &[String]) {
     let mut verbosity = if cli.profile.is_some() {
         cli.verbosity.clone()
     } else {
@@ -4704,22 +4702,6 @@ fn apply_tui_env(
     }
 }
 
-fn lane_process_spec_from_argv(argv: &[String]) -> Result<WorkflowProcessSpec> {
-    let mut environment = std::collections::BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
-        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
-            continue;
-        };
-        if valid_lane_environment_key(key) && !shell_owned_lane_environment(key) {
-            environment.insert(key.to_string(), value.to_string());
-        }
-    }
-    Ok(WorkflowProcessSpec {
-        command: argv.to_vec(),
-        environment: environment.into_iter().collect(),
-    })
-}
-
 fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSpec> {
     let mut argv = Vec::new();
     argv.push(command.get_program().to_string_lossy().into_owned());
@@ -4731,17 +4713,12 @@ fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSp
     lane_process_spec_from_argv(&argv)
 }
 
-
-
-
-
 // There is deliberately no "just run the TUI with these args" helper here. One
 // existed, `thread resume`/`thread fork` used it, and it forwarded neither
 // `--config` nor the resolved telemetry value — so the kill switch the
 // dispatcher had already applied never reached the process that emits. Every
 // delegation is now in-process, and
 // `only_one_function_may_locate_and_spawn_the_tui` pins that.
-
 
 /// Resolve the sibling `codewhale-tui` executable next to the running
 /// dispatcher. Honours platform executable suffix (`.exe` on Windows) so
@@ -4846,9 +4823,13 @@ mod tests {
             // Safety: tests using this helper serialize with env_lock().
             unsafe {
                 if let Some(previous) = self.previous.take() {
-                    unsafe { std::env::set_var(self.name.clone(), previous.clone()); }
+                    unsafe {
+                        std::env::set_var(self.name.clone(), previous.clone());
+                    }
                 } else {
-                    unsafe { std::env::remove_var(self.name.clone()); }
+                    unsafe {
+                        std::env::remove_var(self.name.clone());
+                    }
                 }
             }
         }
@@ -5610,7 +5591,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn hidden_lane_log_proxy_parses_child_argv_and_preserves_other_commands() {
         let cli = parse_ok(&[
@@ -7987,7 +7967,6 @@ mod tests {
     }
 
     #[test]
-
     #[test]
     fn the_telemetry_flag_documents_itself_in_help() {
         // A consent control nobody can find is a consent control nobody has.
@@ -8008,9 +7987,7 @@ mod tests {
     }
 
     #[test]
-
-    
-        #[test]
+    #[test]
     fn only_one_function_may_locate_and_spawn_the_tui() {
         // Single-binary invariant: no sibling TUI discovery exists. The
         // two-process glue has been deleted; the only TUI entry is codewhale_tui::run.
@@ -8019,10 +7996,22 @@ mod tests {
         let b = format!("{}{}", "tui_spawn", "_error");
         let c = format!("{}{}", "build_tui", "_command");
         let d = format!("{}{}", "Command::new", "(&tui)");
-        assert!(!source.contains(&a), "single binary must not contain sibling TUI discovery");
-        assert!(!source.contains(&b), "single binary must not contain tui spawn error");
-        assert!(!source.contains(&c), "single binary must not contain build_tui dispatch");
-        assert!(!source.contains(&d), "single binary must not contain Command new tui");
+        assert!(
+            !source.contains(&a),
+            "single binary must not contain sibling TUI discovery"
+        );
+        assert!(
+            !source.contains(&b),
+            "single binary must not contain tui spawn error"
+        );
+        assert!(
+            !source.contains(&c),
+            "single binary must not contain build_tui dispatch"
+        );
+        assert!(
+            !source.contains(&d),
+            "single binary must not contain Command new tui"
+        );
     }
 
     fn telemetry_test_resolved() -> ResolvedRuntimeOptions {
@@ -8077,11 +8066,8 @@ mod tests {
     }
 
     #[test]
-
     #[test]
-
     #[test]
-
     #[test]
     fn parses_top_level_prompt_flag_for_interactive_startup_prompt() {
         let cli = parse_ok(&["deepseek", "-p", "Reply with exactly OK."]);
@@ -8264,4 +8250,4 @@ mod tests {
             }
         }
     }
-
+}

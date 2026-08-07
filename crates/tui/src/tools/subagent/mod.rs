@@ -562,7 +562,10 @@ impl FleetRole {
             Self::Custom => CUSTOM_AGENT_INTRO,
         };
         match self {
-            Self::Scout => format!("{role_intro}{}", crate::prompts::text::SUBAGENT_SCOUT_OUTPUT_FORMAT),
+            Self::Scout => format!(
+                "{role_intro}{}",
+                crate::prompts::text::SUBAGENT_SCOUT_OUTPUT_FORMAT
+            ),
             _ => format!("{role_intro}{SUBAGENT_OUTPUT_FORMAT}"),
         }
     }

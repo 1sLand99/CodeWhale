@@ -918,8 +918,7 @@ async fn start_authorization(
 }
 
 fn spawn_callback_server(
-    #[allow(dead_code)]
-    listener: Arc<TcpListener>,
+    #[allow(dead_code)] listener: Arc<TcpListener>,
     tx: oneshot::Sender<CallbackResult>,
     expected_callback_path: String,
 ) {
@@ -1073,12 +1072,8 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
 fn local_redirect_uri(listener: &TcpListener) -> Result<String> {
     let addr = listener.local_addr()?;
     match addr {
-        std::net::SocketAddr::V4(v4) => {
-            Ok(format!("http://{}:{}/callback", v4.ip(), v4.port()))
-        }
-        std::net::SocketAddr::V6(v6) => {
-            Ok(format!("http://[{}]:{}/callback", v6.ip(), v6.port()))
-        }
+        std::net::SocketAddr::V4(v4) => Ok(format!("http://{}:{}/callback", v4.ip(), v4.port())),
+        std::net::SocketAddr::V6(v6) => Ok(format!("http://[{}]:{}/callback", v6.ip(), v6.port())),
     }
 }
 

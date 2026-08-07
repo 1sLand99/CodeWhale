@@ -800,6 +800,7 @@ dependencies = [
  "codewhale-secrets",
  "codewhale-state",
  "codewhale-telemetry",
+ "codewhale-tui",
  "codewhale-workflow",
  "console",
  "dirs",
