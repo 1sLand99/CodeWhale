@@ -425,7 +425,7 @@ done
       "agent",
       "remember",
       "tasks",
-      "work_update",
+      "todo_write",
       "tool_search",
     ]);
     expect(matrix.toolSurface.actions).toEqual({
@@ -464,7 +464,7 @@ done
     expect(toolDoc).toContain("`Web` is a conditional, deferred action tool");
     expect(toolDoc).toContain("hidden from the model");
     expect(design).toContain(
-      "The final active names are `Bash`, `File`, `Git`, `Run`, `agent`, `remember`, `tasks`, `update_plan`, `work_update`, and `tool_search`.",
+      "The final active names are `Bash`, `File`, `Git`, `Run`, `agent`, `remember`, `tasks`, `update_plan`, `todo_write`, and `tool_search`.",
     );
     expect(registry).toContain('FileTool::new("File")');
     expect(registry).toContain('GitTool::new("Git")');
