@@ -194,7 +194,7 @@
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 178,
   "max_module_lines": 17631,
-  "max_total_owned_rust_lines": 680500,
+  "max_total_owned_rust_lines": 680700,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",
@@ -220,5 +220,5 @@
   ],
   "_todo_2026_08_07_rlm_turn": "v0.9.4 REPL fence + turn liveness: rlm/turn.rs 1081 lines becomes newly allowed (previously under threshold). Large-module count 176 -> 177. Provenance/empty-guard growth in turn.rs + honest exit ladder in turn_loop.rs. No new packages. Pay down in v0.9.5.",
   "_todo_2026_08_07_session_title_fix": "Session title pinned at New Session fix (codex/session-title-fix bf69e7ff5): aggregate 676325 -> 676653 (+328 lines). Includes two regression tests + DEFAULT_SESSION_TITLE constant (+128 from fork) plus efcf47a1d mid-stream resume/paste/fleet (+279) already landed without ceiling update. Durable test asset, not overspend.",
-  "_todo_2026_08_07_095_stack": "0.9.5 stack re-baseline: aggregate 678400 -> 680500 (+2100) for stacked PRs #5258 session-title fix (+328), #5205 Tabby IME (+35), #5256 mcp-discovery (+445), #5257 auto-model (+260), #5255 FEAT-012 palette (+1179), plus copilot runtime APIs: goal 546, verifier 476, memory 690 (incl native_memory.rs 1017 new large), mcp 738, skill 957. Large-module 177->178 for native_memory.rs. Bump pays for stacked backlog; pay down in 0.9.5 proper."
+  "_todo_2026_08_07_095_stack": "0.9.5 stack re-baseline: 680500 -> 680700 (+200) for #5243 OAuth auto-adopt in-progress (provider_picker + xai_oauth +128) and #5244 fallback helpers; keep slack for #5247 harness."
 }
