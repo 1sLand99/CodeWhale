@@ -13652,7 +13652,7 @@ fn subagent_tool_results_spill_to_disk_and_stay_bounded_inline() {
         assert!(inline.contains("full output at"));
         assert!(inline.contains(crate::tools::truncate::SPILLOVER_RECOVERY_HINT));
         assert!(inline.contains("\n…\n"));
-        assert!(inline.contains(&path.display().to_string()));
+        assert!(inline.contains(&crate::artifacts::format_artifact_relative_path(&path)));
         assert!(!inline.contains("Exact evidence retained"));
         assert!(inline.contains("retrieve_tool_result"), "{inline}");
         // Full output remains recoverable from disk.

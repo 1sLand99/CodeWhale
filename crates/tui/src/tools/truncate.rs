@@ -1687,7 +1687,11 @@ mod tests {
             assert!(result.content.contains("of output omitted ("));
             assert!(result.content.contains(" lines)"));
             assert!(result.content.contains("full output at"));
-            assert!(result.content.contains(&path.display().to_string()));
+            assert!(
+                result
+                    .content
+                    .contains(&crate::artifacts::format_artifact_relative_path(&path))
+            );
             assert!(result.content.contains(SPILLOVER_RECOVERY_HINT));
             assert!(!result.content.contains(SPILLOVER_PREVIEW_HINT));
 
