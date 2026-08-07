@@ -8526,8 +8526,6 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
     };
     let client = crate::tls::reqwest_client();
 
->>>>>>> 3130b49a6 (feat: expose bounded memory inspection and lifecycle controls via Runtime API)
->>>>>>> 9864e2d71 (feat: add skill lifecycle routes to runtime API (install, update, uninstall, trust, audit))
     let info: serde_json::Value = client
         .get(format!("http://{addr}/v1/runtime/info"))
         .send()
@@ -8536,8 +8534,6 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
         .json()
         .await?;
     assert_eq!(
-<<<<<<< HEAD
-<<<<<<< HEAD
         info["capabilities"]["thread_goals"].as_bool(),
         Some(true),
         "runtime info must advertise thread_goals capability"
@@ -8560,7 +8556,6 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
         .send()
         .await?;
     assert_eq!(missing.status(), 404);
-=======
         info["capabilities"]["memory"], true,
         "memory capability must be advertised in runtime/info"
     );
@@ -8730,7 +8725,6 @@ async fn memory_summary_is_redacted_to_max_chars() -> Result<()> {
     assert!(
         summary.ends_with("…") || summary.chars().count() <= 300,
         "overlong text must be truncated with an ellipsis"
-=======
         info["capabilities"]["skill_lifecycle"], true,
         "runtime/info must advertise skill_lifecycle capability"
     );
@@ -8738,7 +8732,6 @@ async fn memory_summary_is_redacted_to_max_chars() -> Result<()> {
     handle.abort();
     Ok(())
 }
-<<<<<<< HEAD
 
 #[tokio::test]
 async fn memory_clear_removes_global_scope() -> Result<()> {
@@ -8882,5 +8875,3 @@ async fn memory_search_query_filters_results() -> Result<()> {
     handle.abort();
     Ok(())
 }
-=======
->>>>>>> 9864e2d71 (feat: add skill lifecycle routes to runtime API (install, update, uninstall, trust, audit))
