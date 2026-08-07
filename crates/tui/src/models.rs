@@ -300,6 +300,7 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
 /// surface an explicit warning instead of silently compacting at 128K
 /// (see #5244).
 #[must_use]
+#[allow(dead_code)]
 pub fn is_legacy_fallback_model(model: &str) -> bool {
     context_window_for_model(model).is_none()
 }
@@ -307,6 +308,7 @@ pub fn is_legacy_fallback_model(model: &str) -> bool {
 /// User-facing warning for the 128K fallback — see #5244.
 /// Returns `Some(warning)` when `model` is unknown, `None` otherwise.
 #[must_use]
+#[allow(dead_code)]
 pub fn legacy_fallback_warning(model: &str) -> Option<String> {
     if is_legacy_fallback_model(model) {
         Some(format!(
