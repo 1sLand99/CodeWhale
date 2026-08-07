@@ -3342,6 +3342,23 @@ fn fleet_roster_with(id: &str, profile: codewhale_config::FleetProfile) -> Fleet
     FleetRoster::load(&config, tmp.path())
 }
 
+/// A roster with a single explicit member and no personal/workspace profiles.
+/// Used for tests that resolve by role name (e.g. `type: "builder"`) and must
+/// not be shadowed by the operator's personal `~/.codewhale/agents/*.toml`.
+fn isolated_fleet_roster_with(id: &str, mut profile: codewhale_config::FleetProfile) -> FleetRoster {
+    if profile.role.name.trim().is_empty() {
+        profile.role.name = id.to_string();
+    }
+    FleetRoster::from_members(vec![crate::fleet::profile::AgentProfile {
+        id: id.to_string(),
+        display_name: Some(id.to_string()),
+        description: None,
+        profile,
+        source: std::path::PathBuf::from("test"),
+        origin: crate::fleet::roster::ProfileOrigin::Config,
+    }])
+}
+
 fn custom_fleet_profile(role: &str) -> codewhale_config::FleetProfile {
     codewhale_config::FleetProfile {
         slot: codewhale_config::FleetSlot::from_name(role),
@@ -3985,6 +4002,59 @@ fn custom_fleet_profile_also_rejects_model_override() {
         message.contains("pre-configured route"),
         "error must explain the route binding: {message}"
     );
+}
+
+/// A type alias that matches a saved fleet roster member is promoted to that
+/// profile so the child gets the member's provider/model pin. An explicit
+/// `model` that matches the profile's pinned model is treated as redundant and
+/// ignored, which is the common case when a model reads the profile and repeats
+/// the model id.
+#[test]
+fn apply_spawn_profile_promotes_type_alias_to_matching_member_and_ignores_matching_model() {
+    let mut profile = custom_fleet_profile("builder");
+    profile.provider = Some("deepseek".to_string());
+    profile.model = Some("deepseek-v4-flash".to_string());
+    let roster = isolated_fleet_roster_with("builder", profile);
+
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "implement a feature",
+        "type": "builder",
+        "model": "deepseek-v4-flash",
+        "write_roots": ["."]
+    }))
+    .expect("parse should succeed");
+    let member = apply_spawn_profile(&mut request, &roster)
+        .expect("type alias matching a member should resolve")
+        .expect("member resolved");
+    assert_eq!(member.id, "builder");
+    assert_eq!(request.agent_type, FleetRole::Builder);
+    assert_eq!(request.profile.as_deref(), Some("builder"));
+    assert!(
+        request.model.is_none(),
+        "redundant matching model should be dropped in favor of the profile pin"
+    );
+}
+
+#[test]
+fn apply_spawn_profile_promoted_alias_rejects_model_mismatch() {
+    let mut profile = custom_fleet_profile("builder");
+    profile.provider = Some("deepseek".to_string());
+    profile.model = Some("deepseek-v4-pro".to_string());
+    let roster = isolated_fleet_roster_with("builder", profile);
+
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "implement a feature",
+        "type": "builder",
+        "model": "deepseek-v4-flash",
+        "write_roots": ["."]
+    }))
+    .expect("parse should succeed");
+    let err = apply_spawn_profile(&mut request, &roster)
+        .expect_err("mismatched model on promoted profile must fail");
+    let message = err.to_string();
+    assert!(message.contains("builder"), "error must name the member: {message}");
+    assert!(message.contains("deepseek-v4-pro"), "error must name the pinned model: {message}");
+    assert!(message.contains("deepseek-v4-flash"), "error must name the requested model: {message}");
 }
 
 /// A Fleet worker subprocess launches as `--model <exact> --reasoning-effort

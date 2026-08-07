@@ -2443,8 +2443,9 @@ fn cached_skills_reject_codewhale_only_workspace_symlink_escape() {
 #[test]
 fn paste_defers_oversized_text_consolidation_until_submit() {
     // (#3263): a large paste stays inline so the user can still edit it.
-    // At submit time, the full text is sent to the model with the @mention
-    // appended so the model can also read the paste file backup.
+    // At submit time, the inline text is replaced by the @mention so the
+    // model reads the full content from the paste file instead of receiving
+    // it twice.
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut opts = test_options(false);
     opts.workspace = tmp.path().to_path_buf();
@@ -2468,21 +2469,13 @@ fn paste_defers_oversized_text_consolidation_until_submit() {
     );
 
     let submitted = app.submit_input().expect("expected submitted input");
-    // The submitted text should contain the original content with the
-    // @mention appended at the end (#3263).
     assert!(
-        submitted.starts_with(&full_content),
-        "submitted should contain full content, got: {}",
+        submitted.starts_with("@.codewhale/pastes/paste-"),
+        "submitted should be the @mention only, got: {}",
         &submitted[..submitted.len().min(80)]
     );
-    let mention_start = full_content.len();
-    assert!(
-        submitted[mention_start..].starts_with("\n@.codewhale/pastes/paste-"),
-        "expected @mention suffix, got: {}",
-        &submitted[mention_start..]
-    );
     assert!(submitted.ends_with(".md"), "expected .md extension");
-    let mention = &submitted[mention_start + 2..]; // strip '\n@'
+    let mention = &submitted[1..]; // strip leading '@'
     let abs = tmp.path().join(mention);
     assert!(abs.is_file(), "paste file must exist at {abs:?}");
     let written = std::fs::read_to_string(&abs).expect("read");
@@ -2569,19 +2562,13 @@ fn submit_input_consolidates_oversized_input_into_paste_file() {
 
     let submitted = app.submit_input().expect("expected submitted input");
 
-    // The submitted text should still contain the original content, with
-    // the @mention appended at the end so the model can read the file
-    // while the composer stays editable for the user (#3263).
+    // The submitted text should be the @mention only so the model reads the
+    // full content from the paste file instead of receiving it twice inline
+    // and as a mention (#3263).
     assert!(
-        submitted.starts_with(&full_content),
-        "submitted text should contain original content, got: {}",
+        submitted.starts_with("@.codewhale/pastes/paste-"),
+        "submitted text should be the @mention, got: {}",
         &submitted[..submitted.len().min(80)]
-    );
-    let mention_start = full_content.len();
-    assert!(
-        submitted[mention_start..].starts_with("\n@.codewhale/pastes/paste-"),
-        "submitted text should end with @mention, got suffix: {}",
-        &submitted[mention_start..]
     );
     assert!(
         submitted.ends_with(".md"),
@@ -2589,7 +2576,7 @@ fn submit_input_consolidates_oversized_input_into_paste_file() {
     );
 
     // The paste file must exist on disk with the full original content.
-    let mention = &submitted[mention_start + 2..]; // strip leading '\n@'
+    let mention = &submitted[1..]; // strip leading '@'
     let abs_path = tmp.path().join(mention);
     assert!(abs_path.is_file(), "paste file must exist at {abs_path:?}");
     let written = std::fs::read_to_string(&abs_path).expect("read paste file");

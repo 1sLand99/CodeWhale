@@ -424,6 +424,13 @@ File edits, terminal width, and Windows installation.
   `retrieve_tool_result` ref for the elided middle instead of telling the
   model the bytes are unrecoverable; write failures degrade to the honest
   no-ref footer.
+- An interactive mid-stream network drop after partial output no longer fails
+  the turn: the partial reply is preserved as a committed assistant message,
+  a runtime continuation message is appended, and the request is re-issued
+  bounded by the stream-retry budget.
+- Large pasted input is no longer sent to the model twice as inline text and
+  as a backup `.md` paste file; the submitted message now carries only the
+  `@`-mention so the model reads the file once.
 
 ### Removed
 

@@ -128,6 +128,32 @@ pub(super) fn should_resume_after_network_drop(
     headless_host && network_class_error && retry_attempts < MAX_STREAM_RETRIES && !cancelled
 }
 
+/// Decide whether an interactive TUI stream should be re-issued after a
+/// mid-stream network drop, preserving the partial reply and appending a
+/// runtime continuation message.
+///
+/// Unlike the headless resume, this keeps the partial fragment: the user has
+/// already seen the deltas, so the assistant message is committed and the next
+/// request is asked to continue where it left off. Tool calls are never resumed
+/// because an incomplete tool call could be re-issued and duplicate side
+/// effects. Bounded by `MAX_STREAM_RETRIES` and gated on a network/timeout-class
+/// error so model/parse/auth failures still surface normally.
+pub(super) fn should_resume_interactive_after_network_drop(
+    terminal_chrome_enabled: bool,
+    network_class_error: bool,
+    any_content_received: bool,
+    tool_uses_empty: bool,
+    retry_attempts: u32,
+    cancelled: bool,
+) -> bool {
+    terminal_chrome_enabled
+        && network_class_error
+        && any_content_received
+        && tool_uses_empty
+        && retry_attempts < MAX_STREAM_RETRIES
+        && !cancelled
+}
+
 /// Convert low-level reqwest/hyper stream read errors into an operator-facing
 /// message. The raw provider error remains attached, but the lead sentence
 /// explains why Codewhale may retry before any output and why it must surface
