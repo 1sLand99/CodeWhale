@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a87c9f323f35 -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 Un agente de programación de código abierto para tu terminal — trae tu propio modelo.
@@ -14,6 +14,13 @@ ejecuta comandos y verifica su propio trabajo, y se detiene cuando la tarea
 queda lista o te necesita. Cambia de modelo a mitad de tarea con `/model`.
 Trabaja de forma interactiva en la TUI, o ejecuta `codewhale exec` en scripts y
 CI. Está escrito en Rust, con licencia MIT, y corre en tu máquina.
+
+Lo que no se parece a otros harnesses: **tú eliges el modelo de cada rol, y no
+tienen por qué coincidir.** Una fleet fija un proveedor, un modelo y un nivel de
+razonamiento por rol — así un modelo barato y rápido puede dirigir a uno de
+razonamiento caro, o un builder GLM puede trabajar en la misma tarea que un
+reviewer Kimi. Escribe tus propios roles y tu propia constitution, y el harness
+es tuyo en lugar de nuestro.
 
 Siempre estamos buscando personas que contribuyan y formas de mejorar. Si falta
 un modelo o proveedor que usas, o algo se rompe, contárnoslo es una de las cosas
@@ -65,6 +72,12 @@ aprobación.
   todo a través de un solo runtime y un solo conjunto de herramientas. Los
   presupuestos de contexto y los precios vienen de la ruta real, y un precio
   desconocido se muestra como desconocido en lugar de $0.
+- **Un harness que tú escribes.** Los roles son archivos que puedes leer y
+  editar — un modelo, una postura de herramientas e instrucciones permanentes por
+  rol — guardados en el proyecto para que el equipo los comparta, o junto a tus
+  ajustes personales para que te acompañen entre repos. Una constitution registra
+  cómo quieres que el agente se comporte en cada sesión, de modo que el harness se
+  ajuste a tu práctica y no a la nuestra.
 - **Solo lectura hasta que permitas más.** El modo Plan no cambia archivos, y
   las aprobaciones controlan los comandos riesgosos. Cuando un sandbox del
   sistema operativo realmente envuelve un comando, Codewhale lo indica: Seatbelt

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a87c9f323f35 -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -6,6 +6,8 @@ Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan An
 Codewhale berawal sebagai pengalaman asli (native) untuk DeepSeek. Sejak saat itu, proyek ini berkembang menjadi proyek yang didorong oleh komunitas: satu coding harness yang memenuhi kebutuhan komunitas internasional yang terus berkembang serta mendukung sebanyak mungkin model dan penyedia (provider) — mengutamakan model terbuka, baik yang di-host maupun lokal, tanpa membeda-bedakan satu sama lain.
 
 Berikan penyedia, model, dan tugas: Codewhale akan membaca kode Anda, mengedit berkas, menjalankan perintah, serta memeriksa hasil kerjanya sendiri, lalu berhenti setelah pekerjaan selesai atau ketika membutuhkan arahan Anda. Ganti model di tengah tugas dengan `/model`. Bekerja secara interaktif di TUI, atau jalankan `codewhale exec` dalam skrip dan CI. Dibuat menggunakan Rust, berlisensi MIT, dan berjalan langsung di mesin Anda sendiri.
+
+Yang membedakannya dari harness lain: **Anda memilih model untuk setiap peran, dan model-model itu tidak harus sama.** Sebuah fleet menyematkan penyedia, model, dan tingkat penalaran per peran — sehingga model yang murah dan cepat bisa mengarahkan model penalaran yang mahal, atau seorang builder GLM bisa mengerjakan tugas yang sama dengan seorang reviewer Kimi. Tulis peran Anda sendiri, constitution Anda sendiri, dan harness itu menjadi milik Anda, bukan milik kami.
 
 Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkembang. Jika model atau penyedia yang Anda gunakan belum tersedia, atau ada hal yang tidak berjalan semestinya, memberi tahu kami adalah salah satu kontribusi paling berharga yang bisa Anda lakukan — lihat [Kontribusi](#kontribusi).
 
@@ -41,6 +43,7 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 ## Fitur & Kapabilitas
 
 - **Model mana saja, penyedia apa saja.** DeepSeek, Claude, GPT, Kimi, GLM, dan 30+ penyedia lainnya, ditambah vLLM, SGLang, atau Ollama milik Anda sendiri tanpa memerlukan API key — semuanya melalui satu runtime dan satu kumpulan alat. Batas konteks dan harga diambil dari rute sebenarnya, dan harga yang tidak diketahui ditampilkan sebagai *unknown* daripada $0.
+- **Harness yang Anda tulis sendiri.** Peran adalah berkas yang bisa Anda baca dan sunting — satu model, satu sikap perkakas, dan instruksi tetap untuk tiap peran — disimpan di dalam proyek agar tim berbagi, atau di samping pengaturan pribadi Anda agar ikut berpindah antar repo. Constitution mencatat bagaimana Anda ingin agen berperilaku di setiap sesi, sehingga harness mengikuti cara kerja Anda, bukan cara kami.
 - **Read-only sampai Anda memberi izin lebih.** Mode Plan tidak dapat mengubah berkas, dan gerbang persetujuan memproteksi perintah berisiko. Ketika sandbox OS membungkus perintah, Codewhale akan menginformasikannya: Seatbelt pada macOS (jika tersedia), serta opsi bubblewrap di Linux. Berkas `constitution.json` repositori dikompilasi menjadi pembatas penulisan yang bahkan tidak dapat dilewati oleh mode Full Access.
 - **Pekerjaan yang dapat dilanjutkan.** Fleet mencatat setiap langkah ke ledger bertipe append-only, sehingga `fleet resume` dapat melanjutkan pekerjaan tepat di mana Anda meninggalkannya.
 
