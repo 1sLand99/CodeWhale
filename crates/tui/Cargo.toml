@@ -27,18 +27,18 @@ path = "src/main.rs"
 [dependencies]
 ahash = "0.8"
 anyhow.workspace = true
-codewhale-config = { path = "../config", version = "0.9.4" }
-codewhale-core = { path = "../core", version = "0.9.4" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.4" }
-codewhale-lane = { path = "../lane", version = "0.9.4" }
-codewhale-paths = { path = "../paths", version = "0.9.4" }
-codewhale-protocol = { path = "../protocol", version = "0.9.4" }
-codewhale-release = { path = "../release", version = "0.9.4" }
-codewhale-secrets = { path = "../secrets", version = "0.9.4" }
-codewhale-telemetry = { path = "../telemetry", version = "0.9.4" }
-codewhale-tools = { path = "../tools", version = "0.9.4" }
-codewhale-workflow = { path = "../workflow", version = "0.9.4" }
-codewhale-workflow-js = { path = "../workflow-js", version = "0.9.4" }
+codewhale-config = { path = "../config", version = "0.9.5" }
+codewhale-core = { path = "../core", version = "0.9.5" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.5" }
+codewhale-lane = { path = "../lane", version = "0.9.5" }
+codewhale-paths = { path = "../paths", version = "0.9.5" }
+codewhale-protocol = { path = "../protocol", version = "0.9.5" }
+codewhale-release = { path = "../release", version = "0.9.5" }
+codewhale-secrets = { path = "../secrets", version = "0.9.5" }
+codewhale-telemetry = { path = "../telemetry", version = "0.9.5" }
+codewhale-tools = { path = "../tools", version = "0.9.5" }
+codewhale-workflow = { path = "../workflow", version = "0.9.5" }
+codewhale-workflow-js = { path = "../workflow-js", version = "0.9.5" }
 schemaui = { version = "0.12.0", default-features = false, optional = true }
 async-stream = "0.3.6"
 async-trait.workspace = true
@@ -104,7 +104,7 @@ shell-words = "1.1.1"
 mimalloc.workspace = true
 
 [build-dependencies]
-codewhale-build-support = { path = "../build-support", version = "0.9.4" }
+codewhale-build-support = { path = "../build-support", version = "0.9.5" }
 
 [dev-dependencies]
 cucumber = "0.23.0"

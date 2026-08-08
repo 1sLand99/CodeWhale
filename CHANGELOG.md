@@ -7,12 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - Unreleased candidate
+
+Codewhale v0.9.5 consolidates the terminal application into one compiled
+runtime while preserving the familiar `codewhale` and `codew` commands. It
+also expands the managed Runtime API, makes session and Fleet work easier to
+inspect and resume, and fixes the local turn backstop that could end productive
+tool work before the model received its final tool result.
+
 ### Added
 
 - **`model = "auto"` for prompt-based tier selection**: When set, the
   dispatcher analyses the user's prompt before delegating to the TUI and
   selects `deepseek-v4-pro` for complex tasks or `deepseek-v4-flash` for simple
   tasks (PR #5257).
+- Runtime API controls for persistent goals, bounded memory inspection, MCP
+  server and skill lifecycle management, and durable Fleet receipt evidence.
+- Append-only session-tree history with `/tree`, `/branch`, `/fork`, and
+  `/resume`, plus `/rc` remote control and managed login.
+- A unified Fleet roster for built-in dispatch postures and a pinned indicator
+  that keeps active background work visible above the composer.
+- Incremental MCP registry refreshes that return the local snapshot immediately
+  and update it in the background.
+
+### Changed
+
+- `codewhale-cli` now contains the terminal runtime directly. Release installers
+  expose byte-identical `codewhale` and `codew` commands without a separate TUI
+  executable. The v0.9.5 asset set alone retains deprecated
+  `codewhale-tui-*` filenames as byte-identical compatibility copies so
+  installed v0.9.4 clients can discover and complete this upgrade.
+- Startup release checks cache successful lookups for one hour. The updater
+  downloads and verifies the primary runtime once, then refreshes any existing
+  `codew` or legacy `codewhale-tui` command paths from the same bytes.
+- Command-palette and slash-completion shadowing now share one alias-aware
+  discovery contract.
+- The website install guidance, localized product copy, navigation controls,
+  social metadata, and Cloudflare build pipeline now describe and deploy the
+  same one-runtime release contract.
+
+### Fixed
+
+- Productive tool-result rounds no longer count toward the 20-step
+  no-user-input backstop. Long-running work can send tool result 20 back to the
+  model, request the next provider step, and finish with an assistant response.
+- A newly minted OAuth credential is adopted in the same provider-selection
+  flow instead of requiring a second picker trip.
+- Fresh session titles can replace a stale cached `New Session` placeholder,
+  unknown model context limits fail loudly, and release/source-install fallbacks
+  no longer request binaries removed by the single-runtime conversion.
 
 ## [0.9.4] - 2026-08-07
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
@@ -5167,7 +5210,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
 [0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
