@@ -60,8 +60,8 @@ export default async function ToolsPage({ params }: { params: Promise<{ locale: 
             {
               group: isZh ? "协调" : "Coordination",
               tools: isZh
-                ? "agent · remember（启用内置记忆时）· tasks · update_plan · todo_write · tool_search（synthetic，始终启用）"
-                : "agent · remember (when built-in memory is enabled) · tasks · update_plan · todo_write · tool_search (synthetic and always active)",
+                ? "agent · remember（启用内置记忆时）· tasks · todo_write · tool_search（synthetic，始终启用）"
+                : "agent · remember (when built-in memory is enabled) · tasks · todo_write · tool_search (synthetic and always active)",
             },
             {
               group: isZh ? "延迟加载" : "Deferred",

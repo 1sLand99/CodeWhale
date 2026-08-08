@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:a87c9f323f35 -->
+<!-- source: README.md sha256:797395092563 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -6,6 +6,8 @@
 Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个由社区驱动的项目:一套契合日益壮大的国际社区需求的编程工具,尽可能支持更多的模型与 provider——开放模型优先,托管或本地皆可,彼此之间没有谁被优先对待。
 
 给它一个 provider、一个模型和一个任务:它会读你的代码、改文件、跑命令、检查自己的工作,并在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI,脚本和 CI 用 `codewhale exec`。它用 Rust 编写,采用 MIT 许可,运行在你自己的机器上。
+
+和其他 harness 不一样的地方在于:**每个角色用哪个模型由你决定,而且它们不必相同。** 一个 Fleet 为每个角色分别固定 provider、模型和推理档位——所以又快又便宜的模型可以指挥昂贵的推理模型,GLM 的 builder 也可以和 Kimi 的 reviewer 干同一份活。写下你自己的角色、你自己的 constitution,这套 harness 就是你的,而不是我们的。
 
 我们一直在寻找贡献者和改进的方式。如果你在用的某个模型或 provider 还不支持,或者有什么东西坏了,告诉我们就是你能做的最有用的事之一——见[贡献](#贡献)。
 
@@ -36,11 +38,12 @@ codewhale web                            # local browser client on 127.0.0.1
 ```
 
 
-在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 运行一组 worker,`/undo` 撤销上一轮,`/restore <N>` 把工作区回滚到更早的快照(不带参数的 `/restore` 只列出快照)。输入区为空时,`Tab` 在 Plan / Act / Operate 之间循环切换;输入区有内容时,`Tab` 改为补全斜杠命令和 `@` 提及。`Shift+Tab` 在任何时候都能循环切换 Ask / Auto-Review / Full Access 权限姿态。`!` 让 shell 命令经由正常的审批路径运行。
+在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 构建并运行团队——一次一个角色,各自带着自己的模型,`/undo` 撤销上一轮,`/restore <N>` 把工作区回滚到更早的快照(不带参数的 `/restore` 只列出快照)。输入区为空时,`Tab` 在 Plan / Act / Operate 之间循环切换;输入区有内容时,`Tab` 改为补全斜杠命令和 `@` 提及。`Shift+Tab` 在任何时候都能循环切换 Ask / Auto-Review / Full Access 权限姿态。`!` 让 shell 命令经由正常的审批路径运行。
 
 ## 功能
 
-- **任意模型,任意 provider。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider,以及你自己的 vLLM、SGLang、Ollama——无需 key——全都跑在同一套运行时和同一套工具之上。上下文预算与价格取自真实路由;价格未知时显示未知,而不是 $0。
+- **任意模型,任意 provider——也可以任意混搭。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider,以及你自己的 vLLM、SGLang、Ollama——无需 key——全都跑在同一套运行时和同一套工具之上。保存下来的角色会显式记录它的 `provider`、`model` 和推理档位,所以一个 Fleet 可以在同一次运行里跨越多家厂商,角色的路由也不会取决于当时恰好激活的是哪个 provider。上下文预算与价格取自真实路由;价格未知时显示未知,而不是 $0。
+- **由你亲手写就的 harness。** 角色就是你能读、能改的文件——每个角色一个模型、一套工具姿态和一份常驻指令——放在项目里让团队共享,或放在你的个人设置旁边,跟着你在不同仓库之间走。constitution 记录你希望 agent 在每一次会话中如何行事,让这套 harness 贴合你的做法,而不是我们的。
 - **默认只读,放开权限才更进一步。** Plan 模式不改动文件,审批把关每一次高风险命令。只有当命令确实被 OS 沙箱包装时,Codewhale 才会如实标明:macOS 上是可用时启用的 Seatbelt,Linux 上是需显式启用的 bubblewrap。仓库的 `constitution.json` 会编译成写入拦截,连 Full Access 也无法跳过。
 - **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。
 
