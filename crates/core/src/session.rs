@@ -132,6 +132,6 @@ mod tests {
         assert!(t.journal.branch_to(&a));
         t.leaf_id = t.journal.leaf_id.clone();
         assert_eq!(t.leaf_id.as_deref(), Some(a.as_str()));
-        assert_eq!(t.journal.len(), 3); // history never rewritten
+        assert_eq!(t.journal.len(), 2); // history never rewritten; branching only moved the leaf
     }
 }
