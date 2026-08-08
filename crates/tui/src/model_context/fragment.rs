@@ -3,7 +3,7 @@
 //! Caps and identities are unified with `codewhale_core::fragments` — the
 //! single `crates/core` owner for the bounded fragment system (issue #5264).
 //! This crate re-exports the core caps so every injection goes through a
-//! typed fragment with a `matches_text` recognizer and the hard caps
+//! typed fragment with a stable marker and the hard caps
 //! (per-fragment size, 10K-token ceiling, injected-item count) are enforced
 //! in one place.
 
@@ -183,9 +183,8 @@ impl ModelContextFragment {
         }
     }
 
-    /// `matches_text` recognizer: true when `haystack` contains this fragment's marker.
+    /// Return whether `haystack` contains this fragment's stable marker.
     #[must_use]
-    #[allow(dead_code)] // consumed by the #5264 context-fragment wiring (in flight)
     pub fn matches_text(&self, haystack: &str) -> bool {
         haystack.contains(self.marker)
     }
@@ -209,7 +208,9 @@ impl ModelContextFragment {
     /// Full render including the stable marker header.
     #[must_use]
     pub fn render_marked(&self) -> String {
-        format!("{}\n{}", self.marker, self.content.trim_end())
+        let rendered = format!("{}\n{}", self.marker, self.content.trim_end());
+        debug_assert!(self.matches_text(&rendered));
+        rendered
     }
 }
 

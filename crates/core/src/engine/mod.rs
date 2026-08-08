@@ -138,12 +138,6 @@ impl Default for EngineConfig {
 // `crates/tui/src/core/engine.rs` `spawn_engine` / `spawn_supervised`).
 
 pub struct Engine {
-    // Scaffolding: consumed by the #5261 extraction slice that moves the turn
-    // loop into core; until then nothing reads these two fields.
-    #[allow(dead_code)]
-    config: EngineConfig,
-    #[allow(dead_code)]
-    state: StateStore,
     rx_op: mpsc::Receiver<OpEnvelope>,
     tx_event: mpsc::Sender<EventMsg>,
     journal: Journal,
@@ -156,7 +150,7 @@ const ENGINE_EVENT_CHANNEL_CAPACITY: usize = 128;
 
 impl Engine {
     #[must_use]
-    pub fn new(config: EngineConfig, state: StateStore) -> (Self, EngineHandle) {
+    pub fn new(config: EngineConfig, _state: StateStore) -> (Self, EngineHandle) {
         let (tx_op, rx_op) = mpsc::channel(ENGINE_OP_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = mpsc::channel(ENGINE_EVENT_CHANNEL_CAPACITY);
         let thread = Thread::new(
@@ -175,8 +169,6 @@ impl Engine {
             cancel_token: Arc::new(StdMutex::new(tokio_util::sync::CancellationToken::new())),
         };
         let engine = Self {
-            config,
-            state,
             rx_op,
             tx_event,
             journal: Journal::new(),

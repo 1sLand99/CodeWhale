@@ -295,31 +295,6 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
     None
 }
 
-/// Returns `true` when `model` has no known context window and will fall
-/// through to `LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS` (128K). Used to
-/// surface an explicit warning instead of silently compacting at 128K
-/// (see #5244).
-#[must_use]
-#[allow(dead_code)]
-pub fn is_legacy_fallback_model(model: &str) -> bool {
-    context_window_for_model(model).is_none()
-}
-
-/// User-facing warning for the 128K fallback — see #5244.
-/// Returns `Some(warning)` when `model` is unknown, `None` otherwise.
-#[must_use]
-#[allow(dead_code)]
-pub fn legacy_fallback_warning(model: &str) -> Option<String> {
-    if is_legacy_fallback_model(model) {
-        Some(format!(
-            "unknown model `{}` — using the 128K default; set `providers.<name>.context_window` if this model serves a larger window",
-            model
-        ))
-    } else {
-        None
-    }
-}
-
 fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
     match model_lower {
         // OpenAI API model docs, verified 2026-06-12:

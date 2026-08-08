@@ -746,10 +746,10 @@ fn token_needs_refresh(expires_at: Option<u64>) -> bool {
     now.saturating_add(REFRESH_SKEW_MILLIS) >= expires_at
 }
 
-#[allow(dead_code)]
 struct CallbackServerGuard {
-    #[allow(dead_code)]
-    listener: Arc<TcpListener>,
+    // Holding the listener open is the guard's purpose; the accept loop owns
+    // another Arc and exits once both owners are dropped.
+    _listener: Arc<TcpListener>,
 }
 
 impl Drop for CallbackServerGuard {
@@ -793,7 +793,7 @@ impl OauthLoginFlow {
                 .map_err(|err| anyhow!(err))?,
         );
         let guard = CallbackServerGuard {
-            listener: Arc::clone(&listener),
+            _listener: Arc::clone(&listener),
         };
         let redirect_uri = resolve_redirect_uri(&listener, callback_url)?;
         let callback_id = callback_id_from_server_url(server_url)?;
@@ -918,7 +918,7 @@ async fn start_authorization(
 }
 
 fn spawn_callback_server(
-    #[allow(dead_code)] listener: Arc<TcpListener>,
+    listener: Arc<TcpListener>,
     tx: oneshot::Sender<CallbackResult>,
     expected_callback_path: String,
 ) {

@@ -204,17 +204,6 @@ impl WorldState {
         self
     }
 
-    #[must_use]
-    #[allow(dead_code)] // consumed by the #5264 context-fragment wiring (in flight)
-    pub fn with_constitution_fragment(mut self, body: impl Into<String>) -> Self {
-        self.upsert(ModelContextFragment::new(
-            FragmentId::Constitution,
-            FragmentRole::Constitution,
-            body,
-        ));
-        self
-    }
-
     /// Enforce the hard caps for this WorldState. Returns an error if the
     /// fragment count or any fragment's byte/token size exceeds the core
     /// ceilings (`MAX_FRAGMENT_BYTES` / `MAX_FRAGMENT_TOKENS`).

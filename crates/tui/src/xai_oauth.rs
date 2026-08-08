@@ -249,22 +249,6 @@ pub fn external_file_is_fresh(path: &Path) -> bool {
     entry_access_token_is_fresh(&entry)
 }
 
-/// Adopt a just-minted OAuth token without a second picker trip.
-///
-/// After `device_code_login` completes, the pending token must be committed as
-/// a Codewhale-owned generation and the provider switched in one chord. This
-/// helper is the #5243 capture step: it writes the generation, points
-/// `[providers.xai] auth_mode = "oauth"` at it, revokes any dormant external
-/// consent, and returns the activation. No external `e` chord follows.
-#[allow(dead_code)]
-pub fn capture_minted_token(
-    pending: PendingXaiDeviceLogin,
-    config_path: Option<&Path>,
-    live_config: Option<&mut Config>,
-) -> Result<XaiDeviceActivation> {
-    activate_device_login(pending, config_path, live_config)
-}
-
 fn configured_owned_auth_file_path(config: &Config) -> Result<Option<PathBuf>> {
     let generation = config
         .provider_config_for(ApiProvider::Xai)
