@@ -4546,6 +4546,18 @@ async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     task.await.expect("engine task");
 }
 
+#[test]
+fn synthetic_resume_paths_have_no_hidden_default_ceiling() {
+    let turn_loop = include_str!("turn_loop.rs");
+
+    for legacy_marker in ["no_user_input_continues", "no-user-input resume backstop"] {
+        assert!(
+            !turn_loop.contains(legacy_marker),
+            "turn_loop.rs reintroduced the hidden synthetic-resume ceiling marker {legacy_marker:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
     use crate::llm_client::mock::{MockLlmClient, canned};
