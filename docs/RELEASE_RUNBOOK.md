@@ -142,7 +142,9 @@ exact requested SHA. It invokes the same reusable artifact workflow as the
 public release, building all seven targets (including Android arm64 and native
 Windows arm64), staging `codewhale` and `codew` (single binary), building the
 NSIS installer and nine platform archives, and validating the authoritative
-27-file inventory from `npm/codewhale/scripts/artifacts.js`. It then installs
+34-file v0.9.5 bridge inventory from `npm/codewhale/scripts/artifacts.js` (27
+current assets plus seven legacy `codewhale-tui-*` names containing the same
+compiled `codewhale` bytes for v0.9.4 update compatibility). It then installs
 the packed npm wrapper against those assembled local assets and exercises its
 delegated entrypoints. The resulting `codewhale-release-assets` bundle is a
 short-lived GitHub Actions artifact only.

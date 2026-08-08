@@ -111,6 +111,7 @@ test("release asset inventory includes binaries, archives, installer, and manife
     BUNDLE_CHECKSUM_MANIFEST,
     CHECKSUM_MANIFEST,
     checksummedReleaseAssetNames,
+    LEGACY_TUI_BRIDGE_ASSET_NAMES,
     WINDOWS_INSTALLER_ASSET,
   } = require(ARTIFACTS_PATH);
   const assetNames = allAssetNames();
@@ -130,6 +131,10 @@ test("release asset inventory includes binaries, archives, installer, and manife
   assert.ok(releaseAssetNames.includes("codewhale.bat"));
   assert.ok(releaseAssetNames.includes("codew-windows-arm64.exe"));
   assert.ok(releaseAssetNames.includes("codew-android-arm64"));
+  for (const bridgeAsset of LEGACY_TUI_BRIDGE_ASSET_NAMES) {
+    assert.ok(releaseAssetNames.includes(bridgeAsset));
+    assert.ok(!assetNames.includes(bridgeAsset));
+  }
   for (const bundle of BUNDLE_ASSET_NAMES) {
     assert.ok(releaseAssetNames.includes(bundle));
   }
@@ -162,6 +167,7 @@ test("CNB mirror URLs use the repository that publishes release assets", () => {
       assert.deepEqual(CNB_RELEASE_ASSET_NAMES, [
         "codewhale-linux-x64",
         "codew-linux-x64",
+        "codewhale-tui-linux-x64",
         "codewhale-artifacts-sha256.txt",
       ]);
       assert.equal(

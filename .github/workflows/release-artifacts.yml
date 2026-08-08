@@ -43,6 +43,7 @@ jobs:
             shim_binary: codew
             cli_artifact: codewhale-linux-x64
             shim_artifact: codew-linux-x64
+            tui_artifact: codewhale-tui-linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64
@@ -50,6 +51,7 @@ jobs:
             shim_binary: codew
             cli_artifact: codewhale-linux-arm64
             shim_artifact: codew-linux-arm64
+            tui_artifact: codewhale-tui-linux-arm64
           - os: ubuntu-latest
             target: aarch64-linux-android
             platform: android-arm64
@@ -57,6 +59,7 @@ jobs:
             shim_binary: codew
             cli_artifact: codewhale-android-arm64
             shim_artifact: codew-android-arm64
+            tui_artifact: codewhale-tui-android-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos-x64
@@ -64,6 +67,7 @@ jobs:
             shim_binary: codew
             cli_artifact: codewhale-macos-x64
             shim_artifact: codew-macos-x64
+            tui_artifact: codewhale-tui-macos-x64
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos-arm64
@@ -71,6 +75,7 @@ jobs:
             shim_binary: codew
             cli_artifact: codewhale-macos-arm64
             shim_artifact: codew-macos-arm64
+            tui_artifact: codewhale-tui-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows-x64
@@ -78,6 +83,7 @@ jobs:
             shim_binary: codew.exe
             cli_artifact: codewhale-windows-x64.exe
             shim_artifact: codew-windows-x64.exe
+            tui_artifact: codewhale-tui-windows-x64.exe
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             platform: windows-arm64
@@ -85,6 +91,7 @@ jobs:
             shim_binary: codew.exe
             cli_artifact: codewhale-windows-arm64.exe
             shim_artifact: codew-windows-arm64.exe
+            tui_artifact: codewhale-tui-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -176,6 +183,12 @@ jobs:
         if: matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
         run: cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli
+      - name: Materialize codew command alias
+        shell: bash
+        run: |
+          bin_dir="target/${{ matrix.target }}/dist"
+          cp "${bin_dir}/${{ matrix.cli_binary }}" "${bin_dir}/${{ matrix.shim_binary }}"
+          cmp "${bin_dir}/${{ matrix.cli_binary }}" "${bin_dir}/${{ matrix.shim_binary }}"
       - name: Smoke binaries on matching native runners
         if: >-
           matrix.target != 'aarch64-linux-android' &&
@@ -203,6 +216,10 @@ jobs:
 
           stage_binary "${{ matrix.cli_binary }}" "${{ matrix.cli_artifact }}"
           stage_binary "${{ matrix.shim_binary }}" "${{ matrix.shim_artifact }}"
+          # One-release compatibility bridge for v0.9.4's hard-coded release
+          # completeness/updater contract. This is the same runtime, not a
+          # separately compiled TUI binary.
+          stage_binary "${{ matrix.cli_binary }}" "${{ matrix.tui_artifact }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.cli_artifact }}
@@ -214,6 +231,13 @@ jobs:
         with:
           name: ${{ matrix.shim_artifact }}
           path: ${{ matrix.shim_artifact }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+          overwrite: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.tui_artifact }}
+          path: ${{ matrix.tui_artifact }}
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
           overwrite: true
@@ -327,7 +351,7 @@ jobs:
         with:
           name: codewhale-release-assets
           path: release-assets
-      - name: Verify 27-asset inventory and checksum manifests (single binary)
+      - name: Verify 34-asset bridge inventory and checksum manifests (single binary)
         run: node scripts/release/assemble-release-assets.js --verify release-assets
       - name: Test release inventory contracts
         run: |
@@ -345,6 +369,6 @@ jobs:
             echo ""
             echo "- Source: \`${{ inputs.source_sha }}\`"
             echo "- Version metadata: \`${{ inputs.version }}\`"
-            echo "- Inventory: 7 targets / 27 files (single binary)"
+            echo "- Inventory: 7 targets / 34 files (single binary; 7 legacy alias assets)"
             echo "- Publication: none (Actions artifact \`codewhale-release-assets\` only)"
           } >> "${GITHUB_STEP_SUMMARY}"

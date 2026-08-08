@@ -58,16 +58,18 @@ function makeIntermediateArtifacts(root) {
   );
 }
 
-test("authoritative release inventory contains seven targets and 27 assets (single binary)", () => {
+test("authoritative release inventory contains seven targets and 34 bridge assets", () => {
   const assets = allReleaseAssetNames();
-  assert.equal(assets.length, 27);
-  assert.equal(checksummedReleaseAssetNames().length, 26);
+  assert.equal(assets.length, 34);
+  assert.equal(checksummedReleaseAssetNames().length, 33);
   for (const required of [
     "codewhale-android-arm64",
     "codew-android-arm64",
     "codewhale-windows-arm64.exe",
     "codew-windows-arm64.exe",
     "codewhale-windows-arm64.zip",
+    "codewhale-tui-android-arm64",
+    "codewhale-tui-windows-arm64.exe",
     "CodeWhaleSetup.exe",
   ]) {
     assert.ok(assets.includes(required), `missing ${required}`);

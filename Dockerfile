@@ -53,8 +53,9 @@ RUN rustup target add "$(cat /rust-target)"
 WORKDIR /build
 COPY . .
 
-# Build both binaries for the target platform.  --locked ensures
-# reproducible builds from the committed lockfile.
+# Build the one runtime for the target platform. Expose the same verified
+# bytes under both supported command names. --locked keeps the build
+# reproducible from the committed lockfile.
 RUN --mount=type=cache,id=codewhale-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=codewhale-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewhale-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
@@ -63,7 +64,7 @@ RUN --mount=type=cache,id=codewhale-target-${TARGETARCH},target=/build/target,sh
       -p codewhale-cli \
     && mkdir -p /out \
     && cp target/$(cat /rust-target)/release/codewhale /out/ \
-    && cp target/$(cat /rust-target)/release/codew /out/ \
+    && cp target/$(cat /rust-target)/release/codewhale /out/codew
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -86,8 +87,7 @@ WORKDIR /home/codewhale
 COPY --from=builder --chown=codewhale:codewhale /out/codewhale /usr/local/bin/codewhale
 COPY --from=builder --chown=codewhale:codewhale /out/codew /usr/local/bin/codew
 
-# The dispatcher expects to find its companion binary next to it.
-# Both are in /usr/local/bin — no further path setup needed.
+# `codewhale` and `codew` are two command names for the same runtime.
 
 ENTRYPOINT ["codewhale"]
 CMD []

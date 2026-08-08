@@ -5,9 +5,24 @@ const CHECKSUM_MANIFEST = "codewhale-artifacts-sha256.txt";
 const BUNDLE_CHECKSUM_MANIFEST = "codewhale-bundles-sha256.txt";
 const WINDOWS_INSTALLER_ASSET = "CodeWhaleSetup.exe";
 
+// v0.9.5 bridge: already-shipped v0.9.4 clients require these names before
+// they will advertise or install a newer release. They contain byte-identical
+// copies of the consolidated `codewhale` runtime; current installers do not
+// expose them as a third command.
+const LEGACY_TUI_BRIDGE_ASSET_NAMES = [
+  "codewhale-tui-linux-x64",
+  "codewhale-tui-linux-arm64",
+  "codewhale-tui-android-arm64",
+  "codewhale-tui-macos-x64",
+  "codewhale-tui-macos-arm64",
+  "codewhale-tui-windows-x64.exe",
+  "codewhale-tui-windows-arm64.exe",
+];
+
 const CNB_BINARY_ASSET_NAMES = [
   "codewhale-linux-x64",
   "codew-linux-x64",
+  "codewhale-tui-linux-x64",
 ];
 const CNB_RELEASE_ASSET_NAMES = [
   ...CNB_BINARY_ASSET_NAMES,
@@ -183,6 +198,7 @@ function allAssetNames() {
 function allReleaseAssetNames() {
   return [
     ...allAssetNames(),
+    ...LEGACY_TUI_BRIDGE_ASSET_NAMES,
     ...BUNDLE_ASSET_NAMES,
     WINDOWS_INSTALLER_ASSET,
     BUNDLE_CHECKSUM_MANIFEST,
@@ -207,6 +223,7 @@ module.exports = {
   checksumManifestUrl,
   detectBinaryNames,
   executableName,
+  LEGACY_TUI_BRIDGE_ASSET_NAMES,
   releaseAssetUrl,
   releaseBaseUrl,
   releaseBinaryDirectory,

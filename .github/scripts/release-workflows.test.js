@@ -9,6 +9,7 @@ const {
   allAssetNames,
   allReleaseAssetNames,
   BUNDLE_ASSET_NAMES,
+  LEGACY_TUI_BRIDGE_ASSET_NAMES,
 } = require(path.join(repoRoot, "npm", "codewhale", "scripts", "artifacts"));
 
 function read(relativePath) {
@@ -118,10 +119,18 @@ const builtAssetNames = [
 assert.equal(builtAssetNames.length, 21);
 assert.deepEqual(
   [...new Set(builtAssetNames)].sort(),
-  allAssetNames().filter((name) => name !== "codewhale.bat").sort(),
+  [
+    ...allAssetNames().filter((name) => name !== "codewhale.bat"),
+    ...LEGACY_TUI_BRIDGE_ASSET_NAMES,
+  ].sort(),
+);
+assert.match(
+  artifacts,
+  /stage_binary "\$\{\{ matrix\.cli_binary \}\}" "\$\{\{ matrix\.tui_artifact \}\}"/,
+  "legacy TUI bridge assets must be staged from the one compiled codewhale binary",
 );
 const bundleInvocations = [...bundles.matchAll(
-  /^bundle (\S+) \\\n\s+\S+ \S+ \S+ (tar\.gz|zip) (""|portable)$/gm,
+  /^bundle (\S+) \\\n\s+\S+ \S+ (tar\.gz|zip) (""|portable)$/gm,
 )].map((match) => {
   const variant = match[3] === "portable" ? "-portable" : "";
   return `codewhale-${match[1]}${variant}.${match[2]}`;
