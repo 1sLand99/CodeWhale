@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.5] - 2026-08-07
+## [0.9.5] - 2026-08-08
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
 runtime while preserving the familiar `codewhale` and `codew` commands. It
 also expands the managed Runtime API, makes session and Fleet work easier to
-inspect and resume, and fixes the local turn backstop that could end productive
-tool work before the model received its final tool result.
+inspect and resume, and removes the hidden local continuation backstop that
+could end productive work without a final assistant response.
 
 ### Added
 
@@ -29,6 +29,9 @@ tool work before the model received its final tool result.
   that keeps active background work visible above the composer.
 - Incremental MCP registry refreshes that return the local snapshot immediately
   and update it in the background.
+- Scout and Reviewer agents can use a bounded direct-command evidence shell for
+  read-only workspace, Git, and GitHub inspection, and can keep private working
+  notes in their own To-do while the durable transcript retains their evidence.
 
 ### Changed
 
@@ -43,6 +46,9 @@ tool work before the model received its final tool result.
 - Headless `codewhale exec` runs and verifier benchmark rollouts no longer
   impose a 100-step default. `--max-turns` remains available as an explicit
   opt-in ceiling; Fleet workers retain their separately configured budget.
+- Goal token and time budgets are telemetry rather than default stop
+  conditions, and automatic goal continuation is unlimited unless the user
+  explicitly configures a continuation ceiling.
 - Command-palette and slash-completion shadowing now share one alias-aware
   discovery contract.
 - The website install guidance, localized product copy, navigation controls,
@@ -51,9 +57,12 @@ tool work before the model received its final tool result.
 
 ### Fixed
 
-- Productive tool-result rounds no longer count toward the 20-step
-  no-user-input backstop. Long-running work can send tool result 20 back to the
-  model, request the next provider step, and finish with an assistant response.
+- The hidden 20-step no-user-input backstop no longer ends productive turns.
+  Tool results, queued steering, child completions, REPL feedback, and goal
+  continuations can all reach the next provider step and a final assistant
+  response; explicit user-configured limits and genuine stuck-loop guards remain.
+- Complete error details are directly inspectable after a failure instead of
+  leaving the terminal with a clipped, unrecoverable error fragment.
 - A newly minted OAuth credential is adopted in the same provider-selection
   flow instead of requiring a second picker trip.
 - Fresh session titles can replace a stale cached `New Session` placeholder,
