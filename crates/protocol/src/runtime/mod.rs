@@ -376,6 +376,7 @@ mod tests {
             fleet_local_target: true,
             thread_goals: true,
             memory: true,
+            mcp_server_management: false,
             skill_lifecycle: false,
         };
         let value = serde_json::to_value(&caps).unwrap();

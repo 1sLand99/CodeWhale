@@ -1715,9 +1715,12 @@ pub fn update_session(
                 .take_while(|(a, b)| a == b)
                 .count();
             if common > 0 && common <= journal.entries.len() {
-                let path = journal.root_to_leaf();
-                if let Some(entry) = path.get(common - 1) {
-                    let _ = journal.branch_to(&entry.id);
+                let target_id = journal
+                    .root_to_leaf()
+                    .get(common - 1)
+                    .map(|entry| entry.id.clone());
+                if let Some(target_id) = target_id {
+                    let _ = journal.branch_to(&target_id);
                 } else {
                     journal.leaf_id = None;
                 }

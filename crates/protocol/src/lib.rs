@@ -7,6 +7,10 @@ pub mod agent_run;
 pub mod fleet;
 pub mod runtime;
 pub mod workroom;
+pub mod ids;
+pub mod op;
+pub mod event_msg;
+pub mod journal;
 
 /// Common trait for lifecycle status enums across the protocol layer.
 ///

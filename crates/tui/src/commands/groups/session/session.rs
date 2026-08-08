@@ -128,7 +128,8 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
         source_session
             .system_prompt
             .as_ref()
-            .map(|s| crate::models::SystemPrompt::Text(s.clone())),
+            .map(|s| crate::models::SystemPrompt::Text(s.clone()))
+            .as_ref(),
         source_session.metadata.mode.as_deref(),
     );
     forked.journal = Some(forked_journal);
