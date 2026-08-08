@@ -1066,8 +1066,9 @@ fn workflow_panel_uses_non_text_keys_for_controls() {
 }
 
 struct ConfigPathEnvGuard {
+    _codewhale_config_path: crate::test_support::EnvVarGuard,
+    _deepseek_config_path: crate::test_support::EnvVarGuard,
     _tmp: TempDir,
-    previous: Option<OsString>,
     _lock: crate::test_support::TestEnvLock,
 }
 
@@ -1077,35 +1078,22 @@ impl ConfigPathEnvGuard {
         let tmp = TempDir::new().expect("config tempdir");
         let config_path = tmp.path().join(".deepseek").join("config.toml");
         std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
-        let previous = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
+        let codewhale_config_path =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+        let deepseek_config_path =
+            crate::test_support::EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
         Self {
+            _codewhale_config_path: codewhale_config_path,
+            _deepseek_config_path: deepseek_config_path,
             _tmp: tmp,
-            previous,
             _lock: lock,
         }
     }
 
     fn config_path(&self) -> PathBuf {
-        std::env::var_os("DEEPSEEK_CONFIG_PATH")
+        std::env::var_os("CODEWHALE_CONFIG_PATH")
             .map(PathBuf::from)
             .expect("config path set")
-    }
-}
-
-impl Drop for ConfigPathEnvGuard {
-    fn drop(&mut self) {
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", previous);
-            } else {
-                std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-            }
-        }
     }
 }
 
@@ -6172,6 +6160,9 @@ async fn failed_native_xai_oauth_activation_stays_in_onboarding_recovery() {
 #[tokio::test]
 async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
     let config_env = ConfigPathEnvGuard::new();
+    let codewhale_home = config_env._tmp.path().canonicalize().expect("temp home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
     let mut app = create_test_app();
     app.config_path = Some(config_env.config_path());
     let mut engine = mock_engine_handle();
@@ -6190,7 +6181,7 @@ async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
     )
     .await;
 
-    assert!(switched);
+    assert!(switched, "provider switch failed: {:?}", app.history);
     let xai = config
         .provider_config_for(ApiProvider::Xai)
         .expect("saved xAI slot");
