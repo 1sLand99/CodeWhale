@@ -11510,7 +11510,12 @@ fn apply_spawn_profile(
     // they do *not* resolve to a member).
     let mut resolved_from_role = false;
     let profile_id = request.profile.as_deref().or_else(|| {
-        if !request.agent_type_named || request.agent_type == FleetRole::Worker {
+        // #5285: every *named* `type` dispatch resolves through the roster —
+        // including worker/planner/custom, which are now seeded roster
+        // members. Only the fully-unnamed default (no type/role/profile) skips
+        // roster resolution, so there is no dispatch posture the roster cannot
+        // see and no parallel hidden enum.
+        if !request.agent_type_named {
             return None;
         }
         let role = request.assignment.role.as_deref()?;
@@ -11551,8 +11556,22 @@ fn apply_spawn_profile(
     // *matches* the profile's pinned model is accepted as redundant and
     // ignored, so a caller that used `type: "builder"` with the same model the
     // profile already pins is helped through instead of being rejected.
+    //
+    // #5285: worker/planner/custom became roster members with this change.
+    // Before the collapse they were not roster members at all, so a named
+    // `type: worker|planner|custom` dispatch never resolved a profile and any
+    // `model`/`model_strength` the caller supplied parsed freely. Seeding them
+    // must not newly reject those previously-valid calls, so a type-resolved
+    // member that does NOT pin a concrete route keeps its legacy model
+    // options. Only a member that actually binds a provider/model (or an
+    // explicitly-named `profile:` member outside the General slot) is
+    // route-bound and rejects overrides.
     let is_general_slot = matches!(member.profile.slot, codewhale_config::FleetSlot::General);
-    if !is_general_slot {
+    let route_permissive = is_general_slot
+        || (resolved_from_role
+            && member.profile.model.is_none()
+            && member.profile.provider.is_none());
+    if !route_permissive {
         if let Some(requested) = request.model.as_deref() {
             if let Some(pinned) = member.profile.model.as_deref() {
                 if requested.trim().eq_ignore_ascii_case(pinned.trim()) {
@@ -11563,7 +11582,7 @@ fn apply_spawn_profile(
                         "fleet profile '{}' pins model '{}', but the caller requested '{}'. \
                          Named agents use exactly their configured model, route, and posture. \
                          Remove 'model' to use the profile pin, or dispatch without a profile \
-                         (type: 'worker'/'general') to use 'model'.",
+                         (type: 'worker'/'general'/'planner'/'custom') to use 'model'.",
                         member.id, pinned, requested
                     )));
                 }
@@ -11572,7 +11591,7 @@ fn apply_spawn_profile(
                     "fleet profile '{}' binds a pre-configured route; 'model' may not be set for \
                      named fleet roles. Named agents use exactly their configured model, route, and \
                      posture — the dispatching model cannot override them. Remove 'model', or dispatch \
-                     with type: 'worker'/'general' (the only role with model options).",
+                     with type: 'worker'/'general'/'planner'/'custom' (the postures with model options).",
                     member.id
                 )));
             }
@@ -11582,7 +11601,8 @@ fn apply_spawn_profile(
                 "fleet profile '{}' binds a pre-configured route; 'model_strength' may not be \
                  set for named fleet roles. Named agents use exactly their configured model, \
                  route, and posture — the dispatching model cannot override them. Remove \
-                 'model_strength', or dispatch with type: 'worker'/'general' (the only role with model options).",
+                 'model_strength', or dispatch with type: 'worker'/'general'/'planner'/'custom' \
+                 (the postures with model options).",
                 member.id
             )));
         }
@@ -11656,6 +11676,9 @@ fn resolve_roster_member<'a>(
         "implementer" | "implement" | "implementation" => Some("builder"),
         "release_lead" | "release-lead" | "releaselead" => Some("manager"),
         "scout" | "explore" | "explorer" | "exploration" => Some("scout"),
+        // #5285: `general`/`default` are legacy spellings of the canonical
+        // `worker` posture, which is now the seeded roster member.
+        "general" | "default" => Some("worker"),
         _ => None,
     };
     alias.and_then(|id| roster.get(id))

@@ -4,7 +4,9 @@
 //! model-spawned sub-agents and fleet dispatch (#fleet-roster cutover
 //! (v0.8.67)):
 //!
-//! - built-in members (the default party, always available),
+//! - built-in members (the default party, always available; every canonical
+//!   dispatch posture — worker/scout/planner/reviewer/builder/verifier/
+//!   consultant/custom — is seeded here, #5285),
 //! - `[fleet.profiles]` entries from config.toml,
 //! - personal `$CODEWHALE_HOME/agents/*.toml` profile files,
 //! - workspace `.codewhale/agents/*.toml` profile files.
@@ -331,7 +333,35 @@ impl FleetRoster {
                 "general",
                 FleetSlot::General,
                 FleetLoadout::Inherit,
-                "General-purpose worker with full capabilities.",
+                "Legacy alias of the 'worker' posture: general-purpose worker with full capabilities.",
+                None,
+            ),
+            // The eight canonical dispatch postures are seeded roster members
+            // (#5285). Every `type`/`role` token the Agent tool accepts maps
+            // 1:1 to a named roster profile, so dispatch always resolves
+            // through the roster instead of a parallel hidden enum. `worker`,
+            // `planner`, and `custom` complete the set the roster previously
+            // could not see (scout/builder/reviewer/verifier/consultant were
+            // already seeded).
+            (
+                "worker",
+                FleetSlot::General,
+                FleetLoadout::Inherit,
+                "General-purpose worker: full tool access for multi-step tasks. The unnamed dispatch default.",
+                None,
+            ),
+            (
+                "planner",
+                FleetSlot::Planner,
+                FleetLoadout::Inherit,
+                "Planning: analysis-only for architectural planning; read-only, no shell.",
+                None,
+            ),
+            (
+                "custom",
+                FleetSlot::Custom("custom".to_string()),
+                FleetLoadout::Inherit,
+                "Custom tool access defined at spawn time via allowed_tools; locked down until then.",
                 None,
             ),
         ]
@@ -520,7 +550,10 @@ mod tests {
                 "verifier",
                 "consultant",
                 "synthesizer",
-                "general"
+                "general",
+                "worker",
+                "planner",
+                "custom"
             ]
         );
         for member in &members {
@@ -567,6 +600,40 @@ mod tests {
         assert_eq!(members[7].profile.loadout, FleetLoadout::Inherit);
     }
 
+    /// #5285: there is no dispatch posture the roster cannot see. Every
+    /// canonical `type` value the Agent tool accepts resolves to a seeded
+    /// roster member, so sub-agent dispatch always has a profile to resolve
+    /// through (posture, route, overlay, delegation from one place).
+    #[test]
+    fn every_canonical_dispatch_posture_is_a_seeded_roster_member() {
+        let roster = FleetRoster::built_ins_only();
+        for (posture, expected_slot) in [
+            ("worker", FleetSlot::General),
+            ("scout", FleetSlot::Scout),
+            ("planner", FleetSlot::Planner),
+            ("reviewer", FleetSlot::Reviewer),
+            ("builder", FleetSlot::Implementer),
+            ("verifier", FleetSlot::Verifier),
+            ("consultant", FleetSlot::Custom("consultant".to_string())),
+            ("custom", FleetSlot::Custom("custom".to_string())),
+        ] {
+            let member = roster.get(posture).unwrap_or_else(|| {
+                panic!("dispatch posture {posture:?} must be a seeded roster member")
+            });
+            assert_eq!(
+                member.profile.slot, expected_slot,
+                "seeded posture {posture:?} slot"
+            );
+            assert_eq!(member.origin, ProfileOrigin::BuiltIn, "{posture}");
+            // Seeded postures must not carry a pinned route: they inherit the
+            // session route exactly like the unnamed default so legacy
+            // type-only dispatches keep their model route (#5285).
+            assert!(member.profile.model.is_none(), "{posture}");
+            assert!(member.profile.provider.is_none(), "{posture}");
+            assert_eq!(member.profile.loadout, FleetLoadout::Inherit, "{posture}");
+        }
+    }
+
     #[test]
     fn config_member_overrides_built_in_and_extras_sort_alphabetically() {
         let _env_lock = crate::test_support::lock_test_env();
@@ -598,6 +665,9 @@ mod tests {
                 "consultant",
                 "synthesizer",
                 "general",
+                "worker",
+                "planner",
+                "custom",
                 "alpha",
                 "zeta"
             ],
