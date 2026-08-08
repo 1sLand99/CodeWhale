@@ -553,10 +553,28 @@ impl Engine {
                 .compaction_pins_for_messages(&self.session.messages, &self.session.working_set);
             let compaction_paths = self.session.working_set.top_paths(24);
 
-            if self.config.compaction.enabled
+            // Reclaimability includes the live-state projection and the exact
+            // active-operation reanchor. Avoid capturing them on ordinary
+            // low-pressure steps; once pressure crosses the trigger, capture
+            // once and reuse the same snapshot for eligibility and commit.
+            let mut auto_compaction_config = self.config.compaction.clone();
+            let prepared = if crate::compaction::compaction_pressure_reached(
+                &self.session.messages,
+                self.session.system_prompt.as_ref(),
+                &auto_compaction_config,
+            ) {
+                let live = self.capture_compaction_live_state().await;
+                auto_compaction_config.live_state = (!live.is_empty()).then_some(live);
+                Some(self.prepare_compaction_envelope(auto_compaction_config))
+            } else {
+                None
+            };
+
+            if let Some(prepared) = prepared
                 && should_compact(
                     &self.session.messages,
-                    &self.config.compaction,
+                    self.session.system_prompt.as_ref(),
+                    &prepared,
                     Some(&self.session.workspace),
                     Some(&compaction_pins),
                     Some(&compaction_paths),
@@ -569,20 +587,12 @@ impl Engine {
                     "Auto context compaction started".to_string(),
                 )
                 .await;
-                let _ = self
-                    .tx_event
-                    .send(Event::status("Auto-compacting context...".to_string()))
-                    .await;
                 let auto_messages_before = self.session.messages.len();
-                let mut auto_compaction_config = self.config.compaction.clone();
-                let live = self.capture_compaction_live_state().await;
-                if !live.is_empty() {
-                    auto_compaction_config.live_state = Some(live);
-                }
                 match compact_messages_safe(
                     client.as_ref(),
                     &self.session.messages,
-                    &auto_compaction_config,
+                    self.session.system_prompt.as_ref(),
+                    &prepared,
                     Some(&self.session.workspace),
                     Some(&compaction_pins),
                     Some(&compaction_paths),
@@ -593,14 +603,18 @@ impl Engine {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
                             let auto_messages_after = result.messages.len();
+                            let retries_used = result.retries_used;
                             self.session.replace_messages(result.messages);
-                            self.merge_compaction_summary(result.summary_prompt);
+                            self.merge_compaction_summary(
+                                result.summary_prompt,
+                                result.successor_reanchor,
+                            );
                             self.emit_session_updated().await;
                             let removed = auto_messages_before.saturating_sub(auto_messages_after);
-                            let status = if result.retries_used > 0 {
+                            let status = if retries_used > 0 {
                                 format!(
                                     "Auto-compaction complete: {auto_messages_before} → {auto_messages_after} messages ({removed} removed, {} retries)",
-                                    result.retries_used
+                                    retries_used
                                 )
                             } else {
                                 format!(

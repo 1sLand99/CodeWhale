@@ -43,6 +43,57 @@ const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCT
 const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
 const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";
 const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
+
+#[tokio::test]
+async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
+    let _env_lock = lock_test_env();
+    let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let route_config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some(String::new()),
+        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
+    };
+    let route = resolve_runtime_route(
+        &route_config,
+        ApiProvider::Deepseek,
+        Some(crate::config::DEFAULT_TEXT_MODEL),
+    )
+    .expect("structurally resolve route without credential");
+    assert!(
+        route.clone().validate().is_err(),
+        "fixture must fail at engine route installation"
+    );
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
+
+    engine
+        .handle_manual_compaction_op(route, CompactionConfig::default())
+        .await;
+
+    let mut started_id = None;
+    let mut failed_id = None;
+    let mut order = Vec::new();
+    let mut events = handle.rx_event.write().await;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            Event::CompactionStarted { id, auto, .. } => {
+                assert!(!auto);
+                started_id = Some(id);
+                order.push("started");
+            }
+            Event::CompactionFailed { id, auto, message } => {
+                assert!(!auto);
+                assert!(message.contains("provider route is not ready"));
+                failed_id = Some(id);
+                order.push("failed");
+            }
+            Event::Error { .. } => order.push("error"),
+            _ => {}
+        }
+    }
+    assert_eq!(order, ["started", "failed", "error"]);
+    assert_eq!(started_id, failed_id);
+}
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 #[test]
@@ -11095,9 +11146,12 @@ async fn compaction_keeps_todos_out_of_prefix_and_next_tail_current() {
         !reminder.contains("staged graph-only todo") && !reminder.contains("### Todos"),
         "compaction live state must not create a second To-do surface: {reminder}"
     );
-    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
-        "{COMPACTION_SUMMARY_MARKER}\nsummary\n{reminder}"
-    ))));
+    engine.merge_compaction_summary(
+        Some(SystemPrompt::Text(format!(
+            "{COMPACTION_SUMMARY_MARKER}\nsummary\n{reminder}"
+        ))),
+        None,
+    );
     let prefix = engine.rendered_compaction_summary().expect("summary");
     assert!(!prefix.contains("staged graph-only todo"), "{prefix}");
     assert!(!prefix.contains("### Todos"), "{prefix}");
@@ -13580,11 +13634,14 @@ fn compaction_summary_stays_in_stable_system_prompt() {
         .working_set
         .observe_user_message("continue in src/main.rs", tmp.path());
     engine.refresh_system_prompt();
-    engine.merge_compaction_summary(Some(SystemPrompt::Blocks(vec![SystemBlock {
-        block_type: "text".to_string(),
-        text: format!("{COMPACTION_SUMMARY_MARKER}\nsummary"),
-        cache_control: None,
-    }])));
+    engine.merge_compaction_summary(
+        Some(SystemPrompt::Blocks(vec![SystemBlock {
+            block_type: "text".to_string(),
+            text: format!("{COMPACTION_SUMMARY_MARKER}\nsummary"),
+            cache_control: None,
+        }])),
+        None,
+    );
 
     let prompt = match &engine.session.system_prompt {
         Some(SystemPrompt::Text(text)) => text.clone(),
@@ -13639,9 +13696,47 @@ fn compaction_reanchors_active_operation_identity_without_raw_output() {
     )
     .expect("owner running report");
 
-    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
-        "{COMPACTION_SUMMARY_MARKER}\nordinary summary"
-    ))));
+    let captured = engine
+        .prepare_compaction_envelope(CompactionConfig::default())
+        .successor_reanchor;
+    work.reconcile_operation(
+        &session_id,
+        crate::work_graph::OperationOwnerSnapshot::new(
+            "shell:shell_compact",
+            crate::work_graph::OwnerState::Completed,
+            2,
+            2,
+        ),
+    )
+    .expect("owner completion report");
+    work.register_operation(
+        &session_id,
+        crate::work_graph::OperationIntent::new(
+            "shell:shell_later",
+            "later graph mutation",
+            false,
+            "exec_shell",
+            "shell_later",
+        ),
+    )
+    .expect("register later operation");
+    work.reconcile_operation(
+        &session_id,
+        crate::work_graph::OperationOwnerSnapshot::new(
+            "shell:shell_later",
+            crate::work_graph::OwnerState::Running,
+            3,
+            3,
+        ),
+    )
+    .expect("later owner running report");
+
+    engine.merge_compaction_summary(
+        Some(SystemPrompt::Text(format!(
+            "{COMPACTION_SUMMARY_MARKER}\nordinary summary"
+        ))),
+        captured,
+    );
     let prompt = match &engine.session.system_prompt {
         Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
@@ -13653,6 +13748,7 @@ fn compaction_reanchors_active_operation_identity_without_raw_output() {
     };
     assert!(prompt.contains("Active Work Graph Operations"), "{prompt}");
     assert!(prompt.contains("shell:shell_compact"), "{prompt}");
+    assert!(!prompt.contains("shell:shell_later"), "{prompt}");
     assert!(prompt.contains("quiet receipt sentinel"), "{prompt}");
     assert!(prompt.contains("active"), "{prompt}");
     assert_eq!(
@@ -13667,9 +13763,25 @@ fn compaction_reanchors_active_operation_identity_without_raw_output() {
         "the re-anchor must never copy operation output"
     );
 
-    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
-        "{COMPACTION_SUMMARY_MARKER}\nsecond summary"
-    ))));
+    let later = engine
+        .prepare_compaction_envelope(CompactionConfig::default())
+        .successor_reanchor;
+    engine.merge_compaction_summary(None, later.clone());
+    let local_prune_only = engine.rendered_compaction_summary().expect("summary");
+    assert!(
+        local_prune_only.contains("shell:shell_compact"),
+        "local-prune-only compaction must preserve the installed reanchor: {local_prune_only}"
+    );
+    assert!(
+        !local_prune_only.contains("shell:shell_later"),
+        "a prepared successor reanchor is committed only with a replacement summary: {local_prune_only}"
+    );
+    engine.merge_compaction_summary(
+        Some(SystemPrompt::Text(format!(
+            "{COMPACTION_SUMMARY_MARKER}\nsecond summary"
+        ))),
+        later,
+    );
     let repeated = engine.rendered_compaction_summary().expect("summary");
     assert_eq!(
         repeated
@@ -13678,20 +13790,29 @@ fn compaction_reanchors_active_operation_identity_without_raw_output() {
         1,
         "repeated compaction must replace, not duplicate, the re-anchor: {repeated}"
     );
+    assert!(repeated.contains("shell:shell_later"), "{repeated}");
+    assert!(!repeated.contains("shell:shell_compact"), "{repeated}");
 
     work.reconcile_operation(
         &session_id,
         crate::work_graph::OperationOwnerSnapshot::new(
-            "shell:shell_compact",
+            "shell:shell_later",
             crate::work_graph::OwnerState::Completed,
-            2,
-            2,
+            4,
+            4,
         ),
     )
     .expect("owner completion report");
-    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
-        "{COMPACTION_SUMMARY_MARKER}\nthird summary"
-    ))));
+    let completed_reanchor = engine
+        .prepare_compaction_envelope(CompactionConfig::default())
+        .successor_reanchor;
+    assert!(completed_reanchor.is_none());
+    engine.merge_compaction_summary(
+        Some(SystemPrompt::Text(format!(
+            "{COMPACTION_SUMMARY_MARKER}\nthird summary"
+        ))),
+        completed_reanchor,
+    );
     let completed = engine.rendered_compaction_summary().expect("summary");
     assert!(
         !completed.contains("Active Work Graph Operations"),

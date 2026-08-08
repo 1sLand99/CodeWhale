@@ -137,12 +137,12 @@ use crate::tui::workspace_context;
 use super::key_actions;
 
 use super::app::{
-    ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App, AppAction, AppMode,
-    ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort, HuntVerdict,
-    OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort, StatusToast,
-    StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence,
-    TuiOptions, bound_agent_activity_text, is_stop_word, looks_like_slash_command_input,
-    shell_command_from_bang_input,
+    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
+    AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
+    HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
+    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
+    ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
+    looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -2159,6 +2159,133 @@ fn try_apply_model_and_compaction_update(
     engine_handle
         .try_send(Op::SetCompaction { config: compaction })
         .is_ok()
+}
+
+fn set_explicit_compaction_status(
+    app: &mut App,
+    text: String,
+    level: StatusToastLevel,
+    sticky: bool,
+) {
+    app.status_message = Some(text.clone());
+    // This lifecycle reducer assigns the semantic level explicitly. Mark the
+    // legacy status bridge as synchronized so it cannot add a second,
+    // keyword-classified toast with a different level on the next frame.
+    app.last_status_message_seen = Some(text.clone());
+    if sticky {
+        app.set_sticky_status(text, level, Some(App::STICKY_ERROR_TTL_MS));
+    } else {
+        app.push_status_toast(text, level, Some(5_000));
+    }
+}
+
+/// Queue manual compaction without ever awaiting the bounded engine mailbox
+/// from the terminal event loop.
+///
+/// During an active turn, a successful send is intentionally deferred until
+/// the engine returns to its outer operation loop. Full and closed mailboxes
+/// are rejected immediately with an actionable receipt, so `/compact` cannot
+/// freeze keyboard input or rendering.
+pub(crate) fn try_queue_manual_compaction(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    focus: Option<String>,
+) {
+    if app.is_compacting || app.manual_compaction_queued {
+        let text = app
+            .tr(MessageId::ContextCompactionAlreadyRunning)
+            .into_owned();
+        set_explicit_compaction_status(app, text, StatusToastLevel::Warning, false);
+        return;
+    }
+
+    let route = match validated_app_runtime_route(app, config) {
+        Ok(route) => route,
+        Err(error) => {
+            let text = app
+                .tr(MessageId::ContextCompactionRouteInvalid)
+                .replace("{error}", &error.to_string());
+            set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
+            return;
+        }
+    };
+    let mut compaction = compaction_for_validated_route(app, &route);
+    compaction.focus = focus;
+    let op = Op::CompactContext {
+        route: Box::new(route.into_resolved()),
+        compaction: Box::new(compaction),
+    };
+
+    match engine_handle.try_send(op) {
+        Ok(()) => {
+            app.manual_compaction_queued = true;
+            let id = if app.is_loading {
+                MessageId::ContextCompactionQueued
+            } else {
+                MessageId::ContextManualCompacting
+            };
+            let text = app.tr(id).into_owned();
+            set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
+        }
+        Err(error) => {
+            let full = error
+                .downcast_ref::<tokio::sync::mpsc::error::TrySendError<Op>>()
+                .is_some_and(|send_error| {
+                    matches!(send_error, tokio::sync::mpsc::error::TrySendError::Full(_))
+                });
+            let id = if full {
+                MessageId::ContextCompactionQueueFull
+            } else {
+                MessageId::ContextCompactionQueueClosed
+            };
+            let text = app.tr(id).into_owned();
+            set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
+        }
+    }
+}
+
+pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
+    if !auto {
+        app.manual_compaction_queued = false;
+    }
+    app.active_compaction = Some(ActiveCompaction { id, auto });
+    app.is_compacting = true;
+    let message_id = if auto {
+        MessageId::ContextAutoCompacting
+    } else {
+        MessageId::ContextManualCompacting
+    };
+    let text = app.tr(message_id).into_owned();
+    set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
+}
+
+fn take_matching_compaction(app: &mut App, id: &str, auto: bool) -> bool {
+    if !app
+        .active_compaction
+        .as_ref()
+        .is_some_and(|active| active.id == id && active.auto == auto)
+    {
+        return false;
+    }
+    app.active_compaction = None;
+    app.is_compacting = false;
+    if !auto {
+        app.manual_compaction_queued = false;
+    }
+    true
+}
+
+pub(crate) fn apply_compaction_completed(app: &mut App, id: &str, auto: bool, message: String) {
+    if take_matching_compaction(app, id, auto) {
+        set_explicit_compaction_status(app, message, StatusToastLevel::Success, false);
+    }
+}
+
+pub(crate) fn apply_compaction_failed(app: &mut App, id: &str, auto: bool, message: String) {
+    if take_matching_compaction(app, id, auto) {
+        set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
+    }
 }
 
 #[cfg(test)]

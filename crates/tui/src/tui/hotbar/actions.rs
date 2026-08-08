@@ -980,7 +980,7 @@ impl HotbarAction for AppHotbarAction {
     fn is_active(&self, app: &App) -> bool {
         match self.kind {
             AppHotbarKind::VoiceToggle => app.voice_enabled,
-            AppHotbarKind::SessionCompact => app.is_compacting,
+            AppHotbarKind::SessionCompact => app.is_compacting || app.manual_compaction_queued,
             AppHotbarKind::Mode(mode) => app.mode == mode,
             AppHotbarKind::ReasoningCycle => {
                 app.reasoning_effort != crate::tui::app::ReasoningEffort::Off
@@ -1001,10 +1001,6 @@ impl HotbarAction for AppHotbarAction {
                 Ok(dispatch_command_result(app, result))
             }
             AppHotbarKind::SessionCompact => {
-                if app.is_compacting {
-                    app.status_message = Some("Compaction is already running.".to_string());
-                    return Ok(HotbarDispatch::Handled);
-                }
                 Ok(HotbarDispatch::AppAction(AppAction::CompactContext {
                     focus: None,
                 }))
@@ -2439,11 +2435,7 @@ mod tests {
             compact
                 .dispatch(&mut app)
                 .expect("dispatch compact while busy"),
-            HotbarDispatch::Handled
-        );
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Compaction is already running.")
+            HotbarDispatch::AppAction(AppAction::CompactContext { focus: None })
         );
     }
 

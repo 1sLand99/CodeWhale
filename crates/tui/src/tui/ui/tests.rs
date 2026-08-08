@@ -7278,6 +7278,169 @@ fn auto_routed_turn_compaction_uses_selected_route_not_stale_app_route() {
     }
 }
 
+fn configure_manual_compaction_test_route(app: &mut App) -> Config {
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = DEFAULT_TEXT_MODEL.to_string();
+    Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some("test-key".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn manual_compaction_queues_once_after_active_turn_without_blocking() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let config = configure_manual_compaction_test_route(&mut app);
+    let mut engine = mock_engine_handle();
+
+    try_queue_manual_compaction(
+        &mut app,
+        &config,
+        &engine.handle,
+        Some("preserve verification evidence".to_string()),
+    );
+
+    assert!(app.manual_compaction_queued);
+    assert!(!app.is_compacting, "queued is not the same as running");
+    assert!(
+        app.session_transition_blocked(),
+        "a queued old-session compaction must block load/new until its lifecycle starts"
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context compaction queued; it will run after the active turn.")
+    );
+    match engine.rx_op.try_recv().expect("one queued compact op") {
+        crate::core::ops::Op::CompactContext { compaction, .. } => {
+            assert_eq!(
+                compaction.focus.as_deref(),
+                Some("preserve verification evidence")
+            );
+        }
+        other => panic!("expected CompactContext, got {other:?}"),
+    }
+
+    try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "duplicate op must not queue"
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context compaction is already in progress.")
+    );
+}
+
+#[test]
+fn full_engine_mailbox_rejects_manual_compaction_immediately() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let config = configure_manual_compaction_test_route(&mut app);
+    let mut engine = mock_engine_handle();
+    for _ in 0..32 {
+        engine
+            .handle
+            .try_send(crate::core::ops::Op::ListSubAgents)
+            .expect("fill mock engine mailbox");
+    }
+
+    try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
+    assert!(!app.manual_compaction_queued);
+    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("engine is busy")
+    }));
+    for _ in 0..32 {
+        assert!(matches!(
+            engine.rx_op.try_recv(),
+            Ok(crate::core::ops::Op::ListSubAgents)
+        ));
+    }
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[test]
+fn closed_engine_mailbox_reports_manual_compaction_unavailable() {
+    let mut app = create_test_app();
+    let config = configure_manual_compaction_test_route(&mut app);
+    let engine = mock_engine_handle();
+    let handle = engine.handle.clone();
+    drop(engine.rx_op);
+
+    try_queue_manual_compaction(&mut app, &config, &handle, None);
+
+    assert!(!app.manual_compaction_queued);
+    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("engine is no longer running")
+    }));
+}
+
+#[test]
+fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
+    let mut app = create_test_app();
+
+    apply_compaction_started(&mut app, "compact-new".to_string(), true);
+    assert!(app.is_compacting);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context automatically compacting…")
+    );
+    assert_eq!(
+        app.active_compaction
+            .as_ref()
+            .map(|active| active.id.as_str()),
+        Some("compact-new")
+    );
+
+    apply_compaction_completed(
+        &mut app,
+        "compact-stale",
+        true,
+        "stale completion".to_string(),
+    );
+    assert!(app.is_compacting, "stale id must not clear newer activity");
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context automatically compacting…")
+    );
+
+    apply_compaction_completed(
+        &mut app,
+        "compact-new",
+        true,
+        "Auto-compaction complete: 126 → 12 messages".to_string(),
+    );
+    assert!(!app.is_compacting);
+    assert!(app.active_compaction.is_none());
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Success
+            && toast.text.starts_with("Auto-compaction complete")
+    }));
+}
+
+#[test]
+fn manual_compaction_label_and_failure_are_typed() {
+    let mut app = create_test_app();
+    app.manual_compaction_queued = true;
+
+    apply_compaction_started(&mut app, "compact-manual".to_string(), false);
+    assert!(!app.manual_compaction_queued);
+    assert_eq!(app.status_message.as_deref(), Some("Compacting context…"));
+
+    apply_compaction_failed(
+        &mut app,
+        "compact-manual",
+        false,
+        "Manual context compaction failed: provider timeout".to_string(),
+    );
+    assert!(!app.is_compacting);
+    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("compaction failed")
+    }));
+}
+
 #[test]
 fn context_override_drives_compaction_meter_and_preflight_budget() {
     let config = Config {

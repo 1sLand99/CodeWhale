@@ -1906,17 +1906,16 @@ pub(crate) async fn run_event_loop(
                                 cached.or_else(|| derive_session_title(&app.api_messages));
                         }
                     }
-                    EngineEvent::CompactionStarted { message, .. } => {
-                        app.is_compacting = true;
-                        app.status_message = Some(message);
+                    EngineEvent::CompactionStarted { id, auto, .. } => {
+                        apply_compaction_started(app, id, auto);
                     }
-                    EngineEvent::CompactionCompleted { message, .. } => {
-                        app.is_compacting = false;
-                        app.status_message = Some(message);
+                    EngineEvent::CompactionCompleted {
+                        id, auto, message, ..
+                    } => {
+                        apply_compaction_completed(app, &id, auto, message);
                     }
-                    EngineEvent::CompactionFailed { message, .. } => {
-                        app.is_compacting = false;
-                        app.status_message = Some(message);
+                    EngineEvent::CompactionFailed { id, auto, message } => {
+                        apply_compaction_failed(app, &id, auto, message);
                     }
                     EngineEvent::PurgeStarted { message } => {
                         app.is_purging = true;
@@ -3889,30 +3888,7 @@ pub(crate) async fn run_event_loop(
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && app.view_stack.is_empty()
             {
-                app.status_message = Some(if app.is_compacting {
-                    "Context compaction already in progress...".to_string()
-                } else {
-                    "Compacting context (Ctrl+L)...".to_string()
-                });
-                if !app.is_compacting {
-                    match validated_app_runtime_route(app, config) {
-                        Ok(route) => {
-                            let compaction = compaction_for_validated_route(app, &route);
-                            let _ = engine_handle
-                                .send(Op::CompactContext {
-                                    route: Box::new(route.into_resolved()),
-                                    compaction: Box::new(compaction),
-                                })
-                                .await;
-                        }
-                        Err(err) => {
-                            app.status_message = Some(format!(
-                                "Cannot compact because the active provider route is invalid: {err}"
-                            ));
-                        }
-                    }
-                }
-                app.needs_redraw = true;
+                try_queue_manual_compaction(app, config, &engine_handle, None);
                 continue;
             }
 

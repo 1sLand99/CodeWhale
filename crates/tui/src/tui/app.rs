@@ -92,6 +92,16 @@ pub struct ActiveTurnMetadata {
     pub suggestion_authority: Option<crate::tui::prompt_suggestion::SuggestionRouteAuthority>,
 }
 
+/// Identity of the compaction pass currently rewriting session context.
+///
+/// The event id prevents a delayed terminal event from clearing a newer pass,
+/// while `auto` selects the truthful live label in the phase strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveCompaction {
+    pub(crate) id: String,
+    pub(crate) auto: bool,
+}
+
 /// Per-message context estimates used by the render-time context meter.
 /// Messages are append-only in the steady state; only the streaming tail is
 /// mutable, so the tail is refreshed while older entries remain cached.
@@ -1849,6 +1859,12 @@ pub struct App {
     pub thinking_started_at: Option<Instant>,
     /// Whether context compaction is currently in progress.
     pub is_compacting: bool,
+    /// Typed identity retained from CompactionStarted until its matching
+    /// CompactionCompleted/CompactionFailed event.
+    pub(crate) active_compaction: Option<ActiveCompaction>,
+    /// A manual compaction op accepted by the UI but waiting for the engine to
+    /// finish the active turn and emit CompactionStarted.
+    pub(crate) manual_compaction_queued: bool,
     /// Whether context purge is currently in progress.
     pub is_purging: bool,
     /// Set when the user scrolls up/down during a streaming turn so subsequent
@@ -2961,6 +2977,7 @@ impl App {
         self.is_loading
             || self.runtime_turn_status.as_deref() == Some("in_progress")
             || self.is_compacting
+            || self.manual_compaction_queued
             || self.is_purging
             || self
                 .task_panel
