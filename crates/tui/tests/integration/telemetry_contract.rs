@@ -760,10 +760,20 @@ async fn mid_session_opt_out_stops_the_shutdown_flush() {
     let mut command = exec_command(&fixture, "hello");
     let mut child = command.spawn().expect("spawn codewhale-tui exec");
 
-    // Wait until the session has armed and started buffering, then take the
-    // documented way out from outside the process.
+    // Wait until this session's event is actually buffered, then leave enough
+    // time for any accidental background flush to reach the recorder. Nothing
+    // may be sent before shutdown.
     let buffer = fixture.telemetry_root().join("buffer.jsonl");
-    wait_until(Duration::from_secs(30), || buffer.exists());
+    wait_until(Duration::from_secs(30), || {
+        std::fs::read_to_string(&buffer)
+            .map(|body| body.contains("\"event\":\"session_start\""))
+            .unwrap_or(false)
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_no_batches(&server, "before the shutdown flush").await;
+
+    // Now take the documented way out from outside the process. The only
+    // flush, at shutdown, must re-resolve this write and suppress the batch.
     fixture.write_config(&sentinel_config(&server.uri(), false));
 
     let status = child
