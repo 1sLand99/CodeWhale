@@ -22,6 +22,7 @@ function valuesForKey(source, key) {
 }
 
 const ci = read(".github/workflows/ci.yml");
+const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
@@ -38,6 +39,47 @@ for (const output of ["heavy", "workflow", "mobile", "actions"]) {
 }
 assert.match(manualForceBlock[1], /#EXPECTED_SHA.*-ne 40/s);
 assert.match(manualForceBlock[1], /actual.*EXPECTED_SHA/s);
+
+const expectedNightlyTargets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+].sort();
+assert.deepEqual([...new Set(valuesForKey(nightly, "target"))].sort(), expectedNightlyTargets);
+assert.deepEqual(
+  [
+    ...valuesForKey(nightly, "primary_artifact"),
+    ...valuesForKey(nightly, "alias_artifact"),
+  ].sort(),
+  [
+    "codewhale-linux-x64",
+    "codew-linux-x64",
+    "codewhale-linux-arm64",
+    "codew-linux-arm64",
+    "codewhale-macos-x64",
+    "codew-macos-x64",
+    "codewhale-macos-arm64",
+    "codew-macos-arm64",
+    "codewhale-windows-x64.exe",
+    "codew-windows-x64.exe",
+    "codewhale-windows-arm64.exe",
+    "codew-windows-arm64.exe",
+  ].sort(),
+);
+assert.match(
+  nightly,
+  /cargo build --release --locked --target \$\{\{ matrix\.target \}\} -p codewhale-cli/,
+);
+assert.match(nightly, /startsWith\(matrix\.target, 'x86_64-'\).*runner\.arch == 'X64'/s);
+assert.match(nightly, /startsWith\(matrix\.target, 'aarch64-'\).*runner\.arch == 'ARM64'/s);
+assert.doesNotMatch(nightly, /codewhale-tui/);
+assert.doesNotMatch(nightly, /target\/[^\n]*\/codew(?:\.exe)?/);
+assert.match(nightly, /cp "\$\{bin_path\}" "\$\{dir\}\/\$\{artifact\}"/);
+assert.match(nightly, /cmp -s[\s\S]*nightly-primary[\s\S]*nightly-alias/);
+assert.equal((nightly.match(/retention-days: 14/g) || []).length, 2);
 
 assert.match(candidate, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
 assert.doesNotMatch(candidate, /^  (push|pull_request|schedule):/m);
@@ -163,4 +205,6 @@ assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
 
-console.log("Release workflow contracts OK: exact-head full CI and 7-target/34-asset non-publishing candidate.");
+console.log(
+  "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",
+);
