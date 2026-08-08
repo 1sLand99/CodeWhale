@@ -294,9 +294,11 @@ jobs:
       # Provider-free paused-consumer measurement of the production
       # persistence request channel. RSS is sampled only on macOS; every host
       # enforces the accepted/retained request and payload contract.
-      - name: Test persistence-backlog checker
+      - name: Test persistence-backlog measurement and checker harnesses
         if: needs.changes.outputs.heavy == 'true'
-        run: python3 scripts/test_check_persistence_backlog_budget.py
+        run: |
+          python3 scripts/test_measure_persistence_backlog.py
+          python3 scripts/test_check_persistence_backlog_budget.py
       - name: Check persistence-backlog budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-persistence-backlog-budget.py
