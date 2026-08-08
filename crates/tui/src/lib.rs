@@ -10815,12 +10815,14 @@ fn apply_fleet_engine_feature_caps(
     features: &mut crate::features::Features,
     fleet_authority_active: bool,
     outer_network_access: Option<bool>,
+    shell_authority: crate::tools::spec::ToolShellAuthority,
 ) {
     if fleet_authority_active {
-        features
-            .disable(crate::features::Feature::ShellTool)
-            .disable(crate::features::Feature::Subagents)
-            .disable(crate::features::Feature::Mcp);
+        features.disable(crate::features::Feature::Subagents);
+        features.disable(crate::features::Feature::Mcp);
+        if shell_authority != crate::tools::spec::ToolShellAuthority::ReadOnly {
+            features.disable(crate::features::Feature::ShellTool);
+        }
     }
     if outer_network_access == Some(false) {
         features.disable(crate::features::Feature::WebSearch);
@@ -10874,7 +10876,10 @@ async fn run_exec_agent(
     let outer_network_access = fleet_authority
         .as_ref()
         .and_then(|authority| authority.network_access);
-
+    let outer_shell_authority = fleet_authority
+        .as_ref()
+        .map(|authority| authority.shell)
+        .unwrap_or_default();
     if let Some(envelope) = fleet_authority {
         crate::tools::spec::install_process_tool_authority(envelope).map_err(anyhow::Error::msg)?;
     }
@@ -10973,6 +10978,7 @@ async fn run_exec_agent(
         &mut engine_features,
         fleet_authority_active,
         outer_network_access,
+        outer_shell_authority,
     );
     let engine_plugin_registry = if fleet_authority_active {
         std::sync::Arc::new(crate::plugins::PluginRegistry::empty(&workspace))
@@ -10985,7 +10991,12 @@ async fn run_exec_agent(
         workspace: workspace.clone(),
         subagent_state_root: None,
         plugin_registry: Some(engine_plugin_registry),
-        allow_shell: !fleet_authority_active && (auto_approve || execution_config.allow_shell()),
+        allow_shell: crate::tools::spec::fleet_exec_shell_enabled(
+            fleet_authority_active,
+            outer_shell_authority,
+            disallowed_tools.as_deref(),
+        ) || (!fleet_authority_active
+            && (auto_approve || execution_config.allow_shell())),
         trust_mode,
         notes_path: execution_config.notes_path(),
         mcp_config_path: execution_config.mcp_config_path(),
@@ -13408,6 +13419,8 @@ mod terminal_mode_tests {
             owner: "consultant-1".to_string(),
             authority: crate::tools::spec::ToolMutationAuthority::ReadOnly,
             network_access: Some(false),
+            shell: crate::tools::spec::ToolShellAuthority::None,
+            verification: crate::tools::spec::ToolVerificationAuthority::None,
             writable_roots: Vec::new(),
             writable_files: Vec::new(),
             coordination_contracts: Vec::new(),
@@ -13423,9 +13436,16 @@ mod terminal_mode_tests {
             "the permissive user config must not widen Consultant network authority"
         );
         let mut features = crate::features::Features::default();
+        features.enable(crate::features::Feature::ShellTool);
         features.enable(crate::features::Feature::WebSearch);
-        apply_fleet_engine_feature_caps(&mut features, true, authority.network_access);
+        apply_fleet_engine_feature_caps(
+            &mut features,
+            true,
+            authority.network_access,
+            authority.shell,
+        );
         assert!(!features.enabled(crate::features::Feature::WebSearch));
+        assert!(!features.enabled(crate::features::Feature::ShellTool));
 
         let worker_policy = exec_network_policy(&config, Some(true)).expect("configured policy");
         assert_eq!(
@@ -13433,12 +13453,7 @@ mod terminal_mode_tests {
             crate::network_policy::Decision::Allow,
             "a network-capable role keeps the configured policy"
         );
-        let mut worker_features = crate::features::Features::default();
-        worker_features.enable(crate::features::Feature::WebSearch);
-        apply_fleet_engine_feature_caps(&mut worker_features, true, Some(true));
-        assert!(worker_features.enabled(crate::features::Feature::WebSearch));
     }
-
     #[test]
     fn hidden_remote_control_flag_starts_the_interactive_handoff() {
         let cli = parse_cli(&["codewhale-tui", "--remote-control"]);

@@ -3582,6 +3582,8 @@ async fn named_file_write_scope_denies_mutation_outside_the_named_files() {
         owner: "test-worker".to_string(),
         authority: crate::tools::spec::ToolMutationAuthority::ScopedWrite,
         network_access: None,
+        shell: crate::tools::spec::ToolShellAuthority::None,
+        verification: crate::tools::spec::ToolVerificationAuthority::None,
         writable_roots: Vec::new(),
         writable_files: vec!["src/named.rs".to_string()],
         coordination_contracts: Vec::new(),
