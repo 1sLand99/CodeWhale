@@ -1689,15 +1689,6 @@ fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
     codewhale_telemetry::record(codewhale_telemetry::Event::SessionStart {
         source: telemetry_session_source(command),
     });
-
-    // Recover a prior session that crashed or was signalled before it could
-    // flush. The due check happens *before* the spawn, so "not due" means no
-    // task at all rather than a task that returns early.
-    if codewhale_telemetry::startup_drain_due() {
-        tokio::task::spawn_blocking(|| {
-            codewhale_telemetry::flush_blocking(codewhale_telemetry::SHUTDOWN_FLUSH_TIMEOUT)
-        });
-    }
 }
 
 /// Close the armed session and flush, bounded.
