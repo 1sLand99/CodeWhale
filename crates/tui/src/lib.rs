@@ -424,7 +424,7 @@ struct ExecArgs {
     /// Comma-separated list of tools to deny (deny wins over allow).
     #[arg(long, value_delimiter = ',')]
     disallowed_tools: Option<Vec<String>>,
-    /// Maximum number of model steps (tool calls) before the run ends.
+    /// Maximum number of model steps before the run ends. Omitted means unlimited.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     max_turns: Option<u32>,
     /// Extra text appended to the system prompt for this run.
@@ -1969,7 +1969,7 @@ async fn run_async_main_dispatch(
                         |value| value.clamp(1, MAX_SUBAGENTS),
                     );
                     let auto_mode = args.auto || yolo;
-                    let max_turns = args.max_turns.unwrap_or(100);
+                    let max_turns = exec_max_steps(args.max_turns);
                     let allowed_tools =
                         resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface);
                     let disallowed_tools = args
@@ -10827,6 +10827,13 @@ fn apply_fleet_engine_feature_caps(
     }
 }
 
+/// Resolve the optional headless safety budget without imposing a hidden
+/// default. Benchmarks and other long-running exec callers continue until the
+/// model finishes unless they opt into a finite `--max-turns` value.
+fn exec_max_steps(max_turns: Option<u32>) -> u32 {
+    max_turns.unwrap_or(u32::MAX)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_exec_agent(
     config: &Config,
@@ -14753,6 +14760,18 @@ mod terminal_mode_tests {
         let err = Cli::try_parse_from(["codewhale", "exec", "--max-turns", "0", "hello"])
             .expect_err("max-turns must be >= 1");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn exec_omits_the_headless_turn_cap_by_default() {
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "benchmark this"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+
+        assert_eq!(args.max_turns, None);
+        assert_eq!(exec_max_steps(args.max_turns), u32::MAX);
+        assert_eq!(exec_max_steps(Some(7)), 7);
     }
 
     #[test]
