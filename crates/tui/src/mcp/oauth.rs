@@ -747,15 +747,14 @@ fn token_needs_refresh(expires_at: Option<u64>) -> bool {
 }
 
 struct CallbackServerGuard {
-    // Holding the listener open is the guard's purpose; the accept loop owns
-    // another Arc and exits once both owners are dropped.
-    _listener: Arc<TcpListener>,
+    accept_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for CallbackServerGuard {
     fn drop(&mut self) {
-        // TcpListener is closed on drop; the accept loop will exit when the
-        // listener is dropped. No explicit unblock needed.
+        // Aborting drops the accept future and its owned listener instead of
+        // leaving a detached task holding a fixed callback port indefinitely.
+        self.accept_task.abort();
     }
 }
 
@@ -787,21 +786,18 @@ impl OauthLoginFlow {
             Some(port) => format!("{bind_host}:{port}"),
             None => format!("{bind_host}:0"),
         };
-        let listener = Arc::new(
-            TcpListener::bind(&bind_addr)
-                .await
-                .map_err(|err| anyhow!(err))?,
-        );
-        let guard = CallbackServerGuard {
-            _listener: Arc::clone(&listener),
-        };
+        let listener = TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|err| anyhow!(err))?;
         let redirect_uri = resolve_redirect_uri(&listener, callback_url)?;
         let callback_id = callback_id_from_server_url(server_url)?;
         let redirect_uri = append_callback_id_to_redirect_uri(&redirect_uri, &callback_id)?;
         let callback_path = callback_path_from_redirect_uri(&redirect_uri)?;
 
         let (tx, rx) = oneshot::channel();
-        spawn_callback_server(Arc::clone(&listener), tx, callback_path);
+        let guard = CallbackServerGuard {
+            accept_task: spawn_callback_server(listener, tx, callback_path),
+        };
 
         let headers = build_default_headers(&http_headers, &env_headers)?;
         let client = apply_default_headers(crate::tls::reqwest_client_builder(), &headers)
@@ -918,10 +914,10 @@ async fn start_authorization(
 }
 
 fn spawn_callback_server(
-    listener: Arc<TcpListener>,
+    listener: TcpListener,
     tx: oneshot::Sender<CallbackResult>,
     expected_callback_path: String,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The sender is wrapped in Option so we can take it on success/error
         let mut tx_opt = Some(tx);
@@ -963,7 +959,7 @@ fn spawn_callback_server(
                 }
             }
         }
-    });
+    })
 }
 
 async fn read_http_path(stream: &mut tokio::net::TcpStream) -> Option<String> {
@@ -1255,5 +1251,33 @@ mod tests {
             dropped.load(Ordering::SeqCst),
             "the callback-server guard must be dropped before cancellation returns"
         );
+    }
+
+    #[tokio::test]
+    async fn callback_guard_aborts_accept_task_and_releases_fixed_port() -> Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        let (tx, _rx) = oneshot::channel();
+        let guard = CallbackServerGuard {
+            accept_task: spawn_callback_server(listener, tx, "/callback/test".to_string()),
+        };
+
+        drop(guard);
+
+        let rebound = timeout(Duration::from_secs(1), async {
+            loop {
+                match TcpListener::bind(addr).await {
+                    Ok(listener) => break Ok(listener),
+                    Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(err) => break Err(err),
+                }
+            }
+        })
+        .await
+        .context("callback listener did not release its fixed port")??;
+        drop(rebound);
+        Ok(())
     }
 }

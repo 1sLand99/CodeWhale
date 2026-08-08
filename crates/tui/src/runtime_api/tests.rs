@@ -7451,7 +7451,7 @@ async fn cors_layer_advertises_exact_supported_headers_and_never_an_extra() -> R
 
 #[tokio::test]
 async fn thread_goal_crud_and_invalid_transition() -> Result<()> {
-    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+    let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
     };
     let client = crate::tls::reqwest_client();
@@ -7506,7 +7506,15 @@ async fn thread_goal_crud_and_invalid_transition() -> Result<()> {
     assert_eq!(fetched["objective"], created["objective"]);
     assert_eq!(fetched["goal_id"], created["goal_id"]);
 
-    // PUT again (update) → 200.
+    // Simulate progress on the first goal before replacing it.
+    let mut accrued: codewhale_protocol::ThreadGoal = serde_json::from_value(created.clone())?;
+    accrued.tokens_used = 1_234;
+    accrued.time_used_seconds = 45;
+    accrued.continuation_count = 3;
+    accrued.created_at -= 60;
+    runtime_threads.save_goal(accrued.clone()).await?;
+
+    // PUT again (replacement) → 200 with a fresh goal lifecycle.
     let updated: serde_json::Value = client
         .put(format!("http://{addr}/v1/threads/{thread_id}/goal"))
         .json(&json!({"objective": "write even better tests"}))
@@ -7519,10 +7527,19 @@ async fn thread_goal_crud_and_invalid_transition() -> Result<()> {
         updated["objective"].as_str(),
         Some("write even better tests")
     );
-    // goal_id is preserved across updates.
-    assert_eq!(updated["goal_id"], created["goal_id"]);
-    // After PUT re-create, status is reset to active.
+    assert_ne!(updated["goal_id"], created["goal_id"]);
+    assert!(
+        updated["goal_id"]
+            .as_str()
+            .is_some_and(|goal_id| goal_id.starts_with("goal-"))
+    );
     assert_eq!(updated["status"].as_str(), Some("active"));
+    assert_eq!(updated["tokens_used"], 0);
+    assert_eq!(updated["time_used_seconds"], 0);
+    assert_eq!(updated["continuation_count"], 0);
+    assert_eq!(updated["token_budget"], serde_json::Value::Null);
+    assert!(updated["created_at"].as_i64() > Some(accrued.created_at));
+    assert_eq!(updated["created_at"], updated["updated_at"]);
 
     // POST /complete → 200 with status = complete.
     let completed: serde_json::Value = client
@@ -8323,6 +8340,13 @@ async fn mcp_server_management_crud() -> Result<()> {
             "name": "test-stdio",
             "command": "echo",
             "args": ["hello"],
+            "url": "https://example.com/mcp",
+            "transport": "sse",
+            "connect_timeout": 11,
+            "execute_timeout": 22,
+            "read_timeout": 33,
+            "bearer_token_env_var": "MCP_TOKEN",
+            "oauth_resource": "https://example.com/resource",
         }))
         .send()
         .await?
@@ -8361,6 +8385,7 @@ async fn mcp_server_management_crud() -> Result<()> {
         .json(&serde_json::json!({
             "args": ["updated"],
             "required": true,
+            "url": null,
         }))
         .send()
         .await?
@@ -8369,6 +8394,54 @@ async fn mcp_server_management_crud() -> Result<()> {
         .await?;
     assert_eq!(updated["required"], true);
     assert_eq!(updated["args"][0], "updated");
+    assert_eq!(updated["url"], serde_json::Value::Null);
+    assert_eq!(updated["transport"], "sse", "missing fields are retained");
+
+    let cleared: serde_json::Value = client
+        .patch(format!("{base}/test-stdio"))
+        .json(&json!({
+            "url": "https://example.com/replacement",
+            "command": null,
+            "transport": null,
+            "connect_timeout": null,
+            "execute_timeout": null,
+            "read_timeout": null,
+            "bearer_token_env_var": null,
+            "oauth_resource": null
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for field in [
+        "command",
+        "transport",
+        "connect_timeout",
+        "execute_timeout",
+        "read_timeout",
+        "oauth_resource",
+    ] {
+        assert_eq!(cleared[field], serde_json::Value::Null, "{field}");
+    }
+    assert_eq!(cleared["url"], "https://example.com/replacement");
+    assert_eq!(cleared["has_bearer_token_env_var"], false);
+
+    // Clearing the final endpoint is invalid and must not alter persisted state.
+    let invalid = client
+        .patch(format!("{base}/test-stdio"))
+        .json(&json!({ "url": null }))
+        .send()
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let retained: serde_json::Value = client
+        .get(format!("{base}/test-stdio"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(retained["url"], "https://example.com/replacement");
 
     // 5. Disable the server.
     let disabled: serde_json::Value = client

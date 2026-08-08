@@ -562,7 +562,8 @@ struct McpToolsResponse {
 #[derive(Debug, Deserialize)]
 struct McpServerWriteRequest {
     /// stdio command binary (e.g. `"npx"`).
-    command: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    command: Option<Option<String>>,
     /// Arguments for the stdio command.
     args: Option<Vec<String>>,
     /// Environment variables injected into the stdio child process.
@@ -570,15 +571,20 @@ struct McpServerWriteRequest {
     /// variables at runtime instead of embedding secrets here.
     env: Option<std::collections::HashMap<String, String>>,
     /// HTTP(S) endpoint for streamable-HTTP or SSE MCP servers.
-    url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    url: Option<Option<String>>,
     /// Explicit transport override (`"sse"` or `"streamable_http"`).
-    transport: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    transport: Option<Option<String>>,
     /// Override the server-level connect timeout in seconds.
-    connect_timeout: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    connect_timeout: Option<Option<u64>>,
     /// Override the server-level execute timeout in seconds.
-    execute_timeout: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    execute_timeout: Option<Option<u64>>,
     /// Override the server-level read timeout in seconds.
-    read_timeout: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    read_timeout: Option<Option<u64>>,
     /// Whether the server is enabled. Defaults to `true` on create.
     enabled: Option<bool>,
     /// Whether a connection failure for this server is fatal.
@@ -593,11 +599,23 @@ struct McpServerWriteRequest {
     /// request time. Credentials remain in the environment, not on disk.
     env_headers: Option<std::collections::HashMap<String, String>>,
     /// Environment variable that contains a bearer token for URL-based servers.
-    bearer_token_env_var: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    bearer_token_env_var: Option<Option<String>>,
     /// OAuth scopes requested during `codewhale mcp login`.
     scopes: Option<Vec<String>>,
     /// RFC 8707 resource parameter for the OAuth authorization URL.
-    oauth_resource: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    oauth_resource: Option<Option<String>>,
+}
+
+/// Preserve the difference between an omitted PATCH field and an explicit
+/// `null`: serde only calls this decoder when the field is present.
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Response returned by MCP server management endpoints.
@@ -3213,13 +3231,15 @@ async fn create_mcp_server(
     let req: McpServerWriteRequest = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))?;
 
-    if req.command.is_none() && req.url.is_none() {
+    if req.command.as_ref().and_then(Option::as_ref).is_none()
+        && req.url.as_ref().and_then(Option::as_ref).is_none()
+    {
         return Err(ApiError::bad_request(
             "Either 'command' or 'url' is required to create an MCP server",
         ));
     }
 
-    if let Some(ref transport) = req.transport {
+    if let Some(Some(transport)) = &req.transport {
         crate::mcp::validate_mcp_transport(Some(transport.as_str()))
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
@@ -3262,7 +3282,7 @@ async fn update_mcp_server(
     Path(name): Path<String>,
     Json(req): Json<McpServerWriteRequest>,
 ) -> Result<Json<McpServerDetail>, ApiError> {
-    if let Some(ref transport) = req.transport {
+    if let Some(Some(transport)) = &req.transport {
         crate::mcp::validate_mcp_transport(Some(transport.as_str()))
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
@@ -3277,6 +3297,11 @@ async fn update_mcp_server(
             .get_mut(&name)
             .ok_or_else(|| ApiError::not_found(format!("MCP server '{name}' not found")))?;
         apply_write_request_to_config(req, existing);
+        if existing.command.is_none() && existing.url.is_none() {
+            return Err(ApiError::bad_request(
+                "Either 'command' or 'url' must remain configured for an MCP server",
+            ));
+        }
         let updated = existing.clone();
         crate::mcp::save_config(&mcp_config_path, &cfg)
             .map_err(|e| ApiError::internal(format!("Failed to save MCP config: {e}")))?;
@@ -3428,15 +3453,15 @@ fn mcp_server_config_from_write_request(
 ) -> crate::mcp::McpServerConfig {
     let enabled = req.enabled.unwrap_or(true);
     crate::mcp::McpServerConfig {
-        command: req.command,
+        command: req.command.flatten(),
         args: req.args.unwrap_or_default(),
         env: req.env.unwrap_or_default(),
         cwd: None,
-        url: req.url,
-        transport: req.transport,
-        connect_timeout: req.connect_timeout,
-        execute_timeout: req.execute_timeout,
-        read_timeout: req.read_timeout,
+        url: req.url.flatten(),
+        transport: req.transport.flatten(),
+        connect_timeout: req.connect_timeout.flatten(),
+        execute_timeout: req.execute_timeout.flatten(),
+        read_timeout: req.read_timeout.flatten(),
         disabled: !enabled,
         enabled,
         required: req.required.unwrap_or(false),
@@ -3444,10 +3469,10 @@ fn mcp_server_config_from_write_request(
         disabled_tools: req.disabled_tools.unwrap_or_default(),
         headers: std::collections::HashMap::new(),
         env_headers: req.env_headers.unwrap_or_default(),
-        bearer_token_env_var: req.bearer_token_env_var,
+        bearer_token_env_var: req.bearer_token_env_var.flatten(),
         scopes: req.scopes.unwrap_or_default(),
         oauth: None,
-        oauth_resource: req.oauth_resource,
+        oauth_resource: req.oauth_resource.flatten(),
         reviewed_plugin: None,
     }
 }
@@ -3458,7 +3483,7 @@ fn apply_write_request_to_config(
     cfg: &mut crate::mcp::McpServerConfig,
 ) {
     if let Some(v) = req.command {
-        cfg.command = Some(v);
+        cfg.command = v;
     }
     if let Some(v) = req.args {
         cfg.args = v;
@@ -3467,19 +3492,19 @@ fn apply_write_request_to_config(
         cfg.env = v;
     }
     if let Some(v) = req.url {
-        cfg.url = Some(v);
+        cfg.url = v;
     }
-    if req.transport.is_some() {
-        cfg.transport = req.transport;
+    if let Some(v) = req.transport {
+        cfg.transport = v;
     }
-    if req.connect_timeout.is_some() {
-        cfg.connect_timeout = req.connect_timeout;
+    if let Some(v) = req.connect_timeout {
+        cfg.connect_timeout = v;
     }
-    if req.execute_timeout.is_some() {
-        cfg.execute_timeout = req.execute_timeout;
+    if let Some(v) = req.execute_timeout {
+        cfg.execute_timeout = v;
     }
-    if req.read_timeout.is_some() {
-        cfg.read_timeout = req.read_timeout;
+    if let Some(v) = req.read_timeout {
+        cfg.read_timeout = v;
     }
     if let Some(v) = req.enabled {
         cfg.enabled = v;
@@ -3497,14 +3522,14 @@ fn apply_write_request_to_config(
     if let Some(v) = req.env_headers {
         cfg.env_headers = v;
     }
-    if req.bearer_token_env_var.is_some() {
-        cfg.bearer_token_env_var = req.bearer_token_env_var;
+    if let Some(v) = req.bearer_token_env_var {
+        cfg.bearer_token_env_var = v;
     }
     if let Some(v) = req.scopes {
         cfg.scopes = v;
     }
-    if req.oauth_resource.is_some() {
-        cfg.oauth_resource = req.oauth_resource;
+    if let Some(v) = req.oauth_resource {
+        cfg.oauth_resource = v;
     }
 }
 
@@ -4045,21 +4070,16 @@ async fn upsert_thread_goal(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let is_new = existing.is_none();
-    let goal_id = existing
-        .as_ref()
-        .map(|g| g.goal_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let created_at = existing.as_ref().map(|g| g.created_at).unwrap_or(now);
     let goal = codewhale_protocol::ThreadGoal {
         thread_id: id.clone(),
-        goal_id,
+        goal_id: format!("goal-{}", uuid::Uuid::new_v4()),
         objective: req.objective.clone(),
         status: codewhale_protocol::ThreadGoalStatus::Active,
         token_budget: req.token_budget,
-        tokens_used: existing.as_ref().map(|g| g.tokens_used).unwrap_or(0),
-        time_used_seconds: existing.as_ref().map(|g| g.time_used_seconds).unwrap_or(0),
-        continuation_count: existing.as_ref().map(|g| g.continuation_count).unwrap_or(0),
-        created_at,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count: 0,
+        created_at: now,
         updated_at: now,
     };
     state
