@@ -536,11 +536,18 @@ impl SavedSession {
 
     fn storage_compatible_copy(&self) -> Option<Self> {
         let journal = self.journal.as_ref()?;
-        if !self.messages.is_empty() {
+        let active_messages = journal.to_messages();
+        if !self.messages.is_empty() && self.messages == active_messages {
             return None;
         }
         let mut copy = self.clone();
-        copy.messages = journal.to_messages();
+        if copy.messages.is_empty() {
+            copy.messages = active_messages;
+        } else if let Some(journal) = copy.journal.as_mut() {
+            journal.rebranch_active_messages(&copy.messages);
+            copy.leaf_id = journal.leaf_id.clone();
+        }
+        copy.metadata.message_count = copy.messages.len();
         Some(copy)
     }
 
