@@ -6136,20 +6136,17 @@ async fn ordinary_scout_catalog_and_dispatch_keep_only_readonly_bash() {
             "Scout must refuse {command}"
         );
     }
-    let pwd_command = if cfg!(windows) { "pwd -W" } else { "pwd" };
+    let sentinel = "SCOUT_WORKSPACE_SENTINEL";
+    std::fs::write(tmp.path().join("scout-cwd-sentinel.txt"), sentinel).expect("sentinel fixture");
     let output = registry
         .execute(
             "agent_scout",
             "Bash",
-            json!({"action": "run", "command": pwd_command}),
+            json!({"action": "run", "command": "cat scout-cwd-sentinel.txt"}),
         )
         .await
         .expect("ordinary Scout dispatches a bounded shell read");
-    let expected = tmp.path().canonicalize().expect("Scout workspace");
-    let expected = expected.display().to_string().replace('\\', "/");
-    let expected = expected.strip_prefix("//?/").unwrap_or(&expected);
-    let output = output.trim().replace('\\', "/");
-    assert!(output.eq_ignore_ascii_case(expected), "{output}");
+    assert_eq!(output, sentinel);
     for (name, input) in [
         ("Git", json!({"action": "status"})),
         ("Run", json!({"action": "tests"})),
