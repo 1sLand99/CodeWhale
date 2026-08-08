@@ -548,7 +548,7 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     for command in [
         "cat ../secret.txt",
         "cat ~/.ssh/id_rsa",
-        "fd . /",
+        "cat /rooted-current-drive.txt",
         "cat C:secret",
         r"cat C:\secret",
         r"cat \\server\share\secret",

@@ -582,7 +582,7 @@ fn apply_spillover_inner(
                     head,
                     tail,
                     &original_content,
-                    &absolute_path.display().to_string(),
+                    &crate::artifacts::format_artifact_relative_path(&absolute_path),
                     Some(artifact_id.as_str()),
                 );
                 artifact_path = Some((absolute_path, relative_path, record));
@@ -852,7 +852,7 @@ fn apply_adaptive_evidence_inner(
         head,
         tail,
         &original,
-        &absolute_path.display().to_string(),
+        &crate::artifacts::format_artifact_relative_path(&absolute_path),
         Some(artifact_id.as_str()),
     );
     let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));

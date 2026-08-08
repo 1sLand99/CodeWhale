@@ -2935,7 +2935,7 @@ fn enforce_readonly_workspace_operands(
         if value.starts_with('~')
             || value.contains('\\')
             || windows_prefixed
-            || candidate.is_absolute()
+            || candidate.has_root()
             || candidate
                 .components()
                 .any(|component| matches!(component, std::path::Component::ParentDir))

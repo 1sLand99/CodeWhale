@@ -6136,20 +6136,20 @@ async fn ordinary_scout_catalog_and_dispatch_keep_only_readonly_bash() {
             "Scout must refuse {command}"
         );
     }
-
+    let pwd_command = if cfg!(windows) { "pwd -W" } else { "pwd" };
     let output = registry
         .execute(
             "agent_scout",
             "Bash",
-            json!({"action": "run", "command": "pwd"}),
+            json!({"action": "run", "command": pwd_command}),
         )
         .await
         .expect("ordinary Scout dispatches a bounded shell read");
-    assert!(
-        output.contains(&tmp.path().display().to_string()),
-        "{output}"
-    );
-
+    let expected = tmp.path().canonicalize().expect("Scout workspace");
+    let expected = expected.display().to_string().replace('\\', "/");
+    let expected = expected.strip_prefix("//?/").unwrap_or(&expected);
+    let output = output.trim().replace('\\', "/");
+    assert!(output.eq_ignore_ascii_case(expected), "{output}");
     for (name, input) in [
         ("Git", json!({"action": "status"})),
         ("Run", json!({"action": "tests"})),

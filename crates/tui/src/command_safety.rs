@@ -526,7 +526,7 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         "git blame" => (2, "-w --line-porcelain --porcelain --show-stats --show-name --show-number --reverse --first-parent", "-L --since"),
         "git grep" => (2, "-n --line-number -i --ignore-case -I -l --files-with-matches -L --files-without-match -w --word-regexp -F --fixed-strings -E --extended-regexp --cached --untracked --exclude-standard", "-e --max-depth"),
         "ls" => (1, "-a -A -l -la -al -h -lh -hl -lah -alh -R -d -1 --all --almost-all --long --human-readable --recursive --directory", ""),
-        "pwd" => (1, "-L -P --logical --physical", ""),
+        "pwd" => (1, if cfg!(windows) { "-L -P -W --logical --physical" } else { "-L -P --logical --physical" }, ""),
         "cat" => (1, "-n -b -s -v -E -T --number --number-nonblank --squeeze-blank --show-ends --show-tabs", ""),
         "head" | "tail" => (1, "-q -v --quiet --verbose", "-n --lines -c --bytes"),
         "wc" => (1, "-c -m -l -w -L --bytes --chars --lines --words --max-line-length", ""),
