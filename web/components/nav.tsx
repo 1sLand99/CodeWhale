@@ -103,7 +103,7 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
           </Link>
           <Link
             href={`/${locale}/install`}
-            className="paper-install-cta hidden md:inline-flex"
+            className="paper-install-cta hidden xl:inline-flex"
           >
             {chrome.installCta}
           </Link>
