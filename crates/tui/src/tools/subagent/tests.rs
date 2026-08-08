@@ -2314,12 +2314,32 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
     ] {
         let prompt = agent_type.system_prompt();
         assert!(prompt.contains(marker));
+        // Every role shares the parseable output-contract spine exactly once.
         assert_eq!(
-            prompt.matches("## Output contract (mandatory)").count(),
+            prompt.matches("## Output contract").count(),
             1,
-            "{agent_type:?} prompt should include the shared output contract exactly once"
+            "{agent_type:?} prompt should include exactly one output contract"
         );
-        assert!(prompt.contains("### SUMMARY") && prompt.contains("### BLOCKERS"));
+        assert!(prompt.contains("### SUMMARY"));
+        if matches!(agent_type, FleetRole::Scout) {
+            // #5189 F5: scouts are read-only explorers and get a scaled-down
+            // contract (SUMMARY+EVIDENCE) that drops CHANGES/RISKS/BLOCKERS.
+            assert!(
+                prompt.contains("## Output contract (scout)"),
+                "{agent_type:?} should use the scaled-down scout contract"
+            );
+            assert!(
+                !prompt.contains("### BLOCKERS"),
+                "{agent_type:?} scout contract drops BLOCKERS ceremony"
+            );
+        } else {
+            assert_eq!(
+                prompt.matches("## Output contract (mandatory)").count(),
+                1,
+                "{agent_type:?} prompt should include the shared output contract exactly once"
+            );
+            assert!(prompt.contains("### SUMMARY") && prompt.contains("### BLOCKERS"));
+        }
     }
 }
 
