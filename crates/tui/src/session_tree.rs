@@ -299,6 +299,25 @@ impl SessionJournal {
     pub fn to_messages(&self) -> Vec<Message> {
         self.active_messages(true)
     }
+
+    /// Make `messages` the active projection without rewriting the journal.
+    ///
+    /// The existing active branch remains as evidence. We reuse its longest
+    /// unchanged prefix, then append the repaired suffix as a sibling branch.
+    pub fn rebranch_active_messages(&mut self, messages: &[Message]) {
+        let active_path = self.root_to_leaf();
+        let shared_prefix = active_path
+            .iter()
+            .zip(messages)
+            .take_while(|(entry, message)| entry.kind.as_message().as_ref() == Some(*message))
+            .count();
+        self.leaf_id = shared_prefix
+            .checked_sub(1)
+            .map(|index| active_path[index].id.clone());
+        for message in &messages[shared_prefix..] {
+            self.append_message(message.clone());
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionImportContainer {
@@ -501,6 +520,31 @@ mod tests {
         assert_eq!(j.entries.len(), 2);
         assert!(j.validate().is_ok());
         assert_eq!(j.root_to_leaf().len(), 2);
+    }
+    #[test]
+    fn repaired_messages_form_an_append_only_sibling_branch() {
+        let original = vec![
+            msg("user", "shared"),
+            msg("assistant", "broken"),
+            msg("user", "old tail"),
+        ];
+        let mut journal = SessionJournal::from_messages(original, 0);
+        let old_leaf = journal.leaf_id.clone().expect("old leaf");
+        let repaired = vec![
+            msg("user", "shared"),
+            msg("assistant", "repaired"),
+            msg("user", "new tail"),
+        ];
+
+        journal.rebranch_active_messages(&repaired);
+
+        assert_eq!(journal.to_messages(), repaired);
+        assert!(journal.contains(&old_leaf), "old evidence must remain");
+        assert_eq!(
+            journal.entries.len(),
+            5,
+            "one shared entry plus two branches"
+        );
     }
     #[test]
     fn compaction_fits() {

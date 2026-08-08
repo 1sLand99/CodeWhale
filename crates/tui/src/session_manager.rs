@@ -526,6 +526,24 @@ pub struct SavedSession {
     pub(crate) last_auto_route: Option<SavedAutoRouteReceipt>,
 }
 impl SavedSession {
+    /// Drop the journal-derived compatibility projection before an async
+    /// persistence request takes ownership. Disk serialization restores it.
+    pub(crate) fn compact_for_persistence_queue(&mut self) {
+        if self.journal.is_some() {
+            self.messages = Vec::new();
+        }
+    }
+
+    fn storage_compatible_copy(&self) -> Option<Self> {
+        let journal = self.journal.as_ref()?;
+        if !self.messages.is_empty() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.messages = journal.to_messages();
+        Some(copy)
+    }
+
     pub fn ensure_journal(&mut self) {
         if self.journal.is_some() {
             if self.leaf_id.is_none() {
@@ -639,6 +657,12 @@ impl SavedSession {
     }
 }
 
+fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
+    let compatible = session.storage_compatible_copy();
+    serde_json::to_string_pretty(compatible.as_ref().unwrap_or(session))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 /// Manager for session persistence operations
 #[derive(Debug)]
 pub struct SessionManager {
@@ -747,8 +771,7 @@ impl SessionManager {
 
         self.archive_before_first_graph_write(session, &path)?;
 
-        let content = serde_json::to_string_pretty(&session)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let content = serialize_saved_session(session)?;
 
         // Atomic write via write_atomic (NamedTempFile + fsync + persist)
         write_atomic(&path, content.as_bytes())?;
@@ -770,8 +793,7 @@ impl SessionManager {
         self.archive_before_first_graph_write(session, &session_path)?;
         fs::create_dir_all(self.checkpoints_dir())?;
         let already_persisted = path.exists() || session_path.exists();
-        let content = serde_json::to_string_pretty(&session)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let content = serialize_saved_session(session)?;
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
         Ok(path)
@@ -1089,9 +1111,14 @@ impl SessionManager {
         }
 
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
+        session.ensure_journal();
 
         let repair = crate::tool_history_repair::repair_tool_call_pairs(&mut session.messages);
         if !repair.is_empty() {
+            if let Some(journal) = session.journal.as_mut() {
+                journal.rebranch_active_messages(&session.messages);
+                session.leaf_id = journal.leaf_id.clone();
+            }
             session.metadata.message_count = session.messages.len();
             tracing::warn!(
                 session_id = %session.metadata.id,
@@ -1101,8 +1128,6 @@ impl SessionManager {
                 "repaired persisted tool call/result history"
             );
         }
-
-        session.ensure_journal();
 
         Ok(session)
     }
@@ -2487,6 +2512,11 @@ mod tests {
                 )
             })
         }));
+        assert_eq!(
+            loaded.journal.as_ref().map(SessionJournal::to_messages),
+            Some(loaded.messages.clone()),
+            "the append-only journal must follow the repaired active branch"
+        );
         assert!(loaded.messages.iter().any(|message| {
             (message.role == "assistant"
                 || message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE)
@@ -3098,6 +3128,11 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_preserves_all_messages_for_cache_fidelity() {
+        #[derive(serde::Deserialize)]
+        struct LegacySession {
+            messages: Vec<Message>,
+        }
+
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
         // Covers the old 500-message cap boundary and well beyond.
@@ -3111,10 +3146,22 @@ mod tests {
                 })
                 .collect();
 
-            let session = create_saved_session(&original, "test-model", tmp.path(), 0, None);
-            manager.save_session(&session).expect("save");
+            let mut session = create_saved_session(&original, "test-model", tmp.path(), 0, None);
+            let expected_journal = session.journal.clone();
+            session.compact_for_persistence_queue();
+            let path = manager.save_session(&session).expect("save");
+            let legacy: LegacySession =
+                serde_json::from_slice(&fs::read(path).expect("read")).expect("legacy reader");
             let loaded = manager.load_session(&session.metadata.id).expect("load");
 
+            assert_eq!(
+                legacy.messages, original,
+                "legacy messages for count={count}"
+            );
+            assert_eq!(
+                loaded.journal, expected_journal,
+                "journal for count={count}"
+            );
             assert_eq!(
                 loaded.messages.len(),
                 count,
@@ -3145,6 +3192,9 @@ mod tests {
             },
             ..SessionWorkState::default()
         });
+        let expected_messages = session.messages.clone();
+        let expected_journal = session.journal.clone();
+        session.compact_for_persistence_queue();
 
         let path = manager.save_checkpoint(&session).expect("save checkpoint");
         assert_eq!(
@@ -3157,7 +3207,8 @@ mod tests {
             .expect("load checkpoint")
             .expect("checkpoint exists");
         assert_eq!(loaded.metadata.id, session.metadata.id);
-        assert_eq!(loaded.messages, session.messages);
+        assert_eq!(loaded.messages, expected_messages);
+        assert_eq!(loaded.journal, expected_journal);
         assert_eq!(
             loaded.work_state, session.work_state,
             "work state must survive the checkpoint round trip"
