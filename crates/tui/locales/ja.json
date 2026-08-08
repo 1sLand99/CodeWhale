@@ -9,6 +9,7 @@
   "HistoryHintAccept": "Enter 確定",
   "HistoryHintRestore": "Esc 復元",
   "HistoryNoMatches": "  一致なし",
+  "TranscriptReasoningExpand": "展開",
   "StatusPickerTitle": " ステータス行 ",
   "StatusPickerInstruction": "フッターに表示する項目を選択:",
   "StatusPickerActionToggle": "切替 ",

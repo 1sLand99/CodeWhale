@@ -6,6 +6,46 @@
 
 use super::*;
 
+/// Apply Space only to the owner stored by the final render pass.
+pub(super) fn handle_transcript_space(app: &mut App) -> bool {
+    let Some((owner, reasoning_target)) = app.viewport.transcript_cache.take_transcript_action()
+    else {
+        return false;
+    };
+    let idx = owner.cell_index;
+    if owner.identity_epoch != app.transcript_identity_epoch {
+        return false;
+    }
+    let Some(cell) = app.cell_at_virtual_index(idx) else {
+        return false;
+    };
+    let is_thinking = matches!(cell, HistoryCell::Thinking { .. });
+    if let Some(target) = reasoning_target.filter(|_| !app.collapsed_cells.contains(&idx)) {
+        if target.owner != owner {
+            return false;
+        }
+        if !app.show_thinking || !is_thinking {
+            return false;
+        }
+        let options = app.transcript_render_options();
+        let folded = (!options.verbose ^ options.thinking_default_expanded)
+            ^ (target.action == ReasoningAction::Collapse);
+        app.folded_thinking.remove(&idx);
+        if folded {
+            app.folded_thinking.insert(idx);
+        }
+    } else if app.toggle_tool_run_expansion_at(idx) {
+        return true;
+    } else if !app.collapsed_cells.remove(&idx) {
+        if is_thinking {
+            return false;
+        }
+        app.collapsed_cells.insert(idx);
+    }
+    app.mark_history_updated();
+    true
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -4133,31 +4173,7 @@ pub(crate) async fn run_event_loop(
                 KeyCode::Char(' ')
                     if key.modifiers == KeyModifiers::NONE && app.input.is_empty() =>
                 {
-                    if let Some(idx) = detail_target_cell_index(app) {
-                        if app.toggle_tool_run_expansion_at(idx) {
-                            continue;
-                        }
-                        let is_thinking = app
-                            .cell_at_virtual_index(idx)
-                            .is_some_and(|c| matches!(c, HistoryCell::Thinking { .. }));
-                        if is_thinking {
-                            if app.folded_thinking.contains(&idx) {
-                                app.folded_thinking.remove(&idx);
-                                app.status_message = Some("Thinking block expanded".to_string());
-                            } else {
-                                app.folded_thinking.insert(idx);
-                                app.status_message = Some("Thinking block folded".to_string());
-                            }
-                        } else if app.collapsed_cells.contains(&idx) {
-                            app.collapsed_cells.remove(&idx);
-                            app.status_message = Some("Cell expanded".to_string());
-                        } else {
-                            app.collapsed_cells.insert(idx);
-                            app.status_message = Some("Cell collapsed".to_string());
-                        }
-                        app.mark_history_updated();
-                        app.needs_redraw = true;
-                    }
+                    let _ = handle_transcript_space(app);
                     continue;
                 }
                 KeyCode::Char('t') | KeyCode::Char('T')
@@ -4273,7 +4289,7 @@ pub(crate) async fn run_event_loop(
                     match ctrl_c_disposition(app) {
                         CtrlCDisposition::CopySelection => {
                             copy_active_selection(app);
-                            app.viewport.transcript_selection.clear();
+                            clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
                             engine_handle.cancel();

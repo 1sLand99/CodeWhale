@@ -83,7 +83,7 @@ pub(super) fn render_thinking(
     collapsed: bool,
     low_motion: bool,
 ) -> Vec<Line<'static>> {
-    render_thinking_with_highlight(
+    render_thinking_with_analysis(
         content,
         width,
         streaming,
@@ -92,9 +92,10 @@ pub(super) fn render_thinking(
         low_motion,
         true,
     )
+    .0
 }
 
-pub(crate) fn render_thinking_with_highlight(
+pub(crate) fn render_thinking_with_analysis(
     content: &str,
     width: u16,
     streaming: bool,
@@ -102,7 +103,7 @@ pub(crate) fn render_thinking_with_highlight(
     collapsed: bool,
     low_motion: bool,
     highlight: bool,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, bool) {
     let state = thinking_visual_state(streaming, duration_secs);
     let style = thinking_style();
     // 12% reasoning surface tint over the app ink — the only deliberately
@@ -140,61 +141,15 @@ pub(crate) fn render_thinking_with_highlight(
     lines.push(Line::from(header_spans));
 
     let content_width = width.saturating_sub(3).max(1);
-    let mut collapsed_without_explicit_summary = false;
-    let body_text = if collapsed {
-        if streaming {
-            // #861 RC4 / #1324: during streaming we don't yet have a
-            // completed reasoning block, so `extract_reasoning_summary`
-            // is meaningless. Show the raw content and let the
-            // truncation logic below keep the *last* `LIMIT` lines so
-            // the user sees the model's most recent thinking instead of
-            // staring at an empty placeholder.
-            content.to_string()
-        } else {
-            match extract_explicit_reasoning_summary(content) {
-                Some(summary) => summary,
-                None => {
-                    collapsed_without_explicit_summary = true;
-                    content.to_string()
-                }
-            }
-        }
-    } else {
-        content.to_string()
-    };
-    // #4146/#4148 used to scrub snake_case tokens out of the collapsed
-    // reasoning here, to keep CodeWhale's own internals out of the transcript.
-    // Removed: the rule could not tell our identifiers from the user's, and in
-    // a coding harness the user's dominate. It rendered `short_dated_radar.py`
-    // as `….py`, `data/market_data/` as `data/…/`, and every env var and
-    // module name as a bare `…`, which made the default reasoning view
-    // unreadable. It also protected nothing — the full body was always one
-    // keypress away on Space/Ctrl+O — so the only thing it reliably did was
-    // damage the surface people actually read.
-    let mut rendered = if body_text.trim().is_empty() {
+    let (collapsed_body, expandable) =
+        collapsed_thinking_body(content, width, streaming, body_style);
+    let rendered = if collapsed {
+        collapsed_body
+    } else if content.trim().is_empty() {
         Vec::new()
     } else {
-        markdown_render::render_markdown(&body_text, content_width, body_style)
+        markdown_render::render_markdown(content, content_width, body_style)
     };
-    let mut truncated = false;
-    let line_limit = if streaming {
-        THINKING_STREAMING_PREVIEW_LINE_LIMIT
-    } else if collapsed_without_explicit_summary {
-        THINKING_COMPLETED_PREVIEW_LINE_LIMIT
-    } else {
-        THINKING_SUMMARY_LINE_LIMIT
-    };
-    if collapsed && rendered.len() > line_limit {
-        if streaming {
-            // Drop the *head* during streaming so the visible window
-            // tracks the live cursor at the bottom.
-            let drop = rendered.len() - line_limit;
-            rendered.drain(0..drop);
-        } else {
-            rendered.truncate(line_limit);
-        }
-        truncated = true;
-    }
 
     let rail_style = Style::default().fg(thinking_state_accent(state));
     let cursor_style = Style::default().fg(palette::ACCENT_REASONING_LIVE);
@@ -212,37 +167,69 @@ pub(crate) fn render_thinking_with_highlight(
     for (idx, line) in rendered.into_iter().enumerate() {
         let mut spans = vec![Span::styled(REASONING_RAIL.to_string(), rail_style)];
         spans.extend(line.spans);
-        // Trailing cursor on the very last body line while streaming —
-        // signals "still generating" without churning every line.
+        // Mark only the live tail; styling every line would churn the block.
         if streaming && !low_motion && idx == last_idx {
             spans.push(Span::styled(format!(" {REASONING_CURSOR}"), cursor_style));
         }
         lines.push(Line::from(spans));
     }
 
-    let needs_affordance = collapsed
-        && if streaming {
-            // #861 RC4 / #1324: during streaming, surface the affordance
-            // whenever any head lines have been clipped so the user
-            // knows there's more above and how to reach it.
-            truncated
-        } else {
-            truncated || body_text.trim() != content.trim()
-        };
-    if needs_affordance {
-        // One notation with the footer: `cap:verb`, middle-dot separator.
-        let label = if streaming {
-            "Ctrl+O:more"
-        } else {
-            "Space:expand · Ctrl+O:detail"
-        };
+    if collapsed && expandable {
         lines.push(Line::from(vec![
             Span::styled(REASONING_RAIL.to_string(), rail_style),
-            Span::styled(label, Style::default().fg(palette::TEXT_MUTED).italic()),
+            Span::styled(
+                REASONING_OPENER,
+                Style::default().fg(palette::TEXT_MUTED).italic(),
+            ),
         ]));
     }
 
-    lines
+    (lines, expandable)
+}
+
+fn collapsed_thinking_body(
+    content: &str,
+    width: u16,
+    streaming: bool,
+    style: Style,
+) -> (Vec<Line<'static>>, bool) {
+    let (body_text, without_explicit_summary) = if streaming {
+        // #861 RC4 / #1324: an in-flight block has no meaningful completed
+        // summary. Render raw content; the limit below keeps its newest lines.
+        (content.to_string(), false)
+    } else {
+        match extract_explicit_reasoning_summary(content) {
+            Some(summary) => (summary, false),
+            None => (content.to_string(), true),
+        }
+    };
+    // #4146/#4148 used to scrub snake_case here. That rule could not tell
+    // CodeWhale identifiers from user identifiers: paths, env vars, and
+    // module names became bare ellipses while the full body remained one
+    // keypress away. Keep the default view readable; do not revive the scrub.
+    let mut lines = if body_text.trim().is_empty() {
+        Vec::new()
+    } else {
+        markdown_render::render_markdown(&body_text, width.saturating_sub(3).max(1), style)
+    };
+    let limit = if streaming {
+        THINKING_STREAMING_PREVIEW_LINE_LIMIT
+    } else if without_explicit_summary {
+        THINKING_COMPLETED_PREVIEW_LINE_LIMIT
+    } else {
+        THINKING_SUMMARY_LINE_LIMIT
+    };
+    let truncated = lines.len() > limit;
+    if truncated {
+        if streaming {
+            // Follow the live cursor: discard the head, not the newest lines.
+            lines.drain(0..lines.len() - limit);
+        } else {
+            lines.truncate(limit);
+        }
+    }
+    let meaningful = truncated || (!streaming && body_text.trim() != content.trim());
+    (lines, meaningful)
 }
 
 pub(super) fn render_hidden_thinking_activity(

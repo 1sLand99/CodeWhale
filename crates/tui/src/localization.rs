@@ -126,6 +126,7 @@ pub enum MessageId {
     HistoryHintAccept,
     HistoryHintRestore,
     HistoryNoMatches,
+    TranscriptReasoningExpand,
     // StatusPicker — `/statusline` multi-select footer-item picker.
     StatusPickerTitle,
     StatusPickerInstruction,
@@ -1504,6 +1505,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::HistoryHintAccept,
     MessageId::HistoryHintRestore,
     MessageId::HistoryNoMatches,
+    MessageId::TranscriptReasoningExpand,
     MessageId::StatusPickerTitle,
     MessageId::StatusPickerInstruction,
     MessageId::StatusPickerActionToggle,

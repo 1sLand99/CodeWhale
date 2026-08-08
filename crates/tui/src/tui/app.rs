@@ -40,7 +40,7 @@ use crate::tui::active_cell::ActiveCell;
 use crate::tui::approval::ApprovalMode;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
 use crate::tui::file_mention::ContextReference;
-use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
+use crate::tui::history::{HistoryCell, TranscriptActionOwner, TranscriptRenderOptions};
 use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::motion::MotionPolicy;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
@@ -1131,6 +1131,9 @@ pub struct App {
     pub paused_quarry: Option<String>,
     pub history: Vec<HistoryCell>,
     pub history_version: u64,
+    /// Bumped when destructive reindexing could make a cached Space owner name
+    /// a different cell before redraw; ordinary streaming revisions preserve it.
+    pub(crate) transcript_identity_epoch: u64,
     /// Per-cell revision counter, kept in lockstep with `history`.
     pub history_revisions: Vec<u64>,
     /// Cached tool-run grouping for transcript collapse. The detector is
@@ -3446,6 +3449,7 @@ impl App {
         let rev = self.fresh_history_revision();
         self.history.insert(0, placeholder);
         self.history_revisions.insert(0, rev);
+        self.transcript_identity_epoch = self.transcript_identity_epoch.wrapping_add(1);
         self.history_version = self.history_version.wrapping_add(1);
         self.needs_redraw = true;
     }
@@ -3513,6 +3517,7 @@ impl App {
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
             .collect();
+        self.folded_thinking.clear();
         self.expanded_tool_runs = std::mem::take(&mut self.expanded_tool_runs)
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
@@ -3709,9 +3714,7 @@ impl App {
         self.context_references_by_cell.clear();
         self.session_context_references.clear();
         self.session_artifacts.clear();
-        self.collapsed_cells.clear();
-        self.expanded_tool_runs.clear();
-        self.collapsed_cell_map.clear();
+        self.prune_transcript_index_state(0);
         self.history_version = self.history_version.wrapping_add(1);
         self.needs_redraw = true;
     }
@@ -3723,8 +3726,7 @@ impl App {
             self.history_revisions.pop();
             self.context_references_by_cell.remove(&self.history.len());
             self.rebuild_session_context_references();
-            self.expanded_tool_runs
-                .retain(|idx| *idx < self.history.len());
+            self.prune_transcript_index_state(self.history.len());
             self.history_version = self.history_version.wrapping_add(1);
             self.needs_redraw = true;
         }
@@ -3760,12 +3762,17 @@ impl App {
         {
             self.last_fanout_card_index = None;
         }
-        // Drop collapsed cells that reference indices past the new tail.
-        self.collapsed_cells.retain(|idx| *idx < new_len);
-        self.expanded_tool_runs.retain(|idx| *idx < new_len);
-        self.collapsed_cell_map.clear();
+        self.prune_transcript_index_state(new_len);
         self.history_version = self.history_version.wrapping_add(1);
         self.needs_redraw = true;
+    }
+
+    pub(crate) fn prune_transcript_index_state(&mut self, len: usize) {
+        self.transcript_identity_epoch = self.transcript_identity_epoch.wrapping_add(1);
+        self.collapsed_cells.retain(|idx| *idx < len);
+        self.folded_thinking.retain(|idx| *idx < len);
+        self.expanded_tool_runs.retain(|idx| *idx < len);
+        self.collapsed_cell_map.clear();
     }
 
     #[must_use]
@@ -3881,6 +3888,34 @@ impl App {
             )
     }
 
+    /// Space owner: selection, newest visible cell, then latest virtual cell.
+    #[must_use]
+    pub(crate) fn transcript_action_owner(&self) -> Option<TranscriptActionOwner> {
+        let meta = self.viewport.transcript_cache.line_meta();
+        let selected = self
+            .viewport
+            .transcript_selection
+            .ordered_endpoints()
+            .and_then(|(start, _)| meta.get(start.line_index));
+        let start = self.viewport.last_transcript_top.min(meta.len());
+        let end = start
+            .saturating_add(self.viewport.last_transcript_visible)
+            .min(meta.len());
+        let cell_index = selected
+            .into_iter()
+            .chain(meta[start..end].iter().rev())
+            .find_map(|meta| {
+                meta.cell_line()
+                    .map(|(idx, _)| self.original_cell_index_for_rendered(idx))
+                    .filter(|&idx| self.cell_at_virtual_index(idx).is_some())
+            })
+            .or_else(|| self.virtual_cell_count().checked_sub(1))?;
+        Some(TranscriptActionOwner {
+            cell_index,
+            identity_epoch: self.transcript_identity_epoch,
+        })
+    }
+
     /// Pick the detail target for the current viewport. This is used by the
     /// transcript highlight and footer hint so they agree with `v`.
     #[must_use]
@@ -3890,48 +3925,38 @@ impl App {
         visible: usize,
         line_meta: &[TranscriptLineMeta],
     ) -> Option<usize> {
-        let selected_cell = self
+        let original = |meta: &TranscriptLineMeta| {
+            meta.cell_line()
+                .map(|(idx, _)| self.original_cell_index_for_rendered(idx))
+        };
+        let selected = self
             .viewport
             .transcript_selection
             .ordered_endpoints()
             .and_then(|(start, _)| line_meta.get(start.line_index))
-            .and_then(TranscriptLineMeta::cell_line)
-            .map(|(cell_index, _)| self.original_cell_index_for_rendered(cell_index))
+            .and_then(original)
             .filter(|&idx| self.cell_has_detail_target(idx));
-        if selected_cell.is_some() {
-            return selected_cell;
-        }
-
         let start = top.min(line_meta.len().saturating_sub(1));
         let end = start.saturating_add(visible).min(line_meta.len());
+        let mut visible_cells = line_meta[start..end].iter().filter_map(original);
         // A visible error is the most urgent detail target. Prefer the newest
         // visible error over an earlier tool card so Alt+V opens the failure
         // the user is looking at, even when both occupy the viewport.
-        for meta in line_meta.iter().take(end).skip(start).rev() {
-            let Some((cell_index, _)) = meta.cell_line() else {
-                continue;
-            };
-            let cell_index = self.original_cell_index_for_rendered(cell_index);
-            if matches!(
-                self.cell_at_virtual_index(cell_index),
-                Some(HistoryCell::Error { .. })
-            ) {
-                return Some(cell_index);
-            }
-        }
-        for meta in line_meta.iter().take(end).skip(start) {
-            let Some((cell_index, _)) = meta.cell_line() else {
-                continue;
-            };
-            let cell_index = self.original_cell_index_for_rendered(cell_index);
-            if self.cell_has_detail_target(cell_index) {
-                return Some(cell_index);
-            }
-        }
-
-        (0..self.virtual_cell_count())
-            .rev()
-            .find(|&idx| self.cell_has_detail_target(idx))
+        selected
+            .or_else(|| {
+                visible_cells.clone().rev().find(|&idx| {
+                    matches!(
+                        self.cell_at_virtual_index(idx),
+                        Some(HistoryCell::Error { .. })
+                    )
+                })
+            })
+            .or_else(|| visible_cells.find(|&idx| self.cell_has_detail_target(idx)))
+            .or_else(|| {
+                (0..self.virtual_cell_count())
+                    .rev()
+                    .find(|&idx| self.cell_has_detail_target(idx))
+            })
     }
 
     pub fn record_context_references(
@@ -4305,6 +4330,7 @@ impl App {
 
     pub fn transcript_render_options(&self) -> TranscriptRenderOptions {
         TranscriptRenderOptions {
+            locale: self.ui_locale,
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
             thinking_default_expanded: self.thinking_default_expanded,

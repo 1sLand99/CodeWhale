@@ -12,9 +12,7 @@ use super::model::WorkRowId;
 pub fn claim_focus(app: &mut App) {
     let was_focused = app.work_surface.focused;
     app.work_surface.focused = true;
-    if app.viewport.transcript_selection.is_active() {
-        app.viewport.transcript_selection.clear();
-    }
+    crate::tui::mouse_ui::clear_transcript_selection(app);
     if !was_focused {
         app.needs_redraw = true;
     }
@@ -136,5 +134,6 @@ mod tests {
         claim_focus(&mut app);
         assert!(app.work_surface.focused);
         assert!(!app.viewport.transcript_selection.is_active());
+        assert!(app.needs_redraw);
     }
 }

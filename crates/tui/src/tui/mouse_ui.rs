@@ -485,6 +485,7 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 app.viewport.transcript_selection.anchor = Some(point);
                 app.viewport.transcript_selection.head = Some(point);
                 app.viewport.transcript_selection.dragging = true;
+                app.needs_redraw = true;
 
                 if app.is_loading
                     && app.viewport.transcript_scroll.is_at_tail()
@@ -495,8 +496,8 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 {
                     app.viewport.transcript_scroll = anchor;
                 }
-            } else if app.viewport.transcript_selection.is_active() {
-                app.viewport.transcript_selection.clear();
+            } else {
+                clear_transcript_selection(app);
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -963,6 +964,7 @@ pub(crate) fn update_selection_drag(app: &mut App, mouse: MouseEvent) {
     if let Some(point) = selection_point_from_mouse(app, mouse) {
         app.viewport.transcript_selection.head = Some(point);
         app.viewport.selection_autoscroll = None;
+        app.needs_redraw = true;
         return;
     }
 
@@ -1290,7 +1292,7 @@ pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuActio
             }
         }
         ContextMenuAction::ClearSelection => {
-            app.viewport.transcript_selection.clear();
+            clear_transcript_selection(app);
             app.status_message = Some("Selection cleared".to_string());
         }
         ContextMenuAction::CopyCell { cell_index } => {
@@ -1497,11 +1499,14 @@ pub(crate) fn copy_active_selection(app: &mut App) {
             app.status_message = Some("Copy failed".to_string());
         }
     } else {
-        app.viewport.transcript_selection.clear();
+        clear_transcript_selection(app);
         app.status_message = Some("No selection to copy".to_string());
     }
 }
-
+pub(crate) fn clear_transcript_selection(app: &mut App) {
+    app.needs_redraw |= app.viewport.transcript_selection.is_active();
+    app.viewport.transcript_selection.clear();
+}
 pub(crate) fn selection_to_text(app: &App) -> Option<String> {
     let (start, end) = app.viewport.transcript_selection.ordered_endpoints()?;
     let lines = app.viewport.transcript_cache.lines();

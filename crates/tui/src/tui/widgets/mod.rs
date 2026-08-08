@@ -25,7 +25,7 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppMode, ComposerDensity};
+use crate::tui::app::{App, AppMode, ComposerDensity, ViewportState};
 use crate::tui::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel,
     ToolCategory,
@@ -82,6 +82,34 @@ struct TranscriptScrollbar {
     top: usize,
     visible: usize,
     total: usize,
+}
+
+fn resolve_transcript_viewport_after_layout(
+    viewport: &mut ViewportState,
+    visible_lines: usize,
+) -> (usize, usize, bool) {
+    let total_lines = viewport.transcript_cache.total_lines();
+    let line_meta = viewport.transcript_cache.line_meta();
+    if viewport.pending_scroll_delta != 0 {
+        viewport.transcript_scroll = viewport.transcript_scroll.scrolled_by(
+            viewport.pending_scroll_delta,
+            line_meta,
+            visible_lines,
+        );
+        viewport.pending_scroll_delta = 0;
+    }
+
+    let max_start = total_lines.saturating_sub(visible_lines);
+    // Snapshot tail intent before resolve: clamping an out-of-range fixed
+    // offset can return `to_bottom()`, which must not masquerade as the user's
+    // choice to resume following a streaming tail (v0.8.11).
+    let was_explicit_tail = viewport.transcript_scroll.is_at_tail();
+    let (scroll_state, top) = viewport.transcript_scroll.resolve_top(line_meta, max_start);
+    viewport.transcript_scroll = scroll_state;
+    viewport.last_transcript_top = top;
+    viewport.last_transcript_visible = visible_lines;
+    viewport.last_transcript_total = total_lines;
+    (total_lines, top, was_explicit_tail)
 }
 
 impl ChatWidget {
@@ -240,6 +268,7 @@ impl ChatWidget {
                 }
             }),
         );
+        let provisional_action_owner = app.transcript_action_owner();
         let active_entries: &[HistoryCell] = app
             .active_cell
             .as_ref()
@@ -317,6 +346,7 @@ impl ChatWidget {
                 render_options,
                 &app.folded_thinking,
                 None,
+                provisional_action_owner,
             );
         } else {
             // Slow path: borrow non-collapsed cells into a filtered ref list
@@ -411,8 +441,15 @@ impl ChatWidget {
                 render_options,
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
+                provisional_action_owner,
             );
         }
+
+        let (total_lines, top, was_explicit_tail) =
+            resolve_transcript_viewport_after_layout(&mut app.viewport, visible_lines);
+        let owner = app.transcript_action_owner();
+        let index_map = has_collapsed.then_some(app.collapsed_cell_map.as_slice());
+        app.viewport.transcript_cache.retarget(owner, index_map);
 
         // The cache has now observed this revision (or the cell was filtered,
         // in which case a later reveal must cold-render). Start the next append
@@ -422,36 +459,8 @@ impl ChatWidget {
             receipt.from_revision = receipt.to_revision;
         }
 
-        let total_lines = app.viewport.transcript_cache.total_lines();
-
         let line_meta = app.viewport.transcript_cache.line_meta();
 
-        if app.viewport.pending_scroll_delta != 0 {
-            app.viewport.transcript_scroll = app.viewport.transcript_scroll.scrolled_by(
-                app.viewport.pending_scroll_delta,
-                line_meta,
-                visible_lines,
-            );
-            app.viewport.pending_scroll_delta = 0;
-        }
-
-        let max_start = total_lines.saturating_sub(visible_lines);
-        // v0.8.11 hotfix: snapshot whether the user's prior scroll state
-        // was *deliberately* tail BEFORE we resolve. `resolve_top` clamps
-        // out-of-range `at_line(N)` to `to_bottom()` (e.g. when content
-        // shrunk so `max_start < N`), and `scrolled_by` returns
-        // `to_bottom()` when the whole transcript fits in one screen
-        // even if the user just scrolled up. Either case would fool a
-        // post-resolve `is_at_tail()` check into thinking the user is
-        // tracking the tail and silently revoke `user_scrolled_during_
-        // stream` — the next stream chunk would then yank them back to
-        // bottom mid-read.
-        let was_explicit_tail = app.viewport.transcript_scroll.is_at_tail();
-        let (scroll_state, top) = app
-            .viewport
-            .transcript_scroll
-            .resolve_top(line_meta, max_start);
-        app.viewport.transcript_scroll = scroll_state;
         // If the user scrolled back to the live tail, the per-stream
         // "leave me alone" lock is over — new chunks should pin to bottom
         // again until they explicitly scroll up. Without this clear, content
@@ -469,9 +478,6 @@ impl ChatWidget {
         }
 
         app.viewport.last_transcript_area = Some(content_area);
-        app.viewport.last_transcript_top = top;
-        app.viewport.last_transcript_visible = visible_lines;
-        app.viewport.last_transcript_total = total_lines;
         app.viewport.last_transcript_padding_top = 0;
         let detail_target_cell = (!app.viewport.transcript_selection.is_active())
             .then(|| app.detail_cell_index_for_viewport(top, visible_lines, line_meta))

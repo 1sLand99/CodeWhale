@@ -9,6 +9,7 @@
   "HistoryHintAccept": "Enter 선택",
   "HistoryHintRestore": "Esc 복원",
   "HistoryNoMatches": "  일치 항목 없음",
+  "TranscriptReasoningExpand": "펼치기",
   "StatusPickerTitle": " 상태 표시줄 ",
   "StatusPickerInstruction": "하단 표시줄에 표시할 항목을 선택하세요:",
   "StatusPickerActionToggle": "전환 ",

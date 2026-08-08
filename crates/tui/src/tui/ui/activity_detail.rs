@@ -537,13 +537,12 @@ pub(super) fn detail_target_cell_index(app: &App) -> Option<usize> {
             .and_then(|meta| meta.cell_line())
             .map(|(cell_index, _)| app.original_cell_index_for_rendered(cell_index));
     }
-
     app.detail_cell_index_for_viewport(
         app.viewport.last_transcript_top,
         app.viewport.last_transcript_visible.max(1),
         app.viewport.transcript_cache.line_meta(),
     )
-    .or_else(|| app.history.len().checked_sub(1))
+    .or_else(|| app.virtual_cell_count().checked_sub(1))
 }
 
 pub(crate) fn detail_target_label(app: &App, cell_index: usize) -> Option<String> {
