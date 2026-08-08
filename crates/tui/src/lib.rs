@@ -675,9 +675,18 @@ enum FleetAlertAdapterArg {
 /// trap a frustrated user pressing Ctrl+C repeatedly.
 ///
 /// See the call site in `main` for the rationale (#1583).
+///
+/// Registration is synchronous, before the spawn: a `tokio::spawn`ed task does
+/// not run until the scheduler first polls it, so registering the signal
+/// streams *inside* it leaves a window — unbounded under load — where SIGINT
+/// still has its default disposition and kills the process outright. That is
+/// the very outcome this handler exists to prevent, and it produced a real
+/// terminated-by-signal exit (no code, no terminal restore, no `session_end`).
+/// After this function returns, the signals are armed.
 fn spawn_signal_cleanup_task() {
-    tokio::spawn(async {
-        let exit_code = wait_for_terminating_signal().await;
+    let signals = TerminatingSignals::register();
+    tokio::spawn(async move {
+        let exit_code = signals.wait().await;
         // If we get here a fatal signal arrived. Restore the terminal
         // and exit. A second signal during cleanup re-enters this
         // path and aborts via `std::process::exit` directly.
@@ -742,29 +751,67 @@ fn record_signal_session_end() {
     codewhale_telemetry::record_blocking(telemetry_session_end());
 }
 
+/// Terminating-signal streams, registered up front and awaited later.
+///
+/// Splitting registration from the await is the point: the OS disposition
+/// changes when `register` returns, not when the waiting task is first polled.
 #[cfg(unix)]
-async fn wait_for_terminating_signal() -> i32 {
-    use tokio::signal::unix::{SignalKind, signal};
-    // Failing to install any individual stream is non-fatal: we still
-    // want the others to work. The fallback never-resolving future
-    // keeps `select!` well-typed when a stream fails to register.
-    let mut sigint = signal(SignalKind::interrupt()).ok();
-    let mut sigterm = signal(SignalKind::terminate()).ok();
-    let mut sighup = signal(SignalKind::hangup()).ok();
-    tokio::select! {
-        _ = async { match sigint.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 130,
-        _ = async { match sigterm.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 143,
-        _ = async { match sighup.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 129,
+struct TerminatingSignals {
+    sigint: Option<tokio::signal::unix::Signal>,
+    sigterm: Option<tokio::signal::unix::Signal>,
+    sighup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl TerminatingSignals {
+    /// Install the handlers. Failing to install any individual stream is
+    /// non-fatal: we still want the others to work.
+    fn register() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self {
+            sigint: signal(SignalKind::interrupt()).ok(),
+            sigterm: signal(SignalKind::terminate()).ok(),
+            sighup: signal(SignalKind::hangup()).ok(),
+        }
+    }
+
+    /// Resolve with 128 + signal number for whichever arrives first. The
+    /// fallback never-resolving future keeps `select!` well-typed when a
+    /// stream failed to register.
+    async fn wait(mut self) -> i32 {
+        tokio::select! {
+            _ = async { match self.sigint.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 130,
+            _ = async { match self.sigterm.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 143,
+            _ = async { match self.sighup.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 129,
+        }
     }
 }
 
+/// Windows: `ctrl_c` covers both Ctrl+C and Ctrl+Break (CTRL_C_EVENT /
+/// CTRL_BREAK_EVENT). Console-close, logoff, and shutdown events are not
+/// currently routed through tokio.
 #[cfg(not(unix))]
-async fn wait_for_terminating_signal() -> i32 {
-    // Windows: tokio::signal::ctrl_c covers both Ctrl+C and Ctrl+Break
-    // (CTRL_C_EVENT / CTRL_BREAK_EVENT). Console-close, logoff, and
-    // shutdown events are not currently routed through tokio.
-    let _ = tokio::signal::ctrl_c().await;
-    130
+struct TerminatingSignals {
+    ctrl_c: Option<tokio::signal::windows::CtrlC>,
+}
+
+#[cfg(not(unix))]
+impl TerminatingSignals {
+    fn register() -> Self {
+        Self {
+            ctrl_c: tokio::signal::windows::ctrl_c().ok(),
+        }
+    }
+
+    async fn wait(mut self) -> i32 {
+        match self.ctrl_c.as_mut() {
+            Some(s) => {
+                s.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+        130
+    }
 }
 
 fn join_prompt_parts(parts: &[String]) -> String {
@@ -1685,6 +1732,28 @@ async fn run_async_main_inner(
     plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
+    // Install signal handlers that restore the terminal before the process
+    // exits. Without this, Ctrl+C delivered while raw mode / kitty keyboard
+    // enhancement / alt-screen are active (or in the brief windows around
+    // startup and teardown where they're being toggled) leaves the user's shell
+    // receiving raw CSI sequences like `^[[>5u` until they run `reset` (#1583).
+    //
+    // Once the TUI's raw mode is engaged the terminal driver delivers Ctrl+C as
+    // the byte 0x03 rather than SIGINT, so the in-TUI key handler — not this
+    // handler — is what processes user interrupts during normal operation. This
+    // handler exists for the gaps: pre-TUI subcommands (--version, doctor,
+    // login, …), the moments around enable_raw_mode / disable_raw_mode, the
+    // external-editor suspend path, and SIGTERM / SIGHUP from the OS.
+    //
+    // It goes up before arming and before the notice: arming is the first
+    // externally observable thing this process does (it creates the telemetry
+    // buffer), and the notice is the first thing that can sit waiting on a
+    // human. A Ctrl-C in either window must still restore the terminal and exit
+    // 130 rather than kill the process outright. Recording a `session_end` from
+    // the signal path is a no-op until `arm_telemetry` runs, so installing
+    // ahead of it collects nothing.
+    spawn_signal_cleanup_task();
+
     // Arming is what makes the panic hook installed back in `main` — and every
     // other write path — stop being a no-op. Nothing before this line can
     // record anything, which is precisely how a disabled user's panic writes
@@ -1712,22 +1781,6 @@ async fn run_async_main_dispatch(
     plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
-    // Install signal handlers that restore the terminal before the
-    // process exits. Without this, Ctrl+C delivered while raw mode /
-    // kitty keyboard enhancement / alt-screen are active (or in the
-    // brief windows around startup and teardown where they're being
-    // toggled) leaves the user's shell receiving raw CSI sequences
-    // like `^[[>5u` until they run `reset` (#1583).
-    //
-    // Once the TUI's raw mode is engaged the terminal driver delivers
-    // Ctrl+C as the byte 0x03 rather than SIGINT, so the in-TUI key
-    // handler — not this handler — is what processes user interrupts
-    // during normal operation. This handler exists for the gaps:
-    // pre-TUI subcommands (--version, doctor, login, …), the moments
-    // around enable_raw_mode / disable_raw_mode, the external-editor
-    // suspend path, and SIGTERM / SIGHUP from the OS.
-    spawn_signal_cleanup_task();
-
     logging::set_verbose(cli.verbose || logging::env_requests_verbose_logging());
 
     // Install any user prompt overrides from the config directory before an

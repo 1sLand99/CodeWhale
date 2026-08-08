@@ -440,6 +440,34 @@ File edits, terminal width, and Windows installation.
 - Large pasted input is no longer sent to the model twice as inline text and
   as a backup `.md` paste file; the submitted message now carries only the
   `@`-mention so the model reads the file once.
+- A builder sub-agent can run ordinary shell writes again. Write claims
+  outlive the agents that register them, so a workspace accumulated one per
+  builder that ever ran — six completed agents left four standing claims in
+  testing — and the shared-checkout gate counted those long-finished children
+  as live contenders. Every later builder was refused `Bash` writes with
+  "cannot prove a bounded file target" and pushed toward worktree isolation,
+  which puts the work in a checkout the operator never looks at. The gate now
+  asks the question it meant to ask: is another *running* child writing in this
+  shared checkout. Concurrent writers are still gated; a lone builder writes in
+  the workspace you are actually watching.
+- Ctrl-C during the first moments of startup no longer kills Codewhale
+  outright. The terminating-signal handlers were registered inside the task
+  that waits on them, and a spawned task does not run until the scheduler
+  first polls it, so a SIGINT arriving in that window hit the default
+  disposition — the process died with no exit code, no terminal restore, and
+  no session record. The handlers are now installed synchronously, before
+  the telemetry notice and before arming, so the window is closed.
+- The documented tool list on the docs site named `update_plan` and
+  `work_update` as coordination tools. Neither is callable by the model —
+  `update_plan` replays older Plan artifacts and `work_update` is a hidden
+  compatibility alias — so the page listed two tools a reader cannot use and
+  omitted `todo_write`, the one they can.
+
+### Security
+
+- Bumped `nanoid` past GHSA-2v37-7h3g-55p8 (a custom generator given size
+  zero could loop indefinitely), restoring a zero-advisory `npm audit` for
+  the website.
 
 ### Removed
 
