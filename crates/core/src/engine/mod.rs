@@ -31,7 +31,7 @@ use codewhale_protocol::op::{Op, OpEnvelope};
 use codewhale_state::StateStore;
 use tokio::sync::mpsc;
 
-use crate::ids::{SessionId as CoreSessionId, ThreadId as CoreThreadId};
+use crate::ids::ThreadId as CoreThreadId;
 use crate::journal::Journal;
 use crate::session::{Session, Thread};
 
@@ -138,7 +138,11 @@ impl Default for EngineConfig {
 // `crates/tui/src/core/engine.rs` `spawn_engine` / `spawn_supervised`).
 
 pub struct Engine {
+    // Scaffolding: consumed by the #5261 extraction slice that moves the turn
+    // loop into core; until then nothing reads these two fields.
+    #[allow(dead_code)]
     config: EngineConfig,
+    #[allow(dead_code)]
     state: StateStore,
     rx_op: mpsc::Receiver<OpEnvelope>,
     tx_event: mpsc::Sender<EventMsg>,

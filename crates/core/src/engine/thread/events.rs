@@ -16,7 +16,7 @@ use codewhale_protocol::ids::{SessionId, ThreadId};
 pub fn to_envelope_seq(
     seq: u64,
     thread_id: ThreadId,
-    session_id: SessionId,
+    _session_id: SessionId,
     msg: EventMsg,
 ) -> codewhale_protocol::runtime::RuntimeEventEnvelope {
     codewhale_protocol::runtime::RuntimeEventEnvelope {

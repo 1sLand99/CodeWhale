@@ -319,16 +319,16 @@ fn collect_candidate_files(workspace: &Path) -> Vec<PathBuf> {
             if let Ok(entries) = std::fs::read_dir(&path) {
                 for e in entries.flatten() {
                     let p = e.path();
-                    if p.is_dir() && !is_symlink(&p) {
-                        if let Ok(sub) = std::fs::read_dir(&p) {
-                            for se in sub.flatten() {
-                                let sp = se.path();
-                                if sp.is_file()
-                                    && sp.extension().is_some_and(|e| e == "md")
-                                    && !is_symlink(&sp)
-                                {
-                                    dir_files.push(sp);
-                                }
+                    if p.is_dir() && !is_symlink(&p)
+                        && let Ok(sub) = std::fs::read_dir(&p)
+                    {
+                        for se in sub.flatten() {
+                            let sp = se.path();
+                            if sp.is_file()
+                                && sp.extension().is_some_and(|e| e == "md")
+                                && !is_symlink(&sp)
+                            {
+                                dir_files.push(sp);
                             }
                         }
                     }
