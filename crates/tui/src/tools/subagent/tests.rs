@@ -9420,6 +9420,69 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
     assert!(!tmp.path().join("docs/run-escape.txt").exists());
 }
 
+/// A lone writer in the shared checkout keeps its shell.
+///
+/// The gate above exists so concurrent children cannot overwrite each other.
+/// With no second writer there is nothing to collide with, and refusing the
+/// shell there bought no safety: the same child may already write these paths
+/// through `File`. It only pushed builders toward worktree isolation, which
+/// puts their work in a checkout the operator never looks at.
+#[tokio::test]
+async fn lone_shared_writer_keeps_unbounded_shell() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    {
+        let mut guard = manager.write().await;
+        guard
+            .coordination
+            .register_claim(
+                WriteScopeClaim {
+                    owner: "agent_solo".into(),
+                    roots: vec!["src".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                },
+                false,
+                |_| false,
+            )
+            .unwrap();
+    }
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    runtime.context.auto_approve = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+    let registry = SubAgentToolRegistry::new_with_owner(
+        runtime,
+        FleetRole::Builder,
+        "agent_solo".into(),
+        "implementer".into(),
+        Some(vec![
+            "File".into(),
+            "Bash".into(),
+            "Run".into(),
+            "agents/coordinate".into(),
+        ]),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+
+    let result = registry
+        .execute(
+            "agent_solo",
+            "Bash",
+            json!({"action": "run", "command": "echo solo > solo.txt"}),
+        )
+        .await;
+    if let Err(err) = &result {
+        assert!(
+            !err.to_string()
+                .contains("cannot prove a bounded file target"),
+            "a lone shared writer must not hit the contention gate: {err}"
+        );
+    }
+}
+
 #[test]
 fn shared_claim_shell_gate_normalizes_only_the_run_action() {
     assert!(is_unbounded_shell_run(

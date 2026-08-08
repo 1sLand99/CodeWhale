@@ -431,6 +431,16 @@ File edits, terminal width, and Windows installation.
 - Large pasted input is no longer sent to the model twice as inline text and
   as a backup `.md` paste file; the submitted message now carries only the
   `@`-mention so the model reads the file once.
+- A builder sub-agent can run ordinary shell writes again. Write claims
+  outlive the agents that register them, so a workspace accumulated one per
+  builder that ever ran — six completed agents left four standing claims in
+  testing — and the shared-checkout gate counted those long-finished children
+  as live contenders. Every later builder was refused `Bash` writes with
+  "cannot prove a bounded file target" and pushed toward worktree isolation,
+  which puts the work in a checkout the operator never looks at. The gate now
+  asks the question it meant to ask: is another *running* child writing in this
+  shared checkout. Concurrent writers are still gated; a lone builder writes in
+  the workspace you are actually watching.
 - Ctrl-C during the first moments of startup no longer kills Codewhale
   outright. The terminating-signal handlers were registered inside the task
   that waits on them, and a spawned task does not run until the scheduler

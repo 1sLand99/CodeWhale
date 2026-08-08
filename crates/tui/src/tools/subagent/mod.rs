@@ -3457,6 +3457,38 @@ impl SubAgentManager {
             .find(|record| record.claim.owner == owner && !record.isolated_worktree)
     }
 
+    /// Is another *live* child writing in the shared checkout?
+    ///
+    /// This is the question the unbounded-write gate actually needs. A claim
+    /// bounds a child so concurrent children cannot overwrite each other's
+    /// files; with no second writer in the shared tree there is nothing to
+    /// collide with, and a shell redirect is no more dangerous than the `File`
+    /// write the same child is already allowed to perform.
+    ///
+    /// Liveness is the load-bearing part. Claims outlive the agents that
+    /// registered them, so a workspace accumulates one per builder that ever
+    /// ran: six completed agents left four standing claims in testing. Counting
+    /// those made every later builder look contended by children that had long
+    /// since finished, and the contention only ever grew. A terminal owner
+    /// cannot write anything, so its claim cannot contend.
+    ///
+    /// Worktree-isolated peers are excluded too: they write into their own
+    /// checkout and can never contend for these paths.
+    fn has_peer_shared_write_claim(&self, owner: &str) -> bool {
+        self.coordination
+            .write_claims
+            .iter()
+            .filter(|record| record.claim.owner != owner && !record.isolated_worktree)
+            .any(|record| {
+                // Unknown owners stay contended: a claim whose agent is not in
+                // this map may predate the current session, and failing closed
+                // is the safe direction for a write gate.
+                self.agents
+                    .get(&record.claim.owner)
+                    .is_none_or(|agent| matches!(agent.status, SubAgentStatus::Running))
+            })
+    }
+
     /// Classify an agent by its `session_boot_id`: `true` when the
     /// agent was either (a) loaded from disk with no id, or (b) carries
     /// a different id than the manager's current boot. Filters
@@ -13133,9 +13165,17 @@ impl SubAgentToolRegistry {
                 }))
         {
             let manager = self.coordination_manager.read().await;
-            if manager.shared_write_claim(&self.owner_agent_id).is_some() {
+            // Only a *contended* shared checkout needs this gate. The claim
+            // exists so concurrent children cannot overwrite each other; a lone
+            // writer has no peer to collide with, and blocking it there bought
+            // no safety while making a builder unable to run ordinary shell
+            // work in the workspace the operator actually watches — worktree
+            // isolation "fixes" that by writing somewhere they never see.
+            if manager.shared_write_claim(&self.owner_agent_id).is_some()
+                && manager.has_peer_shared_write_claim(&self.owner_agent_id)
+            {
                 return Err(anyhow!(
-                    "Tool {name} cannot prove a bounded file target for this shared-workspace write claim. Use scope-aware file tools, or launch the child with worktree isolation."
+                    "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout. Use scope-aware file tools, or launch the children with worktree isolation."
                 ));
             }
         }
