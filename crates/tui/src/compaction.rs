@@ -48,6 +48,31 @@ pub struct CompactionConfig {
     pub runtime_cost_owner: Option<String>,
 }
 
+/// Host-prepared runtime snapshots carried from compaction eligibility through
+/// the successor commit.
+///
+/// The active-operation reanchor is intentionally owned here instead of
+/// recomputed after the model call. Work-graph owner identities are external
+/// data and are not length-bounded, so a fixed reserve cannot conservatively
+/// model them. Capturing the exact prompt makes both reclaimability and commit
+/// use the same active-operation snapshot even if live operations settle while
+/// the compactor is running.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedCompactionEnvelope {
+    pub config: CompactionConfig,
+    pub successor_reanchor: Option<SystemPrompt>,
+}
+
+impl PreparedCompactionEnvelope {
+    #[must_use]
+    pub fn new(config: CompactionConfig, successor_reanchor: Option<SystemPrompt>) -> Self {
+        Self {
+            config,
+            successor_reanchor,
+        }
+    }
+}
+
 /// Host-captured live state injected after compaction so the successor agent
 /// does not reconstruct workers/mode from prose alone (compactionidea P1).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -762,52 +787,150 @@ pub fn estimate_input_tokens_conservative(
         .saturating_add(framing_overhead)
 }
 
+fn estimate_retained_floor_conservative(
+    messages: &[Message],
+    system_prompt: Option<&SystemPrompt>,
+    plan: &CompactionPlan,
+    prepared: &PreparedCompactionEnvelope,
+    workspace: Option<&Path>,
+) -> usize {
+    let config = &prepared.config;
+    let retained_messages = sanitize_retained_messages(
+        plan.pinned_indices
+            .iter()
+            .map(|&index| messages[index].clone())
+            .collect(),
+    );
+    let pinned_tokens = retained_messages
+        .iter()
+        .map(|message| estimate_tokens_for_message(message, message_has_tool_use(message)))
+        .sum::<usize>()
+        .saturating_mul(3)
+        .div_ceil(2);
+    let framing = retained_messages
+        .len()
+        .saturating_mul(12)
+        .saturating_add(48);
+
+    // Size the deterministic successor sections with the same formatters the
+    // commit path uses. Only the model-authored summary is unknown; its
+    // route-effective max output tokens are a hard request bound. Live state
+    // and the active-operation reanchor are captured before eligibility. The
+    // file-backed anchor/instruction reads remain current-snapshot estimates.
+    let summarized_messages: Vec<Message> = plan
+        .summarize_indices
+        .iter()
+        .map(|&index| messages[index].clone())
+        .collect();
+    let deterministic_summary = build_compaction_summary_block_text(
+        "",
+        &build_continuation_block(messages, &plan.pinned_indices),
+        &anchor_summary_section(workspace),
+        &extract_workflow_context(&summarized_messages, workspace),
+        config
+            .live_state
+            .as_ref()
+            .map(format_live_state_reminder)
+            .filter(|text| !text.is_empty())
+            .as_deref()
+            .unwrap_or_default(),
+        &project_instructions_section(workspace),
+    );
+    let summary_tokens = estimate_text_tokens_conservative(&deterministic_summary).saturating_add(
+        summary_input_limits_for_model(&config.model, config.effective_context_window).max_tokens
+            as usize,
+    );
+
+    let retained_system_prompt = strip_active_operation_reanchor(system_prompt);
+    pinned_tokens
+        .saturating_add(estimate_system_tokens_conservative(
+            retained_system_prompt.as_ref(),
+        ))
+        .saturating_add(framing)
+        .saturating_add(summary_tokens)
+        .saturating_add(estimate_system_tokens_conservative(
+            prepared.successor_reanchor.as_ref(),
+        ))
+}
+
+/// Whether the current canonical request has reached the configured automatic
+/// compaction pressure. This deliberately excludes eligibility/reclaimability:
+/// local tool-result pruning uses it to decide when pressure has actually
+/// cleared, even if the remaining transcript cannot support an LLM summary.
+#[must_use]
+pub fn compaction_pressure_reached(
+    messages: &[Message],
+    system_prompt: Option<&SystemPrompt>,
+    config: &CompactionConfig,
+) -> bool {
+    config.enabled
+        && estimate_input_tokens_conservative(messages, system_prompt) >= config.token_threshold
+}
+
 pub fn should_compact(
     messages: &[Message],
-    config: &CompactionConfig,
+    system_prompt: Option<&SystemPrompt>,
+    prepared: &PreparedCompactionEnvelope,
     workspace: Option<&Path>,
     external_pins: Option<&[usize]>,
     external_working_set_paths: Option<&[String]>,
 ) -> bool {
+    let config = &prepared.config;
     if !config.enabled {
         return false;
     }
+    if !compaction_pressure_reached(messages, system_prompt, config) {
+        return false;
+    }
+
+    // The execution path mechanically prunes old verbose tool results before
+    // asking the model for a summary. Project that same deterministic rewrite
+    // here: a pinned tool-result message is not an irreducible byte floor, and
+    // local pruning alone may be enough to clear pressure even when there are
+    // too few summarizable messages for an LLM pass.
+    let mut projected_messages = messages.to_vec();
+    let pruned_bytes =
+        prune_tool_results_until(&mut projected_messages, KEEP_RECENT_MESSAGES, |_, _| false);
+    if pruned_bytes > 0 && !compaction_pressure_reached(&projected_messages, system_prompt, config)
+    {
+        return true;
+    }
+    let compaction_input = if pruned_bytes > 0 {
+        projected_messages.as_slice()
+    } else {
+        messages
+    };
 
     let plan = plan_compaction(
-        messages,
+        compaction_input,
         workspace,
         KEEP_RECENT_MESSAGES,
         external_pins,
         external_working_set_paths,
     );
-    let pinned_tokens: usize = plan
-        .pinned_indices
-        .iter()
-        .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
-        .sum();
-
-    let token_estimate: usize = plan
-        .summarize_indices
-        .iter()
-        .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
-        .sum();
     let message_count = plan.summarize_indices.len();
 
-    // Pinned messages consume part of the budget, so compact earlier when needed.
-    let effective_token_threshold = config.token_threshold.saturating_sub(pinned_tokens);
-
-    // Token-only trigger (v0.8.11): the prior message-count branch was a
-    // 128K-era heuristic that fired compaction on long chats of small
-    // messages — exactly the case where rewriting the prefix cache is
-    // most wasteful. Token budget is the only signal that maps to actual
-    // model context pressure.
-    if effective_token_threshold == 0 {
-        return message_count >= MIN_SUMMARIZE_MESSAGES;
-    }
+    // Eligibility and pressure are deliberately separate. The compactor needs
+    // enough replaceable messages to produce a useful summary, but the trigger
+    // must measure the same full request the provider and TUI meter see:
+    // pinned messages, system prompt, and framing all consume the route window.
+    // Measuring only the summarizable subset made a 260K/272K request look like
+    // ~39K tokens and prevented automatic compaction entirely.
     if message_count < MIN_SUMMARIZE_MESSAGES {
         return false;
     }
-    token_estimate > effective_token_threshold
+
+    // Do not start a pass that cannot get below the trigger even after every
+    // summarizable message is removed and the same retained-message sanitizer
+    // runs. Without this reclaimability guard, a large pinned/system prefix can
+    // cause auto-compaction on every tool step.
+    estimate_retained_floor_conservative(
+        compaction_input,
+        system_prompt,
+        &plan,
+        prepared,
+        workspace,
+    ) < config.token_threshold
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> &str {
@@ -1052,6 +1175,9 @@ pub struct CompactionResult {
     pub summary_prompt: Option<SystemPrompt>,
     /// Number of retries used before success
     pub retries_used: u32,
+    /// Exact active-operation reanchor captured before eligibility. The engine
+    /// commits this value instead of rereading mutable Work state.
+    pub successor_reanchor: Option<SystemPrompt>,
 }
 
 /// Classify a compaction LLM failure for the retry / input-ladder policy.
@@ -1183,7 +1309,8 @@ fn is_context_window_error_message(text: &str) -> bool {
 pub async fn compact_messages_safe(
     client: &dyn ModelClient,
     messages: &[Message],
-    config: &CompactionConfig,
+    system_prompt: Option<&SystemPrompt>,
+    prepared: &PreparedCompactionEnvelope,
     workspace: Option<&Path>,
     external_pins: Option<&[usize]>,
     external_working_set_paths: Option<&[String]>,
@@ -1191,13 +1318,8 @@ pub async fn compact_messages_safe(
     const MAX_RETRIES: u32 = 3;
     const BASE_DELAY_MS: u64 = 1000;
 
-    let was_over_threshold = should_compact(
-        messages,
-        config,
-        workspace,
-        external_pins,
-        external_working_set_paths,
-    );
+    let config = &prepared.config;
+    let was_over_threshold = compaction_pressure_reached(messages, system_prompt, config);
     let mut pruned_messages = messages.to_vec();
     let mut now_under_threshold = false;
     let mut next_stop_check_bytes = 0usize;
@@ -1213,26 +1335,15 @@ pub async fn compact_messages_safe(
             // The check itself is a full compaction-plan pass, so bound it by saved
             // bytes instead of running it after every candidate in huge sessions.
             next_stop_check_bytes = bytes_saved.saturating_add(TOOL_PRUNE_STOP_CHECK_BYTES);
-            now_under_threshold = !should_compact(
-                candidate_messages,
-                config,
-                workspace,
-                external_pins,
-                external_working_set_paths,
-            );
+            now_under_threshold =
+                !compaction_pressure_reached(candidate_messages, system_prompt, config);
             now_under_threshold
         },
     );
     if was_over_threshold && pruned_bytes > 0 && !now_under_threshold {
         // The throttled in-loop check may skip the exact candidate that clears the
         // budget. Do one final pass so a successful local prune still avoids LLM compaction.
-        now_under_threshold = !should_compact(
-            &pruned_messages,
-            config,
-            workspace,
-            external_pins,
-            external_working_set_paths,
-        );
+        now_under_threshold = !compaction_pressure_reached(&pruned_messages, system_prompt, config);
     }
 
     let compaction_input: &[Message] = if pruned_bytes > 0 {
@@ -1244,6 +1355,7 @@ pub async fn compact_messages_safe(
                 messages: sanitize_retained_messages(pruned_messages),
                 summary_prompt: None,
                 retries_used: 0,
+                successor_reanchor: prepared.successor_reanchor.clone(),
             });
         }
         &pruned_messages
@@ -1276,6 +1388,7 @@ pub async fn compact_messages_safe(
                     messages: sanitize_retained_messages(msgs),
                     summary_prompt: prompt,
                     retries_used: attempt,
+                    successor_reanchor: prepared.successor_reanchor.clone(),
                 });
             }
             Err(e) => {
@@ -1334,6 +1447,37 @@ fn anchor_summary_section(workspace: Option<&Path>) -> String {
 
     section.push_str("\n---\n\n");
     section
+}
+
+fn build_compaction_summary_block_text(
+    summary: &str,
+    continuation: &str,
+    anchors_section: &str,
+    workflow_context: &str,
+    live_reminder: &str,
+    project_instructions: &str,
+) -> String {
+    format!(
+        "{anchors_section}\
+         ## 📋 Conversation Summary (Auto-Generated)\n\n\
+         {summary}\n\n\
+         ---\n\n\
+         {continuation}\
+         ## 🔍 Workflow Context\n\n\
+         {workflow_context}\n\n\
+         ---\n\n\
+         {live_reminder}\
+         {project_instructions}\
+         ## 💡 What to Do Next\n\n\
+         You have just resumed from a context compaction. The conversation above was summarized to save space. \
+         Review the summary, continuation contract, live state, and project instructions, then continue the same task. \
+         {language_contract} \
+         Prefer exact paths and commands from the summary over re-discovery. \
+         If you need more details about the summarized portion, ask the user to clarify.\n\n\
+         ---\n\n\
+         Pinned messages follow:",
+        language_contract = COMPACTION_LANGUAGE_CONTRACT,
+    )
 }
 
 pub async fn compact_messages(
@@ -1401,26 +1545,13 @@ pub async fn compact_messages(
     // Build new message list with enhanced summary as system block
     let summary_block = SystemBlock {
         block_type: "text".to_string(),
-        text: format!(
-            "{anchors_section}\
-             ## 📋 Conversation Summary (Auto-Generated)\n\n\
-             {summary}\n\n\
-             ---\n\n\
-             {continuation}\
-             ## 🔍 Workflow Context\n\n\
-             {workflow_context}\n\n\
-             ---\n\n\
-             {live_reminder}\
-             {project_instructions}\
-             ## 💡 What to Do Next\n\n\
-             You have just resumed from a context compaction. The conversation above was summarized to save space. \
-             Review the summary, continuation contract, live state, and project instructions, then continue the same task. \
-             {language_contract} \
-             Prefer exact paths and commands from the summary over re-discovery. \
-             If you need more details about the summarized portion, ask the user to clarify.\n\n\
-             ---\n\n\
-             Pinned messages follow:",
-            language_contract = COMPACTION_LANGUAGE_CONTRACT,
+        text: build_compaction_summary_block_text(
+            &summary,
+            &continuation,
+            &anchors_section,
+            &workflow_context,
+            &live_reminder,
+            &project_instructions,
         ),
         cache_control: if config.cache_summary {
             Some(CacheControl {
@@ -2344,6 +2475,41 @@ fn extract_path_from_input(input: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Remove the prior active-operation reanchor before sizing or committing a
+/// successor prompt. A prepared envelope supplies the one replacement snapshot
+/// that both paths must use.
+pub(crate) fn strip_active_operation_reanchor(
+    prompt: Option<&SystemPrompt>,
+) -> Option<SystemPrompt> {
+    fn strip_text(mut text: String) -> Option<String> {
+        while let Some(start) = text.find(crate::work_graph::ACTIVE_OPERATION_SUMMARY_START) {
+            let tail = start + crate::work_graph::ACTIVE_OPERATION_SUMMARY_START.len();
+            let end = text[tail..]
+                .find(crate::work_graph::ACTIVE_OPERATION_SUMMARY_END)
+                .map_or(text.len(), |offset| {
+                    tail + offset + crate::work_graph::ACTIVE_OPERATION_SUMMARY_END.len()
+                });
+            text.replace_range(start..end, "");
+        }
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    match prompt.cloned()? {
+        SystemPrompt::Text(text) => strip_text(text).map(SystemPrompt::Text),
+        SystemPrompt::Blocks(blocks) => {
+            let blocks = blocks
+                .into_iter()
+                .filter_map(|mut block| {
+                    block.text = strip_text(block.text)?;
+                    Some(block)
+                })
+                .collect::<Vec<_>>();
+            (!blocks.is_empty()).then_some(SystemPrompt::Blocks(blocks))
+        }
+    }
+}
+
 pub fn merge_system_prompts(
     original: Option<&SystemPrompt>,
     summary: Option<SystemPrompt>,
@@ -2425,6 +2591,10 @@ mod tests {
                 cache_control: None,
             }],
         }
+    }
+
+    fn prepared_without_reanchor(config: &CompactionConfig) -> PreparedCompactionEnvelope {
+        PreparedCompactionEnvelope::new(config.clone(), None)
     }
 
     fn tool_use(id: &str, name: &str, input: serde_json::Value) -> Message {
@@ -3248,7 +3418,14 @@ mod tests {
                 }],
             })
             .collect();
-        assert!(!should_compact(&messages, &config, None, None, None));
+        assert!(!should_compact(
+            &messages,
+            None,
+            &prepared_without_reanchor(&config),
+            None,
+            None,
+            None
+        ));
     }
 
     /// v0.8.11: message-count is no longer a compaction trigger. Long
@@ -3276,7 +3453,14 @@ mod tests {
             .collect();
         // Token total stays minuscule so the token threshold is not hit;
         // without the prior message-count trigger, no compaction.
-        assert!(!should_compact(&many_messages, &config, None, None, None));
+        assert!(!should_compact(
+            &many_messages,
+            None,
+            &prepared_without_reanchor(&config),
+            None,
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -3489,7 +3673,14 @@ mod tests {
             .map(|_| msg("user", "Work on src/compaction.rs right now"))
             .collect();
 
-        assert!(!should_compact(&messages, &config, None, None, None));
+        assert!(!should_compact(
+            &messages,
+            None,
+            &prepared_without_reanchor(&config),
+            None,
+            None,
+            None
+        ));
     }
 
     // v0.8.11: removed `should_compact_counts_only_unpinned_messages` and
@@ -3783,20 +3974,177 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_should_compact_token_threshold_triggers() {
+    fn full_request_pressure_crosses_token_threshold() {
         let config = CompactionConfig {
             enabled: true,
-            token_threshold: 100, // Low threshold for testing
+            token_threshold: 20_000,
             ..Default::default()
         };
 
         // Create messages that exceed token threshold
-        let messages: Vec<Message> = (0..10)
-            .map(|_| msg("user", &"x".repeat(50))) // 50 chars = ~12 tokens each
-            .collect();
+        let messages: Vec<Message> = (0..20).map(|_| msg("user", &"x".repeat(5_000))).collect();
 
-        // Total tokens: ~120, which exceeds 100
-        assert!(should_compact(&messages, &config, None, None, None));
+        assert!(compaction_pressure_reached(&messages, None, &config));
+    }
+
+    #[test]
+    fn auto_compaction_uses_full_request_pressure_across_context_sizes() {
+        for (window, output_reserve) in [
+            (128_000_u64, 4_096_u64),
+            (272_000, 4_096),
+            // CodeWhale's V4-class internal budget reserves up to 262K output.
+            (
+                1_000_000,
+                u64::from(crate::route_budget::TURN_MAX_OUTPUT_TOKENS),
+            ),
+        ] {
+            let budget = crate::context_budget::ContextBudget::new(window, 0, output_reserve);
+            let threshold = usize::try_from(budget.compaction_trigger_for_percent(80.0))
+                .expect("test threshold fits usize");
+            let raw_target = threshold.saturating_mul(7) / 10;
+            let chars_per_message = raw_target.saturating_mul(4) / 14;
+            let messages: Vec<Message> = (0..14)
+                .map(|index| {
+                    msg(
+                        if index % 2 == 0 { "user" } else { "assistant" },
+                        &"x".repeat(chars_per_message),
+                    )
+                })
+                .collect();
+            let raw = estimate_tokens(&messages);
+            let full = estimate_input_tokens_conservative(&messages, None);
+            let config = CompactionConfig {
+                enabled: true,
+                token_threshold: threshold,
+                ..Default::default()
+            };
+
+            assert!(
+                raw < threshold,
+                "raw estimator unexpectedly crossed {window}"
+            );
+            assert!(
+                full >= threshold,
+                "full request must cross the {window} trigger: {full} < {threshold}"
+            );
+            assert!(
+                should_compact(
+                    &messages,
+                    None,
+                    &prepared_without_reanchor(&config),
+                    None,
+                    None,
+                    None,
+                ),
+                "full request pressure must trigger for a {window}-token route"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_session_matching_272k_repro_uses_same_estimate_as_meter() {
+        let messages: Vec<Message> = (0..126)
+            .map(|index| {
+                msg(
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &"x".repeat(5_268),
+                )
+            })
+            .collect();
+        let system = SystemPrompt::Text("s".repeat(29_124));
+        let external_pins: Vec<usize> = (0..76).collect();
+        let threshold = 213_504;
+        let config = CompactionConfig {
+            enabled: true,
+            token_threshold: threshold,
+            ..Default::default()
+        };
+        let plan = plan_compaction(
+            &messages,
+            None,
+            KEEP_RECENT_MESSAGES,
+            Some(&external_pins),
+            None,
+        );
+        let pinned_raw: usize = plan
+            .pinned_indices
+            .iter()
+            .map(|&index| estimate_tokens_for_message(&messages[index], false))
+            .sum();
+        let summarizable_raw: usize = plan
+            .summarize_indices
+            .iter()
+            .map(|&index| estimate_tokens_for_message(&messages[index], false))
+            .sum();
+        let old_effective_threshold = threshold.saturating_sub(pinned_raw);
+        let full = estimate_input_tokens_conservative(&messages, Some(&system));
+
+        assert!(
+            summarizable_raw < old_effective_threshold,
+            "fixture must reproduce the retired summarizable-only false negative"
+        );
+        assert!(
+            full >= threshold,
+            "meter-shaped estimate must cross trigger"
+        );
+        assert!(should_compact(
+            &messages,
+            Some(&system),
+            &prepared_without_reanchor(&config),
+            None,
+            Some(&external_pins),
+            None,
+        ));
+    }
+
+    #[test]
+    fn auto_compaction_skips_pressure_that_cannot_be_reclaimed_below_trigger() {
+        let messages: Vec<Message> = (0..20)
+            .map(|index| {
+                msg(
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &"x".repeat(500),
+                )
+            })
+            .collect();
+        let system = SystemPrompt::Text("s".repeat(24_000));
+        let external_pins: Vec<usize> = (0..10).collect();
+        let config = CompactionConfig {
+            enabled: true,
+            token_threshold: 10_000,
+            ..Default::default()
+        };
+
+        assert!(
+            estimate_input_tokens_conservative(&messages, Some(&system)) >= config.token_threshold,
+            "fixture must be under full-request pressure"
+        );
+        assert!(
+            !should_compact(
+                &messages,
+                Some(&system),
+                &prepared_without_reanchor(&config),
+                None,
+                Some(&external_pins),
+                None,
+            ),
+            "a pinned/system floor above the trigger would loop every tool step"
+        );
+    }
+
+    #[test]
+    fn full_request_threshold_is_inclusive() {
+        let messages: Vec<Message> = (0..10)
+            .map(|index| msg(if index % 2 == 0 { "user" } else { "assistant" }, "payload"))
+            .collect();
+        let threshold = estimate_input_tokens_conservative(&messages, None);
+        let config = CompactionConfig {
+            enabled: true,
+            token_threshold: threshold,
+            ..Default::default()
+        };
+
+        assert!(compaction_pressure_reached(&messages, None, &config));
     }
 
     #[test]
@@ -3810,19 +4158,33 @@ mod tests {
         // Create short messages
         let messages: Vec<Message> = (0..5).map(|_| msg("user", "short")).collect();
 
-        assert!(!should_compact(&messages, &config, None, None, None));
+        assert!(!should_compact(
+            &messages,
+            None,
+            &prepared_without_reanchor(&config),
+            None,
+            None,
+            None
+        ));
     }
 
     #[test]
     fn auto_compaction_uses_token_threshold_without_fixed_floor() {
         let config = CompactionConfig {
             enabled: true,
-            token_threshold: 100,
+            token_threshold: 20_000,
             ..Default::default()
         };
 
-        let messages: Vec<Message> = (0..10).map(|_| msg("user", &"x".repeat(50))).collect();
-        assert!(should_compact(&messages, &config, None, None, None));
+        let messages: Vec<Message> = (0..20).map(|_| msg("user", &"x".repeat(5_000))).collect();
+        assert!(should_compact(
+            &messages,
+            None,
+            &prepared_without_reanchor(&config),
+            None,
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -4102,6 +4464,7 @@ mod tests {
             messages: vec![],
             summary_prompt: None,
             retries_used: 2,
+            successor_reanchor: None,
         };
 
         assert_eq!(result.retries_used, 2);

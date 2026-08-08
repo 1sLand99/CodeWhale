@@ -935,6 +935,8 @@ impl App {
             force_next_full_repaint: false,
             thinking_started_at: None,
             is_compacting: false,
+            active_compaction: None,
+            manual_compaction_queued: false,
             is_purging: false,
             user_scrolled_during_stream: false,
             last_send_at: None,

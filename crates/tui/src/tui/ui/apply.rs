@@ -1509,24 +1509,7 @@ pub(crate) async fn apply_command_result(
                 open_turn_inspector_pager(app);
             }
             AppAction::CompactContext { focus } => {
-                app.status_message = Some("Compacting context...".to_string());
-                match validated_app_runtime_route(app, config) {
-                    Ok(route) => {
-                        let mut compaction = compaction_for_validated_route(app, &route);
-                        compaction.focus = focus.clone();
-                        let _ = engine_handle
-                            .send(Op::CompactContext {
-                                route: Box::new(route.into_resolved()),
-                                compaction: Box::new(compaction),
-                            })
-                            .await;
-                    }
-                    Err(err) => {
-                        app.status_message = Some(format!(
-                            "Cannot compact because the active provider route is invalid: {err}"
-                        ));
-                    }
-                }
+                try_queue_manual_compaction(app, config, engine_handle, focus);
             }
             AppAction::PurgeContext => {
                 app.status_message = Some("Agent purging context...".to_string());

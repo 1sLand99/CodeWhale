@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::DeepSeekClient;
 use crate::compaction::{
-    CompactionConfig, CompactionLiveState, compact_messages_safe, merge_system_prompts,
-    should_compact,
+    CompactionConfig, CompactionLiveState, PreparedCompactionEnvelope, compact_messages_safe,
+    merge_system_prompts, should_compact, strip_active_operation_reanchor,
 };
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
@@ -2539,17 +2539,7 @@ impl Engine {
                             .await;
                     }
                     Op::CompactContext { route, compaction } => {
-                        if let Err(err) = self.install_resolved_runtime_route(*route) {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal_auth(format!(
-                                    "Cannot compact context because its provider route is not ready: {err}"
-                                ))))
-                                .await;
-                            continue;
-                        }
-                        self.config.compaction = *compaction;
-                        self.handle_manual_compaction().await;
+                        self.handle_manual_compaction_op(*route, *compaction).await;
                     }
                     Op::GetSessionSnapshot { tx } => {
                         let total_tokens = self.session.total_usage.input_tokens
@@ -4462,8 +4452,45 @@ impl Engine {
         }
     }
 
-    async fn handle_manual_compaction(&mut self) {
+    fn prepare_compaction_envelope(&self, config: CompactionConfig) -> PreparedCompactionEnvelope {
+        let successor_reanchor = self
+            .config
+            .runtime_services
+            .work
+            .as_ref()
+            .and_then(|work| work.active_operation_summary(Some(&self.session.id)))
+            .map(SystemPrompt::Text);
+        PreparedCompactionEnvelope::new(config, successor_reanchor)
+    }
+
+    async fn handle_manual_compaction_op(
+        &mut self,
+        route: ResolvedRuntimeRoute,
+        compaction: CompactionConfig,
+    ) {
         let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        self.emit_compaction_started(
+            id.clone(),
+            false,
+            "Manual context compaction started".to_string(),
+        )
+        .await;
+        if let Err(err) = self.install_resolved_runtime_route(route) {
+            let message =
+                format!("Cannot compact context because its provider route is not ready: {err}");
+            self.emit_compaction_failed(id, false, message.clone())
+                .await;
+            let _ = self
+                .tx_event
+                .send(Event::error(ErrorEnvelope::fatal_auth(message)))
+                .await;
+            return;
+        }
+        self.config.compaction = compaction;
+        self.handle_manual_compaction(id).await;
+    }
+
+    async fn handle_manual_compaction(&mut self, id: String) {
         let zero_usage = Usage {
             input_tokens: 0,
             output_tokens: 0,
@@ -4490,10 +4517,6 @@ impl Engine {
             return;
         };
 
-        let start_message = "Manual context compaction started".to_string();
-        self.emit_compaction_started(id.clone(), false, start_message)
-            .await;
-
         let compaction_pins = self
             .session
             .working_set
@@ -4505,14 +4528,14 @@ impl Engine {
 
         let mut compaction_config = self.config.compaction.clone();
         let live = self.capture_compaction_live_state().await;
-        if !live.is_empty() {
-            compaction_config.live_state = Some(live);
-        }
+        compaction_config.live_state = (!live.is_empty()).then_some(live);
+        let prepared = self.prepare_compaction_envelope(compaction_config);
 
         match compact_messages_safe(
             &client,
             &self.session.messages,
-            &compaction_config,
+            self.session.system_prompt.as_ref(),
+            &prepared,
             Some(&self.session.workspace),
             Some(&compaction_pins),
             Some(&compaction_paths),
@@ -4522,14 +4545,15 @@ impl Engine {
             Ok(result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
                     let messages_after = result.messages.len();
+                    let retries_used = result.retries_used;
                     self.session.replace_messages(result.messages);
-                    self.merge_compaction_summary(result.summary_prompt);
+                    self.merge_compaction_summary(result.summary_prompt, result.successor_reanchor);
                     self.emit_session_updated().await;
                     let removed = messages_before.saturating_sub(messages_after);
-                    let message = if result.retries_used > 0 {
+                    let message = if retries_used > 0 {
                         format!(
                             "Compaction complete: {messages_before} → {messages_after} messages ({removed} removed, {} retries)",
-                            result.retries_used
+                            retries_used
                         )
                     } else {
                         format!(
@@ -4766,6 +4790,7 @@ impl Engine {
 
         let mut retries_used = 0u32;
         let mut summary_prompt = None;
+        let mut successor_reanchor = None;
         let mut compacted_messages: Vec<Message> = self.session.messages.clone().into();
 
         let mut forced_config = self.config.compaction.clone();
@@ -4775,9 +4800,8 @@ impl Engine {
             .min(target_budget.saturating_sub(1))
             .max(1);
         let live = self.capture_compaction_live_state().await;
-        if !live.is_empty() {
-            forced_config.live_state = Some(live);
-        }
+        forced_config.live_state = (!live.is_empty()).then_some(live);
+        let prepared = self.prepare_compaction_envelope(forced_config);
 
         // Preserve the working-set pins on the emergency/preflight path too.
         // Previously this passed None/None, so a compaction routed here (which,
@@ -4790,7 +4814,8 @@ impl Engine {
         match compact_messages_safe(
             client,
             &self.session.messages,
-            &forced_config,
+            self.session.system_prompt.as_ref(),
+            &prepared,
             Some(&self.session.workspace),
             Some(&compaction_pins),
             Some(&compaction_paths),
@@ -4801,6 +4826,7 @@ impl Engine {
                 retries_used = result.retries_used;
                 compacted_messages = result.messages;
                 summary_prompt = result.summary_prompt;
+                successor_reanchor = result.successor_reanchor;
             }
             Err(err) => {
                 let _ = self
@@ -4815,7 +4841,7 @@ impl Engine {
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
             self.session.replace_messages(compacted_messages);
         }
-        self.merge_compaction_summary(summary_prompt);
+        self.merge_compaction_summary(summary_prompt, successor_reanchor);
 
         let trimmed = self.trim_oldest_messages_to_budget(target_budget);
         self.emit_session_updated().await;
@@ -5293,19 +5319,16 @@ impl Engine {
     /// is the one intentional mid-session prefix mutation — the engine
     /// intentionally accepts the cache-invalidation cost because the
     /// context-reduction benefit outweighs it.
-    fn merge_compaction_summary(&mut self, summary_prompt: Option<SystemPrompt>) {
+    fn merge_compaction_summary(
+        &mut self,
+        summary_prompt: Option<SystemPrompt>,
+        successor_reanchor: Option<SystemPrompt>,
+    ) {
         let Some(summary_prompt) = summary_prompt else {
             return;
         };
-        let reanchor = self
-            .config
-            .runtime_services
-            .work
-            .as_ref()
-            .and_then(|work| work.active_operation_summary(Some(&self.session.id)))
-            .map(SystemPrompt::Text);
-        let summary_prompt =
-            merge_system_prompts(Some(&summary_prompt), reanchor).or(Some(summary_prompt));
+        let summary_prompt = merge_system_prompts(Some(&summary_prompt), successor_reanchor)
+            .or(Some(summary_prompt));
         let prior_compaction =
             strip_active_operation_reanchor(self.session.compaction_summary_prompt.as_ref());
         self.session.compaction_summary_prompt =
@@ -5314,36 +5337,6 @@ impl Engine {
         let merged = merge_system_prompts(prior_system.as_ref(), summary_prompt);
         self.session.last_system_prompt_hash = Some(system_prompt_hash(merged.as_ref()));
         self.session.system_prompt = merged;
-    }
-}
-
-fn strip_active_operation_reanchor(prompt: Option<&SystemPrompt>) -> Option<SystemPrompt> {
-    fn strip_text(mut text: String) -> Option<String> {
-        while let Some(start) = text.find(crate::work_graph::ACTIVE_OPERATION_SUMMARY_START) {
-            let tail = start + crate::work_graph::ACTIVE_OPERATION_SUMMARY_START.len();
-            let end = text[tail..]
-                .find(crate::work_graph::ACTIVE_OPERATION_SUMMARY_END)
-                .map_or(text.len(), |offset| {
-                    tail + offset + crate::work_graph::ACTIVE_OPERATION_SUMMARY_END.len()
-                });
-            text.replace_range(start..end, "");
-        }
-        let text = text.trim().to_string();
-        (!text.is_empty()).then_some(text)
-    }
-
-    match prompt.cloned()? {
-        SystemPrompt::Text(text) => strip_text(text).map(SystemPrompt::Text),
-        SystemPrompt::Blocks(blocks) => {
-            let blocks = blocks
-                .into_iter()
-                .filter_map(|mut block| {
-                    block.text = strip_text(block.text)?;
-                    Some(block)
-                })
-                .collect::<Vec<_>>();
-            (!blocks.is_empty()).then_some(SystemPrompt::Blocks(blocks))
-        }
     }
 }
 

@@ -292,6 +292,397 @@ fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     Ok(())
 }
 
+const COMPACTION_SUMMARY: &str = "1. Primary request and intent — preserve the exact active task across compaction.\n\
+2. Key technical concepts — deterministic PTY lifecycle coverage and bounded engine mailboxes.\n\
+3. Files and code sections — the release runtime QA harness owns this loopback proof.\n\
+4. Errors and fixes — None.\n\
+5. Problem solving — keep provider responses local and hold them long enough to outlive toast expiry.\n\
+6. User messages — continue the active release verification without losing state.\n\
+7. Pending tasks — finish the focused release gates.\n\
+8. Current work — proving serialized compaction and persistent lifecycle labels.\n\
+9. Next step — verify the rebuilt binary.";
+
+#[derive(Clone)]
+struct CompactionLifecycleResponder {
+    stream_requests: Arc<AtomicUsize>,
+    compaction_requests: Arc<AtomicUsize>,
+    successor_stream_requests: Arc<AtomicUsize>,
+    order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    stream_delay: Duration,
+    compaction_delay: Duration,
+}
+
+impl CompactionLifecycleResponder {
+    fn new(stream_delay: Duration, compaction_delay: Duration) -> Self {
+        Self {
+            stream_requests: Arc::new(AtomicUsize::new(0)),
+            compaction_requests: Arc::new(AtomicUsize::new(0)),
+            successor_stream_requests: Arc::new(AtomicUsize::new(0)),
+            order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stream_delay,
+            compaction_delay,
+        }
+    }
+
+    fn request_order(&self) -> Vec<&'static str> {
+        self.order
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn record(&self, kind: &'static str) {
+        self.order
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(kind);
+    }
+}
+
+impl Respond for CompactionLifecycleResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body = request.body_json::<Value>().unwrap_or(Value::Null);
+        let raw = body.to_string();
+        // Prepared non-streaming requests may omit `stream: false` on the
+        // OpenAI wire. The successor-brief instruction is the compactor's
+        // stable semantic discriminator and cannot occur in these test turns.
+        let is_compaction = body.get("stream").and_then(Value::as_bool) == Some(false)
+            || raw.contains("Produce a successor briefing for the agent");
+        if is_compaction {
+            self.compaction_requests.fetch_add(1, Ordering::SeqCst);
+            self.record("compact");
+            return json_response(json!({
+                "id": "chatcmpl-compact-pty",
+                "object": "chat.completion",
+                "created": 0,
+                "model": DEEPSEEK_TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": COMPACTION_SUMMARY},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 128,
+                    "completion_tokens": 64,
+                    "total_tokens": 192
+                }
+            }))
+            .set_delay(self.compaction_delay);
+        }
+
+        self.stream_requests.fetch_add(1, Ordering::SeqCst);
+        if raw.contains("preserve the exact active task across compaction") {
+            self.successor_stream_requests
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        self.record("stream");
+        sse_response(text_sse(DEEPSEEK_TEST_MODEL, "loopback turn completed"))
+            .set_delay(self.stream_delay)
+    }
+}
+
+async fn mount_compaction_responder(server: &MockServer, responder: CompactionLifecycleResponder) {
+    mount_models(server, &[DEEPSEEK_TEST_MODEL]).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(responder)
+        .mount(server)
+        .await;
+}
+
+fn write_auto_compaction_settings(
+    ws: &SealedWorkspace,
+    enabled: bool,
+    threshold_percent: u8,
+) -> Result<()> {
+    std::fs::write(
+        ws.home().join(".codewhale").join("settings.toml"),
+        format!("auto_compact = {enabled}\nauto_compact_threshold_percent = {threshold_percent}\n"),
+    )?;
+    Ok(())
+}
+
+fn write_compaction_session(
+    ws: &SealedWorkspace,
+    id: &str,
+    message_count: usize,
+    message_chars: usize,
+) -> Result<std::path::PathBuf> {
+    let messages = (0..message_count)
+        .map(|index| {
+            let mut text = format!("ordinary archive dialogue item {index:02}: ");
+            text.push_str(
+                &"bounded context pressure evidence "
+                    .repeat(message_chars.saturating_div(34).saturating_add(1)),
+            );
+            text.truncate(message_chars.max(48));
+            json!({
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": [{"type": "text", "text": text, "cache_control": null}]
+            })
+        })
+        .collect::<Vec<_>>();
+    let session_path = ws.workspace().join(format!("{id}.json"));
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": id,
+                "title": format!("Compaction PTY {id}"),
+                "created_at": "2026-08-08T00:00:00Z",
+                "updated_at": "2026-08-08T00:00:00Z",
+                "message_count": messages.len(),
+                "total_tokens": message_count.saturating_mul(message_chars).saturating_div(4),
+                "model": DEEPSEEK_TEST_MODEL,
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": messages,
+            "system_prompt": null,
+            "work_state": null
+        }))?,
+    )?;
+    Ok(session_path)
+}
+
+fn load_session(harness: &mut Harness, path: &std::path::Path, message_count: usize) -> Result<()> {
+    type_and_submit(harness, &format!("/load {}", path.to_string_lossy()))?;
+    harness.wait_for_text(&format!("{message_count} messages"), INTERACTION_TIMEOUT)?;
+    Ok(())
+}
+
+fn pump_for(harness: &mut Harness, duration: Duration) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        harness.pump();
+        if let Some(code) = harness.wait_for_exit(Duration::from_millis(0)) {
+            return Err(anyhow!(
+                "TUI exited with {code} during a bounded lifecycle hold\n{}",
+                harness.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    harness.pump();
+    Ok(())
+}
+
+fn compaction_tui_builder(
+    ws: &SealedWorkspace,
+    server: &MockServer,
+) -> crate::qa_harness::harness::HarnessBuilder {
+    common_tui_builder(ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .env("NO_ANIMATIONS", "1")
+}
+
+/// Regression for the v0.9.6 `/compact` freeze: a live turn stops draining the
+/// bounded engine op channel, `/subagents` refresh fills all 32 slots, and the
+/// manual compaction shortcut must still return immediately. The final marker
+/// proves keyboard input and rendering remain live after the full-mailbox path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_compaction_full_mailbox_never_freezes_tui() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let responder =
+        CompactionLifecycleResponder::new(Duration::from_secs(30), Duration::from_millis(0));
+    mount_compaction_responder(&server, responder.clone()).await;
+
+    let ws = make_sealed_workspace()?;
+    write_auto_compaction_settings(&ws, false, 80)?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    type_and_submit(&mut tui, "hold the engine turn for mailbox saturation")?;
+    wait_for_counter(&mut tui, &responder.stream_requests, 1, INTERACTION_TIMEOUT)?;
+    type_and_submit(&mut tui, "/subagents")?;
+    tui.wait_for_text("No Fleet workers running.", Duration::from_secs(5))?;
+
+    // One ListSubAgents op came from opening the view. Forty-eight more refresh
+    // keys leave ample headroom over the engine's 32-slot bounded channel even
+    // if a terminal or scheduler coalesces a few writes.
+    for _ in 0..48 {
+        tui.send(keys::key::ch('r'))?;
+        tui.pump();
+        std::thread::sleep(Duration::from_millis(12));
+    }
+    pump_for(&mut tui, Duration::from_millis(250))?;
+    tui.send(keys::key::esc())?;
+    tui.wait_for(
+        |frame| !frame.contains("No Fleet workers running."),
+        Duration::from_secs(3),
+    )?;
+
+    let compact_started = Instant::now();
+    tui.send(keys::key::ctrl('l'))?;
+    tui.wait_for_text("engine is busy", Duration::from_secs(3))?;
+    assert!(
+        compact_started.elapsed() < Duration::from_secs(3),
+        "full-mailbox compaction did not return within the liveness budget"
+    );
+    assert_eq!(
+        responder.compaction_requests.load(Ordering::SeqCst),
+        0,
+        "a full mailbox must reject rather than start compaction"
+    );
+
+    tui.send(keys::key::text("post-compact-full-mailbox-live"))?;
+    tui.wait_for_text("post-compact-full-mailbox-live", Duration::from_secs(3))?;
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// A manual request accepted during a live turn is serialized behind that
+/// turn, starts exactly one provider compaction request, and owns its typed
+/// phase label beyond the five-second toast lifetime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_manual_compaction_serializes_and_label_persists() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let responder =
+        CompactionLifecycleResponder::new(Duration::from_secs(3), Duration::from_secs(9));
+    mount_compaction_responder(&server, responder.clone()).await;
+
+    let ws = make_sealed_workspace()?;
+    write_auto_compaction_settings(&ws, false, 80)?;
+    let session_path = write_compaction_session(&ws, "manual-compaction-pty", 12, 600)?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+    load_session(&mut tui, &session_path, 12)?;
+
+    type_and_submit(
+        &mut tui,
+        "keep this turn active while manual compaction queues",
+    )?;
+    wait_for_counter(&mut tui, &responder.stream_requests, 1, INTERACTION_TIMEOUT)?;
+    tui.send(keys::key::ctrl('l'))?;
+    tui.wait_for_text(
+        "Context compaction queued; it will run after the active turn.",
+        Duration::from_secs(3),
+    )?;
+    tui.send(keys::key::ctrl('l'))?;
+    tui.wait_for_text(
+        "Context compaction is already in progress.",
+        Duration::from_secs(3),
+    )?;
+
+    wait_for_counter(
+        &mut tui,
+        &responder.compaction_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
+    tui.wait_for_text("Compacting context…", Duration::from_secs(5))?;
+    pump_for(&mut tui, Duration::from_millis(5_500))?;
+    assert!(
+        tui.frame().contains("Compacting context…"),
+        "manual lifecycle label expired with its five-second start toast:\n{}",
+        tui.debug_dump()
+    );
+    tui.wait_for(
+        |frame| !frame.contains("Compacting context…"),
+        INTERACTION_TIMEOUT,
+    )?;
+    // The one-shot completion toast may be superseded by the preceding turn's
+    // done phase before the next PTY draw. Prove the stronger state transition:
+    // a subsequent provider request must carry the committed successor summary.
+    type_and_submit(&mut tui, "post-compaction successor probe")?;
+    wait_for_counter(&mut tui, &responder.stream_requests, 2, INTERACTION_TIMEOUT)?;
+    wait_for_counter(
+        &mut tui,
+        &responder.successor_stream_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
+    assert_eq!(
+        responder.compaction_requests.load(Ordering::SeqCst),
+        1,
+        "repeated manual requests must serialize into one compaction pass"
+    );
+    assert_eq!(
+        responder.request_order(),
+        vec!["stream", "compact", "stream"],
+        "manual compaction must wait behind the active turn and commit before the successor turn"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// Auto-compaction uses full conservative request pressure on a configured
+/// 272K route. Its typed auto label must remain visible beyond toast expiry,
+/// and the ordinary streamed turn may start only after compaction completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_auto_compaction_label_persists() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let responder = CompactionLifecycleResponder::new(Duration::ZERO, Duration::from_secs(9));
+    mount_compaction_responder(&server, responder.clone()).await;
+
+    let ws = make_sealed_workspace()?;
+    write_auto_compaction_settings(&ws, true, 25)?;
+    std::fs::write(
+        ws.home().join(".codewhale").join("config.toml"),
+        "provider = \"deepseek\"\n[providers.deepseek]\ncontext_window = 272000\n",
+    )?;
+    let session_path = write_compaction_session(&ws, "auto-compaction-pty", 24, 8_000)?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+    load_session(&mut tui, &session_path, 24)?;
+
+    type_and_submit(&mut tui, "trigger the conservative pressure boundary")?;
+    wait_for_counter(
+        &mut tui,
+        &responder.compaction_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
+    assert_eq!(
+        responder.stream_requests.load(Ordering::SeqCst),
+        0,
+        "the provider turn must not start before automatic compaction"
+    );
+    tui.wait_for_text("Context automatically compacting…", Duration::from_secs(5))?;
+    pump_for(&mut tui, Duration::from_millis(5_500))?;
+    assert!(
+        tui.frame().contains("Context automatically compacting…"),
+        "auto lifecycle label expired with its five-second start toast:\n{}",
+        tui.debug_dump()
+    );
+    wait_for_counter(&mut tui, &responder.stream_requests, 1, INTERACTION_TIMEOUT)?;
+    wait_for_counter(
+        &mut tui,
+        &responder.successor_stream_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
+    tui.wait_for(
+        |frame| !frame.contains("Context automatically compacting…"),
+        Duration::from_secs(5),
+    )?;
+    assert!(
+        !tui.frame().contains("Context automatically compacting…"),
+        "auto lifecycle label must clear after its matching completion:\n{}",
+        tui.debug_dump()
+    );
+    assert_eq!(
+        responder.request_order(),
+        vec!["compact", "stream"],
+        "automatic compaction must finish before the ordinary provider turn"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn underwater_footer_moves_from_working_through_one_shot_completion() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;

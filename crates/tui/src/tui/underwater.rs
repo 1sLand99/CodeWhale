@@ -185,6 +185,8 @@ pub enum ShellPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveActivityKind {
     Working,
+    Compacting,
+    AutoCompacting,
     Reasoning,
     Reading,
     UsingTool,
@@ -204,7 +206,15 @@ impl LiveActivity {
     #[must_use]
     pub(crate) fn from_app(app: &App) -> Self {
         let tools = running_tool_facts(app);
-        let kind = if tools.verifying {
+        let kind = if app
+            .active_compaction
+            .as_ref()
+            .is_some_and(|compaction| compaction.auto)
+        {
+            LiveActivityKind::AutoCompacting
+        } else if app.active_compaction.is_some() {
+            LiveActivityKind::Compacting
+        } else if tools.verifying {
             LiveActivityKind::Verifying
         } else if tools.count > 0 && tools.all_reading {
             LiveActivityKind::Reading
@@ -240,6 +250,8 @@ impl LiveActivity {
     fn label(self, locale: Locale) -> Cow<'static, str> {
         match self.kind {
             LiveActivityKind::Working => tr(locale, MessageId::PhaseWorking),
+            LiveActivityKind::Compacting => tr(locale, MessageId::ContextManualCompacting),
+            LiveActivityKind::AutoCompacting => tr(locale, MessageId::ContextAutoCompacting),
             LiveActivityKind::Reasoning => tr(locale, MessageId::PhaseReasoning),
             LiveActivityKind::Reading => tr(locale, MessageId::PhaseReading),
             LiveActivityKind::UsingTool => tr(locale, MessageId::PhaseUsingTool),
@@ -324,6 +336,15 @@ impl ShellPhase {
             Some(ModalKind::Approval | ModalKind::Elevation | ModalKind::UserInput)
         ) {
             return Self::Approval;
+        }
+        if matches!(
+            activity.kind(),
+            LiveActivityKind::Compacting | LiveActivityKind::AutoCompacting
+        ) {
+            // A typed CompactionStarted event is newer and more specific than
+            // a prior turn's failed projection. Keep the recovery operation
+            // visible until its matching terminal event arrives.
+            return Self::Working;
         }
         if app.turn_error_posted
             || matches!(app.runtime_turn_status.as_deref(), Some("failed" | "error"))
@@ -477,6 +498,9 @@ pub(crate) fn title_activity_verb(app: &App) -> &'static str {
         ShellPhase::Typing => "drafting…",
         ShellPhase::Idle => "idle",
         ShellPhase::Working => match activity.kind() {
+            LiveActivityKind::Compacting | LiveActivityKind::AutoCompacting => {
+                "compacting context…"
+            }
             LiveActivityKind::Reasoning => "reasoning…",
             LiveActivityKind::Reading => "reading…",
             LiveActivityKind::UsingTool => "using tool…",
@@ -2288,6 +2312,56 @@ mod tests {
         let (marker, label) = phase_marker(&app, ShellPhase::from_app(&app));
         assert_eq!(marker, "✕");
         assert_eq!(label, "failed");
+    }
+
+    #[test]
+    fn compaction_activity_owns_phase_label_for_its_full_lifecycle() {
+        let mut app = test_app();
+        app.is_loading = true;
+        app.is_compacting = true;
+        app.turn_error_posted = true;
+        app.runtime_turn_status = Some("failed".to_string());
+        app.active_compaction = Some(crate::tui::app::ActiveCompaction {
+            id: "compact-auto".to_string(),
+            auto: true,
+        });
+
+        assert_eq!(
+            LiveActivity::from_app(&app).kind(),
+            LiveActivityKind::AutoCompacting
+        );
+        let phase = ShellPhase::from_app(&app);
+        assert_eq!(phase, ShellPhase::Working);
+        assert_eq!(
+            phase_marker(&app, phase).1,
+            "Context automatically compacting…"
+        );
+        let auto_label = "Context automatically compacting…".to_string();
+        app.status_message = Some(auto_label.clone());
+        app.last_status_message_seen = Some(auto_label.clone());
+        app.push_status_toast(
+            auto_label,
+            crate::tui::app::StatusToastLevel::Info,
+            Some(4_000),
+        );
+        for toast in &mut app.status_toasts {
+            toast.created_at = Instant::now() - Duration::from_secs(5);
+        }
+        let footer = footer_text(&mut app);
+        assert!(
+            footer.contains("Context automatically compacting…"),
+            "the lifecycle phase must outlive the start toast: {footer}"
+        );
+
+        app.active_compaction = Some(crate::tui::app::ActiveCompaction {
+            id: "compact-manual".to_string(),
+            auto: false,
+        });
+        assert_eq!(
+            LiveActivity::from_app(&app).kind(),
+            LiveActivityKind::Compacting
+        );
+        assert_eq!(phase_marker(&app, phase).1, "Compacting context…");
     }
 
     #[test]

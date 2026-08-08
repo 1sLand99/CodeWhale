@@ -284,6 +284,7 @@ pub(crate) fn recover_stalled_runtime_turn(app: &mut App, message: &str, level: 
 pub(crate) fn recover_engine_event_disconnect(app: &mut App) -> bool {
     let had_live_work = app.is_loading
         || app.is_compacting
+        || app.manual_compaction_queued
         || app.is_purging
         || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
         || app.pending_turn_route.is_some()
@@ -312,6 +313,8 @@ pub(crate) fn recover_engine_event_disconnect(app: &mut App) -> bool {
 
     app.is_loading = false;
     app.is_compacting = false;
+    app.active_compaction = None;
+    app.manual_compaction_queued = false;
     app.is_purging = false;
     app.turn_started_at = None;
     app.turn_last_activity_at = None;
