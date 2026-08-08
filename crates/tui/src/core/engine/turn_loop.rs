@@ -14,6 +14,7 @@ use crate::runtime_handoff::{
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::tool_call_budget::ToolCallBudget;
+use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
@@ -714,7 +715,7 @@ impl Engine {
                 }
             }
 
-            let mut request = MessageRequest {
+            let mut request = prepare_primary_turn_request(PrimaryTurnRequest {
                 model: self.session.model.clone(),
                 messages: self.request_messages_with_work_tail(work_state_tail.as_ref()),
                 max_tokens: effective_max_output_tokens_for_route(
@@ -733,13 +734,8 @@ impl Engine {
                 } else {
                     None
                 },
-                metadata: None,
-                thinking: None,
                 reasoning_effort: effective_reasoning_effort,
-                stream: Some(true),
-                temperature: None,
-                top_p: None,
-            };
+            });
             // Normalize images against the route this request is actually
             // going to. Session history keeps the real image so that switching
             // to a vision-capable model later makes it visible again; only the

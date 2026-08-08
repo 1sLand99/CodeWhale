@@ -36,8 +36,8 @@ use crate::mcp::{McpConfig, McpPool};
 #[cfg(test)]
 use crate::models::ToolCaller;
 use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
-    Tool, Usage, is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
+    ContentBlock, ContentBlockStart, Delta, Message, StreamEvent, SystemPrompt, Tool, Usage,
+    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
 };
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
