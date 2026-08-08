@@ -7,17 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.5] - Unreleased candidate
+## [0.9.5] - 2026-08-07
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
 runtime while preserving the familiar `codewhale` and `codew` commands. It
 also expands the managed Runtime API, makes session and Fleet work easier to
 inspect and resume, and fixes the local turn backstop that could end productive
 tool work before the model received its final tool result.
-
-This is the Codewhale v0.9.5 source candidate. It is not a published release
-until the exact rebuilt candidate passes dogfood and the release is explicitly
-approved.
 
 ### Added
 
@@ -44,6 +40,9 @@ approved.
 - Startup release checks cache successful lookups for one hour. The updater
   downloads and verifies the primary runtime once, then refreshes any existing
   `codew` or legacy `codewhale-tui` command paths from the same bytes.
+- Headless `codewhale exec` runs and verifier benchmark rollouts no longer
+  impose a 100-step default. `--max-turns` remains available as an explicit
+  opt-in ceiling; Fleet workers retain their separately configured budget.
 - Command-palette and slash-completion shadowing now share one alias-aware
   discovery contract.
 - The website install guidance, localized product copy, navigation controls,

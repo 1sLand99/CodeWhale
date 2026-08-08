@@ -7,17 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.5] - Unreleased candidate
+## [0.9.5] - 2026-08-07
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
 runtime while preserving the familiar `codewhale` and `codew` commands. It
 also expands the managed Runtime API, makes session and Fleet work easier to
 inspect and resume, and fixes the local turn backstop that could end productive
 tool work before the model received its final tool result.
-
-This is the Codewhale v0.9.5 source candidate. It is not a published release
-until the exact rebuilt candidate passes dogfood and the release is explicitly
-approved.
 
 ### Added
 
@@ -44,6 +40,9 @@ approved.
 - Startup release checks cache successful lookups for one hour. The updater
   downloads and verifies the primary runtime once, then refreshes any existing
   `codew` or legacy `codewhale-tui` command paths from the same bytes.
+- Headless `codewhale exec` runs and verifier benchmark rollouts no longer
+  impose a 100-step default. `--max-turns` remains available as an explicit
+  opt-in ceiling; Fleet workers retain their separately configured budget.
 - Command-palette and slash-completion shadowing now share one alias-aware
   discovery contract.
 - The website install guidance, localized product copy, navigation controls,
@@ -5225,8 +5224,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
-[0.9.5]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
