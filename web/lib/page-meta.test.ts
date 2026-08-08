@@ -72,14 +72,15 @@ describe("page metadata", () => {
     expect(Object.keys(languages)).toHaveLength(locales.length + 1);
   });
 
-  it("names Codewhale exactly once across the shared OG heading and identity", () => {
+  it("keeps the canonical brand-first identity without duplicating an OG heading", () => {
     const brand = new RegExp(`\\b${SITE_NAME}\\b`, "gi");
     const ogImage = readFileSync(new URL("../app/opengraph-image.tsx", import.meta.url), "utf8");
 
-    expect(IDENTITY_PHRASE).not.toMatch(brand);
+    expect(IDENTITY_PHRASE).toBe("Codewhale dives into the deep so you don't have to.");
+    expect(OG_ALT).toBe(IDENTITY_PHRASE);
     expect(OG_ALT.match(brand)).toHaveLength(1);
-    expect(ogImage).toContain("{SITE_NAME}");
     expect(ogImage).toContain("{IDENTITY_PHRASE}");
+    expect(ogImage).not.toContain("{SITE_NAME}");
   });
 
   it("keeps the previously incomplete indexable routes on the shared helper", () => {
