@@ -760,6 +760,15 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let pending_preview = build_pending_input_preview(app);
     let desired_preview_height = pending_preview.desired_height(size.width);
 
+    // Persistent background-work indicator (#5286): one pinned row above the
+    // composer while shells / durable tasks / sub-agents are in flight. The
+    // chip mirrors the Work strip and `/jobs` state — no separate registry —
+    // and collapses to zero rows when nothing is pending. It is carved from
+    // the auxiliary budget so compact terminals shed the chip before they
+    // shed chat/composer space.
+    let pending_work = crate::tui::background_indicator::pending_work_from_app(app);
+    let indicator_height = if pending_work.is_empty() { 0 } else { 1 };
+
     // WorkflowPanel unified activity surface (#4121). Expanded while running
     // (interactive drill-in above the composer); when collapsed the panel
     // takes no rows — its persistent status lives in the top status bar as a
@@ -770,12 +779,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         .filter(|panel| panel.expanded)
         .map(|panel| panel.desired_height(size.width))
         .unwrap_or(0);
-    let auxiliary_budget = body_height.saturating_sub(
-        top_work_strip_height
-            .saturating_add(MIN_CHAT_HEIGHT)
-            .saturating_add(composer_height)
-            .saturating_add(footer_height),
-    );
+    let auxiliary_budget = body_height
+        .saturating_sub(
+            top_work_strip_height
+                .saturating_add(MIN_CHAT_HEIGHT)
+                .saturating_add(composer_height)
+                .saturating_add(footer_height),
+        )
+        .saturating_sub(indicator_height);
     // Queued-only previews author the direct controls in row two (and fall
     // back to controls-only when just one row remains). Mixed previews retain
     // up to three compact rows at the release floor.
@@ -790,10 +801,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let phase = crate::tui::underwater::ShellPhase::from_app(app);
     let phase_above =
         crate::tui::phase_strip::PhaseStripPlacement::for_phase(phase).is_above_composer();
+    // The indicator row sits directly above the composer (and above the
+    // footer when the phase strip is above), so background work stays pinned
+    // beside the prompt even when the transcript scrolls (#5286).
     let (composer_slot, footer_slot, tail_constraints) = if phase_above {
         (
+            6,
             5,
-            4,
             [
                 Constraint::Length(footer_height),
                 Constraint::Length(composer_height),
@@ -801,8 +815,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         )
     } else {
         (
-            4,
             5,
+            6,
             [
                 Constraint::Length(composer_height),
                 Constraint::Length(footer_height),
@@ -818,6 +832,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             Constraint::Min(1),                        // Chat area
             Constraint::Length(workflow_panel_height), // Workflow panel (#4121)
             Constraint::Length(preview_height),        // Pending input preview (0 if empty)
+            Constraint::Length(indicator_height),      // Background-work chip (#5286, 0 if idle)
             tail_constraints[0],
             tail_constraints[1],
         ])
@@ -903,6 +918,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     if preview_height > 0 {
         let buf = f.buffer_mut();
         pending_preview.render(body_chunks[3], buf);
+    }
+
+    // Render the pinned background-work chip (0-height when idle, so this is
+    // a no-op unless shells / tasks / sub-agents are in flight; #5286).
+    if indicator_height > 0 {
+        let buf = f.buffer_mut();
+        crate::tui::background_indicator::render(body_chunks[4], buf, app, &pending_work);
     }
 
     // Render composer
