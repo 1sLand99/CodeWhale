@@ -425,7 +425,9 @@ pub fn render_tree(journal: &SessionJournal) -> String {
                     let short: String = summary.chars().take(60).collect();
                     format!("compaction: {short}")
                 }
-                SessionEntryKind::BranchSummary { branch_id, summary, .. } => {
+                SessionEntryKind::BranchSummary {
+                    branch_id, summary, ..
+                } => {
                     let short: String = summary.chars().take(60).collect();
                     format!("branch:{} {short}", &branch_id[..branch_id.len().min(8)])
                 }

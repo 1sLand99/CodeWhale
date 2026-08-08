@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod agent_run;
+pub mod event_msg;
 pub mod fleet;
+pub mod ids;
+pub mod journal;
+pub mod op;
 pub mod runtime;
 pub mod workroom;
-pub mod ids;
-pub mod op;
-pub mod event_msg;
-pub mod journal;
 
 /// Common trait for lifecycle status enums across the protocol layer.
 ///

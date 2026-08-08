@@ -148,14 +148,7 @@ mod tests {
 
     #[test]
     fn dryrun_is_pure_inspection() {
-        let req = build_chat_request(
-            "m",
-            "deepseek",
-            None,
-            vec![],
-            vec![],
-            None,
-        );
+        let req = build_chat_request("m", "deepseek", None, vec![], vec![], None);
         let preview = preview_human(&req);
         assert!(preview.contains("model: m"));
         // Preview must not mutate the request.

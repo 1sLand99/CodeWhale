@@ -65,7 +65,10 @@ pub struct EngineHandle {
 
 impl EngineHandle {
     pub async fn send(&self, op: OpEnvelope) -> anyhow::Result<()> {
-        self.tx_op.send(op).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.tx_op
+            .send(op)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 
@@ -79,7 +82,11 @@ impl EngineHandle {
         }
     }
 
-    pub async fn steer(&self, thread_id: ThreadId, content: impl Into<String>) -> anyhow::Result<()> {
+    pub async fn steer(
+        &self,
+        thread_id: ThreadId,
+        content: impl Into<String>,
+    ) -> anyhow::Result<()> {
         let env = OpEnvelope {
             op_id: format!("op-{}", uuid::Uuid::new_v4()),
             thread_id,
@@ -88,7 +95,10 @@ impl EngineHandle {
                 content: content.into(),
             },
         };
-        self.tx_op.send(env).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.tx_op
+            .send(env)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 }
@@ -179,7 +189,8 @@ impl Engine {
     /// and the `execpolicy` gate that both modes share.
     pub async fn run(mut self) {
         while let Some(env) = self.rx_op.recv().await {
-            let _ = self.tx_event
+            let _ = self
+                .tx_event
                 .send(EventMsg::TurnStarted {
                     thread_id: env.thread_id.clone(),
                     session_id: env.session_id.clone(),
@@ -194,7 +205,8 @@ impl Engine {
                     self.thread.leaf_id = self.journal.leaf_id.clone();
                     self.session.bump_revision();
                     let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
-                    let _ = self.tx_event
+                    let _ = self
+                        .tx_event
                         .send(EventMsg::TurnComplete {
                             thread_id: env.thread_id.clone(),
                             session_id: env.session_id.clone(),
@@ -270,11 +282,8 @@ mod tests {
     async fn headless_session_can_be_started_with_no_tui() {
         let dir = tempfile::tempdir().unwrap();
         let state = StateStore::open(Some(dir.path().join("state.db"))).unwrap();
-        let (handle, thread_id, _session_id) = spawn_headless_thread(
-            dir.path().to_path_buf(),
-            "deepseek-v4-flash",
-            state,
-        );
+        let (handle, thread_id, _session_id) =
+            spawn_headless_thread(dir.path().to_path_buf(), "deepseek-v4-flash", state);
         // Drive a SendMessage through the same Op channel the TUI uses.
         let env = OpEnvelope {
             op_id: "op-1".into(),
