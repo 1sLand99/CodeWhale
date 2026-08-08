@@ -1714,6 +1714,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdExportDescription,
     MessageId::CmdFeedbackDescription,
     MessageId::CmdForkDescription,
+    MessageId::CmdTreeDescription,
+    MessageId::CmdBranchDescription,
+    MessageId::CmdResumeDescription,
     MessageId::CmdGoalDescription,
     MessageId::CmdThemeDescription,
     MessageId::CmdHfDescription,
@@ -3473,6 +3476,29 @@ mod tests {
                 "{} defines key(s) en.json lacks: {extra:?}",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn todo_write_tip_is_localized_and_keeps_the_command_placeholder() {
+        let english = tr(Locale::En, MessageId::BehavioralTipTodoWrite);
+        assert!(english.contains("{command}"));
+
+        for locale in Locale::shipped_complete() {
+            let tip = tr(*locale, MessageId::BehavioralTipTodoWrite);
+            assert!(
+                tip.contains("{command}"),
+                "{} todo_write tip must compose the command in code",
+                locale.tag()
+            );
+            if *locale != Locale::En {
+                assert_ne!(
+                    tip,
+                    english,
+                    "{} todo_write tip must be translated instead of copying English",
+                    locale.tag()
+                );
+            }
         }
     }
 
