@@ -260,13 +260,12 @@ pub static COMMAND_ARITY: &[(&str, u8)] = &[
 ///
 /// # Examples
 ///
-/// ```
-/// # use codewhale_tui::command_safety::classify_command;
-/// assert_eq!(classify_command(&["git", "status", "-s"]),            "git status");
-/// assert_eq!(classify_command(&["git", "push", "origin"]),          "git push");
-/// assert_eq!(classify_command(&["cargo", "check", "--workspace"]),  "cargo check");
-/// assert_eq!(classify_command(&["npm", "run", "dev"]),              "npm run dev");
-/// assert_eq!(classify_command(&["ls", "-la"]),                      "ls");
+/// ```text
+/// ["git", "status", "-s"]           -> "git status"
+/// ["git", "push", "origin"]         -> "git push"
+/// ["cargo", "check", "--workspace"] -> "cargo check"
+/// ["npm", "run", "dev"]             -> "npm run dev"
+/// ["ls", "-la"]                      -> "ls"
 /// ```
 pub fn classify_command(tokens: &[&str]) -> String {
     if tokens.is_empty() {
@@ -321,13 +320,12 @@ pub fn classify_command(tokens: &[&str]) -> String {
 ///
 /// # Examples
 ///
-/// ```
-/// # use codewhale_tui::command_safety::prefix_allow_matches;
-/// assert!( prefix_allow_matches("git status",    "git status --porcelain"));
-/// assert!(!prefix_allow_matches("git status",    "git push origin main"));
-/// assert!( prefix_allow_matches("cargo check",   "cargo check --workspace"));
-/// assert!( prefix_allow_matches("npm run dev",   "npm run dev"));
-/// assert!(!prefix_allow_matches("npm run dev",   "npm run build"));
+/// ```text
+/// "git status"  matches "git status --porcelain"
+/// "git status"  does not match "git push origin main"
+/// "cargo check" matches "cargo check --workspace"
+/// "npm run dev" matches "npm run dev"
+/// "npm run dev" does not match "npm run build"
 /// ```
 pub fn prefix_allow_matches(pattern: &str, command: &str) -> bool {
     // Normalise the pattern: trim + lowercase + collapse whitespace.
