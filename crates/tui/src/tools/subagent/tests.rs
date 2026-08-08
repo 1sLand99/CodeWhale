@@ -6079,6 +6079,7 @@ async fn ordinary_scout_catalog_and_dispatch_keep_only_readonly_bash() {
         "Bash",
         "File",
         "Web",
+        "agent",
         "handle_read",
         "load_skill",
         "retrieve_tool_result",
@@ -9483,7 +9484,7 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
         )
         .await
         .expect_err("read-only General must not receive mutating shell");
-    assert!(shell_error.to_string().contains("not permitted"));
+    assert!(shell_error.to_string().contains("not registered"));
     assert!(!tmp.path().join("forbidden.txt").exists());
     assert!(!tmp.path().join("shell.txt").exists());
 }

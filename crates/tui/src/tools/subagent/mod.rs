@@ -12847,7 +12847,12 @@ impl SubAgentToolRegistry {
 
     fn is_action_allowed(&self, family: &str, action: &str) -> bool {
         let alias = Self::legacy_action_alias(family, action);
-        if self.is_tool_denied(family) || alias.is_some_and(|name| self.is_tool_denied(name)) {
+        let bounded_recon_bash = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && family.eq_ignore_ascii_case("Bash")
+            && action == "run";
+        if self.is_tool_denied(family)
+            || !bounded_recon_bash && alias.is_some_and(|name| self.is_tool_denied(name))
+        {
             return false;
         }
         match &self.allowed_tools {
@@ -12887,6 +12892,7 @@ impl SubAgentToolRegistry {
     fn role_blocks_unhardened_process_tool(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         let recon = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && lower != "agent"
             && !crate::tools::registry::readonly_evidence_tool_name(name);
         let raw_shell = lower == "bash"
             || lower.starts_with("exec_shell")
