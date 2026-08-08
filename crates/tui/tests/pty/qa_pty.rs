@@ -42,12 +42,14 @@ fn boot_minimal() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace
     spawn_minimal_with_env(ws, &[])
 }
 
-fn boot_minimal_over_ssh() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
+fn boot_minimal_over_ssh() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)>
+{
     let ws = make_sealed_workspace()?;
     spawn_minimal_with_env(ws, &[("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.20 22")])
 }
 
-fn boot_minimal_without_retry() -> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
+fn boot_minimal_without_retry()
+-> anyhow::Result<(crate::qa_harness::harness::SealedWorkspace, Harness)> {
     let ws = make_sealed_workspace()?;
     std::fs::write(
         ws.home().join(".deepseek").join("config.toml"),
@@ -267,7 +269,11 @@ fn visible_row_with_text(frame: &crate::qa_harness::Frame, needle: &str) -> Opti
     (0..frame.rows()).find(|&row| frame.row(row).contains(needle))
 }
 
-fn foreground_at_text(frame: &crate::qa_harness::Frame, row: u16, needle: &str) -> crate::qa_harness::Color {
+fn foreground_at_text(
+    frame: &crate::qa_harness::Frame,
+    row: u16,
+    needle: &str,
+) -> crate::qa_harness::Color {
     let col = frame
         .find_text_in_row(row, needle)
         .unwrap_or_else(|| panic!("{needle:?} missing from row {row}: {:?}", frame.row(row)));

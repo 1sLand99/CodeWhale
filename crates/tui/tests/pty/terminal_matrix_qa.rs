@@ -32,11 +32,11 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
 use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
 use crate::qa_harness::modes::{MODES_THAT_MUST_NOT_LEAK, mode};
 use crate::qa_harness::view_log::{self, VIEW_STACK_RUST_LOG};
 use crate::qa_harness::{Frame, keys};
+use anyhow::{Result, anyhow};
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const KEY_TIMEOUT: Duration = Duration::from_secs(6);

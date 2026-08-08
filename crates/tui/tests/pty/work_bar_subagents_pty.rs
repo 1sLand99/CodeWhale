@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
 use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
 use crate::qa_harness::keys;
+use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -181,7 +181,10 @@ impl Respond for ProbeResponder {
     }
 }
 
-fn tui_builder(ws: &SealedWorkspace, server_uri: &str) -> crate::qa_harness::harness::HarnessBuilder {
+fn tui_builder(
+    ws: &SealedWorkspace,
+    server_uri: &str,
+) -> crate::qa_harness::harness::HarnessBuilder {
     Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()
