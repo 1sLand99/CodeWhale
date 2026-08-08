@@ -5155,6 +5155,23 @@ async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
 }
 
 #[tokio::test]
+async fn mobile_runtime_router_starts_without_duplicate_method_routes() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().to_path_buf();
+    let sessions_dir = root.join("sessions");
+    let Some((_addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_and_mobile(root, sessions_dir, None, true).await?
+    else {
+        return Ok(());
+    };
+
+    // Axum panics during `build_router` when a method/path pair is registered
+    // twice, so reaching the running server is the regression assertion.
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let root = tmp.path().to_path_buf();

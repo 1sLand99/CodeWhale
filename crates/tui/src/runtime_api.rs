@@ -995,7 +995,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
-        .route("/v1/skills/{name}", post(set_skill_enabled))
+        .route(
+            "/v1/skills/{name}",
+            post(set_skill_enabled).delete(uninstall_skill_api),
+        )
         .route(
             "/v1/apps/mcp/servers",
             get(list_mcp_servers).post(create_mcp_server),
@@ -1019,14 +1022,9 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             post(reconnect_mcp_server),
         )
         .route("/v1/skills/install", post(install_skill_api))
-        .route(
-            "/v1/skills/{name}",
-            post(set_skill_enabled).delete(uninstall_skill_api),
-        )
         .route("/v1/skills/{name}/update", post(update_skill_api))
         .route("/v1/skills/{name}/trust", post(trust_skill_api))
         .route("/v1/skills/{name}/audit", get(audit_skill_api))
-        .route("/v1/apps/mcp/servers", get(list_mcp_servers))
         .route("/v1/apps/mcp/tools", get(list_mcp_tools))
         .route(
             "/v1/automations",
