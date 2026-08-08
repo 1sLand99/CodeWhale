@@ -12885,6 +12885,43 @@ fn open_tool_details_pager_supports_active_virtual_tool_cell() {
 }
 
 #[test]
+fn visible_error_becomes_full_detail_target_ahead_of_adjacent_tool() {
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "exec_shell".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("command: true".to_string()),
+            output: Some("ok".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+        HistoryCell::Error {
+            message: "Refusing insecure base URL.\nSet CODEWHALE_ALLOW_INSECURE_HTTP=1 only for a trusted LAN host."
+                .to_string(),
+            severity: crate::error_taxonomy::ErrorSeverity::Error,
+        },
+    ];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    app.viewport.last_transcript_top = 0;
+    app.viewport.last_transcript_visible = app.viewport.transcript_cache.total_lines();
+
+    assert!(app.cell_has_detail_target(1));
+    assert_eq!(detail_target_cell_index(&app), Some(1));
+    assert!(open_tool_details_pager(&mut app));
+    let body = pop_pager_body(&mut app);
+    assert!(body.contains("CODEWHALE_ALLOW_INSECURE_HTTP=1"), "{body}");
+}
+
+#[test]
 fn tool_details_pager_frames_leaf_scope_and_preserves_raw_content() {
     let mut app = create_test_app();
     app.history = vec![HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
