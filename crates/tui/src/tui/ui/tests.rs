@@ -10120,6 +10120,60 @@ fn complete_release_json(tag: &str) -> serde_json::Value {
 }
 
 #[test]
+fn startup_notice_accepts_the_v095_single_binary_release_inventory() {
+    const V095_ASSETS: &[&str] = &[
+        "codewhale-linux-x64",
+        "codew-linux-x64",
+        "codewhale-linux-arm64",
+        "codew-linux-arm64",
+        "codewhale-android-arm64",
+        "codew-android-arm64",
+        "codewhale-macos-x64",
+        "codew-macos-x64",
+        "codewhale-macos-arm64",
+        "codew-macos-arm64",
+        "codewhale-windows-x64.exe",
+        "codew-windows-x64.exe",
+        "codewhale.bat",
+        "codewhale-windows-arm64.exe",
+        "codew-windows-arm64.exe",
+        "codewhale-linux-x64.tar.gz",
+        "codewhale-linux-arm64.tar.gz",
+        "codewhale-android-arm64.tar.gz",
+        "codewhale-macos-x64.tar.gz",
+        "codewhale-macos-arm64.tar.gz",
+        "codewhale-windows-x64.zip",
+        "codewhale-windows-x64-portable.zip",
+        "codewhale-windows-arm64.zip",
+        "codewhale-windows-arm64-portable.zip",
+        "CodeWhaleSetup.exe",
+        "codewhale-bundles-sha256.txt",
+        "codewhale-artifacts-sha256.txt",
+    ];
+
+    assert_eq!(REQUIRED_RELEASE_ASSETS, V095_ASSETS);
+    assert!(
+        REQUIRED_RELEASE_ASSETS
+            .iter()
+            .all(|asset| !asset.starts_with("codewhale-tui-")),
+        "the single-binary release must not wait for removed TUI assets"
+    );
+
+    let release = serde_json::json!({
+        "tag_name": "v0.9.5",
+        "draft": false,
+        "prerelease": false,
+        "assets": V095_ASSETS
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "state": "uploaded" }))
+            .collect::<Vec<_>>(),
+    });
+    let notice = version_hint_from_release_json(&release, "0.9.4")
+        .expect("the complete v0.9.5 inventory must produce an update notice");
+    assert_eq!(notice.chip_label(), "↑ v0.9.5");
+}
+
+#[test]
 fn version_hint_requires_complete_release_assets() {
     let complete = complete_release_json("v0.8.47");
     let hint = version_hint_from_release_json(&complete, "0.8.46").expect("newer complete release");

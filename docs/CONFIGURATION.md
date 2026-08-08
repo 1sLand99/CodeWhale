@@ -622,13 +622,13 @@ check_for_updates = false
 #### Throttling
 
 The answer is cached in `~/.codewhale/update-check.json` and reused for
-`check_interval_hours` (default `24`). Only the *network request* is throttled —
+`check_interval_hours` (default `1`). Only the *network request* is throttled —
 the notice still appears on every launch while an update is outstanding. Set `0`
 to check on every launch.
 
 ```toml
 [update]
-check_interval_hours = 24
+check_interval_hours = 1
 ```
 
 A failed check is not cached, so an outage does not suppress the notice until

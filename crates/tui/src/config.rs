@@ -6908,6 +6908,7 @@ reasoning_effort = "auto"
 # Startup update check
 [update]
 check_for_updates = true
+# check_interval_hours = 1
 # update_uri = "https://internal.mirror.example/codewhale/releases/latest"
 "#
     );
