@@ -470,8 +470,8 @@ impl Engine {
         // just 3 blocks inside one message.
         let mut consecutive_empty_repl_rounds: u32 = 0;
         // Combined no-user-input resume backstop (NOTE §5): ends runaway
-        // resumes well before max_steps (1000). Each continue without user
-        // input bumps this; threshold is honest and observable.
+        // synthetic resumes well before max_steps (1000). Productive tool
+        // result steps are progress and intentionally do not count here.
         let mut no_user_input_continues: u32 = 0;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
@@ -3902,18 +3902,9 @@ impl Engine {
                 consecutive_tool_error_steps = 0;
             }
 
-            // Tool stepping (4d): one line why we're continuing without user input.
-            // This is the fourth resume kind alongside subagent/goal/REPL.
-            no_user_input_continues = no_user_input_continues.saturating_add(1);
-            if no_user_input_continues >= 20 {
-                let _ = self
-                    .tx_event
-                    .send(Event::status(
-                        "Turn ending: no-user-input resume backstop hit (20)".to_string(),
-                    ))
-                    .await;
-                break;
-            }
+            // A successful tool step is productive progress, not a runaway
+            // synthetic resume. Declared per-task tool budgets and max_steps
+            // remain the explicit limits for tool-driven work.
             let _ = self
                 .tx_event
                 .send(Event::status("Continuing — tool results".to_string()))

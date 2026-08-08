@@ -4455,6 +4455,96 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
 }
 
 #[tokio::test]
+async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const TOOL_ROUNDS: usize = 20;
+    const FINAL_ANSWER: &str = "All productive tool rounds completed.";
+
+    let workspace = tempdir().expect("tempdir");
+    let mut turns = Vec::with_capacity(TOOL_ROUNDS + 1);
+    for index in 1..=TOOL_ROUNDS {
+        let fixture = format!("fixture-{index}.txt");
+        fs::write(
+            workspace.path().join(&fixture),
+            format!("productive-round-{index}\n"),
+        )
+        .expect("write distinct read fixture");
+        turns.push(canned::tool_call_turn(
+            &format!("call-read-{index}"),
+            "File",
+            &format!(r#"{{"action":"read","path":"{fixture}"}}"#),
+        ));
+    }
+    turns.push(canned::simple_text_turn(FINAL_ANSWER));
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Read every distinct fixture, then report completion.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send productive tool trajectory");
+
+    let mut successful_tool_ids = HashSet::new();
+    let mut saw_final_answer = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for productive tool trajectory")
+    {
+        match event {
+            Event::ToolCallComplete {
+                id, name, result, ..
+            } if name == "File" => {
+                let result = result.expect("File.read result");
+                assert!(result.success, "{id}: {result:?}");
+                assert!(
+                    successful_tool_ids.insert(id.clone()),
+                    "tool id completed twice: {id}"
+                );
+            }
+            Event::MessageDelta { content, .. } => {
+                saw_final_answer |= content.contains(FINAL_ANSWER);
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert_eq!(
+                    successful_tool_ids.len(),
+                    TOOL_ROUNDS,
+                    "turn completed before all productive tool rounds"
+                );
+                assert_eq!(
+                    mock.call_count(),
+                    TOOL_ROUNDS + 1,
+                    "the final provider request must follow tool round 20"
+                );
+                assert!(
+                    saw_final_answer,
+                    "turn completed before the final assistant text arrived"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    assert_eq!(mock.remaining_turns(), 0, "the final turn must be consumed");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
