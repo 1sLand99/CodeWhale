@@ -107,7 +107,7 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
         }
     };
     source_session.ensure_journal();
-    let mut journal = source_session.journal.clone().unwrap_or_else(|| {
+    let journal = source_session.journal.clone().unwrap_or_else(|| {
         crate::session_tree::SessionJournal::from_messages(
             source_session.messages.clone(),
             source_session.metadata.spawn_depth,

@@ -1261,10 +1261,10 @@ mod tests {
         // final snapshot (page pacing + upstream stalls take minutes).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
         let cache = loop {
-            if let Ok(raw) = std::fs::read_to_string(&cache_path) {
-                if let Ok(cache) = serde_json::from_str::<McpRegistryIndex>(&raw) {
-                    break cache;
-                }
+            if let Ok(raw) = std::fs::read_to_string(&cache_path)
+                && let Ok(cache) = serde_json::from_str::<McpRegistryIndex>(&raw)
+            {
+                break cache;
             }
             assert!(
                 std::time::Instant::now() < deadline,

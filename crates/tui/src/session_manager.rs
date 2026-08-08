@@ -1707,34 +1707,34 @@ pub fn update_session(
             }
             session.leaf_id = journal.leaf_id.clone();
         }
-    } else if new_len != old_len || messages != session.messages.as_slice() {
-        if let Some(journal) = session.journal.as_mut() {
-            let common = messages
-                .iter()
-                .zip(session.messages.iter())
-                .take_while(|(a, b)| a == b)
-                .count();
-            if common > 0 && common <= journal.entries.len() {
-                let target_id = journal
-                    .root_to_leaf()
-                    .get(common - 1)
-                    .map(|entry| entry.id.clone());
-                if let Some(target_id) = target_id {
-                    let _ = journal.branch_to(&target_id);
-                } else {
-                    journal.leaf_id = None;
-                }
-            } else if common == 0 {
-                journal.leaf_id = journal.entries.first().and_then(|e| e.parent_id.clone());
-                if journal.leaf_id.is_none() && !journal.entries.is_empty() {
-                    journal.leaf_id = None;
-                }
+    } else if (new_len != old_len || messages != session.messages.as_slice())
+        && let Some(journal) = session.journal.as_mut()
+    {
+        let common = messages
+            .iter()
+            .zip(session.messages.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common > 0 && common <= journal.entries.len() {
+            let target_id = journal
+                .root_to_leaf()
+                .get(common - 1)
+                .map(|entry| entry.id.clone());
+            if let Some(target_id) = target_id {
+                let _ = journal.branch_to(&target_id);
+            } else {
+                journal.leaf_id = None;
             }
-            for msg in messages.iter().skip(common) {
-                journal.append_message(msg.clone());
+        } else if common == 0 {
+            journal.leaf_id = journal.entries.first().and_then(|e| e.parent_id.clone());
+            if journal.leaf_id.is_none() && !journal.entries.is_empty() {
+                journal.leaf_id = None;
             }
-            session.leaf_id = journal.leaf_id.clone();
         }
+        for msg in messages.iter().skip(common) {
+            journal.append_message(msg.clone());
+        }
+        session.leaf_id = journal.leaf_id.clone();
     }
     session.messages.clear();
     session.messages.extend_from_slice(messages);
@@ -2238,7 +2238,10 @@ mod tests {
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
                 archived: false,
+                spawn_depth: 0,
             },
+            journal: None,
+            leaf_id: None,
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
@@ -2274,7 +2277,10 @@ mod tests {
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
                 archived: false,
+                spawn_depth: 0,
             },
+            journal: None,
+            leaf_id: None,
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),

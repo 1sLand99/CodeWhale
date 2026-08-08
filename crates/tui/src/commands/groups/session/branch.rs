@@ -24,18 +24,17 @@ fn branch(app: &mut App, arg: Option<&str>) -> CommandResult {
         );
     }
     let Some(entry_id) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
-        if let Some(session_id) = app.current_session_id.as_deref() {
-            if let Ok(manager) = crate::session_manager::SessionManager::default_location() {
-                if let Ok(mut session) = manager.load_session(session_id) {
-                    session.ensure_journal();
-                    if let Some(journal) = session.journal.as_ref() {
-                        if let Some(leaf) = journal.leaf_id.as_deref() {
-                            return CommandResult::message(format!(
-                                "Current leaf: {leaf}\nUse `/branch <entry_id>` to move the leaf (history is never rewritten).\nUse `/tree` to list entry ids."
-                            ));
-                        }
-                    }
-                }
+        if let Some(session_id) = app.current_session_id.as_deref()
+            && let Ok(manager) = crate::session_manager::SessionManager::default_location()
+            && let Ok(mut session) = manager.load_session(session_id)
+        {
+            session.ensure_journal();
+            if let Some(journal) = session.journal.as_ref()
+                && let Some(leaf) = journal.leaf_id.as_deref()
+            {
+                return CommandResult::message(format!(
+                    "Current leaf: {leaf}\nUse `/branch <entry_id>` to move the leaf (history is never rewritten).\nUse `/tree` to list entry ids."
+                ));
             }
         }
         return CommandResult::message(

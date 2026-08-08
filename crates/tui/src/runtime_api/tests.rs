@@ -149,7 +149,10 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
             archived: false,
+            spawn_depth: 0,
         },
+        journal: None,
+        leaf_id: None,
         messages: vec![crate::models::Message {
             role: "assistant".to_string(),
             content: blocks,

@@ -1733,9 +1733,10 @@ fn run() -> Result<()> {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
-            run_tui_in_process(&cli, &resolved_runtime, args.args).map(|r| {
-                auto_resolved.map(|_| unsafe { std::env::remove_var("CODEWHALE_MODEL") });
-                r
+            run_tui_in_process(&cli, &resolved_runtime, args.args).inspect(|_| {
+                if auto_resolved.is_some() {
+                    unsafe { std::env::remove_var("CODEWHALE_MODEL") }
+                }
             })
         }
         Some(Commands::Doctor(args)) => {
@@ -1789,9 +1790,10 @@ fn run() -> Result<()> {
             reject_exec_global_flags(&args.args)?;
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
-            run_tui_in_process(&cli, &resolved_runtime, tui_args("exec", args)).map(|r| {
-                auto_resolved.map(|_| unsafe { std::env::remove_var("CODEWHALE_MODEL") });
-                r
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("exec", args)).inspect(|_| {
+                if auto_resolved.is_some() {
+                    unsafe { std::env::remove_var("CODEWHALE_MODEL") }
+                }
             })
         }
         Some(Commands::Fleet(args)) => {
@@ -4702,37 +4704,12 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
     }
 }
 
-fn lane_process_spec_from_command(command: &Command) -> Result<WorkflowProcessSpec> {
-    let mut argv = Vec::new();
-    argv.push(command.get_program().to_string_lossy().into_owned());
-    argv.extend(
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned()),
-    );
-    lane_process_spec_from_argv(&argv)
-}
-
 // There is deliberately no "just run the TUI with these args" helper here. One
 // existed, `thread resume`/`thread fork` used it, and it forwarded neither
 // `--config` nor the resolved telemetry value — so the kill switch the
 // dispatcher had already applied never reached the process that emits. Every
 // delegation is now in-process, and
 // `only_one_function_may_locate_and_spawn_the_tui` pins that.
-
-/// Resolve the sibling `codewhale-tui` executable next to the running
-/// dispatcher. Honours platform executable suffix (`.exe` on Windows) so
-/// the npm-distributed Windows package — which ships
-/// `bin/downloads/codewhale-tui.exe` — is found by `Path::exists` (#247).
-///
-/// `CODEWHALE_TUI_BIN` (legacy alias: `DEEPSEEK_TUI_BIN`) is consulted first
-/// as an explicit override for custom installs and CI test layouts. On
-/// Windows we additionally try the suffix-less name as a fallback for users
-/// who already manually renamed the file before this fix landed.
-
-/// Return the first existing sibling-binary path under any of the names
-/// `codewhale-tui` might use on this platform. Pure function to keep
-/// `locate_sibling_tui` testable.
 
 fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     let since = match args.since.as_deref() {
@@ -4777,17 +4754,6 @@ mod tests {
         err.to_string()
     }
 
-    fn command_env(cmd: &Command, name: &str) -> Option<String> {
-        let name = std::ffi::OsStr::new(name);
-        cmd.get_envs().find_map(|(key, value)| {
-            if key == name {
-                value.map(|v| v.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-    }
-
     pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -4823,13 +4789,9 @@ mod tests {
             // Safety: tests using this helper serialize with env_lock().
             unsafe {
                 if let Some(previous) = self.previous.take() {
-                    unsafe {
-                        std::env::set_var(self.name.clone(), previous.clone());
-                    }
+                    std::env::set_var(self.name, previous.clone());
                 } else {
-                    unsafe {
-                        std::env::remove_var(self.name.clone());
-                    }
+                    std::env::remove_var(self.name);
                 }
             }
         }
@@ -7967,7 +7929,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_telemetry_flag_documents_itself_in_help() {
         // A consent control nobody can find is a consent control nobody has.
         let help = Cli::command().render_long_help().to_string();
@@ -7986,7 +7947,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn only_one_function_may_locate_and_spawn_the_tui() {
         // Single-binary invariant: no sibling TUI discovery exists. The
@@ -8012,30 +7972,6 @@ mod tests {
             !source.contains(&d),
             "single binary must not contain Command new tui"
         );
-    }
-
-    fn telemetry_test_resolved() -> ResolvedRuntimeOptions {
-        ResolvedRuntimeOptions {
-            provider: ProviderKind::Deepseek,
-            provider_source: ProviderSource::Config,
-            model_source: ModelSource::ProviderDefault,
-            model: "deepseek-chat".to_string(),
-            api_key: None,
-            api_key_source: None,
-            base_url: "https://api.deepseek.com".to_string(),
-            auth_mode: None,
-            insecure_skip_tls_verify: false,
-            output_mode: None,
-            log_level: None,
-            telemetry: false,
-            telemetry_explicit_off: false,
-            telemetry_endpoint: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            yolo: None,
-            verbosity: None,
-            http_headers: std::collections::BTreeMap::new(),
-        }
     }
 
     #[test]
@@ -8065,9 +8001,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[test]
-    #[test]
     #[test]
     fn parses_top_level_prompt_flag_for_interactive_startup_prompt() {
         let cli = parse_ok(&["deepseek", "-p", "Reply with exactly OK."]);

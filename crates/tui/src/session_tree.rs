@@ -276,16 +276,16 @@ impl SessionJournal {
     pub fn validate(&self) -> Result<(), String> {
         let ids: HashSet<&str> = self.entries.iter().map(|e| e.id.as_str()).collect();
         for entry in &self.entries {
-            if let Some(parent) = entry.parent_id.as_deref() {
-                if !ids.contains(parent) {
-                    return Err(format!("entry {} missing parent {}", entry.id, parent));
-                }
+            if let Some(parent) = entry.parent_id.as_deref()
+                && !ids.contains(parent)
+            {
+                return Err(format!("entry {} missing parent {}", entry.id, parent));
             }
         }
-        if let Some(leaf) = self.leaf_id.as_deref() {
-            if !ids.contains(leaf) {
-                return Err(format!("leaf {leaf} not found"));
-            }
+        if let Some(leaf) = self.leaf_id.as_deref()
+            && !ids.contains(leaf)
+        {
+            return Err(format!("leaf {leaf} not found"));
         }
         Ok(())
     }

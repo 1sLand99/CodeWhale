@@ -2683,8 +2683,6 @@ async fn update_skill_api(
         let msg = err.to_string();
         if msg.contains("not found") {
             ApiError::not_found(format!("update failed: {err:#}"))
-        } else if msg.contains("digest") {
-            ApiError::bad_request(format!("update failed: {err:#}"))
         } else {
             ApiError::bad_request(format!("update failed: {err:#}"))
         }
@@ -3184,9 +3182,10 @@ async fn get_mcp_server(
 
     let connected = {
         let pool_slot = state.mcp_pool.lock().await;
-        pool_slot.as_ref().map_or(false, |pool_handle| {
-            let pool = pool_handle.try_lock();
-            pool.map_or(false, |p| p.connected_servers().contains(&name.as_str()))
+        pool_slot.as_ref().is_some_and(|pool_handle| {
+            pool_handle
+                .try_lock()
+                .is_ok_and(|p| p.connected_servers().contains(&name.as_str()))
         })
     };
 

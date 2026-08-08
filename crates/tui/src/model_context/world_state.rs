@@ -205,6 +205,7 @@ impl WorldState {
     }
 
     #[must_use]
+    #[allow(dead_code)] // consumed by the #5264 context-fragment wiring (in flight)
     pub fn with_constitution_fragment(mut self, body: impl Into<String>) -> Self {
         self.upsert(ModelContextFragment::new(
             FragmentId::Constitution,

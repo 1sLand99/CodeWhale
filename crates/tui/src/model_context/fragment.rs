@@ -185,6 +185,7 @@ impl ModelContextFragment {
 
     /// `matches_text` recognizer: true when `haystack` contains this fragment's marker.
     #[must_use]
+    #[allow(dead_code)] // consumed by the #5264 context-fragment wiring (in flight)
     pub fn matches_text(&self, haystack: &str) -> bool {
         haystack.contains(self.marker)
     }
