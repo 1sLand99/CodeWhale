@@ -2078,21 +2078,19 @@ Notes:
 
 ### Goal loop (`[goal]`)
 
-Operate-mode goals run to their completion gate: the only terminal stops are a
-verified completion, a blocked report, or an exhausted configured token budget
-(#5052). The decision core also accepts an optional time budget, but the TUI
-does not currently configure or expose one. A configurable safety backstop
-still halts a pathological loop that never emits a terminal signal:
+Operate-mode goals run to their completion gate with no default token, time, or
+continuation ceiling (#5052). Token/time budgets, when explicitly supplied,
+are telemetry only and do not stop a goal. Users who want a circuit breaker can
+opt into one:
 
 ```toml
 [goal]
-# Safety backstop on automatic goal continuation passes.
-# Default: 100. Set 0 to disable the backstop entirely so only
-# completion/blocked or budget exhaustion stop the run.
+# Optional safety backstop on automatic goal continuation passes.
+# Default: 0 (unlimited). Set a positive value to opt into a ceiling.
 max_continuations = 100
 ```
 
-When the backstop fires, the goal pauses with a status message naming
+When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
 
