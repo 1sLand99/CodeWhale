@@ -767,7 +767,12 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // the auxiliary budget so compact terminals shed the chip before they
     // shed chat/composer space.
     let pending_work = crate::tui::background_indicator::pending_work_from_app(app);
-    let indicator_height = if pending_work.is_empty() { 0 } else { 1 };
+    let composer_floor = MIN_COMPOSER_HEIGHT.saturating_add(u16::from(app.composer_border));
+    let indicator_height = u16::from(!pending_work.is_empty()).min(
+        rail_budget
+            .saturating_sub(top_work_strip_height)
+            .saturating_sub(composer_height.saturating_sub(composer_floor)),
+    );
 
     // WorkflowPanel unified activity surface (#4121). Expanded while running
     // (interactive drill-in above the composer); when collapsed the panel
