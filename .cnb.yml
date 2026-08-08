@@ -101,6 +101,7 @@
         # Keep the production release profile intact while avoiding a burst of
         # concurrent rustc/linker processes on the shared release runner.
         cargo build --jobs 2 --release --locked -p codewhale-cli
+        cp target/release/codewhale target/release/codew
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version

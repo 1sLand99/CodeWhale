@@ -26,7 +26,10 @@ const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
+const cnb = read(".cnb.yml");
 const bundles = read("scripts/release/create-release-bundles.sh");
+const archiveInstaller = read("scripts/release/install.sh");
+const cliDispatcher = read("crates/cli/src/lib.rs");
 const runbook = read("docs/RELEASE_RUNBOOK.md");
 
 assert.match(ci, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
@@ -204,6 +207,42 @@ assert.match(runbook, /expected_sha/);
 assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
+
+const cnbPreflight = cnb.match(
+  /\.linux_release_preflight: &linux_release_preflight([\s\S]*?)\nmain:/,
+);
+assert.ok(cnbPreflight, "CNB must retain a dedicated release preflight");
+const cnbBuild = cnbPreflight[1].indexOf(
+  "cargo build --jobs 2 --release --locked -p codewhale-cli",
+);
+const cnbAlias = cnbPreflight[1].indexOf(
+  "cp target/release/codewhale target/release/codew",
+);
+const cnbSmoke = cnbPreflight[1].indexOf("node scripts/release/npm-wrapper-smoke.js");
+assert.ok(cnbBuild >= 0, "CNB release preflight must build the consolidated runtime");
+assert.ok(cnbAlias > cnbBuild, "CNB release preflight must materialize codew after the build");
+assert.ok(cnbSmoke > cnbAlias, "CNB release preflight must materialize codew before smoke");
+
+assert.doesNotMatch(
+  archiveInstaller,
+  /cargo install codewhale --locked/,
+  "glibc recovery must name the published codewhale-cli crate",
+);
+assert.equal(
+  (archiveInstaller.match(/cargo install codewhale-cli --locked/g) || []).length,
+  2,
+  "both glibc recovery branches must name codewhale-cli",
+);
+assert.match(
+  archiveInstaller,
+  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive upgrades must refresh the retired TUI path from consolidated bytes",
+);
+assert.doesNotMatch(
+  cliDispatcher,
+  /codewhale_config::auto_model::classify/,
+  "the CLI dispatcher must leave auto routing to the provider-aware runtime",
+);
 
 console.log(
   "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",

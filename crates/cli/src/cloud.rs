@@ -51,7 +51,7 @@ enum CloudCommand {
     Logout,
     /// Manage provider API keys stored in the signed-in Codewhale account.
     Keys(CloudKeysArgs),
-    /// Pull the account-owned settings document (explicit only, --dry-run shows drift).
+    /// Inspect the account document; local settings import is not available yet.
     Pull(CloudPullArgs),
     /// Push local settings to the account document (never automatic, --dry-run required).
     Push(CloudPushArgs),
@@ -73,7 +73,7 @@ struct CloudLoginArgs {
 
 #[derive(Debug, Args)]
 struct CloudPullArgs {
-    /// Show what would be pulled without writing local files.
+    /// Inspect the account document without writing local files.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 }
@@ -682,24 +682,23 @@ fn run_with<T: CloudTransport, W: Write>(
             }
         },
         CloudCommand::Pull(args) => {
+            if !args.dry_run {
+                bail!(
+                    "Account settings import is not available yet; local config was not changed. Run `codewhale account pull --dry-run` to inspect the signed-in account."
+                );
+            }
             let user = client.me()?;
-            // Pull is explicit only; --dry-run shows drift, otherwise would write local state.
-            // The shared settings document lives at GET /api/me; offline stays file-only.
-            writeln!(out, "Account settings (pull):")?;
+            // `/api/me` currently exposes account identity and key metadata,
+            // not a versioned settings document that can be applied locally.
+            // Stay read-only and explicit until that import contract exists.
+            writeln!(out, "Account settings (pull --dry-run):")?;
             writeln!(out, "Account ID: {}", printable(&user.id))?;
             writeln!(out, "Profile: {}", printable(profile))?;
             writeln!(out, "API: {api_base}")?;
-            if args.dry_run {
-                writeln!(
-                    out,
-                    "dry-run: would hydrate local config from account document"
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "Pulled account document (local config unchanged; use --dry-run to preview drift)"
-                )?;
-            }
+            writeln!(
+                out,
+                "dry-run: remote settings import is not available; local config unchanged"
+            )?;
             // Show the invariant: Bearer custody stays in the OS keyring, never in config.toml.
             writeln!(
                 out,

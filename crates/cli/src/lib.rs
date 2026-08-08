@@ -1265,7 +1265,15 @@ fn workflow_exec_command(spec: WorkflowExecSpec<'_>) -> Result<WorkflowProcessSp
     let argv = {
         // Build argv with explicit config path like the previous dispatcher did.
         let mut args = Vec::new();
-        args.push("codewhale".to_string());
+        let executable = std::env::current_exe()
+            .context("resolve current Codewhale executable for workflow lane")?;
+        let executable = executable.into_os_string().into_string().map_err(|path| {
+            anyhow!(
+                "current Codewhale executable path is not valid UTF-8: {}",
+                PathBuf::from(path).display()
+            )
+        })?;
+        args.push(executable);
         // config_path is the explicit workflow config path; prefer it over cli.config
         let cfg = Some(config_path);
         if let Some(cp) = cfg {
@@ -1732,12 +1740,7 @@ fn run() -> Result<()> {
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
-            run_tui_in_process(&cli, &resolved_runtime, args.args).inspect(|_| {
-                if auto_resolved.is_some() {
-                    unsafe { std::env::remove_var("CODEWHALE_MODEL") }
-                }
-            })
+            run_tui_in_process(&cli, &resolved_runtime, args.args)
         }
         Some(Commands::Doctor(args)) => {
             let resolved_runtime =
@@ -1789,12 +1792,7 @@ fn run() -> Result<()> {
         Some(Commands::Exec(args)) => {
             reject_exec_global_flags(&args.args)?;
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            let auto_resolved = try_auto_resolve_model(&resolved_runtime, &args.args);
-            run_tui_in_process(&cli, &resolved_runtime, tui_args("exec", args)).inspect(|_| {
-                if auto_resolved.is_some() {
-                    unsafe { std::env::remove_var("CODEWHALE_MODEL") }
-                }
-            })
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("exec", args))
         }
         Some(Commands::Fleet(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2127,33 +2125,6 @@ fn reject_exec_global_flags(args: &[String]) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// If the resolved model is `"auto"`, analyse the prompt and set
-/// `CODEWHALE_MODEL` to the resolved tier (`deepseek-v4-pro` or
-/// `deepseek-v4-flash`). Returns `Some(())` when auto-resolution was applied,
-/// so the caller can clean up the env var afterwards.
-///
-/// The prompt is extracted from the passthrough args (the text after
-/// `codewhale run` or `codewhale exec`).
-fn try_auto_resolve_model(
-    resolved_runtime: &codewhale_config::ResolvedRuntimeOptions,
-    prompt_args: &[String],
-) -> Option<()> {
-    if resolved_runtime.model != "auto" {
-        return None;
-    }
-    let prompt = if prompt_args.is_empty() {
-        // No prompt provided — nothing to analyse, leave as default.
-        return None;
-    } else {
-        prompt_args.join(" ")
-    };
-    let resolved = codewhale_config::auto_model::classify(&prompt);
-    unsafe {
-        std::env::set_var("CODEWHALE_MODEL", resolved);
-    }
-    Some(())
 }
 
 fn run_login_command(store: &mut ConfigStore, args: LoginArgs) -> Result<()> {
@@ -5726,6 +5697,12 @@ mod tests {
             verify: true,
         })
         .expect("command");
+        let current_executable = std::env::current_exe().expect("current executable");
+        assert_eq!(
+            process.command.first().map(String::as_str),
+            current_executable.to_str(),
+            "workflow lanes must launch the exact runtime that built their process spec"
+        );
         let joined = process.command.join("\n");
         assert!(joined.contains("workflow-tool"));
         assert!(joined.contains("explicit-workflow-command"));

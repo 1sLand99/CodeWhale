@@ -1,7 +1,10 @@
-//! Prompt-based auto-model classifier.
+//! Legacy DeepSeek-scoped prompt complexity classifier.
 //!
-//! When `model = "auto"` is configured, the dispatcher analyses the user's
-//! prompt before delegating to the TUI and chooses a tier:
+//! This pure scorer is retained for API compatibility, but the consolidated
+//! CLI dispatcher must not use it to resolve provider-neutral `model = "auto"`:
+//! doing so fabricates DeepSeek model ids for every active provider. The TUI's
+//! provider-aware router owns runtime auto selection. Callers may use this
+//! helper only when their candidate pair is explicitly the DeepSeek pair:
 //!
 //! - **`deepseek-v4-pro`** — complex tasks (debugging, refactoring, design,
 //!   security review, multi-file changes, code generation, …).
@@ -200,7 +203,7 @@ const SIMPLE: &[&str] = &[
     "简要",
 ];
 
-/// Classify a prompt and return the resolved model name.
+/// Classify a prompt for the legacy DeepSeek candidate pair.
 ///
 /// Uses a simple scoring system:
 /// - Strong complex keyword: +3

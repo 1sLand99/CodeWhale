@@ -228,19 +228,42 @@ else
   fi
 fi
 
+legacy_tui="$install_dir/codewhale-tui"
+refresh_legacy_tui=0
+# v0.9.4's website installer placed a regular codewhale-tui binary beside
+# codewhale. A clean v0.9.5 install exposes only codewhale + codew, but an
+# upgrade must not leave that installer-owned path running stale v0.9.4 code.
+# Refresh the existing compatibility command from the already verified
+# consolidated bytes. Do not create it for new installs or replace a symlink.
+if [ -f "$legacy_tui" ] && [ ! -L "$legacy_tui" ]; then
+  refresh_legacy_tui=1
+fi
+
 stage_cli="$install_dir/.codewhale.$$"
 stage_shim="$install_dir/.codew.$$"
-trap 'rm -rf "$tmpdir"; rm -f "$stage_cli" "$stage_shim" 2>/dev/null || true' EXIT INT TERM
+stage_legacy_tui="$install_dir/.codewhale-tui.$$"
+trap 'rm -rf "$tmpdir"; rm -f "$stage_cli" "$stage_shim" "$stage_legacy_tui" 2>/dev/null || true' EXIT INT TERM
 
 $sudo_cmd cp "$tmpdir/codewhale" "$stage_cli"
 $sudo_cmd cp "$tmpdir/codew" "$stage_shim"
 $sudo_cmd chmod 755 "$stage_cli" "$stage_shim"
+if [ "$refresh_legacy_tui" -eq 1 ]; then
+  $sudo_cmd cp "$tmpdir/codewhale" "$stage_legacy_tui"
+  $sudo_cmd chmod 755 "$stage_legacy_tui"
+fi
 $sudo_cmd mv "$stage_cli" "$install_dir/codewhale"
 $sudo_cmd mv "$stage_shim" "$install_dir/codew"
+if [ "$refresh_legacy_tui" -eq 1 ]; then
+  $sudo_cmd mv "$stage_legacy_tui" "$legacy_tui"
+  say "Refreshed legacy compatibility command: $legacy_tui"
+fi
 
 say "Installed:"
 "$install_dir/codewhale" --version || true
 "$install_dir/codew" --version || true
+if [ "$refresh_legacy_tui" -eq 1 ]; then
+  "$legacy_tui" --version || true
+fi
 
 case ":$PATH:" in
   *":$install_dir:"*) ;;

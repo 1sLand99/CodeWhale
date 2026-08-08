@@ -66,7 +66,7 @@ preflight_glibc() {
     local host
     if ! host="$(detect_host_glibc)" || [[ -z "$host" ]]; then
         echo "ERROR: $(basename "$bin") requires GLIBC_$required, but no GNU libc was detected." >&2
-        echo "Build from source instead: cargo install codewhale --locked" >&2
+        echo "Build from source instead: cargo install codewhale-cli --locked" >&2
         echo "Set CODEWHALE_SKIP_GLIBC_CHECK=1 to bypass this check at your own risk." >&2
         return 1
     fi
@@ -74,7 +74,7 @@ preflight_glibc() {
     if [[ "$(version_code "$host")" -lt "$(version_code "$required")" ]]; then
         echo "ERROR: $(basename "$bin") requires GLIBC_$required, but this system has glibc $host." >&2
         echo "Ubuntu 22.04 ships glibc 2.35 and cannot run assets built against Ubuntu 24.04/glibc 2.39." >&2
-        echo "Build from source instead: cargo install codewhale --locked" >&2
+        echo "Build from source instead: cargo install codewhale-cli --locked" >&2
         echo "Release follow-up: build Linux GNU assets against an older glibc baseline or add a musl/static asset." >&2
         echo "Set CODEWHALE_SKIP_GLIBC_CHECK=1 to bypass this check at your own risk." >&2
         return 1
@@ -106,6 +106,15 @@ for bin in codewhale codew; do
     install_binary "$src" "$dst"
     echo "  $dst"
 done
+
+# v0.9.4 installed a third, separate runtime at this path. Keep clean v0.9.5
+# installs to the two documented commands, while ensuring an upgrade cannot
+# leave the installer-owned legacy command running stale code.
+legacy_tui="$BIN_DIR/codewhale-tui"
+if [[ -f "$legacy_tui" && ! -L "$legacy_tui" ]]; then
+    install_binary "$SCRIPT_DIR/codewhale" "$legacy_tui"
+    echo "  $legacy_tui (refreshed legacy compatibility command)"
+fi
 
 echo ""
 echo "Done. Commands installed to $BIN_DIR."
