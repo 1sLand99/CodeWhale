@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
-import { IDENTITY_PHRASE, SITE_NAME } from "@/lib/page-meta";
+import { IDENTITY_PHRASE, OG_ALT, SITE_NAME } from "@/lib/page-meta";
 
-export const alt = `${SITE_NAME} — ${IDENTITY_PHRASE}`;
+export const alt = OG_ALT;
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -44,7 +44,7 @@ export default function OpengraphImage() {
               letterSpacing: 0,
             }}
           >
-            Codewhale
+            {SITE_NAME}
           </div>
           <div
             style={{

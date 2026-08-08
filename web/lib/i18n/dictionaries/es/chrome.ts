@@ -44,7 +44,7 @@ export const chrome: ChromeDict = {
   wordmarkTag: "cualquier modelo, en tu máquina",
 
   issueLabel: "Edición {date}",
-  dateLocale: "es-ES",
+  dateLocale: "es-419",
 
   starsAria: "Estrellas en GitHub",
   githubFallback: "GitHub",
