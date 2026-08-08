@@ -1232,7 +1232,8 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // `.cursorrules`, `.clinerules`, `.windsurf/rules/*`, `.gemini/*`,
     // `.github/copilot-instructions.md` etc., beyond the canonical
     // `AGENTS.md` already in the constitution prefix.
-    if let Some(fragment) = codewhale_core::fragments::load_project_instruction_fragment(workspace)
+    if let Some(fragment) =
+        codewhale_core::fragments::load_additional_project_instruction_fragment(workspace)
     {
         // `BoundedFragment` already enforces `MAX_FRAGMENT_BYTES` (10K-token
         // ceiling) and per-fragment caps; WorldState's `with_*` also clamps.

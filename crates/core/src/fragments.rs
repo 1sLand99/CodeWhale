@@ -266,6 +266,21 @@ pub const PROJECT_INSTRUCTION_CANDIDATES: &[&str] = &[
     ".github/muse-instructions.md",
 ];
 
+/// Workspace instruction formats not already owned by Codewhale's canonical
+/// project-context loader. The TUI uses this subset to avoid injecting
+/// `AGENTS.md` / `CLAUDE.md` / `instructions.md` twice while still importing
+/// additional agent rule formats through the typed fragment boundary.
+pub const ADDITIONAL_PROJECT_INSTRUCTION_CANDIDATES: &[&str] = &[
+    ".agents/AGENTS.md",
+    ".cursorrules",
+    ".cursor/rules",
+    ".clinerules",
+    ".windsurf/rules",
+    ".gemini",
+    ".github/copilot-instructions.md",
+    ".github/muse-instructions.md",
+];
+
 fn is_symlink(p: &Path) -> bool {
     std::fs::symlink_metadata(p)
         .map(|m| m.file_type().is_symlink())
@@ -302,9 +317,9 @@ fn read_capped(p: &Path) -> Option<String> {
         Some(trimmed.to_string())
     }
 }
-fn collect_candidate_files(workspace: &Path) -> Vec<PathBuf> {
+fn collect_candidate_files(workspace: &Path, candidates: &[&str]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for candidate in PROJECT_INSTRUCTION_CANDIDATES {
+    for candidate in candidates {
         let path = workspace.join(candidate);
         if path.is_dir() {
             let mut dir_files = Vec::new();
@@ -352,8 +367,11 @@ fn collect_candidate_files(workspace: &Path) -> Vec<PathBuf> {
     files
 }
 
-pub fn load_project_instruction_fragment(workspace: &Path) -> Option<BoundedFragment> {
-    let files = collect_candidate_files(workspace);
+fn load_project_instruction_fragment_from_candidates(
+    workspace: &Path,
+    candidates: &[&str],
+) -> Option<BoundedFragment> {
+    let files = collect_candidate_files(workspace, candidates);
     if files.is_empty() {
         return None;
     }
@@ -377,6 +395,20 @@ pub fn load_project_instruction_fragment(workspace: &Path) -> Option<BoundedFrag
     let fragment = BoundedFragment::project_instructions(merged);
     debug_assert!(validate_fragment(&fragment).is_ok());
     Some(fragment)
+}
+
+pub fn load_project_instruction_fragment(workspace: &Path) -> Option<BoundedFragment> {
+    load_project_instruction_fragment_from_candidates(workspace, PROJECT_INSTRUCTION_CANDIDATES)
+}
+
+/// Load only instruction formats that the canonical TUI project-context path
+/// does not already render. This prevents duplicate authority while retaining
+/// the broader compatibility import added by the bounded fragment system.
+pub fn load_additional_project_instruction_fragment(workspace: &Path) -> Option<BoundedFragment> {
+    load_project_instruction_fragment_from_candidates(
+        workspace,
+        ADDITIONAL_PROJECT_INSTRUCTION_CANDIDATES,
+    )
 }
 
 pub fn project_instructions_from_sources(
@@ -578,6 +610,28 @@ mod tests {
         assert!(from_sources.content.contains("AGENTS.md"));
         assert!(from_sources.content.contains(".cursorrules"));
         validate_fragment(&from_sources).expect("explicit sources must also satisfy caps");
+    }
+    #[test]
+    fn additional_project_instruction_import_does_not_duplicate_canonical_authority() {
+        let dir = tempdir().expect("tempdir");
+        let ws = dir.path();
+        fs::write(ws.join("AGENTS.md"), "canonical authority marker").expect("write agents");
+
+        assert!(
+            load_additional_project_instruction_fragment(ws).is_none(),
+            "AGENTS.md is already owned by the canonical project-context loader"
+        );
+
+        fs::write(ws.join(".cursorrules"), "additional cursor marker").expect("write cursor rules");
+        let additional = load_additional_project_instruction_fragment(ws)
+            .expect("additional rules must produce a typed fragment");
+        assert!(additional.content.contains("additional cursor marker"));
+        assert!(!additional.content.contains("canonical authority marker"));
+
+        let complete = load_project_instruction_fragment(ws)
+            .expect("complete importer must retain every supported source");
+        assert!(complete.content.contains("canonical authority marker"));
+        assert!(complete.content.contains("additional cursor marker"));
     }
     #[test]
     fn fragment_budget_snapshot_is_stable() {
