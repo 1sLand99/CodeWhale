@@ -15,6 +15,10 @@ also expands the managed Runtime API, makes session and Fleet work easier to
 inspect and resume, and fixes the local turn backstop that could end productive
 tool work before the model received its final tool result.
 
+This is the Codewhale v0.9.5 source candidate. It is not a published release
+until the exact rebuilt candidate passes dogfood and the release is explicitly
+approved.
+
 ### Added
 
 - **`model = "auto"` for prompt-based tier selection**: When set, the
@@ -56,6 +60,17 @@ tool work before the model received its final tool result.
 - Fresh session titles can replace a stale cached `New Session` placeholder,
   unknown model context limits fail loudly, and release/source-install fallbacks
   no longer request binaries removed by the single-runtime conversion.
+
+### Contributors
+
+- [Sh1Zuku](https://github.com/SparkofSpike) (`@SparkofSpike`) fixed stale
+  cached session titles that could pin the `New Session` placeholder.
+- [Paulo Aboim Pinto](https://github.com/aboimpinto) (`@aboimpinto`) built the
+  shared alias-aware command discovery contract and acceptance coverage.
+- [Sun Zhenyuan](https://github.com/bistack) (`@bistack`) contributed the
+  background incremental MCP Registry refresh.
+- [SKY ZHAO](https://github.com/skyzhao1223) (`@skyzhao1223`) contributed
+  prompt-based `model = "auto"` routing in PR #5257.
 
 ## [0.9.4] - 2026-08-07
 Codewhale v0.9.4 ships the release-train harness work: the familiar Fleet
