@@ -47,8 +47,7 @@
     "recommended": "npm install -g codewhale",
     "binaries": [
       "codewhale",
-      "codew",
-      "codewhale-tui"
+      "codew"
     ],
     "channels": {
       "npm": "published releases only",

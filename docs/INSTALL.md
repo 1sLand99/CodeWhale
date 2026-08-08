@@ -91,7 +91,7 @@ builds. If you are on Ubuntu 22.04 arm64, Debian stable, RHEL/CentOS, or another
 older GNU base for a non-x64 asset, use:
 
 ```bash
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+cargo install codewhale-cli --locked   # installs `codewhale`
 ```
 
 Future release engineering may add static (musl) arm64 assets so the glibc floor
@@ -143,7 +143,7 @@ install the build packages before running Cargo:
 
 ```bash
 pkg install -y rust clang pkg-config make git
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+cargo install codewhale-cli --locked   # installs `codewhale`
 ```
 
 The normal first-run setup path is implemented, but its Android interaction is
@@ -272,11 +272,14 @@ applies to the runtime's own environment variables, not to the installer.)
 
 If GitHub releases are slow, blocked, or you're on an unsupported architecture,
 install from crates.io directly. One Cargo package is required:
-`codewhale-cli` installs the `codewhale` and `codew` commands (single binary, single install).
+`codewhale-cli` installs the `codewhale` command. npm and prebuilt releases also
+expose `codew` as a convenience name for the same compiled runtime; Cargo does
+not create that alias, so define a shell alias yourself if you want the shorter
+name.
 
 ```bash
 # Requires Rust 1.88+ (https://rustup.rs)
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+cargo install codewhale-cli --locked   # installs `codewhale`
 codewhale --version
 ```
 
@@ -449,7 +452,7 @@ codewhale --version
 
 > **macOS Gatekeeper note.** If you downloaded the binaries with a browser,
 > macOS may block them with "Apple cannot verify" warnings. Clear the quarantine
-> attribute on all three binaries and retry:
+> attribute on both binaries and retry:
 > ```bash
 > xattr -d com.apple.quarantine ~/.local/bin/codewhale ~/.local/bin/codew 2>/dev/null || true
 > ```
@@ -474,7 +477,7 @@ explicitly. Replace `X.Y.Z` with the version you want to restore.
 # npm wrapper, only for versions that were published to npm
 npm install -g codewhale@X.Y.Z
 
-# Cargo path: one package provides codewhale + codew (single binary)
+# Cargo path: one package installs codewhale
 cargo install codewhale-cli --version X.Y.Z --locked --force
 ```
 
@@ -617,12 +620,12 @@ build before source builds are expected to work.
 git clone https://github.com/Hmbown/CodeWhale.git
 cd CodeWhale
 
-cargo install --path crates/cli --locked   # provides `codewhale` and `codew` (single binary)
+cargo install --path crates/cli --locked   # installs `codewhale`
 
 codewhale --version
 ```
 
-The commands land in `~/.cargo/bin/` by default; make sure that directory is
+The command lands in `~/.cargo/bin/` by default; make sure that directory is
 on your `PATH`.
 
 ### FreeBSD 14+ (resolves #1097)
@@ -632,7 +635,7 @@ fails with `Unsupported platform: freebsd` and points to Cargo. Install from sou
 
 ```bash
 pkg install -y rust pkgconf git
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew` (single binary)
+cargo install codewhale-cli --locked   # installs `codewhale`
 codewhale --version
 codewhale doctor
 ```
@@ -662,8 +665,9 @@ cross build --release --target aarch64-unknown-linux-gnu -p codewhale-cli   # si
 ```
 
 The resulting binary lands in
-`target/aarch64-unknown-linux-gnu/release/codewhale` (and `codew` shim). Copy it
-to the ARM64 host (e.g. via `scp`) and `chmod +x` them.
+`target/aarch64-unknown-linux-gnu/release/codewhale`. Copy it to the ARM64 host
+(e.g. via `scp`) and make it executable. Release packaging separately exposes
+the same executable under the `codew` convenience name.
 
 If you don't have Docker available, install the cross-linker directly and let
 Cargo do the work:
@@ -739,8 +743,8 @@ set CARGO_HTTP_CHECK_REVOKE=false   # may be needed behind some Chinese ISPs
 cargo build --release
 ```
 
-The binaries appear in `target\release\codewhale.exe` and
-`target\release\codew.exe` (single binary + shim).
+The Cargo-built binary appears at `target\release\codewhale.exe`. Release
+packaging separately exposes the same executable as `codew.exe`.
 
 > Prefer not to build? Install via npm, Cargo, GitHub Releases, or the CNB
 > mirror — see the sections above.
@@ -755,14 +759,17 @@ You're on a release earlier than v0.8.8 that doesn't publish Linux ARM64
 binaries. Either upgrade (`npm i -g codewhale@latest`) or use
 `cargo install` per [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
 
-### `MISSING_COMPANION_BINARY` at runtime
+### `MISSING_COMPANION_BINARY` after upgrading an older install
 
-The dispatcher (`codewhale`) requires the TUI runtime (`codewhale-tui`) to be on
-the same `PATH`. If you installed only one crate via `cargo install`, install
-both:
+The current single binary runs the TUI in-process and does not require a
+companion executable. This error identifies a stale pre-v0.9.5 dispatcher;
+replace that installation with the current npm package or Cargo binary instead
+of downloading an extra runtime:
 
 ```bash
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+npm install -g codewhale
+# or
+cargo install codewhale-cli --locked --force
 ```
 
 ### `codewhale update` reports `no asset found for platform codewhale-linux-aarch64`
@@ -788,8 +795,8 @@ The legacy `DEEPSEEK_TUI_RELEASE_BASE_URL` name is still accepted.
 
 `codewhale update` normally contacts GitHub Releases for metadata and binary
 assets. On networks where GitHub is blocked or unreliable, use the CNB source
-mirror instead and install both Cargo packages from the release tag. Together,
-it provides the `codewhale` and `codew` commands (single binary):
+mirror instead and install the `codewhale-cli` package from the release tag.
+Cargo installs the `codewhale` command:
 
 To check the latest release without downloading or replacing binaries, run
 `codewhale update --check`.
@@ -822,9 +829,9 @@ The package requires the Cargo feature called `edition2024`, but that feature
 is not stabilized in this version of Cargo
 ```
 
-Install current stable Rust through rustup, then rerun the two Cargo package
-install commands from [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
-It provides `codewhale` and `codew` (single binary). For
+Install current stable Rust through rustup, then rerun the one Cargo package
+install command from [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
+It installs `codewhale`. For
 mainland China networks, this rsproxy-based sequence has been verified to work:
 
 ```bash
@@ -834,7 +841,7 @@ export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 rustup default stable
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+cargo install codewhale-cli --locked   # installs `codewhale`
 ```
 
 Afterward, `which cargo` should point to `~/.cargo/bin/cargo`, not
@@ -853,13 +860,12 @@ sudo apt-get install -y build-essential pkg-config libdbus-1-dev
 WSL2 uses the same Linux source-build path as Ubuntu. If `cargo install
 codewhale-cli --locked` fails while compiling the keyring or D-Bus secret
 storage crates, install the Linux build dependencies inside the WSL distro,
-then rerun the two Cargo package install commands. It installs
-`codewhale` and `codew` (single binary):
+then rerun the one Cargo package install command. It installs `codewhale`:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libdbus-1-dev
-cargo install codewhale-cli --locked   # provides `codewhale` and `codew`
+cargo install codewhale-cli --locked   # installs `codewhale`
 ```
 
 The prebuilt npm/GitHub binaries do not need these build-time packages; they
