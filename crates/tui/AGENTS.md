@@ -52,9 +52,9 @@ Narrower reruns of the slow acceptance targets, once `--tests` has told you
 which one moved:
 
 ```sh
-cargo test -p codewhale-tui --test qa_pty --locked     # PTY snapshots
-cargo test -p codewhale-tui --test release_runtime_qa --locked
-cargo test -p codewhale-tui --test terminal_matrix_qa --locked
+cargo test -p codewhale-tui --test pty qa_pty --locked
+cargo test -p codewhale-tui --test pty release_runtime_qa --locked
+cargo test -p codewhale-tui --test pty terminal_matrix_qa --locked
 ```
 
 **`--lib` and `--tests` are disjoint target sets.** `crates/tui/tests/` holds
