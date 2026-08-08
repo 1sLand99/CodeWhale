@@ -148,7 +148,8 @@ use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
 };
 use super::history::{
-    ExecCell, HistoryCell, ToolCell, ToolStatus, history_cells_from_message, summarize_tool_output,
+    ExecCell, HistoryCell, ReasoningAction, ToolCell, ToolStatus, history_cells_from_message,
+    summarize_tool_output,
 };
 use super::slash_menu::{
     apply_slash_menu_selection, partial_inline_skill_mention_at_cursor,
@@ -2063,7 +2064,6 @@ struct UserDispatchSnapshot {
     history_len: usize,
     history_revisions_len: usize,
     history_version: u64,
-    next_history_revision: u64,
     api_messages_len: usize,
     last_send_at: Option<Instant>,
 }

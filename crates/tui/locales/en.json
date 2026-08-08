@@ -9,6 +9,7 @@
   "HistoryHintAccept": "Enter accept",
   "HistoryHintRestore": "Esc restore",
   "HistoryNoMatches": "  No matches",
+  "TranscriptReasoningExpand": "expand",
   "StatusPickerTitle": " Status line ",
   "StatusPickerInstruction": "Pick the chips you want in the footer:",
   "StatusPickerActionToggle": "toggle ",

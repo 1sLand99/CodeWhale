@@ -660,6 +660,7 @@ impl App {
             paused_quarry: None,
             history: Vec::new(),
             history_version: 0,
+            transcript_identity_epoch: 0,
             history_revisions: Vec::new(),
             tool_run_cache: ToolRunCache::default(),
             next_history_revision: 1,

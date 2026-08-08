@@ -614,6 +614,7 @@
   "HistoryHintMove": "Up/Down 移動",
   "HistoryHintRestore": "Esc 還原",
   "HistoryNoMatches": "  無相符",
+  "TranscriptReasoningExpand": "展開",
   "HistorySearchPlaceholder": "搜尋提示歷史...",
   "HistorySearchTitle": "歷史搜尋",
   "HomeAgentModeReviewTip": "  用 /mode plan 來先調查搜尋與生成計畫",

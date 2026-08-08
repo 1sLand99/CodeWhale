@@ -544,7 +544,6 @@ pub(crate) fn prepare_user_dispatch(
         history_len: app.history.len(),
         history_revisions_len: app.history_revisions.len(),
         history_version: app.history_version,
-        next_history_revision: app.next_history_revision,
         api_messages_len: app.api_messages.len(),
         last_send_at: app.last_send_at,
     };
@@ -866,10 +865,10 @@ pub(crate) fn build_dispatch_error_closure(
             app.receipt_started_at = prepare.snapshot.receipt_started_at;
             app.tool_evidence = prepare.snapshot.tool_evidence.clone();
             app.history.truncate(prepare.snapshot.history_len);
+            app.prune_transcript_index_state(prepare.snapshot.history_len);
             app.history_revisions
                 .truncate(prepare.snapshot.history_revisions_len);
             app.history_version = prepare.snapshot.history_version;
-            app.next_history_revision = prepare.snapshot.next_history_revision;
             app.api_messages.truncate(prepare.snapshot.api_messages_len);
             app.last_send_at = prepare.snapshot.last_send_at;
             app.needs_redraw = true;

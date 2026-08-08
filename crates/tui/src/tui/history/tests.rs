@@ -7,7 +7,7 @@ use super::{
     PlanUpdateCell, REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, TOOL_RUNNING_SYMBOLS,
     TOOL_STATUS_SYMBOL_MS, ToolCell, ToolStatus, TranscriptRenderOptions, USER_GLYPH,
     WebSearchCell, assistant_label_style_for, extract_reasoning_summary,
-    render_spillover_annotation, render_thinking, render_thinking_with_highlight,
+    render_spillover_annotation, render_thinking, render_thinking_with_analysis,
     running_status_label_with_elapsed,
 };
 use crate::deepseek_theme::Theme;
@@ -1048,7 +1048,7 @@ fn history_replays_update_plan_tool_use_as_plan_card() {
 }
 
 #[test]
-fn render_thinking_collapsed_shows_details_affordance() {
+fn render_thinking_collapsed_keeps_neutral_affordance() {
     let lines = render_thinking(
         "Summary: First line\nSecond line\nThird line\nFourth line\nFifth line",
         80,
@@ -1061,8 +1061,10 @@ fn render_thinking_collapsed_shows_details_affordance() {
         .iter()
         .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
         .collect::<String>();
-    assert!(text.contains("Ctrl+O:detail"), "{text}");
-    assert!(text.contains("Space:expand"), "{text}");
+    assert!(
+        !text.contains("Ctrl+O") && !text.contains("Space:"),
+        "{text}"
+    );
     // Pin the actual header shape ("… reasoning done") — a bare
     // `contains("reasoning")` is already satisfied by the Ctrl+O
     // affordance line above and would never fail on its own.
@@ -1174,10 +1176,7 @@ fn render_hidden_completed_thinking_stays_hidden() {
 }
 
 #[test]
-fn render_thinking_streaming_truncated_shows_continues_affordance() {
-    // #861 RC4: when a streaming thinking block exceeds the line cap,
-    // surface a live affordance pointing at Ctrl+O. The earlier code
-    // suppressed the affordance unless `!streaming`.
+fn render_thinking_streaming_truncation_keeps_neutral_affordance() {
     let long = (1..=16)
         .map(|i| format!("Reasoning line {i}"))
         .collect::<Vec<_>>()
@@ -1188,8 +1187,8 @@ fn render_thinking_streaming_truncated_shows_continues_affordance() {
         .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
         .collect::<String>();
     assert!(
-        text.contains("Ctrl+O:more"),
-        "streaming-truncation affordance missing, got: {text}"
+        !text.contains("Space:") && !text.contains("Ctrl+O"),
+        "per-cell renderer must stay target-neutral, got: {text}"
     );
     // The most recent line must be the visible tail (head dropped).
     assert!(
@@ -2031,7 +2030,7 @@ fn render_thinking_body_lines_use_dashed_rail_and_italic() {
 
 #[test]
 fn render_thinking_can_omit_background_highlight() {
-    let lines = render_thinking_with_highlight(
+    let lines = render_thinking_with_analysis(
         "reasoning without a filled surface",
         80,
         false,
@@ -2039,7 +2038,8 @@ fn render_thinking_can_omit_background_highlight() {
         false,
         true,
         false,
-    );
+    )
+    .0;
 
     assert!(
         lines
@@ -2375,8 +2375,7 @@ fn exec_cell_prefers_final_output_over_live_shell_tail() {
 fn long_thinking_display_is_shorter_than_transcript() {
     // Build a multi-paragraph thinking body so the live view has
     // something to compress. Without an explicit Summary block, the live
-    // surface should show a bounded preview plus affordance; Ctrl+O
-    // remains the path to the full body.
+    // surface should show a bounded preview plus neutral continuation row.
     let body = "First paragraph lede.\n\
                 Second sentence of the first paragraph.\n\n\
                 Second paragraph: deeper analysis follows.\n\
@@ -2429,8 +2428,8 @@ fn long_thinking_display_is_shorter_than_transcript() {
         "live thinking must drop the tail when collapsed"
     );
     assert!(
-        live_text.contains("Ctrl+O:detail"),
-        "live thinking must offer the pager affordance"
+        live_text.contains('…'),
+        "collapsed reasoning marks continuation"
     );
     assert!(
         !transcript_text.contains("Ctrl+O:detail"),
@@ -2524,17 +2523,20 @@ fn completed_reasoning_receipt_shows_verbatim_body_and_expands() {
         streaming: false,
         duration_secs: Some(1.0),
     };
-    let long_collapsed = long_cell.lines_with_options(
-        80,
-        TranscriptRenderOptions {
-            low_motion: true,
-            ..TranscriptRenderOptions::default()
-        },
-    );
+    let long_collapsed = long_cell
+        .lines_with_options_folded(
+            80,
+            TranscriptRenderOptions {
+                low_motion: true,
+                ..TranscriptRenderOptions::default()
+            },
+            false,
+        )
+        .0;
     let long_collapsed_text = lines_text(&long_collapsed);
     assert!(
-        long_collapsed_text.contains("Space:expand · Ctrl+O:detail"),
-        "a truncated receipt must offer the expand affordance: {long_collapsed_text}"
+        !long_collapsed_text.contains("Space:") && !long_collapsed_text.contains("Ctrl+O"),
+        "an untargeted receipt must keep neutral chrome: {long_collapsed_text}"
     );
     assert!(
         long_collapsed_text.contains("refresh_catalog_cache"),
@@ -2543,14 +2545,16 @@ fn completed_reasoning_receipt_shows_verbatim_body_and_expands() {
 
     // Expanded view (Space toggles the fold relative to the default): every
     // line is restored.
-    let expanded = long_cell.lines_with_options_folded(
-        80,
-        TranscriptRenderOptions {
-            low_motion: true,
-            ..TranscriptRenderOptions::default()
-        },
-        true,
-    );
+    let expanded = long_cell
+        .lines_with_options_folded(
+            80,
+            TranscriptRenderOptions {
+                low_motion: true,
+                ..TranscriptRenderOptions::default()
+            },
+            true,
+        )
+        .0;
     let expanded_text = lines_text(&expanded);
     for i in 1..=20 {
         assert!(
@@ -2581,7 +2585,7 @@ fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
         ..TranscriptRenderOptions::default()
     };
 
-    let expanded = cell.lines_with_options_folded(80, options, false);
+    let expanded = cell.lines_with_options_folded(80, options, false).0;
     let expanded_text = lines_text(&expanded);
     for i in 1..=20 {
         assert!(
@@ -2590,15 +2594,15 @@ fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
         );
     }
 
-    let collapsed = cell.lines_with_options_folded(80, options, true);
+    let collapsed = cell.lines_with_options_folded(80, options, true).0;
     let collapsed_text = lines_text(&collapsed);
     assert!(
         collapsed_text.contains("refresh_catalog_cache"),
         "Space must still collapse a default-expanded reasoning cell, verbatim: {collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("Space:expand · Ctrl+O:detail"),
-        "the collapsed state must retain the full-reasoning affordance"
+        !collapsed_text.contains("Space:") && !collapsed_text.contains("Ctrl+O"),
+        "untargeted collapsed state must retain neutral chrome"
     );
     assert!(
         !collapsed_text.contains("step 20:"),
