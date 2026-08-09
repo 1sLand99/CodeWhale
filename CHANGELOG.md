@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Mistral AI (la Plateforme) is now a first-class OpenAI-compatible provider
+  route. Select it with `provider = "mistral"`, `CODEWHALE_PROVIDER=mistral`,
+  or `codewhale --provider mistral`. Aliases `mistral-ai`, `mistralai`, and
+  `la-plateforme` resolve to the same route. Authenticate with
+  `MISTRAL_API_KEY` (get one at <https://console.mistral.ai/api-keys>), or
+  via `[providers.mistral].api_key` / `codewhale auth set --provider mistral`.
+  Endpoint defaults to `https://api.mistral.ai/v1`; model defaults to
+  `mistral-code-latest` (Codestral coding model, 256K context; the historical
+  `codestral-latest` slug is accepted as an alias). The current static picker
+  ships `mistral-code-latest`, `mistral-medium-latest`,
+  `mistral-small-latest`, and `mistral-large-latest` with 256K-class windows.
+  Adjustable reasoning is wired end-to-end for `mistral-medium-latest` and
+  `mistral-small-latest`: Codewhale sends `reasoning_effort` (`none` or `high`
+  only — intermediate tiers get HTTP 400 code 3051), parses the polymorphic
+  `content: [{type: thinking, thinking: [{type: text, text: ...}], closed:
+  bool}, {type: text, text: ...}]` shape emitted during reasoning, and
+  replays the thinking trace back into multi-turn history per the
+  [official reasoning guide](https://docs.mistral.ai/studio-api/conversations/reasoning).
+  Deprecated native Magistral IDs remain accepted
+  when configured explicitly, always replay thinking, and never receive the
+  adjustable effort field. Non-reasoning models (`mistral-code-latest`,
+  `mistral-large-latest`) never receive it. Mistral-specific reasoning wire
+  behavior is limited to the documented first-party HTTPS `/v1` hosts; custom
+  compatible gateways keep the generic Chat contract. FIM
+  (`/v1/fim/completions`) is not wired.
+
 ## [0.9.5] - 2026-08-08
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled

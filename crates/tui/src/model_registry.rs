@@ -73,6 +73,8 @@ pub enum ModelProvider {
     Meta,
     /// xAI / Grok models.
     Xai,
+    /// Mistral AI la Plateforme models.
+    Mistral,
     /// Anything not otherwise classified (still gets real metadata via the
     /// `models.rs` heuristics where possible).
     Other,
@@ -196,6 +198,12 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("grok-composer-2.5-fast", ModelProvider::Xai),
     ("grok-4.20-0309-reasoning", ModelProvider::Xai),
     ("grok-4.20-0309-non-reasoning", ModelProvider::Xai),
+    // --- Mistral AI (current first-party roster; deprecated Magistral remains
+    // accepted through the long-tail models.rs compatibility path) ---
+    ("mistral-code-latest", ModelProvider::Mistral),
+    ("mistral-medium-latest", ModelProvider::Mistral),
+    ("mistral-small-latest", ModelProvider::Mistral),
+    ("mistral-large-latest", ModelProvider::Mistral),
 ];
 
 fn registry() -> &'static BTreeMap<&'static str, ModelMetadata> {
@@ -301,6 +309,10 @@ mod tests {
             ("grok-4.5", Some(500_000)),
             ("grok-4.3", Some(1_000_000)),
             ("grok-4.20-0309-reasoning", Some(2_000_000)),
+            ("mistral-code-latest", Some(256_000)),
+            ("mistral-medium-latest", Some(262_144)),
+            ("mistral-small-latest", Some(262_144)),
+            ("mistral-large-latest", Some(262_144)),
         ];
         for (model, expected) in sample {
             let meta = lookup(model)
@@ -363,6 +375,20 @@ mod tests {
         assert_eq!(fast.provider, ModelProvider::Xai);
         assert_eq!(fast.context_window, Some(2_000_000));
         assert!(!fast.supports_reasoning);
+    }
+
+    #[test]
+    fn mistral_models_are_classified_with_truthful_reasoning() {
+        for (id, expected_reasoning) in [
+            ("mistral-code-latest", false),
+            ("mistral-medium-latest", true),
+            ("mistral-small-latest", true),
+            ("mistral-large-latest", false),
+        ] {
+            let meta = lookup(id).expect("Mistral model should be seeded");
+            assert_eq!(meta.provider, ModelProvider::Mistral, "{id}");
+            assert_eq!(meta.supports_reasoning, expected_reasoning, "{id}");
+        }
     }
 
     #[test]

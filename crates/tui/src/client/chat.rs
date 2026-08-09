@@ -486,6 +486,173 @@ pub(super) fn apply_route_reasoning_controls(
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
+    apply_mistral_route_reasoning_controls(body, provider, base_url, model, effort);
+}
+
+/// Mistral's polymorphic reasoning-content contract is only proven on its
+/// first-party Chat Completions endpoints. A configured `mistral` provider may
+/// point at an arbitrary OpenAI-compatible gateway, so provider identity alone
+/// is not enough to opt that route into Mistral's request or response dialect.
+fn is_exact_mistral_chat_route(provider: ApiProvider, base_url: &str) -> bool {
+    if provider != ApiProvider::Mistral {
+        return false;
+    }
+    let trimmed = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let Some((host, path)) = trimmed
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+    else {
+        return false;
+    };
+    matches!(
+        host,
+        "api.mistral.ai" | "api.eu.mistral.ai" | "api.us.mistral.ai"
+    ) && path == "v1"
+}
+
+fn mistral_model_has_adjustable_reasoning(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("mistral-medium") || model.starts_with("mistral-small")
+}
+
+fn mistral_model_has_native_reasoning(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("magistral")
+}
+
+fn mistral_model_supports_reasoning(model: &str) -> bool {
+    mistral_model_has_adjustable_reasoning(model) || mistral_model_has_native_reasoning(model)
+}
+
+fn mistral_reasoning_effort_wire_value(effort: &str) -> Option<&'static str> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" | "none" | "false" => Some("none"),
+        "high" | "xhigh" | "max" | "highest" | "ultracode" => Some("high"),
+        _ => None,
+    }
+}
+
+/// Rewrite assistant messages that carry `reasoning_content` back into the
+/// polymorphic `content: [{type: thinking, thinking: [{type: text, text: ...}],
+/// closed: bool}, {type: text, text: ...}]` shape that Mistral la Plateforme
+/// emits and accepts on replay. Mistral tolerates plain-string history in a
+/// thinking-capable conversation, but replaying the original thinking trace
+/// keeps multi-turn reasoning quality high per the official docs
+/// (docs.mistral.ai/capabilities/reasoning). Non-assistant messages and
+/// assistant messages without stored thinking are left untouched.
+fn reshape_mistral_messages_for_reasoning_replay(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let Some(object) = message.as_object_mut() else {
+            continue;
+        };
+        if object.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(reasoning) = object.remove("reasoning_content") else {
+            continue;
+        };
+        let reasoning_text = reasoning
+            .as_str()
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty());
+        let Some(reasoning_text) = reasoning_text else {
+            continue;
+        };
+        let text_content = object
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut blocks = vec![json!({
+            "type": "thinking",
+            "thinking": [{"type": "text", "text": reasoning_text}],
+            "closed": true,
+        })];
+        if let Some(text) = text_content.filter(|s| !s.trim().is_empty()) {
+            blocks.push(json!({"type": "text", "text": text}));
+        }
+        object.insert("content".to_string(), Value::Array(blocks));
+    }
+}
+
+/// Extract thinking and text content from a Mistral polymorphic `content`
+/// value. Mistral la Plateforme returns `content` as either a plain string
+/// (default) or an array of typed blocks (`{type: "thinking", thinking:
+/// [{type: "text", text: "..."}], closed: bool}` and `{type: "text", text:
+/// "..."}`). This helper flattens the thinking sub-array into a single
+/// string and returns any inline text separately. It ignores plain-string
+/// `content` (returns `(None, None)`) so the shared string fallback still
+/// runs for non-reasoning responses.
+fn extract_mistral_polymorphic_content(value: &Value) -> (Option<String>, Option<String>) {
+    let Some(array) = value.get("content").and_then(Value::as_array) else {
+        return (None, None);
+    };
+    let mut thinking = String::new();
+    let mut text = String::new();
+    for block in array {
+        let Some(kind) = block.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        match kind {
+            "thinking" => {
+                if let Some(inner) = block.get("thinking").and_then(Value::as_array) {
+                    for sub in inner {
+                        if let Some(sub_text) = sub
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            thinking.push_str(sub_text);
+                        }
+                    }
+                } else if let Some(inline) = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    thinking.push_str(inline);
+                }
+            }
+            "text" => {
+                if let Some(sub_text) = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    text.push_str(sub_text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let thinking = (!thinking.is_empty()).then_some(thinking);
+    let text = (!text.is_empty()).then_some(text);
+    (thinking, text)
+}
+
+fn apply_mistral_route_reasoning_controls(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if provider != ApiProvider::Mistral {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("thinking");
+        object.remove("reasoning_effort");
+    }
+    if !is_exact_mistral_chat_route(provider, base_url)
+        || !mistral_model_has_adjustable_reasoning(model)
+    {
+        return;
+    }
+    let Some(effort) = effort else {
+        return;
+    };
+    if let Some(wire) = mistral_reasoning_effort_wire_value(effort) {
+        body["reasoning_effort"] = json!(wire);
+    }
 }
 
 /// The direct K3 Chat Completions schema exposes fixed sampling behavior and
@@ -792,7 +959,7 @@ impl DeepSeekClient {
             .context("Failed to read Chat API response body")?;
         let value: Value =
             serde_json::from_str(&response_text).context("Failed to parse Chat API JSON")?;
-        let parsed = parse_chat_message(&value)?;
+        let parsed = parse_chat_message_for_route(&value, self.api_provider, &self.base_url)?;
         if let Some(key) = response_cache_key {
             crate::llm_response_cache::response_cache().put(key, parsed.clone());
         }
@@ -1229,6 +1396,9 @@ impl<'a> PromptBuilder<'a> {
         }
         if provider == ApiProvider::Minimax {
             mirror_minimax_reasoning_details_for_messages(&mut messages);
+        }
+        if is_exact_mistral_chat_route(provider, base_url) {
+            reshape_mistral_messages_for_reasoning_replay(&mut messages);
         }
         messages
     }
@@ -2485,6 +2655,13 @@ pub(super) fn sanitize_thinking_mode_messages_for_route(
     provider: ApiProvider,
     base_url: &str,
 ) -> Option<u32> {
+    // Mistral replay is encoded inside polymorphic `content` blocks, not the
+    // DeepSeek `reasoning_content` field. Running the DeepSeek placeholder
+    // sanitizer after reshaping would add a second, invalid reasoning dialect
+    // to assistant tool-call turns.
+    if is_exact_mistral_chat_route(provider, base_url) {
+        return None;
+    }
     if !should_replay_reasoning_content_for_provider_on_route(provider, base_url, model, effort) {
         return None;
     }
@@ -2670,6 +2847,8 @@ fn should_replay_reasoning_content_for_provider_on_route(
     if is_exact_direct_moonshot_k3_route(provider, base_url, model)
         || is_exact_kimi_code_k3_route(provider, base_url, model)
         || is_exact_modelstudio_thinking_only_route(provider, base_url, model)
+        || (is_exact_mistral_chat_route(provider, base_url)
+            && mistral_model_has_native_reasoning(model))
     {
         return true;
     }
@@ -2686,6 +2865,12 @@ fn should_replay_reasoning_content_for_provider_on_route(
     }
 
     if requires_reasoning_content(model) {
+        return true;
+    }
+
+    if is_exact_mistral_chat_route(provider, base_url)
+        && mistral_model_has_adjustable_reasoning(model)
+    {
         return true;
     }
 
@@ -2769,6 +2954,7 @@ fn is_reasoning_model_for_stream_on_route(
 pub(super) enum ReasoningStreamStyle {
     SeparateField,
     InlineTags,
+    MistralBlocks,
     None,
 }
 
@@ -2788,6 +2974,9 @@ fn reasoning_stream_style_for_route(
     model: &str,
     configured: Option<&str>,
 ) -> ReasoningStreamStyle {
+    if is_exact_mistral_chat_route(provider, base_url) && mistral_model_supports_reasoning(model) {
+        return ReasoningStreamStyle::MistralBlocks;
+    }
     if let Some(configured) = configured {
         if let Some(style) = parse_reasoning_stream_style(configured) {
             return style;
@@ -2907,7 +3096,16 @@ fn reasoning_message_text(value: &Value) -> Option<String> {
         })
 }
 
+#[cfg(test)]
 pub(super) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
+    parse_chat_message_for_route(payload, ApiProvider::Openai, "")
+}
+
+fn parse_chat_message_for_route(
+    payload: &Value,
+    provider: ApiProvider,
+    base_url: &str,
+) -> Result<MessageResponse> {
     let id = payload
         .get("id")
         .and_then(Value::as_str)
@@ -2939,7 +3137,23 @@ pub(super) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
             thinking: reasoning.to_string(),
         });
     }
-    if let Some(text) = message.get("content").and_then(Value::as_str)
+    let (mistral_thinking, mistral_text) = if is_exact_mistral_chat_route(provider, base_url) {
+        extract_mistral_polymorphic_content(message)
+    } else {
+        (None, None)
+    };
+    if let Some(thinking) = mistral_thinking.filter(|s| !s.trim().is_empty()) {
+        content_blocks.push(ContentBlock::Thinking {
+            signature: None,
+            thinking,
+        });
+    }
+    if let Some(text) = mistral_text.filter(|s| !s.trim().is_empty()) {
+        content_blocks.push(ContentBlock::Text {
+            text,
+            cache_control: None,
+        });
+    } else if let Some(text) = message.get("content").and_then(Value::as_str)
         && !text.trim().is_empty()
     {
         content_blocks.push(ContentBlock::Text {
@@ -3288,11 +3502,34 @@ fn parse_sse_chunk_with_reasoning_style(
         if let Some(delta) = delta {
             let reasoning_text = reasoning_delta(delta, choice_index, reasoning_detail_buffers)
                 .filter(|s| !s.is_empty());
-            let content_text = delta
-                .get("content")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            // Mistral la Plateforme streams reasoning as a polymorphic
+            // `delta.content` value: an array of typed {type: thinking|text}
+            // blocks while thinking, then a plain string once the final
+            // answer starts. Flatten thinking sub-blocks into a single
+            // reasoning delta and treat text sub-blocks as normal content
+            // before the shared string fallback below.
+            let (mistral_thinking, mistral_text) =
+                if reasoning_stream_style == ReasoningStreamStyle::MistralBlocks {
+                    extract_mistral_polymorphic_content(delta)
+                } else {
+                    (None, None)
+                };
+            if let Some(reasoning) = mistral_thinking.as_deref() {
+                push_thinking_delta(
+                    &mut events,
+                    content_index,
+                    text_started,
+                    thinking_started,
+                    reasoning.to_string(),
+                );
+            }
+            let content_text = mistral_text.or_else(|| {
+                delta
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
 
             // Handle reasoning_content / reasoning thinking deltas.
             if reasoning_stream_style == ReasoningStreamStyle::SeparateField
@@ -3808,1317 +4045,8 @@ mod minimax_reasoning_replay_tests {
 // === #103 Phase 4: SSE decoder behavior on canned chunk sequences ============
 
 #[cfg(test)]
-mod stream_decoder_tests {
-    //! Drive `parse_sse_chunk` (the in-place SSE event extractor) over canned
-    //! chunk sequences. The full `handle_chat_completion_stream` path needs a
-    //! live `reqwest::Response` so it isn't unit-testable without a mock HTTP
-    //! harness (issue #69 tracks that). For #103 we exercise the chunk decoder
-    //! directly to verify each "class of stream failure" the engine relies on.
-    use super::*;
-    use crate::models::{ContentBlockStart, Delta, StreamEvent};
-
-    /// Decode a raw SSE-data JSON chunk into our internal events, mirroring
-    /// the per-event call shape used by `handle_chat_completion_stream`.
-    fn decode_chunk(json_text: &str) -> Vec<StreamEvent> {
-        decode_chunk_with_reasoning(json_text, true)
-    }
-
-    fn decode_chunk_with_reasoning(json_text: &str, is_reasoning_model: bool) -> Vec<StreamEvent> {
-        let chunk: Value = serde_json::from_str(json_text).expect("valid SSE JSON");
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        parse_sse_chunk(
-            &chunk,
-            &mut content_index,
-            &mut text_started,
-            &mut thinking_started,
-            &mut tool_indices,
-            &mut reasoning_detail_buffers,
-            is_reasoning_model,
-        )
-    }
-
-    fn decode_chunks_with_style(
-        chunks: &[&str],
-        reasoning_stream_style: ReasoningStreamStyle,
-    ) -> Vec<StreamEvent> {
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        let mut inline_reasoning_tags = InlineReasoningTagState::default();
-        let mut events = Vec::new();
-
-        for chunk in chunks {
-            let value: Value = serde_json::from_str(chunk).expect("valid SSE JSON");
-            events.extend(parse_sse_chunk_with_reasoning_style(
-                &value,
-                &mut content_index,
-                &mut text_started,
-                &mut thinking_started,
-                &mut tool_indices,
-                &mut reasoning_detail_buffers,
-                &mut inline_reasoning_tags,
-                reasoning_stream_style,
-            ));
-        }
-        events
-    }
-
-    fn text_delta_text(events: &[StreamEvent]) -> String {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
-                    ..
-                } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn thinking_delta_text(events: &[StreamEvent]) -> String {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { thinking },
-                    ..
-                } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn decoder_emits_text_delta_for_content_chunk() {
-        // The "happy" first chunk: a normal content delta. The engine treats
-        // this as `any_content_received = true` and would NOT transparently
-        // retry on a subsequent error.
-        let events = decode_chunk(r#"{"choices":[{"delta":{"content":"hello"}}]}"#);
-        assert!(
-            matches!(
-                events.first(),
-                Some(StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::Text { .. },
-                    ..
-                })
-            ),
-            "first event should open a text block; got {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
-                    ..
-                } if text == "hello")),
-            "should yield a TextDelta carrying 'hello'; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_emits_thinking_delta_for_reasoning_chunk() {
-        // V4 thinking models surface reasoning_content first — the engine
-        // also counts these as content received (so a subsequent stream error
-        // surfaces rather than retrying transparently).
-        let events = decode_chunk(r#"{"choices":[{"delta":{"reasoning_content":"plan..."}}]}"#);
-        assert!(
-            matches!(
-                events.first(),
-                Some(StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::Thinking { .. },
-                    ..
-                })
-            ),
-            "first event should open a thinking block; got {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { thinking },
-                    ..
-                } if thinking == "plan...")),
-            "should yield a ThinkingDelta carrying 'plan...'; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_streams_moonshot_multi_chunk_reasoning_as_thinking() {
-        // #3016: recorded shape from Moonshot's native endpoint — kimi-k2.6
-        // streams `reasoning_content` deltas before the answer text. The
-        // thinking deltas must accumulate into ONE thinking block and the
-        // answer must arrive as text, not be glued into the trace.
-        let chunks = [
-            r#"{"id":"cmpl-kimi","model":"kimi-k2.6","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me check"}}]}"#,
-            r#"{"id":"cmpl-kimi","model":"kimi-k2.6","choices":[{"index":0,"delta":{"reasoning_content":" the config."}}]}"#,
-            r#"{"id":"cmpl-kimi","model":"kimi-k2.6","choices":[{"index":0,"delta":{"content":"The answer is 42."}}]}"#,
-        ];
-
-        let is_reasoning =
-            is_reasoning_model_for_stream(crate::config::ApiProvider::Moonshot, "kimi-k2.6");
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        let mut events = Vec::new();
-        for chunk in chunks {
-            let value: Value = serde_json::from_str(chunk).expect("valid SSE JSON");
-            events.extend(parse_sse_chunk(
-                &value,
-                &mut content_index,
-                &mut text_started,
-                &mut thinking_started,
-                &mut tool_indices,
-                &mut reasoning_detail_buffers,
-                is_reasoning,
-            ));
-        }
-
-        let thinking: String = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { thinking },
-                    ..
-                } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(thinking, "Let me check the config.");
-
-        let thinking_starts = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    StreamEvent::ContentBlockStart {
-                        content_block: ContentBlockStart::Thinking { .. },
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(thinking_starts, 1, "one thinking block: {events:?}");
-
-        let text: String = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
-                    ..
-                } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(text, "The answer is 42.");
-    }
-
-    #[test]
-    fn decoder_accepts_openrouter_reasoning_delta_with_extra_fields() {
-        let events = decode_chunk(
-            r#"{"id":"or-1","choices":[{"delta":{"reasoning":"openrouter thought","reasoning_details":[{"type":"summary","text":"extra"}],"native_finish_reason":null}}],"usage":{"completion_tokens_details":{"reasoning_tokens":3}}}"#,
-        );
-
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { thinking },
-                    ..
-                } if thinking == "openrouter thought"
-            )),
-            "OpenRouter-style reasoning deltas with extra fields should not crash decoding; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_streams_minimax_reasoning_details_as_incremental_thinking() {
-        // MiniMax's reasoning_split stream reports reasoning_details text as
-        // a cumulative buffer. Emit only the suffix so the Thinking cell does
-        // not duplicate earlier reasoning chunks.
-        let chunks = [
-            r#"{"id":"minimax-1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"text","text":"Inspect"}]}}]}"#,
-            r#"{"id":"minimax-1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"text","text":"Inspect config"}]}}]}"#,
-            r#"{"id":"minimax-1","choices":[{"index":0,"delta":{"content":"Done."}}]}"#,
-        ];
-
-        let is_reasoning = is_reasoning_model_for_stream(ApiProvider::Minimax, "MiniMax-M3");
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        let mut events = Vec::new();
-        for chunk in chunks {
-            let value: Value = serde_json::from_str(chunk).expect("valid SSE JSON");
-            events.extend(parse_sse_chunk(
-                &value,
-                &mut content_index,
-                &mut text_started,
-                &mut thinking_started,
-                &mut tool_indices,
-                &mut reasoning_detail_buffers,
-                is_reasoning,
-            ));
-        }
-
-        let thinking: String = events
-            .iter()
-            .filter_map(|event| match event {
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { thinking },
-                    ..
-                } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(thinking, "Inspect config");
-
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::TextDelta { text },
-                ..
-            } if text == "Inspect" || text == "Inspect config"
-        )));
-    }
-
-    #[test]
-    fn modelstudio_streams_reasoning_content_as_thinking() {
-        // Recorded-style DashScope OpenAI-compatible frames (shape lifted from
-        // Model Studio's deep-thinking docs): reasoning streams in
-        // `delta.reasoning_content`, the answer in `delta.content`, and a
-        // trailing usage-only chunk closes the stream.
-        let chunks = [
-            r#"{"choices":[{"delta":{"content":null,"role":"assistant","reasoning_content":""},"index":0,"logprobs":null,"finish_reason":null}],"object":"chat.completion.chunk","usage":null,"model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-            r#"{"choices":[{"delta":{"reasoning_content":"Let me think"},"index":0}],"object":"chat.completion.chunk","model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-            r#"{"choices":[{"delta":{"reasoning_content":" about this."},"index":0}],"object":"chat.completion.chunk","model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-            r#"{"choices":[{"delta":{"content":"The answer."},"index":0}],"object":"chat.completion.chunk","model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-            r#"{"choices":[{"finish_reason":"stop","delta":{"content":"","reasoning_content":null},"index":0}],"object":"chat.completion.chunk","model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-            r#"{"choices":[],"object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":30,"total_tokens":40,"completion_tokens_details":{"reasoning_tokens":20}},"model":"qwen3.8-max","id":"chatcmpl-ms-1"}"#,
-        ];
-
-        // Both OpenAI-dialect plans classify their reasoning catalog.
-        for (provider, base_url, model) in [
-            (
-                ApiProvider::ModelstudioTokenPlan,
-                crate::config::DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
-                "qwen3.8-max",
-            ),
-            (
-                ApiProvider::ModelstudioCodingPlan,
-                crate::config::DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL,
-                "qwen3.7-plus",
-            ),
-        ] {
-            let style = reasoning_stream_style_for_route(provider, base_url, model, None);
-            assert_eq!(style, ReasoningStreamStyle::SeparateField, "{provider:?}");
-
-            let mut content_index = 0u32;
-            let mut text_started = false;
-            let mut thinking_started = false;
-            let mut tool_indices = std::collections::HashMap::new();
-            let mut reasoning_detail_buffers = std::collections::HashMap::new();
-            let mut inline_reasoning_tags = InlineReasoningTagState::default();
-            let mut events = Vec::new();
-            for chunk in chunks {
-                let value: Value = serde_json::from_str(chunk).expect("valid SSE JSON");
-                events.extend(parse_sse_chunk_with_reasoning_style(
-                    &value,
-                    &mut content_index,
-                    &mut text_started,
-                    &mut thinking_started,
-                    &mut tool_indices,
-                    &mut reasoning_detail_buffers,
-                    &mut inline_reasoning_tags,
-                    style,
-                ));
-            }
-
-            let thinking: String = events
-                .iter()
-                .filter_map(|event| match event {
-                    StreamEvent::ContentBlockDelta {
-                        delta: Delta::ThinkingDelta { thinking },
-                        ..
-                    } => Some(thinking.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(thinking, "Let me think about this.", "{provider:?}");
-
-            let text: String = events
-                .iter()
-                .filter_map(|event| match event {
-                    StreamEvent::ContentBlockDelta {
-                        delta: Delta::TextDelta { text },
-                        ..
-                    } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(text, "The answer.", "{provider:?}");
-
-            // The trailing usage chunk still surfaces token accounting.
-            assert!(
-                events.iter().any(|event| matches!(
-                    event,
-                    StreamEvent::MessageDelta { usage: Some(usage), .. }
-                        if usage.output_tokens == 30
-                )),
-                "{provider:?}: {events:?}"
-            );
-        }
-
-        // A non-reasoning model id on the same route keeps the old
-        // pass-through semantics (no fabricated Thinking surface).
-        let style = reasoning_stream_style_for_route(
-            ApiProvider::ModelstudioTokenPlan,
-            crate::config::DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
-            "qwen3.8-max-lite-unknown",
-            None,
-        );
-        assert_eq!(style, ReasoningStreamStyle::None);
-    }
-
-    #[test]
-    fn decoder_does_not_render_reasoning_as_text_for_known_provider_models() {
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        let is_reasoning_model =
-            is_reasoning_model_for_stream(ApiProvider::XiaomiMimo, "mimo-v2.5-pro");
-        let events = parse_sse_chunk(
-            &serde_json::json!({
-                "choices": [{
-                    "delta": {
-                        "reasoning_content": "private plan"
-                    }
-                }]
-            }),
-            &mut content_index,
-            &mut text_started,
-            &mut thinking_started,
-            &mut tool_indices,
-            &mut reasoning_detail_buffers,
-            is_reasoning_model,
-        );
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::ThinkingDelta { thinking },
-                ..
-            } if thinking == "private plan"
-        )));
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            StreamEvent::ContentBlockDelta {
-                delta: Delta::TextDelta { text },
-                ..
-            } if text == "private plan"
-        )));
-    }
-
-    #[test]
-    fn decoder_treats_reasoning_content_as_text_when_provider_does_not_support_reasoning() {
-        let events = decode_chunk_with_reasoning(
-            r#"{"choices":[{"delta":{"reasoning_content":"hello"}}]}"#,
-            false,
-        );
-
-        assert!(
-            matches!(
-                events.first(),
-                Some(StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::Text { .. },
-                    ..
-                })
-            ),
-            "first event should open a text block; got {events:?}"
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::TextDelta { text },
-                    ..
-                } if text == "hello"
-            )),
-            "should yield a TextDelta carrying 'hello'; got {events:?}"
-        );
-        assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::ThinkingDelta { .. },
-                    ..
-                }
-            )),
-            "should not emit thinking deltas for generic providers; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn reasoning_style_separate_field_routes_reasoning_to_thinking() {
-        let events = decode_chunks_with_style(
-            &[
-                r#"{"choices":[{"delta":{"reasoning_content":"private plan"}}]}"#,
-                r#"{"choices":[{"delta":{"content":"Public answer."}}]}"#,
-            ],
-            ReasoningStreamStyle::SeparateField,
-        );
-
-        assert_eq!(thinking_delta_text(&events), "private plan");
-        assert_eq!(text_delta_text(&events), "Public answer.");
-    }
-
-    #[test]
-    fn exact_kimi_code_k3_streams_reasoning_content_as_thinking() {
-        let style = reasoning_stream_style_for_route(
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::KIMI_CODE_K3_MODEL,
-            None,
-        );
-        assert_eq!(style, ReasoningStreamStyle::SeparateField);
-
-        let events = decode_chunks_with_style(
-            &[r#"{"choices":[{"delta":{"reasoning_content":"private K3 plan"}}]}"#],
-            style,
-        );
-        assert_eq!(thinking_delta_text(&events), "private K3 plan");
-        assert_eq!(text_delta_text(&events), "");
-
-        let generic_style = reasoning_stream_style_for_route(
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            crate::config::KIMI_CODE_K3_MODEL,
-            None,
-        );
-        assert_eq!(generic_style, ReasoningStreamStyle::None);
-    }
-
-    #[test]
-    fn reasoning_style_inline_tags_routes_think_blocks_to_thinking() {
-        let events = decode_chunks_with_style(
-            &[
-                r#"{"choices":[{"delta":{"content":"Before <thi"}}]}"#,
-                r#"{"choices":[{"delta":{"content":"nk>private plan</thi"}}]}"#,
-                r#"{"choices":[{"delta":{"content":"nk> after."}}]}"#,
-            ],
-            ReasoningStreamStyle::InlineTags,
-        );
-
-        assert_eq!(thinking_delta_text(&events), "private plan");
-        assert_eq!(text_delta_text(&events), "Before  after.");
-        assert!(
-            !text_delta_text(&events).contains("<think>"),
-            "inline reasoning tags must not leak into visible text: {events:?}"
-        );
-    }
-
-    #[test]
-    fn reasoning_style_inline_tags_flushes_unclosed_think_at_stream_end() {
-        let events = decode_chunks_with_style(
-            &[
-                r#"{"choices":[{"delta":{"content":"Before <think>partial reasoning"}}]}"#,
-                r#"{"choices":[{"finish_reason":"stop"}]}"#,
-            ],
-            ReasoningStreamStyle::InlineTags,
-        );
-
-        assert_eq!(thinking_delta_text(&events), "partial reasoning");
-        assert_eq!(text_delta_text(&events), "Before ");
-    }
-
-    #[test]
-    fn reasoning_style_inline_tags_ignores_separate_reasoning_field() {
-        let events = decode_chunks_with_style(
-            &[
-                r#"{"choices":[{"delta":{"reasoning_content":"metadata","content":"<think>tagged</think> answer"}}]}"#,
-            ],
-            ReasoningStreamStyle::InlineTags,
-        );
-
-        assert_eq!(thinking_delta_text(&events), "tagged");
-        assert_eq!(text_delta_text(&events), " answer");
-    }
-
-    #[test]
-    fn reasoning_style_none_keeps_inline_tags_visible_text() {
-        let events = decode_chunks_with_style(
-            &[r#"{"choices":[{"delta":{"content":"<think>visible</think> answer"}}]}"#],
-            ReasoningStreamStyle::None,
-        );
-
-        assert_eq!(thinking_delta_text(&events), "");
-        assert_eq!(text_delta_text(&events), "<think>visible</think> answer");
-    }
-
-    #[test]
-    fn configured_reasoning_style_overrides_route_default() {
-        assert_eq!(
-            reasoning_stream_style_for_stream(ApiProvider::Openai, "custom-minimax", None),
-            ReasoningStreamStyle::None
-        );
-        assert_eq!(
-            reasoning_stream_style_for_stream(
-                ApiProvider::Openai,
-                "custom-minimax",
-                Some("inline-tags")
-            ),
-            ReasoningStreamStyle::InlineTags
-        );
-        assert_eq!(
-            reasoning_stream_style_for_stream(ApiProvider::XiaomiMimo, "mimo-v2.5-pro", None),
-            ReasoningStreamStyle::SeparateField
-        );
-        assert_eq!(
-            reasoning_stream_style_for_stream(
-                ApiProvider::XiaomiMimo,
-                "mimo-v2.5-pro",
-                Some("none")
-            ),
-            ReasoningStreamStyle::None
-        );
-    }
-
-    #[test]
-    fn decoder_yields_no_events_for_keepalive_chunk() {
-        // DeepSeek often sends `{"choices":[]}` keepalive chunks before
-        // emitting real content. The engine MUST treat a stream error after
-        // these as "no content received" and be eligible for transparent
-        // retry — assert here that the decoder yields no payload events.
-        let events = decode_chunk(r#"{"choices":[]}"#);
-        assert!(
-            events.is_empty(),
-            "empty-choices chunk must produce no events; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_treats_done_frame_as_terminal() {
-        let mut content_index = 0u32;
-        let mut text_started = false;
-        let mut thinking_started = false;
-        let mut tool_indices = std::collections::HashMap::new();
-        let mut reasoning_detail_buffers = std::collections::HashMap::new();
-        let mut inline_reasoning_tags = InlineReasoningTagState::default();
-
-        let outcome = parse_sse_data_frame(
-            "  [DONE]  ",
-            &mut content_index,
-            &mut text_started,
-            &mut thinking_started,
-            &mut tool_indices,
-            &mut reasoning_detail_buffers,
-            &mut inline_reasoning_tags,
-            ReasoningStreamStyle::SeparateField,
-        );
-
-        assert!(
-            matches!(outcome, SseDataFrame::Done),
-            "`data: [DONE]` must terminate the stream instead of waiting for the HTTP connection to close"
-        );
-        assert_eq!(content_index, 0);
-        assert!(!text_started);
-        assert!(!thinking_started);
-        assert!(tool_indices.is_empty());
-    }
-
-    #[test]
-    fn decoder_emits_tool_use_block_for_tool_call_delta() {
-        // Tool-call deltas are content too — once one arrives, transparent
-        // retry must be off (the model has committed to a tool invocation
-        // path that DeepSeek has billed for).
-        let events = decode_chunk(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"grep_files","arguments":"{\"pattern\":\"foo\"}"}}]}}]}"#,
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::ToolUse { name, .. },
-                    ..
-                } if name == "grep_files"
-            )),
-            "should open a ToolUse block for grep_files; got {events:?}"
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                StreamEvent::ContentBlockDelta {
-                    delta: Delta::InputJsonDelta { partial_json },
-                    ..
-                } if partial_json.contains("\"pattern\"")
-            )),
-            "should yield InputJsonDelta carrying the tool args; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_uses_fallback_name_for_empty_streaming_tool_name() {
-        let events = decode_chunk(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_empty","function":{"name":"","arguments":"{}"}}]}}]}"#,
-        );
-
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::ToolUse { name, .. },
-                    ..
-                } if name == "unknown_tool"
-            )),
-            "empty upstream tool names should render as unknown_tool; got {events:?}"
-        );
-    }
-
-    #[test]
-    fn non_streaming_response_uses_fallback_name_for_missing_tool_name() {
-        let payload: Value = serde_json::from_str(
-            r#"{
-                "id": "chatcmpl_1",
-                "model": "deepseek-v4-pro",
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": "call_missing",
-                            "function": { "arguments": "{}" }
-                        }]
-                    },
-                    "finish_reason": "tool_calls"
-                }]
-            }"#,
-        )
-        .expect("valid response");
-
-        let parsed = parse_chat_message(&payload).expect("message parses");
-        let tool_name = parsed.content.iter().find_map(|block| match block {
-            ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
-            _ => None,
-        });
-
-        assert_eq!(tool_name, Some("unknown_tool"));
-    }
-
-    /// Regression for the parallel-tool-calls-without-id collision (audit
-    /// Finding 8): when the upstream chunk omits the `id` field, the
-    /// fallback used to be the literal string `"tool_call"` for every
-    /// parallel call, so two tool calls in one delta ended up sharing an
-    /// id. Downstream routing then matched the first call's tool_result
-    /// twice and the second call hung. The fallback is now indexed by the
-    /// content-block position, keeping each call unique within the
-    /// response.
-    #[test]
-    fn decoder_assigns_unique_fallback_ids_to_parallel_tool_calls_missing_id() {
-        let events = decode_chunk(
-            r#"{"choices":[{"delta":{"tool_calls":[
-                {"index":0,"function":{"name":"grep_files","arguments":"{\"pattern\":\"a\"}"}},
-                {"index":1,"function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}
-            ]}}]}"#,
-        );
-
-        let ids: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::ToolUse { id, .. },
-                    ..
-                } => Some(id.as_str()),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            ids.len(),
-            2,
-            "expected two tool-use blocks for parallel tool calls; got {events:?}"
-        );
-        assert_ne!(
-            ids[0], ids[1],
-            "parallel tool calls without upstream `id` must get distinct fallback ids; got {ids:?}"
-        );
-    }
-
-    #[test]
-    fn decoder_preserves_upstream_tool_call_id_when_present() {
-        // Counter-test to the fallback regression: when the upstream chunk
-        // does include `id`, we forward it verbatim — we shouldn't quietly
-        // rewrite ids the API gave us just because we have a fallback path.
-        let events = decode_chunk(
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_xyz","function":{"name":"grep_files","arguments":"{}"}}]}}]}"#,
-        );
-        let id = events
-            .iter()
-            .find_map(|e| match e {
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlockStart::ToolUse { id, .. },
-                    ..
-                } => Some(id.as_str()),
-                _ => None,
-            })
-            .expect("tool-use block present");
-        assert_eq!(id, "call_xyz");
-    }
-
-    #[test]
-    fn request_builder_preserves_internal_system_messages() {
-        let messages = vec![Message {
-            role: "system".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "internal runtime event".to_string(),
-                cache_control: None,
-            }],
-        }];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-
-        assert_eq!(built.len(), 1);
-        assert_eq!(built[0]["role"], "system");
-        assert_eq!(built[0]["content"], "internal runtime event");
-    }
-
-    fn tool_use_message(id: &str, name: &str, input: Value) -> Message {
-        Message {
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::ToolUse {
-                id: id.to_string(),
-                name: name.to_string(),
-                input,
-                caller: None,
-            }],
-        }
-    }
-
-    fn tool_result_message(id: &str, content: &str) -> Message {
-        Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: content.to_string(),
-                is_error: None,
-                content_blocks: None,
-            }],
-        }
-    }
-
-    fn user_message_with_turn_meta(turn_meta: &str, task: &str) -> Message {
-        Message {
-            role: "user".to_string(),
-            content: vec![
-                ContentBlock::Text {
-                    text: turn_meta.to_string(),
-                    cache_control: None,
-                },
-                ContentBlock::Text {
-                    text: task.to_string(),
-                    cache_control: None,
-                },
-            ],
-        }
-    }
-
-    fn user_message_with_tail_turn_meta(task: &str, turn_meta: &str) -> Message {
-        Message {
-            role: "user".to_string(),
-            content: vec![
-                ContentBlock::Text {
-                    text: task.to_string(),
-                    cache_control: None,
-                },
-                ContentBlock::Text {
-                    text: turn_meta.to_string(),
-                    cache_control: None,
-                },
-            ],
-        }
-    }
-
-    fn tool_message_content(messages: &[Value], index: usize) -> &str {
-        messages
-            .iter()
-            .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
-            .nth(index)
-            .and_then(|message| message.get("content").and_then(Value::as_str))
-            .expect("tool message content")
-    }
-
-    fn user_message_content(messages: &[Value], index: usize) -> &str {
-        messages
-            .iter()
-            .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-            .nth(index)
-            .and_then(|message| message.get("content").and_then(Value::as_str))
-            .expect("user message content")
-    }
-
-    fn with_tool_result_sha_spillover_root<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::tools::truncate::TEST_SPILLOVER_GUARD
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prior = crate::tools::truncate::set_test_spillover_root(Some(
-            tmp.path().join(".deepseek").join("tool_outputs"),
-        ));
-        struct Restore(Option<std::path::PathBuf>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                crate::tools::truncate::set_test_spillover_root(self.0.take());
-            }
-        }
-        let _restore = Restore(prior);
-        f()
-    }
-
-    #[test]
-    fn request_builder_deduplicates_consecutive_identical_turn_meta_for_wire() {
-        let turn_meta = "<turn_meta>\nCurrent local date: 2026-05-09\n</turn_meta>";
-        let messages = vec![
-            user_message_with_turn_meta(turn_meta, "first task"),
-            Message {
-                role: "assistant".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: "first answer".to_string(),
-                    cache_control: None,
-                }],
-            },
-            user_message_with_turn_meta(turn_meta, "second task"),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let first = user_message_content(&built, 0);
-        let second = user_message_content(&built, 1);
-        let expected_ref = "<turn_meta_unchanged />";
-
-        assert!(first.starts_with(turn_meta), "got: {first}");
-        assert!(second.starts_with(expected_ref), "got: {second}");
-        assert!(second.ends_with("second task"), "got: {second}");
-        assert_eq!(
-            second,
-            format!("{expected_ref}\nsecond task"),
-            "ref text must stay stable"
-        );
-    }
-
-    #[test]
-    fn request_builder_keeps_tail_turn_meta_after_user_text_for_wire() {
-        let turn_meta = "<turn_meta>\nCurrent local date: 2026-05-09\n</turn_meta>";
-        let messages = vec![
-            user_message_with_tail_turn_meta("first task", turn_meta),
-            Message {
-                role: "assistant".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: "first answer".to_string(),
-                    cache_control: None,
-                }],
-            },
-            user_message_with_tail_turn_meta("second task", turn_meta),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let first = user_message_content(&built, 0);
-        let second = user_message_content(&built, 1);
-        let expected_ref = "<turn_meta_unchanged />";
-
-        assert_eq!(first, format!("first task\n{turn_meta}"));
-        assert_eq!(second, format!("second task\n{expected_ref}"));
-    }
-
-    #[test]
-    fn request_builder_keeps_changed_turn_meta_full_and_updates_recent_hash() {
-        let first_meta = "<turn_meta>\nCurrent local date: 2026-05-09\n</turn_meta>";
-        let second_meta =
-            "<turn_meta>\nCurrent local date: 2026-05-09\nWorking set: src/lib.rs\n</turn_meta>";
-        let messages = vec![
-            user_message_with_turn_meta(first_meta, "first task"),
-            user_message_with_turn_meta(second_meta, "second task"),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let first = user_message_content(&built, 0);
-        let second = user_message_content(&built, 1);
-
-        assert!(first.starts_with(first_meta), "got: {first}");
-        assert!(second.starts_with(second_meta), "got: {second}");
-        assert!(!second.contains("<TURN_META_REF"), "got: {second}");
-    }
-
-    #[test]
-    fn turn_meta_dedup_is_wire_only_and_does_not_mutate_session_message() {
-        let turn_meta = "<turn_meta>\nCurrent local date: 2026-05-09\n</turn_meta>";
-        let messages = vec![
-            user_message_with_turn_meta(turn_meta, "first task"),
-            user_message_with_turn_meta(turn_meta, "second task"),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        assert!(
-            user_message_content(&built, 1).starts_with("<turn_meta_unchanged />"),
-            "got: {}",
-            user_message_content(&built, 1)
-        );
-
-        match &messages[1].content[0] {
-            ContentBlock::Text { text, .. } => assert_eq!(text, turn_meta),
-            other => panic!("expected text block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cache_inspect_reports_turn_meta_dedup_metadata() {
-        let turn_meta = format!(
-            "<turn_meta>\nCurrent local date: 2026-05-09\n{}\n</turn_meta>",
-            "Working set: src/lib.rs\n".repeat(20)
-        );
-        let request = MessageRequest {
-            model: "deepseek-v4-flash".to_string(),
-            messages: vec![
-                user_message_with_turn_meta(&turn_meta, "first task"),
-                user_message_with_turn_meta(&turn_meta, "second task"),
-            ],
-            max_tokens: 0,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-        };
-
-        let inspection = inspect_prompt_for_request(&request);
-        let turn_meta_layers: Vec<_> = inspection
-            .layers
-            .iter()
-            .filter_map(|layer| layer.turn_meta.as_ref())
-            .collect();
-
-        assert_eq!(turn_meta_layers.len(), 2);
-        assert_eq!(
-            turn_meta_layers[0].original_chars,
-            turn_meta.chars().count()
-        );
-        assert_eq!(turn_meta_layers[0].sent_chars, turn_meta.chars().count());
-        assert!(!turn_meta_layers[0].deduplicated);
-        assert_eq!(turn_meta_layers[0].sha256, sha256_hex(turn_meta.as_bytes()));
-        assert_eq!(
-            turn_meta_layers[1].original_chars,
-            turn_meta.chars().count()
-        );
-        assert!(turn_meta_layers[1].sent_chars < turn_meta_layers[1].original_chars);
-        assert!(turn_meta_layers[1].deduplicated);
-        assert_eq!(turn_meta_layers[1].sha256, turn_meta_layers[0].sha256);
-    }
-
-    #[test]
-    fn request_builder_truncates_large_tool_result_for_wire() {
-        let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-        let messages = vec![
-            tool_use_message(
-                "tool-long",
-                "shell_command",
-                json!({"command": "cargo test"}),
-            ),
-            tool_result_message("tool-long", &long_output),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let sent = tool_message_content(&built, 0);
-
-        assert!(sent.contains("[TOOL_RESULT_TRUNCATED]"), "got: {sent}");
-        assert!(sent.contains("tool_name: shell_command"), "got: {sent}");
-        assert!(sent.contains("command_or_query: cargo test"), "got: {sent}");
-        assert!(sent.contains("original_chars: 14000"), "got: {sent}");
-        assert!(sent.contains("sha256:"), "got: {sent}");
-        assert!(
-            sent.contains("exact_detail: unavailable; no session-owned artifact was recorded"),
-            "got: {sent}"
-        );
-        assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
-        assert!(sent.contains(&"A".repeat(4_000)), "got: {sent}");
-        assert!(sent.contains(&"Z".repeat(4_000)), "got: {sent}");
-        assert!(
-            sent.contains("truncated 6000 chars from middle"),
-            "got: {sent}"
-        );
-        assert_ne!(sent, long_output);
-    }
-
-    #[test]
-    fn request_builder_keeps_unowned_extreme_tool_output_bounded_without_false_hint() {
-        with_tool_result_sha_spillover_root(|| {
-            let huge_output = format!(
-                "{}{}{}",
-                "DIFF_HEAD\n".repeat(10_000),
-                "MIDDLE_POISON\n".repeat(10_000),
-                "DIFF_TAIL\n".repeat(10_000)
-            );
-            let sha = sha256_hex(huge_output.as_bytes());
-            let messages = vec![
-                tool_use_message("tool-huge", "exec_shell", json!({"command": "git diff"})),
-                tool_result_message("tool-huge", &huge_output),
-            ];
-
-            let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-            let sent = tool_message_content(&built, 0);
-
-            assert!(sent.contains("[TOOL_RESULT_TRUNCATED]"), "got: {sent}");
-            assert!(sent.contains("tool_name: exec_shell"), "got: {sent}");
-            assert!(sent.contains("command_or_query: git diff"), "got: {sent}");
-            assert!(sent.contains(&format!("sha256: {sha}")), "got: {sent}");
-            assert!(sent.contains("exact_detail: unavailable"), "got: {sent}");
-            assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
-            assert!(
-                sent.chars().count() <= TOOL_RESULT_SENT_CHAR_BUDGET,
-                "truncated result should stay bounded, sent {} chars",
-                sent.chars().count()
-            );
-            assert!(
-                !sent.contains("MIDDLE_POISON"),
-                "omitted middle should not be sent to the next model turn"
-            );
-            assert_ne!(sent, huge_output);
-        });
-    }
-
-    #[test]
-    fn request_builder_does_not_dedup_short_tool_results_for_wire() {
-        let output = "same tool output";
-        let messages = vec![
-            tool_use_message("tool-1", "read_file", json!({"path": "README.md"})),
-            tool_result_message("tool-1", output),
-            tool_use_message("tool-2", "read_file", json!({"path": "README.md"})),
-            tool_result_message("tool-2", output),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let first = tool_message_content(&built, 0);
-        let second = tool_message_content(&built, 1);
-
-        assert_eq!(first, output);
-        assert_eq!(second, output);
-        assert!(!second.contains("<TOOL_RESULT_REF"), "got: {second}");
-    }
-
-    #[test]
-    fn request_builder_deduplicates_medium_identical_tool_results_to_earlier_message() {
-        with_tool_result_sha_spillover_root(|| {
-            // 2,000 chars is intentionally above TOOL_RESULT_DEDUP_MIN_CHARS
-            // (1,024) but below TOOL_RESULT_SENT_CHAR_BUDGET (12,000). This
-            // verifies the cache-saving path for repeated medium outputs that
-            // do not otherwise need truncation.
-            let output = "A".repeat(2_000);
-            let messages = vec![
-                tool_use_message("tool-1", "read_file", json!({"path": "README.md"})),
-                tool_result_message("tool-1", &output),
-                tool_use_message("tool-2", "read_file", json!({"path": "README.md"})),
-                tool_result_message("tool-2", &output),
-            ];
-
-            let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-            let first = tool_message_content(&built, 0);
-            let second = tool_message_content(&built, 1);
-
-            assert_eq!(first, output);
-            assert!(!first.contains("[TOOL_RESULT_TRUNCATED]"), "got: {first}");
-            assert!(
-                second.starts_with("<TOOL_RESULT_REF sha=\""),
-                "got: {second}"
-            );
-            assert!(
-                second.contains("original_message=\"Message #1\""),
-                "got: {second}"
-            );
-            assert!(second.contains("chars=\"2000\""), "got: {second}");
-            assert!(
-                second
-                    .contains("source: full content appears in Message #1 earlier in this request"),
-                "got: {second}"
-            );
-            assert!(!second.contains("retrieve_tool_result"), "got: {second}");
-        });
-    }
-
-    #[test]
-    fn request_builder_never_dedups_large_identical_write_file_confirmations() {
-        with_tool_result_sha_spillover_root(|| {
-            // A `write_file` result embeds the unified diff + summary; it is a
-            // confirmation, not retrievable data. Two identical >1024-char
-            // write_file results must BOTH stay inline — collapsing the second
-            // to a SHA ref makes the model lose write-success context and
-            // report the file as missing (#1695).
-            let output = "A".repeat(2_000);
-            let messages = vec![
-                tool_use_message("tool-1", "write_file", json!({"path": "big.txt"})),
-                tool_result_message("tool-1", &output),
-                tool_use_message("tool-2", "write_file", json!({"path": "big.txt"})),
-                tool_result_message("tool-2", &output),
-            ];
-
-            let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-            let first = tool_message_content(&built, 0);
-            let second = tool_message_content(&built, 1);
-
-            assert_eq!(first, output);
-            assert_eq!(second, output);
-            assert!(!second.contains("<TOOL_RESULT_REF"), "got: {second}");
-
-            // Non-mutation tools still dedup: an identical medium read_file
-            // result points back to the first full message in this request.
-            let read_messages = vec![
-                tool_use_message("read-1", "read_file", json!({"path": "README.md"})),
-                tool_result_message("read-1", &output),
-                tool_use_message("read-2", "read_file", json!({"path": "README.md"})),
-                tool_result_message("read-2", &output),
-            ];
-            let read_built = build_chat_messages(None, &read_messages, "deepseek-v4-flash");
-            let read_first = tool_message_content(&read_built, 0);
-            let read_second = tool_message_content(&read_built, 1);
-            assert_eq!(read_first, output);
-            assert!(
-                read_second.starts_with("<TOOL_RESULT_REF sha=\""),
-                "got: {read_second}"
-            );
-            assert!(read_second.contains("source: full content appears in Message #1"));
-            assert!(!read_second.contains("retrieve_tool_result"));
-        });
-    }
-
-    #[test]
-    fn large_unowned_results_stay_bounded_without_false_retrieval_handles() {
-        // The adaptive router normally replaces a large result with a
-        // session-owned artifact receipt before this provider-wire fallback.
-        // If legacy/raw history reaches here, it may be excerpted but must not
-        // advertise the process-wide SHA store as retrievable.
-        let big_diff = "D".repeat(20_000);
-        let sha = sha256_hex(big_diff.as_bytes());
-
-        let messages = vec![
-            tool_use_message("w-1", "write_file", json!({"path": "huge.rs"})),
-            tool_result_message("w-1", &big_diff),
-            tool_use_message("w-2", "write_file", json!({"path": "huge.rs"})),
-            tool_result_message("w-2", &big_diff),
-        ];
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let first = tool_message_content(&built, 0);
-        let second = tool_message_content(&built, 1);
-
-        // Mutation confirmations are independently excerpted, never deduped.
-        assert!(
-            first.contains("[TOOL_RESULT_TRUNCATED]"),
-            "first should be truncated, got: {first}"
-        );
-        assert!(
-            !first.contains("<TOOL_RESULT_REF"),
-            "first must not be a dedup ref, got: {first}"
-        );
-        assert!(
-            !second.contains("<TOOL_RESULT_REF"),
-            "second identical write_file must stay inline (#1695), got: {second}"
-        );
-        assert!(
-            second.contains("[TOOL_RESULT_TRUNCATED]"),
-            "second should also be inline-truncated, got: {second}"
-        );
-        assert!(
-            first.contains(&format!("sha256: {sha}")),
-            "truncation block should retain an integrity digest, got: {first}"
-        );
-        assert!(first.contains("exact_detail: unavailable"));
-        assert!(!first.contains("retrieve_tool_result"));
-
-        // A huge non-mutation result cannot refer to an earlier *full* message,
-        // because both wire messages are excerpts. It therefore stays a
-        // truthful bounded excerpt too.
-        let read_messages = vec![
-            tool_use_message("r-1", "read_file", json!({"path": "huge.rs"})),
-            tool_result_message("r-1", &big_diff),
-            tool_use_message("r-2", "read_file", json!({"path": "huge.rs"})),
-            tool_result_message("r-2", &big_diff),
-        ];
-        let read_built = build_chat_messages(None, &read_messages, "deepseek-v4-flash");
-        let read_second = tool_message_content(&read_built, 1);
-        assert!(read_second.contains("[TOOL_RESULT_TRUNCATED]"));
-        assert!(!read_second.contains("<TOOL_RESULT_REF"));
-        assert!(!read_second.contains("retrieve_tool_result"));
-    }
-
-    #[test]
-    fn tool_result_budget_is_wire_only_and_does_not_mutate_session_message() {
-        let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-        let messages = vec![
-            tool_use_message(
-                "tool-long",
-                "shell_command",
-                json!({"command": "cargo test"}),
-            ),
-            tool_result_message("tool-long", &long_output),
-        ];
-
-        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
-        let sent = tool_message_content(&built, 0);
-        assert_ne!(sent, long_output);
-
-        match &messages[1].content[0] {
-            ContentBlock::ToolResult { content, .. } => assert_eq!(content, &long_output),
-            other => panic!("expected tool result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cache_inspect_reports_bounded_unowned_tool_result_metadata() {
-        let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-        let request = MessageRequest {
-            model: "deepseek-v4-flash".to_string(),
-            messages: vec![
-                tool_use_message("tool-1", "shell_command", json!({"command": "cargo test"})),
-                tool_result_message("tool-1", &long_output),
-                tool_use_message("tool-2", "shell_command", json!({"command": "cargo test"})),
-                tool_result_message("tool-2", &long_output),
-            ],
-            max_tokens: 0,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-        };
-
-        let inspection = inspect_prompt_for_request(&request);
-        let tool_layers: Vec<_> = inspection
-            .layers
-            .iter()
-            .filter_map(|layer| layer.tool_result.as_ref())
-            .collect();
-
-        assert_eq!(tool_layers.len(), 2);
-        for layer in tool_layers {
-            assert_eq!(layer.original_chars, 14_000);
-            assert!(layer.sent_chars < layer.original_chars);
-            assert!(layer.truncated);
-            assert!(!layer.deduplicated);
-        }
-    }
-}
+#[path = "chat/tests/stream_decoder.rs"]
+mod stream_decoder_tests;
 
 #[cfg(test)]
 mod alias_thinking_detection_tests {
@@ -6352,5 +5280,415 @@ mod image_block_wire_tests {
             user["content"].is_string(),
             "text-only turns must stay a plain string: {user}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mistral_reasoning_tests {
+    use super::*;
+
+    fn request_with_assistant_thinking_and_tool() -> MessageRequest {
+        MessageRequest {
+            model: "mistral-medium-latest".to_string(),
+            messages: vec![
+                Message {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: "Inspect the current state before calling the tool."
+                                .to_string(),
+                            signature: None,
+                        },
+                        ContentBlock::Text {
+                            text: "I will inspect it now.".to_string(),
+                            cache_control: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-1".to_string(),
+                            name: "read_file".to_string(),
+                            input: json!({"path": "README.md"}),
+                            caller: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-1".to_string(),
+                        content: "contents".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn mistral_effort_wire_value_covers_codewhale_tiers() {
+        assert_eq!(mistral_reasoning_effort_wire_value("off"), Some("none"));
+        assert_eq!(
+            mistral_reasoning_effort_wire_value("disabled"),
+            Some("none")
+        );
+        assert_eq!(mistral_reasoning_effort_wire_value("none"), Some("none"));
+        assert_eq!(mistral_reasoning_effort_wire_value("false"), Some("none"));
+        assert_eq!(mistral_reasoning_effort_wire_value("high"), Some("high"));
+        assert_eq!(mistral_reasoning_effort_wire_value("xhigh"), Some("high"));
+        assert_eq!(mistral_reasoning_effort_wire_value("max"), Some("high"));
+        assert_eq!(
+            mistral_reasoning_effort_wire_value("ultracode"),
+            Some("high")
+        );
+        // Intermediate tiers must be omitted so the request falls back to
+        // Mistral's own default rather than 400 code 3051 on unsupported
+        // values like "low"/"medium" that the server does not accept today.
+        assert_eq!(mistral_reasoning_effort_wire_value("low"), None);
+        assert_eq!(mistral_reasoning_effort_wire_value("medium"), None);
+        assert_eq!(mistral_reasoning_effort_wire_value("mid"), None);
+        assert_eq!(mistral_reasoning_effort_wire_value("minimal"), None);
+    }
+
+    #[test]
+    fn mistral_model_gate_only_matches_reasoning_capable_families() {
+        assert!(mistral_model_supports_reasoning("mistral-medium-latest"));
+        assert!(mistral_model_supports_reasoning("mistral-medium-3-5"));
+        assert!(mistral_model_supports_reasoning("mistral-small-latest"));
+        assert!(mistral_model_supports_reasoning("mistral-small-2603"));
+        assert!(mistral_model_supports_reasoning("magistral-small-latest"));
+        assert!(mistral_model_supports_reasoning("MISTRAL-MEDIUM-LATEST"));
+        assert!(!mistral_model_supports_reasoning("mistral-code-latest"));
+        assert!(!mistral_model_supports_reasoning("codestral-latest"));
+        assert!(!mistral_model_supports_reasoning("mistral-large-latest"));
+        assert!(!mistral_model_supports_reasoning("mistral-nemo-2407"));
+    }
+
+    #[test]
+    fn mistral_route_shaper_writes_reasoning_only_for_supported_models() {
+        let mut body = json!({"model": "mistral-medium-latest"});
+        apply_mistral_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            "mistral-medium-latest",
+            Some("high"),
+        );
+        assert_eq!(body["reasoning_effort"], json!("high"));
+
+        let mut body = json!({"model": "mistral-code-latest"});
+        apply_mistral_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            "mistral-code-latest",
+            Some("high"),
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "non-reasoning models must never see reasoning_effort (Mistral 400s on 3051): {body}"
+        );
+
+        let mut body = json!({"model": "mistral-medium-latest", "reasoning_effort": "stale"});
+        apply_mistral_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            "mistral-medium-latest",
+            Some("low"),
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "intermediate tiers must be stripped rather than sent unsupported: {body}"
+        );
+
+        // Non-Mistral providers must not be touched by this shaper.
+        let mut body = json!({"model": "deepseek-v4-pro", "reasoning_effort": "high"});
+        apply_mistral_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            "deepseek-v4-pro",
+            Some("high"),
+        );
+        assert_eq!(body["reasoning_effort"], json!("high"));
+
+        let mut body = json!({
+            "model": "mistral-medium-latest",
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "stale",
+        });
+        apply_mistral_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Mistral,
+            "https://gateway.example.test/v1",
+            "mistral-medium-latest",
+            Some("high"),
+        );
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        let mut native = json!({"model": "magistral-small-latest"});
+        apply_mistral_route_reasoning_controls(
+            &mut native,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            "magistral-small-latest",
+            Some("off"),
+        );
+        assert!(
+            native.get("reasoning_effort").is_none(),
+            "legacy native Magistral is always-reasoning and does not use the adjustable effort field"
+        );
+    }
+
+    #[test]
+    fn mistral_wire_dialect_is_limited_to_exact_first_party_routes() {
+        for official in [
+            "https://api.mistral.ai/v1",
+            "https://api.eu.mistral.ai/v1/",
+            "https://api.us.mistral.ai/v1",
+        ] {
+            assert!(is_exact_mistral_chat_route(ApiProvider::Mistral, official));
+        }
+        for neighbor in [
+            "http://api.mistral.ai/v1",
+            "https://api.mistral.ai/v2",
+            "https://proxy.example.test/v1",
+            "https://api.mistral.ai.evil.test/v1",
+        ] {
+            assert!(!is_exact_mistral_chat_route(ApiProvider::Mistral, neighbor));
+        }
+        assert!(!is_exact_mistral_chat_route(
+            ApiProvider::Openai,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+        ));
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Mistral,
+                crate::config::DEFAULT_MISTRAL_BASE_URL,
+                "mistral-medium-latest",
+                None,
+            ),
+            ReasoningStreamStyle::MistralBlocks
+        );
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Mistral,
+                "https://gateway.example.test/v1",
+                "mistral-medium-latest",
+                None,
+            ),
+            ReasoningStreamStyle::None
+        );
+    }
+
+    #[test]
+    fn extract_mistral_polymorphic_content_flattens_thinking_and_text() {
+        // Non-reasoning response: plain string content. Extractor returns
+        // (None, None) so the shared string fallback still runs.
+        let plain = json!({"content": "Hello world"});
+        assert_eq!(extract_mistral_polymorphic_content(&plain), (None, None));
+
+        // Missing content: no panic, returns (None, None).
+        let empty = json!({});
+        assert_eq!(extract_mistral_polymorphic_content(&empty), (None, None));
+
+        // Reasoning response: nested thinking array + text block.
+        let reasoning = json!({"content": [
+            {"type": "thinking", "thinking": [
+                {"type": "text", "text": "First "},
+                {"type": "text", "text": "second."},
+            ], "closed": true},
+            {"type": "text", "text": "Final answer."},
+        ]});
+        let (thinking, text) = extract_mistral_polymorphic_content(&reasoning);
+        assert_eq!(thinking.as_deref(), Some("First second."));
+        assert_eq!(text.as_deref(), Some("Final answer."));
+
+        // Thinking-only chunk (mid-stream) with no closing text yet.
+        let thinking_only = json!({"content": [
+            {"type": "thinking", "thinking": [{"type": "text", "text": "still thinking"}]},
+        ]});
+        let (thinking, text) = extract_mistral_polymorphic_content(&thinking_only);
+        assert_eq!(thinking.as_deref(), Some("still thinking"));
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn reshape_mistral_messages_reconstructs_polymorphic_shape_for_assistant_replay() {
+        // Assistant message with stored reasoning_content is reshaped into
+        // Mistral's polymorphic content-as-array shape.
+        let mut messages = vec![
+            json!({"role": "user", "content": "compute 3+4"}),
+            json!({
+                "role": "assistant",
+                "content": "The answer is 7.",
+                "reasoning_content": "Let me add 3 and 4 to get 7.",
+            }),
+            json!({"role": "user", "content": "now multiply by 2"}),
+        ];
+        reshape_mistral_messages_for_reasoning_replay(&mut messages);
+
+        assert_eq!(messages[0]["role"], "user");
+        assert!(
+            messages[0]["content"].is_string(),
+            "user turns are left untouched: {}",
+            messages[0]
+        );
+
+        assert_eq!(messages[1]["role"], "assistant");
+        assert!(
+            messages[1].get("reasoning_content").is_none(),
+            "reasoning_content field must be removed after reshape: {}",
+            messages[1]
+        );
+        let content = messages[1]["content"]
+            .as_array()
+            .expect("assistant content is now an array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["closed"], true);
+        assert_eq!(content[0]["thinking"][0]["type"], "text");
+        assert_eq!(
+            content[0]["thinking"][0]["text"],
+            "Let me add 3 and 4 to get 7."
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "The answer is 7.");
+
+        // Assistant with no reasoning stays as-is (plain string content).
+        let mut plain = vec![json!({"role": "assistant", "content": "hi"})];
+        reshape_mistral_messages_for_reasoning_replay(&mut plain);
+        assert_eq!(plain[0]["content"], "hi");
+
+        // Empty reasoning is treated as absent — no reshape.
+        let mut empty = vec![json!({
+            "role": "assistant",
+            "content": "hi",
+            "reasoning_content": "   ",
+        })];
+        reshape_mistral_messages_for_reasoning_replay(&mut empty);
+        assert_eq!(empty[0]["content"], "hi");
+    }
+
+    #[test]
+    fn mistral_prompt_builder_replays_stored_thinking_as_polymorphic_content() {
+        let request = request_with_assistant_thinking_and_tool();
+        let exact = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+        );
+        let assistant = &exact[0];
+        assert!(assistant.get("reasoning_content").is_none());
+        assert!(assistant.get("tool_calls").is_some());
+        let content = assistant["content"]
+            .as_array()
+            .expect("exact Mistral history uses polymorphic content");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(
+            content[0]["thinking"][0]["text"],
+            "Inspect the current state before calling the tool."
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "I will inspect it now.");
+
+        for (provider, base_url) in [
+            (ApiProvider::Mistral, "https://gateway.example.test/v1"),
+            (ApiProvider::Openai, crate::config::DEFAULT_MISTRAL_BASE_URL),
+        ] {
+            let neighbor = build_chat_messages_for_request_and_provider_and_route(
+                &request, provider, base_url,
+            );
+            assert!(neighbor[0].get("reasoning_content").is_none());
+            assert!(
+                neighbor[0]["content"].is_string(),
+                "unproven routes must not inherit Mistral's polymorphic dialect: {}",
+                neighbor[0]
+            );
+        }
+    }
+
+    #[test]
+    fn mistral_stream_tool_call_replay_does_not_gain_reasoning_content() {
+        let request = request_with_assistant_thinking_and_tool();
+        let wire = build_chat_wire_body(
+            &request,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+            true,
+        )
+        .expect("Mistral stream wire body");
+        let assistant = &wire.body["messages"][0];
+        assert!(assistant["content"].is_array());
+        assert!(assistant.get("reasoning_content").is_none());
+        assert!(assistant.get("tool_calls").is_some());
+        assert_eq!(wire.body["reasoning_effort"], "high");
+        assert_eq!(wire.replay_input_tokens, None);
+    }
+
+    #[test]
+    fn mistral_nonstream_parser_is_route_isolated() {
+        let payload = json!({
+            "id": "chatcmpl-mistral",
+            "model": "mistral-medium-latest",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": [
+                        {"type": "text", "text": "private trace"}
+                    ], "closed": true},
+                    {"type": "text", "text": "public answer"}
+                ]}
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+        });
+        let mistral = parse_chat_message_for_route(
+            &payload,
+            ApiProvider::Mistral,
+            crate::config::DEFAULT_MISTRAL_BASE_URL,
+        )
+        .expect("Mistral payload parses");
+        assert!(matches!(
+            &mistral.content[0],
+            ContentBlock::Thinking { thinking, .. } if thinking == "private trace"
+        ));
+        assert!(matches!(
+            &mistral.content[1],
+            ContentBlock::Text { text, .. } if text == "public answer"
+        ));
+
+        let generic = parse_chat_message(&payload).expect("generic payload parses");
+        assert!(
+            !generic
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Thinking { .. })),
+            "typed arrays from another provider must not be reinterpreted as Mistral thinking"
+        );
+    }
+
+    #[test]
+    fn mistral_shared_capability_matches_wire_contract() {
+        for model in [
+            "mistral-medium-latest",
+            "mistral-small-latest",
+            "magistral-small-latest",
+        ] {
+            assert!(crate::models::model_supports_reasoning(model), "{model}");
+        }
+        for model in ["mistral-code-latest", "mistral-large-latest"] {
+            assert!(!crate::models::model_supports_reasoning(model), "{model}");
+        }
     }
 }

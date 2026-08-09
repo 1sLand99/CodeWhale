@@ -384,6 +384,22 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "grok-composer-2.5-fast" => Some(200_000),
         "grok-4.20-0309-reasoning" | "grok-4.20-0309-non-reasoning" => Some(2_000_000),
         "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor" => Some(1_000_000),
+        // Mistral la Plateforme text/reasoning models: all report 262144
+        // (256K) tokens on /v1/models as of 2026-08-08. Codestral coding
+        // model (mistral-code-latest) reports 256000 tokens on the same
+        // endpoint. IDs and windows verified live against
+        // https://api.mistral.ai/v1/models rather than model-card slugs.
+        "mistral-medium-latest"
+        | "mistral-medium-3-5"
+        | "mistral-medium-2604"
+        | "mistral-medium-3.5"
+        | "mistral-medium-3"
+        | "mistral-small-latest"
+        | "mistral-small-2603"
+        | "magistral-small-latest"
+        | "mistral-large-latest"
+        | "mistral-large-2512" => Some(262_144),
+        "mistral-code-latest" | "codestral-latest" | "codestral" | "mistral-code" => Some(256_000),
         _ => None,
     }
 }
@@ -478,6 +494,12 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     // including the stable `kimi-for-coding` coding route, emit
     // reasoning_content that must stay out of answer prose.
     if lower.starts_with("kimi-") {
+        return true;
+    }
+    if lower.starts_with("mistral-medium")
+        || lower.starts_with("mistral-small")
+        || lower.starts_with("magistral")
+    {
         return true;
     }
     matches!(

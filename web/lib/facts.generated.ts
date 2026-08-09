@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-08-08T16:49:45.358Z",
+  "generatedAt": "2026-08-08T23:57:18.498Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.5",
@@ -232,6 +232,11 @@ export const FACTS: RepoFacts = {
       "id": "xai",
       "label": "xAI",
       "env": "XAI_API_KEY"
+    },
+    {
+      "id": "mistral",
+      "label": "Mistral AI",
+      "env": "MISTRAL_API_KEY"
     },
     {
       "id": "telecomjs",
