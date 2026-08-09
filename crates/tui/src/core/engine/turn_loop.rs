@@ -5,11 +5,6 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use super::dispatch::{ReadRepeatExecutionPlan, plan_read_repeat_execution};
-use super::read_repeat_guard::{RECEIPT_THRESHOLD, ReadRepeatGuard};
-use super::stuck_guard::{
-    RUNTIME_NOTICE as STUCK_RUNTIME_NOTICE, StepFingerprint, StuckGuard, StuckSignal,
-};
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
@@ -18,11 +13,9 @@ use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
-use crate::tools::spec::ToolTerminalStatus;
 use crate::tools::tool_call_budget::ToolCallBudget;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
-const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
 
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -103,49 +96,6 @@ pub(super) fn registered_tool_forces_prompt(
         && registered_tool_requires_non_bypassable_approval(tool_name)
 }
 
-pub(super) fn tool_error_degradation_runtime_hint(
-    consecutive_tool_error_steps: u32,
-    step_error_tool_names: &[String],
-    step_error_categories: &[ErrorCategory],
-    step_error_tool_inputs: &[serde_json::Value],
-) -> Option<String> {
-    if consecutive_tool_error_steps < TOOL_ERROR_DEGRADATION_THRESHOLD {
-        return None;
-    }
-    if !step_error_categories
-        .iter()
-        .any(|category| tool_error_category_allows_degradation(*category))
-    {
-        return None;
-    }
-
-    let mut tool_names = step_error_tool_names
-        .iter()
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>();
-    tool_names.sort_unstable();
-    tool_names.dedup();
-    let tools = if tool_names.is_empty() {
-        "tools".to_string()
-    } else {
-        tool_names.join(", ")
-    };
-
-    let mut hint = format!(
-        "Tool calls have failed for {consecutive_tool_error_steps} consecutive steps ({tools}). \
-do not repeat the same call unchanged; switch to an alternate tool or source, narrow the request, \
-or ask for the required input before trying again."
-    );
-    if let Some(direct_url_hint) =
-        direct_url_pattern_fallback_hint(step_error_tool_names, step_error_tool_inputs)
-    {
-        hint.push(' ');
-        hint.push_str(&direct_url_hint);
-    }
-    Some(hint)
-}
-
 /// Whether a [`Usage`] carries any provider-reported data. The
 /// chat-completions streaming adapter emits a synthetic `MessageStart` with a
 /// zeroed [`Usage`]; treating that as reported would fabricate zero-valued
@@ -161,107 +111,57 @@ fn usage_has_reported_data(usage: &Usage) -> bool {
         || usage.server_tool_use.is_some()
 }
 
-fn tool_error_category_allows_degradation(category: ErrorCategory) -> bool {
-    matches!(
-        category,
-        ErrorCategory::Network
-            | ErrorCategory::RateLimit
-            | ErrorCategory::Timeout
-            | ErrorCategory::Tool
-    )
-}
-
-fn direct_url_pattern_fallback_hint(
-    step_error_tool_names: &[String],
-    step_error_tool_inputs: &[serde_json::Value],
-) -> Option<String> {
-    let mut domains = std::collections::BTreeSet::new();
-    for (tool_name, input) in step_error_tool_names
-        .iter()
-        .zip(step_error_tool_inputs.iter())
-    {
-        if matches!(tool_name.as_str(), "web_search" | "web.run") {
-            collect_search_domains(input, &mut domains);
+fn merge_stream_usage(total: &mut Usage, update: Usage) {
+    fn max_optional(current: &mut Option<u32>, update: Option<u32>) {
+        if let Some(update) = update {
+            *current = Some(current.unwrap_or(0).max(update));
         }
     }
 
-    let domain = domains.into_iter().next()?;
-    Some(format!(
-        "For blocked search, try fetch_url directly on likely URL patterns such as \
-https://{domain}/announcements and https://{domain}/news."
-    ))
-}
-
-fn collect_search_domains(
-    input: &serde_json::Value,
-    domains: &mut std::collections::BTreeSet<String>,
-) {
-    if let Some(values) = input.get("domains").and_then(serde_json::Value::as_array) {
-        for value in values {
-            if let Some(domain) = value.as_str().and_then(normalize_domain_candidate) {
-                domains.insert(domain);
-            }
-        }
-    }
-    for key in ["query", "q"] {
-        if let Some(query) = input.get(key).and_then(serde_json::Value::as_str) {
-            collect_query_domains(query, domains);
-        }
-    }
-    if let Some(searches) = input
-        .get("search_query")
-        .and_then(serde_json::Value::as_array)
-    {
-        for search in searches {
-            collect_search_domains(search, domains);
-        }
+    total.input_tokens = total.input_tokens.max(update.input_tokens);
+    total.output_tokens = total.output_tokens.max(update.output_tokens);
+    max_optional(
+        &mut total.prompt_cache_hit_tokens,
+        update.prompt_cache_hit_tokens,
+    );
+    max_optional(
+        &mut total.prompt_cache_miss_tokens,
+        update.prompt_cache_miss_tokens,
+    );
+    max_optional(
+        &mut total.prompt_cache_write_tokens,
+        update.prompt_cache_write_tokens,
+    );
+    max_optional(&mut total.reasoning_tokens, update.reasoning_tokens);
+    max_optional(
+        &mut total.reasoning_replay_tokens,
+        update.reasoning_replay_tokens,
+    );
+    if let Some(update) = update.server_tool_use {
+        let current = total.server_tool_use.get_or_insert_default();
+        max_optional(
+            &mut current.code_execution_requests,
+            update.code_execution_requests,
+        );
+        max_optional(
+            &mut current.tool_search_requests,
+            update.tool_search_requests,
+        );
     }
 }
 
-fn collect_query_domains(query: &str, domains: &mut std::collections::BTreeSet<String>) {
-    for token in query.split_whitespace() {
-        let token = token.trim_matches(|c: char| {
-            matches!(
-                c,
-                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-            )
-        });
-        if let Some(site) = token.strip_prefix("site:") {
-            if let Some(domain) = normalize_domain_candidate(site) {
-                domains.insert(domain);
-            }
-        } else if let Some(domain) = normalize_domain_candidate(token) {
-            domains.insert(domain);
-        }
+fn incomplete_tool_result(reason: &str) -> ToolResult {
+    ToolResult {
+        content: format!(
+            "Not executed: the provider ended the model response incompletely (`{reason}`)."
+        ),
+        success: false,
+        metadata: Some(json!({
+            "side_effect_status": "not_started",
+            "error_category": "model_output_incomplete",
+            "model_output_incomplete": true,
+        })),
     }
-}
-
-fn normalize_domain_candidate(value: &str) -> Option<String> {
-    let value = value
-        .trim()
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '<' | '>' | '.' | ',' | ';' | ':'));
-    if value.is_empty() {
-        return None;
-    }
-    let without_scheme = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-        .unwrap_or(value);
-    let host = without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-    let looks_like_domain = host.contains('.')
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-        && host.rsplit('.').next().is_some_and(|suffix| {
-            suffix.len() >= 2 && suffix.chars().any(|c| c.is_ascii_alphabetic())
-        });
-    if looks_like_domain { Some(host) } else { None }
 }
 
 fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
@@ -444,13 +344,10 @@ impl Engine {
             .clone()
             .expect("model client should be configured");
 
-        let mut consecutive_tool_error_steps = 0u32;
-        let mut stuck_guard = StuckGuard::default();
-        let mut no_progress_warning_started_at: Option<Instant> = None;
-        // Scoped to this external user turn: counts survive all model/tool
-        // steps below, then reset before the next user prompt.
-        let mut read_repeat_guard = ReadRepeatGuard::default();
         let mut turn_error: Option<String> = None;
+        // Cleared when the loop continues only for optional runtime work
+        // (a goal continuation) after the model already delivered an answer.
+        let mut step_budget_exhaustion_is_terminal = true;
         let mut context_recovery_attempts = 0u8;
         let mut tool_policy = tool_policy;
         let mut mode = tool_policy.mode;
@@ -520,11 +417,18 @@ impl Engine {
             self.refresh_system_prompt();
 
             if turn.at_max_steps() {
-                let _ = self
-                    .tx_event
-                    .send(Event::status("Reached maximum steps"))
-                    .await;
-                break;
+                // Exhausting the step budget while the model still owes work
+                // is a real failure. Exhausting it after a delivered answer,
+                // on an optional runtime continuation, is a finished turn.
+                if !step_budget_exhaustion_is_terminal {
+                    break;
+                }
+                let error = format!(
+                    "Maximum model steps reached before completion (limit: {})",
+                    self.config.max_steps
+                );
+                let _ = self.tx_event.send(Event::status(error.clone())).await;
+                return (TurnOutcomeStatus::Failed, Some(error));
             }
 
             // A tool-producing response can spend the remaining goal budget
@@ -549,10 +453,6 @@ impl Engine {
                     .await;
             }
 
-            let compaction_pins = self
-                .compaction_pins_for_messages(&self.session.messages, &self.session.working_set);
-            let compaction_paths = self.session.working_set.top_paths(24);
-
             // Reclaimability includes the live-state projection and the exact
             // active-operation reanchor. Avoid capturing them on ordinary
             // low-pressure steps; once pressure crosses the trigger, capture
@@ -575,9 +475,6 @@ impl Engine {
                     &self.session.messages,
                     self.session.system_prompt.as_ref(),
                     &prepared,
-                    Some(&self.session.workspace),
-                    Some(&compaction_pins),
-                    Some(&compaction_paths),
                 )
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -593,9 +490,6 @@ impl Engine {
                     &self.session.messages,
                     self.session.system_prompt.as_ref(),
                     &prepared,
-                    Some(&self.session.workspace),
-                    Some(&compaction_pins),
-                    Some(&compaction_paths),
                 )
                 .await
                 {
@@ -945,6 +839,7 @@ impl Engine {
             // events are only emitted for reported usage — a silent provider
             // must not surface as fabricated zeros.
             let mut usage_reported = false;
+            let mut stop_reason: Option<String> = None;
             let mut current_block_kind: Option<ContentBlockKind> = None;
             // Map block_index → tool_uses position. Required because the
             // OpenAI-compatible streaming parser emits multiple
@@ -1237,7 +1132,7 @@ impl Engine {
                         // MessageStart with a zeroed usage; only a usage that
                         // carries data counts as provider-reported.
                         usage_reported |= usage_has_reported_data(&message.usage);
-                        usage = message.usage;
+                        merge_stream_usage(&mut usage, message.usage);
                     }
                     StreamEvent::ContentBlockStart {
                         index,
@@ -1475,11 +1370,15 @@ impl Engine {
                         }
                     }
                     StreamEvent::MessageDelta {
-                        usage: delta_usage, ..
+                        delta,
+                        usage: delta_usage,
                     } => {
+                        if let Some(reason) = delta.stop_reason {
+                            stop_reason = Some(reason);
+                        }
                         if let Some(u) = delta_usage {
                             usage_reported |= usage_has_reported_data(&u);
-                            usage = u;
+                            merge_stream_usage(&mut usage, u);
                         }
                     }
                     StreamEvent::MessageStop | StreamEvent::Ping => {}
@@ -1494,11 +1393,57 @@ impl Engine {
                 }
             }
 
+            // Account for every provider response before deciding whether to
+            // retry or accept it. A terminal stop reason followed by a
+            // transport error is still a billed, incomplete response; it must
+            // not be discarded and re-issued.
+            turn.add_usage(&usage);
+            if usage_reported {
+                let _ = self
+                    .tx_event
+                    .send(Event::TurnUsage {
+                        usage: usage.clone(),
+                        duration_ms: u64::try_from(stream_start.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    })
+                    .await;
+            }
+
             if self.cancel_token.is_cancelled() {
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 self.add_interrupted_assistant_text(&current_text_visible)
                     .await;
                 return (TurnOutcomeStatus::Interrupted, None);
+            }
+
+            if is_incomplete_stop_reason(stop_reason.as_deref()) {
+                let reason = stop_reason_detail(stop_reason.as_deref());
+                for tool in &tool_uses {
+                    let _ = self
+                        .tx_event
+                        .send(Event::ToolCallComplete {
+                            id: tool.id.clone(),
+                            name: tool.name.clone(),
+                            result: Ok(incomplete_tool_result(reason)),
+                        })
+                        .await;
+                }
+                // Do not emit MessageComplete: hosts must retain the visible
+                // fragment as interrupted/failed rather than recording it as
+                // a completed assistant item.
+                self.add_interrupted_assistant_text(&current_text_visible)
+                    .await;
+                let error = if is_output_limit_stop_reason(stop_reason.as_deref()) {
+                    format!(
+                        "Model output truncated: provider stop reason `{reason}`; no complete response or tool call was accepted."
+                    )
+                } else {
+                    format!(
+                        "Model response incomplete: provider stop reason `{reason}`; no complete response or tool call was accepted."
+                    )
+                };
+                crate::logging::warn(&error);
+                return (TurnOutcomeStatus::Failed, Some(error));
             }
 
             // #103 Phase 3 — transparent retry. The inner loop above bails
@@ -1638,25 +1583,6 @@ impl Engine {
                 stream_retry_attempts = 0;
             }
 
-            // Update turn usage
-            turn.add_usage(&usage);
-
-            // Per-step usage receipt: one per model call, only when the
-            // provider reported usage for it. This is what lets latency and
-            // convergence analysis attribute input/output/reasoning/cache
-            // tokens to individual steps instead of inferring them from
-            // wall time.
-            if usage_reported {
-                let _ = self
-                    .tx_event
-                    .send(Event::TurnUsage {
-                        usage: usage.clone(),
-                        duration_ms: u64::try_from(stream_start.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
-                    })
-                    .await;
-            }
-
             // Build content blocks. If this assistant turn produced tool
             // calls, ensure a Thinking block is present even when the model
             // didn't stream any reasoning text — DeepSeek's thinking-mode
@@ -1756,35 +1682,6 @@ impl Engine {
                 .await;
             }
 
-            if tool_uses.is_empty() {
-                match stuck_guard.observe(StepFingerprint::assistant_no_tool(&current_text_visible))
-                {
-                    Some(StuckSignal::Warn { reason }) => {
-                        let started =
-                            no_progress_warning_started_at.get_or_insert_with(Instant::now);
-                        let status = no_progress_status_message(&reason, started.elapsed());
-                        let _ = self.tx_event.send(Event::status(status)).await;
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            STUCK_RUNTIME_NOTICE.to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
-                        turn.next_step();
-                        continue;
-                    }
-                    Some(StuckSignal::Stop { reason }) => {
-                        let elapsed = no_progress_warning_started_at
-                            .get_or_insert_with(Instant::now)
-                            .elapsed();
-                        let status = no_progress_status_message(&reason, elapsed);
-                        crate::logging::warn(compact_no_progress_diagnostic(&reason, elapsed));
-                        let _ = self.tx_event.send(Event::status(status.clone())).await;
-                        return (TurnOutcomeStatus::Failed, Some(status));
-                    }
-                    None => {}
-                }
-            }
-
             // If no tool uses, check for inline REPL blocks (paper §2) or
             // finish the turn. Honest ladder (NOTE-turn-loop-wrongness §3):
             // 1) pending steers → resume, 2) queued subagent completions →
@@ -1840,9 +1737,6 @@ impl Engine {
                 // from earlier steps. That keeps the simple `repl` route useful
                 // for sustained work instead of forcing the model through a
                 // separate open/eval/configure control surface.
-                // No-tool step: reset tool-error streak (10) — only true
-                // consecutive tool batches should be counted.
-                consecutive_tool_error_steps = 0;
 
                 if has_sendable_assistant_content
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
@@ -2134,6 +2028,11 @@ impl Engine {
                     )
                     .await
                 {
+                    // The model already delivered a complete answer this step;
+                    // the continuation is optional runtime work on top of it.
+                    // If the step budget then runs out, the turn is finished,
+                    // not failed.
+                    step_budget_exhaustion_is_terminal = false;
                     self.add_session_message(self.runtime_text_message_with_turn_metadata(
                         continuation,
                         UserInputProvenance::Runtime,
@@ -2142,8 +2041,7 @@ impl Engine {
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
-                            "Continuing — goal still active ({}/{})",
-                            goal_continuations_this_turn, 3
+                            "Continuing — goal still active (pass {goal_continuations_this_turn})"
                         )))
                         .await;
                     turn.next_step();
@@ -2823,25 +2721,7 @@ impl Engine {
             };
 
             let plan_count = plans.len();
-            let ReadRepeatExecutionPlan {
-                executable,
-                coalesced: coalesced_read_plans,
-                occurrences: read_repeat_occurrences,
-            } = plan_read_repeat_execution(plans, &mut read_repeat_guard);
-            let coalesced_read_indices = coalesced_read_plans
-                .iter()
-                .map(|plan| plan.follower.index)
-                .collect::<std::collections::HashSet<_>>();
-            if !coalesced_read_plans.is_empty() {
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Coalesced {} duplicate read-only call(s) onto the first execution",
-                        coalesced_read_plans.len()
-                    )))
-                    .await;
-            }
-            let batches = plan_tool_execution_batches(executable);
+            let batches = plan_tool_execution_batches(plans);
             let parallel_chunks = batches
                 .iter()
                 .filter_map(|batch| match batch {
@@ -3523,126 +3403,18 @@ impl Engine {
                 }
             }
 
-            // Same-batch read-only duplicates subscribe to the first physical
-            // execution, but retain their own provider tool-call/result pair.
-            // Counts five and above receive a compact pointer instead of a
-            // repeated body; cancellation retains its explicit terminal state.
-            for coalesced in coalesced_read_plans {
-                let occurrence = &coalesced.occurrence;
-                let follower = coalesced.follower;
-                let leader = outcomes
-                    .get(coalesced.leader_index)
-                    .and_then(Option::as_ref);
-                let (leader_id, leader_status, leader_result) = match leader {
-                    Some(leader) => (
-                        leader.id.clone(),
-                        Some(leader.terminal.status),
-                        leader.terminal.legacy_result(),
-                    ),
-                    None => (
-                        format!("missing-leader-{}", coalesced.leader_index),
-                        None,
-                        Err(ToolError::execution_failed(
-                            "coalesced read leader did not produce a terminal result",
-                        )),
-                    ),
-                };
-                let result =
-                    read_repeat_guard.coalesced_result(occurrence, &leader_id, &leader_result);
-                emit_tool_audit(json!({
-                    "event": "tool.read_repeat_coalesced",
-                    "tool_id": follower.id.clone(),
-                    "tool_name": follower.name.clone(),
-                    "leader_tool_id": leader_id,
-                    "count": occurrence.count,
-                    "receipt": occurrence.count >= RECEIPT_THRESHOLD,
-                }));
-                let _ = self
-                    .tx_event
-                    .send(Event::ToolCallComplete {
-                        id: follower.id.clone(),
-                        name: follower.name.clone(),
-                        result: result.clone(),
-                    })
-                    .await;
-                let terminal = match result {
-                    Ok(result) if leader_status == Some(ToolTerminalStatus::Cancelled) => {
-                        ToolExecutionOutcome::cancelled(result)
-                    }
-                    result => ToolExecutionOutcome::from_legacy(result),
-                };
-                outcomes[follower.index] = Some(ToolExecOutcome {
-                    index: follower.index,
-                    id: follower.id,
-                    name: follower.name,
-                    input: follower.input,
-                    started_at: Instant::now(),
-                    terminal,
-                });
-            }
-
-            let mut step_error_count = 0usize;
-            // Categorized tool errors collected this step. Feeds the capacity
-            // controller's error-escalation checkpoint so it can distinguish
-            // (e.g.) a Tool failure that should escalate from a permission
-            // denial that should not.
-            let mut step_error_categories: Vec<ErrorCategory> = Vec::new();
-            let mut step_error_tool_names: Vec<String> = Vec::new();
-            let mut step_error_tool_inputs: Vec<serde_json::Value> = Vec::new();
             // #dogfood 0.8.67: if the model mutates the goal mid-turn via
             // create_goal/update_goal, push the change to the sidebar right after
             // this tool batch instead of waiting for turn end — otherwise the
             // sidebar "Goal:" line stays stale for the whole (possibly long)
             // goal-loop turn while get_goal already reflects the new objective.
             let mut goal_tool_ran = false;
-            let mut stuck_signal = None;
-            let mut read_repeat_stop: Option<(String, usize)> = None;
 
             for outcome in outcomes.into_iter().flatten() {
                 let tool_input = outcome.input.clone();
                 let tool_name_for_ws = outcome.name.clone();
                 let terminal_status = outcome.terminal.status;
-                let mut result = outcome.terminal.into_legacy_result();
-                if let Some(occurrence) = read_repeat_occurrences.get(&outcome.index) {
-                    if let Ok(output) = result.as_mut() {
-                        read_repeat_guard.remember_success(occurrence, &outcome.id, output);
-                        read_repeat_guard.decorate_model_result(occurrence, output);
-                    }
-                    if ReadRepeatGuard::should_stop(occurrence) {
-                        read_repeat_stop = Some((outcome.name.clone(), occurrence.count));
-                    }
-                }
-                // Read-only repetition has its own non-consecutive 3/5/8
-                // policy. Feeding the same calls into the older consecutive
-                // stuck guard would stop at five and defeat the receipt lane.
-                let observed_signal =
-                    if read_repeat_occurrences.contains_key(&outcome.index) {
-                        None
-                    } else {
-                        match &result {
-                            Ok(output) if output.success => stuck_guard
-                                .observe(StepFingerprint::tool(&outcome.name, &tool_input, None)),
-                            Ok(output) => stuck_guard.observe(StepFingerprint::tool(
-                                &outcome.name,
-                                &tool_input,
-                                Some(&output.content),
-                            )),
-                            Err(error) => stuck_guard.observe(StepFingerprint::tool(
-                                &outcome.name,
-                                &tool_input,
-                                Some(&error.to_string()),
-                            )),
-                        }
-                    };
-                match observed_signal {
-                    Some(stop @ StuckSignal::Stop { .. }) => {
-                        stuck_signal = Some(stop);
-                    }
-                    Some(warn @ StuckSignal::Warn { .. }) if stuck_signal.is_none() => {
-                        stuck_signal = Some(warn);
-                    }
-                    _ => {}
-                }
+                let result = outcome.terminal.into_legacy_result();
                 if matches!(outcome.name.as_str(), "create_goal" | "update_goal") {
                     goal_tool_ran = true;
                 }
@@ -3744,34 +3516,17 @@ impl Engine {
                             "category": envelope.category.to_string(),
                             "severity": envelope.severity.to_string(),
                         }));
-                        step_error_count += 1;
-                        step_error_categories.push(envelope.category);
-                        step_error_tool_names.push(outcome.name.clone());
-                        step_error_tool_inputs.push(tool_input.clone());
                         let input_schema = tool_catalog
                             .iter()
                             .find(|tool| tool.name == outcome.name)
                             .map(|tool| &tool.input_schema);
-                        let mut error =
-                            format_tool_error_with_schema(&e, &outcome.name, input_schema);
-                        if let Some(occurrence) = read_repeat_occurrences.get(&outcome.index)
-                            && let Some(nudge) = ReadRepeatGuard::corrective_nudge(occurrence)
-                        {
-                            error.push_str("\n\n");
-                            error.push_str(nudge);
-                        }
-                        // A raw ToolError has no result metadata where the
-                        // coalescer can record `executed: false`. Keep the
-                        // follower model-visible, but do not count it as a
-                        // second physical working-set touch.
-                        if !coalesced_read_indices.contains(&outcome.index) {
-                            self.session.working_set.observe_tool_call(
-                                &tool_name_for_ws,
-                                &tool_input,
-                                Some(&error),
-                                &self.session.workspace,
-                            );
-                        }
+                        let error = format_tool_error_with_schema(&e, &outcome.name, input_schema);
+                        self.session.working_set.observe_tool_call(
+                            &tool_name_for_ws,
+                            &tool_input,
+                            Some(&error),
+                            &self.session.workspace,
+                        );
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {
@@ -3793,46 +3548,6 @@ impl Engine {
                 self.emit_goal_updated().await;
             }
 
-            if let Some((tool_name, count)) = read_repeat_stop {
-                let reason = format!(
-                    "read-only repetition limit reached for '{tool_name}' at occurrence {count}; stopping turn deterministically"
-                );
-                emit_tool_audit(json!({
-                    "event": "tool.read_repeat_stopped",
-                    "tool_name": tool_name,
-                    "count": count,
-                }));
-                let _ = self.tx_event.send(Event::status(reason.clone())).await;
-                return (TurnOutcomeStatus::Failed, Some(reason));
-            }
-
-            if let Some(signal) = stuck_signal {
-                match signal {
-                    StuckSignal::Warn { reason } => {
-                        let started =
-                            no_progress_warning_started_at.get_or_insert_with(Instant::now);
-                        let status = no_progress_status_message(&reason, started.elapsed());
-                        let _ = self.tx_event.send(Event::status(status)).await;
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            STUCK_RUNTIME_NOTICE.to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
-                    }
-                    StuckSignal::Stop { reason } => {
-                        let elapsed = no_progress_warning_started_at
-                            .get_or_insert_with(Instant::now)
-                            .elapsed();
-                        let status = no_progress_status_message(&reason, elapsed);
-                        crate::logging::warn(compact_no_progress_diagnostic(&reason, elapsed));
-                        let _ = self.tx_event.send(Event::status(status.clone())).await;
-                        return (TurnOutcomeStatus::Failed, Some(status));
-                    }
-                }
-            } else {
-                no_progress_warning_started_at = None;
-            }
-
             if !pending_steers.is_empty() {
                 for steer in pending_steers.drain(..) {
                     self.session
@@ -3841,24 +3556,6 @@ impl Engine {
                     self.add_session_message(self.user_text_message_with_turn_metadata(steer))
                         .await;
                 }
-            }
-
-            if step_error_count > 0 {
-                consecutive_tool_error_steps = consecutive_tool_error_steps.saturating_add(1);
-                if let Some(hint) = tool_error_degradation_runtime_hint(
-                    consecutive_tool_error_steps,
-                    &step_error_tool_names,
-                    &step_error_categories,
-                    &step_error_tool_inputs,
-                ) {
-                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                        hint,
-                        UserInputProvenance::Runtime,
-                    ))
-                    .await;
-                }
-            } else {
-                consecutive_tool_error_steps = 0;
             }
 
             // A successful tool step is productive progress, not a runaway
@@ -3920,17 +3617,6 @@ impl Engine {
         let current_turn_tokens = u64::from(current_turn_usage.input_tokens)
             .saturating_add(u64::from(current_turn_usage.output_tokens));
 
-        let per_turn_max = crate::tools::goal::MAX_GOAL_CONTINUATIONS_PER_TURN;
-        if *continuations_this_turn >= per_turn_max {
-            let _ = self
-                .tx_event
-                .send(Event::status(format!(
-                    "Goal remains active after {per_turn_max} continuation pass(es) this turn; ending turn to avoid a runaway loop."
-                )))
-                .await;
-            return None;
-        }
-
         // Route the continuation decision through the goal-loop decision core.
         // A goal runs until complete/blocked or the user pauses it; token/time
         // accounting is telemetry (#5052). The configurable run-level backstop
@@ -3971,7 +3657,7 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::status(format!(
-                "Continuing active goal ({}/{per_turn_max} this turn, {} total)",
+                "Continuing active goal (pass {} this turn, {} total)",
                 *continuations_this_turn, snapshot.continuation_count
             )))
             .await;
@@ -4167,32 +3853,6 @@ fn should_hold_turn_for_subagents(queued_completions: usize, running_children: u
     // background-status message, but deliberately no longer gates the hold.
     let _ = running_children;
     queued_completions > 0
-}
-
-fn no_progress_status_message(reason: &str, elapsed: Duration) -> String {
-    format!(
-        "No progress detected ({reason}; elapsed {}). Recovery: retry the current operation, cancel or reconcile child agents, checkpoint-and-restart, or return to the prompt.",
-        format_no_progress_elapsed(elapsed)
-    )
-}
-
-fn compact_no_progress_diagnostic(reason: &str, elapsed: Duration) -> String {
-    format!(
-        "{{\"event\":\"turn.no_progress\",\"reason\":\"{}\",\"elapsed_seconds\":{}}}",
-        reason.replace('"', "\\\""),
-        elapsed.as_secs()
-    )
-}
-
-fn format_no_progress_elapsed(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    let minutes = secs / 60;
-    let remainder = secs % 60;
-    if minutes == 0 {
-        format!("{secs}s")
-    } else {
-        format!("{minutes}m {remainder}s")
-    }
 }
 
 fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
@@ -4795,23 +4455,6 @@ mod tests {
         assert!(!should_hold_turn_for_subagents(0, 0));
         // Queued completions hold regardless of how many children are running.
         assert!(should_hold_turn_for_subagents(2, 5));
-    }
-
-    #[test]
-    fn no_progress_status_reports_reason_elapsed_and_recovery_paths() {
-        let message = no_progress_status_message(
-            "waiting for 2 sub-agent(s) is repeating without terminal child updates",
-            Duration::from_secs(125),
-        );
-        assert!(message.contains("No progress detected"));
-        assert!(message.contains("2m 5s"), "{message}");
-        assert!(message.contains("retry the current operation"), "{message}");
-        assert!(
-            message.contains("cancel or reconcile child agents"),
-            "{message}"
-        );
-        assert!(message.contains("checkpoint-and-restart"), "{message}");
-        assert!(message.contains("return to the prompt"), "{message}");
     }
 
     #[test]

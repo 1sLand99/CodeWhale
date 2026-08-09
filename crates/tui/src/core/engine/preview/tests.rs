@@ -365,12 +365,7 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
     };
 
     let planned_reasons = engine
-        .preview_runtime_transforms(
-            &messages,
-            Some(&planned_prompt),
-            &engine.session.working_set,
-            &compaction,
-        )
+        .preview_runtime_transforms(&messages, Some(&planned_prompt), &compaction)
         .await;
     assert!(
         planned_reasons.contains(&"auto-compaction would rewrite the conversation first"),
@@ -378,12 +373,7 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
     );
 
     let installed_reasons = engine
-        .preview_runtime_transforms(
-            &messages,
-            Some(&installed_prompt),
-            &engine.session.working_set,
-            &compaction,
-        )
+        .preview_runtime_transforms(&messages, Some(&installed_prompt), &compaction)
         .await;
     assert!(
         !installed_reasons.contains(&"auto-compaction would rewrite the conversation first"),

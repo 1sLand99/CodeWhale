@@ -427,12 +427,7 @@ impl Engine {
         // dispatch and the wire. Detected read-only; nothing pending is
         // consumed, drained, or flushed by looking.
         let mut runtime_transforms = self
-            .preview_runtime_transforms(
-                &messages,
-                system_prompt.as_ref(),
-                &previewed_working_set,
-                &planned_compaction,
-            )
+            .preview_runtime_transforms(&messages, system_prompt.as_ref(), &planned_compaction)
             .await;
 
         // Resolve the same authoritative transient Work/To-do tail that the
@@ -633,7 +628,6 @@ impl Engine {
         &self,
         messages: &[Message],
         system_prompt: Option<&SystemPrompt>,
-        working_set: &crate::working_set::WorkingSet,
         compaction: &crate::compaction::CompactionConfig,
     ) -> Vec<&'static str> {
         let mut reasons = Vec::new();
@@ -675,16 +669,7 @@ impl Engine {
                 ..Default::default()
             });
             let prepared = self.prepare_compaction_envelope(preview_compaction);
-            let pins = self.compaction_pins_for_messages(messages, working_set);
-            let paths = working_set.top_paths(24);
-            if should_compact(
-                messages,
-                system_prompt,
-                &prepared,
-                Some(&self.session.workspace),
-                Some(&pins),
-                Some(&paths),
-            ) {
+            if should_compact(messages, system_prompt, &prepared) {
                 reasons.push("auto-compaction would rewrite the conversation first");
             }
         }

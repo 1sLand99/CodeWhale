@@ -36,7 +36,15 @@ const LARGE_CONTEXT_WINDOW_TOKENS: u32 = 500_000;
 /// Max chars to keep from metadata-provided output summaries.
 const TOOL_RESULT_METADATA_SUMMARY_CHARS: usize = 320;
 
-pub(super) const COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+pub(super) const COMPACTION_SUMMARY_MARKER: &str =
+    "Another language model started to solve this problem";
+/// Marker written by pre-v0.9.6 compaction; sessions saved under the old
+/// format must still restore their committed summary on reload.
+pub(super) const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+
+pub(super) fn is_compaction_summary_text(text: &str) -> bool {
+    text.contains(COMPACTION_SUMMARY_MARKER) || text.contains(LEGACY_COMPACTION_SUMMARY_MARKER)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ToolResultContextLimits {
@@ -496,7 +504,7 @@ pub(super) fn extract_compaction_summary_prompt(
         Some(SystemPrompt::Blocks(blocks)) => {
             let summary_blocks: Vec<_> = blocks
                 .into_iter()
-                .filter(|block| block.text.contains(COMPACTION_SUMMARY_MARKER))
+                .filter(|block| is_compaction_summary_text(&block.text))
                 .collect();
             if summary_blocks.is_empty() {
                 None
@@ -505,7 +513,7 @@ pub(super) fn extract_compaction_summary_prompt(
             }
         }
         Some(SystemPrompt::Text(text)) => {
-            if text.contains(COMPACTION_SUMMARY_MARKER) {
+            if is_compaction_summary_text(&text) {
                 Some(SystemPrompt::Text(text))
             } else {
                 None
