@@ -270,6 +270,12 @@ pub(crate) async fn draft_fleet_profile_with_model<C: LlmClient>(
         .create_message(request)
         .await
         .map_err(|err| format!("request failed: {err:#}"))?;
+    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        return Err(format!(
+            "the draft reply was incomplete (provider stop reason `{}`)",
+            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+        ));
+    }
     let text = profile_draft_response_text(&response.content);
     match FleetProfileDraft::from_untrusted_json(&text) {
         UntrustedProfileParse::Drafted(draft) => Ok(draft),

@@ -269,6 +269,9 @@ struct EvidenceBlock {
 struct CritiqueRun {
     report: CritiqueReport,
     usage: Usage,
+    /// Provider stop reason when the critic response was incomplete; billed
+    /// usage above still counts, but the partial report must not.
+    incomplete_stop_reason: Option<String>,
 }
 
 /// Agent-callable adversarial self-critique tool.
@@ -458,6 +461,15 @@ self-check of whether what you just did is actually correct and complete."
             )
             .await?;
 
+        if let Some(reason) = &run.incomplete_stop_reason {
+            let mut metadata = json!({ "tool": "verify" });
+            crate::cost_status::attach_child_usage_metadata(&mut metadata, &route, &run.usage);
+            return Ok(ToolResult::error(format!(
+                "Verify critic response incomplete: provider stop reason `{reason}`; the partial critique was not accepted."
+            ))
+            .with_metadata(metadata));
+        }
+
         let mut metadata = json!({
             "tool": "verify",
             "verdict": run.report.verdict,
@@ -490,10 +502,15 @@ async fn run_critique<C: LlmClient>(
         .create_message(request)
         .await
         .map_err(|e| ToolError::execution_failed(format!("verify critic request failed: {e}")))?;
+    let incomplete_stop_reason =
+        crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()).then(|| {
+            crate::models::stop_reason_detail(response.stop_reason.as_deref()).to_string()
+        });
     let text = extract_text(&response.content);
     Ok(CritiqueRun {
         report: CritiqueReport::from_model_text(&text),
         usage: response.usage,
+        incomplete_stop_reason,
     })
 }
 

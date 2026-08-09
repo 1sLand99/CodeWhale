@@ -693,6 +693,8 @@ fn spawn_signal_cleanup_task() {
         static CLEANED_UP: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         if !CLEANED_UP.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            #[cfg(unix)]
+            crate::tools::shell::abort_pending_persistent_process_groups_for_exit();
             crate::tui::ui::emergency_restore_terminal();
             // Nothing async survives the `exit` below, so this is the last
             // chance to say how the session ended. `record_blocking` is one
@@ -7612,13 +7614,17 @@ Provide findings ordered by severity with file references, then open questions, 
     };
 
     let response = client.create_message(request).await?;
+    let review_stop_reason = response.stop_reason.clone();
+    let review_incomplete = crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref());
     let mut output = String::new();
     for block in response.content {
         if let ContentBlock::Text { text, .. } = block {
             output.push_str(&text);
         }
     }
-    let receipt = if args.write_receipt {
+    // A truncated review must not become a receipt or a success. The partial
+    // text is still printed for diagnostics below.
+    let receipt = if args.write_receipt && !review_incomplete {
         let parsed_output = crate::tools::review::ReviewOutput::from_str(&output);
         let receipt = crate::tools::review::build_review_receipt(
             review_target_label(&args),
@@ -7635,6 +7641,12 @@ Provide findings ordered by severity with file references, then open questions, 
     } else {
         None
     };
+    let review_error = review_incomplete.then(|| {
+        format!(
+            "Model response incomplete: provider stop reason `{}`; the partial review was not accepted.",
+            crate::models::stop_reason_detail(review_stop_reason.as_deref())
+        )
+    });
     if args.json {
         println!(
             "{}",
@@ -7642,18 +7654,26 @@ Provide findings ordered by severity with file references, then open questions, 
                 "mode": "review",
                 "provider": route_provider,
                 "model": model,
-                "success": true,
+                "success": !review_incomplete,
                 "content": output,
+                "stop_reason": review_stop_reason,
+                "error": review_error,
                 "receipt_path": receipt
                     .as_ref()
                     .map(|(path, _)| path.display().to_string()),
                 "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
             }))?
         );
+        if let Some(error) = review_error {
+            anyhow::bail!(error);
+        }
     } else {
         println!("{output}");
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
+        }
+        if let Some(error) = review_error {
+            anyhow::bail!(error);
         }
     }
     Ok(())
@@ -9688,7 +9708,9 @@ async fn run_one_shot(
     force_configured_route: bool,
 ) -> Result<()> {
     use crate::client::DeepSeekClient;
-    use crate::models::{ContentBlock, Message, MessageRequest};
+    use crate::models::{
+        ContentBlock, Message, MessageRequest, is_incomplete_stop_reason, stop_reason_detail,
+    };
 
     let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
@@ -9719,11 +9741,19 @@ async fn run_one_shot(
     };
 
     let response = client.create_message(request).await?;
+    let stop_reason = response.stop_reason.clone();
 
     for block in response.content {
         if let ContentBlock::Text { text, .. } = block {
             println!("{text}");
         }
+    }
+
+    if is_incomplete_stop_reason(stop_reason.as_deref()) {
+        anyhow::bail!(
+            "Model response incomplete: provider stop reason `{}`; the partial response was printed but the command did not succeed.",
+            stop_reason_detail(stop_reason.as_deref())
+        );
     }
 
     Ok(())
@@ -9736,7 +9766,10 @@ async fn run_one_shot_json(
     force_configured_route: bool,
 ) -> Result<()> {
     use crate::client::DeepSeekClient;
-    use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
+    use crate::models::{
+        ContentBlock, Message, MessageRequest, SystemPrompt, is_incomplete_stop_reason,
+        stop_reason_detail,
+    };
 
     let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
@@ -9770,6 +9803,8 @@ async fn run_one_shot_json(
     };
 
     let response = client.create_message(request).await?;
+    let stop_reason = response.stop_reason.clone();
+    let usage = response.usage.clone();
     let mut output = String::new();
     for block in response.content {
         if let ContentBlock::Text { text, .. } = block {
@@ -9778,8 +9813,20 @@ async fn run_one_shot_json(
     }
     println!(
         "{}",
-        serde_json::to_string_pretty(&one_shot_exec_json_receipt(provider, model, output,))?
+        serde_json::to_string_pretty(&one_shot_exec_json_receipt(
+            provider,
+            model,
+            output,
+            stop_reason.clone(),
+            usage,
+        ))?
     );
+    if is_incomplete_stop_reason(stop_reason.as_deref()) {
+        anyhow::bail!(
+            "Model response incomplete: provider stop reason `{}`; the JSON receipt records success=false.",
+            stop_reason_detail(stop_reason.as_deref())
+        );
+    }
     Ok(())
 }
 
@@ -9787,13 +9834,25 @@ fn one_shot_exec_json_receipt(
     provider: String,
     model: String,
     output: String,
+    stop_reason: Option<String>,
+    usage: crate::models::Usage,
 ) -> serde_json::Value {
+    let incomplete = crate::models::is_incomplete_stop_reason(stop_reason.as_deref());
+    let error = incomplete.then(|| {
+        format!(
+            "Model response incomplete: provider stop reason `{}`.",
+            crate::models::stop_reason_detail(stop_reason.as_deref())
+        )
+    });
     serde_json::json!({
         "mode": "one-shot",
         "provider": provider,
         "model": model,
-        "success": true,
-        "output": output
+        "success": !incomplete,
+        "output": output,
+        "stop_reason": stop_reason,
+        "usage": usage,
+        "error": error,
     })
 }
 
@@ -9856,6 +9915,8 @@ struct ExecStreamMeta {
     termination_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, PartialEq, Eq)]
@@ -9945,6 +10006,13 @@ enum ExecStreamEvent {
     },
     #[serde(rename = "session_capture")]
     SessionCapture { content: String },
+    #[serde(rename = "service_released")]
+    ServiceReleased {
+        task_id: String,
+        pid: u32,
+        process_group_id: u32,
+        ownership: String,
+    },
     /// Per-model-call usage receipt. Field names mirror the terminal
     /// `metadata` receipt (`prompt_cache_hit_tokens` is the provider's
     /// cache-read count, `prompt_cache_write_tokens` the cache-creation
@@ -10249,6 +10317,8 @@ async fn run_workflow_tool_command_inner(
             status: Some(workflow_status.clone()),
             termination_reason: Some(if completed { "resolved" } else { "tool_error" }.to_string()),
             error_category: (!completed).then(|| "tool".to_string()),
+            error: (!completed)
+                .then(|| format!("workflow run ended with terminal status {workflow_status}")),
         }),
     })?;
     if !completed {
@@ -10768,6 +10838,8 @@ struct ExecSummary {
     termination_reason: Option<String>,
     error_category: Option<String>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    released_services: Vec<crate::tools::shell::PersistentServiceReceipt>,
 }
 
 fn validate_exec_tool_authority_resume(
@@ -10976,18 +11048,31 @@ async fn run_exec_agent(
     } else {
         plugin_registry
     };
+    let exec_allow_shell = crate::tools::spec::fleet_exec_shell_enabled(
+        fleet_authority_active,
+        outer_shell_authority,
+        disallowed_tools.as_deref(),
+    ) || (!fleet_authority_active
+        && (auto_approve || execution_config.allow_shell()));
+    let persist_services_enabled = cfg!(unix)
+        && !fleet_authority_active
+        && exec_allow_shell
+        && explicit_sandbox
+            .is_some_and(|sandbox| sandbox.eq_ignore_ascii_case("danger-full-access"));
+    let exec_shell_manager = crate::tools::shell::new_shared_shell_manager(workspace.clone());
+    let runtime_services = crate::tools::spec::RuntimeToolServices {
+        shell_manager: Some(exec_shell_manager.clone()),
+        persist_services_enabled,
+        ..crate::tools::spec::RuntimeToolServices::default()
+    };
+
     let engine_config = EngineConfig {
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
         subagent_state_root: None,
         plugin_registry: Some(engine_plugin_registry),
-        allow_shell: crate::tools::spec::fleet_exec_shell_enabled(
-            fleet_authority_active,
-            outer_shell_authority,
-            disallowed_tools.as_deref(),
-        ) || (!fleet_authority_active
-            && (auto_approve || execution_config.allow_shell())),
+        allow_shell: exec_allow_shell,
         trust_mode,
         notes_path: execution_config.notes_path(),
         mcp_config_path: execution_config.mcp_config_path(),
@@ -11037,7 +11122,7 @@ async fn run_exec_agent(
             .max_workspace_gb
             .saturating_mul(1024 * 1024 * 1024),
         lsp_config,
-        runtime_services: crate::tools::spec::RuntimeToolServices::default(),
+        runtime_services,
         subagent_model_overrides: execution_config.subagent_model_overrides(),
         fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
             &execution_config.fleet_config(),
@@ -11480,13 +11565,69 @@ async fn run_exec_agent(
                 tool_catalog,
                 ..
             } => {
-                summary.status = Some(format!("{status:?}").to_lowercase());
-                if error.is_some() {
-                    summary.error = error;
+                let mut terminal_status = status;
+                let mut terminal_error = error;
+                if matches!(
+                    terminal_status,
+                    crate::core::events::TurnOutcomeStatus::Completed
+                ) && terminal_error.is_none()
+                {
+                    #[cfg(unix)]
+                    match exec_shell_manager.lock() {
+                        Ok(mut manager) => match manager.commit_persistent_services() {
+                            Ok(receipts) => {
+                                for receipt in &receipts {
+                                    if output_format == ExecOutputFormat::StreamJson {
+                                        emit_exec_stream_event(
+                                            &ExecStreamEvent::ServiceReleased {
+                                                task_id: receipt.task_id.clone(),
+                                                pid: receipt.pid,
+                                                process_group_id: receipt.process_group_id,
+                                                ownership: receipt.ownership.clone(),
+                                            },
+                                        )?;
+                                    } else if !json_output {
+                                        eprintln!(
+                                            "persistent service released: {} pid={} pgid={} ownership={}",
+                                            receipt.task_id,
+                                            receipt.pid,
+                                            receipt.process_group_id,
+                                            receipt.ownership
+                                        );
+                                    }
+                                }
+                                summary.released_services.extend(receipts);
+                            }
+                            Err(error) => {
+                                manager.abort_persistent_services();
+                                terminal_status = crate::core::events::TurnOutcomeStatus::Failed;
+                                terminal_error = Some(format!(
+                                    "Persistent service ownership transfer failed: {error}"
+                                ));
+                            }
+                        },
+                        Err(_) => {
+                            terminal_status = crate::core::events::TurnOutcomeStatus::Failed;
+                            terminal_error = Some(
+                                "Persistent service ownership transfer failed: shell manager lock poisoned"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                } else if let Ok(mut manager) = exec_shell_manager.lock() {
+                    manager.abort_persistent_services();
+                }
+
+                summary.status = Some(format!("{terminal_status:?}").to_lowercase());
+                if terminal_error.is_some() {
+                    summary.error = terminal_error;
                 }
                 if sandbox_denied
                     && summary.error.is_none()
-                    && matches!(status, crate::core::events::TurnOutcomeStatus::Failed)
+                    && matches!(
+                        terminal_status,
+                        crate::core::events::TurnOutcomeStatus::Failed
+                    )
                 {
                     summary.error = Some(
                         "exec turn failed after sandbox denial; explicit sandbox elevation was not authorized"
@@ -11502,7 +11643,7 @@ async fn run_exec_agent(
                         last_error_category.map(|category| category.to_string());
                 }
                 let termination_reason = crate::core::termination::classify_turn_termination(
-                    status,
+                    terminal_status,
                     last_error_category,
                     tool_error_seen,
                     approval_required,
@@ -11596,6 +11737,7 @@ async fn run_exec_agent(
                             status: summary.status.clone(),
                             termination_reason: summary.termination_reason.clone(),
                             error_category: summary.error_category.clone(),
+                            error: summary.error.clone(),
                         }),
                     })?;
                     emit_exec_stream_event(&ExecStreamEvent::Done)?;
@@ -11621,11 +11763,35 @@ async fn run_exec_agent(
             Event::Status { message }
                 if output_format == ExecOutputFormat::Text
                     && !json_output
-                    && message.contains("Reached maximum steps") =>
+                    && message.contains("Maximum model steps") =>
             {
                 eprintln!("{message}");
             }
             _ => {}
+        }
+    }
+
+    if summary.status.is_none() {
+        if let Ok(mut manager) = exec_shell_manager.lock() {
+            manager.abort_persistent_services();
+        }
+        let error = summary.error.clone().unwrap_or_else(|| {
+            "Engine event channel closed before a terminal turn receipt".to_string()
+        });
+        let category = last_error_category
+            .unwrap_or_else(|| crate::error_taxonomy::classify_error_message(&error));
+        let termination_reason = crate::core::termination::classify_turn_termination(
+            crate::core::events::TurnOutcomeStatus::Failed,
+            Some(category),
+            tool_error_seen,
+            approval_required,
+        );
+        summary.status = Some("failed".to_string());
+        summary.error_category = Some(category.to_string());
+        summary.termination_reason = Some(termination_reason.as_str().to_string());
+        summary.error = Some(error.clone());
+        if output_format == ExecOutputFormat::StreamJson {
+            emit_exec_stream_event(&ExecStreamEvent::Error { error })?;
         }
     }
 
@@ -11723,48 +11889,8 @@ mod serve_bind_host_tests {
 }
 
 #[cfg(test)]
-mod exec_exit_semantics_tests {
-    use super::*;
-
-    #[test]
-    fn retryable_infra_categories_exit_with_ex_tempfail() {
-        // Provider/transport failures after all in-session retries: the task
-        // neither passed nor failed, and the harness may safely retry.
-        assert_eq!(exec_failure_exit_code(Some("network")), 75);
-        assert_eq!(exec_failure_exit_code(Some("timeout")), 75);
-        assert_eq!(EXEC_EXIT_RETRYABLE_INFRA, 75, "EX_TEMPFAIL from sysexits.h");
-    }
-
-    #[test]
-    fn genuine_failures_keep_exit_1() {
-        // Task-side failures and unknown categories keep the historical
-        // exit-1 contract — no masking, no forced zero exits.
-        assert_eq!(exec_failure_exit_code(Some("tool")), 1);
-        assert_eq!(exec_failure_exit_code(Some("authentication")), 1);
-        assert_eq!(exec_failure_exit_code(Some("invalid_input")), 1);
-        assert_eq!(exec_failure_exit_code(None), 1);
-        // rate_limit is deliberately exit 1: the same category also covers
-        // quota exhaustion, which a blind harness retry would hammer.
-        assert_eq!(exec_failure_exit_code(Some("rate_limit")), 1);
-    }
-
-    #[test]
-    fn recoverable_error_events_do_not_fail_the_run_summary() {
-        // A recoverable warning (e.g. a stream-stall notice mid-turn) must
-        // not force the exec summary into failure; the terminal TurnComplete
-        // carries the authoritative outcome.
-        let warning = crate::error_taxonomy::ErrorEnvelope::network(
-            "Stream stalled: no data received for 120s, closing stream",
-        );
-        assert!(
-            !exec_error_event_is_fatal(&warning),
-            "recoverable envelopes must not poison the exec summary"
-        );
-        let fatal = crate::error_taxonomy::ErrorEnvelope::fatal("engine exploded");
-        assert!(exec_error_event_is_fatal(&fatal));
-    }
-}
-
+#[path = "tests/exec_exit_semantics.rs"]
+mod exec_exit_semantics_tests;
 #[cfg(test)]
 mod doctor_legacy_state_tests {
     use super::*;
@@ -14296,9 +14422,38 @@ mod terminal_mode_tests {
     fn exec_json_receipts_keep_exact_named_custom_provider() {
         let config = custom_exec_config("custom-a");
         let provider = config.provider_identity_for(crate::config::ApiProvider::Custom);
-        let one_shot =
-            one_shot_exec_json_receipt(provider.clone(), "model-a".to_string(), "done".to_string());
+        let one_shot = one_shot_exec_json_receipt(
+            provider.clone(),
+            "model-a".to_string(),
+            "done".to_string(),
+            Some("end_turn".to_string()),
+            crate::models::Usage {
+                input_tokens: 12,
+                output_tokens: 3,
+                ..Default::default()
+            },
+        );
         assert_eq!(one_shot["provider"], "custom-a");
+        assert_eq!(one_shot["success"], true);
+
+        let truncated = one_shot_exec_json_receipt(
+            provider.clone(),
+            "model-a".to_string(),
+            "partial".to_string(),
+            Some("max_output_tokens".to_string()),
+            crate::models::Usage {
+                input_tokens: 20,
+                output_tokens: 9,
+                ..Default::default()
+            },
+        );
+        assert_eq!(truncated["success"], false);
+        assert_eq!(truncated["stop_reason"], "max_output_tokens");
+        assert_eq!(truncated["usage"]["input_tokens"], 20);
+        assert_eq!(truncated["usage"]["output_tokens"], 9);
+        assert!(truncated["error"].as_str().is_some_and(|error| {
+            error.contains("Model response incomplete") && error.contains("max_output_tokens")
+        }));
 
         let agent = serde_json::to_value(ExecSummary {
             mode: "agent".to_string(),
@@ -15407,6 +15562,7 @@ mod terminal_mode_tests {
                 status: Some("completed".to_string()),
                 termination_reason: Some("resolved".to_string()),
                 error_category: None,
+                error: None,
             }),
         };
 
@@ -17483,188 +17639,12 @@ mod setup_helper_tests {
 }
 
 #[cfg(test)]
-mod pr_prompt_tests {
-    use super::*;
-
-    fn sample_pr() -> GhPullRequest {
-        GhPullRequest {
-            title: "Add cool feature".to_string(),
-            body: "Closes #99.\n\nAlso:\n- bullet a\n- bullet b".to_string(),
-            base: "main".to_string(),
-            head: "feat/cool".to_string(),
-            url: "https://github.com/example/repo/pull/123".to_string(),
-        }
-    }
-
-    #[test]
-    fn format_pr_prompt_includes_title_url_branches_body_and_diff() {
-        let prompt = format_pr_prompt(123, &sample_pr(), "diff --git a/x b/x\n+y");
-        assert!(prompt.contains("Review PR #123 — Add cool feature"));
-        assert!(prompt.contains("URL: https://github.com/example/repo/pull/123"));
-        assert!(prompt.contains("Branches: main ← feat/cool"));
-        assert!(prompt.contains("Closes #99."));
-        assert!(prompt.contains("- bullet a"));
-        assert!(prompt.contains("```diff"));
-        assert!(prompt.contains("diff --git a/x b/x"));
-    }
-
-    #[test]
-    fn format_pr_prompt_handles_empty_body_and_unknown_branches() {
-        let pr = GhPullRequest {
-            title: String::new(),
-            body: "   ".to_string(),
-            base: String::new(),
-            head: String::new(),
-            url: String::new(),
-        };
-        let prompt = format_pr_prompt(7, &pr, "(diff body)");
-        // Empty title falls back to a placeholder.
-        assert!(prompt.contains("(PR #7)"));
-        // Empty body renders the explicit placeholder.
-        assert!(prompt.contains("(no description)"));
-        assert!(prompt.contains("Branches: (unknown)"));
-        assert!(prompt.contains("URL: (unavailable)"));
-    }
-
-    #[test]
-    fn format_pr_prompt_truncates_oversize_diff_at_a_codepoint_boundary() {
-        // 300 KiB of `X` bytes with a multibyte char near the cap.
-        let mut diff = "X".repeat(190 * 1024);
-        diff.push_str(&"🚀".repeat(5_000));
-        let prompt = format_pr_prompt(1, &sample_pr(), &diff);
-        assert!(prompt.contains("[…diff truncated"));
-        assert!(prompt.contains("at 200 KiB"));
-        // Ensure we didn't slice mid-codepoint — the result still
-        // round-trips as valid UTF-8 (it's a String, so this is by
-        // construction; the test pins behaviour against silent panics
-        // if the cut logic regresses).
-        assert!(prompt.is_ascii() || prompt.contains('🚀'));
-    }
-
-    #[test]
-    fn is_command_available_detects_present_and_absent_binaries() {
-        // `sh` is part of the POSIX baseline on every Unix runner and
-        // ships with `git-bash` on Windows CI. It should be present.
-        // (Skip on Windows CI without git-bash because the runner
-        // could legitimately lack `sh.exe`.)
-        #[cfg(unix)]
-        assert!(is_command_available("sh"), "POSIX `sh` should be on PATH");
-
-        // A deliberately-implausible name to confirm the negative
-        // branch — `--version` on this would exec(3) → ENOENT.
-        assert!(
-            !is_command_available("this-command-cannot-exist-codewhale-tui-test-ENOENT-marker"),
-            "missing command should return false, not panic"
-        );
-    }
-}
+#[path = "tests/pr_prompt.rs"]
+mod pr_prompt_tests;
 
 #[cfg(test)]
-mod telemetry_surface_tests {
-    use super::*;
-    use clap::Parser;
-    use codewhale_telemetry::{SessionSource, Surface};
-
-    fn command_of(args: &[&str]) -> Option<Commands> {
-        Cli::try_parse_from(args)
-            .expect("CLI args should parse")
-            .command
-    }
-
-    #[test]
-    fn every_surface_is_named_by_the_subcommand_not_the_executable() {
-        // One binary, five surfaces. `current_exe()` would call all of them
-        // the same thing, which is why nothing derives the surface from it.
-        assert_eq!(telemetry_surface(None), Surface::Tui);
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "resume", "--last"]).as_ref()),
-            Surface::Tui
-        );
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "fork", "--last"]).as_ref()),
-            Surface::Tui
-        );
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "exec", "hello"]).as_ref()),
-            Surface::Exec
-        );
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "serve", "--http"]).as_ref()),
-            Surface::Serve
-        );
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "serve", "--mcp"]).as_ref()),
-            Surface::McpServer
-        );
-        assert_eq!(
-            telemetry_surface(command_of(&["codewhale-tui", "doctor"]).as_ref()),
-            Surface::Cli
-        );
-    }
-
-    #[test]
-    fn the_session_source_distinguishes_resume_and_fork_from_a_fresh_launch() {
-        assert_eq!(telemetry_session_source(None), SessionSource::Interactive);
-        assert_eq!(
-            telemetry_session_source(command_of(&["codewhale-tui", "resume", "--last"]).as_ref()),
-            SessionSource::Resume
-        );
-        assert_eq!(
-            telemetry_session_source(command_of(&["codewhale-tui", "fork", "--last"]).as_ref()),
-            SessionSource::Fork
-        );
-        assert_eq!(
-            telemetry_session_source(command_of(&["codewhale-tui", "serve", "--http"]).as_ref()),
-            SessionSource::Api
-        );
-        assert_eq!(
-            telemetry_session_source(command_of(&["codewhale-tui", "doctor"]).as_ref()),
-            SessionSource::Unknown
-        );
-    }
-
-    #[test]
-    fn a_session_end_built_without_arming_writes_nothing() {
-        // `telemetry_session_end` is pure: it reads the counters and the exit
-        // class and builds a value. Nothing about building it may touch disk,
-        // because the signal path builds it on every run including runs that
-        // never armed.
-        let event = telemetry_session_end();
-        assert!(matches!(
-            event,
-            codewhale_telemetry::Event::SessionEnd { .. }
-        ));
-        // And handing it to `record_blocking` while unarmed is a no-op.
-        codewhale_telemetry::record_blocking(event);
-        assert!(!codewhale_telemetry::is_armed());
-    }
-
-    #[test]
-    fn canceled_run_reports_exit_class_error_not_signal() {
-        // A cancelled turn and a SIGINT both exit 130, so an exit-class derived
-        // from the exit code would report every Esc as a signal. The exec path
-        // states the class from the termination reason instead; this pins the
-        // predicate that site applies (`!is_success()` ⇒ `Error`) and the exit
-        // code collision that makes it necessary.
-        use crate::core::termination::RunTerminationReason;
-        assert_eq!(RunTerminationReason::Canceled.process_exit_code(), 130);
-        assert_eq!(
-            codewhale_telemetry::ExitClass::Signal.as_str(),
-            "signal",
-            "the SIGINT path's class is a distinct value, not a synonym for error"
-        );
-        assert!(!RunTerminationReason::Canceled.is_success());
-        assert!(RunTerminationReason::Resolved.is_success());
-        // The exit class is read from the process-wide atomic, and an unarmed
-        // process reports `Clean` rather than inventing one from an exit code.
-        assert!(!codewhale_telemetry::is_armed());
-        codewhale_telemetry::set_exit_class(codewhale_telemetry::ExitClass::Error);
-        assert_eq!(
-            codewhale_telemetry::exit_class(),
-            codewhale_telemetry::ExitClass::Clean
-        );
-    }
-}
+#[path = "tests/telemetry_surface.rs"]
+mod telemetry_surface_tests;
 
 #[cfg(test)]
 #[path = "tests/telemetry_counters.rs"]

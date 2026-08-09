@@ -1025,6 +1025,12 @@ impl FleetRouterCaller for LiveFleetRouter {
             .create_message(request)
             .await
             .map_err(|error| error.to_string())?;
+        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            return Err(format!(
+                "reasoning router response incomplete: provider stop reason `{}`",
+                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+            ));
+        }
         let text = response
             .content
             .into_iter()
