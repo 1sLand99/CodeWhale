@@ -51,8 +51,7 @@ export default async function FleetPage({ params }: { params: Promise<{ locale: 
             ? "Fleet 状态存放在工作区的 .codewhale/fleet.jsonl 台账中，worker 日志在 .codewhale/fleet/ 下。codewhale fleet resume <run-id> 是重启恢复命令：它重放台账、调和停止心跳的在途租约，且幂等——在管理进程退出、笔记本睡眠或运行时重启后都可以安全运行。"
             : "Fleet state lives in the workspace's .codewhale/fleet.jsonl ledger, with worker logs under .codewhale/fleet/. codewhale fleet resume <run-id> is the restart-recovery verb: it replays the ledger, reconciles in-flight leases whose workers stopped heartbeating, and is idempotent — safe after a manager exit, laptop sleep, or runtime restart."}
         </p>
-        <pre className="code-block mt-4">{`codewhale fleet init
-codewhale fleet run tasks.json --max-workers 4
+        <pre className="code-block mt-4">{`codewhale fleet run tasks.json --max-workers 4
 codewhale fleet status
 codewhale fleet inspect <worker-id>
 codewhale fleet logs <worker-id>

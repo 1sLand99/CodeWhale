@@ -13,8 +13,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "新手指引 · Codewhale 文档" : "Getting started · Codewhale Docs",
     description: isZh
-      ? "从安装到第一个 Fleet Workflow 的完整路径：安装、无需密钥的首次会话、连接提供商、运行 Fleet。"
-      : "The full path from install to a first Fleet workflow: install, a first keyless session, provider connection, and Fleet.",
+      ? "从安装到配置理想 Fleet 的完整路径：安装、无需密钥的首次会话、连接提供商、设置 Fleet。"
+      : "The full path from install to your ideal fleet: install, a first keyless session, provider connection, and fleet setup.",
   });
 }
 
@@ -32,8 +32,8 @@ export default async function GuidePage({ params }: { params: Promise<{ locale: 
         <h2 className="font-display text-3xl mb-1">{isZh ? "新手指引" : "Getting started"}</h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh
-            ? "从一条安装命令到第一个 Fleet Workflow，四步走完。每一步都只陈述当前版本真实的行为；未发布或待录制的内容会明确标注。"
-            : "Four steps from one install command to a first Fleet workflow. Every step states only what the current candidate actually does; anything unreleased or unrecorded is labeled as such."}
+            ? "从一条安装命令到配置好你的 Fleet，四步走完。每一步都只陈述当前版本真实的行为；未发布或待录制的内容会明确标注。"
+            : "Four steps from one install command to a fleet set up for your work. Every step states only what the current candidate actually does; anything unreleased or unrecorded is labeled as such."}
         </p>
       </section>
 
