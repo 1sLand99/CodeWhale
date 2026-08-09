@@ -2,7 +2,7 @@
  * getting-started.ts — the canonical new-user path for codewhale.net.
  *
  * Four steps, in order: install → first offline session → provider connection
- * → first Fleet workflow. Both the homepage band and the /docs/guide page
+ * → fleet setup. Both the homepage band and the /docs/guide page
  * render from this module, so the path reads identically everywhere.
  *
  * TRUTH CONTRACT:
@@ -71,12 +71,12 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
   },
   {
     id: "fleet-workflow",
-    title: { en: "Run a first Fleet workflow", zh: "运行第一个 Fleet Workflow" },
+    title: { en: "Set up your ideal fleet", zh: "配置你的理想 Fleet" },
     body: {
-      en: "For durable workers, ordered phases, or receipts, author a reusable agent-team profile and launch a run. Fleet state lives in the workspace ledger; ordinary single tasks need none of this.",
-      zh: "工作需要持久 worker、有序阶段或收据时，编写可复用的 agent 团队档案并启动运行。Fleet 状态保存在工作区台账中；普通单一任务不需要这些。",
+      en: "Add every provider you use — one auth set per hosted route; keyless local runtimes need nothing — then author the team: /fleet setup walks one role at a time (a model from any configured provider, a thinking tier, permissions) and saves a reusable profile for this repo or every repo on this machine. Fleet state lives in the workspace ledger; ordinary single tasks need none of this.",
+      zh: "把你用的每个提供商都接进来——每条托管路由执行一次 auth set，免密钥本地运行时无需配置——然后编写团队：/fleet setup 一次聚焦一个角色（可选任意已配置提供商的模型、思考档位与权限），保存为可复用档案，可仅用于本仓库或本机所有仓库。Fleet 状态保存在工作区台账中；普通单一任务不需要这些。",
     },
-    commands: ["codewhale fleet init", "codewhale fleet run tasks.json --max-workers 4"],
+    commands: ["/fleet setup", "codewhale fleet status"],
     link: {
       href: "/docs/fleet",
       label: { en: "Fleet and Workflow docs", zh: "Fleet 与 Workflow 文档" },

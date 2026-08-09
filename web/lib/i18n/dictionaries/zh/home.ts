@@ -66,7 +66,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "第一次用？四步走完。",
   startLede:
-    "安装 → 免密钥的首次会话 → 接入提供商 → 第一个 Fleet 工作流。名词解释见产品名词页。",
+    "安装 → 免密钥的首次会话 → 接入提供商 → 配置你的 Fleet。名词解释见产品名词页。",
   startGuideLink: "阅读新手指引 →",
   startVocabularyLink: "查看产品名词 →",
 

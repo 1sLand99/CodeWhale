@@ -67,7 +67,7 @@ export const home: HomeDict = {
   sealStart: "起",
   startHeading: "New to Codewhale? Four steps end to end.",
   startLede:
-    "Install → keyless first session → connect a provider → first Fleet workflow. Nouns defined on the vocabulary page.",
+    "Install → keyless first session → connect a provider → set up your fleet. Nouns defined on the vocabulary page.",
   startGuideLink: "Read the getting-started guide →",
   startVocabularyLink: "See the product vocabulary →",
 
