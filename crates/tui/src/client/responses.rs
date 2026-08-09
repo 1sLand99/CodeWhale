@@ -447,19 +447,10 @@ impl DeepSeekClient {
                                         usage_data =
                                             Some(parse_responses_usage(usage_val));
                                     }
-                                    let status = resp
-                                        .get("status")
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("completed");
-                                    let stop_reason = match status {
-                                        "completed" if saw_tool_call => "tool_use",
-                                        "completed" => "end_turn",
-                                        "incomplete" => "max_tokens",
-                                        _ => "end_turn",
-                                    };
+                                    let stop_reason = responses_stop_reason(resp, saw_tool_call);
                                     yield Ok(StreamEvent::MessageDelta {
                                         delta: MessageDelta {
-                                            stop_reason: Some(stop_reason.to_string()),
+                                            stop_reason: Some(stop_reason),
                                             stop_sequence: None,
                                         },
                                         usage: usage_data.take(),
@@ -826,6 +817,18 @@ fn responses_event_error_details(event: &Value) -> (String, String) {
         },
     );
     (code.to_string(), message)
+}
+
+fn responses_stop_reason(response: &Value, saw_tool_call: bool) -> String {
+    match string_at(response, "/status").unwrap_or("completed") {
+        "completed" if saw_tool_call => "tool_use".to_string(),
+        "completed" => "end_turn".to_string(),
+        "incomplete" => format!(
+            "incomplete:{}",
+            string_at(response, "/incomplete_details/reason").unwrap_or("max_tokens")
+        ),
+        _ => "end_turn".to_string(),
+    }
 }
 
 fn first_string_at<'a>(value: &'a Value, paths: &[&str]) -> Option<&'a str> {

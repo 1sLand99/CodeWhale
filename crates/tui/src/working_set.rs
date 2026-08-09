@@ -1210,44 +1210,6 @@ impl WorkingSet {
         }
     }
 
-    /// Return the most relevant paths in score order.
-    pub fn top_paths(&self, limit: usize) -> Vec<String> {
-        self.sorted_entries()
-            .into_iter()
-            .take(limit)
-            .map(|entry| entry.path.clone())
-            .collect()
-    }
-
-    /// Identify message indices that should be pinned during compaction.
-    pub fn pinned_message_indices(&self, messages: &[Message], workspace: &Path) -> Vec<usize> {
-        if messages.is_empty() || self.entries.is_empty() {
-            return Vec::new();
-        }
-
-        let pinned_paths: Vec<&WorkingSetEntry> = self
-            .sorted_entries()
-            .into_iter()
-            .take(self.config.max_pinned_paths)
-            .collect();
-        if pinned_paths.is_empty() {
-            return Vec::new();
-        }
-
-        let needles = build_search_needles(&pinned_paths, workspace);
-        if needles.is_empty() {
-            return Vec::new();
-        }
-
-        let mut pinned: Vec<usize> = Vec::new();
-        for (idx, message) in messages.iter().enumerate() {
-            if message_mentions_any_path(message, &needles, self.config.max_scan_chars) {
-                pinned.push(idx);
-            }
-        }
-        pinned
-    }
-
     fn record_candidates(
         &mut self,
         candidates: Vec<String>,
@@ -1311,17 +1273,6 @@ impl WorkingSet {
         }
     }
 
-    fn sorted_entries(&self) -> Vec<&WorkingSetEntry> {
-        let mut entries: Vec<&WorkingSetEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| {
-            let sb = score_entry(b, self.turn);
-            let sa = score_entry(a, self.turn);
-            sb.cmp(&sa).then_with(|| a.path.cmp(&b.path))
-        });
-        entries
-    }
-
-    /// Turn-agnostic ordering used when rendering the prompt summary block.
     /// `sorted_entries` mixes in a recency bonus from `self.turn`, so its
     /// output reorders as turns advance even when no new paths are touched —
     /// that movement would cross `max_prompt_entries` boundaries and bust the
@@ -1559,75 +1510,6 @@ fn path_regex() -> &'static Regex {
     })
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> &str {
-    if max_chars == 0 {
-        return "";
-    }
-    match text.char_indices().nth(max_chars) {
-        Some((idx, _)) => &text[..idx],
-        None => text,
-    }
-}
-
-fn build_search_needles(entries: &[&WorkingSetEntry], workspace: &Path) -> Vec<String> {
-    let mut needles: HashSet<String> = HashSet::new();
-    for entry in entries {
-        let rel = entry.path.clone();
-        if rel.is_empty() {
-            continue;
-        }
-        let abs = workspace.join(&rel);
-        let abs_str = abs.as_os_str().to_str().map(ToOwned::to_owned);
-
-        let _ = needles.insert(rel.clone());
-        if let Some(abs_str) = abs_str {
-            let _ = needles.insert(abs_str);
-        }
-    }
-    needles.into_iter().collect()
-}
-
-fn message_mentions_any_path(message: &Message, needles: &[String], max_scan_chars: usize) -> bool {
-    if needles.is_empty() {
-        return false;
-    }
-    for block in &message.content {
-        match block {
-            ContentBlock::Text { text, .. } => {
-                let snippet = truncate_chars(text, max_scan_chars);
-                if contains_any(snippet, needles) {
-                    return true;
-                }
-            }
-            ContentBlock::ToolUse { input, .. } => {
-                if let Ok(json) = serde_json::to_string(input)
-                    && contains_any(&json, needles)
-                {
-                    return true;
-                }
-            }
-            ContentBlock::ToolResult { content, .. } => {
-                let snippet = truncate_chars(content, max_scan_chars);
-                if contains_any(snippet, needles) {
-                    return true;
-                }
-            }
-            ContentBlock::Thinking { .. }
-            | ContentBlock::ServerToolUse { .. }
-            | ContentBlock::ToolSearchToolResult { .. }
-            | ContentBlock::CodeExecutionToolResult { .. }
-            | ContentBlock::ImageUrl { .. } => {}
-        }
-    }
-    false
-}
-
-fn contains_any(text: &str, needles: &[String]) -> bool {
-    needles
-        .iter()
-        .any(|needle| !needle.is_empty() && text.contains(needle))
-}
-
 fn summarize_repo_root(workspace: &Path) -> Option<String> {
     let key_files = detect_key_files(workspace);
     let top_dirs = list_top_level_dirs(workspace, 8);
@@ -1748,27 +1630,6 @@ mod tests {
         ws.observe_tool_call("read_file", &input, None, tmp.path());
 
         assert!(ws.entries.contains_key("Cargo.toml"));
-    }
-
-    #[test]
-    fn pinned_message_indices_respects_working_set() {
-        let tmp = TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        fs::create_dir_all(&src).expect("mkdir");
-        let file = src.join("main.rs");
-        fs::write(&file, "fn main() {}").expect("write");
-
-        let mut ws = WorkingSet::default();
-        ws.observe_user_message("Edit src/main.rs", tmp.path());
-
-        let messages = vec![
-            make_message("user", "Unrelated text"),
-            make_message("assistant", "I will read src/main.rs next."),
-            make_message("user", "More unrelated text"),
-        ];
-
-        let pinned = ws.pinned_message_indices(&messages, tmp.path());
-        assert_eq!(pinned, vec![1]);
     }
 
     #[test]

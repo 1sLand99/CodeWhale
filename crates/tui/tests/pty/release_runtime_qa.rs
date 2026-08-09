@@ -344,10 +344,10 @@ impl Respond for CompactionLifecycleResponder {
         let body = request.body_json::<Value>().unwrap_or(Value::Null);
         let raw = body.to_string();
         // Prepared non-streaming requests may omit `stream: false` on the
-        // OpenAI wire. The successor-brief instruction is the compactor's
+        // OpenAI wire. The compact-prompt instruction is the compactor's
         // stable semantic discriminator and cannot occur in these test turns.
         let is_compaction = body.get("stream").and_then(Value::as_bool) == Some(false)
-            || raw.contains("Produce a successor briefing for the agent");
+            || raw.contains("You are performing a context checkpoint compaction");
         if is_compaction {
             self.compaction_requests.fetch_add(1, Ordering::SeqCst);
             self.record("compact");

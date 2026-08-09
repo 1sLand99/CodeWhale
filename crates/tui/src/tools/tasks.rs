@@ -47,6 +47,16 @@ fn build_gate_command(command: &str, cwd: &Path) -> Command {
     cmd
 }
 
+fn task_shell_wait_input(mut input: Value) -> Value {
+    if input.get("wait").is_none_or(Value::is_null)
+        && input.get("block").is_none_or(Value::is_null)
+        && let Some(object) = input.as_object_mut()
+    {
+        object.insert("wait".to_string(), Value::Bool(false));
+    }
+    input
+}
+
 /// Unified durable-task tool (piagent phase B).
 ///
 /// The model sees one tool, `tasks`, with an `action` parameter routing to
@@ -945,8 +955,9 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let shell_input = task_shell_wait_input(input.clone());
         let result = BashTool::alias("exec_shell_wait", "wait")
-            .execute(input.clone(), context)
+            .execute(shell_input, context)
             .await?;
         let Some(gate) = optional_str(&input, "gate")? else {
             return Ok(result);
@@ -1423,6 +1434,73 @@ mod tests {
         let wait_schema = TaskShellWaitTool.input_schema();
         assert_eq!(wait_schema["required"][0], "task_id");
         assert!(wait_schema["properties"]["gate"].is_object());
+    }
+
+    #[test]
+    fn task_shell_wait_keeps_its_documented_nonblocking_default() {
+        assert_eq!(
+            task_shell_wait_input(json!({"task_id": "shell_1"}))["wait"],
+            false
+        );
+        assert_eq!(
+            task_shell_wait_input(json!({"task_id": "shell_1", "wait": true}))["wait"],
+            true
+        );
+        assert_eq!(
+            task_shell_wait_input(json!({"task_id": "shell_1", "block": true}))["block"],
+            true
+        );
+        assert_eq!(
+            task_shell_wait_input(json!({"task_id": "shell_1", "wait": null}))["wait"],
+            false
+        );
+        assert_eq!(
+            task_shell_wait_input(json!({"task_id": "shell_1", "block": null}))["wait"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn task_shell_wait_null_is_a_nonblocking_snapshot() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ToolContext::new(workspace.path());
+        let started = TaskShellStartTool
+            .execute(json!({"command": "sleep 2", "timeout_ms": 5_000}), &context)
+            .await
+            .expect("start background shell");
+        let task_id = started
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("task_id"))
+            .and_then(Value::as_str)
+            .expect("task id")
+            .to_string();
+
+        let before = std::time::Instant::now();
+        let snapshot = TaskShellWaitTool
+            .execute(
+                json!({"task_id": task_id, "wait": null, "timeout_ms": 5_000}),
+                &context,
+            )
+            .await
+            .expect("poll background shell");
+        assert!(
+            before.elapsed() < std::time::Duration::from_secs(1),
+            "task_shell_wait wait:null must preserve the nonblocking default"
+        );
+        assert_eq!(
+            snapshot
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("status"))
+                .and_then(Value::as_str),
+            Some("Running")
+        );
+
+        BashTool::alias("exec_shell_cancel", "cancel")
+            .execute(json!({"task_id": task_id}), &context)
+            .await
+            .expect("cancel background shell");
     }
 
     #[test]

@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "File yang ada:",
   "SetupConstitutionExpertOverrideLabel": "Override ahli:",
   "SetupConstitutionGuidedHint": "1-6 menyesuaikan draf, G pratinjau, G lagi meratifikasi. Hanya panduan: tidak pernah mengubah persetujuan runtime, sandbox, shell, jaringan, kepercayaan, atau izin MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Jawaban terpandu hanya menyimpan preferensi global pengguna. Inti bawaan tetap aktif; modul doktrin tetap di prompt mode/opt-in mendatang.",
+  "SetupConstitutionGuidedAnswersHint": "Jawaban terpandu hanya menyimpan preferensi global pengguna. Inti bawaan tetap aktif; eksekusi berada di kebijakan runtime dan opt-in mendatang.",
   "SetupConstitutionPurposeLabel": "Tujuan:",
   "SetupConstitutionAutonomyLabel": "Inisiatif:",
   "SetupConstitutionEvidenceLabel": "Bukti:",

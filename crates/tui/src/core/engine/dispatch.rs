@@ -14,8 +14,6 @@
 //! All items are `pub(super)`-only: the public engine surface (Op/Event,
 //! `EngineHandle`, `spawn_engine`) stays in `core/engine.rs`.
 
-use std::collections::HashMap;
-
 use serde_json::json;
 
 use crate::models::{Tool, ToolCaller};
@@ -24,7 +22,6 @@ use crate::tools::spec::{
 };
 
 use super::ToolUseState;
-use super::read_repeat_guard::{ReadRepeatGuard, ReadRepeatOccurrence};
 
 // === Types ============================================================
 
@@ -60,18 +57,6 @@ pub(super) struct ToolExecutionPlan {
 pub(super) enum ToolExecutionBatch {
     Parallel(Vec<ToolExecutionPlan>),
     Serial(Box<ToolExecutionPlan>),
-}
-
-pub(super) struct CoalescedReadPlan {
-    pub(super) leader_index: usize,
-    pub(super) follower: ToolExecutionPlan,
-    pub(super) occurrence: ReadRepeatOccurrence,
-}
-
-pub(super) struct ReadRepeatExecutionPlan {
-    pub(super) executable: Vec<ToolExecutionPlan>,
-    pub(super) coalesced: Vec<CoalescedReadPlan>,
-    pub(super) occurrences: HashMap<usize, ReadRepeatOccurrence>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -241,7 +226,6 @@ pub(super) fn format_tool_error_with_schema(
         }
     };
 
-    let message = with_transient_tool_fallback_hint(message, err, tool_name);
     let (category, bad_field) = match err {
         ToolError::InvalidInput { .. } => ("invalid_input", None),
         ToolError::MissingField { field } => ("missing_field", Some(field.as_str())),
@@ -263,100 +247,6 @@ pub(super) fn format_tool_error_with_schema(
         "side_effect_status": "not_started"
     });
     format!("{message}\nTool validation feedback: {feedback}")
-}
-
-fn with_transient_tool_fallback_hint(message: String, err: &ToolError, tool_name: &str) -> String {
-    if message_already_has_recovery_hint(&message) {
-        return message;
-    }
-
-    let Some(hint) = transient_tool_fallback_hint(err, tool_name, &message) else {
-        return message;
-    };
-
-    format!("{message} Fallback: {hint}")
-}
-
-fn message_already_has_recovery_hint(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("recovery:") || lower.contains("fallback:")
-}
-
-fn transient_tool_fallback_hint(
-    err: &ToolError,
-    tool_name: &str,
-    formatted_message: &str,
-) -> Option<&'static str> {
-    if !is_transient_tool_failure(err, formatted_message) {
-        return None;
-    }
-
-    let lower_tool = tool_name.to_ascii_lowercase();
-    if lower_tool.contains("web_search")
-        || lower_tool.contains("web_run")
-        || lower_tool == "web.run"
-    {
-        return Some(
-            "after one retry, switch to a direct URL/open/fetch path or cached context instead of repeating the same search.",
-        );
-    }
-
-    if lower_tool.contains("fetch_url") {
-        return Some(
-            "after one retry, try a narrower URL/source, use search results or cached context, or state the access limit instead of repeating the same request.",
-        );
-    }
-
-    if lower_tool.contains("file_search") || lower_tool.contains("grep") {
-        return Some(
-            "after one retry, narrow the query/path or inspect likely files directly instead of repeating the same search unchanged.",
-        );
-    }
-
-    if lower_tool.contains("exec_shell")
-        || lower_tool.contains("run_tests")
-        || lower_tool.contains("run_verifiers")
-    {
-        return Some(
-            "after one retry, narrow the command/scope, increase timeout only for expected long runs, or switch to file-level evidence.",
-        );
-    }
-
-    if lower_tool.contains("agent") {
-        return Some(
-            "after one retry, reduce delegated scope or continue in the parent context instead of repeatedly spawning the same agent.",
-        );
-    }
-
-    Some(
-        "after one retry, choose a different tool or narrower strategy instead of repeating the same call unchanged.",
-    )
-}
-
-fn is_transient_tool_failure(err: &ToolError, formatted_message: &str) -> bool {
-    if matches!(err, ToolError::Timeout { .. }) {
-        return true;
-    }
-
-    if !matches!(err, ToolError::ExecutionFailed { .. }) {
-        return false;
-    }
-
-    let lower = formatted_message.to_ascii_lowercase();
-    [
-        "timeout",
-        "timed out",
-        "request failed",
-        "connection",
-        "network",
-        "http 429",
-        "rate limit",
-        "http 5",
-        "anti-bot",
-        "captcha",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
 }
 
 // === Streaming-buffer parsing =========================================
@@ -533,61 +423,6 @@ pub(super) fn tool_plan_can_join_parallel_batch(plan: &ToolExecutionPlan) -> boo
     plan.blocked_error.is_none()
         && (tool_plan_is_parallel_safe(plan)
             || (plan.detached_start && !plan.approval_required && !plan.interactive))
-}
-
-/// Register finalized read-only calls and remove same-batch duplicates from
-/// physical execution. Every removed follower is retained so the turn loop can
-/// fan the leader's terminal result back out under the follower's own tool ID.
-pub(super) fn plan_read_repeat_execution(
-    plans: Vec<ToolExecutionPlan>,
-    guard: &mut ReadRepeatGuard,
-) -> ReadRepeatExecutionPlan {
-    let mut executable = Vec::with_capacity(plans.len());
-    let mut coalesced = Vec::new();
-    let mut occurrences = HashMap::new();
-    let mut leaders = HashMap::new();
-
-    for mut plan in plans {
-        let eligible = plan.read_only
-            && !plan.interactive
-            && !plan.detached_start
-            && plan.blocked_error.is_none()
-            && plan.guard_result.is_none();
-        if !eligible {
-            // A write, interactive call, detached start, denial, or other
-            // execution barrier may change what a later read observes. Do not
-            // subscribe a post-barrier read to a pre-barrier result.
-            leaders.clear();
-            executable.push(plan);
-            continue;
-        }
-
-        let occurrence = guard.register(&plan.name, &plan.input);
-        occurrences.insert(plan.index, occurrence.clone());
-
-        if let Some(receipt) = guard.prior_receipt(&occurrence) {
-            plan.guard_result = Some(receipt);
-            executable.push(plan);
-            continue;
-        }
-
-        if let Some(leader_index) = leaders.get(&occurrence.key).copied() {
-            coalesced.push(CoalescedReadPlan {
-                leader_index,
-                follower: plan,
-                occurrence,
-            });
-        } else {
-            leaders.insert(occurrence.key.clone(), plan.index);
-            executable.push(plan);
-        }
-    }
-
-    ReadRepeatExecutionPlan {
-        executable,
-        coalesced,
-        occurrences,
-    }
 }
 
 pub(super) fn plan_tool_execution_batches(

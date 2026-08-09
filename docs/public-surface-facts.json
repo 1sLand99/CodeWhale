@@ -20,7 +20,7 @@
     ]
   },
   "sourceCandidate": {
-    "version": "0.9.5",
+    "version": "0.9.6",
     "providerCount": 41,
     "toolCount": 69,
     "sandboxBackends": [
@@ -228,10 +228,7 @@
       "web/lib/release-credits.ts"
     ],
     "requiredCandidateCredits": [
-      "@SparkofSpike",
-      "@aboimpinto",
-      "@bistack",
-      "@skyzhao1223"
+      "@xavierpestel-ai"
     ]
   },
   "screenshot": {

@@ -582,6 +582,15 @@ pub async fn run_purge(
     // whether this is a metered public API, a plan quota, or a local runtime.
     crate::cost_status::report_effective_route(cost_scope, &cost_route, &response.usage);
 
+    // A truncated response can still carry a complete-looking `purge_context`
+    // call; executing it would mutate the session from incomplete output.
+    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        return Err(format!(
+            "Purge model response incomplete: provider stop reason `{}`; no purge was applied.",
+            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+        ));
+    }
+
     // 5. Find the `purge_context` tool call in the response.
     let tool_input = response.content.iter().find_map(|block| {
         if let ContentBlock::ToolUse { name, input, .. } = block

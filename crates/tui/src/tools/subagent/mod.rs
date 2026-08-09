@@ -35,6 +35,7 @@ use crate::dependencies::{ExternalTool, Git};
 use crate::llm_client::{LlmClient, LlmError};
 use crate::models::{
     ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
+    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
 };
 use crate::request_tuning::RequestTuning;
 use crate::tools::canonical_action::{
@@ -277,7 +278,6 @@ fn child_wall_time_exhausted_reason(limit: Duration) -> String {
 // arguments, especially write_file content. The API bills generated tokens, not
 // the requested ceiling.
 const SUBAGENT_RESPONSE_MAX_TOKENS: u32 = 16_384;
-const MAX_CONSECUTIVE_TRUNCATED_SUBAGENT_RESPONSES: u32 = 5;
 const SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES: u32 = 2;
 const SUBAGENT_TRANSIENT_PROVIDER_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 /// Per-step API-call timeout retry budget. A `create_message` call that
@@ -9153,43 +9153,20 @@ fn subagent_failed_sentinel(res: &SubAgentResult, error: &str) -> String {
 }
 
 fn response_was_truncated(response: &MessageResponse) -> bool {
-    response.stop_reason.as_deref() == Some("length")
+    is_output_limit_stop_reason(response.stop_reason.as_deref())
 }
 
-fn truncated_response_tool_results(tool_uses: &[(String, String, Value)]) -> Vec<ContentBlock> {
-    tool_uses
-        .iter()
-        .map(|(tool_id, tool_name, _)| ContentBlock::ToolResult {
-            tool_use_id: tool_id.clone(),
-            content: format!(
-                "Error: the model response was truncated by max_tokens before the tool call arguments for '{tool_name}' could be fully generated. Split large content into smaller writes and retry."
-            ),
-            is_error: Some(true),
-            content_blocks: None,
-        })
-        .collect()
-}
-
-fn truncated_response_text_retry_message() -> Vec<ContentBlock> {
-    vec![ContentBlock::Text {
-        text: "Error: the model response was truncated by max_tokens. No complete tool call was available, so the partial response was not accepted as the sub-agent result. Retry with a shorter response or split the work into smaller steps.".to_string(),
-        cache_control: None,
-    }]
-}
-
-fn record_truncated_subagent_response(consecutive: &mut u32) -> Result<()> {
-    *consecutive = consecutive.saturating_add(1);
-    if *consecutive > MAX_CONSECUTIVE_TRUNCATED_SUBAGENT_RESPONSES {
-        return Err(anyhow!(
-            "Sub-agent response was truncated by max_tokens {count} consecutive times; stopping to avoid an unbounded retry loop.",
-            count = *consecutive
-        ));
+fn incomplete_subagent_response_failure(response: &MessageResponse) -> String {
+    let reason = stop_reason_detail(response.stop_reason.as_deref());
+    if response_was_truncated(response) {
+        format!(
+            "Sub-agent model output was truncated (provider stop reason `{reason}`); no partial tool call was executed and any partial text was preserved for diagnostics."
+        )
+    } else {
+        format!(
+            "Sub-agent model response was incomplete (provider stop reason `{reason}`); no partial tool call or final result was accepted, and any partial text was preserved for diagnostics."
+        )
     }
-    Ok(())
-}
-
-fn reset_truncated_subagent_responses(consecutive: &mut u32) {
-    *consecutive = 0;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9906,9 +9883,9 @@ async fn run_subagent(
     let mut steps = 0;
     let mut final_result: Option<String> = None;
     let mut pending_inputs: VecDeque<SubAgentInput> = VecDeque::new();
-    let mut consecutive_truncated_responses = 0;
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
     let mut tokens_used: u64 = 0;
+    let mut terminal_failure_reason: Option<String> = None;
     // #4050: distinguish a real "the model chose to stop" exit (the `break`
     // below) from loop exhaustion (running out of `max_steps` while still
     // tool-calling). Only the former, with a non-empty final summary, is a
@@ -10305,21 +10282,84 @@ async fn run_subagent(
         // burn many times the configured budget and still report Completed.
         // Checking the live aggregate after each turn caps the overshoot at
         // the turns already in flight.
+        // Compute the budget state now, after accounting, but terminalize on
+        // it only after the provider stop reason has been classified below.
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
-        let scope_exhausted = {
+        let scope_budget_state = {
             let manager = runtime.manager.read().await;
-            manager
-                .budget_scope_state(&agent_id)
-                .filter(|(spent, limit)| spent > limit)
+            manager.budget_scope_state(&agent_id)
         };
-        let budget_exhausted_detail =
-            if let Some(budget) = token_budget.filter(|&budget| tokens_used > budget) {
-                Some(format!("token budget exhausted ({tokens_used}/{budget})"))
-            } else {
-                scope_exhausted.map(|(spent, limit)| {
+        let budget_exhausted_detail = if let Some(budget) =
+            token_budget.filter(|&budget| tokens_used > budget)
+        {
+            Some(format!("token budget exhausted ({tokens_used}/{budget})"))
+        } else {
+            scope_budget_state
+                .filter(|(spent, limit)| spent > limit)
+                .map(|(spent, limit)| {
                     format!("shared token budget exhausted ({spent}/{limit} spent across the run)")
                 })
-            };
+        };
+
+        let mut current_response_text = None;
+        for block in &response.content {
+            match block {
+                ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
+                    current_response_text = Some(text.clone());
+                    final_result = Some(text.clone());
+                }
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
+                    tool_uses.push((id.clone(), name.clone(), input.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: response.content.clone(),
+        });
+        latest_checkpoint = Some(
+            checkpoint_subagent_progress(
+                runtime,
+                &agent_id,
+                "after_model_response",
+                &messages,
+                steps,
+                true,
+            )
+            .await,
+        );
+        publish_live_subagent_transcript(
+            runtime,
+            &agent_id,
+            &agent_type,
+            &assignment,
+            final_result.as_ref(),
+            latest_checkpoint.as_ref(),
+            transcript_artifact.as_mut(),
+            &messages,
+            steps,
+            started_at,
+            fork_context_enabled,
+        )
+        .await;
+
+        if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            final_result = current_response_text;
+            let failure = incomplete_subagent_response_failure(&response);
+            record_agent_progress(
+                runtime,
+                &agent_id,
+                AgentProgressEventMeta::new(AgentWorkerStatus::Failed).with_step(steps),
+                format!("{}: {failure}", format_step_counter(steps, max_steps)),
+            );
+            terminal_failure_reason = Some(failure);
+            break;
+        }
+
         if let Some(detail) = budget_exhausted_detail {
             record_agent_progress(
                 runtime,
@@ -10385,105 +10425,6 @@ async fn run_subagent(
                 from_prior_session: false,
             });
         }
-
-        for block in &response.content {
-            match block {
-                ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
-                    final_result = Some(text.clone());
-                }
-                ContentBlock::ToolUse {
-                    id, name, input, ..
-                } => {
-                    tool_uses.push((id.clone(), name.clone(), input.clone()));
-                }
-                _ => {}
-            }
-        }
-
-        messages.push(Message {
-            role: "assistant".to_string(),
-            content: response.content.clone(),
-        });
-        latest_checkpoint = Some(
-            checkpoint_subagent_progress(
-                runtime,
-                &agent_id,
-                "after_model_response",
-                &messages,
-                steps,
-                true,
-            )
-            .await,
-        );
-        publish_live_subagent_transcript(
-            runtime,
-            &agent_id,
-            &agent_type,
-            &assignment,
-            final_result.as_ref(),
-            latest_checkpoint.as_ref(),
-            transcript_artifact.as_mut(),
-            &messages,
-            steps,
-            started_at,
-            fork_context_enabled,
-        )
-        .await;
-
-        if response_was_truncated(&response) {
-            final_result = None;
-            record_truncated_subagent_response(&mut consecutive_truncated_responses)?;
-            let progress = if tool_uses.is_empty() {
-                "response truncated, returning retry instruction".to_string()
-            } else {
-                format!(
-                    "response truncated, returning {} tool error(s)",
-                    tool_uses.len()
-                )
-            };
-            record_agent_progress(
-                runtime,
-                &agent_id,
-                AgentProgressEventMeta::new(AgentWorkerStatus::Running).with_step(steps),
-                format!("{}: {progress}", format_step_counter(steps, max_steps)),
-            );
-            messages.push(Message {
-                role: "user".to_string(),
-                content: if tool_uses.is_empty() {
-                    truncated_response_text_retry_message()
-                } else {
-                    truncated_response_tool_results(&tool_uses)
-                },
-            });
-            latest_checkpoint = Some(
-                checkpoint_subagent_progress(
-                    runtime,
-                    &agent_id,
-                    "after_truncated_response_retry_message",
-                    &messages,
-                    steps,
-                    true,
-                )
-                .await,
-            );
-            publish_live_subagent_transcript(
-                runtime,
-                &agent_id,
-                &agent_type,
-                &assignment,
-                final_result.as_ref(),
-                latest_checkpoint.as_ref(),
-                transcript_artifact.as_mut(),
-                &messages,
-                steps,
-                started_at,
-                fork_context_enabled,
-            )
-            .await;
-            continue;
-        }
-        reset_truncated_subagent_responses(&mut consecutive_truncated_responses);
-
         if tool_uses.is_empty() {
             let child_completions = drain_child_completion_events(&mut child_completion_rx);
             if !child_completions.is_empty() {
@@ -10686,7 +10627,9 @@ async fn run_subagent(
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false);
     // #4050: only a natural stop with a final summary is a real success.
-    let status = if stopped_naturally {
+    let status = if let Some(reason) = terminal_failure_reason {
+        SubAgentStatus::Failed(reason)
+    } else if stopped_naturally {
         if has_final_summary {
             SubAgentStatus::Completed
         } else {

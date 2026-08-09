@@ -520,6 +520,14 @@ impl ToolSpec for ReviewTool {
             .await
             .map_err(|e| ToolError::execution_failed(format!("Review request failed: {e}")))?;
 
+        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            return Ok(ToolResult::error(format!(
+                "Review model response incomplete: provider stop reason `{}`; the partial review was not accepted.",
+                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+            ))
+            .with_metadata(review_usage_metadata(&route, &response.usage)));
+        }
+
         let response_text = extract_text(&response.content);
         let output = ReviewOutput::from_str(&response_text);
         let metadata = review_usage_metadata(&route, &response.usage);

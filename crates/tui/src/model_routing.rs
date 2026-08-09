@@ -1031,6 +1031,12 @@ async fn auto_route_inventory_recommendation(
         )
         .await??
     };
+    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        anyhow::bail!(
+            "auto-route classifier response incomplete: provider stop reason `{}`",
+            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+        );
+    }
     Ok(parse_inventory_auto_route_recommendation(
         &message_response_text(&response),
         inventory,

@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "Bestehende Datei:",
   "SetupConstitutionExpertOverrideLabel": "Experten-Override:",
   "SetupConstitutionGuidedHint": "1-6 passt den Entwurf an, G zeigt die Vorschau, erneut G ratifiziert. Nur Leitlinien: Laufzeit-Freigabe, Sandbox, Shell, Netzwerk, Vertrauen oder MCP-Berechtigungen werden nie geändert.",
-  "SetupConstitutionGuidedAnswersHint": "Geführte Antworten speichern nur benutzer-globale Präferenzen. Der mitgelieferte Kern bleibt aktiv; Doktrin-Module bleiben in Modus-Prompts/künftigen Opt-ins.",
+  "SetupConstitutionGuidedAnswersHint": "Geführte Antworten speichern nur benutzer-globale Präferenzen. Der mitgelieferte Kern bleibt aktiv; Ausführung liegt bei der Laufzeitrichtlinie und künftigen Opt-ins.",
   "SetupConstitutionPurposeLabel": "Zweck:",
   "SetupConstitutionAutonomyLabel": "Initiative:",
   "SetupConstitutionEvidenceLabel": "Belege:",

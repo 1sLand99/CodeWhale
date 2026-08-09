@@ -274,6 +274,7 @@ fn classify_session_failure(value: &Value, message: &str) -> SessionFailureClass
     match classify_error_message(message) {
         ErrorCategory::Network | ErrorCategory::RateLimit => SessionFailureClass::Network,
         ErrorCategory::Timeout => SessionFailureClass::Timeout,
+        ErrorCategory::Budget => SessionFailureClass::Unknown,
         ErrorCategory::Authorization => SessionFailureClass::SandboxApproval,
         ErrorCategory::Authentication => SessionFailureClass::Model,
         ErrorCategory::State => SessionFailureClass::MissingDependency,

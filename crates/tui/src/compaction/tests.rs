@@ -26,7 +26,6 @@ fn typed_quota_renders_quota_and_is_not_transient() {
         "Auto-compaction failed: provider plan quota exhausted — switch provider/model or renew the provider plan"
     );
     assert!(!is_transient_error(&error));
-    assert!(!should_retry_cache_aligned_with_formatted(&error));
 }
 
 #[test]
@@ -37,7 +36,6 @@ fn typed_rate_limit_stays_transient_and_does_not_become_quota() {
     });
     assert!(report(&error).contains("provider rate limit blocked compaction"));
     assert!(is_transient_error(&error));
-    assert!(should_retry_cache_aligned_with_formatted(&error));
 }
 
 #[test]
@@ -114,7 +112,6 @@ fn pinned_tool_result_local_pruning_is_reclaimable() {
     let mut messages =
         oversized_tool_pair("old-read", "error: ".to_string() + &"x".repeat(300_000));
     messages.extend(pressure_fixture());
-    let external_pins = [0, 1];
     let full_pressure = estimate_input_tokens_conservative(&messages, None);
     let mut projected = messages.clone();
     let pruned_bytes = prune_tool_results_until(&mut projected, KEEP_RECENT_MESSAGES, |_, _| false);
@@ -135,37 +132,23 @@ fn pinned_tool_result_local_pruning_is_reclaimable() {
         &messages,
         None,
         &PreparedCompactionEnvelope::new(config, None),
-        None,
-        Some(&external_pins),
-        None,
     ));
 }
 
 #[test]
-fn retained_tool_result_cap_is_used_in_successor_floor() {
+fn successor_floor_counts_retained_user_messages_not_tool_results() {
     let mut messages = pressure_fixture();
     messages.extend(oversized_tool_pair(
         "recent-read",
         "z".repeat(RETAINED_TOOL_RESULT_MAX_CHARS * 4),
     ));
-    let plan = plan_compaction(&messages, None, KEEP_RECENT_MESSAGES, None, None);
     let base_config = CompactionConfig::default();
     let prepared = PreparedCompactionEnvelope::new(base_config.clone(), None);
-    let retained_floor =
-        estimate_retained_floor_conservative(&messages, None, &plan, &prepared, None);
-    let raw_pinned_tokens = plan
-        .pinned_indices
-        .iter()
-        .map(|&index| {
-            let message = &messages[index];
-            estimate_tokens_for_message(message, message_has_tool_use(message))
-        })
-        .sum::<usize>()
-        .saturating_mul(3)
-        .div_ceil(2);
+    let retained_floor = estimate_retained_floor_conservative(&messages, None, &prepared);
+    let full_pressure = estimate_input_tokens_conservative(&messages, None);
     assert!(
-        retained_floor < raw_pinned_tokens,
-        "the retained-message cap must reduce the nominal pinned floor"
+        retained_floor < full_pressure,
+        "user-only retention must reclaim the giant tool result"
     );
 
     let config = CompactionConfig {
@@ -173,25 +156,19 @@ fn retained_tool_result_cap_is_used_in_successor_floor() {
         ..base_config
     };
     assert!(compaction_pressure_reached(&messages, None, &config));
-    assert!(raw_pinned_tokens >= config.token_threshold);
     assert!(should_compact(
         &messages,
         None,
         &PreparedCompactionEnvelope::new(config, None),
-        None,
-        None,
-        None,
     ));
 }
 
 #[test]
 fn exact_unbounded_reanchor_controls_reclaimability() {
     let messages = pressure_fixture();
-    let plan = plan_compaction(&messages, None, KEEP_RECENT_MESSAGES, None, None);
     let mut config = CompactionConfig::default();
     let without_reanchor = PreparedCompactionEnvelope::new(config.clone(), None);
-    let retained_floor =
-        estimate_retained_floor_conservative(&messages, None, &plan, &without_reanchor, None);
+    let retained_floor = estimate_retained_floor_conservative(&messages, None, &without_reanchor);
     let pressure = estimate_input_tokens_conservative(&messages, None);
     assert!(
         retained_floor < pressure,
@@ -200,14 +177,7 @@ fn exact_unbounded_reanchor_controls_reclaimability() {
     config.token_threshold = retained_floor + (pressure - retained_floor) / 2;
 
     let without_reanchor = PreparedCompactionEnvelope::new(config.clone(), None);
-    assert!(should_compact(
-        &messages,
-        None,
-        &without_reanchor,
-        None,
-        None,
-        None,
-    ));
+    assert!(should_compact(&messages, None, &without_reanchor));
 
     let external = "x".repeat(300_000);
     let reanchor = SystemPrompt::Text(format!(
@@ -221,7 +191,7 @@ fn exact_unbounded_reanchor_controls_reclaimability() {
     );
     let with_exact_reanchor = PreparedCompactionEnvelope::new(config, Some(reanchor));
     assert!(
-        !should_compact(&messages, None, &with_exact_reanchor, None, None, None,),
+        !should_compact(&messages, None, &with_exact_reanchor),
         "an unbounded exact reanchor must make an unreclaimable successor ineligible"
     );
 }
@@ -241,18 +211,12 @@ fn stale_installed_reanchor_is_replaced_not_double_counted() {
         crate::work_graph::ACTIVE_OPERATION_SUMMARY_START,
         crate::work_graph::ACTIVE_OPERATION_SUMMARY_END,
     ));
-    let plan = plan_compaction(&messages, None, KEEP_RECENT_MESSAGES, None, None);
     let mut config = CompactionConfig::default();
     let prepared = PreparedCompactionEnvelope::new(config.clone(), Some(current_reanchor.clone()));
-    let retained_floor = estimate_retained_floor_conservative(
-        &messages,
-        Some(&current_system),
-        &plan,
-        &prepared,
-        None,
-    );
+    let retained_floor =
+        estimate_retained_floor_conservative(&messages, Some(&current_system), &prepared);
     let base_retained_floor =
-        estimate_retained_floor_conservative(&messages, Some(&base_system), &plan, &prepared, None);
+        estimate_retained_floor_conservative(&messages, Some(&base_system), &prepared);
     assert_eq!(
         retained_floor, base_retained_floor,
         "the stale installed reanchor must be stripped before sizing its exact replacement"
@@ -265,12 +229,5 @@ fn stale_installed_reanchor_is_replaced_not_double_counted() {
     config.token_threshold = retained_floor + 1;
 
     let prepared = PreparedCompactionEnvelope::new(config, Some(current_reanchor));
-    assert!(should_compact(
-        &messages,
-        Some(&current_system),
-        &prepared,
-        None,
-        None,
-        None,
-    ));
+    assert!(should_compact(&messages, Some(&current_system), &prepared));
 }

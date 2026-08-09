@@ -203,7 +203,7 @@ async fn coalesce_stream_delta(
 
 /// Sentinel delimiters wrapping the compaction summary section persisted in a
 /// thread record's `system_prompt`. The section carries the engine-rendered
-/// summary (which contains the `Conversation Summary (Auto-Generated)` marker,
+/// summary (which contains the compaction summary marker,
 /// so `SyncSession` → `extract_compaction_summary_prompt` restores it on
 /// engine reload). Delimiters make replacement idempotent: each completed
 /// compaction swaps the section in place instead of stacking duplicates.
@@ -5802,6 +5802,7 @@ impl RuntimeThreadManager {
                     dynamic_tool_executor: Some(Arc::new(self.clone())),
                     work: None,
                     shell_manager: None,
+                    persist_services_enabled: false,
                     hook_executor: None,
                     handle_store: crate::tools::handle::new_shared_handle_store(),
                     rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
@@ -7146,11 +7147,15 @@ impl RuntimeThreadManager {
         }
 
         if let Some(mut item) = current_message_item.take() {
-            if turn_status == RuntimeTurnStatus::Interrupted {
-                item.status = TurnItemLifecycleStatus::Interrupted;
-            } else {
-                item.status = TurnItemLifecycleStatus::Completed;
-            }
+            item.status = match turn_status {
+                RuntimeTurnStatus::Completed => TurnItemLifecycleStatus::Completed,
+                RuntimeTurnStatus::Interrupted | RuntimeTurnStatus::Canceled => {
+                    TurnItemLifecycleStatus::Interrupted
+                }
+                RuntimeTurnStatus::Queued
+                | RuntimeTurnStatus::InProgress
+                | RuntimeTurnStatus::Failed => TurnItemLifecycleStatus::Failed,
+            };
             item.summary =
                 summarize_text(item.detail.as_deref().unwrap_or_default(), SUMMARY_LIMIT);
             item.ended_at = Some(Utc::now());
@@ -7159,10 +7164,10 @@ impl RuntimeThreadManager {
                 &thread_id,
                 Some(&turn_id),
                 Some(&item.id),
-                if item.status == TurnItemLifecycleStatus::Interrupted {
-                    "item.interrupted"
-                } else {
-                    "item.completed"
+                match item.status {
+                    TurnItemLifecycleStatus::Interrupted => "item.interrupted",
+                    TurnItemLifecycleStatus::Failed => "item.failed",
+                    _ => "item.completed",
                 },
                 json!({ "item": item }),
             )
@@ -7170,11 +7175,15 @@ impl RuntimeThreadManager {
         }
 
         if let Some(mut item) = current_reasoning_item.take() {
-            if turn_status == RuntimeTurnStatus::Interrupted {
-                item.status = TurnItemLifecycleStatus::Interrupted;
-            } else {
-                item.status = TurnItemLifecycleStatus::Completed;
-            }
+            item.status = match turn_status {
+                RuntimeTurnStatus::Completed => TurnItemLifecycleStatus::Completed,
+                RuntimeTurnStatus::Interrupted | RuntimeTurnStatus::Canceled => {
+                    TurnItemLifecycleStatus::Interrupted
+                }
+                RuntimeTurnStatus::Queued
+                | RuntimeTurnStatus::InProgress
+                | RuntimeTurnStatus::Failed => TurnItemLifecycleStatus::Failed,
+            };
             item.summary =
                 summarize_text(item.detail.as_deref().unwrap_or_default(), SUMMARY_LIMIT);
             item.ended_at = Some(Utc::now());
@@ -7183,10 +7192,10 @@ impl RuntimeThreadManager {
                 &thread_id,
                 Some(&turn_id),
                 Some(&item.id),
-                if item.status == TurnItemLifecycleStatus::Interrupted {
-                    "item.interrupted"
-                } else {
-                    "item.completed"
+                match item.status {
+                    TurnItemLifecycleStatus::Interrupted => "item.interrupted",
+                    TurnItemLifecycleStatus::Failed => "item.failed",
+                    _ => "item.completed",
                 },
                 json!({ "item": item }),
             )

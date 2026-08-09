@@ -4011,7 +4011,7 @@ fn constitution_ratification_text(
                  既定モード、公開、支出の権限を付与または変更することはできません。これらは実行時にあなたが管理します。\n\n\
                  縮小コアと任意モジュール\n\
                  組み込みのコアは引き続き有効です。この草案はユーザーグローバルの長期設定だけを保存します。\
-                 重い実行/オーケストレーション教義はモードプロンプトまたは将来の任意モジュールに属します。このプレビューはモジュールを有効化せず、設定も変更しません。\n\n\
+                 実行とオーケストレーションの機能は、ランタイムポリシー、現在のツールカタログ、または将来の任意モジュールから提供されます。このプレビューはモジュールを有効化せず、設定も変更しません。\n\n\
                  批准\n{ratify_how}"
             )
         }
@@ -4044,7 +4044,7 @@ fn constitution_ratification_text(
                  它不能做什么\n\
                  它只提供行为指导，不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限、默认模式、发布或支出权限——这些始终由你在运行时掌控。\n\n\
                  精简核心与可选策略\n\
-                 内置核心始终生效。本草案只保存你的用户全局长期偏好。执行与编排等高级策略仍由模式提示词或未来的可选规则包管理；此预览不会启用任何策略或更改配置。\n\n\
+                 内置核心始终生效。本草案只保存你的用户全局长期偏好。执行与编排能力来自运行时策略、当前工具目录或未来的可选规则包；此预览不会启用任何策略或更改配置。\n\n\
                  确认\n{ratify_how}"
             )
         }
@@ -4077,7 +4077,7 @@ fn constitution_ratification_text(
                  它不能做什麼\n\
                  它只提供行為指導，不能授予或更改審批策略、沙箱、Shell、網路、信任、MCP 權限、預設模式、發布或支出權限；這些始終由你在執行時掌控。\n\n\
                  精簡核心與可選模組\n\
-                 內建核心始終生效。本草案只保存你的使用者全域長期偏好。執行/編排等重型教義位於模式提示詞或未來的可選模組中；此預覽不會啟用模組或更改其配置。\n\n\
+                 內建核心始終生效。本草案只保存你的使用者全域長期偏好。執行與編排能力由執行時政策、即時工具目錄或未來的可選模組提供；此預覽不會啟用模組或更改其配置。\n\n\
                  批准\n{ratify_how}"
             )
         }
@@ -4117,7 +4117,7 @@ fn constitution_ratification_text(
                  confiança, permissões MCP, modo padrão, publicação ou autoridade para gastos; isso continua sob seu controle em tempo de execução.\n\n\
                  NÚCLEO REDUZIDO E MÓDULOS OPT-IN\n\
                  O núcleo embutido continua ativo. Este rascunho só salva suas preferências permanentes globais de usuário. \
-                 Doutrina pesada de execução ou orquestração pertence a prompts de modo ou módulos opt-in futuros; esta prévia não ativa módulos nem muda sua configuração.\n\n\
+                 Capacidades de execução e orquestração vêm da política de execução, do catálogo de ferramentas ativo ou de módulos opt-in futuros; esta prévia não ativa módulos nem muda sua configuração.\n\n\
                  RATIFICAÇÃO\n{ratify_how}"
             )
         }
@@ -4157,7 +4157,7 @@ fn constitution_ratification_text(
                  confianza, permisos MCP, modo predeterminado, publicación o autoridad de gasto; eso sigue bajo tu control en tiempo de ejecución.\n\n\
                  NÚCLEO REDUCIDO Y MÓDULOS OPT-IN\n\
                  El núcleo integrado sigue activo. Este borrador solo guarda tus preferencias permanentes globales de usuario. \
-                 La doctrina pesada de ejecución u orquestación pertenece a prompts de modo o módulos opt-in futuros; esta vista previa no activa módulos ni cambia su configuración.\n\n\
+                 Las capacidades de ejecución y orquestación provienen de la política de ejecución, el catálogo activo de herramientas o módulos opt-in futuros; esta vista previa no activa módulos ni cambia su configuración.\n\n\
                  RATIFICACIÓN\n{ratify_how}"
             )
         }
@@ -4197,7 +4197,7 @@ fn constitution_ratification_text(
                  độ tin cậy, quyền MCP, chế độ mặc định, xuất bản hoặc quyền chi tiêu; những thứ đó vẫn do bạn kiểm soát lúc chạy.\n\n\
                  LÕI RÚT GỌN VÀ MÔ-ĐUN OPT-IN\n\
                  Lõi tích hợp vẫn hoạt động. Bản nháp này chỉ lưu tùy chọn thường trực toàn cục của người dùng. \
-                 Giáo điều thực thi hoặc điều phối nặng thuộc về prompt chế độ hoặc mô-đun opt-in trong tương lai; bản xem trước này không bật mô-đun hoặc đổi cấu hình của chúng.\n\n\
+                 Khả năng thực thi và điều phối đến từ chính sách thời gian chạy, danh mục công cụ đang hoạt động hoặc mô-đun opt-in trong tương lai; bản xem trước này không bật mô-đun hoặc đổi cấu hình của chúng.\n\n\
                  PHÊ CHUẨN\n{ratify_how}"
             )
         }
@@ -4237,7 +4237,7 @@ fn constitution_ratification_text(
                  부여하거나 바꿀 수 없습니다; 이는 여전히 런타임에서 당신이 직접 관리합니다.\n\n\
                  축소된 코어와 옵트인 모듈\n\
                  내장된 코어는 계속 활성 상태입니다. 이 초안은 사용자 전역의 상시 선호만 저장합니다. \
-                 무거운 실행/오케스트레이션 지침은 모드 프롬프트나 향후 옵트인 모듈에 속합니다. 이 미리보기는 모듈을 활성화하지 않으며 그 설정도 바꾸지 않습니다.\n\n\
+                 실행 및 오케스트레이션 기능은 런타임 정책, 현재 도구 카탈로그 또는 향후 옵트인 모듈에서 제공됩니다. 이 미리보기는 모듈을 활성화하지 않으며 그 설정도 바꾸지 않습니다.\n\n\
                  승인\n{ratify_how}"
             )
         }
@@ -4277,7 +4277,7 @@ fn constitution_ratification_text(
                  confiança, permisos MCP, mode per defecte, publicació o autoritat de despesa; això queda sota el teu control en temps d'execució.\n\n\
                  NUCLI REDUÏT I MÒDULS OPT-IN\n\
                  El nucli inclòs continua actiu. Aquest esborrany només desa les teves preferències permanents globals d'usuari. \
-                 La doctrina pesada d'execució o orquestració pertany als prompts de mode o a futurs mòduls opt-in; aquesta previsualització no activa mòduls ni canvia la seva configuració.\n\n\
+                 Les capacitats d'execució i orquestració provenen de la política d'execució, el catàleg d'eines actiu o futurs mòduls opt-in; aquesta previsualització no activa mòduls ni canvia la seva configuració.\n\n\
                  RATIFICACIÓ\n{ratify_how}"
             )
         }
@@ -4317,7 +4317,7 @@ fn constitution_ratification_text(
                  Vertrauen, MCP-Berechtigungen, Standardmodus, Veröffentlichung oder Ausgabenbefugnis gewähren oder ändern — die bleiben zur Laufzeit in deiner Hand.\n\n\
                  REDUZIERTER KERN UND OPT-IN-MODULE\n\
                  Der mitgelieferte Kern bleibt aktiv. Dieser Entwurf speichert nur deine benutzer-globalen Dauerpräferenzen. \
-                 Schwere Ausführungs- oder Orchestrierungsdoktrin gehört in Modus-Prompts oder künftige Opt-in-Module; diese Vorschau aktiviert keine Module und ändert nicht ihre Konfiguration.\n\n\
+                 Ausführungs- und Orchestrierungsfähigkeiten kommen aus der Laufzeitrichtlinie, dem aktuellen Werkzeugkatalog oder künftigen Opt-in-Modulen; diese Vorschau aktiviert keine Module und ändert nicht ihre Konfiguration.\n\n\
                  RATIFIZIERUNG\n{ratify_how}"
             )
         }
@@ -4357,7 +4357,7 @@ fn constitution_ratification_text(
                  la confiance, les permissions MCP, le mode par défaut, la publication ou le pouvoir de dépense — ceux-ci restent entre vos mains à l'exécution.\n\n\
                  NOYAU RÉDUIT ET MODULES OPT-IN\n\
                  Le noyau intégré reste actif. Ce brouillon n'enregistre que vos préférences permanentes globales. \
-                 La doctrine lourde d'exécution ou d'orchestration appartient aux prompts de mode ou à de futurs modules opt-in ; cet aperçu n'active pas de modules et ne change pas leur configuration.\n\n\
+                 Les capacités d'exécution et d'orchestration proviennent de la politique d'exécution, du catalogue d'outils actif ou de futurs modules opt-in ; cet aperçu n'active pas de modules et ne change pas leur configuration.\n\n\
                  RATIFICATION\n{ratify_how}"
             )
         }
@@ -4397,7 +4397,7 @@ fn constitution_ratification_text(
                  kepercayaan, izin MCP, mode default, publikasi, atau wewenang belanja — semua itu tetap di tangan Anda saat runtime.\n\n\
                  INTI RINGKAS DAN MODUL OPT-IN\n\
                  Inti bawaan tetap aktif. Draf ini hanya menyimpan preferensi tetap global pengguna Anda. \
-                 Doktrin eksekusi atau orkestrasi yang berat termasuk dalam prompt mode atau modul opt-in mendatang; pratinjau ini tidak mengaktifkan modul atau mengubah konfigurasinya.\n\n\
+                 Kemampuan eksekusi dan orkestrasi berasal dari kebijakan runtime, katalog alat aktif, atau modul opt-in mendatang; pratinjau ini tidak mengaktifkan modul atau mengubah konfigurasinya.\n\n\
                  RATIFIKASI\n{ratify_how}"
             )
         }
@@ -4559,8 +4559,8 @@ fn constitution_ratification_text(
                  authority — those stay under your hand at runtime.\n\n\
                  REDUCED CORE AND OPT-IN MODULES\n\
                  The bundled core stays active. This draft only saves your user-global \
-                 standing preferences. Heavy execution or orchestration doctrine belongs in mode \
-                 prompts or future opt-in modules; this preview does not enable modules or change \
+                 standing preferences. Execution and orchestration capabilities come from runtime \
+                 policy, the live tool catalog, or future opt-in modules; this preview does not enable modules or change \
                  their configuration.\n\n\
                  RATIFICATION\n{ratify_how}"
             )
@@ -5941,8 +5941,10 @@ mod tests {
         // The en copy no longer claims a line count for the core (#4057 wave 2
         // reword: the shipped core outgrew "55-line").
         assert!(text.contains("bundled core"));
-        assert!(text.contains("mode prompts"));
+        assert!(text.contains("runtime policy"));
         assert!(text.contains("future opt-ins"));
+        // Mode prompts no longer exist; the copy must not resurrect them.
+        assert!(!text.contains("mode prompt"));
     }
 
     #[test]

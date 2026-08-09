@@ -567,14 +567,12 @@ fn base_source_entries(
         ));
     }
 
-    builder.push(SourceEntry::text(
+    builder.push(SourceEntry::omitted(
         SourceKind::ContextManagement,
-        format!("{} mode doctrine", mode.label()),
+        format!("{} runtime mode", mode.label()),
         None,
-        ActivationReason::AlwaysOn,
-        crate::prompts::mode_doctrine(mode),
-        CountingConfidence::High,
         Some(3),
+        "mode enforced by runtime policy and the live tool catalog; no prompt doctrine",
     ));
     builder.push(SourceEntry::omitted(
         SourceKind::CompactionRelayTemplate,

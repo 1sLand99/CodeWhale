@@ -652,6 +652,24 @@ fn responses_incomplete_event_reports_reason() {
 }
 
 #[test]
+fn responses_incomplete_stop_reason_preserves_provider_reason() {
+    assert_eq!(
+        responses_stop_reason(
+            &json!({
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" }
+            }),
+            false,
+        ),
+        "incomplete:max_output_tokens"
+    );
+    assert_eq!(
+        responses_stop_reason(&json!({"status": "incomplete"}), false),
+        "incomplete:max_tokens"
+    );
+}
+
+#[test]
 fn parse_responses_usage_derives_cache_miss_and_reasoning() {
     let usage = json!({
         "input_tokens": 1000,

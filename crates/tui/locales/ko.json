@@ -609,7 +609,7 @@
   "SetupConstitutionExistingLabel": "기존 파일:",
   "SetupConstitutionExpertOverrideLabel": "전문가 재정의:",
   "SetupConstitutionGuidedHint": "1-6으로 초안을 조정하고, G로 미리보기, G를 다시 누르면 승인합니다. 어디까지나 지침일 뿐 런타임 승인, 샌드박스, 셸, 네트워크, 신뢰, MCP 권한은 절대 바꾸지 않습니다.",
-  "SetupConstitutionGuidedAnswersHint": "가이드 답변은 사용자 전역 설정만 저장합니다. 내장 코어는 계속 활성 상태이며, 세부 지침 모듈은 모드 프롬프트나 향후 옵트인 기능에 남아 있습니다.",
+  "SetupConstitutionGuidedAnswersHint": "가이드 답변은 사용자 전역 설정만 저장합니다. 내장 코어는 계속 활성 상태이며, 실행은 런타임 정책과 향후 옵트인이 담당합니다.",
   "SetupConstitutionPurposeLabel": "목적:",
   "SetupConstitutionAutonomyLabel": "주도성:",
   "SetupConstitutionEvidenceLabel": "근거:",

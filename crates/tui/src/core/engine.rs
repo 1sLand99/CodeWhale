@@ -37,7 +37,7 @@ use crate::mcp::{McpConfig, McpPool};
 use crate::models::ToolCaller;
 use crate::models::{
     ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
-    Tool, Usage,
+    Tool, Usage, is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
 };
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
@@ -1128,6 +1128,12 @@ impl Engine {
     pub fn new(mut config: EngineConfig, api_config: &Config) -> (Self, EngineHandle) {
         crate::tls::ensure_rustls_crypto_provider();
 
+        // Compaction re-states the user's `/anchor` file after its summary;
+        // hand it the workspace root once so every prepared pass can read it.
+        if config.compaction.workspace.is_none() {
+            config.compaction.workspace = Some(config.workspace.clone());
+        }
+
         // Unlike a Skill body, this instruction is visible on the first model
         // request. Keep selection semantic: the host supplies no keywords or
         // ranking and the model compares the full user context with the full
@@ -1218,8 +1224,13 @@ impl Engine {
         );
         let prompt_goal_objective =
             goal_objective_for_prompt(config.goal_objective.as_deref(), &config.goal_state);
+        let prompt_host = if config.terminal_chrome_enabled {
+            prompts::PromptHost::Interactive
+        } else {
+            prompts::PromptHost::Headless
+        };
         let system_prompt =
-            prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
+            prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                 &config.workspace,
                 None,
                 Some(&config.skills_dir),
@@ -1245,6 +1256,7 @@ impl Engine {
                     // `/mode` switch re-runs `refresh_system_prompt`.
                     mode: AppMode::Agent,
                 },
+                prompt_host,
             );
         let stable_prompt = Some(system_prompt);
         session.last_system_prompt_hash = Some(system_prompt_hash(stable_prompt.as_ref()));
@@ -1687,10 +1699,9 @@ impl Engine {
     }
 
     fn apply_runtime_mode_policy(&mut self, authority: &TurnAuthority) {
-        // Mode doctrine lives in the stable prefix (#4780), so a mode change
-        // has to rebuild it. `refresh_system_prompt` is hash-guarded and only
-        // swaps the prompt when the composed text actually differs, so modes
-        // that share an overlay (Agent/Auto/Yolo) keep the prefix cache warm.
+        // Prompt composition is mode-agnostic. Keep the hash-guarded refresh
+        // because embedders may still derive custom prompt bytes from session
+        // context; bundled prompts remain byte-identical across modes.
         let mode_changed = self.current_mode != authority.mode;
         self.current_mode = authority.mode;
         if mode_changed {
@@ -2905,9 +2916,9 @@ impl Engine {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Facts only (#4780 + turn-meta diet). Mode doctrine ships once in the
-        // stable system prefix. The permission posture does not: preserve its
-        // compact label so the model can distinguish Ask, Auto-Review, Full
+        // Facts only (#4780 + turn-meta diet). Mode behavior lives in runtime
+        // policy and the tool catalog, not prose. Preserve the compact
+        // permission label so the model can distinguish Ask, Auto-Review, Full
         // Access, and Never without repeating question-discipline prose.
         // Route/effort/model lines are telemetry the model cannot act on.
         // DGF-02 (dogfood 2026-08-02): the model was never told its own
@@ -4452,7 +4463,15 @@ impl Engine {
         }
     }
 
-    fn prepare_compaction_envelope(&self, config: CompactionConfig) -> PreparedCompactionEnvelope {
+    fn prepare_compaction_envelope(
+        &self,
+        mut config: CompactionConfig,
+    ) -> PreparedCompactionEnvelope {
+        // Host-supplied configs may not carry the workspace; compaction needs
+        // it only to re-state the user's `/anchor` file after the summary.
+        config
+            .workspace
+            .get_or_insert_with(|| self.config.workspace.clone());
         let successor_reanchor = self
             .config
             .runtime_services
@@ -4517,11 +4536,6 @@ impl Engine {
             return;
         };
 
-        let compaction_pins = self
-            .session
-            .working_set
-            .pinned_message_indices(&self.session.messages, &self.session.workspace);
-        let compaction_paths = self.session.working_set.top_paths(24);
         let messages_before = self.session.messages.len();
         let mut turn_status = TurnOutcomeStatus::Completed;
         let mut turn_error = None;
@@ -4536,9 +4550,6 @@ impl Engine {
             &self.session.messages,
             self.session.system_prompt.as_ref(),
             &prepared,
-            Some(&self.session.workspace),
-            Some(&compaction_pins),
-            Some(&compaction_paths),
         )
         .await
         {
@@ -4754,18 +4765,6 @@ impl Engine {
         removed
     }
 
-    fn compaction_pins_for_messages(
-        &self,
-        messages: &[Message],
-        working_set: &crate::working_set::WorkingSet,
-    ) -> Vec<usize> {
-        let mut pins = working_set.pinned_message_indices(messages, &self.session.workspace);
-
-        pins.sort_unstable();
-        pins.dedup();
-        pins
-    }
-
     async fn recover_context_overflow(
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
@@ -4803,22 +4802,11 @@ impl Engine {
         forced_config.live_state = (!live.is_empty()).then_some(live);
         let prepared = self.prepare_compaction_envelope(forced_config);
 
-        // Preserve the working-set pins on the emergency/preflight path too.
-        // Previously this passed None/None, so a compaction routed here (which,
-        // on large windows, is the path that actually fires) could summarize
-        // away pinned errors, patches, and the files the user is editing.
-        let compaction_pins =
-            self.compaction_pins_for_messages(&self.session.messages, &self.session.working_set);
-        let compaction_paths = self.session.working_set.top_paths(24);
-
         match compact_messages_safe(
             client,
             &self.session.messages,
             self.session.system_prompt.as_ref(),
             &prepared,
-            Some(&self.session.workspace),
-            Some(&compaction_pins),
-            Some(&compaction_paths),
         )
         .await
         {
@@ -5006,6 +4994,7 @@ impl Engine {
         .with_shell_policy(authority.shell_policy())
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
+        ctx.persist_services_enabled = self.config.runtime_services.persist_services_enabled;
 
         // Hand the user-memory path to tools so the model-callable
         // `remember` tool can append entries (#489). `None` when the
@@ -5269,29 +5258,38 @@ impl Engine {
             &self.config.memory_path,
             &self.config.workspace,
         );
-        let base = prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
-            &self.config.workspace,
-            None,
-            Some(&self.config.skills_dir),
-            Some(&self.config.instructions),
-            prompts::PromptSessionContext {
-                user_memory_block: user_memory_block.as_deref(),
-                goal_objective: context.goal_objective.as_deref(),
-                project_context_pack_enabled: self.config.project_context_pack_enabled,
-                locale_tag: &self.config.locale_tag,
-                translation_enabled: context.translation_enabled,
-                model_id: &context.model,
-                context_window_override: Some(crate::route_budget::route_context_window_tokens(
-                    context.provider,
-                    &context.model,
-                    context.route_limits,
-                )),
-                verbosity: context.verbosity.as_deref(),
-                skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
-                plugin_registry: Some(self.plugin_registry.as_ref()),
-                mode: context.mode,
-            },
-        );
+        let prompt_host = if self.config.terminal_chrome_enabled {
+            prompts::PromptHost::Interactive
+        } else {
+            prompts::PromptHost::Headless
+        };
+        let base =
+            prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+                &self.config.workspace,
+                None,
+                Some(&self.config.skills_dir),
+                Some(&self.config.instructions),
+                prompts::PromptSessionContext {
+                    user_memory_block: user_memory_block.as_deref(),
+                    goal_objective: context.goal_objective.as_deref(),
+                    project_context_pack_enabled: self.config.project_context_pack_enabled,
+                    locale_tag: &self.config.locale_tag,
+                    translation_enabled: context.translation_enabled,
+                    model_id: &context.model,
+                    context_window_override: Some(
+                        crate::route_budget::route_context_window_tokens(
+                            context.provider,
+                            &context.model,
+                            context.route_limits,
+                        ),
+                    ),
+                    verbosity: context.verbosity.as_deref(),
+                    skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
+                    plugin_registry: Some(self.plugin_registry.as_ref()),
+                    mode: context.mode,
+                },
+                prompt_host,
+            );
         merge_system_prompts(Some(&base), self.session.compaction_summary_prompt.clone())
     }
 
@@ -6114,9 +6112,7 @@ use context::{
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
 mod dispatch;
 mod lsp_hooks;
-mod read_repeat_guard;
 mod streaming;
-mod stuck_guard;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;
 mod tool_execution;

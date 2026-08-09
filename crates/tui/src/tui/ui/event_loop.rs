@@ -319,6 +319,7 @@ pub async fn run_tui(
     }
     app.runtime_services = RuntimeToolServices {
         shell_manager: Some(shell_manager),
+        persist_services_enabled: false,
         task_manager: Some(task_manager.clone()),
         automations: Some(automations),
         task_data_dir: Some(task_manager.data_dir()),

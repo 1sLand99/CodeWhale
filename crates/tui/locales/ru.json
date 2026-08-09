@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "Текущий файл:",
   "SetupConstitutionExpertOverrideLabel": "Экспертное переопределение:",
   "SetupConstitutionGuidedHint": "1-6 настраивают черновик, G — предпросмотр, G ещё раз — утвердить. Только рекомендации: это никогда не меняет разрешения выполнения, песочницы, шелла, сети, доверия или MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Ответы мастера сохраняют только глобальные предпочтения пользователя. Встроенное ядро остаётся активным; модули доктрины остаются в промптах режимов и будущих опциях.",
+  "SetupConstitutionGuidedAnswersHint": "Ответы мастера сохраняют только глобальные предпочтения пользователя. Встроенное ядро остаётся активным; выполнение остаётся за политикой среды выполнения и будущими опциями.",
   "SetupConstitutionPurposeLabel": "Цель:",
   "SetupConstitutionAutonomyLabel": "Инициатива:",
   "SetupConstitutionEvidenceLabel": "Доказательства:",

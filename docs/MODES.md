@@ -176,7 +176,10 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
 - `auto` (**Auto-Review**): the fully autonomous posture. It never opens a user
   question; the model resolves ambiguity from context, chooses a safe reversible
   interpretation, or reports that it cannot proceed safely. Tool safety holds
-  remain separate from user questions.
+  remain separate from user questions. Approval decisions here are
+  **deterministic**: rules and the built-in safety floor allow proven-safe
+  calls, and any call that would otherwise need a human decision is denied
+  rather than executed. No AI reviewer approves actions on your behalf.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
   while deliberate user questions remain available. Non-bypassable safety,
   repository-law, and managed-policy holds fail closed as hard blocks instead

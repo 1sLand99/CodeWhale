@@ -320,6 +320,15 @@ pub async fn run_advisor_for_turn(
         }
     };
 
+    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        tracing::warn!(
+            target: "advisor",
+            "advisor response incomplete for turn {turn_id} (stop reason `{}`); dropping partial note",
+            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+        );
+        return;
+    }
+
     // Extract the text from the response.
     let note: String = response
         .content

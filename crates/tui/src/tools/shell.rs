@@ -62,6 +62,55 @@ use output::{tail_from_buffer, take_delta_from_buffer};
 
 const READONLY_ENV_MARKER: &str = "CODEWHALE_INTERNAL_READONLY_ARGV";
 
+#[cfg(unix)]
+static PENDING_PERSISTENT_PROCESS_GROUPS: std::sync::OnceLock<
+    Mutex<std::collections::HashSet<u32>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn pending_persistent_process_groups() -> &'static Mutex<std::collections::HashSet<u32>> {
+    PENDING_PERSISTENT_PROCESS_GROUPS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(unix)]
+fn register_pending_persistent_process_group(process_group_id: u32) {
+    let mut groups = pending_persistent_process_groups()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    groups.insert(process_group_id);
+}
+
+#[cfg(unix)]
+fn unregister_pending_persistent_process_group(process_group_id: u32) {
+    let mut groups = pending_persistent_process_groups()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    groups.remove(&process_group_id);
+}
+
+/// Kill services that were staged for ownership transfer but have not yet
+/// been released. The process-wide signal path calls this immediately before
+/// `process::exit`, where Rust destructors cannot run.
+#[cfg(unix)]
+pub(crate) fn abort_pending_persistent_process_groups_for_exit() {
+    let groups = {
+        let mut groups = pending_persistent_process_groups()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        groups.drain().collect::<Vec<_>>()
+    };
+    for process_group_id in groups {
+        if let Ok(process_group_id) = i32::try_from(process_group_id) {
+            // SAFETY: the id was captured from a child spawned with
+            // `process_group(0)`. A negative pid targets that child's process
+            // group, never Codewhale's own group.
+            unsafe {
+                libc::kill(-process_group_id, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
     let metadata = std::fs::metadata(path).with_context(|| {
         let source = if inherited_session_workspace {
@@ -272,6 +321,31 @@ enum ShellChild {
     Process(Child),
     #[cfg(not(target_env = "ohos"))]
     Pty(Box<dyn portable_pty::Child + Send>),
+}
+#[cfg(unix)]
+impl ShellChild {
+    fn process_id(&self) -> Option<u32> {
+        match self {
+            Self::Process(child) => Some(child.id()),
+            #[cfg(not(target_env = "ohos"))]
+            Self::Pty(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellOwnership {
+    Managed,
+    PersistPending,
+    Released,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistentServiceReceipt {
+    pub task_id: String,
+    pub pid: u32,
+    pub process_group_id: u32,
+    pub ownership: String,
 }
 
 #[cfg(unix)]
@@ -717,6 +791,7 @@ pub struct BackgroundShell {
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
+    ownership: ShellOwnership,
     stdout_buffer: Arc<Mutex<Vec<u8>>>,
     stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
     heavy_permit: Option<HeavyCommandPermit>,
@@ -839,6 +914,10 @@ impl BackgroundShell {
             return true;
         }
 
+        #[cfg(unix)]
+        let pending_process_group = (self.ownership == ShellOwnership::PersistPending)
+            .then(|| self.child.as_ref().and_then(ShellChild::process_id))
+            .flatten();
         let completed = if let Some(ref mut child) = self.child {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -863,6 +942,10 @@ impl BackgroundShell {
         } else {
             true
         };
+        #[cfg(unix)]
+        if completed && let Some(process_group_id) = pending_process_group {
+            unregister_pending_persistent_process_group(process_group_id);
+        }
         self.publish_lifecycle_best_effort();
         completed
     }
@@ -1035,6 +1118,12 @@ impl BackgroundShell {
 
     /// Kill the process
     fn kill(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        if self.ownership == ShellOwnership::PersistPending
+            && let Some(process_group_id) = self.child.as_ref().and_then(ShellChild::process_id)
+        {
+            unregister_pending_persistent_process_group(process_group_id);
+        }
         if let Some(ref mut child) = self.child {
             match child {
                 ShellChild::Process(proc) => {
@@ -1223,7 +1312,14 @@ fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellS
 
 impl Drop for BackgroundShell {
     fn drop(&mut self) {
-        if self.status == ShellStatus::Running
+        #[cfg(unix)]
+        if self.ownership == ShellOwnership::PersistPending
+            && let Some(process_group_id) = self.child.as_ref().and_then(ShellChild::process_id)
+        {
+            unregister_pending_persistent_process_group(process_group_id);
+        }
+        if self.ownership != ShellOwnership::Released
+            && self.status == ShellStatus::Running
             && let Some(ref mut child) = self.child
         {
             #[cfg(windows)]
@@ -1480,6 +1576,7 @@ impl ShellManager {
             owner_agent,
             None,
             None,
+            false,
         )
     }
 
@@ -1498,6 +1595,7 @@ impl ShellManager {
         owner_agent: Option<ShellJobOwner>,
         work_lifecycle: Option<ShellWorkLifecycle>,
         readonly_workspace: Option<&std::path::Path>,
+        persist_pending: bool,
     ) -> Result<ShellResult> {
         // Log execution via ShellDispatcher when SHELL_DISPATCHER_LOG is set.
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
@@ -1541,6 +1639,7 @@ impl ShellManager {
                     owner_agent,
                     work_lifecycle,
                 },
+                persist_pending,
             )
         } else {
             if tty {
@@ -1904,6 +2003,7 @@ impl ShellManager {
         stdin_data: Option<&str>,
         tty: bool,
         spawn_context: ShellSpawnContext,
+        persist_pending: bool,
     ) -> Result<ShellResult> {
         let ShellSpawnContext {
             owner_agent,
@@ -1928,7 +2028,7 @@ impl ShellManager {
         }
 
         let stdout_buffer = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buffer = if tty {
+        let stderr_buffer = if tty || persist_pending {
             None
         } else {
             Some(Arc::new(Mutex::new(Vec::new())))
@@ -1991,6 +2091,26 @@ impl ShellManager {
                     None,
                 )
             }
+        } else if persist_pending {
+            let mut cmd = Command::new(program);
+            crate::utils::suppress_console_window(&mut cmd);
+            push_shell_args(&mut cmd, program, args);
+            cmd.current_dir(working_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                cmd.process_group(0);
+            }
+
+            child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
+            remove_readonly_redirect_env(&mut cmd, &exec_env.env);
+
+            let child = cmd.spawn().with_context(|| {
+                format!("Failed to spawn persistent service: {original_command}")
+            })?;
+            (ShellChild::Process(child), None, None, None)
         } else {
             let mut cmd = Command::new(program);
             crate::utils::suppress_console_window(&mut cmd);
@@ -2065,6 +2185,11 @@ impl ShellManager {
             sandbox_type,
             linked_task_id: None,
             owner_agent,
+            ownership: if persist_pending {
+                ShellOwnership::PersistPending
+            } else {
+                ShellOwnership::Managed
+            },
             stdout_buffer,
             stderr_buffer,
             heavy_permit,
@@ -2082,6 +2207,16 @@ impl ShellManager {
             last_lifecycle_status: None,
             last_lifecycle_bytes: 0,
         };
+
+        #[cfg(unix)]
+        if persist_pending {
+            let process_group_id = bg_shell
+                .child
+                .as_ref()
+                .and_then(ShellChild::process_id)
+                .ok_or_else(|| anyhow!("Persistent service has no process group id"))?;
+            register_pending_persistent_process_group(process_group_id);
+        }
 
         if let Some(input) = stdin_data
             && let Err(err) = bg_shell.write_stdin(input, false)
@@ -2269,6 +2404,86 @@ impl ShellManager {
             results.push(self.kill(&id)?);
         }
         Ok(results)
+    }
+
+    /// Transfer every still-running `persist:true` process out of Codewhale's
+    /// ownership. This is called only by the real headless exec host after the
+    /// enclosing turn has completed successfully.
+    #[cfg(unix)]
+    pub fn commit_persistent_services(&mut self) -> Result<Vec<PersistentServiceReceipt>> {
+        let mut ids = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| shell.ownership == ShellOwnership::PersistPending)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+
+        for id in &ids {
+            let shell = self
+                .processes
+                .get_mut(id)
+                .ok_or_else(|| anyhow!("Persistent service {id} disappeared before commit"))?;
+            shell.poll();
+            if shell.status != ShellStatus::Running {
+                return Err(anyhow!(
+                    "Persistent service {id} exited before ownership transfer (status {:?}, exit code {:?})",
+                    shell.status,
+                    shell.exit_code
+                ));
+            }
+            if shell
+                .child
+                .as_ref()
+                .and_then(ShellChild::process_id)
+                .is_none()
+            {
+                return Err(anyhow!(
+                    "Persistent service {id} has no releasable process id"
+                ));
+            }
+        }
+
+        let mut receipts = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut shell = self
+                .processes
+                .remove(&id)
+                .ok_or_else(|| anyhow!("Persistent service {id} disappeared during commit"))?;
+            let pid = shell
+                .child
+                .as_ref()
+                .and_then(ShellChild::process_id)
+                .ok_or_else(|| anyhow!("Persistent service {id} lost its process id"))?;
+            unregister_pending_persistent_process_group(pid);
+            shell.ownership = ShellOwnership::Released;
+            shell.stdin = None;
+            shell.heavy_permit.take();
+            shell.work_lifecycle = None;
+            receipts.push(PersistentServiceReceipt {
+                task_id: id,
+                pid,
+                process_group_id: pid,
+                ownership: "external".to_string(),
+            });
+        }
+        Ok(receipts)
+    }
+
+    /// Kill only services waiting for a successful exec ownership transfer.
+    /// Ordinary background jobs retain their existing manager lifetime.
+    pub fn abort_persistent_services(&mut self) {
+        let ids = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| shell.ownership == ShellOwnership::PersistPending)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            if let Err(error) = self.kill(&id) {
+                tracing::warn!(shell_id = %id, %error, "failed to abort pending persistent service");
+            }
+        }
     }
 
     /// Poll a background process and return incremental output.
@@ -3082,6 +3297,26 @@ fn exec_shell_input_starts_detached(input: &serde_json::Value) -> bool {
             || input.get("tty").and_then(serde_json::Value::as_bool) == Some(true))
 }
 
+fn persistent_services_enabled_for(context: &ToolContext) -> bool {
+    #[cfg(unix)]
+    {
+        context.persist_services_enabled
+            && context.owner_agent_id.is_none()
+            && context.tool_authority.is_none()
+            && context.sandbox_backend.is_none()
+            && matches!(context.shell_policy, ShellPolicy::Full)
+            && matches!(
+                context.elevated_sandbox_policy,
+                Some(ExecutionSandboxPolicy::DangerFullAccess)
+            )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = context;
+        false
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_foreground_via_background(
     context: &ToolContext,
@@ -3116,6 +3351,7 @@ async fn execute_foreground_via_background(
             owner,
             lifecycle,
             direct_argv.then_some(context.workspace.as_path()),
+            false,
         )?
     };
     let task_id = spawned
@@ -3254,7 +3490,7 @@ impl ToolSpec for BashTool {
         if self.read_only {
             "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
-            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" blocks for a background task until completion or timeout; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Pass wait=false for a nonblocking task snapshot. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
         }
     }
 
@@ -3280,7 +3516,7 @@ impl ToolSpec for BashTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return task_id (default: false). Prefer this for commands expected to take >5 seconds."
+                    "description": "Temporary background; killed at session exit. Surviving headless services need background:true,persist:true."
                 },
                 "interactive": {
                     "type": "boolean",
@@ -3320,7 +3556,7 @@ impl ToolSpec for BashTool {
                 },
                 "wait": {
                     "type": "boolean",
-                    "description": "Block until task completes or the timeout elapses (action=wait, default: false; `block` is an accepted alias)"
+                    "description": "For action=wait, block until the task completes or timeout elapses (default: true). Pass false for a nonblocking snapshot; `block` is an accepted alias."
                 },
                 "close_stdin": {
                     "type": "boolean",
@@ -3329,6 +3565,10 @@ impl ToolSpec for BashTool {
                 "all": {
                     "type": "boolean",
                     "description": "Cancel all running background tasks (action=cancel)"
+                },
+                "persist": {
+                    "type": "boolean",
+                    "description": "Keep this background service running after a successful headless exec (default: false). Requires background:true and explicit danger-full-access. Run the service itself in the foreground; do not use nohup or a trailing `&`."
                 }
             },
             // The schema used to declare nothing required at all, so
@@ -3469,6 +3709,30 @@ impl ToolSpec for BashTool {
             return Ok(ToolResult::error(
                 "Interactive mode cannot be combined with stdin data.",
             ));
+        }
+
+        let persist = optional_bool(&input, "persist", false)?;
+        if persist {
+            if !background {
+                return Err(ToolError::invalid_input(
+                    "persist:true requires background:true; a persisted service must be started as a background task.",
+                ));
+            }
+            if interactive || tty {
+                return Err(ToolError::invalid_input(
+                    "persist:true cannot be combined with interactive or TTY modes.",
+                ));
+            }
+            if stdin_data.is_some() {
+                return Err(ToolError::invalid_input(
+                    "persist:true spawns the service with null stdio; stdin data is not accepted.",
+                ));
+            }
+            if !persistent_services_enabled_for(context) {
+                return Err(ToolError::not_available(
+                    "persistent background services (persist:true) are only available on Unix in the real headless `codewhale exec` host under an explicit danger-full-access / full shell authority. They are rejected in interactive sessions, desktop/app-server hosts, Fleet/sub-agents, restricted or external sandboxes, and TTY/interactive/stdin modes.",
+                ));
+            }
         }
 
         let background = background || tty;
@@ -3811,6 +4075,7 @@ impl ToolSpec for BashTool {
                 shell_job_owner_from_context(context),
                 shell_work_lifecycle_from_context(context),
                 None,
+                persist,
             );
             if let (Ok(result), Some(permit)) = (&result, heavy_permit)
                 && let Some(task_id) = result.task_id.as_deref()
@@ -3884,14 +4149,18 @@ impl ToolSpec for BashTool {
                     } else {
                         format!("{}\n\nSTDERR:\n{}", result.stdout, result.stderr)
                     }
+                } else if persist && result.status == ShellStatus::Running {
+                    format!(
+                        "Persistent service staged: {task_id_str}. Probe readiness with a separate command. Codewhale will transfer ownership only if this exec finishes successfully."
+                    )
                 } else if result.status == ShellStatus::Running {
                     if backgrounded_foreground {
                         format!(
-                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" only if you need early output, final output, or wait=true at a true dependency."
+                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
                         )
                     } else {
                         format!(
-                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" only if you need early output, final output, or wait=true at a true dependency."
+                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Codewhale terminates this task when the session exits. If a service must survive a successful headless exec, start it with background=true and persist=true. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
                         )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
@@ -3975,7 +4244,13 @@ impl ToolSpec for BashTool {
                     }),
                 });
                 metadata["backgrounded"] = json!(background || backgrounded_foreground);
-                if background || backgrounded_foreground {
+                if persist {
+                    metadata["persist_requested"] = json!(true);
+                    metadata["ownership"] = json!("managed_pending_exec_success");
+                    metadata["background_policy"] = json!("pending_ownership_transfer");
+                    metadata["auto_resume_on_completion"] = json!(false);
+                    metadata["completion_surface"] = json!("headless_exec_release_receipt");
+                } else if background || backgrounded_foreground {
                     metadata["auto_resume_on_completion"] = json!(true);
                     metadata["completion_surface"] = json!("runtime_event_and_task_status");
                     metadata["background_policy"] = json!("nonblocking");
@@ -4028,7 +4303,12 @@ impl BashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let task_id = required_task_id(input)?;
-        let wait = optional_bool(input, "wait", false)? || optional_bool(input, "block", false)?;
+        let wait = match first_present_field(input, &["wait", "block"]) {
+            None => true,
+            Some((name, value)) => value
+                .as_bool()
+                .ok_or_else(|| type_mismatch(name, value, "a boolean"))?,
+        };
         let timeout_ms = wait_timeout_ms(input)?;
 
         let (delta, wait_canceled) = if wait {

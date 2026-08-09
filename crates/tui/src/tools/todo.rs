@@ -277,7 +277,7 @@ impl ToolSpec for TodoWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace the active thread/task To-do list (concrete current work items). This is the canonical progress surface the user watches, so keep it live while you work: mark an item in_progress before starting it (exactly one at a time), and call todo_write again the moment an item finishes so it shows completed — never batch completions at the end. Durable tasks remain the real executable work object."
+        "Replace the To-do list shown to the user. Optional: use it when a visible plan helps; at most one item may be in_progress at a time."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -446,22 +446,19 @@ mod tests {
     }
 
     #[test]
-    fn work_update_description_teaches_live_upkeep() {
-        // 2026-07-23 user report: models wrote the list once and never
-        // updated it while working. The canonical tool description must
-        // carry the upkeep contract every provider sees.
+    fn todo_write_description_states_the_tool_without_upkeep_coaching() {
+        // The list is optional support for the user's view, not an obligation.
+        // Behavior coaching ("keep it live", "never batch") pressured models
+        // into list management instead of the actual task.
         let tool = super::TodoWriteTool::new(super::new_shared_todo_list());
         let description = crate::tools::spec::ToolSpec::description(&tool);
-        for phrase in [
-            "keep it live while you work",
-            "in_progress before starting it (exactly one at a time)",
-            "the moment an item finishes",
-            "never batch completions",
-        ] {
-            assert!(
-                description.contains(phrase),
-                "work_update description missing {phrase:?}: {description}"
-            );
+        assert!(description.contains("Optional"), "{description}");
+        assert!(
+            description.contains("at most one item may be in_progress"),
+            "{description}"
+        );
+        for coaching in ["keep it live", "never batch", "the moment an item finishes"] {
+            assert!(!description.contains(coaching), "{description}");
         }
     }
 

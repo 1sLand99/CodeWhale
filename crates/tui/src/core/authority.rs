@@ -44,7 +44,7 @@ pub(crate) struct EffectiveModePolicy {
 /// - `Plan`   -> read-only: no shell, no trust, `Suggest` approvals.
 /// - `Agent`  -> the user's durable baseline (`prefs`).
 /// - `Auto`   -> compatibility alias for Agent; not a separate behavior.
-/// - `Operate` -> Agent baseline plus orchestration posture in prompts.
+/// - `Operate` -> Agent baseline plus orchestration capabilities in the runtime.
 /// - `Yolo`   -> legacy compat; full authority: shell + trust + `Bypass` approvals.
 #[must_use]
 pub(crate) fn base_policy_for_mode(mode: AppMode, prefs: &ModeSessionPrefs) -> EffectiveModePolicy {

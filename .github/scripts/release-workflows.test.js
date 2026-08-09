@@ -21,6 +21,14 @@ function valuesForKey(source, key) {
   return [...source.matchAll(expression)].map((match) => match[1]);
 }
 
+function namedStep(source, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing workflow step: ${name}`);
+  const next = source.indexOf("\n      - ", start + marker.length);
+  return source.slice(start, next === -1 ? source.length : next);
+}
+
 const ci = read(".github/workflows/ci.yml");
 const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
@@ -51,7 +59,7 @@ assert.doesNotMatch(ci, /--test qa_pty\b/, "CI must not name the removed qa_pty 
 
 const expectedNightlyTargets = [
   "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
   "x86_64-pc-windows-msvc",
@@ -84,6 +92,21 @@ assert.match(
 );
 assert.match(nightly, /startsWith\(matrix\.target, 'x86_64-'\).*runner\.arch == 'X64'/s);
 assert.match(nightly, /startsWith\(matrix\.target, 'aarch64-'\).*runner\.arch == 'ARM64'/s);
+const nightlyArmMuslSetup = namedStep(nightly, "Install Linux ARM64 musl toolchain");
+assert.match(nightlyArmMuslSetup, /matrix\.target == 'aarch64-unknown-linux-musl'/);
+assert.match(nightlyArmMuslSetup, /apt-get install -y binutils musl-tools/);
+assert.match(nightlyArmMuslSetup, /rustup target add --toolchain stable aarch64-unknown-linux-musl/);
+const nightlyArmStaticSmoke = namedStep(
+  nightly,
+  "Verify static Linux ARM64 binary and launch",
+);
+assert.match(
+  nightlyArmStaticSmoke,
+  /matrix\.target == 'aarch64-unknown-linux-musl' && runner\.arch == 'ARM64'/,
+);
+assert.match(nightlyArmStaticSmoke, /readelf -l "\$\{bin_path\}"/);
+assert.match(nightlyArmStaticSmoke, /grep -Fq 'INTERP'/);
+assert.match(nightlyArmStaticSmoke, /"\$\{bin_path\}" --version/);
 assert.doesNotMatch(nightly, /codewhale-tui/);
 assert.doesNotMatch(nightly, /target\/[^\n]*\/codew(?:\.exe)?/);
 assert.match(nightly, /cp "\$\{bin_path\}" "\$\{dir\}\/\$\{artifact\}"/);
@@ -153,7 +176,7 @@ assert.match(artifacts, /^  workflow_call:/m);
 assert.match(artifacts, /^permissions:\n  contents: read$/m);
 const expectedTargets = [
   "x86_64-unknown-linux-musl",
-  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
   "aarch64-linux-android",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
@@ -161,6 +184,27 @@ const expectedTargets = [
   "aarch64-pc-windows-msvc",
 ].sort();
 assert.deepEqual([...new Set(valuesForKey(artifacts, "target"))].sort(), expectedTargets);
+
+const releaseMuslBuild = namedStep(artifacts, "Build static Linux binaries (musl)");
+assert.match(releaseMuslBuild, /endsWith\(matrix\.target, '-unknown-linux-musl'\)/);
+assert.match(releaseMuslBuild, /apt-get install -y binutils musl-tools/);
+assert.match(releaseMuslBuild, /rustup target add --toolchain stable \$\{\{ matrix\.target \}\}/);
+assert.match(
+  releaseMuslBuild,
+  /cargo build --profile dist --locked --target \$\{\{ matrix\.target \}\} -p codewhale-cli/,
+);
+const releaseStaticSmoke = namedStep(
+  artifacts,
+  "Verify static Linux binaries and launch on matching native runners",
+);
+assert.match(releaseStaticSmoke, /endsWith\(matrix\.target, '-unknown-linux-musl'\)/);
+assert.match(
+  releaseStaticSmoke,
+  /startsWith\(matrix\.target, 'aarch64-'\) && runner\.arch == 'ARM64'/,
+);
+assert.match(releaseStaticSmoke, /readelf -l "\$\{bin_path\}"/);
+assert.match(releaseStaticSmoke, /grep -Fq 'INTERP'/);
+assert.match(releaseStaticSmoke, /"\$\{bin_path\}" --version/);
 
 const builtAssetNames = [
   ...valuesForKey(artifacts, "cli_artifact"),

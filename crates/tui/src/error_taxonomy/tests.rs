@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn model_output_truncated_classifies_as_invalid_input_not_tool() {
+    // The turn-level "Model output truncated" error is a provider/model
+    // condition, not a tool failure: it must land in the same bucket as
+    // `LlmError::ModelError` so the exec termination classifier reduces it
+    // to `RunTerminationReason::ModelError` (never Resolved).
+    assert_eq!(
+        classify_error_message(
+            "Model output truncated: provider stop reason `max_output_tokens`; no complete response or tool call was accepted."
+        ),
+        ErrorCategory::InvalidInput
+    );
+    assert_eq!(
+        classify_error_message(
+            "Model output truncated: provider stop reason `max_tokens`; no complete response or tool call was accepted."
+        ),
+        ErrorCategory::InvalidInput
+    );
+    assert_eq!(
+        classify_error_message(
+            "Model response incomplete: provider stop reason `content_filter`; no complete response or tool call was accepted."
+        ),
+        ErrorCategory::InvalidInput
+    );
+}
+
+#[test]
 fn raw_rate_and_quota_phrases_remain_coarse_rate_limit_diagnostics() {
     for message in [
         "Rate limit reached for gpt-4",

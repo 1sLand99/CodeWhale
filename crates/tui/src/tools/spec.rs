@@ -55,6 +55,9 @@ pub trait DynamicToolExecutor: Send + Sync {
 #[derive(Clone)]
 pub struct RuntimeToolServices {
     pub shell_manager: Option<SharedShellManager>,
+    /// True only for the real headless exec host after it has established the
+    /// explicit authority required to transfer `persist:true` services.
+    pub persist_services_enabled: bool,
     pub task_manager: Option<crate::task_manager::SharedTaskManager>,
     pub automations: Option<crate::automation_manager::SharedAutomationManager>,
     pub task_data_dir: Option<PathBuf>,
@@ -78,6 +81,7 @@ impl Default for RuntimeToolServices {
     fn default() -> Self {
         Self {
             shell_manager: None,
+            persist_services_enabled: false,
             task_manager: None,
             automations: None,
             task_data_dir: None,
@@ -96,6 +100,7 @@ impl std::fmt::Debug for RuntimeToolServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeToolServices")
             .field("shell_manager", &self.shell_manager.is_some())
+            .field("persist_services_enabled", &self.persist_services_enabled)
             .field("task_manager", &self.task_manager.is_some())
             .field("automations", &self.automations.is_some())
             .field("task_data_dir", &self.task_data_dir)
@@ -562,6 +567,11 @@ pub struct ToolExecutionState {
     /// Elevated sandbox policy override (used when retrying after sandbox denial).
     /// This overrides the default sandbox behavior for shell commands.
     pub elevated_sandbox_policy: Option<crate::sandbox::SandboxPolicy>,
+    /// Whether the enclosing host is the real headless `codewhale exec`
+    /// process. `persist:true` background services are only permitted there;
+    /// interactive TUI, desktop/app-server, and hosted runtime-thread engines
+    /// leave this false so the feature fails closed.
+    pub persist_services_enabled: bool,
     /// Optional user-facing hint for shell commands that fail because the
     /// active sandbox policy intentionally denies outbound network access.
     pub shell_network_denied_hint: Option<String>,
@@ -708,6 +718,7 @@ impl ToolContext {
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
                 elevated_sandbox_policy: None,
+                persist_services_enabled: false,
                 shell_network_denied_hint: None,
                 auto_approve: false,
                 shell_policy,

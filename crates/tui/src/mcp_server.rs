@@ -413,6 +413,28 @@ impl McpServer {
                 message: format!("DeepSeek API call failed: {e}"),
             })?;
 
+        // A provider-declared incomplete reply must not enter the stored
+        // thread or be returned as a successful answer. The billed usage is
+        // still reported in the error payload.
+        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            let error = format!(
+                "Model response incomplete: provider stop reason `{}`; the partial reply was not accepted.",
+                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+            );
+            return Ok(json!({
+                "content": [{ "type": "text", "text": &error }],
+                "isError": true,
+                "structuredContent": {
+                    "threadId": thread_id,
+                    "error": error,
+                    "usage": {
+                        "inputTokens": response.usage.input_tokens,
+                        "outputTokens": response.usage.output_tokens,
+                    }
+                }
+            }));
+        }
+
         // Extract response text from content blocks
         let response_text = response
             .content

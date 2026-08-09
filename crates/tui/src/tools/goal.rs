@@ -17,16 +17,6 @@ use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
 
-/// Maximum number of automatic goal-continuation prompt injections in one
-/// engine turn. This is intra-turn granularity only — it prevents a stuck spin
-/// within a single turn from making no progress. The cross-turn loop has its
-/// own conservative circuit breaker; see `goal_loop::decide_continuation`.
-pub const MAX_GOAL_CONTINUATIONS_PER_TURN: u32 = 3;
-
-/// Identical critical verifier gap sets required before automatic
-/// continuation pauses for inspection.
-pub const NO_PROGRESS_STALL_THRESHOLD: u32 = 3;
-
 /// Shared reference to the current runtime goal.
 pub type SharedGoalState = Arc<Mutex<GoalState>>;
 
@@ -312,14 +302,6 @@ impl GoalState {
         };
         self.last_gap_fingerprint = Some(fingerprint);
 
-        if self.repeated_gap_count >= NO_PROGRESS_STALL_THRESHOLD {
-            self.status = Some(GoalStatus::Paused);
-            self.finished_at = Some(Instant::now());
-            self.pause_reason = Some(GoalPauseReason::NoProgress);
-            self.evidence = None;
-            self.blocker = None;
-            self.completion_verification = None;
-        }
         Ok(())
     }
 
@@ -1388,32 +1370,6 @@ mod tests {
     }
 
     #[test]
-    fn three_identical_critical_gap_sets_pause_for_no_progress() {
-        let mut state = GoalState::default();
-        state
-            .create("finish the release candidate".to_string(), None)
-            .expect("create goal");
-
-        for expected_count in 1..=NO_PROGRESS_STALL_THRESHOLD {
-            state
-                .record_not_achieved(not_achieved_review(
-                    GoalReviewRole::Critical,
-                    &[
-                        "add the missing compatibility test",
-                        "fix the final warning",
-                    ],
-                ))
-                .expect("record verifier gaps");
-            assert_eq!(state.snapshot().repeated_gap_count, expected_count);
-        }
-
-        let stalled = state.snapshot();
-        assert_eq!(stalled.status, "paused");
-        assert_eq!(stalled.pause_reason, Some(GoalPauseReason::NoProgress));
-        assert!(stalled.last_gap_fingerprint.is_some());
-    }
-
-    #[test]
     fn changed_gaps_reset_stall_counter_and_advice_never_advances_it() {
         let mut state = GoalState::default();
         state
@@ -1453,38 +1409,6 @@ mod tests {
         let progressed = state.snapshot();
         assert_eq!(progressed.repeated_gap_count, 1);
         assert_eq!(progressed.status, "active");
-    }
-
-    #[tokio::test]
-    async fn update_goal_not_achieved_receipts_pause_after_threshold() {
-        let state = new_shared_goal_state_from_host_status(
-            Some("close every verifier gap".to_string()),
-            None,
-            GoalStatus::Active,
-        );
-        let update = UpdateGoalTool::new(state.clone());
-        for _ in 0..NO_PROGRESS_STALL_THRESHOLD {
-            update
-                .execute(
-                    json!({
-                        "status": "not_achieved",
-                        "verification": {
-                            "status": "not_achieved",
-                            "check": "cargo test",
-                            "summary": "the same regression remains",
-                            "role": "critical",
-                            "gaps": ["fix the failing regression"]
-                        }
-                    }),
-                    &ToolContext::new("."),
-                )
-                .await
-                .expect("record not-achieved receipt");
-        }
-
-        let snapshot = state.lock().expect("goal lock").snapshot();
-        assert_eq!(snapshot.status, "paused");
-        assert_eq!(snapshot.pause_reason, Some(GoalPauseReason::NoProgress));
     }
 
     #[tokio::test]
@@ -1642,7 +1566,6 @@ mod tests {
         assert!(prompt.contains("Goal Continuation"));
         assert!(prompt.contains("finish issue 2199"));
         assert!(prompt.contains("Continuation pass #2"));
-        assert!(prompt.contains("waiting for user response"));
     }
 
     #[test]

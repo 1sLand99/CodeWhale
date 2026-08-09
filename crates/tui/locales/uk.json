@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "Наявний файл:",
   "SetupConstitutionExpertOverrideLabel": "Експертне перевизначення:",
   "SetupConstitutionGuidedHint": "1-6 налаштовують проєкт, G — попередній перегляд, повторне G — ратифікація. Лише настанови: це ніколи не змінює дозволи виконання, пісочниці, оболонки, мережі, довіри чи MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Керовані відповіді зберігають лише глобальні вподобання користувача. Вбудоване ядро лишається активним; доктринальні модулі лишаються в промптах режимів/майбутніх opt-in.",
+  "SetupConstitutionGuidedAnswersHint": "Керовані відповіді зберігають лише глобальні вподобання користувача. Вбудоване ядро лишається активним; виконання належить політиці середовища виконання та майбутнім opt-in.",
   "SetupConstitutionPurposeLabel": "Мета:",
   "SetupConstitutionAutonomyLabel": "Ініціатива:",
   "SetupConstitutionEvidenceLabel": "Докази:",
