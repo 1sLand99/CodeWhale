@@ -8,7 +8,7 @@ If you just want the short version, see the
 [main README](../README.md#install) or
 [简体中文 README](../README.zh-CN.md#安装).
 
-This branch describes the **v0.9.5 source candidate**. Install commands that use
+This branch describes the **v0.9.6 source candidate**. Install commands that use
 `latest` resolve to the latest published package or GitHub Release, which may
 trail the source candidate. A candidate is not a published install until the
 matching package, tag, checksums, and release assets exist.
@@ -28,7 +28,7 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 ## 1. Supported platforms
 
 Published Codewhale releases ship matched `codewhale` and `codew` prebuilt binaries for their supported platform/architecture
-combinations. The table below is the intended v0.9.5 candidate matrix;
+combinations. The table below is the intended v0.9.6 candidate matrix;
 Android/Termux is preview pending real-device QA. Linux ARM64 is available from
 v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
@@ -43,8 +43,8 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 | macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`    |
 | Windows      | x64          |     ✅      |       ✅        | `codewhale-windows-x64.exe`, `codew-windows-x64.exe` |
 | Windows      | arm64        |     ✅      |       ✅        | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe` |
-| Linux x64 on musl (Alpine) | ✅ (static) |    ✅      |       ✅        | static `codewhale-linux-x64` (musl) asset           |
-| Other Linux (musl non-x64, other arches) | — | ❌¹ | ✅² | build from source                                     |
+| Linux x64 or arm64 on musl (Alpine) | native arch | ✅ (static) | ✅ | matching static Linux asset |
+| Other Linux (musl on other arches) | — | ❌¹ | ✅² | build from source                                     |
 | FreeBSD 14+ / OpenBSD          | x64, arm64 |   ❌      |       ✅²       | `cargo install codewhale-cli --locked` (no prebuilt; see § FreeBSD) |
 
 ¹ The npm package will exit with a clear error and point you here.
@@ -52,7 +52,7 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The v0.9.5 source-candidate npm wrapper recognizes Android arm64 and resolves
+⁴ The v0.9.6 source-candidate npm wrapper recognizes Android arm64 and resolves
   the matching `codewhale` and `codew` Android assets. npm
   installation works only for a package version whose GitHub Release publishes
   those matching assets. The Android/Termux path remains preview-only until the
@@ -60,43 +60,35 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
   in #4236 and #4242 are complete.
 
 Android / Termux is not the same target as Linux arm64. Do not install the
-GNU libc `codewhale-linux-arm64` archive in Termux; use the Termux-specific
+Linux `codewhale-linux-arm64` archive in Termux; use the Termux-specific
 Android archive when a release or release candidate publishes one, or build
 from source inside Termux.
 
-The Linux **x64** release assets have been **static (musl) builds** since v0.8.65.
-They have no glibc dependency and run on any x86_64 Linux, including Ubuntu
-22.04, Debian stable, RHEL/CentOS, and Alpine/musl. SQLite is bundled into the
-binary through `rusqlite`, so no separate `libsqlite3` runtime package is needed.
+The Linux **x64 and arm64** v0.9.6 candidate assets are **static musl builds**.
+The x64 release path has used musl since v0.8.65; v0.9.6 extends the same build
+and static-launch check to arm64. These binaries have no glibc dependency and
+run on their matching architecture across Ubuntu, Debian, RHEL/CentOS, and
+Alpine/musl. SQLite is bundled through `rusqlite`, so no separate `libsqlite3`
+runtime package is needed.
 
-The Linux **arm64** release assets are still GNU libc (glibc) builds. They
-dynamically link normal Linux runtime libraries such as `libdbus-1` and `libc`.
-The v0.9.5 candidate build runs on Ubuntu 24.04, so it can require `GLIBC_2.39`.
+### Linux ARM64 portability
 
-### Linux glibc floor (arm64)
-
-This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
-asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
-older systems without error. The v0.9.5 candidate GNU arm64 asset is built on
-Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
-2.35, so those arm64 binaries fail with errors such as:
+Linux arm64 assets before v0.9.6 were GNU libc builds and could inherit the
+Ubuntu 24.04 build host's `GLIBC_2.39` floor. Ubuntu 22.04 ships glibc 2.35, so
+those older arm64 binaries can fail with errors such as:
 
 ```text
 version `GLIBC_2.39' not found
 ```
 
-The npm wrapper, `codewhale update`, and the Unix archive installer preflight
-Linux GNU binaries before installing them and point older systems to Cargo/source
-builds. If you are on Ubuntu 22.04 arm64, Debian stable, RHEL/CentOS, or another
-older GNU base for a non-x64 asset, use:
+The npm wrapper, `codewhale update`, and the Unix archive installer retain their
+GNU-binary preflight for older releases. The v0.9.6 arm64 candidate instead uses
+`aarch64-unknown-linux-musl`, so it has no `GLIBC_*` floor. If you are installing
+an earlier release on an older arm64 distribution, use:
 
 ```bash
 cargo install codewhale-cli --locked   # installs `codewhale`
 ```
-
-Future release engineering may add static (musl) arm64 assets so the glibc floor
-goes away entirely; until then, x64 is static and arm64 users on older distros
-should build from source.
 
 > **Linux ARM64 note (v0.8.7 and earlier).** v0.8.7 and earlier do **not**
 > publish a Linux ARM64 prebuilt; users on HarmonyOS thin-and-light, Asahi
@@ -111,8 +103,8 @@ should build from source.
 
 Termux runs on Android's Bionic libc and uses `$PREFIX` as its Unix prefix, so
 it needs a Termux-specific Android arm64 archive. The Linux arm64 release asset
-is a GNU libc build for normal Linux distributions and should not be used on
-Android.
+targets standard Linux with musl; Android uses a distinct Rust target, so the
+Linux asset should not be used there.
 
 Install the minimum archive/runtime tools first:
 
@@ -644,14 +636,15 @@ The `rquickjs` FreeBSD bindings are generated at build time via `bindgen` (see
 `1582ba965`/`5eb0385e8`). No separate `pkg install codewhale` port exists yet —
 a native port is tracked as the follow-up to #1097 under `packaging/freebsd/`
 (contributions welcome). Validate with `cargo check --target x86_64-unknown-freebsd -p codewhale-cli --locked`
-on the release branch; the 7×1 release matrix (Linux musl x64, Linux gnu arm64,
+on the release branch; the 7×1 release matrix (Linux musl x64/arm64,
 Android arm64, macOS x64/arm64, Windows x64/arm64) stays 7 targets — FreeBSD is a
 source-build target, not a prebuilt asset.
 
 ### Cross-compiling from x64 to ARM64 Linux
 
-If you want to build an ARM64 Linux binary on an x64 Linux host (e.g. for a
-HarmonyOS / openEuler ARM64 thin-and-light), use
+The release asset uses `aarch64-unknown-linux-musl` and is built on a native ARM
+runner. If you want to build a GNU-linked ARM64 Linux binary on an x64 Linux
+host (e.g. for a HarmonyOS / openEuler ARM64 thin-and-light), use
 [`cross`](https://github.com/cross-rs/cross), which wraps the official Rust
 cross-targets in a Docker container:
 
@@ -666,8 +659,9 @@ cross build --release --target aarch64-unknown-linux-gnu -p codewhale-cli   # si
 
 The resulting binary lands in
 `target/aarch64-unknown-linux-gnu/release/codewhale`. Copy it to the ARM64 host
-(e.g. via `scp`) and make it executable. Release packaging separately exposes
-the same executable under the `codew` convenience name.
+(e.g. via `scp`) and make it executable. This local GNU build is distinct from
+the portable musl release asset; either executable can be copied under the
+`codew` convenience name.
 
 If you don't have Docker available, install the cross-linker directly and let
 Cargo do the work:
@@ -684,8 +678,9 @@ EOF
 cargo build --release --target aarch64-unknown-linux-gnu -p codewhale-cli   # single binary
 ```
 
-The same recipe works for `aarch64-unknown-linux-musl` if your distro is
-musl-based.
+Producing `aarch64-unknown-linux-musl` while cross-compiling requires an
+appropriate musl cross-linker. The release workflow avoids that extra moving
+part by building and launching the musl binary on GitHub's native ARM runner.
 
 ### Windows build from source
 

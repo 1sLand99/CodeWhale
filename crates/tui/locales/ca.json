@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "Fitxer existent:",
   "SetupConstitutionExpertOverrideLabel": "Override expert:",
   "SetupConstitutionGuidedHint": "1-6 ajusten l'esborrany, G previsualitza, G de nou ratifica. Només orientació: mai no canvia aprovacions del runtime, sandbox, shell, xarxa, confiança ni permisos MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Les respostes guiades només desen preferències globals d'usuari. El nucli inclòs continua actiu; els mòduls de doctrina queden per als prompts de mode/futures adhesions.",
+  "SetupConstitutionGuidedAnswersHint": "Les respostes guiades només desen preferències globals d'usuari. El nucli inclòs continua actiu; l'execució queda en la política d'execució i futures adhesions.",
   "SetupConstitutionPurposeLabel": "Propòsit:",
   "SetupConstitutionAutonomyLabel": "Iniciativa:",
   "SetupConstitutionEvidenceLabel": "Evidència:",

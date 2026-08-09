@@ -609,7 +609,7 @@
   "SetupConstitutionExistingLabel": "现有文件：",
   "SetupConstitutionExpertOverrideLabel": "专家覆盖：",
   "SetupConstitutionGuidedHint": "1-6 调整草稿，按 G 预览，再按 G 确认。仅作指导：不会更改运行时批准、沙箱、Shell、网络、信任或 MCP 权限。",
-  "SetupConstitutionGuidedAnswersHint": "引导式答案只保存全局偏好，内置核心始终生效。高级策略仍由模式提示词或可选规则包管理。",
+  "SetupConstitutionGuidedAnswersHint": "引导式答案只保存全局偏好，内置核心始终生效。执行能力由运行时策略或未来的可选规则包提供。",
   "SetupConstitutionPurposeLabel": "用途：",
   "SetupConstitutionAutonomyLabel": "主动性：",
   "SetupConstitutionEvidenceLabel": "证据：",

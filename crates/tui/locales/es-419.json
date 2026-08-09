@@ -609,7 +609,7 @@
   "SetupConstitutionExistingLabel": "Archivo existente:",
   "SetupConstitutionExpertOverrideLabel": "Override experto:",
   "SetupConstitutionGuidedHint": "1-6 ajustan el borrador, G previsualiza, G otra vez ratifica. Es solo guía: nunca cambia aprobaciones de runtime, sandbox, shell, red, confianza ni permisos MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Las respuestas guiadas solo guardan preferencias globales de usuario. El núcleo incluido sigue activo; los módulos de doctrina quedan en prompts de modo/futuros opt-ins.",
+  "SetupConstitutionGuidedAnswersHint": "Las respuestas guiadas solo guardan preferencias globales de usuario. El núcleo incluido sigue activo; la ejecución queda en la política de ejecución y futuros opt-ins.",
   "SetupConstitutionPurposeLabel": "Propósito:",
   "SetupConstitutionAutonomyLabel": "Iniciativa:",
   "SetupConstitutionEvidenceLabel": "Evidencia:",

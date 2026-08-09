@@ -5,43 +5,43 @@
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 7016,
-        "identity_sha256": "06217f849f9cbf02b3d8cabd2d0002dd661833381072c6fd09962a819a09a280"
+        "bytes": 5848,
+        "identity_sha256": "7d0769c098849fb2d3f6a626befc566f0587e6ad299aeb7a616089ab7bbf60fc"
       },
       "goal": {
-        "bytes": 9179,
+        "bytes": 8011,
         "delta_bytes": 81,
-        "identity_sha256": "72b46052a988489a8960c27ac6b0fbb3f33825e5beb9dfc78b84ce14f22d6e39"
+        "identity_sha256": "b2175a39f0451f081b03733a82dd874591d5ddfb4d03c0f36ce08e1b30ea658e"
       },
       "handoff": {
-        "bytes": 9567,
+        "bytes": 8399,
         "delta_bytes": 388,
-        "identity_sha256": "6d331070efe45bf911005c98353a51e5ba9d15bba871eb78d962ea9617e5d7d6"
+        "identity_sha256": "ecb467503b923e06d7644e45269fc74aa51917c36678ac595f3913cdd6792990"
       },
       "instructions": {
-        "bytes": 7468,
+        "bytes": 6300,
         "delta_bytes": 131,
-        "identity_sha256": "02c61955d5deb6c41d35a4b8c734d81b6b413baf216ba2e0f01e679e618d9017"
+        "identity_sha256": "e5a74b827fd93335c1962ab2bdeb71a97a770d5bb4bc3757e32be25db8362037"
       },
       "memory": {
-        "bytes": 9098,
+        "bytes": 7930,
         "delta_bytes": 963,
-        "identity_sha256": "735056c348b3070d7cde81abaeca6d87faa998b97db9aa2ddf1ca60a2ea562b5"
+        "identity_sha256": "c4ecd1ac059fd9e7bd7850ce171745f7deaba6530f255662bcc89c28d76589ae"
       },
       "project": {
-        "bytes": 7337,
+        "bytes": 6169,
         "delta_bytes": 321,
-        "identity_sha256": "c706b368622ae954b70b51c3b7708a4f0df5cb75ebda1a4d2b5b40f5b7404d3d"
+        "identity_sha256": "9ae2524b00cf3aa7b924811eda5a334bc6d20aa3d8826e18814ed55585fb026c"
       },
       "skill": {
-        "bytes": 8135,
+        "bytes": 6967,
         "delta_bytes": 667,
-        "identity_sha256": "1818150940199974ea5dafba2b243a0b7c720ee72da1072604a1588bbb2d7310"
+        "identity_sha256": "2ab9229910c4e552d1e6a39d96602afe6d31ebce83a9fd97853fb6d5deb32ac9"
       }
     },
     "system_prompt_blocks": 6,
-    "total_bytes": 9567,
-    "total_tokens_est": 2392
+    "total_bytes": 8399,
+    "total_tokens_est": 2100
   },
   "schema_version": 1,
   "skill_discovery": {
@@ -59,25 +59,25 @@
   "system_prompt": {
     "modes": {
       "act": {
-        "mode_instructions_bytes": 1167,
-        "mode_instructions_tokens_est": 292,
+        "mode_instructions_bytes": 0,
+        "mode_instructions_tokens_est": 0,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 7016,
-        "system_prompt_tokens_est": 1754
+        "system_prompt_bytes": 5848,
+        "system_prompt_tokens_est": 1462
       },
       "operate": {
-        "mode_instructions_bytes": 1671,
-        "mode_instructions_tokens_est": 418,
+        "mode_instructions_bytes": 0,
+        "mode_instructions_tokens_est": 0,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 7520,
-        "system_prompt_tokens_est": 1880
+        "system_prompt_bytes": 5848,
+        "system_prompt_tokens_est": 1462
       },
       "plan": {
-        "mode_instructions_bytes": 716,
-        "mode_instructions_tokens_est": 179,
+        "mode_instructions_bytes": 0,
+        "mode_instructions_tokens_est": 0,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 6565,
-        "system_prompt_tokens_est": 1642
+        "system_prompt_bytes": 5848,
+        "system_prompt_tokens_est": 1462
       }
     }
   },
@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 23280,
+          "bytes": 23406,
           "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
-          "tokens_est": 5820,
+          "tokens_est": 5852,
           "tool_names": [
             "Bash",
             "File",
@@ -102,9 +102,9 @@
           "tools": 9
         },
         "full": {
-          "bytes": 68080,
+          "bytes": 68206,
           "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
-          "tokens_est": 17020,
+          "tokens_est": 17052,
           "tool_names": [
             "Bash",
             "File",
@@ -160,9 +160,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 23280,
+          "bytes": 23406,
           "identity_sha256": "91bbfb5891540ad8eceadb88192efd7087d185877796ebd30760a1d85c20f68a",
-          "tokens_est": 5820,
+          "tokens_est": 5852,
           "tool_names": [
             "Bash",
             "File",
@@ -177,9 +177,9 @@
           "tools": 9
         },
         "full": {
-          "bytes": 68080,
+          "bytes": 68206,
           "identity_sha256": "5ab3ae7ec9c95d11cafa35d76fa359c96d8e8b12d837a2deb94cdc8f134f938d",
-          "tokens_est": 17020,
+          "tokens_est": 17052,
           "tool_names": [
             "Bash",
             "File",
@@ -235,9 +235,9 @@
       },
       "plan": {
         "active": {
-          "bytes": 17489,
+          "bytes": 17221,
           "identity_sha256": "a62fe19356273d0a5b95704ae43f7570855c6e144eee148ae4c673c196b7f21b",
-          "tokens_est": 4373,
+          "tokens_est": 4306,
           "tool_names": [
             "File",
             "Git",
@@ -250,9 +250,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 42414,
+          "bytes": 42146,
           "identity_sha256": "a857096f86f3a044354a246b567ad7efa06dd0341fddc4da9f4d9d491f71b0bc",
-          "tokens_est": 10604,
+          "tokens_est": 10537,
           "tool_names": [
             "File",
             "Git",

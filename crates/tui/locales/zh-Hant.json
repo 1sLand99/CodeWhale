@@ -1085,7 +1085,7 @@
   "SetupConstitutionFileNotChecked": "尚未檢查",
   "SetupConstitutionFilePathError": "無法解析 CODEWHALE_HOME 中的 constitution.json",
   "SetupConstitutionFileUnreadable": "constitution.json 無法讀取；請修復/重新生成，或使用內建",
-  "SetupConstitutionGuidedAnswersHint": "引導回答只保存使用者全域偏好；內建核心始終生效，教義模組留在模式提示詞/未來 opt-in 模組中。",
+  "SetupConstitutionGuidedAnswersHint": "引導回答只保存使用者全域偏好；內建核心始終生效，執行能力由執行時政策與未來 opt-in 模組提供。",
   "SetupConstitutionGuidedHint": "1-6 調整草稿，G 預覽，再按 G 確認。這只是指引：不會變更執行核准、沙箱、shell、網路、信任或 MCP 權限。",
   "SetupConstitutionPreviewLabel": "預覽雜湊：",
   "SetupConstitutionPrinciplesLabel": "原則：",

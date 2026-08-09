@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "मौजूदा फ़ाइल:",
   "SetupConstitutionExpertOverrideLabel": "विशेषज्ञ ओवरराइड:",
   "SetupConstitutionGuidedHint": "1-6 मसौदा समायोजित करते हैं, G पूर्वावलोकन, फिर G अंगीकार। केवल मार्गदर्शन: यह रनटाइम अनुमति, सैंडबॉक्स, शेल, नेटवर्क, ट्रस्ट या MCP अनुमतियाँ कभी नहीं बदलता।",
-  "SetupConstitutionGuidedAnswersHint": "निर्देशित उत्तर केवल उपयोगकर्ता-वैश्विक प्राथमिकताएँ सहेजते हैं। bundled कोर सक्रिय रहता है; सिद्धांत मॉड्यूल मोड प्रॉम्प्ट/भविष्य के opt-in में रहते हैं।",
+  "SetupConstitutionGuidedAnswersHint": "निर्देशित उत्तर केवल उपयोगकर्ता-वैश्विक प्राथमिकताएँ सहेजते हैं। bundled कोर सक्रिय रहता है; निष्पादन रनटाइम नीति और भविष्य के opt-in के पास रहता है।",
   "SetupConstitutionPurposeLabel": "उद्देश्य:",
   "SetupConstitutionAutonomyLabel": "पहल:",
   "SetupConstitutionEvidenceLabel": "साक्ष्य:",

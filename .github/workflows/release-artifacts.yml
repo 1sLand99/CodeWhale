@@ -45,7 +45,7 @@ jobs:
             shim_artifact: codew-linux-x64
             tui_artifact: codewhale-tui-linux-x64
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             platform: linux-arm64
             cli_binary: codewhale
             shim_binary: codew
@@ -116,23 +116,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
-      - name: Install Linux ARM64 system dependencies
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          for i in 1 2 3 4 5; do
-            sudo apt-get update && break
-            echo "apt-get update failed (attempt $i); retrying in 15s"
-            sleep 15
-          done
-          sudo apt-get install -y libdbus-1-dev pkg-config
-      - name: Build static Linux x64 binaries (musl)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Build static Linux binaries (musl)
+        if: endsWith(matrix.target, '-unknown-linux-musl')
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo build --profile dist --locked --target x86_64-unknown-linux-musl -p codewhale-cli
+          sudo apt-get install -y binutils musl-tools
+          rustup target add --toolchain stable ${{ matrix.target }}
+          cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli
       - name: Configure Android NDK linker
         if: matrix.target == 'aarch64-linux-android' && runner.os == 'Linux'
         shell: bash
@@ -180,7 +171,7 @@ jobs:
             echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           } >> "${GITHUB_ENV}"
       - name: Build
-        if: matrix.target != 'x86_64-unknown-linux-musl'
+        if: ${{ !endsWith(matrix.target, '-unknown-linux-musl') }}
         shell: bash
         run: cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli
       - name: Materialize codew command alias
@@ -189,6 +180,23 @@ jobs:
           bin_dir="target/${{ matrix.target }}/dist"
           cp "${bin_dir}/${{ matrix.cli_binary }}" "${bin_dir}/${{ matrix.shim_binary }}"
           cmp "${bin_dir}/${{ matrix.cli_binary }}" "${bin_dir}/${{ matrix.shim_binary }}"
+      - name: Verify static Linux binaries and launch on matching native runners
+        if: >-
+          endsWith(matrix.target, '-unknown-linux-musl') &&
+          ((startsWith(matrix.target, 'x86_64-') && runner.arch == 'X64') ||
+          (startsWith(matrix.target, 'aarch64-') && runner.arch == 'ARM64'))
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_dir="target/${{ matrix.target }}/dist"
+          for binary in "${{ matrix.cli_binary }}" "${{ matrix.shim_binary }}"; do
+            bin_path="${bin_dir}/${binary}"
+            if readelf -l "${bin_path}" | grep -Fq 'INTERP'; then
+              echo "Expected a static musl binary, but ${bin_path} has an ELF interpreter" >&2
+              exit 1
+            fi
+            "${bin_path}" --version
+          done
       - name: Smoke binaries on matching native runners
         if: >-
           matrix.target != 'aarch64-linux-android' &&

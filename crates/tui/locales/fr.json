@@ -586,7 +586,7 @@
   "SetupConstitutionExistingLabel": "Fichier existant :",
   "SetupConstitutionExpertOverrideLabel": "Dérogation experte :",
   "SetupConstitutionGuidedHint": "1-6 ajustent le brouillon, G affiche l'aperçu, G à nouveau ratifie. Directives seulement : cela ne change jamais les approbations runtime, le sandbox, le shell, le réseau, la confiance ou les permissions MCP.",
-  "SetupConstitutionGuidedAnswersHint": "Les réponses guidées n'enregistrent que des préférences globales utilisateur. Le noyau intégré reste actif ; les modules de doctrine restent dans les prompts de mode/futures options.",
+  "SetupConstitutionGuidedAnswersHint": "Les réponses guidées n'enregistrent que des préférences globales utilisateur. Le noyau intégré reste actif ; l'exécution relève de la politique d'exécution et de futures options.",
   "SetupConstitutionPurposeLabel": "Objectif :",
   "SetupConstitutionAutonomyLabel": "Initiative :",
   "SetupConstitutionEvidenceLabel": "Preuve :",
