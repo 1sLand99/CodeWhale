@@ -21,6 +21,7 @@ Current packaging note:
   - `codewhale-release`
   - `codewhale-secrets`
   - `codewhale-state`
+  - `codewhale-telemetry`
   - `codewhale-workflow`
   - `codewhale-workflow-js`
   - `codewhale-execpolicy`
@@ -95,10 +96,12 @@ clippy/test/npm-smoke gates for `fix/*`, `rebrand/*`, `work/v*`, and `main`.
 GitHub Actions keeps the cheap drift/fmt statuses plus macOS and Windows
 coverage, while CNB carries the Linux work.
 
-`publish-crates.sh dry-run` performs a full `cargo publish --dry-run` for crates
-without unpublished workspace dependencies and a packaging preflight for dependent
-workspace crates. That avoids false negatives from crates.io not yet containing the
-new workspace version while still validating package contents before publish.
+`publish-crates.sh dry-run` first validates the maintained publication order
+against the locked Cargo workspace graph. It then performs a full
+`cargo publish --dry-run` for crates without unpublished workspace dependencies
+and a packaging preflight for dependent workspace crates. That avoids false
+negatives from crates.io not yet containing the new workspace version while
+still validating package contents before publish.
 
 For npm wrapper verification, build the single runtime and run the
 cross-platform smoke harness. This packs the npm wrapper, installs it into a
@@ -271,7 +274,7 @@ and fails branch-only release sources before assets are published.
    ```
 
    Both Cargo and npm publication fail closed unless `HEAD`, the clean local
-   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 18-crate
+   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 20-crate
    dependency order lives in `scripts/release/crates.sh`; do not maintain a
    second handwritten order in this runbook. The helper waits for each new
    version to appear on crates.io before moving to dependents and safely skips

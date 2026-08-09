@@ -14,11 +14,6 @@ case "${mode}" in
     ;;
 esac
 
-if [[ "${mode}" == "publish" ]]; then
-  "${script_dir}/require-release-tag-checkout.sh"
-  "${script_dir}/verify-release-assets.sh"
-fi
-
 packages=("${release_crates[@]}")
 crates_user_agent="CodeWhale release publish check (https://github.com/Hmbown/CodeWhale)"
 
@@ -26,6 +21,9 @@ workspace_version=""
 workspace_codewhale_packages=()
 workspace_package_dep_flags=()
 
+metadata_inventory="$(
+  python3 "${script_dir}/validate-crate-publish-order.py" "${packages[@]}"
+)"
 while IFS=$'\t' read -r kind name value; do
   case "${kind}" in
     version)
@@ -36,79 +34,18 @@ while IFS=$'\t' read -r kind name value; do
       workspace_package_dep_flags+=("${value}")
       ;;
   esac
-done < <(
-  python3 - <<'PY'
-import json
-import subprocess
-
-metadata = json.loads(
-    subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"])
-)
-workspace_members = set(metadata["workspace_members"])
-workspace_packages = [
-    pkg for pkg in metadata["packages"] if pkg["id"] in workspace_members
-]
-workspace_by_name = {pkg["name"]: pkg for pkg in workspace_packages}
-
-versions = sorted({pkg["version"] for pkg in workspace_packages})
-if not versions:
-    raise SystemExit("workspace has no packages")
-if len(versions) != 1:
-    raise SystemExit(f"workspace packages have mixed versions: {', '.join(versions)}")
-print(f"version\t{versions[0]}\t")
-
-for pkg in sorted(workspace_packages, key=lambda item: item["name"]):
-    if not pkg["name"].startswith("codewhale-"):
-        continue
-    has_workspace_dep = any(
-        dep.get("path") and dep["name"] in workspace_by_name
-        for dep in pkg["dependencies"]
-    )
-    print(f"crate\t{pkg['name']}\t{1 if has_workspace_dep else 0}")
-PY
-)
+done <<<"${metadata_inventory}"
 
 if [[ -z "${workspace_version}" ]]; then
   echo "Could not determine workspace version." >&2
   exit 1
 fi
 
-missing_packages=()
-for workspace_package in "${workspace_codewhale_packages[@]}"; do
-  found=0
-  for package in "${packages[@]}"; do
-    if [[ "${package}" == "${workspace_package}" ]]; then
-      found=1
-      break
-    fi
-  done
-  if [[ "${found}" == "0" ]]; then
-    missing_packages+=("${workspace_package}")
-  fi
-done
+echo "Crate publication order OK: ${#packages[@]} workspace crates."
 
-extra_packages=()
-for package in "${packages[@]}"; do
-  found=0
-  for workspace_package in "${workspace_codewhale_packages[@]}"; do
-    if [[ "${package}" == "${workspace_package}" ]]; then
-      found=1
-      break
-    fi
-  done
-  if [[ "${found}" == "0" ]]; then
-    extra_packages+=("${package}")
-  fi
-done
-
-if (( ${#missing_packages[@]} > 0 || ${#extra_packages[@]} > 0 )); then
-  if (( ${#missing_packages[@]} > 0 )); then
-    echo "publish package list is missing workspace crates: ${missing_packages[*]}" >&2
-  fi
-  if (( ${#extra_packages[@]} > 0 )); then
-    echo "publish package list contains non-workspace crates: ${extra_packages[*]}" >&2
-  fi
-  exit 1
+if [[ "${mode}" == "publish" ]]; then
+  "${script_dir}/require-release-tag-checkout.sh"
+  "${script_dir}/verify-release-assets.sh"
 fi
 
 package_has_workspace_deps() {
