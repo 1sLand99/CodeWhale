@@ -6,8 +6,9 @@
 //! arbitrary command strings never cross this boundary.
 
 use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
+    collections::{BTreeMap, HashMap, HashSet},
+    io::Write,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,7 +31,53 @@ const SYNC_INTERVAL: Duration = Duration::from_millis(1_200);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_RUNS: usize = 64;
 const MAX_COMMANDS: usize = 128;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_RUNTIME_ENVELOPE_BYTES: usize = 128 * 1024;
+const SNAPSHOT_ENVELOPE_BYTE_BUDGET: usize = 120 * 1024;
+const MAX_SNAPSHOT_MESSAGES: usize = 64;
+const MAX_SNAPSHOT_MESSAGE_CHARS: usize = 128 * 1024;
+const MIN_TRUNCATED_MESSAGE_CHARS: usize = 32;
+const MAX_REMOTE_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
+const RUNTIME_UPLOAD_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const RUNTIME_UPLOAD_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const CAPABILITIES: &[&str] = &["evidence-ledger", "fim", "git", "shell"];
+/// How long an aborted or failed relay keeps local input locked. Matches the
+/// server-side runner lease expiry with margin; local input never returns
+/// while the server could still consider a remote owner live.
+const OWNERSHIP_LOCK_AFTER_FAILURE: Duration = Duration::from_secs(95);
+/// Ceiling for draining unacknowledged runtime events during `/rc stop`.
+/// Deliberately below `OWNERSHIP_LOCK_AFTER_FAILURE` so a failed drain still
+/// resolves into the ownership-locked path before the lease question is moot.
+const STOP_DRAIN_DEADLINE: Duration = Duration::from_secs(45);
+const JOURNAL_SCHEMA_VERSION: u64 = 1;
+/// Hard bounds for the crash-recoverable unacknowledged-envelope journal.
+const MAX_JOURNAL_EVENTS: usize = 256;
+const MAX_JOURNAL_ENCODED_BYTES: usize = 4 * 1024 * 1024;
+/// Capacity held back exclusively for integrity-critical envelopes (terminal
+/// turn state, approvals, failures, resynchronization snapshots). Ordinary
+/// deltas may never consume this headroom.
+const JOURNAL_RESERVED_INTEGRITY_EVENTS: usize = 64;
+const JOURNAL_RESERVED_INTEGRITY_BYTES: usize = 1024 * 1024;
+/// A deferred (not yet handed to transport) delta envelope may grow to this
+/// encoded size through coalescing before it is forced onto the wire.
+const DELTA_COALESCE_BYTE_CAP: usize = 32 * 1024;
+const JOURNAL_SETUP_ERROR: &str = "Remote control could not prepare its private delivery journal.";
+const JOURNAL_UNTRUSTED_ERROR: &str = "The saved remote-control delivery journal could not be trusted; it was set aside. The account run may show an incomplete turn.";
+
+/// Envelopes whose loss would strand account-side truth: terminal turn state,
+/// approval requests, failure records, and resynchronization snapshots. They
+/// draw on reserved journal capacity, are never dropped silently, and gate
+/// `/rc stop` until the server cursor covers them.
+fn integrity_critical_event(event: &str) -> bool {
+    matches!(
+        event,
+        "turn.completed" | "approval.required" | "item.failed" | "session.snapshot"
+    )
+}
+
+fn runtime_envelope_event(envelope: &Value) -> Option<&str> {
+    envelope.get("event").and_then(Value::as_str)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteControlAction {
@@ -45,6 +92,10 @@ pub struct RemoteStart {
     pub session_id: String,
     pub runtime_version: String,
     pub runtime_commit: String,
+    /// Directory that holds the crash-recoverable delivery journal. `None`
+    /// runs memory-only and is reserved for tests; production callers must
+    /// always provide a private directory under the Codewhale home.
+    pub journal_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +105,14 @@ pub enum RemoteEvent {
         account_ref: String,
         runner_id: String,
         target_ref: String,
+        attachment: RemoteAttachment,
+    },
+    Attachment {
+        attachment: RemoteAttachment,
+    },
+    RuntimeCursor {
+        run_id: String,
+        cursor: u64,
     },
     Command {
         run_id: String,
@@ -65,6 +124,20 @@ pub enum RemoteEvent {
     OwnershipRestored {
         approvals: Vec<PendingRemoteApproval>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAttachment {
+    pub run_id: String,
+    pub workspace_id: String,
+    pub runtime_cursor: u64,
+    pub snapshot_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerConnection {
+    runner_id: String,
+    attachment: RemoteAttachment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +170,192 @@ enum WorkerCommand {
         envelopes: Vec<Value>,
     },
     Stop,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeTransportOutbox {
+    events: BTreeMap<(String, u64), Value>,
+}
+
+/// One unacknowledged runtime envelope owned by the controller.
+///
+/// `handed_off` records whether the envelope may already have reached the
+/// server through the transport worker. Once true the envelope is immutable:
+/// ambiguous retries must resend byte-identical JSON.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingRuntimeEnvelope {
+    envelope: Value,
+    encoded_len: usize,
+    integrity: bool,
+    handed_off: bool,
+}
+
+/// Crash-recoverable journal of unacknowledged runtime envelopes.
+///
+/// The file name is hash-derived so nothing about the workspace or session
+/// leaks through the path; the directory is private and the file owner-only.
+/// Neither the path nor the contents are ever reported to the control plane
+/// or written to logs. Acknowledged prefixes are compacted on every persist,
+/// and a journal that cannot be verified fails closed at load time.
+struct RuntimeEventJournal {
+    path: PathBuf,
+    session_tag: String,
+}
+
+impl RuntimeEventJournal {
+    fn open(dir: &Path, session_id: &str) -> Result<Self, String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"cwc-remote-control-journal\0");
+        hasher.update(session_id.as_bytes());
+        let session_tag = bytes_to_hex(&hasher.finalize())[..32].to_string();
+        std::fs::create_dir_all(dir).map_err(|_| JOURNAL_SETUP_ERROR.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| JOURNAL_SETUP_ERROR.to_string())?;
+        }
+        Ok(Self {
+            path: dir.join(format!("journal_{session_tag}.json")),
+            session_tag,
+        })
+    }
+
+    /// Loads every journaled envelope, or fails closed when the journal
+    /// cannot be trusted (corrupt, oversized, or written for another
+    /// session). A missing file is an ordinary empty journal.
+    fn load(&self) -> Result<HashMap<String, BTreeMap<u64, Value>>, String> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HashMap::new());
+            }
+            Err(_) => return Err(JOURNAL_UNTRUSTED_ERROR.to_string()),
+        };
+        if bytes.len() > MAX_JOURNAL_ENCODED_BYTES.saturating_mul(2) {
+            return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+        }
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| JOURNAL_UNTRUSTED_ERROR.to_string())?;
+        if value.get("schemaVersion").and_then(Value::as_u64) != Some(JOURNAL_SCHEMA_VERSION)
+            || value.get("session").and_then(Value::as_str) != Some(self.session_tag.as_str())
+        {
+            return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+        }
+        let runs = value
+            .get("runs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| JOURNAL_UNTRUSTED_ERROR.to_string())?;
+        let mut restored: HashMap<String, BTreeMap<u64, Value>> = HashMap::new();
+        let mut total_events = 0usize;
+        let mut total_bytes = 0usize;
+        for (run_id, envelopes) in runs {
+            if !valid_opaque_ref(run_id) {
+                return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+            }
+            let envelopes = envelopes
+                .as_array()
+                .ok_or_else(|| JOURNAL_UNTRUSTED_ERROR.to_string())?;
+            let mut events = BTreeMap::new();
+            for envelope in envelopes {
+                let seq = runtime_envelope_seq(envelope)
+                    .ok_or_else(|| JOURNAL_UNTRUSTED_ERROR.to_string())?;
+                let encoded_len = serde_json::to_vec(envelope)
+                    .map(|body| body.len())
+                    .unwrap_or(usize::MAX);
+                if encoded_len > MAX_RUNTIME_ENVELOPE_BYTES {
+                    return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+                }
+                total_events += 1;
+                total_bytes = total_bytes.saturating_add(encoded_len);
+                if total_events > MAX_JOURNAL_EVENTS || total_bytes > MAX_JOURNAL_ENCODED_BYTES {
+                    return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+                }
+                if events.insert(seq, envelope.clone()).is_some() {
+                    return Err(JOURNAL_UNTRUSTED_ERROR.to_string());
+                }
+            }
+            if !events.is_empty() {
+                restored.insert(run_id.clone(), events);
+            }
+        }
+        Ok(restored)
+    }
+
+    /// Atomically replaces the journal with the current unacknowledged set.
+    /// An empty set removes the file entirely (prompt compaction).
+    fn persist(
+        &self,
+        pending: &HashMap<String, BTreeMap<u64, PendingRuntimeEnvelope>>,
+    ) -> Result<(), String> {
+        if pending.values().all(BTreeMap::is_empty) {
+            self.remove();
+            return Ok(());
+        }
+        let mut runs = serde_json::Map::new();
+        for (run_id, events) in pending {
+            if events.is_empty() {
+                continue;
+            }
+            runs.insert(
+                run_id.clone(),
+                Value::Array(
+                    events
+                        .values()
+                        .map(|entry| entry.envelope.clone())
+                        .collect(),
+                ),
+            );
+        }
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": JOURNAL_SCHEMA_VERSION,
+            "session": self.session_tag,
+            "runs": runs,
+        }))
+        .map_err(|_| JOURNAL_SETUP_ERROR.to_string())?;
+        let tmp = self.path.with_extension("tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|_| JOURNAL_SETUP_ERROR.to_string())?;
+        file.write_all(&body)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| JOURNAL_SETUP_ERROR.to_string())?;
+        drop(file);
+        std::fs::rename(&tmp, &self.path).map_err(|_| JOURNAL_SETUP_ERROR.to_string())
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(self.path.with_extension("tmp"));
+    }
+
+    /// Moves an untrusted journal aside so the failure is explicit and a
+    /// deliberate later `/rc` start can proceed from a clean slate.
+    fn quarantine(&self) {
+        let _ = std::fs::rename(&self.path, self.path.with_extension("corrupt"));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePostOutcome {
+    Accepted(u64),
+    Retryable,
+    AccessTokenExpired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeFlushOutcome {
+    Idle,
+    Accepted { run_id: String, cursor: u64 },
+    Retryable,
+    AccessTokenExpired,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +426,7 @@ pub struct RemoteControlController {
     active_run: Option<ActiveRelayRun>,
     event_seq: HashMap<String, u64>,
     uploaded_snapshots: HashSet<String>,
+    pending_runtime_events: HashMap<String, BTreeMap<u64, PendingRuntimeEnvelope>>,
     pending_approvals: HashMap<String, PendingRemoteApproval>,
     command_fingerprints: HashMap<(String, u64), String>,
     worker_tx: Option<mpsc::UnboundedSender<WorkerCommand>>,
@@ -174,6 +434,17 @@ pub struct RemoteControlController {
     worker: Option<tokio::task::JoinHandle<()>>,
     applying_remote_command: bool,
     ownership_blocked_until: Option<Instant>,
+    journal: Option<RuntimeEventJournal>,
+    /// At most one deferred (unsent, still coalescible) delta seq per run.
+    deferred_delta: HashMap<String, u64>,
+    /// Runs whose deltas were shed under pressure; truth is restored with a
+    /// bounded snapshot at the next terminal boundary.
+    resync_required: HashSet<String>,
+    /// Runs that crossed their terminal boundary with `resync_required` set;
+    /// the UI drains these via `take_pending_resync`.
+    resync_ready: Vec<String>,
+    pending_event_count: usize,
+    pending_encoded_bytes: usize,
 }
 
 impl Default for RemoteControlController {
@@ -186,6 +457,7 @@ impl Default for RemoteControlController {
             active_run: None,
             event_seq: HashMap::new(),
             uploaded_snapshots: HashSet::new(),
+            pending_runtime_events: HashMap::new(),
             pending_approvals: HashMap::new(),
             command_fingerprints: HashMap::new(),
             worker_tx: None,
@@ -193,6 +465,12 @@ impl Default for RemoteControlController {
             worker: None,
             applying_remote_command: false,
             ownership_blocked_until: None,
+            journal: None,
+            deferred_delta: HashMap::new(),
+            resync_required: HashSet::new(),
+            resync_ready: Vec::new(),
+            pending_event_count: 0,
+            pending_encoded_bytes: 0,
         }
     }
 }
@@ -218,9 +496,28 @@ impl RemoteControlController {
         if !valid_runtime_version(&start.runtime_version)
             || !valid_runtime_commit(&start.runtime_commit)
             || !valid_opaque_ref(&start.target_ref)
-            || !valid_opaque_ref(&start.session_id)
+            || !valid_session_ref(&start.session_id)
         {
             return Err("This build or session does not have an enrollable identity.".to_string());
+        }
+        match &start.journal_dir {
+            Some(dir) => {
+                let journal = RuntimeEventJournal::open(dir, &start.session_id)?;
+                match journal.load() {
+                    Ok(restored) => {
+                        self.reset_pending_from(restored);
+                        self.journal = Some(journal);
+                    }
+                    Err(error) => {
+                        // Fail closed: an unverifiable journal may hide
+                        // undelivered terminal or approval state. Set it
+                        // aside explicitly rather than silently discarding.
+                        journal.quarantine();
+                        return Err(error);
+                    }
+                }
+            }
+            None => self.journal = None,
         }
         let (worker_tx, worker_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -238,6 +535,34 @@ impl RemoteControlController {
         Ok(())
     }
 
+    /// Why `/rc stop` must currently be refused, if any reason exists.
+    ///
+    /// Stopping is only safe once no remote turn is active and every
+    /// integrity-critical envelope (terminal turn state, approvals, failures,
+    /// resynchronization snapshots) is behind the server-confirmed cursor.
+    pub fn stop_refusal(&self) -> Option<String> {
+        if self.has_active_run() {
+            return Some(
+                "Finish or interrupt the active remote turn before stopping remote control."
+                    .to_string(),
+            );
+        }
+        if self.has_unacknowledged_integrity_events() {
+            return Some(
+                "The server has not yet acknowledged this session's terminal or approval events; try /rc stop again in a moment."
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    fn has_unacknowledged_integrity_events(&self) -> bool {
+        self.pending_runtime_events
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|entry| entry.integrity)
+    }
+
     pub fn stop(&mut self) {
         if self.status == Status::Connecting {
             // The worker may have completed its server-side connect just before
@@ -249,8 +574,11 @@ impl RemoteControlController {
             self.status_detail =
                 "authorization cancelled; waiting for any server lease to expire safely"
                     .to_string();
-            self.ownership_blocked_until = Some(Instant::now() + Duration::from_secs(95));
+            self.ownership_blocked_until = Some(Instant::now() + OWNERSHIP_LOCK_AFTER_FAILURE);
         } else if self.status == Status::Connected {
+            // Hand every deferred delta to the transport first so the worker's
+            // pre-heartbeat drain covers the complete unacknowledged set.
+            self.hand_off_all_deferred();
             let queued = self
                 .worker_tx
                 .as_ref()
@@ -263,7 +591,7 @@ impl RemoteControlController {
                 self.status = Status::Failed;
                 self.status_detail =
                     "waiting for the last server lease to expire safely".to_string();
-                self.ownership_blocked_until = Some(Instant::now() + Duration::from_secs(95));
+                self.ownership_blocked_until = Some(Instant::now() + OWNERSHIP_LOCK_AFTER_FAILURE);
             }
         }
         if self.status == Status::Off {
@@ -284,6 +612,9 @@ impl RemoteControlController {
     }
 
     pub fn try_next_event(&mut self) -> Option<RemoteEvent> {
+        // Coalescing ends at the next UI poll: hand any deferred delta to the
+        // transport so live viewers never wait more than one tick.
+        self.hand_off_all_deferred();
         if self.status == Status::Failed
             && self
                 .ownership_blocked_until
@@ -305,30 +636,48 @@ impl RemoteControlController {
             RemoteEvent::Connected {
                 account_ref,
                 target_ref,
+                attachment,
                 ..
             } => {
+                self.apply_attachment(attachment);
+                // Journal recovery may hold unacknowledged envelopes for runs
+                // beyond this attachment; resend every pending run now.
+                self.flush_all_pending();
                 self.status = Status::Connected;
                 self.status_detail = "web owns prompts and approvals".to_string();
                 self.ownership_blocked_until = None;
                 self.account_ref = Some(account_ref.clone());
                 self.target_ref = Some(target_ref.clone());
             }
+            RemoteEvent::Attachment { attachment } => {
+                self.apply_attachment(attachment);
+            }
+            RemoteEvent::RuntimeCursor { run_id, cursor } => {
+                self.reconcile_runtime_cursor(run_id, *cursor);
+            }
             RemoteEvent::Failed(reason) => {
                 self.status = Status::Failed;
                 self.status_detail =
                     format!("{reason}; waiting for the last server lease to expire safely");
-                self.ownership_blocked_until = Some(Instant::now() + Duration::from_secs(95));
+                self.ownership_blocked_until = Some(Instant::now() + OWNERSHIP_LOCK_AFTER_FAILURE);
                 self.active_run = None;
-                // The worker may have failed after the UI queued a snapshot but before the
-                // control plane durably accepted it. A later attachment must be allowed to
-                // send a fresh bounded snapshot for that run.
-                self.uploaded_snapshots.clear();
+                // Exact unacknowledged runtime envelopes remain owned by this
+                // controller (and its journal). A later worker reconnect
+                // resends them unchanged.
             }
             RemoteEvent::Stopped => {
                 self.status = Status::Off;
                 self.status_detail = "off".to_string();
                 self.active_run = None;
                 self.ownership_blocked_until = None;
+                // The worker only reports Stopped after draining through the
+                // server-confirmed cursor and posting the offline heartbeat,
+                // so an empty pending set means the journal is spent.
+                if self.pending_runtime_events.values().all(BTreeMap::is_empty)
+                    && let Some(journal) = &self.journal
+                {
+                    journal.remove();
+                }
                 if !self.pending_approvals.is_empty() {
                     let approvals = self
                         .pending_approvals
@@ -409,17 +758,45 @@ impl RemoteControlController {
             .is_some_and(|active| active.run_id == run_id)
     }
 
+    /// A remotely-owned turn must reach a terminal engine event before the
+    /// user can release the relay lease. Dropping the worker earlier would
+    /// discard the run binding and strand the control-plane ledger while the
+    /// local engine continued producing results.
+    pub fn has_active_run(&self) -> bool {
+        self.active_run.is_some()
+    }
+
+    /// A remote prompt can fail during local route preparation before the
+    /// engine owns a turn and therefore before it can emit `EngineEvent::Error`.
+    /// That failure is still terminal for the account-owned run.
+    pub fn fail_active_dispatch(&mut self, error: &str) {
+        self.fail_active_run("dispatch_failed", error);
+    }
+
+    fn apply_attachment(&mut self, attachment: &RemoteAttachment) {
+        self.reconcile_runtime_cursor(&attachment.run_id, attachment.runtime_cursor);
+        let local_cursor = self
+            .pending_runtime_events
+            .get(&attachment.run_id)
+            .and_then(|events| events.last_key_value().map(|(seq, _)| *seq))
+            .unwrap_or(0);
+        let cursor = self.event_seq.entry(attachment.run_id.clone()).or_insert(0);
+        *cursor = (*cursor).max(attachment.runtime_cursor).max(local_cursor);
+        self.flush_pending_runtime_events(&attachment.run_id);
+        // `snapshot_present` is server history, not proof that this freshly
+        // loaded TUI process has uploaded its current saved history. The local
+        // marker below prevents ordinary same-process reconnect duplication.
+    }
+
     pub fn upload_snapshot(&mut self, run_id: &str, messages: &[Message]) {
-        if !self.uploaded_snapshots.insert(run_id.to_string()) {
+        if self.uploaded_snapshots.contains(run_id) {
             return;
         }
-        let projected = project_session_messages(messages);
-        self.upload_envelope(
-            run_id,
-            "session.snapshot",
-            None,
-            json!({ "messages": projected }),
-        );
+        let seq = self.next_runtime_seq(run_id);
+        let envelope = bounded_session_snapshot_envelope(seq, messages);
+        if self.queue_runtime_envelope(run_id, envelope) {
+            self.uploaded_snapshots.insert(run_id.to_string());
+        }
     }
 
     pub fn acknowledge(
@@ -494,12 +871,9 @@ impl RemoteControlController {
             return;
         };
         match event {
-            EngineEvent::MessageDelta { content, .. } => self.upload_envelope(
-                &active.run_id,
-                "item.delta",
-                Some(&active.turn_id),
-                json!({ "kind": "agent_message", "delta": content }),
-            ),
+            EngineEvent::MessageDelta { content, .. } => {
+                self.upload_delta(&active.run_id, &active.turn_id, content);
+            }
             EngineEvent::ToolCallStarted { id, name, .. } => self.upload_envelope(
                 &active.run_id,
                 "item.started",
@@ -556,10 +930,51 @@ impl RemoteControlController {
                     Some(&active.turn_id),
                     json!({ "turn": { "status": status, "usage": usage } }),
                 );
+                if self.resync_required.remove(&active.run_id) {
+                    // Deltas were shed under pressure during this turn; the UI
+                    // must now upload a bounded current snapshot so account
+                    // truth is restored at the terminal boundary.
+                    self.resync_ready.push(active.run_id.clone());
+                }
                 self.active_run = None;
+            }
+            EngineEvent::Error {
+                envelope,
+                recoverable,
+            } if !recoverable => {
+                self.fail_active_run(&envelope.code, &envelope.message);
             }
             _ => {}
         }
+    }
+
+    fn fail_active_run(&mut self, code: &str, error: &str) {
+        let Some(active) = self.active_run.clone() else {
+            return;
+        };
+        let message = bounded_remote_error_message(error);
+        let item_id = projected_error_item_id(&active.run_id, &active.turn_id, code);
+        self.upload_envelope(
+            &active.run_id,
+            "item.failed",
+            Some(&active.turn_id),
+            json!({
+                "item": {
+                    "id": item_id,
+                    "kind": "error",
+                    "status": "failed",
+                    "summary": message,
+                    "detail": message,
+                }
+            }),
+        );
+        self.upload_envelope(
+            &active.run_id,
+            "turn.completed",
+            Some(&active.turn_id),
+            json!({ "turn": { "status": "failed", "usage": {} } }),
+        );
+        self.active_run = None;
     }
 
     fn upload_envelope(
@@ -569,24 +984,364 @@ impl RemoteControlController {
         turn_id: Option<&str>,
         payload: Value,
     ) {
-        let seq = self.event_seq.entry(run_id.to_string()).or_insert(0);
-        *seq = seq.saturating_add(1);
+        let seq = self.next_runtime_seq(run_id);
+        let envelope = runtime_envelope(
+            seq,
+            event,
+            turn_id,
+            chrono::Utc::now().to_rfc3339(),
+            payload,
+        );
+        self.queue_runtime_envelope(run_id, envelope);
+    }
+
+    fn next_runtime_seq(&self, run_id: &str) -> u64 {
+        let acknowledged = self.event_seq.get(run_id).copied().unwrap_or(0);
+        let pending = self
+            .pending_runtime_events
+            .get(run_id)
+            .and_then(|events| events.last_key_value().map(|(seq, _)| *seq))
+            .unwrap_or(0);
+        acknowledged.max(pending).saturating_add(1)
+    }
+
+    fn queue_runtime_envelope(&mut self, run_id: &str, envelope: Value) -> bool {
+        // Per-run sequence order must reach the transport in order, so any
+        // deferred delta is handed off before a later envelope is queued.
+        self.hand_off_deferred(run_id);
+        self.queue_runtime_envelope_inner(run_id, envelope, false)
+    }
+
+    fn queue_runtime_envelope_inner(&mut self, run_id: &str, envelope: Value, defer: bool) -> bool {
+        let Some(seq) = runtime_envelope_seq(&envelope) else {
+            self.status_detail = "a local runtime event had no valid sequence".to_string();
+            return false;
+        };
+        let encoded_len = serde_json::to_vec(&envelope)
+            .map(|body| body.len())
+            .unwrap_or(usize::MAX);
+        if encoded_len > MAX_RUNTIME_ENVELOPE_BYTES {
+            self.status_detail = "a local runtime event exceeded the safe relay limit".to_string();
+            return false;
+        }
+        let integrity = runtime_envelope_event(&envelope).is_some_and(integrity_critical_event);
+        let already_pending = self
+            .pending_runtime_events
+            .get(run_id)
+            .and_then(|events| events.get(&seq))
+            .is_some();
+        if already_pending {
+            let entry = self
+                .pending_runtime_events
+                .get(run_id)
+                .and_then(|events| events.get(&seq))
+                .expect("checked above");
+            if entry.envelope != envelope {
+                self.status_detail =
+                    "a local runtime sequence changed before acknowledgement".to_string();
+                return false;
+            }
+        } else {
+            if !self.reserve_capacity(run_id, encoded_len, integrity) {
+                return false;
+            }
+            self.pending_runtime_events
+                .entry(run_id.to_string())
+                .or_default()
+                .insert(
+                    seq,
+                    PendingRuntimeEnvelope {
+                        envelope: envelope.clone(),
+                        encoded_len,
+                        integrity,
+                        handed_off: false,
+                    },
+                );
+            self.pending_event_count += 1;
+            self.pending_encoded_bytes = self.pending_encoded_bytes.saturating_add(encoded_len);
+        }
+        self.event_seq
+            .entry(run_id.to_string())
+            .and_modify(|cursor| *cursor = (*cursor).max(seq))
+            .or_insert(seq);
+        if defer {
+            self.deferred_delta.insert(run_id.to_string(), seq);
+        } else {
+            if let Some(entry) = self
+                .pending_runtime_events
+                .get_mut(run_id)
+                .and_then(|events| events.get_mut(&seq))
+            {
+                entry.handed_off = true;
+            }
+            self.send_runtime_envelope(run_id, envelope);
+            self.persist_journal();
+        }
+        true
+    }
+
+    /// Bounded-journal admission control.
+    ///
+    /// Integrity-critical envelopes may use the full budget, ordinary deltas
+    /// only the unreserved share. A shed delta marks the run for terminal-
+    /// boundary resynchronization; a shed integrity envelope can never happen
+    /// silently — the relay fails closed and local input stays locked through
+    /// the server lease expiry.
+    fn reserve_capacity(&mut self, run_id: &str, encoded_len: usize, integrity: bool) -> bool {
+        let (event_budget, byte_budget) = if integrity {
+            (MAX_JOURNAL_EVENTS, MAX_JOURNAL_ENCODED_BYTES)
+        } else {
+            (
+                MAX_JOURNAL_EVENTS - JOURNAL_RESERVED_INTEGRITY_EVENTS,
+                MAX_JOURNAL_ENCODED_BYTES - JOURNAL_RESERVED_INTEGRITY_BYTES,
+            )
+        };
+        if self.pending_event_count < event_budget
+            && self.pending_encoded_bytes.saturating_add(encoded_len) <= byte_budget
+        {
+            return true;
+        }
+        if integrity {
+            self.status = Status::Failed;
+            self.status_detail =
+                "the runtime delivery buffer overflowed; waiting for the last server lease to expire safely"
+                    .to_string();
+            self.ownership_blocked_until = Some(Instant::now() + OWNERSHIP_LOCK_AFTER_FAILURE);
+        } else {
+            self.resync_required.insert(run_id.to_string());
+        }
+        false
+    }
+
+    /// Streams a message delta, coalescing into the run's deferred envelope
+    /// while that envelope has provably never been handed to the transport.
+    fn upload_delta(&mut self, run_id: &str, turn_id: &str, content: &str) {
+        if let Some(seq) = self.deferred_delta.get(run_id).copied() {
+            if self.try_coalesce_delta(run_id, seq, turn_id, content) {
+                return;
+            }
+            self.hand_off_deferred(run_id);
+        }
+        let seq = self.next_runtime_seq(run_id);
+        let envelope = runtime_envelope(
+            seq,
+            "item.delta",
+            Some(turn_id),
+            chrono::Utc::now().to_rfc3339(),
+            json!({ "kind": "agent_message", "delta": content }),
+        );
+        self.queue_runtime_envelope_inner(run_id, envelope, true);
+    }
+
+    fn try_coalesce_delta(&mut self, run_id: &str, seq: u64, turn_id: &str, content: &str) -> bool {
+        let Some(entry) = self
+            .pending_runtime_events
+            .get_mut(run_id)
+            .and_then(|events| events.get_mut(&seq))
+        else {
+            return false;
+        };
+        if entry.handed_off
+            || entry.envelope.get("turn_id").and_then(Value::as_str) != Some(turn_id)
+        {
+            return false;
+        }
+        let Some(existing) = entry
+            .envelope
+            .pointer("/payload/delta")
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        let merged = format!("{existing}{content}");
+        let mut candidate = entry.envelope.clone();
+        candidate["payload"]["delta"] = Value::String(merged);
+        let encoded_len = serde_json::to_vec(&candidate)
+            .map(|body| body.len())
+            .unwrap_or(usize::MAX);
+        if encoded_len > DELTA_COALESCE_BYTE_CAP {
+            return false;
+        }
+        let old_len = entry.encoded_len;
+        entry.envelope = candidate;
+        entry.encoded_len = encoded_len;
+        self.pending_encoded_bytes = self
+            .pending_encoded_bytes
+            .saturating_sub(old_len)
+            .saturating_add(encoded_len);
+        true
+    }
+
+    /// Hands the run's deferred delta to the transport. From this point the
+    /// envelope may have reached the server and becomes immutable.
+    fn hand_off_deferred(&mut self, run_id: &str) {
+        let Some(seq) = self.deferred_delta.remove(run_id) else {
+            return;
+        };
+        let Some(envelope) = self
+            .pending_runtime_events
+            .get_mut(run_id)
+            .and_then(|events| events.get_mut(&seq))
+            .map(|entry| {
+                entry.handed_off = true;
+                entry.envelope.clone()
+            })
+        else {
+            return;
+        };
+        self.send_runtime_envelope(run_id, envelope);
+        self.persist_journal();
+    }
+
+    fn hand_off_all_deferred(&mut self) {
+        let runs: Vec<String> = self.deferred_delta.keys().cloned().collect();
+        for run_id in runs {
+            self.hand_off_deferred(&run_id);
+        }
+    }
+
+    /// The UI drains this after each engine event batch and answers with
+    /// `upload_resync_snapshot` for the returned run.
+    pub fn take_pending_resync(&mut self) -> Option<String> {
+        self.resync_ready.pop()
+    }
+
+    /// Uploads a bounded current-history snapshot to repair account truth
+    /// after deltas were shed under pressure.
+    pub fn upload_resync_snapshot(&mut self, run_id: &str, messages: &[Message]) {
+        let seq = self.next_runtime_seq(run_id);
+        let envelope = bounded_session_snapshot_envelope(seq, messages);
+        self.queue_runtime_envelope(run_id, envelope);
+    }
+
+    fn persist_journal(&mut self) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        if journal.persist(&self.pending_runtime_events).is_err() {
+            // Crash durability is degraded, but nothing is lost silently: the
+            // live relay keeps every envelope in memory and `/rc stop` still
+            // requires the server-confirmed drain.
+            self.status_detail =
+                "the delivery journal could not be written; stop waits for server confirmation"
+                    .to_string();
+        }
+    }
+
+    /// Replaces the in-memory pending set from a verified journal load.
+    fn reset_pending_from(&mut self, restored: HashMap<String, BTreeMap<u64, Value>>) {
+        self.pending_runtime_events.clear();
+        self.deferred_delta.clear();
+        self.pending_event_count = 0;
+        self.pending_encoded_bytes = 0;
+        for (run_id, events) in restored {
+            let mut pending = BTreeMap::new();
+            for (seq, envelope) in events {
+                let encoded_len = serde_json::to_vec(&envelope)
+                    .map(|body| body.len())
+                    .unwrap_or(usize::MAX);
+                let integrity =
+                    runtime_envelope_event(&envelope).is_some_and(integrity_critical_event);
+                self.pending_event_count += 1;
+                self.pending_encoded_bytes = self.pending_encoded_bytes.saturating_add(encoded_len);
+                pending.insert(
+                    seq,
+                    PendingRuntimeEnvelope {
+                        envelope,
+                        encoded_len,
+                        integrity,
+                        handed_off: false,
+                    },
+                );
+            }
+            if let Some((top, _)) = pending.last_key_value() {
+                let top = *top;
+                self.event_seq
+                    .entry(run_id.clone())
+                    .and_modify(|cursor| *cursor = (*cursor).max(top))
+                    .or_insert(top);
+            }
+            if !pending.is_empty() {
+                self.pending_runtime_events.insert(run_id, pending);
+            }
+        }
+    }
+
+    fn send_runtime_envelope(&self, run_id: &str, envelope: Value) {
         let Some(tx) = &self.worker_tx else {
             return;
         };
         let _ = tx.send(WorkerCommand::Upload {
             run_id: run_id.to_string(),
             acknowledgements: Vec::new(),
-            envelopes: vec![json!({
-                "schema_version": 1,
-                "seq": *seq,
-                "event": event,
-                "kind": event,
-                "turn_id": turn_id,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "payload": payload,
-            })],
+            envelopes: vec![envelope],
         });
+    }
+
+    fn flush_pending_runtime_events(&mut self, run_id: &str) {
+        // A reconnect resend covers everything, deferred deltas included;
+        // after this every envelope may have reached the server.
+        self.deferred_delta.remove(run_id);
+        let mut to_send = Vec::new();
+        if let Some(events) = self.pending_runtime_events.get_mut(run_id) {
+            for entry in events.values_mut() {
+                entry.handed_off = true;
+                to_send.push(entry.envelope.clone());
+            }
+        }
+        if to_send.is_empty() {
+            return;
+        }
+        for envelope in to_send {
+            self.send_runtime_envelope(run_id, envelope);
+        }
+        self.persist_journal();
+    }
+
+    fn flush_all_pending(&mut self) {
+        let runs: Vec<String> = self.pending_runtime_events.keys().cloned().collect();
+        for run_id in runs {
+            self.flush_pending_runtime_events(&run_id);
+        }
+    }
+
+    fn reconcile_runtime_cursor(&mut self, run_id: &str, cursor: u64) {
+        if cursor > JS_MAX_SAFE_INTEGER {
+            self.status_detail = "the server returned an unsafe runtime cursor".to_string();
+            return;
+        }
+        let mut empty = false;
+        let mut retired_any = false;
+        if let Some(events) = self.pending_runtime_events.get_mut(run_id) {
+            let retired: Vec<u64> = events.range(..=cursor).map(|(seq, _)| *seq).collect();
+            for seq in retired {
+                if let Some(entry) = events.remove(&seq) {
+                    retired_any = true;
+                    self.pending_event_count = self.pending_event_count.saturating_sub(1);
+                    self.pending_encoded_bytes =
+                        self.pending_encoded_bytes.saturating_sub(entry.encoded_len);
+                }
+            }
+            empty = events.is_empty();
+        }
+        if empty {
+            self.pending_runtime_events.remove(run_id);
+        }
+        if self
+            .deferred_delta
+            .get(run_id)
+            .is_some_and(|seq| *seq <= cursor)
+        {
+            self.deferred_delta.remove(run_id);
+        }
+        self.event_seq
+            .entry(run_id.to_string())
+            .and_modify(|known| *known = (*known).max(cursor))
+            .or_insert(cursor);
+        if retired_any {
+            // Compact the acknowledged prefix out of the journal promptly.
+            self.persist_journal();
+        }
     }
 }
 
@@ -622,37 +1377,124 @@ pub fn target_ref(workspace: &Path, session_id: &str) -> String {
     format!("target_{}", &bytes_to_hex(&hasher.finalize())[..32])
 }
 
-fn project_session_messages(messages: &[Message]) -> Vec<Value> {
-    messages
+fn runtime_envelope(
+    seq: u64,
+    event: &str,
+    turn_id: Option<&str>,
+    timestamp: String,
+    payload: Value,
+) -> Value {
+    json!({
+        "schema_version": 1,
+        "seq": seq,
+        "event": event,
+        "kind": event,
+        "turn_id": turn_id,
+        "timestamp": timestamp,
+        "payload": payload,
+    })
+}
+
+fn runtime_envelope_seq(envelope: &Value) -> Option<u64> {
+    envelope
+        .get("seq")
+        .and_then(Value::as_u64)
+        .filter(|seq| (1..=JS_MAX_SAFE_INTEGER).contains(seq))
+}
+
+fn bounded_session_snapshot_envelope(seq: u64, messages: &[Message]) -> Value {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let candidates = messages
         .iter()
-        .filter_map(|message| {
-            let role = match message.role.as_str() {
-                "user" => "user",
-                "assistant" => "assistant",
-                _ => return None,
-            };
-            let text = message
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.trim().is_empty()).then(|| {
-                json!({
-                    "role": role,
-                    "text": text.chars().take(16 * 1024).collect::<String>(),
-                })
-            })
+        .rev()
+        .filter_map(project_session_message)
+        .take(MAX_SNAPSHOT_MESSAGES)
+        .collect::<Vec<_>>();
+    let mut kept = Vec::<Value>::new();
+    for (role, text) in candidates {
+        let full = json!({ "role": role, "text": text });
+        kept.insert(0, full);
+        if snapshot_envelope_len(seq, &timestamp, &kept) <= SNAPSHOT_ENVELOPE_BYTE_BUDGET {
+            continue;
+        }
+        kept.remove(0);
+        let max_chars = text.chars().count();
+        let mut low = 0usize;
+        let mut high = max_chars;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            let prefix = unicode_prefix(&text, mid);
+            kept.insert(0, json!({ "role": role, "text": prefix }));
+            let fits =
+                snapshot_envelope_len(seq, &timestamp, &kept) <= SNAPSHOT_ENVELOPE_BYTE_BUDGET;
+            kept.remove(0);
+            if fits {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        if low >= MIN_TRUNCATED_MESSAGE_CHARS || (kept.is_empty() && low > 0) {
+            kept.insert(
+                0,
+                json!({ "role": role, "text": unicode_prefix(&text, low) }),
+            );
+        }
+        break;
+    }
+    let envelope = runtime_envelope(
+        seq,
+        "session.snapshot",
+        None,
+        timestamp,
+        json!({ "messages": kept }),
+    );
+    debug_assert!(
+        serde_json::to_vec(&envelope).is_ok_and(|body| body.len() <= SNAPSHOT_ENVELOPE_BYTE_BUDGET)
+    );
+    envelope
+}
+
+fn project_session_message(message: &Message) -> Option<(String, String)> {
+    let role = match message.role.as_str() {
+        "user" => "user",
+        "assistant" => "assistant",
+        _ => return None,
+    };
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
         })
-        .rev()
-        .take(64)
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+        .join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((
+        role.to_string(),
+        text.chars()
+            .take(MAX_SNAPSHOT_MESSAGE_CHARS)
+            .collect::<String>(),
+    ))
+}
+
+fn snapshot_envelope_len(seq: u64, timestamp: &str, messages: &[Value]) -> usize {
+    serde_json::to_vec(&runtime_envelope(
+        seq,
+        "session.snapshot",
+        None,
+        timestamp.to_string(),
+        json!({ "messages": messages }),
+    ))
+    .map(|body| body.len())
+    .unwrap_or(usize::MAX)
+}
+
+fn unicode_prefix(value: &str, chars: usize) -> String {
+    value.chars().take(chars).collect()
 }
 
 fn projected_approval_id(raw: &str) -> String {
@@ -660,6 +1502,27 @@ fn projected_approval_id(raw: &str) -> String {
     hasher.update(b"local-runtime:approval\0");
     hasher.update(raw.as_bytes());
     format!("local_approval_{}", &bytes_to_hex(&hasher.finalize())[..24])
+}
+
+fn projected_error_item_id(run_id: &str, turn_id: &str, code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"local-runtime:error\0");
+    hasher.update(run_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(turn_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(code.as_bytes());
+    format!("local_item_{}", &bytes_to_hex(&hasher.finalize())[..24])
+}
+
+fn bounded_remote_error_message(error: &str) -> String {
+    let without_nul = error.replace('\0', " ");
+    let redacted = codewhale_config::persistence::redact_secrets(&without_nul);
+    let message = redacted.trim();
+    if message.is_empty() {
+        return "The local model turn failed.".to_string();
+    }
+    crate::utils::truncate_with_ellipsis(message, MAX_REMOTE_ERROR_MESSAGE_BYTES, "…")
 }
 
 fn command_fingerprint(command: &RemoteCommand) -> String {
@@ -702,21 +1565,37 @@ async fn relay_worker(
         None => enroll_device(&client, &base, &start, &event_tx).await?,
     };
 
-    let mut runner_id = connect_runner(&client, &enrollment, &start).await?;
-    let _ = event_tx.send(RemoteEvent::Connected {
-        account_ref: enrollment.persisted.account_ref.clone(),
-        runner_id: runner_id.clone(),
-        target_ref: start.target_ref.clone(),
-    });
+    let connection = connect_runner(&client, &enrollment, &start).await?;
+    let mut runner_id = connection.runner_id.clone();
+    event_tx
+        .send(RemoteEvent::Connected {
+            account_ref: enrollment.persisted.account_ref.clone(),
+            runner_id: runner_id.clone(),
+            target_ref: start.target_ref.clone(),
+            attachment: connection.attachment,
+        })
+        .map_err(|_| "The terminal remote-control owner stopped.".to_string())?;
     let mut last_heartbeat = Instant::now() - HEARTBEAT_INTERVAL;
     let mut command_cursor: HashMap<String, u64> = HashMap::new();
     let mut delivered: HashMap<(String, u64), String> = HashMap::new();
+    let mut runtime_outbox = RuntimeTransportOutbox::default();
+    let mut runtime_upload_tick = tokio::time::interval(RUNTIME_UPLOAD_RETRY_INTERVAL);
+    runtime_upload_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+    let mut runtime_retry_not_before = Instant::now();
 
     loop {
         tokio::select! {
             command = worker_rx.recv() => {
                 match command {
                     Some(WorkerCommand::Upload { run_id, acknowledgements, envelopes }) => {
+                        if !envelopes.is_empty() {
+                            if !acknowledgements.is_empty() || envelopes.len() != 1 {
+                                return Err("The local runtime queued an invalid event batch.".to_string());
+                            }
+                            runtime_outbox.enqueue(&run_id, envelopes[0].clone())?;
+                            continue;
+                        }
                         let body = Some(json!({ "acknowledgements": acknowledgements, "envelopes": envelopes }));
                         let result = runner_request(
                             &client,
@@ -753,9 +1632,22 @@ async fn relay_worker(
                     }
                     Some(WorkerCommand::Stop) | None => {
                         // Do not return local input until the control plane has
-                        // durably released this lease. If the confirmation
-                        // cannot be delivered, the UI keeps ownership locked
-                        // through the server-side lease expiry instead.
+                        // durably released this lease. Every queued runtime
+                        // envelope must first drain behind the server-confirmed
+                        // cursor; only then may the offline heartbeat be
+                        // posted. If either cannot be confirmed, this worker
+                        // errors out and the UI keeps ownership locked through
+                        // the server-side lease expiry instead.
+                        drain_runtime_outbox_for_stop(
+                            &client,
+                            &mut enrollment,
+                            &mut runner_id,
+                            &start,
+                            &event_tx,
+                            &mut runtime_outbox,
+                            Instant::now() + STOP_DRAIN_DEADLINE,
+                        )
+                        .await?;
                         let hb = post_heartbeat(&client, &enrollment, &runner_id, &start, "offline").await;
                         if let Err(err) = hb {
                             if err == "runner_access_token_expired" {
@@ -777,18 +1669,71 @@ async fn relay_worker(
                     }
                 }
             }
+            _ = runtime_upload_tick.tick(), if !runtime_outbox.events.is_empty() => {
+                if Instant::now() < runtime_retry_not_before {
+                    continue;
+                }
+                match runtime_outbox
+                    .try_flush_one(&client, &enrollment, &runner_id)
+                    .await?
+                {
+                    RuntimeFlushOutcome::Idle => {
+                        runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+                        runtime_retry_not_before = Instant::now();
+                    }
+                    RuntimeFlushOutcome::Retryable => {
+                        runtime_retry_not_before = Instant::now() + runtime_retry_delay;
+                        runtime_retry_delay = runtime_retry_delay
+                            .saturating_mul(2)
+                            .min(RUNTIME_UPLOAD_MAX_BACKOFF);
+                    }
+                    RuntimeFlushOutcome::Accepted { run_id, cursor } => {
+                        runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+                        runtime_retry_not_before = Instant::now();
+                        event_tx
+                            .send(RemoteEvent::RuntimeCursor { run_id, cursor })
+                            .map_err(|_| "The terminal remote-control owner stopped.".to_string())?;
+                    }
+                    RuntimeFlushOutcome::AccessTokenExpired => {
+                        refresh_enrollment_and_reconnect(
+                            &client,
+                            &mut enrollment,
+                            &mut runner_id,
+                            &start,
+                            &event_tx,
+                        )
+                        .await?;
+                        runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+                        runtime_retry_not_before = Instant::now();
+                    }
+                }
+            }
             () = tokio::time::sleep(SYNC_INTERVAL) => {
                 if enrollment_needs_refresh(&enrollment) {
                     // Proactive refresh before expiry; reconnect to keep runner lease valid.
                     match refresh_enrollment(&client, enrollment.persisted.clone()).await {
                         Ok(new_enrollment) => {
                             enrollment = new_enrollment;
-                            runner_id = connect_runner(&client, &enrollment, &start).await?;
+                            reconnect_runner(
+                                &client,
+                                &enrollment,
+                                &mut runner_id,
+                                &start,
+                                &event_tx,
+                            )
+                            .await?;
                         }
                         Err(err) if err == "runner_enrollment_revoked" => {
                             delete_persisted_enrollment();
                             enrollment = enroll_device(&client, &base, &start, &event_tx).await?;
-                            runner_id = connect_runner(&client, &enrollment, &start).await?;
+                            reconnect_runner(
+                                &client,
+                                &enrollment,
+                                &mut runner_id,
+                                &start,
+                                &event_tx,
+                            )
+                            .await?;
                         }
                         Err(err) => return Err(err),
                     }
@@ -943,6 +1888,157 @@ async fn relay_worker(
             }
         }
     }
+}
+
+impl RuntimeTransportOutbox {
+    fn enqueue(&mut self, run_id: &str, envelope: Value) -> Result<(), String> {
+        if !valid_opaque_ref(run_id) {
+            return Err("The local runtime queued an invalid run id.".to_string());
+        }
+        let seq = runtime_envelope_seq(&envelope)
+            .ok_or_else(|| "The local runtime queued an invalid event sequence.".to_string())?;
+        let encoded = serde_json::to_vec(&envelope)
+            .map_err(|_| "The local runtime could not encode an event.".to_string())?;
+        if encoded.len() > MAX_RUNTIME_ENVELOPE_BYTES {
+            return Err("The local runtime queued an oversized event.".to_string());
+        }
+        let key = (run_id.to_string(), seq);
+        if let Some(existing) = self.events.get(&key) {
+            if existing != &envelope {
+                return Err(
+                    "The local runtime changed an unacknowledged event sequence.".to_string(),
+                );
+            }
+            return Ok(());
+        }
+        self.events.insert(key, envelope);
+        Ok(())
+    }
+
+    async fn try_flush_one(
+        &mut self,
+        client: &Client,
+        enrollment: &LiveEnrollment,
+        runner_id: &str,
+    ) -> Result<RuntimeFlushOutcome, String> {
+        let Some(((run_id, seq), envelope)) = self
+            .events
+            .first_key_value()
+            .map(|(key, value)| (key.clone(), value.clone()))
+        else {
+            return Ok(RuntimeFlushOutcome::Idle);
+        };
+        match post_runtime_event(client, enrollment, runner_id, &run_id, seq, &envelope).await? {
+            RuntimePostOutcome::Retryable => Ok(RuntimeFlushOutcome::Retryable),
+            RuntimePostOutcome::AccessTokenExpired => Ok(RuntimeFlushOutcome::AccessTokenExpired),
+            RuntimePostOutcome::Accepted(cursor) => {
+                self.events.retain(|(pending_run, pending_seq), _| {
+                    pending_run != &run_id || *pending_seq > cursor
+                });
+                Ok(RuntimeFlushOutcome::Accepted { run_id, cursor })
+            }
+        }
+    }
+}
+
+/// Flushes every queued runtime envelope through the server-confirmed cursor
+/// before a stop may be acknowledged. Emits `RuntimeCursor` events so the
+/// controller compacts its journal as acknowledgements land. Failing to drain
+/// by `deadline` is a hard error: the stop is *not* confirmed and the caller
+/// must leave ownership locked.
+#[allow(clippy::too_many_arguments)]
+async fn drain_runtime_outbox_for_stop(
+    client: &Client,
+    enrollment: &mut LiveEnrollment,
+    runner_id: &mut String,
+    start: &RemoteStart,
+    event_tx: &mpsc::UnboundedSender<RemoteEvent>,
+    outbox: &mut RuntimeTransportOutbox,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+    while !outbox.events.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(
+                "queued runtime events were not server-acknowledged in time; the stop was not confirmed"
+                    .to_string(),
+            );
+        }
+        match outbox.try_flush_one(client, enrollment, runner_id).await? {
+            RuntimeFlushOutcome::Idle => break,
+            RuntimeFlushOutcome::Accepted { run_id, cursor } => {
+                delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
+                let _ = event_tx.send(RemoteEvent::RuntimeCursor { run_id, cursor });
+            }
+            RuntimeFlushOutcome::Retryable => {
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2).min(RUNTIME_UPLOAD_MAX_BACKOFF);
+            }
+            RuntimeFlushOutcome::AccessTokenExpired => {
+                refresh_enrollment_and_reconnect(client, enrollment, runner_id, start, event_tx)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn post_runtime_event(
+    client: &Client,
+    enrollment: &LiveEnrollment,
+    runner_id: &str,
+    run_id: &str,
+    seq: u64,
+    envelope: &Value,
+) -> Result<RuntimePostOutcome, String> {
+    let url = control_plane_url(
+        &enrollment.persisted.control_plane_base,
+        &["api", "local-runners", runner_id, "runs", run_id, "events"],
+        &[],
+    )?;
+    let response = match client
+        .post(url)
+        .bearer_auth(&enrollment.access_token)
+        .json(&json!({
+            "acknowledgements": [],
+            "envelopes": [envelope],
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(RuntimePostOutcome::Retryable),
+    };
+    let status = response.status();
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return Ok(RuntimePostOutcome::AccessTokenExpired);
+    }
+    if matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY | StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
+    {
+        return Ok(RuntimePostOutcome::Retryable);
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "The remote-control server rejected runtime event {seq} ({status})."
+        ));
+    }
+    let value = match read_bounded_json(response).await {
+        Ok(value) => value,
+        Err(_) => return Ok(RuntimePostOutcome::Retryable),
+    };
+    let Some(cursor) = value
+        .get("cursor")
+        .and_then(Value::as_u64)
+        .filter(|cursor| *cursor >= seq && *cursor <= JS_MAX_SAFE_INTEGER)
+    else {
+        // A success without a durable cursor is indistinguishable from a lost
+        // response. Retain and retry the exact same event body.
+        return Ok(RuntimePostOutcome::Retryable);
+    };
+    Ok(RuntimePostOutcome::Accepted(cursor))
 }
 
 impl PersistedEnrollment {
@@ -1144,31 +2240,114 @@ async fn connect_runner(
     client: &Client,
     enrollment: &LiveEnrollment,
     start: &RemoteStart,
-) -> Result<String, String> {
+) -> Result<RunnerConnection, String> {
     let value = runner_request(
         client,
         enrollment,
         Method::POST,
         &["api", "local-runners", "connect"],
         &[],
-        Some(json!({
-            "deviceId": enrollment.persisted.device_id,
-            "targetRef": start.target_ref,
-            "displayLabel": start.workspace_label,
-            "runtimeVersion": start.runtime_version,
-            "runtimeCommit": start.runtime_commit,
-            "capabilities": CAPABILITIES,
-            "status": "active",
-        })),
+        Some(connect_runner_body(enrollment, start)),
     )
     .await?;
-    value
+    parse_runner_connection(&value, enrollment, start)
+}
+
+fn connect_runner_body(enrollment: &LiveEnrollment, start: &RemoteStart) -> Value {
+    json!({
+        "deviceId": enrollment.persisted.device_id,
+        "targetRef": start.target_ref,
+        "displayLabel": start.workspace_label,
+        "runtimeVersion": start.runtime_version,
+        "runtimeCommit": start.runtime_commit,
+        "capabilities": CAPABILITIES,
+        "status": "active",
+        // This is the only session attachment input. It is an opaque runtime
+        // id, never a workspace path, prompt, environment, or credential.
+        "sessionRef": start.session_id,
+    })
+}
+
+fn parse_runner_connection(
+    value: &Value,
+    enrollment: &LiveEnrollment,
+    start: &RemoteStart,
+) -> Result<RunnerConnection, String> {
+    let response = value
+        .as_object()
+        .filter(|record| {
+            record.len() == 2 && record.contains_key("runner") && record.contains_key("attachment")
+        })
+        .ok_or_else(|| "Codewhale returned an invalid runner attachment response.".to_string())?;
+    let runner = response
         .get("runner")
-        .and_then(|value| value.get("id"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Codewhale returned an invalid runner lease.".to_string())?;
+    let runner_id = runner
+        .get("id")
         .and_then(Value::as_str)
         .filter(|value| valid_opaque_ref(value))
         .map(ToString::to_string)
-        .ok_or_else(|| "Codewhale returned an invalid runner lease.".to_string())
+        .ok_or_else(|| "Codewhale returned an invalid runner lease.".to_string())?;
+    let runner_binding_matches = runner.get("userId").and_then(Value::as_str)
+        == Some(enrollment.persisted.account_ref.as_str())
+        && runner.get("deviceId").and_then(Value::as_str)
+            == Some(enrollment.persisted.device_id.as_str())
+        && runner.get("targetRef").and_then(Value::as_str) == Some(start.target_ref.as_str())
+        && runner.get("runtimeVersion").and_then(Value::as_str)
+            == Some(start.runtime_version.as_str())
+        && runner.get("runtimeCommit").and_then(Value::as_str)
+            == Some(start.runtime_commit.as_str())
+        && runner.get("controlPath").and_then(Value::as_str) == Some("outbound_relay")
+        && runner.get("status").and_then(Value::as_str) == Some("active")
+        && runner.get("active").and_then(Value::as_bool) == Some(true)
+        && exact_capabilities(runner.get("capabilities"));
+    if !runner_binding_matches {
+        return Err("Codewhale returned a runner lease for a different session.".to_string());
+    }
+
+    let attachment = response
+        .get("attachment")
+        .and_then(Value::as_object)
+        .filter(|record| {
+            record.len() == 4
+                && record.contains_key("runId")
+                && record.contains_key("workspaceId")
+                && record.contains_key("runtimeCursor")
+                && record.contains_key("snapshotPresent")
+        })
+        .ok_or_else(|| "Codewhale returned an invalid session attachment.".to_string())?;
+    let run_id = attachment
+        .get("runId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_ref(value))
+        .map(ToString::to_string)
+        .ok_or_else(|| "Codewhale returned an invalid attached run.".to_string())?;
+    let workspace_id = attachment
+        .get("workspaceId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_ref(value))
+        .map(ToString::to_string)
+        .ok_or_else(|| "Codewhale returned an invalid attached workspace.".to_string())?;
+    let runtime_cursor = attachment
+        .get("runtimeCursor")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= JS_MAX_SAFE_INTEGER)
+        .ok_or_else(|| "Codewhale returned an invalid runtime event cursor.".to_string())?;
+    let snapshot_present = attachment
+        .get("snapshotPresent")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "Codewhale returned an invalid snapshot receipt.".to_string())?;
+
+    Ok(RunnerConnection {
+        runner_id,
+        attachment: RemoteAttachment {
+            run_id,
+            workspace_id,
+            runtime_cursor,
+            snapshot_present,
+        },
+    })
 }
 
 async fn post_heartbeat(
@@ -1552,17 +2731,31 @@ async fn refresh_enrollment_and_reconnect(
     match refresh_enrollment(client, enrollment.persisted.clone()).await {
         Ok(new_enrollment) => {
             *enrollment = new_enrollment;
-            *runner_id = connect_runner(client, enrollment, start).await?;
-            Ok(())
+            reconnect_runner(client, enrollment, runner_id, start, event_tx).await
         }
         Err(err) if err == "runner_enrollment_revoked" => {
             delete_persisted_enrollment();
             *enrollment = enroll_device(client, &base, start, event_tx).await?;
-            *runner_id = connect_runner(client, enrollment, start).await?;
-            Ok(())
+            reconnect_runner(client, enrollment, runner_id, start, event_tx).await
         }
         Err(err) => Err(err),
     }
+}
+
+async fn reconnect_runner(
+    client: &Client,
+    enrollment: &LiveEnrollment,
+    runner_id: &mut String,
+    start: &RemoteStart,
+    event_tx: &mpsc::UnboundedSender<RemoteEvent>,
+) -> Result<(), String> {
+    let connection = connect_runner(client, enrollment, start).await?;
+    *runner_id = connection.runner_id;
+    event_tx
+        .send(RemoteEvent::Attachment {
+            attachment: connection.attachment,
+        })
+        .map_err(|_| "The terminal remote-control owner stopped.".to_string())
 }
 
 fn enrollment_needs_refresh(enrollment: &LiveEnrollment) -> bool {
@@ -1659,6 +2852,18 @@ fn valid_opaque_ref(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
+fn valid_session_ref(value: &str) -> bool {
+    (1..=160).contains(&value.len())
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'@')
+        })
+        && !value.contains("..")
+}
+
 fn valid_secret(value: &str) -> bool {
     (32..=8192).contains(&value.len()) && !value.chars().any(char::is_whitespace)
 }
@@ -1681,10 +2886,104 @@ fn epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
+        Mock, MockServer, Request, Respond, ResponseTemplate,
         matchers::{body_json, method, path, query_param},
     };
+
+    #[derive(Clone, Default)]
+    struct AmbiguousRuntimeResponder {
+        bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl Respond for AmbiguousRuntimeResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).expect("runtime request JSON");
+            let mut bodies = self.bodies.lock().expect("runtime request bodies");
+            bodies.push(body);
+            if bodies.len() == 1 {
+                // Model a committed request whose response was truncated in
+                // transit. The client must keep the exact body and retry.
+                ResponseTemplate::new(200).set_body_raw("{", "application/json")
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "accepted": [],
+                    "count": 0,
+                    "cursor": 1
+                }))
+            }
+        }
+    }
+
+    fn text_message(role: &str, text: impl Into<String>) -> Message {
+        Message {
+            role: role.to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        }
+    }
+
+    fn fixture_start() -> RemoteStart {
+        RemoteStart {
+            workspace_label: "private-project".to_string(),
+            target_ref: "target_fixture".to_string(),
+            session_id: "session:fixture@01".to_string(),
+            runtime_version: "0.9.6".to_string(),
+            runtime_commit: "a".repeat(40),
+            journal_dir: None,
+        }
+    }
+
+    fn fixture_enrollment(base: &str) -> LiveEnrollment {
+        LiveEnrollment {
+            persisted: PersistedEnrollment {
+                schema_version: 1,
+                control_plane_base: base.to_string(),
+                runner_enrollment_id: "enrollment_fixture".to_string(),
+                account_ref: "account_fixture".to_string(),
+                device_id: "device_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                target_grant_ref: "grant_fixture".to_string(),
+                runtime_version: "0.9.6".to_string(),
+                runtime_commit: "a".repeat(40),
+                bootstrap_secret: "b".repeat(43),
+            },
+            access_token: "fixture-runner-access-token".to_string(),
+        }
+    }
+
+    fn fixture_connection_response() -> Value {
+        json!({
+            "runner": {
+                "id": "runner_fixture",
+                "userId": "account_fixture",
+                "deviceId": "device_fixture",
+                "targetRef": "target_fixture",
+                "displayLabel": "private-project",
+                "runtimeVersion": "0.9.6",
+                "runtimeCommit": "a".repeat(40),
+                "capabilities": CAPABILITIES,
+                "controlPath": "outbound_relay",
+                "status": "active",
+                "active": true,
+                "capacity": 1,
+                "lastHeartbeatAt": "2026-08-08T12:00:00.000Z",
+                "expiresAt": "2026-08-08T12:01:30.000Z",
+                "revokedAt": "",
+                "createdAt": "2026-08-08T12:00:00.000Z",
+                "updatedAt": "2026-08-08T12:00:00.000Z"
+            },
+            "attachment": {
+                "runId": "run_fixture",
+                "workspaceId": "workspace_fixture",
+                "runtimeCursor": 41,
+                "snapshotPresent": false
+            }
+        })
+    }
 
     #[test]
     fn target_identity_is_stable_without_exposing_the_path() {
@@ -1696,6 +2995,486 @@ mod tests {
             target,
             target_ref(Path::new("/Users/alice/private/project"), "session-123")
         );
+    }
+
+    #[tokio::test]
+    async fn connect_request_sends_only_the_opaque_session_ref_for_attachment() {
+        crate::tls::ensure_rustls_crypto_provider();
+        let server = MockServer::start().await;
+        let enrollment = fixture_enrollment(&format!("{}/", server.uri()));
+        let start = fixture_start();
+        let expected = json!({
+            "deviceId": "device_fixture",
+            "targetRef": "target_fixture",
+            "displayLabel": "private-project",
+            "runtimeVersion": "0.9.6",
+            "runtimeCommit": "a".repeat(40),
+            "capabilities": CAPABILITIES,
+            "status": "active",
+            "sessionRef": "session:fixture@01"
+        });
+        assert_eq!(connect_runner_body(&enrollment, &start), expected);
+        for forbidden in [
+            "sessionId",
+            "workspacePath",
+            "path",
+            "prompt",
+            "environment",
+            "env",
+            "token",
+            "credential",
+        ] {
+            assert!(expected.get(forbidden).is_none(), "leaked {forbidden}");
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/local-runners/connect"))
+            .and(body_json(expected))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fixture_connection_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fixture client");
+
+        let connection = connect_runner(&client, &enrollment, &start)
+            .await
+            .expect("strict runner attachment");
+
+        assert_eq!(connection.runner_id, "runner_fixture");
+        assert_eq!(connection.attachment.run_id, "run_fixture");
+        assert_eq!(connection.attachment.runtime_cursor, 41);
+        assert!(!connection.attachment.snapshot_present);
+    }
+
+    #[test]
+    fn attachment_response_validation_fails_closed() {
+        let enrollment = fixture_enrollment("https://api.codewhale.net/");
+        let start = fixture_start();
+        let valid = fixture_connection_response();
+        assert!(parse_runner_connection(&valid, &enrollment, &start).is_ok());
+
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove("attachment");
+        assert!(parse_runner_connection(&missing, &enrollment, &start).is_err());
+
+        let mut oversized_cursor = valid.clone();
+        oversized_cursor["attachment"]["runtimeCursor"] = json!(JS_MAX_SAFE_INTEGER + 1);
+        assert!(parse_runner_connection(&oversized_cursor, &enrollment, &start).is_err());
+
+        let mut false_receipt = valid.clone();
+        false_receipt["attachment"]["snapshotPresent"] = json!("false");
+        assert!(parse_runner_connection(&false_receipt, &enrollment, &start).is_err());
+
+        let mut extra_authority = valid.clone();
+        extra_authority["attachment"]["workspacePath"] = json!("/private/project");
+        assert!(parse_runner_connection(&extra_authority, &enrollment, &start).is_err());
+
+        let mut wrong_control_path = valid;
+        wrong_control_path["runner"]["controlPath"] = json!("direct_native");
+        assert!(parse_runner_connection(&wrong_control_path, &enrollment, &start).is_err());
+    }
+
+    #[test]
+    fn attachment_cursor_seeds_the_first_runtime_event_sequence() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 41,
+                    snapshot_present: false,
+                },
+            })
+            .unwrap();
+
+        assert!(matches!(
+            controller.try_next_event(),
+            Some(RemoteEvent::Connected { .. })
+        ));
+        controller.upload_snapshot("run_fixture", &[]);
+
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("expected snapshot upload");
+        };
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["event"], "session.snapshot");
+        assert_eq!(envelopes[0]["seq"], 42);
+    }
+
+    #[test]
+    fn fresh_controller_refreshes_old_server_snapshot_then_deduplicates_reconnects() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 7,
+                    snapshot_present: true,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+
+        controller.upload_snapshot("run_fixture", &[]);
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("fresh controller must refresh saved history");
+        };
+        assert_eq!(envelopes[0]["seq"], 8);
+
+        event_tx
+            .send(RemoteEvent::Attachment {
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 7,
+                    snapshot_present: false,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        controller.upload_snapshot("run_fixture", &[]);
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("unacknowledged snapshot must be retried");
+        };
+        assert_eq!(envelopes[0]["seq"], 8);
+        controller.upload_snapshot("run_fixture", &[]);
+        assert!(worker_rx.try_recv().is_err());
+
+        event_tx
+            .send(RemoteEvent::Attachment {
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 8,
+                    snapshot_present: true,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        controller.upload_snapshot("run_fixture", &[]);
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reconnect_cursor_retires_only_the_acknowledged_prefix() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        controller.event_seq.insert("run_fixture".to_string(), 6);
+        controller.upload_envelope(
+            "run_fixture",
+            "item.delta",
+            None,
+            json!({ "delta": "seven" }),
+        );
+        controller.upload_envelope(
+            "run_fixture",
+            "item.delta",
+            None,
+            json!({ "delta": "eight" }),
+        );
+        worker_rx.try_recv().unwrap();
+        worker_rx.try_recv().unwrap();
+
+        event_tx
+            .send(RemoteEvent::Attachment {
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 7,
+                    snapshot_present: false,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("seq 8 must remain pending");
+        };
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["seq"], 8);
+        assert_eq!(
+            controller
+                .pending_runtime_events
+                .get("run_fixture")
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+
+        event_tx
+            .send(RemoteEvent::Attachment {
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 6,
+                    snapshot_present: false,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("older cursor cannot discard seq 8");
+        };
+        assert_eq!(envelopes[0]["seq"], 8);
+
+        event_tx
+            .send(RemoteEvent::RuntimeCursor {
+                run_id: "run_fixture".to_string(),
+                cursor: 8,
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        assert!(
+            !controller
+                .pending_runtime_events
+                .contains_key("run_fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_success_retries_the_identical_runtime_event_until_cursor_acceptance() {
+        crate::tls::ensure_rustls_crypto_provider();
+        let server = MockServer::start().await;
+        let responder = AmbiguousRuntimeResponder::default();
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/local-runners/runner_fixture/runs/run_fixture/events",
+            ))
+            .respond_with(responder.clone())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let enrollment = fixture_enrollment(&format!("{}/", server.uri()));
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fixture client");
+        let envelope = runtime_envelope(
+            1,
+            "item.delta",
+            None,
+            "2026-08-08T12:00:00Z".to_string(),
+            json!({ "delta": "exact body" }),
+        );
+        let mut outbox = RuntimeTransportOutbox::default();
+        outbox
+            .enqueue("run_fixture", envelope)
+            .expect("queue runtime event");
+
+        assert_eq!(
+            outbox
+                .try_flush_one(&client, &enrollment, "runner_fixture")
+                .await
+                .unwrap(),
+            RuntimeFlushOutcome::Retryable
+        );
+        assert_eq!(outbox.events.len(), 1);
+        assert_eq!(
+            outbox
+                .try_flush_one(&client, &enrollment, "runner_fixture")
+                .await
+                .unwrap(),
+            RuntimeFlushOutcome::Accepted {
+                run_id: "run_fixture".to_string(),
+                cursor: 1,
+            }
+        );
+        assert!(outbox.events.is_empty());
+        let bodies = responder.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+    }
+
+    #[test]
+    fn snapshot_envelope_is_unicode_safe_and_keeps_newest_history() {
+        let messages = (0..80)
+            .map(|index| {
+                let marker = format!("message-{index:02}-");
+                text_message(
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    marker + &"🫧\"\\\n".repeat(1_500),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let envelope = bounded_session_snapshot_envelope(1, &messages);
+        let encoded = serde_json::to_vec(&envelope).unwrap();
+        let retained = envelope["payload"]["messages"].as_array().unwrap();
+
+        assert!(encoded.len() <= SNAPSHOT_ENVELOPE_BYTE_BUDGET);
+        assert!(encoded.len() < MAX_RUNTIME_ENVELOPE_BYTES);
+        assert!(!retained.is_empty());
+        assert!(retained.len() <= MAX_SNAPSHOT_MESSAGES);
+        assert!(
+            retained.last().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("message-79-")
+        );
+        for message in retained {
+            let text = message["text"].as_str().unwrap();
+            assert!(!text.contains('\u{FFFD}'));
+            assert!(text.is_char_boundary(text.len()));
+        }
+    }
+
+    #[test]
+    fn snapshot_truncation_pins_the_exact_encoded_byte_boundary() {
+        let source = "🫧\"\\\n".repeat(40_000);
+        let message = text_message("assistant", source);
+        let envelope = bounded_session_snapshot_envelope(9, std::slice::from_ref(&message));
+        let encoded = serde_json::to_vec(&envelope).unwrap();
+        assert!(encoded.len() <= SNAPSHOT_ENVELOPE_BYTE_BUDGET);
+
+        let retained = envelope["payload"]["messages"][0]["text"].as_str().unwrap();
+        let projected = project_session_message(&message).unwrap().1;
+        let retained_chars = retained.chars().count();
+        let next = projected.chars().nth(retained_chars).unwrap();
+        let mut one_more = retained.to_string();
+        one_more.push(next);
+        let timestamp = envelope["timestamp"].as_str().unwrap();
+        let expanded = vec![json!({ "role": "assistant", "text": one_more })];
+        assert!(
+            snapshot_envelope_len(9, timestamp, &expanded) > SNAPSHOT_ENVELOPE_BYTE_BUDGET,
+            "one more Unicode scalar must cross the chosen encoded boundary"
+        );
+    }
+
+    #[test]
+    fn fatal_engine_error_projects_failure_and_releases_the_remote_run() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.activate_prompt("run_fixture", "turn_fixture");
+        let secret = "sk-runtime-secret-that-must-not-cross-the-relay";
+        let message = format!(
+            "DeepSeek API key: {secret}\n{}",
+            "🫧".repeat(MAX_REMOTE_ERROR_MESSAGE_BYTES)
+        );
+
+        controller.observe_engine_event(&EngineEvent::Error {
+            envelope: crate::error_taxonomy::ErrorEnvelope::new(
+                crate::error_taxonomy::ErrorCategory::Authentication,
+                crate::error_taxonomy::ErrorSeverity::Critical,
+                false,
+                "llm_auth_error",
+                message,
+            ),
+            recoverable: false,
+        });
+
+        assert!(!controller.has_active_run());
+        let WorkerCommand::Upload {
+            envelopes: failed, ..
+        } = worker_rx.try_recv().expect("fatal item upload")
+        else {
+            panic!("fatal error must upload an item.failed envelope");
+        };
+        let WorkerCommand::Upload {
+            envelopes: completed,
+            ..
+        } = worker_rx.try_recv().expect("fatal turn upload")
+        else {
+            panic!("fatal error must upload a terminal turn envelope");
+        };
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["seq"], 1);
+        assert_eq!(failed[0]["event"], "item.failed");
+        assert_eq!(failed[0]["turn_id"], "turn_fixture");
+        assert_eq!(failed[0]["payload"]["item"]["kind"], "error");
+        assert_eq!(failed[0]["payload"]["item"]["status"], "failed");
+        let projected = failed[0]["payload"]["item"]["detail"]
+            .as_str()
+            .expect("bounded error detail");
+        assert!(projected.len() <= MAX_REMOTE_ERROR_MESSAGE_BYTES);
+        assert!(projected.is_char_boundary(projected.len()));
+        assert!(!projected.contains(secret));
+        assert!(projected.contains("[redacted]"));
+
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["seq"], 2);
+        assert_eq!(completed[0]["event"], "turn.completed");
+        assert_eq!(completed[0]["turn_id"], "turn_fixture");
+        assert_eq!(completed[0]["payload"]["turn"]["status"], "failed");
+        assert_eq!(
+            controller.pending_runtime_events["run_fixture"]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn recoverable_engine_error_stays_nonterminal_for_provider_fallback() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.activate_prompt("run_fixture", "turn_fixture");
+
+        controller.observe_engine_event(&EngineEvent::Error {
+            envelope: crate::error_taxonomy::ErrorEnvelope::network(
+                "temporary provider connection failure",
+            ),
+            recoverable: true,
+        });
+
+        assert!(controller.active_run_matches("run_fixture"));
+        assert!(controller.pending_runtime_events.is_empty());
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn terminal_pre_dispatch_error_uses_the_same_failure_projection() {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.activate_prompt("run_fixture", "turn_fixture");
+
+        controller.fail_active_dispatch(
+            "DeepSeek API key: sk-preflight-secret-that-must-not-cross-the-relay",
+        );
+
+        assert!(!controller.has_active_run());
+        let WorkerCommand::Upload { envelopes, .. } =
+            worker_rx.try_recv().expect("pre-dispatch item upload")
+        else {
+            panic!("pre-dispatch error must upload item.failed");
+        };
+        assert_eq!(envelopes[0]["event"], "item.failed");
+        assert!(!envelopes[0].to_string().contains("sk-preflight-secret"));
+        let WorkerCommand::Upload { envelopes, .. } =
+            worker_rx.try_recv().expect("pre-dispatch turn upload")
+        else {
+            panic!("pre-dispatch error must upload turn.completed");
+        };
+        assert_eq!(envelopes[0]["event"], "turn.completed");
+        assert_eq!(envelopes[0]["payload"]["turn"]["status"], "failed");
+        assert!(worker_rx.try_recv().is_err());
     }
 
     #[test]
@@ -1851,16 +3630,23 @@ mod tests {
             session_id: "session_fixture".to_string(),
             runtime_version: "0.9.1".to_string(),
             runtime_commit: "a".repeat(40),
+            journal_dir: None,
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("previous remote lease"));
     }
 
     #[test]
-    fn failed_worker_allows_snapshot_retry_without_releasing_ownership() {
+    fn failed_worker_retains_snapshot_marker_and_exact_unacked_event() {
         let mut controller = RemoteControlController::default();
         controller.status = Status::Connected;
-        controller.uploaded_snapshots.insert("run-1".to_string());
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.upload_snapshot("run-1", &[]);
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("snapshot queued");
+        };
+        let exact = envelopes[0].clone();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         controller.event_rx = Some(event_rx);
         event_tx
@@ -1871,7 +3657,14 @@ mod tests {
             controller.try_next_event(),
             Some(RemoteEvent::Failed(_))
         ));
-        assert!(controller.uploaded_snapshots.is_empty());
+        assert!(controller.uploaded_snapshots.contains("run-1"));
+        assert_eq!(
+            controller.pending_runtime_events["run-1"]
+                .values()
+                .next()
+                .map(|entry| &entry.envelope),
+            Some(&exact)
+        );
         assert!(controller.blocks_local_input());
     }
 
@@ -1966,5 +3759,573 @@ mod tests {
         )
         .await
         .expect("durable accepted acknowledgement");
+    }
+
+    fn wired_controller() -> (
+        RemoteControlController,
+        mpsc::UnboundedReceiver<WorkerCommand>,
+        mpsc::UnboundedSender<RemoteEvent>,
+    ) {
+        let mut controller = RemoteControlController::default();
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        (controller, worker_rx, event_tx)
+    }
+
+    fn turn_complete_event() -> EngineEvent {
+        EngineEvent::TurnComplete {
+            usage: crate::models::Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        }
+    }
+
+    #[test]
+    fn stop_refusal_holds_until_terminal_event_is_acknowledged() {
+        let (mut controller, mut worker_rx, event_tx) = wired_controller();
+        controller.activate_prompt("run_fixture", "turn_fixture");
+        let refusal = controller.stop_refusal().expect("active turn blocks stop");
+        assert!(refusal.contains("active remote turn"), "{refusal}");
+
+        controller.observe_engine_event(&turn_complete_event());
+        assert!(
+            !controller.has_active_run(),
+            "the terminal event releases the run binding"
+        );
+        let refusal = controller
+            .stop_refusal()
+            .expect("a queued but unacknowledged terminal event must still block stop");
+        assert!(refusal.contains("acknowledged"), "{refusal}");
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("the terminal envelope must be handed to the transport");
+        };
+        assert_eq!(envelopes[0]["event"], "turn.completed");
+        let seq = envelopes[0]["seq"].as_u64().expect("terminal seq");
+
+        event_tx
+            .send(RemoteEvent::RuntimeCursor {
+                run_id: "run_fixture".to_string(),
+                cursor: seq,
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        assert_eq!(
+            controller.stop_refusal(),
+            None,
+            "a server-acknowledged terminal event unblocks stop"
+        );
+    }
+
+    #[test]
+    fn failed_stop_keeps_ownership_locked_with_no_dual_ownership() {
+        let (mut controller, _worker_rx, event_tx) = wired_controller();
+        controller.status = Status::Connected;
+        controller.stop();
+        assert_eq!(controller.status, Status::Stopping);
+        assert!(
+            controller.blocks_local_input(),
+            "stopping must not return local input before confirmation"
+        );
+
+        // The worker could not confirm the drain or the offline heartbeat.
+        event_tx
+            .send(RemoteEvent::Failed(
+                "the offline heartbeat could not be delivered".to_string(),
+            ))
+            .unwrap();
+        let event = controller.try_next_event().unwrap();
+        assert!(matches!(event, RemoteEvent::Failed(_)));
+        assert!(
+            controller.blocks_local_input(),
+            "an unconfirmed stop must keep ownership locked through the lease expiry"
+        );
+        assert!(controller.ownership_blocked_until.is_some());
+        assert!(controller.status_line().contains("disconnected"));
+        assert!(
+            controller.try_next_event().is_none(),
+            "ownership must not be restored while the lease could still be live"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_drain_flushes_runtime_outbox_with_byte_identical_retries() {
+        crate::tls::ensure_rustls_crypto_provider();
+        let server = MockServer::start().await;
+        let responder = AmbiguousRuntimeResponder::default();
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/local-runners/runner_fixture/runs/run_fixture/events",
+            ))
+            .respond_with(responder.clone())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut enrollment = fixture_enrollment(&format!("{}/", server.uri()));
+        let mut runner_id = "runner_fixture".to_string();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fixture client");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut outbox = RuntimeTransportOutbox::default();
+        outbox
+            .enqueue(
+                "run_fixture",
+                runtime_envelope(
+                    1,
+                    "turn.completed",
+                    Some("turn_fixture"),
+                    "2026-08-08T12:00:00Z".to_string(),
+                    json!({ "turn": { "status": "completed", "usage": {} } }),
+                ),
+            )
+            .expect("queue terminal envelope");
+
+        drain_runtime_outbox_for_stop(
+            &client,
+            &mut enrollment,
+            &mut runner_id,
+            &fixture_start(),
+            &event_tx,
+            &mut outbox,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("the drain must complete before stop is confirmed");
+
+        assert!(outbox.events.is_empty(), "the outbox must drain fully");
+        let RemoteEvent::RuntimeCursor { run_id, cursor } = event_rx
+            .try_recv()
+            .expect("cursor event for journal compaction")
+        else {
+            panic!("drain must surface the server cursor");
+        };
+        assert_eq!(run_id, "run_fixture");
+        assert_eq!(cursor, 1);
+        let bodies = responder.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "ambiguous response must be retried");
+        assert_eq!(bodies[0], bodies[1], "retries must be byte-identical");
+    }
+
+    #[tokio::test]
+    async fn stop_drain_deadline_failure_refuses_to_confirm_stop() {
+        crate::tls::ensure_rustls_crypto_provider();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/local-runners/runner_fixture/runs/run_fixture/events",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let mut enrollment = fixture_enrollment(&format!("{}/", server.uri()));
+        let mut runner_id = "runner_fixture".to_string();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("fixture client");
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut outbox = RuntimeTransportOutbox::default();
+        outbox
+            .enqueue(
+                "run_fixture",
+                runtime_envelope(
+                    1,
+                    "turn.completed",
+                    Some("turn_fixture"),
+                    "2026-08-08T12:00:00Z".to_string(),
+                    json!({ "turn": { "status": "completed", "usage": {} } }),
+                ),
+            )
+            .expect("queue terminal envelope");
+
+        let error = drain_runtime_outbox_for_stop(
+            &client,
+            &mut enrollment,
+            &mut runner_id,
+            &fixture_start(),
+            &event_tx,
+            &mut outbox,
+            Instant::now() + Duration::from_millis(700),
+        )
+        .await
+        .expect_err("an undrained outbox must fail the stop");
+        assert!(error.contains("not confirmed"), "{error}");
+        assert!(
+            !outbox.events.is_empty(),
+            "the exact unacknowledged envelope must be retained for the reconnect resend"
+        );
+    }
+
+    #[test]
+    fn journal_roundtrip_restores_unacknowledged_envelopes_byte_identically() {
+        let dir = tempfile::tempdir().expect("journal tempdir");
+        let journal =
+            RuntimeEventJournal::open(dir.path(), "session:fixture@01").expect("journal setup");
+        assert!(journal.load().expect("missing file is empty").is_empty());
+
+        let delta = runtime_envelope(
+            1,
+            "item.delta",
+            Some("turn_fixture"),
+            "2026-08-08T12:00:00Z".to_string(),
+            json!({ "kind": "agent_message", "delta": "exact 🫧 body" }),
+        );
+        let terminal = runtime_envelope(
+            2,
+            "turn.completed",
+            Some("turn_fixture"),
+            "2026-08-08T12:00:01Z".to_string(),
+            json!({ "turn": { "status": "completed", "usage": {} } }),
+        );
+        let mut pending: HashMap<String, BTreeMap<u64, PendingRuntimeEnvelope>> = HashMap::new();
+        let mut events = BTreeMap::new();
+        for envelope in [delta.clone(), terminal.clone()] {
+            let seq = runtime_envelope_seq(&envelope).unwrap();
+            let encoded_len = serde_json::to_vec(&envelope).unwrap().len();
+            let integrity = runtime_envelope_event(&envelope).is_some_and(integrity_critical_event);
+            events.insert(
+                seq,
+                PendingRuntimeEnvelope {
+                    envelope,
+                    encoded_len,
+                    integrity,
+                    handed_off: true,
+                },
+            );
+        }
+        pending.insert("run_fixture".to_string(), events);
+        journal.persist(&pending).expect("atomic persist");
+
+        let reopened =
+            RuntimeEventJournal::open(dir.path(), "session:fixture@01").expect("journal reopen");
+        let restored = reopened.load().expect("verified load");
+        let events = restored.get("run_fixture").expect("restored run");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            serde_json::to_vec(&events[&1]).unwrap(),
+            serde_json::to_vec(&delta).unwrap(),
+            "a restored envelope must re-serialize byte-identically for ambiguous retries"
+        );
+        assert_eq!(
+            serde_json::to_vec(&events[&2]).unwrap(),
+            serde_json::to_vec(&terminal).unwrap()
+        );
+
+        // Compaction: an empty pending set removes the file entirely.
+        pending.get_mut("run_fixture").unwrap().clear();
+        journal.persist(&pending).expect("compacting persist");
+        assert!(!journal.path.exists(), "acknowledged journals are deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_directory_and_file_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().expect("journal tempdir");
+        let dir = base.path().join("journal");
+        let journal = RuntimeEventJournal::open(&dir, "session:fixture@01").expect("journal setup");
+        let mut pending: HashMap<String, BTreeMap<u64, PendingRuntimeEnvelope>> = HashMap::new();
+        let envelope = runtime_envelope(
+            1,
+            "turn.completed",
+            None,
+            "2026-08-08T12:00:00Z".to_string(),
+            json!({ "turn": { "status": "completed", "usage": {} } }),
+        );
+        let encoded_len = serde_json::to_vec(&envelope).unwrap().len();
+        pending.insert(
+            "run_fixture".to_string(),
+            BTreeMap::from([(
+                1,
+                PendingRuntimeEnvelope {
+                    envelope,
+                    encoded_len,
+                    integrity: true,
+                    handed_off: true,
+                },
+            )]),
+        );
+        journal.persist(&pending).expect("atomic persist");
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "journal directory must be private");
+        let file_mode = std::fs::metadata(&journal.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "journal file must be owner-only");
+    }
+
+    #[test]
+    fn corrupt_journal_fails_closed_and_start_quarantines_it() {
+        let dir = tempfile::tempdir().expect("journal tempdir");
+        let probe =
+            RuntimeEventJournal::open(dir.path(), "session:fixture@01").expect("journal setup");
+        std::fs::write(&probe.path, b"{ not json").expect("plant corrupt journal");
+
+        let mut controller = RemoteControlController::default();
+        let error = controller
+            .start(RemoteStart {
+                journal_dir: Some(dir.path().to_path_buf()),
+                ..fixture_start()
+            })
+            .expect_err("a corrupt journal must fail closed");
+        assert_eq!(error, JOURNAL_UNTRUSTED_ERROR);
+        assert_eq!(controller.status, Status::Off, "no relay may start");
+        assert!(
+            !probe.path.exists(),
+            "the untrusted journal must not stay in place"
+        );
+        assert!(
+            probe.path.with_extension("corrupt").exists(),
+            "the untrusted journal is quarantined, not silently discarded"
+        );
+
+        // A mismatched session tag is equally untrusted.
+        let other =
+            RuntimeEventJournal::open(dir.path(), "session:fixture@02").expect("journal setup");
+        std::fs::write(
+            &other.path,
+            serde_json::to_vec(&json!({
+                "schemaVersion": JOURNAL_SCHEMA_VERSION,
+                "session": "00000000000000000000000000000000",
+                "runs": {},
+            }))
+            .unwrap(),
+        )
+        .expect("plant mismatched journal");
+        assert_eq!(other.load().unwrap_err(), JOURNAL_UNTRUSTED_ERROR);
+    }
+
+    #[test]
+    fn start_recovers_journaled_envelopes_and_resends_on_connect() {
+        let dir = tempfile::tempdir().expect("journal tempdir");
+        {
+            let journal =
+                RuntimeEventJournal::open(dir.path(), "session:fixture@01").expect("journal setup");
+            let envelope = runtime_envelope(
+                3,
+                "turn.completed",
+                Some("turn_fixture"),
+                "2026-08-08T12:00:00Z".to_string(),
+                json!({ "turn": { "status": "completed", "usage": {} } }),
+            );
+            let encoded_len = serde_json::to_vec(&envelope).unwrap().len();
+            let pending = HashMap::from([(
+                "run_fixture".to_string(),
+                BTreeMap::from([(
+                    3,
+                    PendingRuntimeEnvelope {
+                        envelope,
+                        encoded_len,
+                        integrity: true,
+                        handed_off: true,
+                    },
+                )]),
+            )]);
+            journal
+                .persist(&pending)
+                .expect("previous process persisted");
+        }
+
+        let mut controller = RemoteControlController::default();
+        let journal =
+            RuntimeEventJournal::open(dir.path(), "session:fixture@01").expect("journal setup");
+        controller.reset_pending_from(journal.load().expect("clean recovery"));
+        controller.journal = Some(journal);
+        assert!(
+            controller.has_unacknowledged_integrity_events(),
+            "recovered terminal state must gate /rc stop until acknowledged"
+        );
+        assert!(controller.stop_refusal().is_some());
+
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_other".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 0,
+                    snapshot_present: false,
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("recovered envelopes must resend on connect");
+        };
+        assert_eq!(envelopes[0]["seq"], 3);
+        assert_eq!(envelopes[0]["event"], "turn.completed");
+    }
+
+    #[test]
+    fn delta_pressure_sheds_to_resync_and_preserves_integrity_capacity() {
+        let (mut controller, _worker_rx, _event_tx) = wired_controller();
+        let delta_budget = MAX_JOURNAL_EVENTS - JOURNAL_RESERVED_INTEGRITY_EVENTS;
+        for index in 0..delta_budget {
+            assert!(
+                controller.queue_runtime_envelope(
+                    "run_fixture",
+                    runtime_envelope(
+                        (index + 1) as u64,
+                        "item.delta",
+                        Some("turn_fixture"),
+                        "2026-08-08T12:00:00Z".to_string(),
+                        json!({ "kind": "agent_message", "delta": index.to_string() }),
+                    ),
+                ),
+                "delta {index} fits the unreserved budget"
+            );
+        }
+        assert_eq!(controller.pending_event_count, delta_budget);
+
+        let shed_seq = (delta_budget + 1) as u64;
+        assert!(
+            !controller.queue_runtime_envelope(
+                "run_fixture",
+                runtime_envelope(
+                    shed_seq,
+                    "item.delta",
+                    Some("turn_fixture"),
+                    "2026-08-08T12:00:00Z".to_string(),
+                    json!({ "kind": "agent_message", "delta": "over budget" }),
+                ),
+            ),
+            "a delta beyond the unreserved budget is shed"
+        );
+        assert_eq!(controller.pending_event_count, delta_budget);
+        assert!(controller.resync_required.contains("run_fixture"));
+        assert_ne!(
+            controller.status,
+            Status::Failed,
+            "delta pressure is ordinary and must not fail the relay"
+        );
+
+        // Reserved capacity keeps the terminal boundary deliverable, and the
+        // terminal boundary schedules the resynchronization snapshot.
+        controller.activate_prompt("run_fixture", "turn_fixture");
+        controller.observe_engine_event(&turn_complete_event());
+        assert!(
+            controller.has_unacknowledged_integrity_events(),
+            "the terminal envelope must use the reserved capacity"
+        );
+        assert_eq!(
+            controller.take_pending_resync().as_deref(),
+            Some("run_fixture"),
+            "the shed run resynchronizes at its terminal boundary"
+        );
+        controller.upload_resync_snapshot("run_fixture", &[]);
+        assert!(
+            controller
+                .pending_runtime_events
+                .get("run_fixture")
+                .is_some_and(|events| events.values().any(|entry| runtime_envelope_event(
+                    &entry.envelope
+                ) == Some("session.snapshot"))),
+            "the bounded snapshot restores account truth"
+        );
+    }
+
+    #[test]
+    fn integrity_overflow_fails_closed_without_restoring_input() {
+        let (mut controller, _worker_rx, _event_tx) = wired_controller();
+        controller.status = Status::Connected;
+        for index in 0..MAX_JOURNAL_EVENTS {
+            assert!(controller.queue_runtime_envelope(
+                "run_fixture",
+                runtime_envelope(
+                    (index + 1) as u64,
+                    "item.failed",
+                    Some("turn_fixture"),
+                    "2026-08-08T12:00:00Z".to_string(),
+                    json!({ "item": { "id": index.to_string(), "kind": "error" } }),
+                ),
+            ));
+        }
+        assert!(!controller.queue_runtime_envelope(
+            "run_fixture",
+            runtime_envelope(
+                (MAX_JOURNAL_EVENTS + 1) as u64,
+                "turn.completed",
+                Some("turn_fixture"),
+                "2026-08-08T12:00:00Z".to_string(),
+                json!({ "turn": { "status": "failed", "usage": {} } }),
+            ),
+        ));
+        assert_eq!(
+            controller.status,
+            Status::Failed,
+            "losing integrity state can never be silent"
+        );
+        assert!(
+            controller.blocks_local_input(),
+            "a failed-closed relay keeps ownership locked"
+        );
+    }
+
+    #[test]
+    fn message_deltas_coalesce_until_a_handoff_boundary() {
+        let (mut controller, mut worker_rx, _event_tx) = wired_controller();
+        controller.activate_prompt("run_fixture", "turn_fixture");
+        controller.observe_engine_event(&EngineEvent::MessageDelta {
+            index: 0,
+            content: "Hello ".to_string(),
+        });
+        controller.observe_engine_event(&EngineEvent::MessageDelta {
+            index: 0,
+            content: "world".to_string(),
+        });
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "deferred deltas coalesce before any transport handoff"
+        );
+        let events = controller
+            .pending_runtime_events
+            .get("run_fixture")
+            .unwrap();
+        assert_eq!(events.len(), 1, "both deltas share one envelope");
+        assert_eq!(
+            events.values().next().unwrap().envelope["payload"]["delta"],
+            "Hello world"
+        );
+
+        controller.observe_engine_event(&EngineEvent::ToolCallStarted {
+            id: "tool_fixture".to_string(),
+            name: "shell".to_string(),
+            input: json!({}),
+        });
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("the coalesced delta must hand off before a later event");
+        };
+        assert_eq!(envelopes[0]["event"], "item.delta");
+        assert_eq!(envelopes[0]["payload"]["delta"], "Hello world");
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("the tool event follows the coalesced delta");
+        };
+        assert_eq!(envelopes[0]["event"], "item.started");
+
+        // Once handed off an envelope is immutable; new deltas open a fresh
+        // envelope that flushes on the next UI poll.
+        controller.observe_engine_event(&EngineEvent::MessageDelta {
+            index: 0,
+            content: "again".to_string(),
+        });
+        assert!(worker_rx.try_recv().is_err());
+        assert!(controller.try_next_event().is_none());
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx.try_recv().unwrap() else {
+            panic!("the UI poll hands the deferred delta to the transport");
+        };
+        assert_eq!(envelopes[0]["payload"]["delta"], "again");
     }
 }

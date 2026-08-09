@@ -857,6 +857,7 @@ pub(crate) fn build_dispatch_error_closure(
               _engine_handle: &EngineHandle,
               _config: &Config|
               -> anyhow::Result<()> {
+            app.remote_control.fail_active_dispatch(&error);
             app.dispatch_in_flight = false;
             // Roll back the optimistic sync prepare mutations.
             app.is_loading = prepare.snapshot.is_loading;

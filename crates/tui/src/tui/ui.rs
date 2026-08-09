@@ -708,8 +708,11 @@ async fn drain_remote_control_events(
             crate::remote_control::RemoteEvent::Connected {
                 account_ref,
                 runner_id,
+                attachment,
                 ..
             } => {
+                app.remote_control
+                    .upload_snapshot(&attachment.run_id, &app.api_messages);
                 let status = format!(
                     "REMOTE CONTROL · account {account_ref} · runner {runner_id} · /rc stop returns input here"
                 );
@@ -720,6 +723,16 @@ async fn drain_remote_control_events(
                 });
                 app.status_message = Some(status.clone());
                 app.sticky_status = Some(StatusToast::new(status, StatusToastLevel::Warning, None));
+            }
+            crate::remote_control::RemoteEvent::Attachment { attachment } => {
+                // Reconnect responses carry the server's current cursor and
+                // snapshot receipt. `try_next_event` applies that truth before
+                // this handler, so this is either a no-op or one bounded retry.
+                app.remote_control
+                    .upload_snapshot(&attachment.run_id, &app.api_messages);
+            }
+            crate::remote_control::RemoteEvent::RuntimeCursor { .. } => {
+                // The controller has already retired the acknowledged prefix.
             }
             crate::remote_control::RemoteEvent::Failed(error) => {
                 let status = format!(
@@ -807,6 +820,9 @@ async fn drain_remote_control_events(
                                     .acknowledge(&run_id, seq, &command, "applied", None);
                             }
                             Ok(()) => {
+                                app.remote_control.fail_active_dispatch(
+                                    "The remote prompt was blocked before dispatch.",
+                                );
                                 app.remote_control.acknowledge(
                                     &run_id,
                                     seq,
@@ -819,6 +835,7 @@ async fn drain_remote_control_events(
                                 );
                             }
                             Err(error) => {
+                                app.remote_control.fail_active_dispatch(&error.to_string());
                                 app.remote_control.acknowledge(
                                     &run_id,
                                     seq,
@@ -905,6 +922,20 @@ fn start_remote_control_session(app: &mut App) {
     let runtime_commit = option_env!("CODEWHALE_BUILD_COMMIT")
         .unwrap_or("")
         .to_string();
+    // The crash-recoverable delivery journal is mandatory outside tests: it is
+    // what lets an interrupted session prove which terminal/approval events
+    // never reached the account before handing the session back.
+    let journal_dir = match codewhale_config::codewhale_home() {
+        Ok(home) => home.join("remote-control"),
+        Err(_) => {
+            let error =
+                "Remote control needs a writable Codewhale home directory for its delivery journal."
+                    .to_string();
+            app.status_message = Some(error.clone());
+            app.push_status_toast(error, StatusToastLevel::Error, Some(12_000));
+            return;
+        }
+    };
     match app
         .remote_control
         .start(crate::remote_control::RemoteStart {
@@ -913,6 +944,7 @@ fn start_remote_control_session(app: &mut App) {
             session_id,
             runtime_version: env!("CARGO_PKG_VERSION").to_string(),
             runtime_commit,
+            journal_dir: Some(journal_dir),
         }) {
         Ok(()) => {
             let status = app.remote_control.status_line();
