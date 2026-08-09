@@ -214,6 +214,21 @@ assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
 
+const cnbRustGates = cnb.match(
+  /\.rust_workspace_gates_stage: &rust_workspace_gates_stage([\s\S]*?)\n\.linux_rust_gates:/,
+);
+assert.ok(cnbRustGates, "CNB must retain the shared Rust workspace gate");
+assert.match(
+  cnbRustGates[1],
+  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked/,
+  "CNB must serialize the memory-heavy Rust gate without weakening its checks",
+);
+assert.equal(
+  (cnb.match(/^\s+- \*rust_workspace_gates_stage$/gm) || []).length,
+  2,
+  "both CNB Rust pipelines must reuse the constrained workspace gate",
+);
+
 const cnbPreflight = cnb.match(
   /\.linux_release_preflight: &linux_release_preflight([\s\S]*?)\nmain:/,
 );

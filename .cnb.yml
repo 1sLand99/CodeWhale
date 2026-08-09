@@ -19,8 +19,15 @@
 
 .rust_workspace_gates_stage: &rust_workspace_gates_stage
   name: rust workspace gates
+  # The all-feature TUI test crate is large enough that concurrent rustc and
+  # clippy processes or disposable test debug metadata can exceed the shared
+  # CNB runner's memory. Keep the full gate surface, but serialize Cargo,
+  # omit test-only debug tables, and allow the bounded run to finish.
+  timeout: 45m
   script: |
     set -eu
+    export CARGO_BUILD_JOBS=1
+    export CARGO_PROFILE_TEST_DEBUG=0
     ./scripts/release/check-versions.sh
     ./scripts/release/check-ohos-deps.sh
     cargo fmt --all -- --check
