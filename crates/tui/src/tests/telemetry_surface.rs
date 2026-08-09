@@ -38,6 +38,33 @@ fn every_surface_is_named_by_the_subcommand_not_the_executable() {
 }
 
 #[test]
+fn read_only_diagnostics_never_arm_usage_counting() {
+    for args in [
+        vec!["codewhale-tui", "doctor"],
+        vec!["codewhale-tui", "doctor", "--json"],
+        vec!["codewhale-tui", "session-diagnostics", "session.jsonl"],
+        vec!["codewhale-tui", "setup", "--status"],
+    ] {
+        let command = command_of(&args);
+        assert!(
+            telemetry_command_is_read_only(command.as_ref()),
+            "{args:?} must remain state-free"
+        );
+    }
+
+    for args in [
+        vec!["codewhale-tui", "exec", "hello"],
+        vec!["codewhale-tui", "setup", "--skills"],
+    ] {
+        let command = command_of(&args);
+        assert!(
+            !telemetry_command_is_read_only(command.as_ref()),
+            "{args:?} is not a read-only diagnostic"
+        );
+    }
+}
+
+#[test]
 fn the_session_source_distinguishes_resume_and_fork_from_a_fresh_launch() {
     assert_eq!(telemetry_session_source(None), SessionSource::Interactive);
     assert_eq!(

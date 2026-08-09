@@ -1656,6 +1656,14 @@ fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::
     }
 }
 
+/// Read-only diagnostics must not create telemetry state as a side effect.
+fn telemetry_command_is_read_only(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Doctor(_) | Commands::SessionDiagnostics(_))
+    ) || matches!(command, Some(Commands::Setup(args)) if args.status)
+}
+
 /// Resolve the emit predicate and arm, once, before anything can record.
 ///
 /// This is the read that v1 of the design was missing entirely:
@@ -1670,6 +1678,9 @@ fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::
 /// `parse_bool`, the `DEEPSEEK_TELEMETRY` alias, and the floor into a second
 /// source of truth.
 fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
+    if telemetry_command_is_read_only(command) {
+        return;
+    }
     let surface = telemetry_surface(command);
     let Ok(store) = codewhale_config::ConfigStore::load(cli.config.clone()) else {
         return;

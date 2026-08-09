@@ -99,7 +99,8 @@ then reading the trials Codewhale lost.
   file/repo/branch names, model content, credentials, or a per-turn/per-tool
   timeline. The random install id rotates every 90 days and is deleted on
   opt-out. This makes daily unique-install counts representative without
-  expanding what is collected.
+  expanding what is collected. Read-only `doctor`, `session-diagnostics`, and
+  `setup --status` runs never arm counting or create telemetry state.
 - **`Bash action="wait"` blocks by default.** It previously computed blocking
   from a separate `wait` boolean defaulting to false, so
   `{"action":"wait","task_id":...,"timeout_ms":600000}` returned immediately
