@@ -996,6 +996,8 @@ async fn auto_route_inventory_recommendation(
         selected_model_mode,
         selected_thinking_mode,
     );
+    let request_route =
+        client.effective_route_envelope(&inventory.router_model, chrono::Utc::now());
     let request = MessageRequest {
         model: inventory.router_model.to_string(),
         messages: vec![Message {
@@ -1005,7 +1007,11 @@ async fn auto_route_inventory_recommendation(
                 cache_control: None,
             }],
         }],
-        max_tokens: 128,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: Some(SystemPrompt::Text(router_system)),
         tools: None,
         tool_choice: None,
@@ -1018,7 +1024,7 @@ async fn auto_route_inventory_recommendation(
                 .unwrap_or_else(|| "off".to_string()),
         ),
         stream: Some(false),
-        temperature: Some(0.0),
+        temperature: None,
         top_p: None,
     };
 

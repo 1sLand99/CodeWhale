@@ -36,11 +36,11 @@ use codewhale_workflow::{
     CapturedReasoningRouter, CredentialReadiness, EffectiveReasoning, EndpointIdentity,
     FleetDocument, FleetRouterRef, FleetSearchRoot, FleetSnapshot, FleetSnapshotMember,
     FleetTaskReceipt, NamedFleetError, PermissionCeiling, PreflightError, PreflightedRoute,
-    ProviderReasoningControl, QualifiedFleetId, ROUTER_MAX_OUTPUT_TOKENS, ReasoningCapability,
-    ReasoningRouterProfile, ReasoningTier, ResolvedReasoning, RoutePreflight, RouterAvailability,
-    RouterCallInput, RouterCallPlan, RouterIdentity, RoutingDisclosure, ShellCeiling,
-    bounded_routing_payload, captured_legacy_inline_router, parse_router_decision,
-    resolve_exact_member_reasoning, router_call_plan, router_system_prompt, router_user_message,
+    ProviderReasoningControl, QualifiedFleetId, ReasoningCapability, ReasoningRouterProfile,
+    ReasoningTier, ResolvedReasoning, RoutePreflight, RouterAvailability, RouterCallInput,
+    RouterCallPlan, RouterIdentity, RoutingDisclosure, ShellCeiling, bounded_routing_payload,
+    captured_legacy_inline_router, parse_router_decision, resolve_exact_member_reasoning,
+    router_call_plan, router_system_prompt, router_user_message,
 };
 
 use crate::config::{ApiProvider, Config};
@@ -996,19 +996,20 @@ impl FleetRouterCaller for LiveFleetRouter {
                     cache_control: None,
                 }],
             }],
-            // Compact, bounded output: one small JSON object, nothing else.
-            max_tokens: ROUTER_MAX_OUTPUT_TOKENS,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                self.provider,
+                &self.route.wire_model,
+                None,
+            ),
             system: Some(SystemPrompt::Text(router_system_prompt(input))),
             // A router receives no tools. Ever.
             tools: None,
             tool_choice: None,
             metadata: None,
             thinking: None,
-            // The operator-configured call tier, normalized against this
-            // route's real capability and disclosed on the receipt — then
-            // spelled the way *this* provider route actually expresses it, via
-            // the same normalizer the client uses. A bare tier label here would
-            // be a generic approximation of a specific route.
+            // The operator-configured call tier remains authoritative. The
+            // normal route allowance above leaves room for its hidden
+            // reasoning before the small JSON answer is emitted.
             reasoning_effort: Some(route_reasoning_setting(
                 self.provider,
                 &self.base_url,
@@ -1016,7 +1017,7 @@ impl FleetRouterCaller for LiveFleetRouter {
                 self.call.tier,
             )),
             stream: Some(false),
-            temperature: Some(0.0),
+            temperature: None,
             top_p: None,
         };
 

@@ -48,8 +48,8 @@ use windows::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMo
 use crate::audit::log_sensitive_event;
 use crate::automation_manager::{AutomationManager, AutomationSchedulerConfig, spawn_scheduler};
 use crate::client::{
-    CacheWarmupKey, DeepSeekClient, PromptInspection, build_cache_warmup_request,
-    inspect_prompt_for_request,
+    CACHE_WARMUP_MAX_TOKENS, CacheWarmupKey, DeepSeekClient, PromptInspection,
+    build_cache_warmup_request, inspect_prompt_for_request,
 };
 use crate::commands;
 use crate::compaction::CompactionConfig;

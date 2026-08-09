@@ -565,7 +565,7 @@ pub async fn run_purge(
         thinking: None,
         reasoning_effort,
         stream: Some(false),
-        temperature: Some(0.2),
+        temperature: None,
         top_p: None,
     };
 

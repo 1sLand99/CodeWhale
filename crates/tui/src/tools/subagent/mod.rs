@@ -277,7 +277,6 @@ fn child_wall_time_exhausted_reason(limit: Duration) -> String {
 // Non-streaming sub-agents need enough response budget to carry large tool-call
 // arguments, especially write_file content. The API bills generated tokens, not
 // the requested ceiling.
-const SUBAGENT_RESPONSE_MAX_TOKENS: u32 = 16_384;
 const SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES: u32 = 2;
 const SUBAGENT_TRANSIENT_PROVIDER_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 /// Per-step API-call timeout retry budget. A `create_message` call that
@@ -10010,10 +10009,17 @@ async fn run_subagent(
         // checkpoints, live inspection) stays byte-identical, so no retry or
         // later step can accumulate a second block.
         let request_messages = subagent_request_messages(&messages, &work_state_source).await;
+        let request_route = runtime
+            .client
+            .effective_route_envelope(&runtime.model, chrono::Utc::now());
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            max_tokens: SUBAGENT_RESPONSE_MAX_TOKENS,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                request_route.provider,
+                &request_route.model,
+                None,
+            ),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: has_tools.then(|| json!({ "type": "auto" })),
@@ -12051,7 +12057,7 @@ fn assignment_model_route(
 fn subagent_request_tuning(reasoning_effort: Option<&str>) -> RequestTuning {
     RequestTuning {
         reasoning_effort: reasoning_effort.map(ReasoningEffort::from_setting),
-        max_output_tokens: Some(SUBAGENT_RESPONSE_MAX_TOKENS),
+        max_output_tokens: None,
     }
 }
 

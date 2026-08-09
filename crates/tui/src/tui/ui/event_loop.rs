@@ -5128,7 +5128,7 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
     let request = MessageRequest {
         model: route.model.clone(),
         messages: app.api_messages.clone(),
-        max_tokens: 1024,
+        max_tokens: CACHE_WARMUP_MAX_TOKENS,
         system: app.system_prompt.clone(),
         tools: app.session.last_tool_catalog.clone(),
         tool_choice: None,

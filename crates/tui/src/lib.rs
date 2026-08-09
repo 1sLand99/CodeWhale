@@ -7188,7 +7188,8 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
         tool_choice: None,
         metadata: None,
         thinking: None,
-        reasoning_effort: None,
+        // This is a one-token transport probe, not a reasoning task.
+        reasoning_effort: Some("off".to_string()),
         stream: Some(false),
         temperature: None,
         top_p: None,
@@ -7592,6 +7593,7 @@ Provide findings ordered by severity with file references, then open questions, 
             .to_string(),
     );
     let client = DeepSeekClient::new(&execution_config)?;
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
@@ -7601,7 +7603,11 @@ Provide findings ordered by severity with file references, then open questions, 
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: Some(system),
         tools: None,
         tool_choice: None,
@@ -7609,8 +7615,8 @@ Provide findings ordered by severity with file references, then open questions, 
         thinking: None,
         reasoning_effort,
         stream: Some(false),
-        temperature: Some(0.2),
-        top_p: Some(0.9),
+        temperature: None,
+        top_p: None,
     };
 
     let response = client.create_message(request).await?;
@@ -9718,9 +9724,11 @@ async fn run_one_shot(
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort, prompt)
     });
+    let model = route.model;
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
 
     let request = MessageRequest {
-        model: route.model,
+        model,
         messages: vec![Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
@@ -9728,7 +9736,11 @@ async fn run_one_shot(
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: None,
         tools: None,
         tool_choice: None,
@@ -9779,6 +9791,7 @@ async fn run_one_shot_json(
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, prompt)
     });
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
@@ -9788,7 +9801,11 @@ async fn run_one_shot_json(
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: Some(SystemPrompt::Text(
             "You are a coding assistant. Give concise, actionable responses.".to_string(),
         )),
@@ -9798,8 +9815,8 @@ async fn run_one_shot_json(
         thinking: None,
         reasoning_effort,
         stream: Some(false),
-        temperature: Some(0.2),
-        top_p: Some(0.9),
+        temperature: None,
+        top_p: None,
     };
 
     let response = client.create_message(request).await?;

@@ -5666,8 +5666,7 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             case.agent_type
         );
         assert_eq!(
-            route.tuning.max_output_tokens,
-            Some(SUBAGENT_RESPONSE_MAX_TOKENS),
+            route.tuning.max_output_tokens, None,
             "{:?}",
             case.agent_type
         );
@@ -10301,10 +10300,11 @@ async fn auto_approved_parent_runs_required_tools_in_subagent() {
 }
 
 #[test]
-fn subagent_request_budget_allows_large_write_file_arguments() {
+fn subagent_request_budget_inherits_the_resolved_route_allowance() {
     assert_eq!(
-        SUBAGENT_RESPONSE_MAX_TOKENS, 16_384,
-        "non-streaming sub-agent tool calls need enough output budget for large write_file arguments"
+        subagent_request_tuning(Some("high")).max_output_tokens,
+        None,
+        "sub-agents must not impose a smaller internal output ceiling"
     );
 }
 

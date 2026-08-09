@@ -1671,7 +1671,12 @@ fn translation_system_prompt(target_language: &str) -> String {
     )
 }
 
-fn translation_message_request(text: &str, model: String, target_language: &str) -> MessageRequest {
+fn translation_message_request(
+    text: &str,
+    model: String,
+    target_language: &str,
+    max_tokens: u32,
+) -> MessageRequest {
     MessageRequest {
         model,
         messages: vec![Message {
@@ -1681,7 +1686,7 @@ fn translation_message_request(text: &str, model: String, target_language: &str)
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens,
         system: Some(SystemPrompt::Text(translation_system_prompt(
             target_language,
         ))),
@@ -1691,7 +1696,7 @@ fn translation_message_request(text: &str, model: String, target_language: &str)
         thinking: None,
         reasoning_effort: Some("off".to_string()),
         stream: Some(false),
-        temperature: Some(0.1),
+        temperature: None,
         top_p: None,
     }
 }
@@ -1976,6 +1981,11 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
+        let max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
+            self.api_provider,
+            &model,
+            None,
+        );
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -1984,7 +1994,7 @@ impl DeepSeekClient {
             // deliberately does not claim to describe either
             // (see `docs/PREVIEW_REQUEST.md`).
             let prepared = self.prepare_outbound_request(
-                translation_message_request(text, model, target_language),
+                translation_message_request(text, model, target_language, max_tokens),
                 false,
             )?;
             let response = match prepared.dialect {
@@ -2012,8 +2022,7 @@ impl DeepSeekClient {
                     "content": text
                 }
             ],
-            "max_tokens": 4096,
-            "temperature": 0.1,
+            "max_tokens": max_tokens,
             "stream": false
         });
         chat::apply_route_reasoning_controls(
@@ -3558,6 +3567,8 @@ pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInsp
 pub(crate) fn build_cache_warmup_request(request: &MessageRequest) -> MessageRequest {
     chat::build_cache_warmup_request(request)
 }
+
+pub(crate) use chat::CACHE_WARMUP_MAX_TOKENS;
 
 #[cfg(test)]
 mod tests {
@@ -5179,7 +5190,7 @@ mod tests {
     }
 
     fn minimal_zen_request(model: &str) -> MessageRequest {
-        translation_message_request("hello", model.to_string(), "English")
+        translation_message_request("hello", model.to_string(), "English", 4096)
     }
 
     fn assert_zen_bearer_without_codex_headers(request: &wiremock::Request) {
@@ -6523,6 +6534,21 @@ mod tests {
             "translation disables thinking: {body}"
         );
         assert!(
+            body.get("temperature").is_none() && body.get("top_p").is_none(),
+            "translation must not inject sampling controls: {body}"
+        );
+        assert_eq!(
+            body.get("max_tokens").and_then(Value::as_u64),
+            Some(u64::from(
+                crate::route_budget::effective_max_output_tokens_for_route(
+                    ApiProvider::DeepseekAnthropic,
+                    "deepseek-chat",
+                    None,
+                )
+            )),
+            "translation must inherit its resolved route allowance: {body}"
+        );
+        assert!(
             body.get("system")
                 .and_then(Value::as_str)
                 .is_some_and(|system| system.contains("Spanish")),
@@ -7319,8 +7345,9 @@ mod tests {
         let warmup = build_cache_warmup_request(&request);
 
         assert_eq!(warmup.max_tokens, 8);
-        assert_eq!(warmup.temperature, Some(0.0));
-        assert_eq!(warmup.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(warmup.temperature, None);
+        assert_eq!(warmup.top_p, None);
+        assert_eq!(warmup.reasoning_effort.as_deref(), Some("off"));
         assert_eq!(warmup.tools.as_ref().map(Vec::len), Some(1));
         assert_eq!(warmup.tool_choice, Some(json!("none")));
         assert_eq!(warmup.messages.len(), 2);

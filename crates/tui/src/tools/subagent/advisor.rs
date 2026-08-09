@@ -306,10 +306,12 @@ pub async fn run_advisor_for_turn(
         tool_choice: None,
         metadata: None,
         thinking: None,
-        reasoning_effort: None,
+        // The advisor has a deliberately tiny answer contract. Hidden
+        // reasoning would spend that allowance before the note is emitted.
+        reasoning_effort: Some("off".to_string()),
         stream: Some(false),
-        temperature: Some(0.3),
-        top_p: Some(0.9),
+        temperature: None,
+        top_p: None,
     };
 
     let response = match client.create_message(request).await {

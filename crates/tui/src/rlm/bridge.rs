@@ -46,8 +46,6 @@ impl ModelClientRlmAdapter {
 
 /// Per-child completion timeout — same as the previous sidecar default.
 const CHILD_TIMEOUT_SECS: u64 = 120;
-/// Default `max_tokens` for one-shot child completions.
-const DEFAULT_CHILD_MAX_TOKENS: u32 = 4096;
 /// Hard cap on prompts per batch RPC.
 pub const MAX_BATCH: usize = 16;
 
@@ -57,6 +55,12 @@ pub const MAX_BATCH: usize = 16;
 /// The bridge only needs non-streaming completions, so this boxed-future shim
 /// gives tests a clean mock seam without changing the wider provider trait.
 pub(crate) trait RlmLlmClient: Send + Sync {
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope;
+
     fn create_message_boxed(
         &self,
         request: MessageRequest,
@@ -64,6 +68,15 @@ pub(crate) trait RlmLlmClient: Send + Sync {
 }
 
 impl RlmLlmClient for ModelClientRlmAdapter {
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        self.client
+            .effective_route_envelope(requested_model, dispatched_at)
+    }
+
     fn create_message_boxed(
         &self,
         request: MessageRequest,
@@ -77,6 +90,14 @@ impl<T> RlmLlmClient for T
 where
     T: LlmClient + Send + Sync,
 {
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        LlmClient::effective_route_envelope(self, requested_model, dispatched_at)
+    }
+
     fn create_message_boxed(
         &self,
         request: MessageRequest,
@@ -120,6 +141,14 @@ impl RlmBridge {
         max_tokens: Option<u32>,
         system: Option<String>,
     ) -> SingleResp {
+        let request_route = self
+            .client
+            .effective_route_envelope(&self.child_model, chrono::Utc::now());
+        let route_max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        );
         let request = MessageRequest {
             // The Python helper accepts `model=` for older snippets, but it is
             // intentionally not authoritative. RLM child calls are pinned to
@@ -133,7 +162,10 @@ impl RlmBridge {
                     cache_control: None,
                 }],
             }],
-            max_tokens: max_tokens.unwrap_or(DEFAULT_CHILD_MAX_TOKENS),
+            // An explicit RLM helper bound remains authoritative, but the
+            // default is the selected route's ordinary allowance rather than
+            // a hidden 4K ceiling.
+            max_tokens: max_tokens.map_or(route_max_tokens, |limit| limit.min(route_max_tokens)),
             system: system.map(SystemPrompt::Text),
             tools: None,
             tool_choice: None,
@@ -141,8 +173,8 @@ impl RlmBridge {
             thinking: None,
             reasoning_effort: None,
             stream: Some(false),
-            temperature: Some(0.4_f32),
-            top_p: Some(0.9_f32),
+            temperature: None,
+            top_p: None,
         };
 
         let fut = self.client.create_message_boxed(request);

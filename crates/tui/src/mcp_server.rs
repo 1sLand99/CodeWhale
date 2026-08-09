@@ -390,11 +390,17 @@ impl McpServer {
             existing
         };
 
-        // Send the API request (non-streaming for the basic version)
+        // Send the API request (non-streaming for the basic version). Internal
+        // chat uses the same resolved output policy as an ordinary turn.
+        let request_route = client.effective_route_envelope(model, chrono::Utc::now());
         let request = MessageRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            max_tokens: 16384,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                request_route.provider,
+                &request_route.model,
+                None,
+            ),
             system: None,
             tools: None,
             tool_choice: None,
