@@ -458,10 +458,17 @@ impl Engine {
             // low-pressure steps; once pressure crosses the trigger, capture
             // once and reuse the same snapshot for eligibility and commit.
             let mut auto_compaction_config = self.config.compaction.clone();
-            let prepared = if crate::compaction::compaction_pressure_reached(
+            // The turn's usage tracks the max billed prompt tokens across its
+            // steps — the provider's own measure of the current context size.
+            // It describes the live message list (nothing has pruned it since
+            // the last request), so it is a valid pressure signal here.
+            let billed_input_tokens =
+                (turn.usage.input_tokens > 0).then_some(u64::from(turn.usage.input_tokens));
+            let prepared = if crate::compaction::compaction_pressure_reached_with_billed(
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &auto_compaction_config,
+                billed_input_tokens,
             ) {
                 let live = self.capture_compaction_live_state().await;
                 auto_compaction_config.live_state = (!live.is_empty()).then_some(live);
@@ -471,10 +478,11 @@ impl Engine {
             };
 
             if let Some(prepared) = prepared
-                && should_compact(
+                && crate::compaction::should_compact_with_billed(
                     &self.session.messages,
                     self.session.system_prompt.as_ref(),
                     &prepared,
+                    billed_input_tokens,
                 )
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);

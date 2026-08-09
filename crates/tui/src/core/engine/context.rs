@@ -36,15 +36,11 @@ const LARGE_CONTEXT_WINDOW_TOKENS: u32 = 500_000;
 /// Max chars to keep from metadata-provided output summaries.
 const TOOL_RESULT_METADATA_SUMMARY_CHARS: usize = 320;
 
-pub(super) const COMPACTION_SUMMARY_MARKER: &str =
-    "Another language model started to solve this problem";
-/// Marker written by pre-v0.9.6 compaction; sessions saved under the old
-/// format must still restore their committed summary on reload.
-pub(super) const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
-
-pub(super) fn is_compaction_summary_text(text: &str) -> bool {
-    text.contains(COMPACTION_SUMMARY_MARKER) || text.contains(LEGACY_COMPACTION_SUMMARY_MARKER)
-}
+pub(super) use crate::compaction::is_compaction_summary_text;
+// Engine tests exercise the marker directly; the runtime path only needs the
+// predicate above.
+#[cfg(test)]
+pub(super) use crate::compaction::COMPACTION_SUMMARY_MARKER;
 
 #[derive(Debug, Clone, Copy)]
 struct ToolResultContextLimits {

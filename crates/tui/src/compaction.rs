@@ -45,6 +45,11 @@ pub struct CompactionConfig {
     /// Workspace root, used only to re-state the user's `/anchor` file after
     /// the summary. `None` skips anchors.
     pub workspace: Option<std::path::PathBuf>,
+    /// Text of the previously committed compaction summary, if any. Injected
+    /// into the summarization request as a coalescing bridge (the summarizer
+    /// never sees the system prompt the old summary lives in); the commit step
+    /// replaces the old summary with the new one.
+    pub prior_summary: Option<String>,
 }
 
 /// Host-prepared runtime snapshots carried from compaction eligibility through
@@ -124,6 +129,7 @@ impl Default for CompactionConfig {
             live_state: None,
             runtime_cost_owner: None,
             workspace: None,
+            prior_summary: None,
         }
     }
 }
@@ -174,7 +180,20 @@ handoff summary for another LLM that will resume the task.\n\nInclude:\n\
 - Important context, constraints, or user preferences\n\
 - What remains to be done (clear next steps)\n\
 - Any critical data, examples, or references needed to continue (exact file paths, commands, and error text)\n\n\
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work. Do not call tools.";
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work. Do not call tools.\n\
+Summarize the task, not the checkpoint machinery: do not mention compaction, checkpoints, or \
+context management, and do not carry forward meta-commentary about them (e.g. \"context intact\") \
+from earlier turns.";
+
+/// Bridge preamble for the previous committed summary when a later compaction
+/// runs. The summarizer only sees the live message list — the prior summary
+/// lives in the system prompt it is never shown — so the host injects it here
+/// for coalescing, and the commit step then REPLACES the old summary instead
+/// of appending a second one.
+const PRIOR_SUMMARY_BRIDGE: &str = "A previous context checkpoint produced the summary below. \
+Fold anything still relevant into your new summary — the old summary is replaced by yours, \
+so any fact you drop is lost. Do not quote it verbatim wholesale and do not describe the \
+checkpoint process itself.";
 
 /// Preamble ahead of the committed summary in the successor system prompt
 /// (ported from Codex `templates/compact/summary_prefix.md`).
@@ -182,6 +201,56 @@ const SUMMARY_HEADER: &str = "Another language model started to solve this probl
 a summary of its progress. Use the information in this summary to build on the work that has \
 already been done and avoid duplicating work. The most recent user messages are retained after \
 this summary.";
+
+/// Detection marker for committed compaction-summary text: the stable first
+/// sentence of [`SUMMARY_HEADER`]. `engine/context.rs` restores summaries by
+/// the same marker on session load.
+pub const COMPACTION_SUMMARY_MARKER: &str = "Another language model started to solve this problem";
+/// Marker written by pre-v0.9.6 compaction; sessions saved under the old
+/// format must still be recognized so their summary is replaced, not stacked.
+pub const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+
+/// Whether a system-prompt text block is a committed compaction summary.
+#[must_use]
+pub fn is_compaction_summary_text(text: &str) -> bool {
+    text.contains(COMPACTION_SUMMARY_MARKER) || text.contains(LEGACY_COMPACTION_SUMMARY_MARKER)
+}
+
+/// Remove every committed compaction-summary block from a system prompt.
+///
+/// Compaction commits exactly one live summary: the newest one replaces its
+/// predecessors. Before this existed, each compaction appended another
+/// summary block to the successor system prompt, so the stable prefix grew by
+/// up to a full summary per pass — which re-latched compaction pressure and
+/// retriggered compaction on the next turn, forever.
+#[must_use]
+pub fn strip_compaction_summaries(prompt: Option<&SystemPrompt>) -> Option<SystemPrompt> {
+    match prompt.cloned()? {
+        SystemPrompt::Text(text) => {
+            (!is_compaction_summary_text(&text)).then_some(SystemPrompt::Text(text))
+        }
+        SystemPrompt::Blocks(blocks) => {
+            let blocks = blocks
+                .into_iter()
+                .filter(|block| !is_compaction_summary_text(&block.text))
+                .collect::<Vec<_>>();
+            (!blocks.is_empty()).then_some(SystemPrompt::Blocks(blocks))
+        }
+    }
+}
+
+/// Flatten a committed summary prompt to plain text for the coalescing bridge.
+#[must_use]
+pub fn summary_prompt_text(prompt: &SystemPrompt) -> String {
+    match prompt {
+        SystemPrompt::Text(text) => text.clone(),
+        SystemPrompt::Blocks(blocks) => blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
+}
 
 fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usize {
     message
@@ -262,6 +331,28 @@ pub fn estimate_input_tokens_conservative(
         .saturating_add(framing_overhead)
 }
 
+/// Best-effort estimate of real request input tokens, without the 1.5×
+/// safety inflation used by overflow math.
+///
+/// Compaction *pressure* compares against a threshold whose percentage means
+/// "fraction of the context window" on the user-facing meter. Feeding the
+/// inflated overflow estimate into that comparison made an 80% setting fire
+/// at roughly half the real usage. Overflow protection keeps its inflated
+/// estimator; the pressure trigger uses this one, preferring provider-billed
+/// prompt tokens when the caller has them.
+#[must_use]
+pub fn estimate_input_tokens_for_pressure(
+    messages: &[Message],
+    system: Option<&SystemPrompt>,
+) -> usize {
+    let message_tokens = estimate_tokens(messages);
+    let system_tokens = estimate_system_tokens_conservative(system);
+    let framing_overhead = messages.len().saturating_mul(12).saturating_add(48);
+    message_tokens
+        .saturating_add(system_tokens)
+        .saturating_add(framing_overhead)
+}
+
 fn estimate_retained_floor_conservative(
     messages: &[Message],
     system_prompt: Option<&SystemPrompt>,
@@ -285,7 +376,11 @@ fn estimate_retained_floor_conservative(
     ))
     .saturating_add(SUMMARY_MAX_TOKENS as usize);
 
-    let retained_system_prompt = strip_active_operation_reanchor(system_prompt);
+    // Post-compaction the committed summary is REPLACED, not stacked; the new
+    // summary's allowance is already counted above, so prior summary blocks
+    // must not inflate the floor.
+    let retained_system_prompt =
+        strip_compaction_summaries(strip_active_operation_reanchor(system_prompt).as_ref());
     retained_tokens
         .saturating_add(estimate_system_tokens_conservative(
             retained_system_prompt.as_ref(),
@@ -307,8 +402,32 @@ pub fn compaction_pressure_reached(
     system_prompt: Option<&SystemPrompt>,
     config: &CompactionConfig,
 ) -> bool {
-    config.enabled
-        && estimate_input_tokens_conservative(messages, system_prompt) >= config.token_threshold
+    compaction_pressure_reached_with_billed(messages, system_prompt, config, None)
+}
+
+/// Pressure check that additionally honors provider-billed prompt tokens.
+///
+/// Billed usage is the ground truth for how large the context actually is;
+/// the estimator undercounts non-ASCII text and cannot see server-side
+/// framing. Whichever signal is higher decides, so an undercounting estimate
+/// cannot hide pressure the provider already billed for. Callers must only
+/// pass a billed count that describes the message list being checked —
+/// post-prune re-checks pass `None` and fall back to the estimate.
+#[must_use]
+pub fn compaction_pressure_reached_with_billed(
+    messages: &[Message],
+    system_prompt: Option<&SystemPrompt>,
+    config: &CompactionConfig,
+    billed_input_tokens: Option<u64>,
+) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    let estimated = estimate_input_tokens_for_pressure(messages, system_prompt);
+    let billed = billed_input_tokens
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .unwrap_or(0);
+    estimated.max(billed) >= config.token_threshold
 }
 
 pub fn should_compact(
@@ -316,11 +435,27 @@ pub fn should_compact(
     system_prompt: Option<&SystemPrompt>,
     prepared: &PreparedCompactionEnvelope,
 ) -> bool {
+    should_compact_with_billed(messages, system_prompt, prepared, None)
+}
+
+/// Eligibility check that honors provider-billed prompt tokens for the
+/// pressure gate, mirroring [`compaction_pressure_reached_with_billed`].
+pub fn should_compact_with_billed(
+    messages: &[Message],
+    system_prompt: Option<&SystemPrompt>,
+    prepared: &PreparedCompactionEnvelope,
+    billed_input_tokens: Option<u64>,
+) -> bool {
     let config = &prepared.config;
     if !config.enabled {
         return false;
     }
-    if !compaction_pressure_reached(messages, system_prompt, config) {
+    if !compaction_pressure_reached_with_billed(
+        messages,
+        system_prompt,
+        config,
+        billed_input_tokens,
+    ) {
         return false;
     }
 
@@ -947,6 +1082,26 @@ async fn create_summary(
     // message asking for the handoff summary, so the provider's prefix cache
     // covers everything already sent this session.
     let mut request_messages = messages.to_vec();
+    // A prior committed summary lives in the system prompt, which this
+    // request does not send. Inject it as a bridge so the new summary
+    // coalesces it — the commit step replaces the old summary entirely.
+    if let Some(prior) = config
+        .prior_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|prior| !prior.is_empty())
+    {
+        request_messages.insert(
+            0,
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!("{PRIOR_SUMMARY_BRIDGE}\n\n{prior}"),
+                    cache_control: None,
+                }],
+            },
+        );
+    }
     request_messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
@@ -967,7 +1122,13 @@ async fn create_summary(
             thinking: None,
             reasoning_effort: None,
             stream: Some(false),
-            temperature: Some(0.3),
+            // Route parity with ordinary turns: turns send no sampling
+            // params, so every provider's own normalization/defaults apply.
+            // A hard-coded 0.3 leaked to the wire on routes that pass
+            // temperature through (e.g. Kimi Code membership), where the
+            // fixed-sampling contract rejects it and the whole compaction
+            // pass fails.
+            temperature: None,
             top_p: None,
         };
 
@@ -1847,7 +2008,7 @@ mod tests {
                 })
                 .collect();
             let raw = estimate_tokens(&messages);
-            let full = estimate_input_tokens_conservative(&messages, None);
+            let full = estimate_input_tokens_for_pressure(&messages, None);
             let config = CompactionConfig {
                 enabled: true,
                 token_threshold: threshold,
@@ -1856,15 +2017,32 @@ mod tests {
 
             assert!(
                 raw < threshold,
-                "raw estimator unexpectedly crossed {window}"
+                "raw message estimator alone must not cross {window}"
+            );
+            // The pressure estimate adds per-message framing on top of the
+            // raw message tokens; billed usage from the provider can also
+            // cross the trigger on its own.
+            assert!(
+                full < threshold,
+                "70%-filled fixture must stay under the {window} trigger: {full} >= {threshold}"
             );
             assert!(
-                full >= threshold,
-                "full request must cross the {window} trigger: {full} < {threshold}"
+                crate::compaction::compaction_pressure_reached_with_billed(
+                    &messages,
+                    None,
+                    &config,
+                    Some(threshold as u64),
+                ),
+                "billed prompt tokens at the trigger must reach pressure for {window}"
             );
             assert!(
-                should_compact(&messages, None, &prepared_without_reanchor(&config)),
-                "full request pressure must trigger for a {window}-token route"
+                crate::compaction::should_compact_with_billed(
+                    &messages,
+                    None,
+                    &prepared_without_reanchor(&config),
+                    Some(threshold as u64),
+                ),
+                "billed pressure must trigger eligibility for a {window}-token route"
             );
         }
     }
@@ -1905,7 +2083,7 @@ mod tests {
         let messages: Vec<Message> = (0..10)
             .map(|index| msg(if index % 2 == 0 { "user" } else { "assistant" }, "payload"))
             .collect();
-        let threshold = estimate_input_tokens_conservative(&messages, None);
+        let threshold = estimate_input_tokens_for_pressure(&messages, None);
         let config = CompactionConfig {
             enabled: true,
             token_threshold: threshold,

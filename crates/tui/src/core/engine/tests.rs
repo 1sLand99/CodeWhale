@@ -13926,6 +13926,59 @@ fn compaction_summary_stays_in_stable_system_prompt() {
     assert!(!prompt.contains(WORKING_SET_SUMMARY_MARKER));
 }
 
+/// Regression for the v0.9.6 auto-compaction feedback loop: every compaction
+/// appended another summary block to the successor system prompt, so the
+/// stable prefix grew by a full summary per pass, pressure re-latched, and
+/// compaction retriggered on every subsequent turn. Repeated commits must
+/// keep exactly one live summary and a bounded system prompt.
+#[test]
+fn repeated_compaction_replaces_the_committed_summary() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.session.system_prompt = Some(SystemPrompt::Text("stable base prompt".to_string()));
+
+    let flatten = |prompt: &Option<SystemPrompt>| match prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
+        Some(SystemPrompt::Blocks(blocks)) => blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => String::new(),
+    };
+
+    let mut sizes = Vec::new();
+    for round in 0..3 {
+        engine.merge_compaction_summary(
+            Some(SystemPrompt::Text(format!(
+                "{COMPACTION_SUMMARY_MARKER}\nround-{round} summary body"
+            ))),
+            None,
+        );
+        let prompt = flatten(&engine.session.system_prompt);
+        assert_eq!(
+            prompt.matches(COMPACTION_SUMMARY_MARKER).count(),
+            1,
+            "round {round}: exactly one live summary: {prompt}"
+        );
+        assert!(prompt.contains("stable base prompt"), "{prompt}");
+        assert!(
+            prompt.contains(&format!("round-{round} summary body")),
+            "{prompt}"
+        );
+        sizes.push(prompt.len());
+    }
+    assert_eq!(
+        sizes[0], sizes[2],
+        "the stable prefix must not grow across compactions: {sizes:?}"
+    );
+    let committed = flatten(&engine.session.compaction_summary_prompt);
+    assert_eq!(
+        committed.matches(COMPACTION_SUMMARY_MARKER).count(),
+        1,
+        "the committed summary must be replaced, not stacked: {committed}"
+    );
+}
+
 #[test]
 fn compaction_reanchors_active_operation_identity_without_raw_output() {
     let tmp = tempdir().expect("tempdir");

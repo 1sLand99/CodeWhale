@@ -1554,7 +1554,7 @@ fn app_new_defaults_auto_compact_on_for_256k_class_models_when_unset() {
     assert!(app.auto_compact);
     assert!(!app.auto_compact_user_configured);
     assert_eq!(app.auto_compact_threshold_percent, 80.0);
-    assert_eq!(app.compact_threshold, 156_467);
+    assert_eq!(app.compact_threshold, 195_584);
 }
 
 #[test]
@@ -1571,7 +1571,7 @@ fn app_new_defaults_auto_compact_on_for_v4_class_models_when_unset() {
     assert!(app.auto_compact);
     assert!(!app.auto_compact_user_configured);
     assert_eq!(app.auto_compact_threshold_percent, 80.0);
-    assert_eq!(app.compact_threshold, 589_466);
+    assert_eq!(app.compact_threshold, 736_832);
 }
 
 #[test]
@@ -1588,7 +1588,7 @@ fn app_new_respects_explicit_auto_compact_false_for_256k_class_models() {
 
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
-    assert_eq!(app.compact_threshold, 156_467);
+    assert_eq!(app.compact_threshold, 195_584);
 }
 
 #[test]
@@ -1605,7 +1605,7 @@ fn app_new_respects_explicit_auto_compact_false_for_v4_class_models() {
 
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
-    assert_eq!(app.compact_threshold, 589_466);
+    assert_eq!(app.compact_threshold, 736_832);
 }
 
 #[test]

@@ -306,6 +306,9 @@ const COMPACTION_SUMMARY: &str = "1. Primary request and intent — preserve the
 struct CompactionLifecycleResponder {
     stream_requests: Arc<AtomicUsize>,
     compaction_requests: Arc<AtomicUsize>,
+    /// Compaction requests that carried the prior committed summary as a
+    /// coalescing bridge (repeat compactions replace, not stack, summaries).
+    bridged_compaction_requests: Arc<AtomicUsize>,
     successor_stream_requests: Arc<AtomicUsize>,
     order: Arc<std::sync::Mutex<Vec<&'static str>>>,
     stream_delay: Duration,
@@ -317,6 +320,7 @@ impl CompactionLifecycleResponder {
         Self {
             stream_requests: Arc::new(AtomicUsize::new(0)),
             compaction_requests: Arc::new(AtomicUsize::new(0)),
+            bridged_compaction_requests: Arc::new(AtomicUsize::new(0)),
             successor_stream_requests: Arc::new(AtomicUsize::new(0)),
             order: Arc::new(std::sync::Mutex::new(Vec::new())),
             stream_delay,
@@ -350,6 +354,10 @@ impl Respond for CompactionLifecycleResponder {
             || raw.contains("You are performing a context checkpoint compaction");
         if is_compaction {
             self.compaction_requests.fetch_add(1, Ordering::SeqCst);
+            if raw.contains("A previous context checkpoint produced the summary below") {
+                self.bridged_compaction_requests
+                    .fetch_add(1, Ordering::SeqCst);
+            }
             self.record("compact");
             return json_response(json!({
                 "id": "chatcmpl-compact-pty",
@@ -633,12 +641,14 @@ async fn release_auto_compaction_label_persists() -> Result<()> {
         ws.home().join(".codewhale").join("config.toml"),
         "provider = \"deepseek\"\n[providers.deepseek]\ncontext_window = 272000\n",
     )?;
-    let session_path = write_compaction_session(&ws, "auto-compaction-pty", 24, 8_000)?;
+    // 24 × 14K chars ≈ 84K plain-estimate tokens, over the 68K trigger
+    // (25% of the configured 272K window).
+    let session_path = write_compaction_session(&ws, "auto-compaction-pty", 24, 14_000)?;
     let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
     enter_launch_session(&mut tui)?;
     load_session(&mut tui, &session_path, 24)?;
 
-    type_and_submit(&mut tui, "trigger the conservative pressure boundary")?;
+    type_and_submit(&mut tui, "trigger the pressure boundary")?;
     wait_for_counter(
         &mut tui,
         &responder.compaction_requests,
@@ -678,6 +688,62 @@ async fn release_auto_compaction_label_persists() -> Result<()> {
         vec!["compact", "stream"],
         "automatic compaction must finish before the ordinary provider turn"
     );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// Regression for the v0.9.6 release blocker: an idle `/compact` ran and
+/// committed engine-side, but its only feedback was a status toast that the
+/// engine's immediately-following turn-complete status replaced within the
+/// same event drain — the user saw nothing and reported `/compact` as dead.
+/// The outcome must land in the transcript, where it survives later frames.
+/// A second `/compact` must feed the committed summary back into the
+/// summarization request as the coalescing bridge (replace, not stack).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_idle_compaction_reports_outcome_in_transcript() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let responder = CompactionLifecycleResponder::new(Duration::ZERO, Duration::ZERO);
+    mount_compaction_responder(&server, responder.clone()).await;
+
+    let ws = make_sealed_workspace()?;
+    write_auto_compaction_settings(&ws, false, 80)?;
+    let session_path = write_compaction_session(&ws, "idle-compaction-pty", 12, 600)?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+    load_session(&mut tui, &session_path, 12)?;
+
+    tui.send(keys::key::ctrl('l'))?;
+    wait_for_counter(
+        &mut tui,
+        &responder.compaction_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
+    tui.wait_for_text("Compaction complete:", INTERACTION_TIMEOUT)?;
+    // Transcript receipt, not a toast: it must outlive the five-second toast
+    // lifetime and the turn-complete footer transition.
+    pump_for(&mut tui, Duration::from_millis(5_500))?;
+    assert!(
+        tui.frame().contains("Compaction complete:"),
+        "compaction outcome must survive as a transcript receipt:\n{}",
+        tui.debug_dump()
+    );
+
+    tui.send(keys::key::ctrl('l'))?;
+    wait_for_counter(
+        &mut tui,
+        &responder.compaction_requests,
+        2,
+        INTERACTION_TIMEOUT,
+    )?;
+    wait_for_counter(
+        &mut tui,
+        &responder.bridged_compaction_requests,
+        1,
+        INTERACTION_TIMEOUT,
+    )?;
 
     let _ = tui.shutdown();
     Ok(())

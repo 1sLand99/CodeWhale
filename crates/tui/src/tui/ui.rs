@@ -2196,6 +2196,7 @@ pub(crate) fn try_queue_manual_compaction(
         let text = app
             .tr(MessageId::ContextCompactionAlreadyRunning)
             .into_owned();
+        add_compaction_receipt(app, &text);
         set_explicit_compaction_status(app, text, StatusToastLevel::Warning, false);
         return;
     }
@@ -2206,6 +2207,7 @@ pub(crate) fn try_queue_manual_compaction(
             let text = app
                 .tr(MessageId::ContextCompactionRouteInvalid)
                 .replace("{error}", &error.to_string());
+            add_compaction_receipt(app, &text);
             set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
             return;
         }
@@ -2226,6 +2228,11 @@ pub(crate) fn try_queue_manual_compaction(
                 MessageId::ContextManualCompacting
             };
             let text = app.tr(id).into_owned();
+            // Queued-behind-a-turn is a state the user must be able to find
+            // again after the 5s toast: leave it in the transcript too.
+            if app.is_loading {
+                add_compaction_receipt(app, &text);
+            }
             set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
         }
         Err(error) => {
@@ -2240,6 +2247,7 @@ pub(crate) fn try_queue_manual_compaction(
                 MessageId::ContextCompactionQueueClosed
             };
             let text = app.tr(id).into_owned();
+            add_compaction_receipt(app, &text);
             set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
         }
     }
@@ -2260,11 +2268,20 @@ pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
 }
 
-fn take_matching_compaction(app: &mut App, id: &str, auto: bool) -> bool {
-    if !app
+/// Clear the compaction-in-flight state for a terminal lifecycle event.
+///
+/// An exact id match clears normally. A terminal event with NO tracked
+/// compaction is still authoritative (the started event can be lost to a
+/// dropped drain or session switch): without this, `is_compacting`/
+/// `manual_compaction_queued` stayed latched and every later `/compact` was
+/// silently rejected as "already in progress". A stale event while a NEWER
+/// compaction is live must not clear it (or report anything) — that live
+/// pass gets its own terminal event. Returns whether the event settled.
+fn settle_compaction(app: &mut App, id: &str, auto: bool) -> bool {
+    if app
         .active_compaction
         .as_ref()
-        .is_some_and(|active| active.id == id && active.auto == auto)
+        .is_some_and(|active| active.id != id || active.auto != auto)
     {
         return false;
     }
@@ -2276,14 +2293,29 @@ fn take_matching_compaction(app: &mut App, id: &str, auto: bool) -> bool {
     true
 }
 
+/// Durable transcript receipt for a compaction outcome.
+///
+/// Outcome feedback used to be toast-only, and the engine emits
+/// `TurnComplete` immediately after the compaction event — both land in the
+/// same UI drain batch, so the turn's "done" status replaced the completion
+/// toast before a single frame was drawn. `/compact` looked like a no-op
+/// even when the summary committed (the v0.9.6 release blocker).
+fn add_compaction_receipt(app: &mut App, message: &str) {
+    app.add_message(HistoryCell::System {
+        content: message.to_string(),
+    });
+}
+
 pub(crate) fn apply_compaction_completed(app: &mut App, id: &str, auto: bool, message: String) {
-    if take_matching_compaction(app, id, auto) {
+    if settle_compaction(app, id, auto) {
+        add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Success, false);
     }
 }
 
 pub(crate) fn apply_compaction_failed(app: &mut App, id: &str, auto: bool, message: String) {
-    if take_matching_compaction(app, id, auto) {
+    if settle_compaction(app, id, auto) {
+        add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
     }
 }
@@ -2307,6 +2339,7 @@ mod config_update_tests {
             live_state: None,
             runtime_cost_owner: None,
             workspace: None,
+            prior_summary: None,
         };
 
         assert!(try_apply_model_and_compaction_update(

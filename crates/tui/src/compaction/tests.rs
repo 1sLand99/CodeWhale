@@ -5,6 +5,47 @@ fn report(error: &anyhow::Error) -> String {
 }
 
 #[test]
+fn strip_compaction_summaries_removes_only_summary_blocks() {
+    let base = SystemBlock {
+        block_type: "text".to_string(),
+        text: "stable base prompt".to_string(),
+        cache_control: None,
+    };
+    let summary = SystemBlock {
+        block_type: "text".to_string(),
+        text: format!("{COMPACTION_SUMMARY_MARKER} and its body"),
+        cache_control: None,
+    };
+    let legacy = SystemBlock {
+        block_type: "text".to_string(),
+        text: format!("{LEGACY_COMPACTION_SUMMARY_MARKER}\nold-format body"),
+        cache_control: None,
+    };
+
+    let stripped = strip_compaction_summaries(Some(&SystemPrompt::Blocks(vec![
+        base.clone(),
+        summary.clone(),
+        legacy,
+    ])))
+    .expect("base block survives");
+    match stripped {
+        SystemPrompt::Blocks(blocks) => {
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].text, "stable base prompt");
+        }
+        SystemPrompt::Text(_) => panic!("blocks stay blocks"),
+    }
+
+    // A prompt that is nothing but a summary strips to None.
+    assert!(strip_compaction_summaries(Some(&SystemPrompt::Text(summary.text))).is_none());
+    // A prompt without summaries is unchanged.
+    assert_eq!(
+        strip_compaction_summaries(Some(&SystemPrompt::Text("plain".to_string()))),
+        Some(SystemPrompt::Text("plain".to_string()))
+    );
+}
+
+#[test]
 fn untyped_usage_limit_text_never_becomes_quota_exhaustion() {
     let error = anyhow::anyhow!(
         "[auth] Authorization failed: You've reached your usage limit for this billing cycle"
@@ -112,10 +153,10 @@ fn pinned_tool_result_local_pruning_is_reclaimable() {
     let mut messages =
         oversized_tool_pair("old-read", "error: ".to_string() + &"x".repeat(300_000));
     messages.extend(pressure_fixture());
-    let full_pressure = estimate_input_tokens_conservative(&messages, None);
+    let full_pressure = estimate_input_tokens_for_pressure(&messages, None);
     let mut projected = messages.clone();
     let pruned_bytes = prune_tool_results_until(&mut projected, KEEP_RECENT_MESSAGES, |_, _| false);
-    let projected_pressure = estimate_input_tokens_conservative(&projected, None);
+    let projected_pressure = estimate_input_tokens_for_pressure(&projected, None);
     assert!(
         pruned_bytes > 250_000,
         "fixture must prune the pinned result"
@@ -169,7 +210,7 @@ fn exact_unbounded_reanchor_controls_reclaimability() {
     let mut config = CompactionConfig::default();
     let without_reanchor = PreparedCompactionEnvelope::new(config.clone(), None);
     let retained_floor = estimate_retained_floor_conservative(&messages, None, &without_reanchor);
-    let pressure = estimate_input_tokens_conservative(&messages, None);
+    let pressure = estimate_input_tokens_for_pressure(&messages, None);
     assert!(
         retained_floor < pressure,
         "fixture must have reclaimable pressure"

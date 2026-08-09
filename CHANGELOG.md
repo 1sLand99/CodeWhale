@@ -123,6 +123,41 @@ then reading the trials Codewhale lost.
 
 ### Fixed
 
+- **`/compact` outcomes are transcript receipts, not toasts.** The compaction
+  lifecycle reported queued/running/completed/failed states only through the
+  five-second status toast, and the engine emits its turn-complete transition
+  in the same event batch as the completion — the "done" footer replaced the
+  completion toast before a single frame was drawn, so a successful `/compact`
+  looked like a no-op (the finding that stopped the first v0.9.6 release run).
+  Completion, failure, queued-behind-a-turn, duplicate-request, and
+  full/closed-mailbox states now also land in the transcript, where they
+  survive later frames. A terminal compaction event with no tracked start no
+  longer strands `is_compacting`, which silently rejected every later
+  `/compact` as "already in progress".
+- **Repeat compactions replace the committed summary instead of stacking it.**
+  Every compaction appended its summary to the successor system prompt while
+  keeping the previous ones, so the stable prefix grew by a full summary per
+  pass, pressure re-latched, and auto-compaction retriggered on nearly every
+  turn — each new summary quoting the previous one's meta-commentary. The
+  previous committed summary is now injected into the summarization request as
+  a coalescing bridge, the commit replaces the old block, and the compaction
+  prompt instructs the model to summarize the task rather than the checkpoint
+  machinery.
+- **Auto-compact percentage means percent of the context window.** The
+  threshold was computed as percent of the spendable input ceiling (window
+  minus output reservation and headroom) and compared against a 1.5×-inflated
+  token estimate, so an "80%" setting on a 1M window with a 262K output
+  reservation fired near 30% of real usage. The trigger is now
+  `min(window × percent, window − output reservation − headroom)`, and
+  pressure is measured with the uninflated estimate or the provider-billed
+  prompt tokens from the current turn, whichever is higher. The inflated
+  estimator remains in place for overflow protection.
+- **Compaction summary requests use the same request shaping as ordinary
+  turns.** The summary call hard-coded `temperature: 0.3`, which leaked to the
+  wire on routes that pass sampling parameters through (e.g. Kimi Code
+  membership, whose fixed-sampling contract rejects it) and failed the entire
+  compaction pass. Like ordinary turns, the summary request now sends no
+  sampling parameters and inherits each route's own normalization.
 - **A truncated response is a failure, not an answer.** The turn loop read
   usage from the message delta and discarded its stop reason; trials that spent
   their whole output allowance on reasoning and emitted no answer were recorded

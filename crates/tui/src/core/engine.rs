@@ -4472,6 +4472,15 @@ impl Engine {
         config
             .workspace
             .get_or_insert_with(|| self.config.workspace.clone());
+        // Carry the committed summary into the summarization request so a
+        // repeat compaction coalesces it; the commit replaces it afterwards.
+        config.prior_summary = crate::compaction::strip_active_operation_reanchor(
+            self.session.compaction_summary_prompt.as_ref(),
+        )
+        .as_ref()
+        .map(crate::compaction::summary_prompt_text)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
         let successor_reanchor = self
             .config
             .runtime_services
@@ -5327,11 +5336,15 @@ impl Engine {
         };
         let summary_prompt = merge_system_prompts(Some(&summary_prompt), successor_reanchor)
             .or(Some(summary_prompt));
-        let prior_compaction =
-            strip_active_operation_reanchor(self.session.compaction_summary_prompt.as_ref());
-        self.session.compaction_summary_prompt =
-            merge_system_prompts(prior_compaction.as_ref(), summary_prompt.clone());
-        let prior_system = strip_active_operation_reanchor(self.session.system_prompt.as_ref());
+        // Exactly one committed summary is live at a time. The new summary
+        // coalesced the previous one via the summarization bridge, so the old
+        // block is REPLACED here — appending it again grew the stable prefix
+        // by a full summary per pass, which re-latched compaction pressure
+        // and retriggered compaction on every subsequent turn.
+        self.session.compaction_summary_prompt = summary_prompt.clone();
+        let prior_system = crate::compaction::strip_compaction_summaries(
+            strip_active_operation_reanchor(self.session.system_prompt.as_ref()).as_ref(),
+        );
         let merged = merge_system_prompts(prior_system.as_ref(), summary_prompt);
         self.session.last_system_prompt_hash = Some(system_prompt_hash(merged.as_ref()));
         self.session.system_prompt = merged;

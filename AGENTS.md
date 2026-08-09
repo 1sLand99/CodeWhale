@@ -7,7 +7,9 @@ Read it there; don't trust memory of it.
 ## Intent is the artifact
 
 Writing the code again is cheaper than recovering the code we wrote. Act on
-that.
+that. **Less code lets the model do more**: prefer deleting over adding,
+fight big files, and remove artificial constraints on the model rather than
+scaffolding around them.
 
 - **Rewriting any part of this project is always in scope**, up to the whole
   thing. Nothing is load-bearing by virtue of existing. Argue a rewrite on
