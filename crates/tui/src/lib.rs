@@ -11566,10 +11566,9 @@ async fn run_exec_agent(
                 tool_catalog,
                 ..
             } => {
-                #[cfg(unix)]
-                let (mut terminal_status, mut terminal_error) = (status, error);
-                #[cfg(not(unix))]
                 let (terminal_status, terminal_error) = (status, error);
+                #[cfg(unix)]
+                let (mut terminal_status, mut terminal_error) = (terminal_status, terminal_error);
                 if matches!(
                     terminal_status,
                     crate::core::events::TurnOutcomeStatus::Completed
@@ -11620,7 +11619,6 @@ async fn run_exec_agent(
                 } else if let Ok(mut manager) = exec_shell_manager.lock() {
                     manager.abort_persistent_services();
                 }
-
                 summary.status = Some(format!("{terminal_status:?}").to_lowercase());
                 if terminal_error.is_some() {
                     summary.error = terminal_error;
@@ -11689,7 +11687,6 @@ async fn run_exec_agent(
                 } else {
                     latest_session_id.clone()
                 };
-
                 if output_format == ExecOutputFormat::StreamJson {
                     if let Some(id) = saved_session_id.as_ref() {
                         emit_exec_stream_event(&ExecStreamEvent::SessionCapture {

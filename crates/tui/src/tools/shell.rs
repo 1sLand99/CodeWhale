@@ -322,7 +322,6 @@ enum ShellChild {
     #[cfg(not(target_env = "ohos"))]
     Pty(Box<dyn portable_pty::Child + Send>),
 }
-
 #[cfg(unix)]
 impl ShellChild {
     fn process_id(&self) -> Option<u32> {
