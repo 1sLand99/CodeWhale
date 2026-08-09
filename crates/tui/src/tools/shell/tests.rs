@@ -936,8 +936,8 @@ async fn background_start_advertises_task_status_completion() {
         )
         .await
         .expect("start background");
-
     assert!(result.content.contains("completion is delivered"));
+    assert!(result.content.contains("session exits") && result.content.contains("persist=true"));
     let metadata = result.metadata.as_ref().expect("metadata");
     assert_eq!(
         metadata
@@ -1979,10 +1979,10 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
 #[test]
 fn test_exec_shell_schema_guides_gt_five_second_work_to_background() {
     let schema = BashTool::new("Bash").input_schema();
-    let description = schema["properties"]["background"]["description"]
+    let d = schema["properties"]["background"]["description"]
         .as_str()
         .expect("background description");
-    assert!(description.contains(">5 seconds"), "{description}");
+    assert!(d.contains(">5 seconds") && d.contains("terminates") && d.contains("persist:true"));
 }
 
 #[tokio::test]
