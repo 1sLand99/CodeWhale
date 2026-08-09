@@ -788,9 +788,13 @@ async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
 }
 
 #[test]
-fn exec_shell_wait_schema_defaults_to_nonblocking_snapshot() {
+fn exec_shell_wait_schema_defaults_to_blocking() {
     let schema = BashTool::alias("exec_shell_wait", "wait").input_schema();
-    assert!(schema["properties"]["wait"].is_object());
+    assert!(
+        schema["properties"]["wait"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("default: true"))
+    );
     assert!(
         BashTool::alias("exec_shell_wait", "wait")
             .description()
@@ -799,7 +803,44 @@ fn exec_shell_wait_schema_defaults_to_nonblocking_snapshot() {
 }
 
 #[tokio::test]
-async fn exec_shell_wait_without_wait_arg_returns_snapshot() {
+async fn exec_shell_wait_without_wait_arg_blocks_until_completion() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let start_result = BashTool::new("Bash")
+        .execute(
+            json!({"command": sleep_command(1), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = start_result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let wait_result = BashTool::new("Bash")
+        .execute(
+            json!({"action": "wait", "task_id": task_id, "timeout_ms": 5_000}),
+            &ctx,
+        )
+        .await
+        .expect("wait for completion");
+
+    assert_eq!(
+        wait_result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str),
+        Some("Completed")
+    );
+}
+
+#[tokio::test]
+async fn exec_shell_wait_false_returns_nonblocking_snapshot() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
     let start_result = BashTool::new("Bash")
@@ -818,14 +859,17 @@ async fn exec_shell_wait_without_wait_arg_returns_snapshot() {
         .to_string();
 
     let started = Instant::now();
-    let wait_result = BashTool::alias("exec_shell_wait", "wait")
-        .execute(json!({"task_id": task_id, "timeout_ms": 5_000}), &ctx)
+    let wait_result = BashTool::new("Bash")
+        .execute(
+            json!({"action": "wait", "task_id": task_id, "timeout_ms": 5_000, "wait": false}),
+            &ctx,
+        )
         .await
-        .expect("wait snapshot");
+        .expect("poll snapshot");
 
     assert!(
         started.elapsed() < Duration::from_millis(1_000),
-        "default wait path should return a snapshot instead of blocking"
+        "wait=false should return a snapshot without blocking"
     );
     assert_eq!(
         wait_result
@@ -835,6 +879,50 @@ async fn exec_shell_wait_without_wait_arg_returns_snapshot() {
             .and_then(Value::as_str),
         Some("Running")
     );
+}
+
+#[tokio::test]
+async fn exec_shell_wait_without_wait_arg_returns_running_at_timeout() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let start_result = BashTool::new("Bash")
+        .execute(
+            json!({"command": sleep_command(5), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = start_result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let started = Instant::now();
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"action": "wait", "task_id": task_id, "timeout_ms": 1_000}),
+            &ctx,
+        )
+        .await
+        .expect("bounded wait");
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(
+        result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str),
+        Some("Running")
+    );
+
+    BashTool::new("Bash")
+        .execute(json!({"action": "cancel", "task_id": task_id}), &ctx)
+        .await
+        .expect("cancel background");
 }
 
 #[tokio::test]
@@ -2015,11 +2103,11 @@ async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let task_ctx = ctx.clone();
 
     let task = tokio::spawn(async move {
-        BashTool::alias("exec_shell_wait", "wait")
+        BashTool::new("Bash")
             .execute(
                 json!({
+                    "action": "wait",
                     "task_id": wait_task_id,
-                    "wait": true,
                     "timeout_ms": 600_000
                 }),
                 &task_ctx,
@@ -3066,4 +3154,152 @@ fn timeout_ms_description_covers_every_action_default() {
             "missing {expected}: {description}"
         );
     }
+}
+
+#[cfg(unix)]
+fn authorized_persistent_service_context(workspace: &Path) -> ToolContext {
+    let mut context = ToolContext::new(workspace.to_path_buf())
+        .with_elevated_sandbox_policy(ExecutionSandboxPolicy::DangerFullAccess);
+    context.persist_services_enabled = true;
+    context.tool_authority = None;
+    context.shell_policy = ShellPolicy::Full;
+    context.auto_approve = true;
+    context
+}
+
+#[cfg(unix)]
+fn persistent_service_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_service_requires_explicit_headless_exec_authority() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "action": "run",
+                "command": "sleep 30",
+                "background": true,
+                "persist": true,
+            }),
+            &context,
+        )
+        .await
+        .expect_err("ordinary tool contexts must reject ownership transfer");
+
+    assert!(error.to_string().contains("real headless `codewhale exec`"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn committed_persistent_service_survives_manager_drop_and_reports_identity() {
+    let _guard = persistent_service_test_lock().lock().await;
+    let workspace = tempdir().expect("workspace");
+    let marker = workspace.path().join("persistent-service-finished");
+    let context = authorized_persistent_service_context(workspace.path());
+
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({
+                "action": "run",
+                "command": format!("sleep 1; printf released > '{}'", marker.display()),
+                "background": true,
+                "persist": true,
+            }),
+            &context,
+        )
+        .await
+        .expect("stage persistent service");
+    assert!(result.success, "{result:?}");
+    assert_eq!(
+        result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata["ownership"].as_str()),
+        Some("managed_pending_exec_success")
+    );
+    let task_id = result.metadata.as_ref().unwrap()["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+
+    let receipts = context
+        .shell_manager
+        .lock()
+        .expect("shell manager")
+        .commit_persistent_services()
+        .expect("commit persistent service");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].task_id, task_id);
+    assert_eq!(receipts[0].process_group_id, receipts[0].pid);
+    assert_eq!(receipts[0].ownership, "external");
+
+    drop(context);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        marker.exists(),
+        "released service must survive Codewhale manager teardown"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn signal_cleanup_kills_staged_persistent_service_group() {
+    let _guard = persistent_service_test_lock().lock().await;
+    let workspace = tempdir().expect("workspace");
+    let context = authorized_persistent_service_context(workspace.path());
+
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({
+                "action": "run",
+                "command": "sleep 30",
+                "background": true,
+                "persist": true,
+            }),
+            &context,
+        )
+        .await
+        .expect("stage persistent service");
+    let task_id = result.metadata.as_ref().unwrap()["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let pid = context
+        .shell_manager
+        .lock()
+        .expect("shell manager")
+        .processes[&task_id]
+        .child
+        .as_ref()
+        .and_then(ShellChild::process_id)
+        .expect("persistent process id");
+
+    abort_pending_persistent_process_groups_for_exit();
+    let pid = i32::try_from(pid).expect("pid fits pid_t");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        let mut status = 0;
+        // SAFETY: `pid` is the direct child owned by this test's manager; the
+        // nonblocking wait only reaps that exact process.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "signal cleanup must kill the staged service process group"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(libc::WIFSIGNALED(status));
+    assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
 }
