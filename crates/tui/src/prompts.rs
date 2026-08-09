@@ -1557,6 +1557,7 @@ mod tests {
 
     #[test]
     fn every_mode_shares_one_prompt_per_host() {
+        let _env_lock = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join("AGENTS.md"),

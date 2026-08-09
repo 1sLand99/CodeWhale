@@ -5103,55 +5103,58 @@ async fn create_thread_normalizes_and_persists_named_permission_posture() -> Res
 
 #[tokio::test]
 async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
-    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-        return Ok(());
-    };
-    let client = crate::tls::reqwest_client();
+    Box::pin(async {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = crate::tls::reqwest_client();
 
-    let created: serde_json::Value = client
-        .post(format!("http://{addr}/v1/threads"))
-        .json(&json!({ "model": "test-model" }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let thread_id = created["id"].as_str().context("missing thread id")?;
+        let created: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({ "model": "test-model" }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let thread_id = created["id"].as_str().context("missing thread id")?;
 
-    let started: serde_json::Value = client
-        .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-        .json(&json!({
-            "prompt": "hello",
-            "dynamic_tools": [
-                {
-                    "name": "simple_tool",
-                    "description": "A simple tool.",
-                    "input_schema": { "type": "object" }
-                }
-            ],
-            "environment_id": "local",
-            "permission_posture": "auto-review"
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(started["turn"]["thread_id"], thread_id);
-    assert_eq!(started["thread"]["permission_posture"], "ask");
-    assert_eq!(started["turn"]["permission_posture"], "auto_review");
+        let started: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
+            .json(&json!({
+                "prompt": "hello",
+                "dynamic_tools": [
+                    {
+                        "name": "simple_tool",
+                        "description": "A simple tool.",
+                        "input_schema": { "type": "object" }
+                    }
+                ],
+                "environment_id": "local",
+                "permission_posture": "auto-review"
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(started["turn"]["thread_id"], thread_id);
+        assert_eq!(started["thread"]["permission_posture"], "ask");
+        assert_eq!(started["turn"]["permission_posture"], "auto_review");
 
-    let stored: serde_json::Value = client
-        .get(format!("http://{addr}/v1/threads/{thread_id}"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(stored["turns"][0]["permission_posture"], "auto_review");
+        let stored: serde_json::Value = client
+            .get(format!("http://{addr}/v1/threads/{thread_id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(stored["turns"][0]["permission_posture"], "auto_review");
 
-    handle.abort();
-    Ok(())
+        handle.abort();
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
