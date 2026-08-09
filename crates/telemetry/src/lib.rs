@@ -1,4 +1,4 @@
-//! Opt-in product telemetry for Codewhale.
+//! Default-on, user-disableable anonymous product usage counting for Codewhale.
 //!
 //! The whole of what this crate may ever send is [`event`]. The whole of what
 //! decides whether it may send anything is [`decision`]. Nothing else in the
@@ -9,7 +9,7 @@
 //!
 //! # The shape of the guarantee
 //!
-//! Consent is a **value**, not a convention. [`decide`] is the only constructor
+//! Permission is a **value**, not a convention. [`decide`] is the only constructor
 //! of [`TelemetryConsent`]; [`init`] takes one by value and there is no
 //! bool-taking sibling. Six init sites cannot each drift from the predicate,
 //! because they never see the predicate.
@@ -21,8 +21,8 @@
 //! construction empty until resolution completes. A disabled user's panic
 //! therefore writes nothing and creates no directory.
 //!
-//! Arming also **truncates** the buffer. No event recorded before consent can
-//! ever be in the batch that follows it.
+//! Arming also **truncates** any stale buffer before a newly permitted process
+//! begins recording.
 //!
 //! # Failure posture
 //!
@@ -91,8 +91,8 @@ pub fn init(consent: TelemetryConsent) {
     }
     let root = consent.root().to_path_buf();
 
-    // Clear the tombstone and drop anything buffered before consent. A stale
-    // buffer is not evidence of this user's answer.
+    // Clear a tombstone only after the permission decision has allowed this
+    // process, and drop anything stale from before that decision.
     if let Err(error) = buffer::arm(&root) {
         tracing::debug!("telemetry could not prepare its buffer: {error}");
         return;

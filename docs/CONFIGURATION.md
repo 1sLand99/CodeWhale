@@ -990,8 +990,8 @@ the `CODEWHALE_*` value wins.
 - `CODEWHALE_NOTES_PATH`
 - `CODEWHALE_MEMORY` (`1|on|true|yes|y|enabled` turns user memory on)
 - `CODEWHALE_MEMORY_PATH`
-- `CODEWHALE_TELEMETRY` / `DEEPSEEK_TELEMETRY` (legacy alias) — opt-in product
-  telemetry, off by default. Accepts `0|1|true|false|yes|no|on|off|enabled|
+- `CODEWHALE_TELEMETRY` / `DEEPSEEK_TELEMETRY` (legacy alias) — anonymous usage
+  counting, on by default and disclosed on first interactive launch. Accepts `0|1|true|false|yes|no|on|off|enabled|
   disabled`. An explicit "off" is a **floor**: it beats `--telemetry true` and
   `telemetry = true` in config, and a value this list cannot read also resolves
   to off, because a typo in a kill switch must never resolve to "on". See
@@ -1001,8 +1001,7 @@ the `CODEWHALE_*` value wins.
   Unset selects the shipped default,
   `https://telemetry.codewhale.net/v1/telemetry`; setting it to the **empty
   string** routes batches to a local dry-run file and contacts nobody. Either
-  way it only decides where an already-enabled session sends — it cannot turn
-  telemetry on.
+  way it only decides where a session sends — it cannot override an opt-out.
 - `CODEWHALE_ALLOW_SHELL` (`1`/`true` enables)
 - `CODEWHALE_APPROVAL_POLICY` (`on-request|untrusted|never`)
 - `CODEWHALE_SANDBOX_MODE` (`read-only|workspace-write|danger-full-access|external-sandbox`)
@@ -1662,14 +1661,11 @@ If you are upgrading from older releases:
   `eval`) default to `concise` unless config/env/CLI overrides it.
   Override per process with `CODEWHALE_VERBOSITY` or the legacy
   `DEEPSEEK_VERBOSITY` alias.
-- `telemetry` (bool, optional): opt-in product telemetry, **`false` by
-  default**. Setting it to `true` is only half of the switch: nothing is
-  collected unless the first-run notice has also been answered with "Enable" on
-  this machine, so a `telemetry = true` written before 0.9.4 stays inert. An
-  explicit `false` here is the *opt-out* — it deletes the random install id,
+- `telemetry` (bool, optional): anonymous usage counting, **`true` by default**,
+  with a clear first-run disclosure. An explicit `false` here is the durable
+  *opt-out* — it deletes the random install id,
   truncates every buffered event, and leaves a tombstone that every later run
-  re-asserts for as long as the key says `false` — while the unset default
-  simply never collects. It is also a floor: `--telemetry true` and
+  re-asserts for as long as the key says `false`. It is also a floor: `--telemetry true` and
   `CODEWHALE_TELEMETRY=1` both lose to it, and turning telemetry back on means
   writing `true` here. Override per process with `CODEWHALE_TELEMETRY` (legacy
   alias `DEEPSEEK_TELEMETRY`), where an explicit "off" is a hard floor that
@@ -1683,9 +1679,8 @@ If you are upgrading from older releases:
   unset selects the shipped default,
   **`https://telemetry.codewhale.net/v1/telemetry`** — the first-party ingest
   service described in [`TELEMETRY.md`](TELEMETRY.md), whose source is in
-  `telemetry-ingest/`. This key decides only *where* an enabled session sends;
-  it cannot turn telemetry on, and it is read only after `telemetry` above
-  resolved true and the first-run notice was answered with "Enable". Setting it
+  `telemetry-ingest/`. This key decides only *where* a permitted session sends;
+  it cannot override an opt-out. Setting it
   to the **empty string** is how you stay enabled and contact nobody: each batch
   is then written to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` and no HTTP client
   is constructed at all, so you can read exactly what would have been sent. Any

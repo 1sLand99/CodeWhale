@@ -20,7 +20,7 @@ model-visible link resolution remain follow-up work.
 1. **Local-first.** Future persisted workroom state should live under the
    CodeWhale home directory, protected by user-only filesystem permissions.
    No cloud sync and no third-party hosting. Workroom content is never a
-   telemetry subject: the opt-in product telemetry in `docs/TELEMETRY.md`
+   telemetry subject: the anonymous usage counting in `docs/TELEMETRY.md`
    collects counts and closed enums only, and no workroom id, title, link, or
    body may ever be added to its schema. That telemetry now has a live ingest
    endpoint (`https://telemetry.codewhale.net/v1/telemetry`, source in
@@ -28,9 +28,8 @@ model-visible link resolution remain follow-up work.
    stated: the endpoint validates against a **closed** field set and rejects an
    entire batch carrying any key the published schema does not name, so a
    workroom field added by accident is refused at ingest rather than stored.
-   Telemetry remains opt-in and off until the first-run notice is answered with
-   Enable, so the default posture for workroom content is still that no batch
-   exists at all.
+   Counting is disclosed and can be disabled immediately. It is on by default,
+   but workroom content is still structurally absent from every accepted batch.
 
 2. **No secrets in links.** `codewhale://workroom/wr_...` URLs contain only
    opaque UUIDs. They carry no API keys, bearer tokens, passwords, or file

@@ -91,6 +91,15 @@ then reading the trials Codewhale lost.
 
 ### Changed
 
+- **Anonymous usage counting is now opt-out.** Fresh installations send the
+  existing closed, aggregate telemetry schema by default and show a clear
+  first-run disclosure with an immediate Disable choice. Every prior decline,
+  `telemetry = false`, and `CODEWHALE_TELEMETRY=0` remains authoritative.
+  Codewhale still never sends conversations, code, prompts, files,
+  file/repo/branch names, model content, credentials, or a per-turn/per-tool
+  timeline. The random install id rotates every 90 days and is deleted on
+  opt-out. This makes daily unique-install counts representative without
+  expanding what is collected.
 - **`Bash action="wait"` blocks by default.** It previously computed blocking
   from a separate `wait` boolean defaulting to false, so
   `{"action":"wait","task_id":...,"timeout_ms":600000}` returned immediately

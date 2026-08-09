@@ -203,7 +203,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "BOOL",
-        help = "Opt in to anonymous product telemetry for this run (default off; \
+        help = "Control anonymous usage counting for this run (default on; \
                 CODEWHALE_TELEMETRY=0 always wins)"
     )]
     telemetry: Option<bool>,
@@ -2030,8 +2030,8 @@ fn resolve_runtime_for_diagnostic_dispatch(
 /// process*.
 ///
 /// Existing at all is the permission: it is only ever constructed behind
-/// [`TelemetryDecision::Enabled`], and the default state of every installation —
-/// no notice answered — yields `None`.
+/// [`TelemetryDecision::Enabled`] after persistent and run-scoped opt-outs are
+/// applied.
 struct CliTelemetrySession {
     started: std::time::Instant,
 }
@@ -2043,9 +2043,8 @@ struct CliTelemetrySession {
 /// this dispatcher forwards — naming a surface here for a delegated command
 /// would report one run twice under two identities.
 ///
-/// The setup-state decision is an independent AND condition applied inside
-/// [`telemetry::decide`]; a pre-existing `telemetry = true` is not consent,
-/// because the key has been settable and inert for a long time.
+/// Persistent config and setup-state opt-outs are applied inside
+/// [`telemetry::decide`].
 fn start_cli_telemetry(
     resolved: &ResolvedRuntimeOptions,
     config_path: Option<PathBuf>,
@@ -3856,14 +3855,7 @@ fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
-            // Turning telemetry on from the command line is still a consent
-            // moment, and it is the only one this surface can offer. The
-            // notice goes to stderr so `config set` stays pipeable, and it is
-            // shown *before* the write commits: declining writes nothing at
-            // all, not a value that a later notice would have to undo.
-            if !confirm_telemetry_opt_in_if_needed(&key, &value)? {
-                return Ok(());
-            }
+            clear_recorded_telemetry_opt_out_if_reenabled(&key, &value)?;
             store.config.set_value(&key, &value)?;
             store.save()?;
             println!("set {key}");
@@ -3896,64 +3888,24 @@ fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result
     }
 }
 
-/// Show the telemetry notice and record the answer when `config set` is about
-/// to turn telemetry on.
-///
-/// Returns whether the caller should proceed with the write. `Ok(false)` means
-/// the user declined; the decline is recorded, so they are not asked again
-/// until the notice content itself changes.
-///
-/// Off a terminal this is a no-op and the value is written unchanged: the
-/// setup-state decision stays unrecorded, which leaves the switch inert. That
-/// is the shape of the whole feature — both halves are required, neither alone
-/// suffices, and a script that flips the key on a build machine has not
-/// consented on anyone's behalf.
-fn confirm_telemetry_opt_in_if_needed(key: &str, value: &str) -> Result<bool> {
-    use codewhale_telemetry::notice;
-
-    // The same spellings `ConfigToml::set_value` accepts for a boolean. An
-    // unrecognised value is left to the setter to reject.
+/// An explicit `telemetry = true` re-enables a machine that previously declined
+/// the notice. Fresh machines keep the notice owed, so the disclosure still
+/// appears on their first interactive launch.
+fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Result<()> {
     let turning_on = matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "enabled"
     );
     if key != "telemetry" || !turning_on {
-        return Ok(true);
+        return Ok(());
     }
-    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
-        return Ok(true);
+    if let Some(mut state) = SetupState::load()?
+        && state.telemetry_opted_out()
+    {
+        state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
+        state.save()?;
     }
-    let Ok(Some(mut state)) = SetupState::load().map(|state| Some(state.unwrap_or_default()))
-    else {
-        return Ok(true);
-    };
-    if !state.needs_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION) {
-        return Ok(true);
-    }
-
-    eprintln!("\n  {}\n", notice::NOTICE_HEADLINE);
-    for line in notice::NOTICE_BODY.lines() {
-        if line.is_empty() {
-            eprintln!();
-        } else {
-            eprintln!("  {line}");
-        }
-    }
-    eprint!("\n  {} ", notice::NOTICE_PROMPT);
-    io::stderr().flush().ok();
-
-    let mut answer = String::new();
-    // A failed read is not an answer. Enter is not an answer either — it is
-    // the pre-selected decline.
-    let opt_in = io::stdin().read_line(&mut answer).is_ok() && notice::answer_is_yes(&answer);
-
-    state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, opt_in);
-    if let Err(error) = state.save() {
-        eprintln!("  Could not record that decision ({error}); telemetry stays off.\n");
-        return Ok(false);
-    }
-    eprintln!("  {}\n", notice::decision_receipt(opt_in));
-    Ok(opt_in)
+    Ok(())
 }
 
 fn model_command_provider_hint(

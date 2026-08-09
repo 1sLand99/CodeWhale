@@ -513,15 +513,15 @@ fn decision_matrix_is_exhaustive() {
     let home = temp_home();
     let path = home.path();
 
-    // Row: nobody has said anything. Default off is not an answer.
+    // Row: nobody has said anything. Anonymous usage counting is default-on.
     assert!(matches!(
         decide_in_home(
             Some(path),
-            &resolved(false, false, None),
+            &resolved(true, false, None),
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: a human said off. That is an answer.
@@ -535,8 +535,7 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::OptedOut
     ));
 
-    // Row: on, but never asked. A pre-existing `telemetry = true` is not
-    // consent — the key has been settable and inert for a long time.
+    // Row: on, notice not yet shown. Headless/default-on still works.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -544,7 +543,7 @@ fn decision_matrix_is_exhaustive() {
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: on, asked, declined.
@@ -558,7 +557,8 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::OptedOut
     ));
 
-    // Row: on, but the notice content changed since they answered.
+    // Row: on, but the notice content changed since they answered yes. A
+    // disclosure refresh does not pause usage counting.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -566,7 +566,7 @@ fn decision_matrix_is_exhaustive() {
             &stale_setup(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: on and accepted, no home to keep state in.
@@ -619,19 +619,18 @@ fn decision_matrix_is_exhaustive() {
         .is_enabled()
     );
 
-    // Row: every headless surface is reachable, because consent is
-    // machine-scoped: a TTY-recorded decision authorizes later exec, cli,
-    // app-server, mcp-server, and serve runs on the same home.
+    // Row: every headless surface uses the same documented default and kill
+    // switches.
     for surface in Surface::ALL {
         assert!(
             decide_in_home(
                 Some(path),
                 &resolved(true, false, None),
-                &accepted_setup(),
+                &SetupState::default(),
                 *surface
             )
             .is_enabled(),
-            "{surface:?} must be able to emit on a consenting machine"
+            "{surface:?} must be able to emit by default"
         );
     }
 }
@@ -670,8 +669,6 @@ fn only_opt_out_touches_disk() {
     // have broken: `false` is the *default*, so it fired on every ordinary run.
     let forced_off_rows: Vec<(ResolvedRuntimeOptions, SetupState)> = vec![
         (resolved(false, false, None), accepted_setup()),
-        (resolved(true, false, None), SetupState::default()),
-        (resolved(true, false, None), stale_setup()),
         (
             resolved(true, false, Some("http://example.com/t")),
             accepted_setup(),
@@ -827,7 +824,7 @@ fn an_opt_out_on_a_fresh_home_creates_nothing() {
     assert!(matches!(decision, TelemetryDecision::OptedOut));
     assert!(
         !root.exists(),
-        "a user who never opted in must not get a telemetry directory for saying no"
+        "a fresh user who opts out must not get a telemetry directory"
     );
 }
 
@@ -1293,12 +1290,11 @@ fn no_public_api_accepts_a_bare_bool() {
     let init: fn(crate::TelemetryConsent) = crate::init;
     let _ = init;
 
-    // The only source of one is `decide`, which needs both a resolved config
-    // and a setup-state record — neither of which a caller can fake into "yes"
-    // without the user having answered.
+    // The only source of one is `decide`, which still applies every persistent
+    // and run-scoped opt-out before constructing the capability.
     let home = temp_home();
     assert!(
-        !decide_in_home(
+        decide_in_home(
             Some(home.path()),
             &resolved(true, false, None),
             &SetupState::default(),
@@ -1601,11 +1597,11 @@ fn the_notice_promises_exactly_what_the_schema_collects() {
     // Everything the envelope carries has to be described. `install_id` is
     // "a random ID stored on this machine"; the rest are named directly.
     for claim in [
-        "which version you run",
+        "version",
         "OS and CPU family",
-        "which features you used",
-        "how long sessions ran",
-        "how they ended",
+        "session duration and outcome",
+        "aggregate",
+        "feature and error counters",
         "random ID stored on this machine",
         "every 90 days",
     ] {
@@ -1618,21 +1614,20 @@ fn the_notice_promises_exactly_what_the_schema_collects() {
     // And every red line has to be stated as *not collected*, not as
     // anonymized or sampled — two promises this client does not make.
     for red_line in [
+        "conversations",
         "prompts",
         "code",
-        "file names",
-        "paths",
-        "repo or branch names",
-        "model output",
-        "model names",
+        "files",
+        "file, repo, or branch names",
+        "model content",
         "credentials",
+        "per-turn or per-tool timeline",
     ] {
         assert!(
             body.contains(red_line),
             "the notice does not disclaim: {red_line}"
         );
     }
-    assert!(body.contains("Not sampled, not hashed"));
     assert!(!body.to_ascii_lowercase().contains("anonymized"));
 
     // The two documented ways out, both of which are real.
@@ -1642,26 +1637,28 @@ fn the_notice_promises_exactly_what_the_schema_collects() {
 }
 
 #[test]
-fn only_an_affirmative_answer_is_an_answer() {
-    use crate::notice::answer_is_yes;
+fn only_an_explicit_negative_answer_disables_the_default() {
+    use crate::notice::answer_keeps_enabled;
 
-    assert!(answer_is_yes("y"));
-    assert!(answer_is_yes("Y\n"));
-    assert!(answer_is_yes(" yes \n"));
-    // Enter, EOF, a typo, and a stray keystroke all decline. The default is
-    // the safe direction and it is reachable without aiming.
-    assert!(!answer_is_yes(""));
-    assert!(!answer_is_yes("\n"));
-    assert!(!answer_is_yes("n"));
-    assert!(!answer_is_yes("ye"));
-    assert!(!answer_is_yes("1"));
-    assert!(!answer_is_yes("true"));
+    assert!(answer_keeps_enabled(""));
+    assert!(answer_keeps_enabled("\n"));
+    assert!(answer_keeps_enabled("y"));
+    assert!(answer_keeps_enabled("Y\n"));
+    assert!(answer_keeps_enabled(" yes \n"));
+    assert!(answer_keeps_enabled("ye"));
+    assert!(answer_keeps_enabled("1"));
+    assert!(answer_keeps_enabled("true"));
+    assert!(!answer_keeps_enabled("n"));
+    assert!(!answer_keeps_enabled(" no \n"));
+    assert!(!answer_keeps_enabled("off"));
+    assert!(!answer_keeps_enabled("disable"));
+    assert!(!answer_keeps_enabled("disabled"));
 }
 
 #[test]
-fn the_notice_prompt_capitalises_the_declining_default() {
-    // `[y/N]`, not `[Y/n]` and not `[y/n]`. The shape of the prompt is the
+fn the_notice_prompt_capitalises_the_enabled_default() {
+    // `[Y/n]`, not `[y/N]` and not `[y/n]`. The shape of the prompt is the
     // first thing a user reads about which way Enter goes.
-    assert!(crate::notice::NOTICE_PROMPT.contains("[y/N]"));
-    assert!(!crate::notice::NOTICE_PROMPT.contains("[Y/n]"));
+    assert!(crate::notice::NOTICE_PROMPT.contains("[Y/n]"));
+    assert!(!crate::notice::NOTICE_PROMPT.contains("[y/N]"));
 }

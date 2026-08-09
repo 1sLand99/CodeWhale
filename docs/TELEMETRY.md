@@ -1,18 +1,23 @@
 # Codewhale product telemetry
 
-**Status for 0.9.4: opt-in, and off by default.** Nothing is collected until you
-answer the first-run notice with "Enable" — before that answer no event is
-recorded, no batch is assembled, and `$CODEWHALE_HOME/telemetry/` is not even
-created. Answering "Enable" is the entire consent decision; there is no other
-way to turn this on, and a `telemetry = true` written before 0.9.4 does not
-count as one.
+**Status for 0.9.6: anonymous usage counting is on by default and can be
+disabled immediately.** The first interactive launch says exactly what is
+counted and preselects "Keep on"; `n`, `no`, `off`, or `disable` records a
+durable opt-out. Headless surfaces follow the same documented default without
+pretending an interactive notice was shown. Every decline recorded by the
+former 0.9.4 opt-in notice remains off after upgrade.
+
+Codewhale does not collect conversations, code, prompts, files, file/repo/branch
+names, model content, or credentials. It sends no per-turn or per-tool timeline.
+It does send the closed, aggregate schema below: version and platform classes,
+session duration/outcome, feature/error counters, and a random install id that
+rotates every 90 days.
 
 **There is now a real endpoint.** An enabled session sends its batches to the
 first-party ingest service at `https://telemetry.codewhale.net/v1/telemetry`,
 which is the shipped default for `telemetry_endpoint`. What that service is,
 what it stores, and what it structurally cannot store is spelled out in "What
-the endpoint does" below. The default decides only *where* an enabled session's
-batches go — it changes nothing about whether a session collects.
+the endpoint does" below.
 
 **To send nothing anywhere, keep telemetry off** (see "Turning it off"). To stay
 enabled but contact nobody, set `telemetry_endpoint = ""`: batches are then
@@ -98,9 +103,9 @@ claim one.
 
 ## When anything is sent, and where
 
-Nothing is sent at all unless telemetry resolved on **and** the first-run notice
-was answered with "Enable" on this machine. Given both, there is exactly one
-flush point: an attempt during shutdown, bounded at three seconds. There is no
+Nothing is sent when the persistent opt-out or a run-scoped kill switch is in
+force. Otherwise there is exactly one flush point: an attempt during shutdown,
+bounded at three seconds. There is no
 startup flush, mid-session flush, per-turn flush, or per-tool-call flush. The
 shutdown flush re-resolves your setting from disk immediately beforehand, so
 `codewhale config set telemetry false` written from another terminal stops the
@@ -156,24 +161,25 @@ most once per flush point and never grows a queue.
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | Random, never derived, rotated every 90 days. See "Where it lives" above. |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`, as at `crates/tui/src/tui/ui.rs:17894` | Must match `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`. |
 | `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")` — a **new** rustc-env | First 12 hex chars. Emitted **only** when `codewhale_build_support::release_build_sha` saw `DEEPSEEK_BUILD_SHA` or `GITHUB_SHA` in the build environment, i.e. only for release-CI builds. `null` for every locally built binary, unconditionally, with no runtime lookup of any kind. **Never** `CODEWHALE_BUILD_COMMIT` — that falls back to `git_commit` and is the builder's private HEAD. **Never** `Thread.git_sha` (`crates/state/src/lib.rs:88`) — that is the user's workspace commit and a red line, one identifier away by name. |
-| `surface` | enum | set explicitly at each subcommand dispatch | `tui \| exec \| cli \| app-server \| mcp-server \| serve`. **Not derivable from the executable**: `codewhale-tui` serves at least five surfaces, and app-server runs *in-process* inside `codewhale` (`crates/cli/src/lib.rs:3945-3968`), so `current_exe()` would report every app-server session as CLI. `desktop` is omitted — no desktop surface exists. Which of these can emit is governed by the consent record, not by the surface: see "Which surfaces emit" below. |
+| `surface` | enum | set explicitly at each subcommand dispatch | `tui \| exec \| cli \| app-server \| mcp-server \| serve`. **Not derivable from the executable**: `codewhale-tui` serves at least five surfaces, and app-server runs *in-process* inside `codewhale` (`crates/cli/src/lib.rs:3945-3968`), so `current_exe()` would report every app-server session as CLI. `desktop` is omitted — no desktop surface exists. Which of these can emit is governed by the opt-out policy, not by the surface: see "Which surfaces emit" below. |
 | `os` | enum | `std::env::consts::OS`, as at `crates/cli/src/update.rs:41` | Whitelist: `linux \| macos \| windows \| freebsd \| android \| other`. |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`. |
 | `libc` | enum | `cfg!(target_env)` — **compile time** | `gnu \| musl \| none`. Runtime detection reads distro vendor strings; compile-time is free and leaks nothing. |
-| `tty` | bool | `std::io::IsTerminal`, as at `crates/tui/src/tui/ui.rs:1169` | `stdin().is_terminal() && stdout().is_terminal()`. Varies, because consent is machine-scoped. |
+| `tty` | bool | `std::io::IsTerminal`, as at `crates/tui/src/tui/ui.rs:1169` | `stdin().is_terminal() && stdout().is_terminal()`. |
 | `events` | array | the drained buffer | Every element is one of the four events below and nothing else. Capped at 200 events or 64 KiB per batch; a batch that would exceed either cap leaves the remainder buffered for the next flush. |
 
 **`os_major` is not collected.** Reading it costs unsafe FFI on two platforms plus a file parser on a third, in the one crate whose entire value is being small enough to audit — and `os`, `arch`, and `libc` are free and answer the platform question. It may be reconsidered if the stored data ever shows that the OS-version cut is what triage is missing; a hunch is not that evidence.
 
 ### Which surfaces emit
 
-A surface emits when — and only when — a notice decision was recorded on this machine and resolves to opt-in. The notice is only ever rendered on a TTY. So:
+A surface emits by default unless the machine has a persistent opt-out or the
+run has a kill switch. The notice is only rendered on a TTY. So:
 
-- **`tui`** — emits after the user answers the notice.
-- **`exec`, `cli`, `app-server`, `mcp-server`, `serve`** — emit only on a machine where the notice was already answered interactively. On a fresh home (CI, a container, a new user) they emit nothing, and nothing is written to disk.
+- **`tui`** — shows the disclosure before raw mode on first interactive launch,
+  then follows the answer.
+- **`exec`, `cli`, `app-server`, `mcp-server`, `serve`** — follow the documented
+  default on a fresh home and every persistent/run-scoped opt-out on any home.
 - **Fleet workers never emit**, on any surface, by construction (`crates/tui/src/fleet/host.rs:1362`).
-
-`docs/TELEMETRY.md` states this so nobody reads a structural zero as an adoption zero.
 
 ### Event: `install_or_upgrade`
 

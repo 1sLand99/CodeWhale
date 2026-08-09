@@ -1753,12 +1753,9 @@ async fn run_async_main_inner(
     // nothing and creates no directory.
     // The notice runs before arming, and only on the interactive surface: it
     // is the one surface that owns a terminal it can ask on, and asking before
-    // `arm_telemetry` is what lets a user who says yes be counted from this
-    // session rather than the next one.
-    //
-    // Every path that does not render and answer it leaves the decision unset,
-    // and unset means nothing is ever collected. `--skip-onboarding` and a
-    // non-TTY stdin both take that path, on purpose.
+    // `arm_telemetry` is what lets an immediate Disable choice stop this very
+    // session. Non-TTY surfaces follow the disclosed default without writing a
+    // fictional notice decision.
     if telemetry_surface(command.as_ref()) == codewhale_telemetry::Surface::Tui {
         crate::telemetry_notice::prompt_if_due(cli.skip_onboarding, cli.config.clone());
     }

@@ -415,11 +415,11 @@ pub fn wipe(root: &Path) -> Result<()> {
     })
 }
 
-/// Clear the tombstone and drop anything buffered before consent.
+/// Clear the tombstone and drop anything buffered before this process was
+/// permitted.
 ///
-/// Called by `init` on every arming. No event recorded before the user said yes
-/// can be in the batch that follows it — a stale buffer left by an earlier
-/// consenting run, or by a bug, is not evidence of this user's consent.
+/// Called by `init` on every arming. A stale buffer left by an earlier run or by
+/// a bug cannot enter the new process's batch.
 pub fn arm(root: &Path) -> Result<()> {
     ensure_dir(root)?;
     with_lock(root, || {

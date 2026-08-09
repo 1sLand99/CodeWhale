@@ -488,19 +488,14 @@ done
 
     expect(matrix.trust.hostedProviderBoundary).toContain("selected hosted provider");
     expect(matrix.trust.localInference).toContain("loopback local-model route");
-    // 0.9.4 ships an opt-in, default-off telemetry client that now has a live
-    // first-party endpoint as its shipped default. The claim has been rewritten
-    // twice as reality changed — "no Codewhale product telemetry", then "ships
-    // with no endpoint configured" — and this gate is what caught each drift,
-    // so the string moves to what is true now rather than being deleted.
-    //
-    // The consent half is asserted first and separately: an endpoint existing
-    // must never be allowed to soften "opt-in, off by default" into "we collect
-    // by default".
-    expect(matrix.trust.telemetry).toContain("opt-in, off by default");
-    expect(matrix.trust.telemetry).toContain(
-      "sends nothing until the first-run notice is answered with Enable",
-    );
+    // 0.9.6 makes anonymous usage counting default-on. The trust gate therefore
+    // requires both plain disclosure and a durable opt-out, plus explicit red
+    // lines around product content and agent timelines.
+    expect(matrix.trust.telemetry).toContain("on by default");
+    expect(matrix.trust.telemetry).toContain("clear first-run disclosure");
+    expect(matrix.trust.telemetry).toContain("durable opt-out");
+    expect(matrix.trust.telemetry).toContain("does not collect conversations");
+    expect(matrix.trust.telemetry).toContain("per-turn/per-tool timelines");
     // The destination is now named, and named exactly — a trust claim that says
     // "an endpoint" without saying which one is not a trust claim.
     expect(matrix.trust.telemetry).toContain(
