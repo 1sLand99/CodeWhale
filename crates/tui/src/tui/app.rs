@@ -551,8 +551,10 @@ impl LaunchState {
         let worktree_available = std::process::Command::new("git")
             .current_dir(workspace)
             .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .is_ok_and(|output| output.status.success());
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
         Self {
             visible,
             selected: 0,
