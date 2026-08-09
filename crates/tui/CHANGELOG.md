@@ -35,6 +35,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compatible gateways keep the generic Chat contract. FIM
   (`/v1/fim/completions`) is not wired.
 
+## [0.9.6] - 2026-08-09
+
+Codewhale v0.9.6 is a subtractive release. The runtime stopped supervising the
+model and started getting out of its way: the guards that interrupted live work
+are gone, mode-specific prompt doctrine is gone, compaction was rebuilt on a
+much smaller design, and a truncated provider response can no longer be
+recorded as a finished answer.
+
+Most of these were found by running the v0.9.5 binary against Terminal-Bench
+2.1 beside Pi 0.8.41 on the same model, effort, endpoint, and task digests, and
+then reading the trials Codewhale lost.
+
+### Added
+
+- Mistral AI (la Plateforme) is now a first-class OpenAI-compatible provider
+  route. Select it with `provider = "mistral"`, `CODEWHALE_PROVIDER=mistral`,
+  or `codewhale --provider mistral`. Aliases `mistral-ai`, `mistralai`, and
+  `la-plateforme` resolve to the same route. Authenticate with
+  `MISTRAL_API_KEY` (get one at <https://console.mistral.ai/api-keys>), or
+  via `[providers.mistral].api_key` / `codewhale auth set --provider mistral`.
+  Endpoint defaults to `https://api.mistral.ai/v1`; model defaults to
+  `mistral-code-latest` (Codestral coding model, 256K context; the historical
+  `codestral-latest` slug is accepted as an alias). The current static picker
+  ships `mistral-code-latest`, `mistral-medium-latest`,
+  `mistral-small-latest`, and `mistral-large-latest` with 256K-class windows.
+  Adjustable reasoning is wired end-to-end for `mistral-medium-latest` and
+  `mistral-small-latest`: Codewhale sends `reasoning_effort` (`none` or `high`
+  only — intermediate tiers get HTTP 400 code 3051), parses the polymorphic
+  `content: [{type: thinking, thinking: [{type: text, text: ...}], closed:
+  bool}, {type: text, text: ...}]` shape emitted during reasoning, and
+  replays the thinking trace back into multi-turn history per the
+  [official reasoning guide](https://docs.mistral.ai/studio-api/conversations/reasoning).
+  Deprecated native Magistral IDs remain accepted
+  when configured explicitly, always replay thinking, and never receive the
+  adjustable effort field. Non-reasoning models (`mistral-code-latest`,
+  `mistral-large-latest`) never receive it. Mistral-specific reasoning wire
+  behavior is limited to the documented first-party HTTPS `/v1` hosts; custom
+  compatible gateways keep the generic Chat contract. FIM
+  (`/v1/fim/completions`) is not wired.
+- **Persistent background services for headless exec.** `Bash` accepts
+  `persist: true` (Unix, real `codewhale exec`, explicit
+  `--sandbox danger-full-access`, `background: true` only). The service starts
+  with null stdio in its own process group; a successful exec transfers
+  ownership and emits a release receipt naming the pid. Failure, cancellation,
+  a terminating signal, or engine-channel EOF kills it and exits nonzero.
+  Ordinary background jobs keep their existing kill-on-drop lifetime. Before
+  this, a server the model started and verified died when the exec that
+  started it succeeded, and the external verifier got connection refused.
+- **Static Linux ARM64 binaries.** Release and nightly now build
+  `aarch64-unknown-linux-musl` on the native ARM runner, with a static check
+  (no ELF interpreter) and a launch smoke on the matching runner. The previous
+  GNU build inherited the builder's `GLIBC_2.39` floor and would not start on
+  Ubuntu 22.04 ARM64 and similar images.
+
+### Changed
+
+- **`Bash action="wait"` blocks by default.** It previously computed blocking
+  from a separate `wait` boolean defaulting to false, so
+  `{"action":"wait","task_id":...,"timeout_ms":600000}` returned immediately
+  and ignored the timeout. Pass `wait: false` for a nonblocking snapshot.
+  `task_shell_wait` keeps its documented nonblocking default, including when
+  `wait`/`block` arrive as null.
+- **Compaction rebuilt on the Codex design.** One summary request that is the
+  live conversation plus a final handoff-summary message, so the provider's
+  prefix cache covers everything already sent; a committed summary; and a
+  replacement history of the recent user messages within a fixed token budget.
+  On context-window overflow it drops the oldest history item and retries.
+  Sessions saved under the previous format still restore their committed
+  summary. Manual compaction remains nonblocking and serialized, both
+  lifecycle labels persist for the real lifecycle, and the successor request
+  carries the committed summary.
+- **One prompt for every mode.** Plan, Agent, and Operate previously shipped
+  separate doctrine prompts that were prepended to the constitution, so a mode
+  change rewrote the stable prefix. Modes differ in permissions and available
+  tools, which runtime policy and the live tool catalog already express per
+  turn. Headless hosts get a compact constitution; interactive hosts keep the
+  full base; explicit embedder and base-prompt overrides still win.
+- **Goals are no longer bounded from inside the runtime.** The three-per-turn
+  continuation cap, the auto-pause after three identical verifier gap sets, and
+  the instruction to stop at any unanswered question are gone. `max_steps`,
+  the opt-in `[goal] max_continuations` circuit breaker, and terminal
+  complete/blocked status remain the ways a goal run ends.
+- `todo_write` is documented as an optional progress surface. Its description
+  no longer instructs the model to keep the list live or never batch
+  completions.
+
+### Fixed
+
+- **A truncated response is a failure, not an answer.** The turn loop read
+  usage from the message delta and discarded its stop reason; trials that spent
+  their whole output allowance on reasoning and emitted no answer were recorded
+  `status=completed`, `termination_reason=resolved`. The stop reason is now
+  retained end to end. On an incomplete stop the runtime charges the billed
+  usage, keeps the visible fragment as interrupted rather than as a completed
+  assistant message, closes every opened tool lifecycle without executing the
+  call, and fails the turn with the provider's own reason. The Responses
+  adapter preserves `incomplete_details.reason` instead of flattening it, so an
+  unknown future reason cannot be mistaken for a finished answer.
+- The same rule now covers every remaining direct model consumer: compaction,
+  the `review` and `verify` tools, MCP thread handling, purge, the advisor, the
+  auto-route classifier, the fleet router, both setup drafts, and
+  `codewhale review`.
+- **Step-budget exhaustion is a typed failure.** Reaching `max_steps` before
+  completion is `Failed` / `BudgetExhausted` and cannot release a pending
+  persistent service. A goal continuation injected on the final step no longer
+  relabels an already delivered answer as a step-budget failure.
+- Cancellation arriving after the provider reported terminal usage still
+  charges the turn.
+
+### Removed
+
+- **The no-progress stuck guard.** It fingerprinted steps by tool name and
+  arguments with no result digest, so polling a live background job looked
+  identical every time. It stopped `filter-js-from-html` while the task it was
+  waiting on went on to pass, and stopped `llm-inference-batching-scheduler`
+  and `mcmc-sampling-stan` mid-optimizer and mid-compile.
+- **The read-repeat guard.** It coalesced same-batch duplicate reads onto one
+  execution and, past a threshold, replaced results with a receipt pointing at
+  a prior tool-use id. A model that asks to read a file twice now reads it
+  twice.
+- **Tool-error strategy coaching.** Errors were rewritten to append fallback
+  advice, and a degradation hint fired after two consecutive error steps.
+  Errors now return as the tool produced them.
+
+### Contributors
+
+- Xavier Pestel (@xavierpestel-ai) — Mistral AI provider route (#5295).
+
 ## [0.9.5] - 2026-08-08
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
@@ -3304,60 +3432,6 @@ folds in several community contributions.
 - WeChat bridge (`integrations/weixin-bridge` via Feishu + Tencent OpenClaw) — thanks @VincentCorleone (#3206)
 - Config robustness: atomic permission-rule save, one-time config `.bak` backup before the first changed write, `CODEWHALE_HOME` as primary config home, and accepting the dispatcher-written config shape (camelCase aliases + `[features.enabled]` table) so legacy/dual-written configs parse cleanly
 - Dependency/CI bumps: docker login/qemu actions, softprops gh-release, download-artifact, vitest, @opennextjs/cloudflare, form-data, js-yaml, dompurify, ws
-
-## [0.8.60] - 2026-06-13
-
-### Added
-
-- **Agent Fleet real-run cutover (#3154/#3096).** `codewhale fleet run` now
-  launches durable workers through the headless `codewhale exec --output-format
-  stream-json` path instead of the local simulation interpreter, with terminal
-  worker events freeing leases so queued fleet tasks continue running.
-- **Read-only shell parallelism (#2983).** The engine can now run conservative
-  read-only shell calls in parallel, including strict `bash`/`sh`/`zsh -c`
-  wrappers for whitelisted commands, while writes, stdin, background TTY work,
-  redirects, pipes, command substitution, and follow-mode tails stay serial.
-- **Declarative JS/TS WhaleFlow authoring (#3097).** WhaleFlow now accepts a
-  compile-only `workflow({...})` JavaScript/TypeScript authoring form that
-  lowers into the existing `WorkflowSpec` validator without executing user
-  JavaScript.
-- **Slash-menu Ctrl+P/Ctrl+N navigation (#3196).** The slash command menu now
-  supports Ctrl+P/Ctrl+N movement without letting the global file picker steal
-  focus while the menu is open. Thanks @1Git2Clone for the PR.
-- **New models and first-party provider routes.** This release adds
-  **GLM-5.2** (selectable on the Z.ai Coding Plan and over OpenRouter as
-  `z-ai/glm-5.2`, alongside the existing GLM-5.1 default), a first-party
-  **Z.ai** provider route, a first-party **StepFun / StepFlash** route
-  (`step-3.7-flash`), and a first-party **MiniMax** route defaulting to
-  `MiniMax-M3` with the M2.7/M2.5/M2.1 family selectable (#3187/#3191).
-
-### Changed
-
-- **README and contributor credits.** The README now has a shorter public
-  overview and moves the full contributor ledger to `docs/CONTRIBUTORS.md`,
-  preserving public thanks for [DeepSeek](https://github.com/deepseek-ai),
-  [DataWhale](https://github.com/datawhalechina),
-  [OpenWarp](https://github.com/zerx-lab/warp), and
-  [Open Design](https://github.com/nexu-io/open-design).
-- **Fleet-backed sub-agent direction.** Runtime docs now state the intended
-  cutover clearly: "sub-agent" is role/UX vocabulary, while durable detached
-  work should converge on the fleet-backed worker lifecycle with retries,
-  receipts, and ledgered inspection.
-
-### Fixed
-
-- **Sub-agent eval no longer blocks by default.** `agent_eval` now returns the
-  current projection immediately and delivers follow-up input without waiting
-  for a running child to finish its provider call. Pass `block:true` for an
-  intentional terminal wait.
-- **Z.ai GLM thinking traces.** Direct Z.ai requests now use the documented
-  `thinking` shape, preserve and replay `reasoning_content`, classify GLM
-  reasoning streams as thinking output, and accept `ultracode` as a max-effort
-  alias.
-- **Claude skill archive compatibility (#2743).** `/skill install` keeps
-  portable Claude-style skill folders supported while rejecting multi-skill
-  Claude plugin archives clearly instead of silently installing only one skill
-  and dropping plugin semantics. Thanks @AiurArtanis for the ecosystem request.
 
 ---
 

@@ -28,6 +28,18 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.6 — fewer bumpers, truthful endings</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[Xavier Pestel / xavierpestel-ai](https://github.com/xavierpestel-ai)** —
+  Mistral AI (la Plateforme) as a first-class provider route, including the
+  adjustable-reasoning wire contract and its multi-turn thinking replay
+  (PR #5295)
+
+</details>
+
+<details>
 <summary><strong>v0.9.5 — one runtime, managed controls, and uninterrupted turns</strong></summary>
 
 **Merged or adapted contributions**
