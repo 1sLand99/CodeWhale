@@ -4,11 +4,10 @@
 //! engine session maintenance code. Keeping them here prevents the top-level
 //! engine module from accumulating unrelated context-policy details.
 
-use crate::compaction::estimate_tokens;
 use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
 use crate::error_taxonomy::ErrorCategory;
-use crate::models::{Message, SystemPrompt};
+use crate::models::SystemPrompt;
 pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
 #[cfg(test)]
 pub(super) use crate::route_budget::{TURN_MAX_OUTPUT_TOKENS, effective_max_output_tokens};
@@ -517,36 +516,6 @@ pub(super) fn extract_compaction_summary_prompt(
         }
         None => None,
     }
-}
-
-#[allow(dead_code)] // exposed for future engine-side callers; current call path goes through compaction::estimate_input_tokens_conservative via token_estimate_cache.
-fn estimate_text_tokens_conservative(text: &str) -> usize {
-    text.chars().count().div_ceil(3)
-}
-
-#[allow(dead_code)] // see estimate_text_tokens_conservative above
-fn estimate_system_tokens_conservative(system: Option<&SystemPrompt>) -> usize {
-    match system {
-        Some(SystemPrompt::Text(text)) => estimate_text_tokens_conservative(text),
-        Some(SystemPrompt::Blocks(blocks)) => blocks
-            .iter()
-            .map(|block| estimate_text_tokens_conservative(&block.text))
-            .sum(),
-        None => 0,
-    }
-}
-
-#[allow(dead_code)] // see estimate_text_tokens_conservative above
-pub(super) fn estimate_input_tokens_conservative(
-    messages: &[Message],
-    system: Option<&SystemPrompt>,
-) -> usize {
-    let message_tokens = estimate_tokens(messages).saturating_mul(3).div_ceil(2);
-    let system_tokens = estimate_system_tokens_conservative(system);
-    let framing_overhead = messages.len().saturating_mul(12).saturating_add(48);
-    message_tokens
-        .saturating_add(system_tokens)
-        .saturating_add(framing_overhead)
 }
 
 /// Internal input-side token budget for a provider/model route:

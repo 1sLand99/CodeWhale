@@ -55,6 +55,7 @@
 use super::*;
 
 use crate::client::PreparedOutboundRequest;
+use crate::compaction::should_compact;
 use crate::request_manifest::{
     Availability, BasePromptProvenance, BillingFacts, ManifestDraft, PreparedBodyInputs,
     PromptProvenance, ReasoningResolution, RequestManifest, RouteFacts, SessionFacts,

@@ -169,9 +169,6 @@ const RETAINED_THINKING_MAX_CHARS: usize = 16 * 1024;
 /// Token budget for the recent user messages retained verbatim in the
 /// replacement history (Codex parity: COMPACT_USER_MESSAGE_MAX_TOKENS).
 const COMPACT_RETAINED_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
-/// Output allowance for the one summary call.
-const SUMMARY_MAX_TOKENS: u32 = 2_048;
-
 /// Handoff summarization prompt, appended to the live conversation as the
 /// final user message (ported from Codex `templates/compact/prompt.md`).
 const COMPACT_PROMPT: &str = "You are performing a context checkpoint compaction. Create a \
@@ -369,16 +366,14 @@ fn estimate_retained_floor_conservative(
         .filter(|text| !text.is_empty())
         .unwrap_or_default();
     let anchors = user_anchors_section(config.workspace.as_deref());
-    let summary_tokens = estimate_text_tokens_conservative(&build_compaction_summary_block_text(
-        "",
-        &anchors,
-        &live_reminder,
-    ))
-    .saturating_add(SUMMARY_MAX_TOKENS as usize);
+    let summary_scaffolding_tokens = estimate_text_tokens_conservative(
+        &build_compaction_summary_block_text("", &anchors, &live_reminder),
+    );
 
-    // Post-compaction the committed summary is REPLACED, not stacked; the new
-    // summary's allowance is already counted above, so prior summary blocks
-    // must not inflate the floor.
+    // Post-compaction the committed summary is REPLACED, not stacked, so prior
+    // summary blocks must not inflate the floor. Count only the exact installed
+    // scaffolding here; the model owns the concise summary length, just as it
+    // owns the answer length on an ordinary turn.
     let retained_system_prompt =
         strip_compaction_summaries(strip_active_operation_reanchor(system_prompt).as_ref());
     retained_tokens
@@ -386,7 +381,7 @@ fn estimate_retained_floor_conservative(
             retained_system_prompt.as_ref(),
         ))
         .saturating_add(framing)
-        .saturating_add(summary_tokens)
+        .saturating_add(summary_scaffolding_tokens)
         .saturating_add(estimate_system_tokens_conservative(
             prepared.successor_reanchor.as_ref(),
         ))
@@ -430,6 +425,8 @@ pub fn compaction_pressure_reached_with_billed(
     estimated.max(billed) >= config.token_threshold
 }
 
+/// Estimate-only eligibility check ([`should_compact_with_billed`] with no
+/// billed tokens): used by the request preview, where no provider bill exists.
 pub fn should_compact(
     messages: &[Message],
     system_prompt: Option<&SystemPrompt>,
@@ -1101,10 +1098,19 @@ async fn create_summary(
     });
 
     loop {
+        // Codex compaction is a normal model generation over the existing
+        // cached prefix. Do the same here: the resolved route decides how
+        // much output the model may need instead of imposing a smaller,
+        // compaction-only ceiling that can be consumed by hidden reasoning.
+        let cost_route = client.effective_route_envelope(&config.model, chrono::Utc::now());
         let request = MessageRequest {
             model: config.model.clone(),
             messages: request_messages.clone(),
-            max_tokens: SUMMARY_MAX_TOKENS,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                cost_route.provider,
+                &cost_route.model,
+                None,
+            ),
             system: None,
             tools: None,
             tool_choice: None,
@@ -1125,7 +1131,6 @@ async fn create_summary(
         // Capture the session scope before awaiting so a late response cannot
         // accrue into a subsequently loaded/new session.
         let cost_scope = crate::cost_status::scope_token();
-        let cost_route = client.effective_route_envelope(&config.model, chrono::Utc::now());
         let response = match client.create_message(request).await {
             Ok(response) => response,
             Err(err) if is_context_window_error(&err) && request_messages.len() > 2 => {
@@ -1638,9 +1643,30 @@ mod tests {
         assert!(!serialized.contains("two words"));
     }
 
-    #[derive(Default)]
     struct FixedSummaryClient {
         request: std::sync::Mutex<Option<MessageRequest>>,
+        provider: &'static str,
+        model: &'static str,
+    }
+
+    impl Default for FixedSummaryClient {
+        fn default() -> Self {
+            Self {
+                request: std::sync::Mutex::new(None),
+                provider: "test",
+                model: "test-model",
+            }
+        }
+    }
+
+    impl FixedSummaryClient {
+        fn for_route(provider: &'static str, model: &'static str) -> Self {
+            Self {
+                request: std::sync::Mutex::new(None),
+                provider,
+                model,
+            }
+        }
     }
 
     const FIXED_SUMMARY: &str = "1. Primary request and intent — migrate the session store. \
@@ -1650,11 +1676,11 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::core::model_client::ModelClient for FixedSummaryClient {
         fn provider_name(&self) -> &str {
-            "test"
+            self.provider
         }
 
         fn model(&self) -> &str {
-            "test-model"
+            self.model
         }
 
         async fn create_message(
@@ -1670,7 +1696,7 @@ mod tests {
                     text: FIXED_SUMMARY.to_string(),
                     cache_control: None,
                 }],
-                model: "test-model".to_string(),
+                model: self.model.to_string(),
                 stop_reason: None,
                 stop_sequence: None,
                 container: None,
@@ -1733,6 +1759,14 @@ mod tests {
         assert!(text.contains("Prior durable fact"));
         assert_eq!(request.temperature, None);
         assert_eq!(request.top_p, None);
+        assert_eq!(
+            request.max_tokens,
+            crate::route_budget::effective_max_output_tokens_for_route(
+                crate::config::ApiProvider::Custom,
+                "test-model",
+                None,
+            )
+        );
 
         let Some(SystemPrompt::Blocks(blocks)) = summary_prompt else {
             panic!("compaction must produce a summary system block");
@@ -1753,6 +1787,46 @@ mod tests {
             block,
             ContentBlock::Text { text, .. } if text == "Sounds good, do it"
         )));
+    }
+
+    #[tokio::test]
+    async fn compaction_uses_the_resolved_route_output_allowance() {
+        for (route_label, provider, model) in [
+            (
+                "thinking-default route",
+                crate::config::ApiProvider::Deepseek,
+                "deepseek-v4-flash",
+            ),
+            (
+                "fixed-sampling route",
+                crate::config::ApiProvider::Moonshot,
+                "k3",
+            ),
+        ] {
+            let client = FixedSummaryClient::for_route(provider.as_str(), model);
+            let config = CompactionConfig {
+                model: model.to_string(),
+                cache_summary: false,
+                ..Default::default()
+            };
+            compact_messages(&client, &[msg("user", "summarize this task")], &config)
+                .await
+                .expect("route compaction should complete");
+
+            let request = client
+                .request
+                .lock()
+                .expect("read summary request")
+                .clone()
+                .expect("summary request was captured");
+            assert_eq!(
+                request.max_tokens,
+                crate::route_budget::effective_max_output_tokens_for_route(provider, model, None),
+                "{route_label} must use the ordinary route output policy"
+            );
+            assert_eq!(request.temperature, None);
+            assert_eq!(request.top_p, None);
+        }
     }
 
     struct TruncatedSummaryClient;

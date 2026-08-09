@@ -21,7 +21,6 @@ use super::spec::{
 
 const DEFAULT_MAX_CHARS: usize = 200_000;
 const MAX_MAX_CHARS: usize = 1_000_000;
-const REVIEW_MAX_TOKENS: u32 = 2048;
 const FALLBACK_MAX_CHARS: usize = 4000;
 const REVIEW_RECEIPT_SCHEMA_VERSION: u32 = 1;
 
@@ -493,6 +492,7 @@ impl ToolSpec for ReviewTool {
                 .await?;
         let prompt = build_review_prompt(&source, max_chars);
 
+        let route = client.effective_route_envelope(&self.model, chrono::Utc::now());
         let request = MessageRequest {
             model: self.model.clone(),
             messages: vec![Message {
@@ -502,7 +502,14 @@ impl ToolSpec for ReviewTool {
                     cache_control: None,
                 }],
             }],
-            max_tokens: REVIEW_MAX_TOKENS,
+            // A review is a deliberative call: on thinking-default routes the
+            // reasoning stream shares this budget, so it gets the route's
+            // normal output allowance, not a review-only ceiling.
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                route.provider,
+                &route.model,
+                None,
+            ),
             system: Some(SystemPrompt::Text(REVIEW_SYSTEM_PROMPT.to_string())),
             tools: None,
             tool_choice: None,
@@ -510,11 +517,13 @@ impl ToolSpec for ReviewTool {
             thinking: None,
             reasoning_effort: None,
             stream: Some(false),
-            temperature: Some(0.2),
-            top_p: Some(0.9),
+            // Route parity with ordinary turns: no sampling params, so every
+            // provider's own defaults apply and fixed-sampling routes don't
+            // reject the request.
+            temperature: None,
+            top_p: None,
         };
 
-        let route = client.effective_route_envelope(&request.model, chrono::Utc::now());
         let response = client
             .create_message(request)
             .await

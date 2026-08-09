@@ -61,8 +61,6 @@ use super::spec::{
 const DEFAULT_MAX_EVIDENCE_CHARS: usize = 120_000;
 /// Per-file evidence cap so a single huge file can't crowd out the rest.
 const PER_FILE_MAX_CHARS: usize = 40_000;
-/// Response budget for the critic's structured JSON.
-const CRITIC_MAX_TOKENS: u32 = 2_048;
 /// Cap on the raw-text fallback summary when the critic returns non-JSON.
 const FALLBACK_SUMMARY_MAX_CHARS: usize = 4_000;
 
@@ -454,10 +452,24 @@ self-check of whether what you just did is actually correct and complete."
         // Run the critic under the re-entry marker so any (future) nested tool
         // call to `verify` is refused.
         let route = client.effective_route_envelope(&self.model, chrono::Utc::now());
+        // The critic runs at elevated reasoning, so its output allowance must
+        // be the route's normal one: a small fixed cap is consumed by the
+        // reasoning stream on thinking routes and truncates every critique.
+        let max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
+            route.provider,
+            &route.model,
+            None,
+        );
         let run = VERIFY_ACTIVE
             .scope(
                 (),
-                run_critique(&client, &self.model, self.critic_effort, &critique_input),
+                run_critique(
+                    &client,
+                    &self.model,
+                    self.critic_effort,
+                    max_tokens,
+                    &critique_input,
+                ),
             )
             .await?;
 
@@ -494,10 +506,11 @@ async fn run_critique<C: LlmClient>(
     client: &C,
     model: &str,
     effort: ReasoningEffort,
+    max_tokens: u32,
     input: &CritiqueInput,
 ) -> Result<CritiqueRun, ToolError> {
     let prompt = build_critic_prompt(input, DEFAULT_MAX_EVIDENCE_CHARS);
-    let request = build_critic_request(model, effort, prompt);
+    let request = build_critic_request(model, effort, max_tokens, prompt);
     let response = client
         .create_message(request)
         .await
@@ -518,7 +531,12 @@ async fn run_critique<C: LlmClient>(
 /// `tools` is always `None`, so the critic cannot invoke `verify` (or any other
 /// tool). `reasoning_effort` is set explicitly so the critic runs elevated
 /// regardless of the session tier.
-fn build_critic_request(model: &str, effort: ReasoningEffort, prompt: String) -> MessageRequest {
+fn build_critic_request(
+    model: &str,
+    effort: ReasoningEffort,
+    max_tokens: u32,
+    prompt: String,
+) -> MessageRequest {
     MessageRequest {
         model: model.to_string(),
         messages: vec![Message {
@@ -528,7 +546,10 @@ fn build_critic_request(model: &str, effort: ReasoningEffort, prompt: String) ->
                 cache_control: None,
             }],
         }],
-        max_tokens: CRITIC_MAX_TOKENS,
+        // Route-effective allowance: elevated reasoning shares the output
+        // budget on thinking routes, so a small fixed cap here truncates the
+        // critique before the JSON starts.
+        max_tokens,
         system: Some(SystemPrompt::Text(CRITIC_SYSTEM_PROMPT.to_string())),
         // Hard bound: the critic gets NO tools, so it cannot recurse into verify.
         tools: None,
@@ -538,8 +559,10 @@ fn build_critic_request(model: &str, effort: ReasoningEffort, prompt: String) ->
         // Test-time compute: elevated reasoning, independent of session tier.
         reasoning_effort: Some(clamp_to_elevated(effort).as_setting().to_string()),
         stream: Some(false),
-        temperature: Some(0.1),
-        top_p: Some(0.9),
+        // Route parity with ordinary turns: no sampling params, so every
+        // provider's own defaults apply and fixed-sampling routes don't reject.
+        temperature: None,
+        top_p: None,
     }
 }
 
@@ -875,7 +898,7 @@ mod tests {
     fn critic_request_is_elevated_and_toolless() {
         // Even if someone constructs the tool at Low, the critic must run
         // elevated and carry NO tools (so it cannot recurse into verify).
-        let req = build_critic_request("m", ReasoningEffort::Low, "prompt".to_string());
+        let req = build_critic_request("m", ReasoningEffort::Low, 65_536, "prompt".to_string());
         assert_eq!(
             req.reasoning_effort.as_deref(),
             Some("high"),
@@ -885,8 +908,14 @@ mod tests {
             req.tools.is_none(),
             "critic must be given NO tools — this is the structural recursion guard"
         );
+        assert_eq!(
+            req.max_tokens, 65_536,
+            "critic must use the route-effective allowance it was handed"
+        );
+        assert_eq!(req.temperature, None, "no sampling params on the wire");
+        assert_eq!(req.top_p, None, "no sampling params on the wire");
 
-        let req_max = build_critic_request("m", ReasoningEffort::Max, "prompt".to_string());
+        let req_max = build_critic_request("m", ReasoningEffort::Max, 65_536, "prompt".to_string());
         assert_eq!(req_max.reasoning_effort.as_deref(), Some("max"));
         assert!(req_max.tools.is_none());
     }
@@ -926,6 +955,7 @@ mod tests {
             &mock,
             "mock-critic",
             ReasoningEffort::Max,
+            65_536,
             &planted_bug_input(),
         )
         .await
@@ -962,9 +992,15 @@ mod tests {
     async fn unstructured_critic_output_is_unresolved_risk() {
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(text_response("m", "I think it looks fine, ship it."));
-        let run = run_critique(&mock, "m", ReasoningEffort::High, &planted_bug_input())
-            .await
-            .expect("runs");
+        let run = run_critique(
+            &mock,
+            "m",
+            ReasoningEffort::High,
+            65_536,
+            &planted_bug_input(),
+        )
+        .await
+        .expect("runs");
         // Fail safe: non-JSON critic output must not read as a clean pass.
         assert_eq!(run.report.verdict, "uncertain");
         assert!(run.report.unresolved_risk);

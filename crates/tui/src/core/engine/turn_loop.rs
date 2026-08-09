@@ -3789,7 +3789,7 @@ pub(super) fn production_input_estimate_with_work_tail(
     let Some(tail) = work_tail else {
         return base_message_estimate;
     };
-    base_message_estimate.saturating_add(super::context::estimate_input_tokens_conservative(
+    base_message_estimate.saturating_add(crate::compaction::estimate_input_tokens_conservative(
         std::slice::from_ref(tail),
         None,
     ))

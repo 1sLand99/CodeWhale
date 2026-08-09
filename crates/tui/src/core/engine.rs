@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::client::DeepSeekClient;
 use crate::compaction::{
     CompactionConfig, CompactionLiveState, PreparedCompactionEnvelope, compact_messages_safe,
-    merge_system_prompts, should_compact, strip_active_operation_reanchor,
+    merge_system_prompts, strip_active_operation_reanchor,
 };
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
@@ -6107,6 +6107,7 @@ mod approval;
 mod context;
 mod handle;
 pub mod preview;
+use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]
 pub(crate) use context::compact_tool_result_for_context;
 pub(crate) use context::compact_tool_result_for_route;
@@ -6117,9 +6118,8 @@ pub use context::context_input_budget_for_route;
 use context::route_context_budget_for_provider;
 use context::{
     MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
-    effective_max_output_tokens_for_route, estimate_input_tokens_conservative,
-    extract_compaction_summary_prompt, is_context_length_error_message,
-    route_context_budget_for_route, summarize_text,
+    effective_max_output_tokens_for_route, extract_compaction_summary_prompt,
+    is_context_length_error_message, route_context_budget_for_route, summarize_text,
 };
 #[cfg(test)]
 use context::{context_input_budget_for_provider, effective_max_output_tokens};

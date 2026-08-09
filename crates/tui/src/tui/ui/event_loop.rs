@@ -1879,12 +1879,9 @@ pub(crate) async fn run_event_loop(
                         {
                             if let Ok(session) = build_session_snapshot(app, &manager) {
                                 app.session_title = Some(session.metadata.title.clone());
-                                // Pin the id so every checkpoint of this
-                                // session lands in the same per-session file
-                                // and the eventual clear targets it.
-                                if app.current_session_id.is_none() {
-                                    app.current_session_id = Some(session.metadata.id.clone());
-                                }
+                                // The engine's session id was pinned above, so
+                                // every checkpoint of this session lands in the
+                                // same per-session file.
                                 if let Err(err) = persist_with_pending_work_boundary(
                                     app,
                                     PersistRequest::SaveCheckpoint { session },
