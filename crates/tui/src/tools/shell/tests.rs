@@ -1977,12 +1977,12 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
 }
 
 #[test]
-fn test_exec_shell_schema_guides_gt_five_second_work_to_background() {
+fn background_schema_distinguishes_temporary_jobs_from_persistent_services() {
     let schema = BashTool::new("Bash").input_schema();
     let d = schema["properties"]["background"]["description"]
         .as_str()
         .expect("background description");
-    assert!(d.contains(">5 seconds") && d.contains("terminates") && d.contains("persist:true"));
+    assert!(d.contains("killed") && d.contains("background:true") && d.contains("persist:true"));
 }
 
 #[tokio::test]

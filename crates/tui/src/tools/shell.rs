@@ -3516,7 +3516,7 @@ impl ToolSpec for BashTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run temporarily in background and return task_id (default: false). Prefer this for commands expected to take >5 seconds, but Codewhale terminates it when the session exits. A service that must outlive a successful headless exec requires persist:true."
+                    "description": "Temporary background; killed at session exit. Surviving headless services need background:true,persist:true."
                 },
                 "interactive": {
                     "type": "boolean",
