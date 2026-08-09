@@ -172,6 +172,7 @@ jobs:
           bash scripts/release/install-dogfood.test.sh
           bash scripts/release/prepare-release.test.sh
           bash scripts/release/require-release-tag-checkout.test.sh
+          bash scripts/release/validate-crate-publish-order.test.sh
           bash scripts/release/verify-remote-tag.test.sh
           bash .github/scripts/update-homebrew-tap.test.sh
           node .github/scripts/release-workflows.test.js

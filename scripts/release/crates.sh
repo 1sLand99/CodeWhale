@@ -19,8 +19,8 @@ release_crates=(
   codewhale-telemetry
   codewhale-lane
   codewhale-agent
-  codewhale-tui
   codewhale-core
+  codewhale-tui
   codewhale-app-server
   codewhale-cli
 )
