@@ -1024,34 +1024,28 @@ mod atomic_write_tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_atomic_workspace_replaces_symlink_when_target_is_unreadable() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+    fn write_atomic_workspace_replaces_self_referential_symlink_without_following() {
+        use std::os::unix::fs::symlink;
 
         let dir = tempdir().expect("tempdir");
-        let secret_dir = dir.path().join("secret");
-        fs::create_dir(&secret_dir).expect("create secret dir");
-        let secret_file = secret_dir.join("hidden.txt");
-        fs::write(&secret_file, b"hidden").expect("write hidden");
-        // Remove search permission so following the symlink fails with EACCES,
-        // while lstat on the symlink itself still succeeds.
-        fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o000))
-            .expect("lock secret dir");
+        let link = dir.path().join("self-link.txt");
+        symlink(&link, &link).expect("create self-referential symlink");
 
-        let link = dir.path().join("to-hidden.txt");
-        symlink(&secret_file, &link).expect("symlink to hidden file");
-
-        // Following metadata must fail; workspace write must still succeed.
         assert!(
-            fs::metadata(&link).is_err(),
-            "precondition: following the symlink must fail"
+            fs::symlink_metadata(&link)
+                .expect("lstat self-referential symlink")
+                .file_type()
+                .is_symlink()
+        );
+        let follow_error = fs::metadata(&link).expect_err("following the symlink must fail");
+        assert_ne!(
+            follow_error.kind(),
+            std::io::ErrorKind::NotFound,
+            "the fixture must catch a metadata-following regression"
         );
 
         let result = write_atomic_workspace(&link, b"new-content");
-
-        // Restore dir perms so tempdir cleanup can remove nested files.
-        let _ = fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o700));
-
-        result.expect("workspace write must not abort when symlink target is unreadable");
+        result.expect("workspace write must not follow a self-referential symlink");
         let link_meta = fs::symlink_metadata(&link).expect("link metadata");
         assert!(link_meta.file_type().is_file() && !link_meta.file_type().is_symlink());
         assert_eq!(fs::read(&link).expect("read"), b"new-content");

@@ -143,7 +143,7 @@ function releaseBaseUrl(version, repo = "Hmbown/CodeWhale") {
   // mirror that already builds and publishes binary release assets.
   if (usesCnbMirror()) {
     assertCnbMirrorSupportedPlatform();
-    return `https://cnb.cool/codewhale.net/codewhale/-/releases/v${version}/`;
+    return `https://cnb.cool/codewhale.net/codewhale/-/releases/download/v${version}/`;
   }
   return `https://github.com/${repo}/releases/download/v${version}/`;
 }
