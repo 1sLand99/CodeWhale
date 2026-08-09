@@ -7,6 +7,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "report:dau": "node scripts/report-dau.mjs",
     "dev": "wrangler dev",
     "check": "wrangler deploy --dry-run --outdir=.wrangler/dry-run",
     "deploy": "wrangler deploy"

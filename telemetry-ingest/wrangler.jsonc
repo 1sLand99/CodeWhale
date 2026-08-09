@@ -56,6 +56,7 @@
   // `https://telemetry.codewhale.net/v1/telemetry` is the shipped default for
   // `telemetry_endpoint` (`DEFAULT_TELEMETRY_ENDPOINT` in
   // `crates/config/src/lib.rs`), so real batches arrive here. Only from
-  // sessions that answered the first-run notice with Enable — the default
-  // decides where a batch goes, never whether one exists. See README.md.
+  // sessions that have not opted out. v0.9.6 discloses anonymous usage
+  // counting on first interactive launch and enables it by default. See
+  // README.md.
 }
