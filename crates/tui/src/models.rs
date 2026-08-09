@@ -230,6 +230,47 @@ pub struct MessageResponse {
     pub usage: Usage,
 }
 
+/// True when the provider ended generation because its output allowance was
+/// exhausted. Providers use several wire spellings for the same condition.
+#[must_use]
+pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        let reason = reason
+            .trim()
+            .strip_prefix("incomplete:")
+            .unwrap_or_else(|| reason.trim());
+        matches!(
+            reason.to_ascii_lowercase().as_str(),
+            "length" | "max_tokens" | "max_output_tokens"
+        )
+    })
+}
+
+/// True when the provider explicitly reported that it did not complete the
+/// response. Responses API reasons carry an `incomplete:` prefix so unknown
+/// future reasons cannot accidentally be accepted as a finished answer.
+#[must_use]
+pub(crate) fn is_incomplete_stop_reason(reason: Option<&str>) -> bool {
+    is_output_limit_stop_reason(reason)
+        || reason.is_some_and(|reason| {
+            let reason = reason.trim().to_ascii_lowercase();
+            reason.starts_with("incomplete:")
+                || matches!(
+                    reason.as_str(),
+                    "content_filter" | "model_context_window_exceeded"
+                )
+        })
+}
+
+#[must_use]
+pub(crate) fn stop_reason_detail(reason: Option<&str>) -> &str {
+    reason
+        .map(str::trim)
+        .and_then(|reason| reason.strip_prefix("incomplete:").or(Some(reason)))
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("unknown")
+}
+
 /// Token usage metadata for a response.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct Usage {
@@ -792,6 +833,37 @@ pub struct MessageDelta {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn output_limit_stop_reason_accepts_provider_aliases_only() {
+        for reason in [
+            "length",
+            "max_tokens",
+            "max_output_tokens",
+            " MAX_TOKENS ",
+            "incomplete:max_output_tokens",
+        ] {
+            assert!(is_output_limit_stop_reason(Some(reason)), "{reason}");
+        }
+        for reason in [None, Some("end_turn"), Some("tool_use"), Some("")] {
+            assert!(!is_output_limit_stop_reason(reason), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn incomplete_stop_reason_never_accepts_unknown_responses_failures() {
+        assert!(is_incomplete_stop_reason(Some("incomplete:content_filter")));
+        assert!(is_incomplete_stop_reason(Some("content_filter")));
+        assert!(is_incomplete_stop_reason(Some(
+            "model_context_window_exceeded"
+        )));
+        assert!(is_incomplete_stop_reason(Some("max_tokens")));
+        assert!(!is_incomplete_stop_reason(Some("end_turn")));
+        assert_eq!(
+            stop_reason_detail(Some("incomplete:content_filter")),
+            "content_filter"
+        );
+    }
 
     #[test]
     fn interrupted_assistant_role_round_trips_as_distinct_session_item() {

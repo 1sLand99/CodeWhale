@@ -10309,64 +10309,23 @@ fn subagent_request_budget_allows_large_write_file_arguments() {
 }
 
 #[test]
-fn truncated_subagent_tool_calls_return_model_visible_errors() {
-    let tool_uses = vec![(
-        "toolu_write".to_string(),
-        "write_file".to_string(),
-        json!({"path": "report.md", "content": "partial"}),
-    )];
+fn incomplete_response_failure_keeps_the_provider_stop_cause() {
+    let response = MessageResponse {
+        id: "response_incomplete".to_string(),
+        r#type: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![],
+        model: "deepseek-v4-flash".to_string(),
+        stop_reason: Some("incomplete:content_filter".to_string()),
+        stop_sequence: None,
+        container: None,
+        usage: Usage::default(),
+    };
 
-    let results = truncated_response_tool_results(&tool_uses);
-
-    assert_eq!(results.len(), 1);
-    match &results[0] {
-        ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-            ..
-        } => {
-            assert_eq!(tool_use_id, "toolu_write");
-            assert_eq!(is_error, &Some(true));
-            assert!(content.contains("truncated by max_tokens"));
-            assert!(content.contains("write_file"));
-            assert!(content.contains("smaller writes"));
-        }
-        other => panic!("expected tool error result, got {other:?}"),
-    }
-}
-
-#[test]
-fn truncated_subagent_text_response_returns_model_visible_error() {
-    let results = truncated_response_text_retry_message();
-
-    assert_eq!(results.len(), 1);
-    match &results[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("truncated by max_tokens"));
-            assert!(text.contains("No complete tool call was available"));
-            assert!(text.contains("Retry with a shorter response"));
-        }
-        other => panic!("expected text retry message, got {other:?}"),
-    }
-}
-
-#[test]
-fn consecutive_truncated_subagent_responses_are_capped() {
-    let mut consecutive = 0;
-
-    for _ in 0..MAX_CONSECUTIVE_TRUNCATED_SUBAGENT_RESPONSES {
-        record_truncated_subagent_response(&mut consecutive).expect("within truncation cap");
-    }
-
-    let err = record_truncated_subagent_response(&mut consecutive)
-        .expect_err("one more truncation should stop the sub-agent");
-    assert!(err.to_string().contains("truncated by max_tokens"));
-    assert!(err.to_string().contains("consecutive"));
-
-    reset_truncated_subagent_responses(&mut consecutive);
-    record_truncated_subagent_response(&mut consecutive).expect("reset should allow recovery");
-    assert_eq!(consecutive, 1);
+    let failure = incomplete_subagent_response_failure(&response);
+    assert!(failure.contains("response was incomplete"), "{failure}");
+    assert!(failure.contains("`content_filter`"), "{failure}");
+    assert!(!failure.contains("budget exhausted"), "{failure}");
 }
 
 #[test]
@@ -13277,6 +13236,274 @@ async fn token_heavy_chat_client(
     };
     let client = DeepSeekClient::new(&config).expect("fake chat client");
     (client, calls)
+}
+
+/// First response carries partial text plus a tool call and the requested
+/// incomplete/output-limit reason. A second request, when the runtime is
+/// allowed to retry, completes normally.
+async fn incomplete_then_complete_chat_client(
+    first_stop_reason: &str,
+) -> (DeepSeekClient, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_stop_reason = first_stop_reason.to_string();
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            move |Json(_body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                let first_stop_reason = first_stop_reason.clone();
+                async move {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let choice = if attempt == 1 {
+                        json!({
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "partial response diagnostics",
+                                "tool_calls": [{
+                                    "id": "call_partial_must_not_run",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "write_file",
+                                        "arguments": "{\"path\":\"partial-must-not-run.txt\",\"content\":\"unsafe\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": first_stop_reason
+                        })
+                    } else {
+                        json!({
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "recovered complete response"
+                            },
+                            "finish_reason": "stop"
+                        })
+                    };
+                    Json(json!({
+                        "id": format!("chatcmpl-incomplete-{attempt}"),
+                        "model": "deepseek-v4-flash",
+                        "choices": [choice],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 5,
+                            "total_tokens": 15
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake incomplete-response server");
+    let addr = listener.local_addr().expect("fake server addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(format!("http://{addr}/v1")),
+        ..crate::config::Config::default()
+    };
+    let client = DeepSeekClient::new(&config).expect("fake incomplete-response client");
+    (client, calls)
+}
+
+async fn run_incomplete_response_worker(
+    workspace: &Path,
+    stop_reason: &str,
+    max_steps: u32,
+    token_budget: Option<u64>,
+) -> (
+    SubAgentResult,
+    Arc<AtomicUsize>,
+    Vec<MailboxMessage>,
+    Option<u64>,
+) {
+    use tokio_util::sync::CancellationToken;
+
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        workspace.to_path_buf(),
+        2,
+    )));
+    let agent_id = format!("agent_incomplete_{}", stop_reason.replace(':', "_"));
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        FleetRole::Worker,
+        "Return a concise answer".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Partial".to_string()),
+        Some(vec![]),
+        task_input_tx,
+        workspace.to_path_buf(),
+        "boot_incomplete".to_string(),
+    );
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, workspace.to_path_buf()));
+    }
+
+    let (client, calls) = incomplete_then_complete_chat_client(stop_reason).await;
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(workspace.to_path_buf());
+    runtime.mailbox = Some(mailbox);
+
+    run_subagent_task(SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: FleetRole::Worker,
+        prompt: "Return a concise answer".to_string(),
+        assignment: make_assignment(),
+        // The fake provider intentionally hallucinates a tool call despite an
+        // empty catalog. Stop-reason handling must reject it before dispatch.
+        allowed_tools: Some(vec![]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps,
+        token_budget,
+        wall_time: DEFAULT_CHILD_WALL_TIME,
+        input_rx: task_input_rx,
+        launch_gate: None,
+    })
+    .await;
+
+    let mailbox_messages = mailbox_rx
+        .drain()
+        .into_iter()
+        .map(|envelope| envelope.message)
+        .collect::<Vec<_>>();
+    let (result, total_tokens) = {
+        let manager = manager.read().await;
+        let result = manager.get_result(&agent_id).expect("agent registered");
+        let total_tokens = manager
+            .get_worker_record(&agent_id)
+            .expect("worker record")
+            .usage
+            .total_tokens;
+        (result, total_tokens)
+    };
+    (result, calls, mailbox_messages, total_tokens)
+}
+
+fn assert_partial_tool_was_not_executed(messages: &[MailboxMessage]) {
+    assert!(
+        !messages
+            .iter()
+            .any(|message| matches!(message, MailboxMessage::ToolCallStarted { .. })),
+        "an incomplete response must never dispatch its partial tool call: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn output_limit_on_last_step_preserves_partial_text_and_exact_cause() {
+    let tmp = tempdir().expect("tempdir");
+    let (result, calls, mailbox, total_tokens) =
+        run_incomplete_response_worker(tmp.path(), "length", 1, None).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!(
+            "expected exact output-limit failure, got {:?}",
+            result.status
+        );
+    };
+    assert!(reason.contains("output was truncated"), "{reason}");
+    assert!(reason.contains("`length`"), "{reason}");
+    assert!(!reason.contains("step budget exhausted"), "{reason}");
+    assert_eq!(
+        result.result.as_deref(),
+        Some("partial response diagnostics")
+    );
+    assert_eq!(total_tokens, Some(15), "usage must be accounted first");
+    assert_partial_tool_was_not_executed(&mailbox);
+    assert!(
+        result
+            .checkpoint
+            .as_ref()
+            .expect("terminal checkpoint")
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "partial response diagnostics")),
+        "the partial assistant text must remain in the transcript checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn output_limit_cause_wins_over_generic_token_budget() {
+    let tmp = tempdir().expect("tempdir");
+    let (result, calls, mailbox, total_tokens) =
+        run_incomplete_response_worker(tmp.path(), "max_tokens", 4, Some(10)).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!(
+            "expected exact output-limit failure, got {:?}",
+            result.status
+        );
+    };
+    assert!(reason.contains("output was truncated"), "{reason}");
+    assert!(reason.contains("`max_tokens`"), "{reason}");
+    assert!(!reason.contains("token budget exhausted ("), "{reason}");
+    assert_eq!(
+        result.result.as_deref(),
+        Some("partial response diagnostics")
+    );
+    assert_eq!(total_tokens, Some(15), "usage must still be recorded");
+    assert_partial_tool_was_not_executed(&mailbox);
+}
+
+#[tokio::test]
+async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
+    let tmp = tempdir().expect("tempdir");
+    let (result, calls, mailbox, total_tokens) =
+        run_incomplete_response_worker(tmp.path(), "incomplete:content_filter", 4, Some(10)).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!("expected exact incomplete failure, got {:?}", result.status);
+    };
+    assert!(reason.contains("response was incomplete"), "{reason}");
+    assert!(reason.contains("`content_filter`"), "{reason}");
+    assert!(!reason.contains("token budget exhausted"), "{reason}");
+    assert_eq!(
+        result.result.as_deref(),
+        Some("partial response diagnostics")
+    );
+    assert_eq!(total_tokens, Some(15), "usage must still be recorded");
+    assert_partial_tool_was_not_executed(&mailbox);
+}
+
+#[tokio::test]
+async fn output_limit_never_retries_or_executes_partial_tools() {
+    let tmp = tempdir().expect("tempdir");
+    let (result, calls, mailbox, total_tokens) =
+        run_incomplete_response_worker(tmp.path(), "length", 2, Some(100)).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!("incomplete output must fail, got {:?}", result.status);
+    };
+    assert!(reason.contains("output was truncated"), "{reason}");
+    assert!(reason.contains("`length`"), "{reason}");
+    assert_eq!(
+        result.result.as_deref(),
+        Some("partial response diagnostics")
+    );
+    assert_eq!(total_tokens, Some(15));
+    assert_partial_tool_was_not_executed(&mailbox);
 }
 
 /// Shared scaffolding for the per-worker token-budget runtime tests: spins up

@@ -63,8 +63,10 @@ impl RunTerminationReason {
 
 /// Reduce the existing Engine outcome plus typed subsystem evidence into the
 /// terminal status shared by machine-facing projections. Successful and
-/// canceled turns are unambiguous; failed turns prefer explicit approval/tool
-/// evidence before classifying provider and infrastructure categories.
+/// canceled turns are unambiguous. For failed turns, the terminal error
+/// category wins over historical tool failures from earlier, recovered steps;
+/// approval/tool evidence is the fallback when the terminal event has no
+/// typed cause.
 #[must_use]
 pub fn classify_turn_termination(
     status: crate::core::events::TurnOutcomeStatus,
@@ -78,9 +80,17 @@ pub fn classify_turn_termination(
     match status {
         TurnOutcomeStatus::Completed => RunTerminationReason::Resolved,
         TurnOutcomeStatus::Interrupted => RunTerminationReason::Canceled,
+        // A provider-declared incomplete response is the terminal cause even
+        // if an earlier tool in the same run needed approval. Historical
+        // approval evidence must not relabel model truncation.
+        TurnOutcomeStatus::Failed
+            if matches!(error_category, Some(ErrorCategory::InvalidInput)) =>
+        {
+            RunTerminationReason::ModelError
+        }
         TurnOutcomeStatus::Failed if approval_required => RunTerminationReason::ApprovalRequired,
-        TurnOutcomeStatus::Failed if tool_error_seen => RunTerminationReason::ToolError,
         TurnOutcomeStatus::Failed => match error_category {
+            Some(ErrorCategory::Budget) => RunTerminationReason::BudgetExhausted,
             Some(ErrorCategory::Timeout) => RunTerminationReason::Timeout,
             Some(
                 ErrorCategory::Network
@@ -94,6 +104,7 @@ pub fn classify_turn_termination(
             Some(ErrorCategory::State | ErrorCategory::Internal) => {
                 RunTerminationReason::InfrastructureError
             }
+            None if tool_error_seen => RunTerminationReason::ToolError,
             None => RunTerminationReason::Unresolved,
         },
     }
@@ -205,6 +216,15 @@ mod tests {
         assert_eq!(
             classify_turn_termination(
                 TurnOutcomeStatus::Failed,
+                Some(ErrorCategory::InvalidInput),
+                false,
+                false,
+            ),
+            RunTerminationReason::ModelError
+        );
+        assert_eq!(
+            classify_turn_termination(
+                TurnOutcomeStatus::Failed,
                 Some(ErrorCategory::Internal),
                 false,
                 false,
@@ -214,6 +234,26 @@ mod tests {
         assert_eq!(
             classify_turn_termination(TurnOutcomeStatus::Failed, None, true, false),
             RunTerminationReason::ToolError
+        );
+        assert_eq!(
+            classify_turn_termination(
+                TurnOutcomeStatus::Failed,
+                Some(ErrorCategory::InvalidInput),
+                true,
+                false,
+            ),
+            RunTerminationReason::ModelError,
+            "a recovered tool error must not hide the terminal model failure"
+        );
+        assert_eq!(
+            classify_turn_termination(
+                TurnOutcomeStatus::Failed,
+                Some(ErrorCategory::InvalidInput),
+                true,
+                true,
+            ),
+            RunTerminationReason::ModelError,
+            "historical approval evidence must not hide terminal truncation"
         );
     }
 }

@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::client::DeepSeekClient;
 use crate::core::events::Event;
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
+use crate::models::{
+    ContentBlock, Message, MessageRequest, SystemPrompt, Usage, is_incomplete_stop_reason,
+    stop_reason_detail,
+};
 use crate::repl::PythonRuntime;
 
 use super::bridge::{RlmBridge, RlmLlmClient};
@@ -286,6 +289,22 @@ async fn run_rlm_turn_impl(
             };
 
             super::add_usage_with_prompt_cache(&mut total_usage, &response.usage);
+
+            if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+                let reason = stop_reason_detail(response.stop_reason.as_deref());
+                break 'turn RlmTurnResult {
+                    answer: String::new(),
+                    iterations: iteration + 1,
+                    duration: start.elapsed(),
+                    error: Some(format!(
+                        "RLM root model response incomplete: provider stop reason `{reason}`; partial FINAL/REPL output was not accepted."
+                    )),
+                    usage: total_usage,
+                    termination: RlmTermination::Error,
+                    trace: trace.clone(),
+                    total_rpcs,
+                };
+            }
 
             let response_text = extract_text_blocks(&response.content);
             last_response_text = response_text.clone();
@@ -872,6 +891,67 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm_client::mock::MockLlmClient;
+    use crate::models::MessageResponse;
+
+    #[tokio::test]
+    async fn max_tokens_complete_repl_is_not_executed_or_accepted() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let marker = workspace.path().join("truncated-repl-executed.txt");
+        let marker_literal = serde_json::to_string(&marker.to_string_lossy())
+            .expect("marker path should serialize as a Python string literal");
+        let partial = format!(
+            "```repl\nfrom pathlib import Path\nPath({marker_literal}).write_text('executed')\nFINAL('partial answer')\n```"
+        );
+        let usage = Usage {
+            input_tokens: 17,
+            output_tokens: 4096,
+            ..Usage::default()
+        };
+        let mock = Arc::new(MockLlmClient::new(Vec::new()));
+        mock.push_message_response(MessageResponse {
+            id: "mock_truncated_rlm".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: partial,
+                cache_control: None,
+            }],
+            model: "mock-model".to_string(),
+            stop_reason: Some("max_tokens".to_string()),
+            stop_sequence: None,
+            container: None,
+            usage: usage.clone(),
+        });
+        let client: Arc<dyn RlmLlmClient> = mock.clone();
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = run_rlm_turn_inner(
+            client,
+            "root-model".to_string(),
+            "long context".to_string(),
+            None,
+            "child-model".to_string(),
+            tx,
+            0,
+        )
+        .await;
+
+        assert_eq!(result.termination, RlmTermination::Error);
+        assert!(
+            result.answer.is_empty(),
+            "partial FINAL must not be accepted"
+        );
+        let error = result.error.expect("truncation must fail the RLM turn");
+        assert!(error.contains("incomplete"), "{error}");
+        assert!(error.contains("max_tokens"), "{error}");
+        assert_eq!(result.usage, usage, "billed usage must still be charged");
+        assert_eq!(mock.call_count(), 1, "truncation must not retry");
+        assert!(
+            !marker.exists(),
+            "complete-looking code from a truncated response must not execute"
+        );
+    }
 
     #[test]
     fn extract_repl_code_finds_simple_block() {

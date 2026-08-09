@@ -13,6 +13,7 @@ pub enum ErrorCategory {
     Authorization,
     RateLimit,
     Timeout,
+    Budget,
     InvalidInput,
     Parse,
     Tool,
@@ -48,6 +49,7 @@ impl fmt::Display for ErrorCategory {
             Self::Authorization => "authorization",
             Self::RateLimit => "rate_limit",
             Self::Timeout => "timeout",
+            Self::Budget => "budget",
             Self::InvalidInput => "invalid_input",
             Self::Parse => "parse",
             Self::Tool => "tool",
@@ -179,9 +181,10 @@ impl ErrorEnvelope {
         let category = classify_error_message(&message);
         let severity = match category {
             ErrorCategory::Authentication => ErrorSeverity::Critical,
-            ErrorCategory::RateLimit | ErrorCategory::Timeout | ErrorCategory::Network => {
-                ErrorSeverity::Warning
-            }
+            ErrorCategory::RateLimit
+            | ErrorCategory::Timeout
+            | ErrorCategory::Network
+            | ErrorCategory::Budget => ErrorSeverity::Warning,
             ErrorCategory::InvalidInput | ErrorCategory::Authorization | ErrorCategory::Parse => {
                 ErrorSeverity::Error
             }
@@ -311,7 +314,12 @@ impl From<LlmError> for ErrorEnvelope {
 pub fn classify_error_message(message: &str) -> ErrorCategory {
     let lower = message.to_lowercase();
 
-    if lower.contains("maximum context length")
+    if lower.contains("maximum model steps") || lower.contains("step budget exhausted") {
+        return ErrorCategory::Budget;
+    }
+    if lower.contains("model output truncated")
+        || lower.contains("model response incomplete")
+        || lower.contains("maximum context length")
         || lower.contains("context length")
         || lower.contains("context_length")
         || lower.contains("prompt is too long")

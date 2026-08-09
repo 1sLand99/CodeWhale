@@ -20,7 +20,10 @@ use futures_util::future::join_all;
 use tokio::sync::Mutex;
 
 use crate::llm_client::LlmClient;
-use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage};
+use crate::models::{
+    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage,
+    is_incomplete_stop_reason, stop_reason_detail,
+};
 use crate::repl::runtime::{BatchResp, RpcDispatcher, RpcRequest, RpcResponse, SingleResp};
 use crate::utils::spawn_supervised;
 
@@ -160,6 +163,21 @@ impl RlmBridge {
                 }
             };
 
+        {
+            let mut u = self.usage.lock().await;
+            super::add_usage_with_prompt_cache(&mut u, &response.usage);
+        }
+
+        if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            return SingleResp {
+                text: String::new(),
+                error: Some(format!(
+                    "llm_query response incomplete: provider stop reason `{}`; partial output was not accepted.",
+                    stop_reason_detail(response.stop_reason.as_deref())
+                )),
+            };
+        }
+
         let text = response
             .content
             .iter()
@@ -169,11 +187,6 @@ impl RlmBridge {
             })
             .collect::<Vec<_>>()
             .join("\n");
-
-        {
-            let mut u = self.usage.lock().await;
-            super::add_usage_with_prompt_cache(&mut u, &response.usage);
-        }
 
         SingleResp { text, error: None }
     }
@@ -506,6 +519,49 @@ mod tests {
         assert_eq!(usage.output_tokens, 100);
         assert_eq!(usage.prompt_cache_hit_tokens, Some(800));
         assert_eq!(usage.prompt_cache_miss_tokens, Some(200));
+    }
+
+    #[tokio::test]
+    async fn llm_dispatch_rejects_max_tokens_partial_output_after_charging_usage() {
+        let mock = Arc::new(MockLlmClient::new(Vec::new()));
+        let usage = Usage {
+            input_tokens: 23,
+            output_tokens: 4096,
+            reasoning_tokens: Some(4000),
+            ..Usage::default()
+        };
+        let mut response = mock_response_with_usage(
+            "FINAL('partial answer')\n```repl\nFINAL('also partial')\n```",
+            usage.clone(),
+        );
+        response.stop_reason = Some("max_tokens".to_string());
+        mock.push_message_response(response);
+        let bridge = bridge_for(Arc::clone(&mock), 1);
+
+        let response = bridge
+            .dispatch(RpcRequest::Llm {
+                prompt: "child prompt".to_string(),
+                model: None,
+                max_tokens: None,
+                system: None,
+            })
+            .await;
+
+        match response {
+            RpcResponse::Single(single) => {
+                assert!(
+                    single.text.is_empty(),
+                    "partial output must not be accepted"
+                );
+                let error = single.error.expect("truncation must surface as an error");
+                assert!(error.contains("incomplete"), "{error}");
+                assert!(error.contains("max_tokens"), "{error}");
+            }
+            other => panic!("expected single response, got {other:?}"),
+        }
+
+        assert_eq!(*bridge.usage.lock().await, usage);
+        assert_eq!(mock.call_count(), 1, "truncation must not retry");
     }
 
     #[tokio::test]
