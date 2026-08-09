@@ -47,7 +47,7 @@ pub const LEGACY_UPDATE_VERSION_ENV: &str = "DEEPSEEK_VERSION";
 /// User-Agent header sent with release metadata requests.
 pub const UPDATE_USER_AGENT: &str = "codewhale-updater";
 
-const CNB_RELEASE_ASSET_BASE: &str = "https://cnb.cool/Hmbown/CodeWhale/-/releases";
+const CNB_RELEASE_ASSET_BASE: &str = "https://cnb.cool/codewhale.net/codewhale/-/releases/download";
 const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build a reqwest client builder with the TLS roots appropriate for the
@@ -563,7 +563,7 @@ mod tests {
 
         assert_eq!(
             release_base_url_from_env("v1.2.3"),
-            Some("https://cnb.cool/Hmbown/CodeWhale/-/releases/v1.2.3".to_string())
+            Some("https://cnb.cool/codewhale.net/codewhale/-/releases/download/v1.2.3".to_string())
         );
 
         set_release_env(RELEASE_BASE_URL_ENV, "https://explicit.example.com");
@@ -740,11 +740,11 @@ mod tests {
     fn cnb_release_base_url_includes_tag_directory() {
         assert_eq!(
             cnb_release_base_url("0.8.47"),
-            "https://cnb.cool/Hmbown/CodeWhale/-/releases/v0.8.47"
+            "https://cnb.cool/codewhale.net/codewhale/-/releases/download/v0.8.47"
         );
         assert_eq!(
             cnb_release_base_url("v0.8.47"),
-            "https://cnb.cool/Hmbown/CodeWhale/-/releases/v0.8.47"
+            "https://cnb.cool/codewhale.net/codewhale/-/releases/download/v0.8.47"
         );
     }
 

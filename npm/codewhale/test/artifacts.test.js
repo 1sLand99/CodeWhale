@@ -172,15 +172,15 @@ test("CNB mirror URLs use the repository that publishes release assets", () => {
       ]);
       assert.equal(
         releaseBaseUrl("0.8.68"),
-        "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/",
+        "https://cnb.cool/codewhale.net/codewhale/-/releases/download/v0.8.68/",
       );
       assert.equal(
         releaseAssetUrl("codewhale-linux-x64", "0.8.68"),
-        "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/codewhale-linux-x64",
+        "https://cnb.cool/codewhale.net/codewhale/-/releases/download/v0.8.68/codewhale-linux-x64",
       );
       assert.equal(
         checksumManifestUrl("0.8.68"),
-        "https://cnb.cool/codewhale.net/codewhale/-/releases/v0.8.68/codewhale-artifacts-sha256.txt",
+        "https://cnb.cool/codewhale.net/codewhale/-/releases/download/v0.8.68/codewhale-artifacts-sha256.txt",
       );
     } finally {
       for (const key of keys) {
