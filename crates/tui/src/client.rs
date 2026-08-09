@@ -4939,6 +4939,27 @@ mod tests {
         assert_k3_request_json_route_boundaries(true).await;
     }
 
+    #[tokio::test]
+    async fn kimi_code_compaction_shape_omits_sampling_parameters_on_wire() {
+        let mut request = k3_request_fixture(
+            crate::config::KIMI_CODE_K3_MODEL,
+            None,
+            /*stream*/ false,
+        );
+        request.temperature = None;
+        request.top_p = None;
+        let body = capture_moonshot_chat_request_body(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            request,
+        )
+        .await;
+
+        assert_eq!(body["model"], crate::config::KIMI_CODE_K3_MODEL);
+        assert!(body.get("temperature").is_none(), "{body}");
+        assert!(body.get("top_p").is_none(), "{body}");
+    }
+
     /// v0.9.1 kimi-k3 dogfood report: the id the user selects has to be the id on the wire. A
     /// dogfood user selecting `kimi-k3` was served `kimi-k2.7-code`, so this
     /// asserts the wire `model` field for each K3 product on its own endpoint,

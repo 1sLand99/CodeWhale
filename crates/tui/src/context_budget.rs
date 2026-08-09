@@ -202,8 +202,8 @@ impl ContextBudget {
     /// Derive a compaction trigger from a window percentage.
     ///
     /// The percentage means what the user-facing context meter says it means:
-    /// a fraction of the full route window (`80` on a 1M window triggers near
-    /// 839K input tokens). One internal clamp applies:
+    /// a fraction of the full route window (`80` on a 1M window is 800K input
+    /// tokens before the route ceiling clamp). One internal clamp applies:
     ///
     /// ```text
     /// trigger = min(window × percent, window − output reservation − headroom)

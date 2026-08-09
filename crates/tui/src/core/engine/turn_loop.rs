@@ -458,12 +458,10 @@ impl Engine {
             // low-pressure steps; once pressure crosses the trigger, capture
             // once and reuse the same snapshot for eligibility and commit.
             let mut auto_compaction_config = self.config.compaction.clone();
-            // The turn's usage tracks the max billed prompt tokens across its
-            // steps — the provider's own measure of the current context size.
-            // It describes the live message list (nothing has pruned it since
-            // the last request), so it is a valid pressure signal here.
-            let billed_input_tokens =
-                (turn.usage.input_tokens > 0).then_some(u64::from(turn.usage.input_tokens));
+            // Billing usage accumulates every parent step and child-model
+            // call. Only the most recent parent-route request describes the
+            // live message list whose pressure we are checking here.
+            let billed_input_tokens = turn.latest_parent_input_tokens.map(u64::from);
             let prepared = if crate::compaction::compaction_pressure_reached_with_billed(
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
@@ -1405,7 +1403,7 @@ impl Engine {
             // retry or accept it. A terminal stop reason followed by a
             // transport error is still a billed, incomplete response; it must
             // not be discarded and re-issued.
-            turn.add_usage(&usage);
+            turn.add_parent_usage(&usage);
             if usage_reported {
                 let _ = self
                     .tx_event

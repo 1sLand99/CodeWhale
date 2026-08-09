@@ -1082,30 +1082,20 @@ async fn create_summary(
     // message asking for the handoff summary, so the provider's prefix cache
     // covers everything already sent this session.
     let mut request_messages = messages.to_vec();
-    // A prior committed summary lives in the system prompt, which this
-    // request does not send. Inject it as a bridge so the new summary
-    // coalesces it — the commit step replaces the old summary entirely.
-    if let Some(prior) = config
+    // Keep the original conversation as an unchanged request prefix for cache
+    // reuse. A prior committed summary lives outside this message list, so
+    // append its coalescing bridge to the final compaction instruction.
+    let prior_summary = config
         .prior_summary
         .as_deref()
         .map(str::trim)
         .filter(|prior| !prior.is_empty())
-    {
-        request_messages.insert(
-            0,
-            Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("{PRIOR_SUMMARY_BRIDGE}\n\n{prior}"),
-                    cache_control: None,
-                }],
-            },
-        );
-    }
+        .map(|prior| format!("\n\n{PRIOR_SUMMARY_BRIDGE}\n\n{prior}"))
+        .unwrap_or_default();
     request_messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
-            text: compact_prompt(config.focus.as_deref()),
+            text: format!("{}{prior_summary}", compact_prompt(config.focus.as_deref())),
             cache_control: None,
         }],
     });
@@ -1648,7 +1638,10 @@ mod tests {
         assert!(!serialized.contains("two words"));
     }
 
-    struct FixedSummaryClient;
+    #[derive(Default)]
+    struct FixedSummaryClient {
+        request: std::sync::Mutex<Option<MessageRequest>>,
+    }
 
     const FIXED_SUMMARY: &str = "1. Primary request and intent — migrate the session store. \
         2. Key technical concepts — sqlite. 7. Pending tasks — finish the fixed clock. \
@@ -1666,8 +1659,9 @@ mod tests {
 
         async fn create_message(
             &self,
-            _request: MessageRequest,
+            request: MessageRequest,
         ) -> anyhow::Result<crate::models::MessageResponse> {
+            *self.request.lock().expect("capture summary request") = Some(request);
             Ok(crate::models::MessageResponse {
                 id: "summary-fixture".to_string(),
                 r#type: "message".to_string(),
@@ -1716,13 +1710,29 @@ mod tests {
         let config = CompactionConfig {
             model: "test-model".to_string(),
             cache_summary: false,
+            prior_summary: Some("Prior durable fact: keep the sqlite rollback plan.".to_string()),
             ..Default::default()
         };
+        let client = FixedSummaryClient::default();
 
         let (retained, summary_prompt, _) =
-            compact_messages(&FixedSummaryClient, &messages, &config)
-                .await
-                .unwrap();
+            compact_messages(&client, &messages, &config).await.unwrap();
+
+        let request = client
+            .request
+            .lock()
+            .expect("read summary request")
+            .clone()
+            .expect("summary request was captured");
+        assert_eq!(&request.messages[..messages.len()], messages.as_slice());
+        assert_eq!(request.messages.len(), messages.len() + 1);
+        let ContentBlock::Text { text, .. } = &request.messages.last().unwrap().content[0] else {
+            panic!("final compaction instruction must be text");
+        };
+        assert!(text.contains(PRIOR_SUMMARY_BRIDGE));
+        assert!(text.contains("Prior durable fact"));
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.top_p, None);
 
         let Some(SystemPrompt::Blocks(blocks)) = summary_prompt else {
             panic!("compaction must produce a summary system block");
