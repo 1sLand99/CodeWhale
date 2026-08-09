@@ -136,6 +136,11 @@ def validate_order(
             # They may legitimately point back across the publication DAG.
             if kind == "dev":
                 continue
+            if dependency_name not in positions:
+                raise ValidationError(
+                    f"{dependent} depends on workspace crate {dependency_name} "
+                    f"[{kind}], which is not in the codewhale-* release inventory"
+                )
             publish_edges.add((dependency_name, dependent, str(kind)))
 
     violations = sorted(

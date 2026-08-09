@@ -54,6 +54,105 @@ cat >"${metadata_file}" <<'JSON'
 }
 JSON
 
+expect_validation_failure() {
+  local label="$1"
+  local expected="$2"
+  local fixture="$3"
+  shift 3
+
+  local output="${tmp_dir}/${label}.txt"
+  if python3 "${script_dir}/validate-crate-publish-order.py" \
+    --metadata-file "${fixture}" "$@" >"${output}" 2>&1; then
+    echo "${label} unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -F "${expected}" "${output}" >/dev/null
+  if grep -F "Traceback" "${output}" >/dev/null; then
+    echo "${label} emitted an unhandled traceback" >&2
+    exit 1
+  fi
+}
+
+expect_validation_failure \
+  duplicate-crate \
+  "publish package list contains duplicates: codewhale-core" \
+  "${metadata_file}" \
+  codewhale-build-support \
+  codewhale-core \
+  codewhale-core \
+  codewhale-tui \
+  codewhale-app-server \
+  codewhale-cli
+
+expect_validation_failure \
+  missing-crate \
+  "publish package list is missing workspace crates: codewhale-app-server" \
+  "${metadata_file}" \
+  codewhale-build-support \
+  codewhale-core \
+  codewhale-tui \
+  codewhale-cli
+
+expect_validation_failure \
+  extra-crate \
+  "publish package list contains non-workspace crates: codewhale-extra" \
+  "${metadata_file}" \
+  codewhale-build-support \
+  codewhale-core \
+  codewhale-tui \
+  codewhale-app-server \
+  codewhale-cli \
+  codewhale-extra
+
+mixed_metadata_file="${tmp_dir}/mixed-metadata.json"
+python3 - "${metadata_file}" "${mixed_metadata_file}" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+mixed = source.replace('"version": "0.9.5"', '"version": "0.9.4"', 1)
+if mixed == source:
+    raise SystemExit("failed to create mixed-version Cargo metadata fixture")
+pathlib.Path(sys.argv[2]).write_text(mixed, encoding="utf-8")
+PY
+expect_validation_failure \
+  mixed-versions \
+  "workspace packages have mixed versions: 0.9.4, 0.9.5" \
+  "${mixed_metadata_file}" \
+  codewhale-build-support \
+  codewhale-core \
+  codewhale-tui \
+  codewhale-app-server \
+  codewhale-cli
+
+nonrelease_metadata_file="${tmp_dir}/nonrelease-metadata.json"
+cat >"${nonrelease_metadata_file}" <<'JSON'
+{
+  "workspace_members": ["helper", "core"],
+  "packages": [
+    {
+      "id": "helper",
+      "name": "internal-helper",
+      "version": "0.9.5",
+      "dependencies": []
+    },
+    {
+      "id": "core",
+      "name": "codewhale-core",
+      "version": "0.9.5",
+      "dependencies": [
+        {"name": "internal-helper", "path": "/workspace/helper", "kind": null}
+      ]
+    }
+  ]
+}
+JSON
+expect_validation_failure \
+  nonrelease-workspace-dependency \
+  "codewhale-core depends on workspace crate internal-helper [normal], which is not in the codewhale-* release inventory" \
+  "${nonrelease_metadata_file}" \
+  codewhale-core
+
 bad_output="${tmp_dir}/bad-order.txt"
 if python3 "${script_dir}/validate-crate-publish-order.py" \
   --metadata-file "${metadata_file}" \
