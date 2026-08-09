@@ -741,7 +741,7 @@ max_subagents = 10 # optional (1-20)
 [providers.mistral]
 # api_key = "YOUR_MISTRAL_API_KEY"
 # base_url = "https://api.mistral.ai/v1"
-# model = "mistral-code-latest"            # or mistral-medium-latest, mistral-small-latest, magistral-small-latest, mistral-large-latest
+# model = "mistral-code-latest"            # or mistral-medium-latest, mistral-small-latest, mistral-large-latest
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Alibaba Cloud Model Studio — Token Plan

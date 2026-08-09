@@ -496,6 +496,12 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     if lower.starts_with("kimi-") {
         return true;
     }
+    if lower.starts_with("mistral-medium")
+        || lower.starts_with("mistral-small")
+        || lower.starts_with("magistral")
+    {
+        return true;
+    }
     matches!(
         lower.as_str(),
         "claude-opus-4-8"

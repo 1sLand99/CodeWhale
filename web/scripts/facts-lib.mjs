@@ -98,6 +98,7 @@ const PROVIDER_LABEL_MAP = {
   Meta: { id: "meta", label: "Meta Model API", env: "META_MODEL_API_KEY / MODEL_API_KEY" },
   Telecomjs: { id: "telecomjs", label: "TelecomJS TokenHub", env: "TELECOMJS_API_KEY" },
   Xai: { id: "xai", label: "xAI", env: "XAI_API_KEY" },
+  Mistral: { id: "mistral", label: "Mistral AI", env: "MISTRAL_API_KEY" },
   ModelstudioTokenPlan: { id: "modelstudio-token-plan", label: "Model Studio Token Plan", env: "MODELSTUDIO_API_KEY" },
   ModelstudioTokenPlanAnthropic: { id: "modelstudio-token-plan-anthropic", label: "Model Studio Token Plan (Anthropic-compatible)", env: "MODELSTUDIO_API_KEY" },
   ModelstudioCodingPlan: { id: "modelstudio-coding-plan", label: "Model Studio Coding Plan", env: "MODELSTUDIO_API_KEY" },

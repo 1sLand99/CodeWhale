@@ -1539,7 +1539,6 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             DEFAULT_MISTRAL_MODEL,
             "mistral-medium-latest",
             "mistral-small-latest",
-            "magistral-small-latest",
             "mistral-large-latest",
         ],
         // Custom endpoints expose no built-in completion names; the user
@@ -7883,6 +7882,16 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .providers
             .get_or_insert_with(ProvidersConfig::default)
             .xai
+            .model = Some(value);
+    }
+    if matches!(config.api_provider(), ApiProvider::Mistral)
+        && let Ok(value) = std::env::var("MISTRAL_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .mistral
             .model = Some(value);
     }
     if matches!(config.api_provider(), ApiProvider::OpencodeGo)

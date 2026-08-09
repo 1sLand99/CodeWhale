@@ -6758,6 +6758,7 @@ fn vendor_locked_providers_reject_foreign_root_default_model() {
         ("xai", DEFAULT_XAI_MODEL),
         ("openai", DEFAULT_OPENAI_MODEL),
         ("moonshot", DEFAULT_MOONSHOT_MODEL),
+        ("mistral", DEFAULT_MISTRAL_MODEL),
     ] {
         let config = Config {
             provider: Some(provider.to_string()),
@@ -6770,6 +6771,39 @@ fn vendor_locked_providers_reject_foreign_root_default_model() {
             "a root DeepSeek default must not leak onto the official {provider} endpoint"
         );
     }
+}
+
+#[test]
+fn mistral_model_env_overrides_vendor_default() {
+    let _lock = lock_test_env();
+    let _model = EnvVarGuard::set("MISTRAL_MODEL", "mistral-medium-latest");
+    let _generic_model = EnvVarGuard::remove("CODEWHALE_MODEL");
+    let _legacy_model = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let mut config = Config {
+        provider: Some("mistral".to_string()),
+        ..Config::default()
+    };
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.api_provider(), ApiProvider::Mistral);
+    assert_eq!(config.default_model(), "mistral-medium-latest");
+}
+
+#[test]
+fn codewhale_model_precedes_mistral_model() {
+    let _lock = lock_test_env();
+    let _provider_model = EnvVarGuard::set("MISTRAL_MODEL", "mistral-small-latest");
+    let _generic_model = EnvVarGuard::set("CODEWHALE_MODEL", "mistral-medium-latest");
+    let _legacy_model = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let mut config = Config {
+        provider: Some("mistral".to_string()),
+        ..Config::default()
+    };
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.default_model(), "mistral-medium-latest");
 }
 
 #[test]
@@ -10271,6 +10305,23 @@ fn provider_capability_wanjie_ark_reasoner_has_thinking_no_cache() {
         cap.request_payload_mode,
         RequestPayloadMode::ChatCompletions
     );
+}
+
+#[test]
+fn provider_capability_mistral_matches_reasoning_model_contract() {
+    for model in ["mistral-medium-latest", "mistral-small-latest"] {
+        let cap = provider_capability(ApiProvider::Mistral, model);
+        assert_eq!(cap.context_window, 262_144, "{model}");
+        assert!(cap.thinking_supported, "{model}");
+        assert_eq!(
+            cap.request_payload_mode,
+            RequestPayloadMode::ChatCompletions
+        );
+    }
+    for model in ["mistral-code-latest", "mistral-large-latest"] {
+        let cap = provider_capability(ApiProvider::Mistral, model);
+        assert!(!cap.thinking_supported, "{model}");
+    }
 }
 
 #[test]

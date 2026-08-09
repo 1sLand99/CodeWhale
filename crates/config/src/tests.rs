@@ -4546,6 +4546,14 @@ model = "mistral-large-latest"
     assert_eq!(resolved.base_url, "https://api.mistral.ai/v1");
     assert_eq!(resolved.model, "mistral-large-latest");
     assert_eq!(resolved.api_key.as_deref(), Some("mistral-config-key"));
+
+    unsafe {
+        std::env::set_var("MISTRAL_BASE_URL", "https://api.eu.mistral.ai/v1");
+        std::env::set_var("MISTRAL_MODEL", "mistral-medium-latest");
+    }
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://api.eu.mistral.ai/v1");
+    assert_eq!(resolved.model, "mistral-medium-latest");
 }
 
 #[test]
