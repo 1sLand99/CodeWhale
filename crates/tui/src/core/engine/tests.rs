@@ -16869,6 +16869,18 @@ async fn user_prompt_reaches_the_model_exactly_once_per_request() {
     assert_eq!(requests.len(), 4, "two turns of two steps each");
 
     for (index, request) in requests.iter().enumerate() {
+        assert!(
+            request.messages.iter().all(|message| {
+                message.content.iter().all(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { thinking, .. }
+                            if thinking == "(reasoning omitted)"
+                    )
+                })
+            }),
+            "request {index} replayed a wire-only placeholder as stored reasoning"
+        );
         let carriers = request
             .messages
             .iter()

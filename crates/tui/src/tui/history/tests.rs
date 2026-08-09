@@ -43,6 +43,30 @@ fn web_search_cell_renders_receipt_source_degradation_and_citations() {
     assert!(rendered.contains("citations"));
 }
 
+#[test]
+fn restored_history_hides_wire_reasoning_placeholder_but_keeps_model_reasoning() {
+    let message = Message {
+        role: "assistant".to_string(),
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "(reasoning omitted)".to_string(),
+                signature: None,
+            },
+            ContentBlock::Thinking {
+                thinking: "Actual model reasoning".to_string(),
+                signature: None,
+            },
+        ],
+    };
+
+    let cells = super::history_cells_from_message(&message);
+    assert_eq!(cells.len(), 1);
+    assert!(matches!(
+        &cells[0],
+        HistoryCell::Thinking { content, .. } if content == "Actual model reasoning"
+    ));
+}
+
 // ---- elapsed-seconds badge for long-running tools ----
 //
 // Below 3s the label stays "running" — quick reads/greps shouldn't

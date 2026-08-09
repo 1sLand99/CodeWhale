@@ -1585,25 +1585,15 @@ impl Engine {
                 stream_retry_attempts = 0;
             }
 
-            // Build content blocks. If this assistant turn produced tool
-            // calls, ensure a Thinking block is present even when the model
-            // didn't stream any reasoning text — DeepSeek's thinking-mode
-            // API requires `reasoning_content` to accompany every tool-call
-            // assistant message in the conversation history. Saving a
-            // placeholder here keeps the on-disk session structurally
-            // correct so subsequent requests won't 400.
-            let needs_thinking_block =
-                !tool_uses.is_empty() || tool_parser::has_tool_call_markers(&current_text_raw);
-            let thinking_to_persist = if !current_thinking.is_empty() {
-                Some(current_thinking.clone())
-            } else if needs_thinking_block {
-                Some(String::from("(reasoning omitted)"))
-            } else {
-                None
-            };
-            if let Some(thinking) = thinking_to_persist {
+            // Persist only reasoning the provider actually emitted. Some chat
+            // wires require a non-empty `reasoning_content` field when an
+            // assistant message carries tool calls; the route serializer adds
+            // that compatibility value to the outgoing JSON only. Persisting
+            // it here leaked an invented "(reasoning omitted)" block into the
+            // transcript and every provider-neutral session replay.
+            if !current_thinking.is_empty() {
                 content_blocks.push(ContentBlock::Thinking {
-                    thinking,
+                    thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
                 });
             }

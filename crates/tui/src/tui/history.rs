@@ -653,6 +653,12 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
                 }
             }
             ContentBlock::Thinking { thinking, .. } => {
+                // Older sessions may contain this transport-only fallback from
+                // thinking-mode tool-call replay. It was never model output,
+                // so do not surface it when restoring their transcripts.
+                if thinking == "(reasoning omitted)" {
+                    continue;
+                }
                 if let Some(HistoryCell::Thinking { content, .. }) = cells.last_mut() {
                     if !content.is_empty() {
                         content.push('\n');
