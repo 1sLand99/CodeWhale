@@ -2174,8 +2174,7 @@ consent_version = 1
         fs::create_dir(&config_dir).unwrap();
         let config_path = config_dir.join("config.toml");
         fs::write(&config_path, "[providers.xai]\nauth_mode = \"api_key\"\n").unwrap();
-        fs::write(config_dir.join("config.toml.lock"), "").unwrap();
-        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::create_dir(config_dir.join("config.toml.bak")).unwrap();
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
         let legacy_path = seed_legacy_owned_credentials();
         let legacy_before = fs::read(&legacy_path).unwrap();
@@ -2196,8 +2195,7 @@ consent_version = 1
             Some(&config_path),
             Some(&mut live),
         );
-        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = result.expect_err("read-only config directory must fail activation");
+        let error = result.expect_err("invalid backup path must fail activation");
         assert!(error.to_string().contains("not activated"), "{error:#}");
         let live_xai = live.provider_config_for(ApiProvider::Xai).unwrap();
         assert_eq!(live_xai.auth_mode.as_deref(), Some("api_key"));
