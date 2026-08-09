@@ -220,8 +220,8 @@ const cnbRustGates = cnb.match(
 assert.ok(cnbRustGates, "CNB must retain the shared Rust workspace gate");
 assert.match(
   cnbRustGates[1],
-  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked/,
-  "CNB must serialize the memory-heavy Rust gate without weakening its checks",
+  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked/,
+  "CNB must serialize the memory-heavy Rust gate and preserve the workspace test stack contract",
 );
 assert.equal(
   (cnb.match(/^\s+- \*rust_workspace_gates_stage$/gm) || []).length,
