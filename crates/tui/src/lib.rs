@@ -10007,6 +10007,7 @@ enum ExecStreamEvent {
     #[serde(rename = "session_capture")]
     SessionCapture { content: String },
     #[serde(rename = "service_released")]
+    #[cfg(unix)]
     ServiceReleased {
         task_id: String,
         pid: u32,
@@ -11565,8 +11566,10 @@ async fn run_exec_agent(
                 tool_catalog,
                 ..
             } => {
-                let mut terminal_status = status;
-                let mut terminal_error = error;
+                #[cfg(unix)]
+                let (mut terminal_status, mut terminal_error) = (status, error);
+                #[cfg(not(unix))]
+                let (terminal_status, terminal_error) = (status, error);
                 if matches!(
                     terminal_status,
                     crate::core::events::TurnOutcomeStatus::Completed

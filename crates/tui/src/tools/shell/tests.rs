@@ -2550,6 +2550,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         last_output_at: now,
         last_observed_output_len: 0,
         sandbox_type: SandboxType::None,
+        ownership: ShellOwnership::Managed,
         linked_task_id: None,
         owner_agent: None,
         stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

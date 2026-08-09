@@ -323,6 +323,7 @@ enum ShellChild {
     Pty(Box<dyn portable_pty::Child + Send>),
 }
 
+#[cfg(unix)]
 impl ShellChild {
     fn process_id(&self) -> Option<u32> {
         match self {
