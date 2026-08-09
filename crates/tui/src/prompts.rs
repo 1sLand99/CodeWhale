@@ -1,10 +1,10 @@
 #![allow(dead_code)]
-//! System prompts for different modes.
+//! System prompt composition.
 //!
 //! Prompts are assembled from composable layers loaded at compile time from
 //! the single [`text`] module:
 //!   constitution + personality overlay → `message[0]` (byte-stable).
-//!   mode delta + approval policy → request-time runtime metadata.
+//!   approval policy → request-time runtime metadata.
 //! Tool availability comes only from the per-turn model catalog.
 //!
 //! Keeping every layer's text in one module makes prompt tuning a
@@ -50,13 +50,9 @@ pub struct PromptSessionContext<'a> {
     /// Immutable plugin snapshot owned by this App/Engine workspace context.
     /// Never sourced from process-global mutable state.
     pub plugin_registry: Option<&'a crate::plugins::PluginRegistry>,
-    /// Active mode. Its doctrine overlay ships once here, in the stable
-    /// prefix, rather than being re-asserted in `<turn_meta>` on every user
-    /// message (#4780) — repetition-per-turn out-shouts the constitution and
-    /// makes the model perform compliance instead of exercising judgment.
-    ///
-    /// Changing mode does invalidate the prefix cache, which is the intended
-    /// trade: mode changes are rare, user messages are not.
+    /// Active runtime mode. Retained in the session contract for embedders;
+    /// bundled prompt text deliberately ignores it because policy and the live
+    /// tool catalog already express the mode.
     pub mode: crate::tui::app::AppMode,
 }
 
@@ -175,7 +171,7 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
 /// actionable host facts that affect command syntax.
 ///
 /// The block is appended to the workspace-static portion of the system
-/// prompt (after mode prompt + project context, before configured
+/// prompt (after the shared constitution + project context, before configured
 /// instructions / skills). `locale_tag` is resolved by the caller from
 /// `Settings` so this function stays I/O-free.
 ///
@@ -390,9 +386,8 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 #[cfg(test)]
 use text::CALM_PERSONALITY;
 pub use text::{
-    AGENT_MODE, BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT,
-    GOAL_CONTINUATION_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OPERATE_MODE, OUTPUT_PROMPT,
-    PLAN_MODE,
+    BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT, GOAL_CONTINUATION_PROMPT,
+    HEADLESS_BASE_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OUTPUT_PROMPT,
 };
 
 // ── Embedder prompt overrides ──
@@ -419,8 +414,8 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 /// Context passed to an embedder-provided static prompt composer.
 ///
 /// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, Core Execution, and action-specific relay
-/// formatting stay owned by Codewhale.
+/// Approval policy, Core Execution, and action-specific relay formatting stay
+/// owned by Codewhale.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct StaticPromptCtx<'a> {
@@ -452,7 +447,7 @@ pub fn set_base_prompt_override(s: String) -> Result<(), String> {
 // custom embedder build.
 //
 // Scope is deliberately narrow: only the byte-stable base prompt segment is
-// user-overridable. Mode deltas, approval policy, Core Execution, and
+// user-overridable. Approval policy, Core Execution, and
 // action-specific relay formatting stay owned by the runtime assembly (see
 // `StaticPromptCtx`), so an override cannot strip safety-relevant guidance.
 // A missing or empty file is a no-op — the bundled constant is used — so this
@@ -736,7 +731,7 @@ pub(crate) fn effective_authority_recap() -> &'static str {
 ///      hard to triage from bug reports.
 ///   2. **Cache stability.** With one English `constitution.md` and a
 ///      per-locale preamble+closer, the largest cacheable chunk
-///      (mode prompt + project context + environment) stays
+///      (shared constitution + project context + environment) stays
 ///      byte-stable within a session and across users in the same
 ///      locale. A fully translated per-locale `constitution.md` keeps cache
 ///      per-locale but doesn't share with English users.
@@ -945,19 +940,14 @@ fn compose_default_static_layers_with_context(
     apply_model_template(&layers, model_id, context_window_override)
 }
 
-/// Mode doctrine overlay for the stable prefix.
+/// Host surface selecting the bundled constitution size.
 ///
-/// Single mapping shared by prompt composition and the engine's mode-change
-/// invalidation check, so the two can never disagree about which text a mode
-/// ships (#4780).
-pub(crate) fn mode_doctrine(mode: crate::tui::app::AppMode) -> &'static str {
-    use crate::tui::app::AppMode;
-
-    match mode {
-        AppMode::Agent | AppMode::Auto | AppMode::Yolo => AGENT_MODE,
-        AppMode::Plan => PLAN_MODE,
-        AppMode::Operate => OPERATE_MODE,
-    }
+/// Modes never select prompt doctrine. Their permissions and capabilities are
+/// expressed by runtime policy and the live tool catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptHost {
+    Interactive,
+    Headless,
 }
 
 fn apply_static_prompt_composer(
@@ -976,8 +966,9 @@ fn apply_static_prompt_composer(
     }
 }
 
-// The full base prompt is always used; effective tool availability is enforced
-// by the tool catalog and execution layer rather than by mutating message[0].
+// Interactive hosts use the full base and bundled headless hosts use the
+// compact base. Tool availability is enforced by the catalog and execution
+// layer, never by mode-specific prompt text.
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -995,7 +986,7 @@ pub fn system_prompt_for_mode_with_context(
 /// most-static to most-volatile so DeepSeek's KV prefix cache hits the
 /// longest possible byte prefix turn-over-turn:
 ///
-///   1. mode prompt (compile-time constant)
+///   1. shared constitution (compile-time constant)
 ///   2. project context / fallback (workspace-static)
 ///   3. skills block (skills-dir-static)
 ///   4. `## Core Execution` (compile-time constant)
@@ -1057,26 +1048,48 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     instructions: Option<&[InstructionSource]>,
     session_context: PromptSessionContext<'_>,
 ) -> SystemPrompt {
-    let default_layers = compose_default_static_layers_with_context(
-        session_context.model_id,
-        session_context.context_window_override,
-    );
-    let composed = apply_static_prompt_composer(
-        effective_static_prompt_composer(),
-        Personality::Calm,
-        session_context.model_id,
-        &default_layers,
-    );
+    system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+        workspace,
+        _working_set_summary,
+        skills_dir,
+        instructions,
+        session_context,
+        PromptHost::Interactive,
+    )
+}
 
-    // Mode doctrine is layer 1 of the stable prefix (#4780). It sits above the
-    // constitution's own layers so the model reads "which mode am I in" before
-    // the general rules it modulates, and it ships exactly once per prefix
-    // rather than per user message.
-    let mode_prompt = format!(
-        "{}\n\n{}",
-        mode_doctrine(session_context.mode).trim(),
-        composed.trim_start()
-    );
+pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+    workspace: &Path,
+    _working_set_summary: Option<&str>,
+    skills_dir: Option<&Path>,
+    instructions: Option<&[InstructionSource]>,
+    session_context: PromptSessionContext<'_>,
+    prompt_host: PromptHost,
+) -> SystemPrompt {
+    // The bundled headless coding host gets one compact constitution. Explicit
+    // user/embedder overrides retain the established full composition because
+    // those bytes are an intentional customization, not bundled ceremony.
+    let bundled_headless = prompt_host == PromptHost::Headless
+        && BASE_PROMPT_OVERRIDE.get().is_none()
+        && effective_static_prompt_composer().is_none();
+    let composed = if bundled_headless {
+        apply_model_template(
+            HEADLESS_BASE_PROMPT.trim(),
+            session_context.model_id,
+            session_context.context_window_override,
+        )
+    } else {
+        let default_layers = compose_default_static_layers_with_context(
+            session_context.model_id,
+            session_context.context_window_override,
+        );
+        apply_static_prompt_composer(
+            effective_static_prompt_composer(),
+            Personality::Calm,
+            session_context.model_id,
+            &default_layers,
+        )
+    };
 
     // Load project context from workspace
     let project_context = load_project_context_with_parents(workspace);
@@ -1091,17 +1104,18 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // `None` and keep the previous behavior unchanged.
     let preamble = locale_reinforcement_preamble(session_context.locale_tag);
 
-    // 1–2. Mode prompt + project context.
+    // 1–2. Shared constitution + project context. Mode is deliberately absent:
+    // permissions and capabilities come from runtime policy and the tool catalog.
     // `load_project_context_with_parents` generates an in-memory bounded
     // overview when no context file exists, so the fallback should usually be
     // available without writing project-local files.
     let mut full_prompt = if let Some(project_block) = project_context.as_system_block() {
-        format!("{mode_prompt}\n\n{project_block}")
+        format!("{}\n\n{project_block}", composed.trim())
     } else {
         // Extremely unlikely: context generation failed (e.g. filesystem error).
-        // Use mode prompt alone rather than panic.
+        // Use the shared constitution alone rather than panic.
         tracing::warn!("No project context available and auto-generation failed");
-        mode_prompt
+        composed
     };
 
     if let Some(preamble) = preamble {
@@ -1171,8 +1185,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // 4. Lean, runtime-only coding discipline. Context pressure, prompt-cache
     // accounting, footer presentation, and automatic compaction are host
     // responsibilities; teaching their UI to the model dilutes the task.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    if !bundled_headless {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    }
 
     // The compaction/relay format is action-specific context. Automatic
     // compaction owns its structured successor brief, while `/relay` appends
@@ -1196,7 +1212,9 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     {
         workspace_parts.push(format!("{memory_block}\n\n{MEMORY_GUIDANCE}"));
     }
-    if let Some(harness_block) = crate::continual_harness::prompt_block(workspace) {
+    if prompt_host == PromptHost::Interactive
+        && let Some(harness_block) = crate::continual_harness::prompt_block(workspace)
+    {
         workspace_parts.push(harness_block);
     }
     if let Some(goal_objective) = session_context.goal_objective
@@ -1248,11 +1266,13 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     .to_system_blocks();
 
     // Trailers keep recency bias after WorldState: authority, then locale.
-    blocks.push(SystemBlock {
-        block_type: "text".to_string(),
-        text: effective_authority_recap().trim().to_string(),
-        cache_control: None,
-    });
+    if !bundled_headless {
+        blocks.push(SystemBlock {
+            block_type: "text".to_string(),
+            text: effective_authority_recap().trim().to_string(),
+            cache_control: None,
+        });
+    }
     if let Some(closer) = locale_reinforcement_closer(session_context.locale_tag) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
@@ -1494,28 +1514,86 @@ mod tests {
     }
 
     #[test]
-    fn agent_mode_carries_execution_discipline_block() {
+    fn bundled_headless_contract_is_small_and_direct() {
         for phrase in [
-            "Execute the user's task autonomously",
-            "call `todo_write` with all planned steps",
-            "Keep it current as you go",
-            "verify load-bearing child",
-            "never manufacture completion sentinels",
-            "For substantial work",
-            "session-persistent `repl` blocks",
-            "retain source/transcript\nas data",
-            "`workflow`, `agent`, goals, `harness`",
+            "You already have an A",
+            "begin from possibility",
+            "bring your whole attention",
+            "a question, idea, or task",
+            "Invent no urgency or deadline",
+            "tools as senses",
+            "active authority is your limit",
+            "Failure is information",
+            "Check\nbefore concluding",
+            "unverified work as complete",
         ] {
             assert!(
-                AGENT_MODE.contains(phrase),
-                "AGENT_MODE missing execution-discipline phrase {phrase:?}"
+                HEADLESS_BASE_PROMPT.contains(phrase),
+                "bundled headless contract missing {phrase:?}"
+            );
+        }
+        for ceremony in [
+            "todo_write",
+            "checklist",
+            "`repl`",
+            "workflow",
+            "Fleet",
+            "sub-agent",
+            "delegation",
+            "goals",
+            "harness",
+            "Mode:",
+        ] {
+            assert!(
+                !HEADLESS_BASE_PROMPT.contains(ceremony),
+                "bundled headless contract must leave optional capabilities to the tool catalog: {ceremony:?}"
             );
         }
         assert!(
-            !BASE_PROMPT.contains("<tool_persistence>")
-                && !BASE_PROMPT.contains("Tool-use enforcement"),
-            "0.9.0 base constitution should not carry the old execution-discipline tail"
+            HEADLESS_BASE_PROMPT.split_whitespace().count() <= 75,
+            "bundled headless contract must stay compact"
         );
+    }
+
+    #[test]
+    fn every_mode_shares_one_prompt_per_host() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# Project instruction\nPreserve the blue-ocean marker.\n",
+        )
+        .expect("write project instruction");
+        for host in [PromptHost::Interactive, PromptHost::Headless] {
+            let prompts = [
+                crate::tui::app::AppMode::Plan,
+                crate::tui::app::AppMode::Agent,
+                crate::tui::app::AppMode::Operate,
+            ]
+            .map(|mode| {
+                system_prompt_flat_text(
+                    &system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+                        tmp.path(),
+                        None,
+                        None,
+                        None,
+                        PromptSessionContext {
+                            mode,
+                            ..PromptSessionContext::default()
+                        },
+                        host,
+                    ),
+                )
+            });
+            assert_eq!(prompts[0], prompts[1]);
+            assert_eq!(prompts[1], prompts[2]);
+            assert!(prompts[0].contains("Preserve the blue-ocean marker"));
+            assert!(!prompts[0].contains("##### Mode:"));
+            if host == PromptHost::Headless {
+                assert!(prompts[0].contains("You already have an A"));
+                assert!(!prompts[0].contains("## Core Execution"));
+                assert!(!prompts[0].contains("## Authority Recap"));
+            }
+        }
     }
 
     #[test]
@@ -1611,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn yolo_mode_composed_prompt_carries_completion_contract() {
+    fn yolo_mode_uses_the_shared_completion_contract() {
         // `codewhale exec --auto` runs AppMode::Yolo; the verify-then-stop
         // contract must survive composition into the prompt that mode ships.
         let tmp = tempdir().expect("tempdir");
@@ -1637,7 +1715,6 @@ mod tests {
             ),
         );
         for phrase in [
-            "##### Mode: Agent",
             "### Truthful completion",
             "Nothing is done until checked.",
             "Never present a partial result as the whole.",
@@ -1647,6 +1724,7 @@ mod tests {
                 "YOLO-mode composed prompt missing completion-contract phrase {phrase:?}"
             );
         }
+        assert!(!text.contains("##### Mode:"));
     }
 
     #[test]
@@ -1966,31 +2044,6 @@ mod tests {
         // Verify the preamble still carries the Codewhale identity.
         assert!(prompt.contains("You are Codewhale"));
         assert!(prompt.contains("Let the work speak"));
-    }
-
-    #[test]
-    fn execution_discipline_lives_in_agent_mode_after_core_constitution() {
-        assert!(AGENT_MODE.contains("Execute the user's task autonomously"));
-        assert!(AGENT_MODE.contains("verify load-bearing child"));
-        assert!(
-            !BASE_PROMPT.contains("Execution Discipline")
-                && !BASE_PROMPT.contains("<tool_persistence>"),
-            "base constitution should stay reduced; execution discipline belongs to Agent mode"
-        );
-    }
-
-    #[test]
-    fn plan_mode_prompt_uses_one_progress_surface() {
-        assert!(
-            PLAN_MODE.contains("call `todo_write` with all planned steps")
-                && PLAN_MODE.contains("There is no second Strategy/Plan progress surface"),
-            "Plan mode must carry §3d todo_write wording and single-surface note"
-        );
-        assert!(!PLAN_MODE.contains("call `update_plan`"));
-        assert!(
-            PLAN_MODE.contains("switch to Act (`/mode act`)"),
-            "Plan mode must use a normal conversational handoff"
-        );
     }
 
     #[test]
@@ -2609,6 +2662,34 @@ mod tests {
     }
 
     #[test]
+    fn headless_prompt_omits_continual_harness_guidance() {
+        let tmp = tempdir().expect("tempdir");
+        crate::continual_harness::refine(
+            tmp.path(),
+            crate::continual_harness::HarnessRefinement {
+                kind: crate::continual_harness::HarnessEntryKind::PromptNote,
+                title: "Use a project-specific orchestration routine".to_string(),
+                content: "This guidance is available through the harness tool.".to_string(),
+                evidence: "Prior interactive session.".to_string(),
+            },
+        )
+        .expect("persist harness state");
+
+        let prompt = system_prompt_flat_text(
+            &system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+                tmp.path(),
+                None,
+                None,
+                None,
+                PromptSessionContext::default(),
+                PromptHost::Headless,
+            ),
+        );
+        assert!(!prompt.contains("<continual_harness"));
+        assert!(!prompt.contains("project-specific orchestration routine"));
+    }
+
+    #[test]
     fn memory_guidance_does_not_state_precedence() {
         // #4777: only BASE_PROMPT § Whose word wins states ranks. Memory
         // hygiene keeps the imperative→preference rule and drops the
@@ -2640,9 +2721,6 @@ mod tests {
         // Composed overlays must describe behavior, never their own rank.
         let overlays = [
             ("CALM_PERSONALITY", CALM_PERSONALITY),
-            ("AGENT_MODE", AGENT_MODE),
-            ("PLAN_MODE", PLAN_MODE),
-            ("OPERATE_MODE", OPERATE_MODE),
             ("COMPACT_TEMPLATE", COMPACT_TEMPLATE),
             ("MEMORY_GUIDANCE", MEMORY_GUIDANCE),
             ("LANGUAGE_PROMPT", LANGUAGE_PROMPT),
@@ -2897,76 +2975,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_mode_prompt_keeps_safety_invariants_after_compression() {
-        let prompt = AGENT_MODE.replace("\r\n", "\n").replace('\r', "\n");
-        for must in [
-            "autonomously",
-            "tools in the current catalog",
-            "todo_write",
-            "current catalog includes delegation",
-            "Do not announce the mode",
-        ] {
-            assert!(
-                prompt.contains(must),
-                "compressed agent mode missing invariant {must:?}"
-            );
-        }
-        for unavailable_claim in ["`File`", "`Git`", "`Run`", "`Bash`"] {
-            assert!(!prompt.contains(unavailable_claim));
-        }
-        // Procedural PowerShell manuals must not live in the mode delta.
-        for forbidden in ["Invoke-Expression", "pwsh.exe -NoLogo", "ProcessStartInfo"] {
-            assert!(
-                !prompt.contains(forbidden),
-                "agent mode must not absorb PowerShell manuals: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn mode_prompts_remain_small_deltas_not_base_policy_copies() {
-        assert!(
-            PLAN_MODE.contains("All writes, patches, shell commands"),
-            "Plan may summarize the user-facing mode delta"
-        );
-        for (name, prompt) in [("agent", AGENT_MODE), ("plan", PLAN_MODE)] {
-            // Measure semantic size on LF so Windows autocrlf checkouts do not
-            // inflate char/3 token estimates via extra `\r` bytes.
-            let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
-            let word_count = normalized.split_whitespace().count();
-            let estimated_tokens =
-                crate::compaction::estimate_text_tokens_conservative(&normalized);
-            // 2026-07-21: mode deltas contain permissions and durable behavior
-            // only. Action recipes belong to the canonical tool schemas.
-            // 2026-08-06: §3d expanded Agent/Plan with work_update wording (165 words).
-            let max_words = 180;
-            let max_tokens = 400;
-
-            assert!(
-                word_count <= max_words,
-                "{name} mode prompt should remain a delta, got {word_count} words"
-            );
-            assert!(
-                estimated_tokens <= max_tokens,
-                "{name} mode prompt should remain compact, got {estimated_tokens} estimated tokens"
-            );
-            for forbidden in [
-                "## Codewhale",
-                "## STATUTES (Tier 2)",
-                "## REGULATIONS (Tier 3)",
-                "## EVIDENCE (Tier 6)",
-                "## Context Management",
-                "## Runtime Policy Reference",
-            ] {
-                assert!(
-                    !normalized.contains(forbidden),
-                    "{name} mode prompt duplicated shared base section {forbidden:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn approval_policy_no_longer_inlined_in_base_prompt() {
         let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
         assert!(!prompt.contains("Mode: Agent"));
@@ -3071,24 +3079,23 @@ mod tests {
     }
 
     #[test]
-    fn agent_mode_tool_guidance_avoids_defensive_tool_suppression() {
+    fn universal_prompt_leaves_tool_selection_to_the_catalog() {
         let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
         assert!(!prompt.contains("Tool Selection Guide"));
-        for tool in ["`File`", "`Git`", "`Run`", "`Bash`"] {
-            assert!(!AGENT_MODE.contains(tool));
+        for forbidden in [
+            "`File`",
+            "`Git`",
+            "`Run`",
+            "`Bash`",
+            "read_file",
+            "git_status",
+            "run_tests",
+            "exec_shell",
+            "When NOT to use certain tools",
+            "Don't reach for",
+        ] {
+            assert!(!HEADLESS_BASE_PROMPT.contains(forbidden));
         }
-        assert!(AGENT_MODE.contains("tools in the current catalog"));
-        for legacy in ["read_file", "git_status", "run_tests", "exec_shell"] {
-            assert!(!AGENT_MODE.contains(legacy));
-        }
-        assert!(
-            !AGENT_MODE.contains("When NOT to use certain tools"),
-            "agent mode should steer tool choice without training the model to avoid available tools"
-        );
-        assert!(
-            !AGENT_MODE.contains("Don't reach for"),
-            "avoid defensive anti-tool wording in mode guidance"
-        );
     }
 
     /// #588: after the 0.9.0 constitution reduction, language-mirroring
@@ -3197,8 +3204,6 @@ mod tests {
 
     #[test]
     fn legacy_rlm_compatibility_descriptions_remain_available() {
-        assert!(!AGENT_MODE.contains("Large Context Tools"));
-
         let descriptions = [
             RlmTool::alias("rlm_open", "open", None)
                 .description()
@@ -3220,10 +3225,7 @@ mod tests {
             rlm_count >= 5,
             "RLM tool descriptions present: expected >= 5 mentions of 'rlm', got {rlm_count}"
         );
-        assert!(
-            !AGENT_MODE.contains("`rlm`"),
-            "the normal Agent prompt should not teach the retired RLM control surface"
-        );
+        assert!(!HEADLESS_BASE_PROMPT.contains("`rlm`"));
     }
 
     /// Project instructions rank above memory, with the nearest scope winning
@@ -3257,31 +3259,22 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_the_single_agent_kernel_surface() {
-        for tool in ["rlm_open", "rlm_eval", "rlm_configure", "rlm_close"] {
-            assert!(!AGENT_MODE.contains(tool));
-        }
-        assert!(AGENT_MODE.contains("sub-agent"));
-        assert!(AGENT_MODE.contains("session-persistent `repl` blocks"));
-    }
-
-    #[test]
     fn prompt_documents_fork_context_prefix_cache_contract() {
         let source = include_str!("tools/subagent/mod.rs");
         assert!(source.contains("fork_context"));
-        assert!(!AGENT_MODE.contains("fork_context"));
+        assert!(!HEADLESS_BASE_PROMPT.contains("fork_context"));
     }
 
     #[test]
     fn prompt_documents_explicit_subagent_model_strength() {
         let source = include_str!("tools/subagent/mod.rs");
         assert!(source.contains("model_strength"));
-        assert!(!AGENT_MODE.contains("model_strength"));
+        assert!(!HEADLESS_BASE_PROMPT.contains("model_strength"));
     }
 
     #[test]
     fn prompt_documents_structured_subagent_briefs() {
-        assert!(!AGENT_MODE.contains("Subagent Brief"));
+        assert!(!HEADLESS_BASE_PROMPT.contains("Subagent Brief"));
         for heading in [
             "### SUMMARY",
             "### EVIDENCE",
@@ -3294,94 +3287,34 @@ mod tests {
     }
 
     #[test]
-    fn prompt_bounds_explore_without_tiny_cap_for_implementers() {
-        assert!(AGENT_MODE.contains("current catalog includes delegation"));
-        assert!(!AGENT_MODE.contains("3-5 tool calls"));
-        assert!(!AGENT_MODE.contains("No fan-out without a fan-in owner"));
+    fn universal_prompt_does_not_invent_orchestration_limits() {
+        assert!(!HEADLESS_BASE_PROMPT.contains("3-5 tool calls"));
+        assert!(!HEADLESS_BASE_PROMPT.contains("No fan-out without a fan-in owner"));
     }
 
     #[test]
-    fn agent_mode_prompt_teaches_automatic_workflow_use() {
+    fn universal_prompt_does_not_teach_optional_workflow_recipes() {
         for recipe in [
             "Workflow",
             "responseSchema",
             "request_user_input",
             ".workflow.js",
         ] {
-            assert!(!AGENT_MODE.contains(recipe));
+            assert!(!HEADLESS_BASE_PROMPT.contains(recipe));
         }
     }
 
     #[test]
-    fn operate_mode_prompt_keeps_multitask_simple_and_async() {
-        for phrase in [
-            "dispatch, join,",
-            "capabilities present in the current catalog",
-            "When worker dispatch is available",
-            "Fan out, block on one wait until the batch lands",
-            "queued user messages as new tasks",
-            "Preserve approval",
-            "settled is not",
-            "internal control-plane mechanics",
-            "When goal control is available",
-            "Dispatch is not completion",
-            "verification capabilities",
-            "When an ordered Workflow capability is present",
-        ] {
-            assert!(
-                OPERATE_MODE.contains(phrase),
-                "OPERATE_MODE missing multitask phrase {phrase:?}"
-            );
-        }
-        for implementation_detail in [
-            "risk` is exactly",
-            "parallel([() =>",
-            "terminal Workflow receipt",
-            "/multitask",
-        ] {
-            assert!(
-                !OPERATE_MODE.contains(implementation_detail),
-                "OPERATE_MODE leaks implementation detail {implementation_detail:?}"
-            );
-        }
-    }
-
-    /// The owner watched a model reason that it had to stay available for its
-    /// children instead of simply joining them. Operate must not frame a
-    /// blocking join as a lapse: the anti-pattern is the poll loop, not the
-    /// single wait, and returning control mid-flight is the exception.
-    #[test]
-    fn operate_mode_endorses_one_blocking_join_over_staying_responsive() {
-        for obligation in [
-            "keep the parent responsive",
-            "parent responsive",
+    fn universal_prompt_does_not_expose_control_plane_ceremony() {
+        for internal in [
+            "sub-agent",
+            "completion sentinels",
+            "<codewhale:subagent.done>",
+            "dispatch, join",
             "busy-waiting",
-            "return control instead",
         ] {
-            assert!(
-                !OPERATE_MODE.contains(obligation),
-                "OPERATE_MODE still frames staying responsive as an obligation: {obligation:?}"
-            );
+            assert!(!HEADLESS_BASE_PROMPT.contains(internal));
         }
-        for endorsement in [
-            "Fan out, block on one wait until the batch lands, then synthesize",
-            "endorsed default",
-            "Polling in a loop is the anti-pattern; one blocking wait",
-            "Returning control mid-flight is the exception",
-        ] {
-            assert!(
-                OPERATE_MODE.contains(endorsement),
-                "OPERATE_MODE missing fan-out/join endorsement {endorsement:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn subagent_done_sentinel_section_present() {
-        assert!(AGENT_MODE.contains("completion events as internal evidence"));
-        assert!(AGENT_MODE.contains("verify load-bearing child"));
-        assert!(AGENT_MODE.contains("never manufacture completion sentinels"));
-        assert!(!AGENT_MODE.contains("<codewhale:subagent.done>"));
     }
 
     #[test]
@@ -3404,8 +3337,8 @@ mod tests {
 
     #[test]
     fn compose_prompt_is_byte_stable_across_calls() {
-        // Suspect #4 from #263: mode prompt churn within a single mode.
-        // Two calls with identical (mode, personality) inputs must produce
+        // Suspect #4 from #263: stable prompt churn within a single session.
+        // Two calls with identical personality inputs must produce
         // identical bytes — anything else is a cache buster.
         let a = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
         let b = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
