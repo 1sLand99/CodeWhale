@@ -35,10 +35,19 @@ impl RegisterCommand for RemoteControlCmd {
                 )
             }
             Some("status") => CommandResult::message(app.remote_control.status_line()),
-            Some("stop") => CommandResult::with_message_and_action(
-                "Stopping web remote control…",
-                AppAction::RemoteControl(RemoteControlAction::Stop),
-            ),
+            Some("stop") => {
+                // Stop is refused while a remote turn is active or while any
+                // terminal/approval/integrity envelope is still awaiting the
+                // server-confirmed cursor; releasing the session earlier could
+                // strand account-side truth or create a second owner.
+                if let Some(reason) = app.remote_control.stop_refusal() {
+                    return CommandResult::error(reason);
+                }
+                CommandResult::with_message_and_action(
+                    "Stopping web remote control…",
+                    AppAction::RemoteControl(RemoteControlAction::Stop),
+                )
+            }
             Some(_) => CommandResult::error("Usage: /rc [status|stop]"),
         }
     }
@@ -60,5 +69,25 @@ mod tests {
         let result = RemoteControlCmd::execute(&mut app, None);
         assert!(result.is_error);
         assert!(result.action.is_none());
+    }
+
+    #[test]
+    fn stop_is_blocked_while_a_remote_turn_is_active() {
+        let options = TuiOptions {
+            ..crate::test_support::test_tui_options(PathBuf::from("."))
+        };
+        let mut app = crate::test_support::test_app_with_options(options);
+        app.remote_control.activate_prompt("run-1", "turn-1");
+
+        let result = RemoteControlCmd::execute(&mut app, Some("stop"));
+
+        assert!(result.is_error);
+        assert!(result.action.is_none());
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("active remote turn"))
+        );
     }
 }

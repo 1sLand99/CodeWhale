@@ -911,6 +911,12 @@ pub(crate) async fn run_event_loop(
                 }
                 if !matches!(event, EngineEvent::ApprovalRequired { .. }) {
                     app.remote_control.observe_engine_event(&event);
+                    // A terminal boundary reached after deltas were shed under
+                    // pressure repairs account truth with a bounded snapshot.
+                    while let Some(resync_run) = app.remote_control.take_pending_resync() {
+                        app.remote_control
+                            .upload_resync_snapshot(&resync_run, &app.api_messages);
+                    }
                 }
                 record_turn_activity(app, &event, Instant::now());
                 match event {

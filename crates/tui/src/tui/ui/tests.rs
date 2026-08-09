@@ -6947,6 +6947,40 @@ async fn immediate_submit_custom_provider_preflight_restores_exact_message() {
 }
 
 #[tokio::test]
+async fn remote_preflight_failure_releases_the_account_owned_run() {
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    app.remote_control
+        .activate_prompt("run_remote_fixture", "turn_remote_fixture");
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &handle,
+        QueuedMessage::new("remote preflight failure".to_string(), None),
+    )
+    .await
+    .expect_err("provider preflight must fail before engine dispatch");
+
+    assert!(
+        !app.remote_control.has_active_run(),
+        "a terminal pre-dispatch failure must not strand the remote run"
+    );
+}
+
+#[tokio::test]
 async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_step() {
     let _lock = crate::test_support::lock_test_env();
     let _missing_key =
