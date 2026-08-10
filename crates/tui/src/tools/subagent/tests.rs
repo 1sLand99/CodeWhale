@@ -16749,7 +16749,14 @@ async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     let snapshot = inner.get_result(&agent_id).expect("snapshot");
     let worker_record = inner.get_worker_record(&agent_id);
     let context = ToolContext::new(".");
-    let projection = subagent_session_projection(snapshot, false, &context, worker_record).await;
+    let mut projection =
+        subagent_session_projection(snapshot, false, &context, worker_record).await;
+    // The route receipt rides inside the budget rather than being exempt from
+    // it (#5305), so measure the receipt that ships.
+    let mut metadata = spawn_route_metadata("zai", "glm-5", "agent_profile.model");
+    metadata.requested_provider = Some("zai".to_string());
+    metadata.requested_model = Some("glm-5".to_string());
+    projection.child_route = Some(spawn_child_route_projection(&metadata));
 
     let full = serde_json::to_value(&projection).expect("projection json");
     let full_len = serde_json::to_string(&full).expect("serialize").len();
@@ -16765,6 +16772,7 @@ async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     assert!(compact.get("takeover").is_none());
     assert!(compact.get("transcript_handle").is_none());
     assert!(compact.get("verification").is_none());
+    assert_eq!(compact["child_route"]["effective_model"], json!("glm-5"));
     // The poll path must survive compaction — a spawn ack's one job is
     // saying how to check on the child.
     assert!(compact.get("follow_up").is_some());
@@ -16790,6 +16798,135 @@ async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     assert!(verbose.get("snapshot").is_some());
     assert!(verbose.get("compact").is_none());
     assert_eq!(verbose, full, "verbose: true must restore the old shape");
+}
+
+fn spawn_route_metadata(provider: &str, model: &str, source: &str) -> WorkflowTaskSpawnMetadata {
+    WorkflowTaskSpawnMetadata {
+        resolved_provider: provider.to_string(),
+        resolved_model: model.to_string(),
+        route_source: source.to_string(),
+        requested_provider: None,
+        requested_model: None,
+        requested_reasoning: None,
+        effective_reasoning: None,
+        resolved_role: None,
+        resolved_profile: None,
+        parent_task_id: None,
+        depth: 0,
+        workflow_run_id: None,
+        workflow_phase_id: None,
+        workflow_task_label: None,
+        workflow_child_index: None,
+        resume_from_agent_id: None,
+    }
+}
+
+#[test]
+fn spawn_receipt_route_names_the_provider_and_model_the_child_actually_got() {
+    // #5305: a Fleet profile can route a child onto a provider the parent
+    // never ran. A receipt that names only the profile lets the reader
+    // attribute the child's work to the session model.
+    let mut pinned = spawn_route_metadata("zai", "glm-5", "agent_profile.model");
+    pinned.requested_provider = Some("zai".to_string());
+    pinned.resolved_profile = Some("scout".to_string());
+    let route = serde_json::to_value(spawn_child_route_projection(&pinned)).expect("route json");
+    assert_eq!(route["effective_provider"], json!("zai"));
+    assert_eq!(route["effective_model"], json!("glm-5"));
+    assert_eq!(route["route_source"], json!("agent_profile.model"));
+    assert_eq!(route["requested_provider"], json!("zai"));
+    assert!(
+        route.get("requested_model").is_none(),
+        "an unpinned model stays absent rather than echoing the effective one: {route}"
+    );
+
+    // Origin labels only: the receipt carries no key that could hold an
+    // endpoint, credential, or workspace path.
+    let keys: Vec<&str> = route
+        .as_object()
+        .expect("route object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "requested_provider",
+            "effective_provider",
+            "effective_model",
+            "route_source",
+        ]
+    );
+
+    // An explicit caller pin is reported as requested, alongside the wire id
+    // it normalized to.
+    let mut caller_pinned = spawn_route_metadata("deepseek", "deepseek-v4-pro", "task.model");
+    caller_pinned.requested_model = Some("pro".to_string());
+    let route =
+        serde_json::to_value(spawn_child_route_projection(&caller_pinned)).expect("route json");
+    assert_eq!(route["requested_model"], json!("pro"));
+    assert_eq!(route["effective_model"], json!("deepseek-v4-pro"));
+    assert_eq!(route["route_source"], json!("task.model"));
+}
+
+#[tokio::test]
+async fn spawn_receipt_route_survives_compaction_for_a_type_only_spawn() {
+    // A type-only spawn resolves no roster member: no profile, no pins. The
+    // receipt still has to name the inherited route (#5305) — that is exactly
+    // the case where the reader would otherwise be guessing.
+    let request = parse_spawn_request(&json!({"prompt": "x", "type": "scout"}))
+        .expect("type-only spawn parses");
+    assert!(
+        request.model.is_none() && request.profile.is_none(),
+        "a type-only spawn pins neither model nor profile — what the metadata below encodes"
+    );
+
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let current_boot = inner.session_boot_id().to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        "test_agent_type_only_route".to_string(),
+        FleetRole::Scout,
+        "prompt".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Blue".to_string()),
+        Some(vec!["read_file".to_string()]),
+        input_tx,
+        PathBuf::from("."),
+        current_boot,
+    );
+    let agent_id = agent.id.clone();
+    inner.agents.insert(agent_id.clone(), agent);
+
+    let snapshot = inner.get_result(&agent_id).expect("snapshot");
+    let worker_record = inner.get_worker_record(&agent_id);
+    let context = ToolContext::new(".");
+    let mut projection =
+        subagent_session_projection(snapshot, false, &context, worker_record).await;
+    let metadata = spawn_route_metadata("deepseek", "deepseek-v4-flash", "run.model");
+    projection.child_route = Some(spawn_child_route_projection(&metadata));
+
+    let mut receipt = serde_json::to_value(&projection).expect("projection json");
+    compact_spawn_receipt(&mut receipt, false);
+
+    assert_eq!(
+        receipt["child_route"]["effective_provider"],
+        json!("deepseek")
+    );
+    assert_eq!(
+        receipt["child_route"]["effective_model"],
+        json!("deepseek-v4-flash")
+    );
+    assert_eq!(receipt["child_route"]["route_source"], json!("run.model"));
+    assert!(
+        receipt["child_route"].get("requested_provider").is_none()
+            && receipt["child_route"].get("requested_model").is_none(),
+        "nothing was pinned, so nothing is reported as requested: {receipt}"
+    );
+    assert!(
+        receipt.get("fleet_profile").is_none(),
+        "a type-only spawn resolves no profile: {receipt}"
+    );
 }
 
 #[tokio::test]

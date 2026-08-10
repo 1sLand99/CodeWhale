@@ -1569,6 +1569,14 @@ pub(crate) struct WorkflowTaskSpawnMetadata {
     pub resolved_provider: String,
     pub resolved_model: String,
     pub route_source: String,
+    /// Provider the spawn asked for: the id a resolved Fleet profile pins.
+    /// `None` means nothing was pinned and the child inherited the session
+    /// provider — `route_source` names the rule that chose it (#5305).
+    pub requested_provider: Option<String>,
+    /// Model the caller pinned on the spawn request, verbatim (before
+    /// normalization to the provider's wire id). `None` when the caller pinned
+    /// no model (#5305).
+    pub requested_model: Option<String>,
     /// Reasoning the caller asked for, verbatim (`inherit`/`auto`/effort).
     /// `None` only when the spawn request carried no reasoning at all (#4039).
     pub requested_reasoning: Option<String>,
@@ -6238,6 +6246,31 @@ pub struct SubAgentSessionProjection {
     /// resolved to before launch (#5046).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet_profile: Option<String>,
+    /// Route the child was actually launched on. Populated on `action=start`
+    /// receipts; absent for status/peek projections. Without it a receipt that
+    /// names only the profile invites false model attribution — the reader
+    /// cannot tell whether the child kept the session route or took the
+    /// profile's (#5305).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_route: Option<SubAgentChildRouteProjection>,
+}
+
+/// Requested-vs-effective route receipt for a launched child.
+///
+/// Origin labels only: provider ids, model ids, and the precedence rule that
+/// chose them. Never endpoints, credentials, or filesystem paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentChildRouteProjection {
+    /// Absent when the spawn pinned no provider (the child inherited the
+    /// session's); `route_source` still says where the route came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_provider: Option<String>,
+    /// Absent when the caller pinned no model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    pub effective_provider: String,
+    pub effective_model: String,
+    pub route_source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6393,6 +6426,7 @@ async fn subagent_session_projection(
         timed_out_with_checkpoint: timed_out && continuable,
         worker_record,
         fleet_profile: None,
+        child_route: None,
     }
 }
 
@@ -7344,8 +7378,10 @@ impl ToolSpec for AgentTool {
         };
         let mut projection =
             subagent_session_projection(snapshot, false, context, worker_record).await;
-        // Populate the resolved fleet profile in the spawn receipt so the
-        // dispatching model can confirm which configured profile was used (#5046).
+        // The receipt names the configured profile that was used (#5046) and
+        // the route that profile actually produced (#5305) — a profile id
+        // alone does not say which provider/model the child got.
+        projection.child_route = Some(spawn_child_route_projection(&spawn_metadata));
         projection.fleet_profile = spawn_metadata.resolved_profile;
         let mut value = serde_json::to_value(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
@@ -7359,9 +7395,25 @@ impl ToolSpec for AgentTool {
             "terminal": projection.terminal,
             "context_mode": projection.context_mode,
             "prefix_cache": projection.prefix_cache,
+            "child_route": projection.child_route,
         });
         tool_result.metadata = Some(metadata);
         Ok(tool_result)
+    }
+}
+
+/// Read the child's route off the spawn metadata, which was captured at the
+/// spawn seam: a later session-level model switch cannot rewrite a launched
+/// child's receipt.
+fn spawn_child_route_projection(
+    metadata: &WorkflowTaskSpawnMetadata,
+) -> SubAgentChildRouteProjection {
+    SubAgentChildRouteProjection {
+        requested_provider: metadata.requested_provider.clone(),
+        requested_model: metadata.requested_model.clone(),
+        effective_provider: metadata.resolved_provider.clone(),
+        effective_model: metadata.resolved_model.clone(),
+        route_source: metadata.route_source.clone(),
     }
 }
 
@@ -7391,6 +7443,9 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
     object.remove("takeover");
     object.remove("transcript_handle");
     object.remove("verification");
+    // `child_route` is kept inside the 1KB budget rather than exempted from
+    // it: five short identifiers cost ~150B, and a receipt that omits the
+    // route the child actually took is the misattribution #5305 is about.
     object.insert("compact".to_string(), json!(true));
     object.insert(
         "compact_note".to_string(),
@@ -8102,6 +8157,12 @@ async fn spawn_subagent_from_input(
             .unwrap_or_else(|| child_runtime.client.api_provider().as_str().to_string()),
         resolved_model: effective_model.clone(),
         route_source: model_selection.source.as_str().to_string(),
+        // #5305: same explicit-only source the launch route used above, so the
+        // receipt cannot claim a pin the child was never bound to.
+        requested_provider: crate::fleet::worker_runtime::explicit_fleet_provider_id(
+            profile_member.as_ref(),
+        ),
+        requested_model: spawn_request.model.clone(),
         // #4039: requested is what the caller asked for; effective is what the
         // child runtime was installed with a line above. Both are read here,
         // at the spawn seam, so a later session-level model/reasoning switch
