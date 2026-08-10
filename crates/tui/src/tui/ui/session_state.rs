@@ -315,6 +315,7 @@ pub(crate) fn recover_engine_event_disconnect(app: &mut App) -> bool {
     app.is_compacting = false;
     app.active_compaction = None;
     app.manual_compaction_queued = false;
+    app.deferred_manual_compaction = None;
     app.is_purging = false;
     app.turn_started_at = None;
     app.turn_last_activity_at = None;

@@ -459,7 +459,23 @@ fn write_compaction_session(
 
 fn load_session(harness: &mut Harness, path: &std::path::Path, message_count: usize) -> Result<()> {
     type_and_submit(harness, &format!("/load {}", path.to_string_lossy()))?;
-    harness.wait_for_text(&format!("{message_count} messages"), INTERACTION_TIMEOUT)?;
+    // The loaded-session note wraps when the temp path is long, splitting the
+    // needle across rows, a gutter prefix, and the scrollbar edge glyph. Match
+    // on frame text with chrome glyphs removed and whitespace normalized so
+    // the wait survives any wrap point.
+    let needle = format!("{message_count} messages");
+    harness.wait_for(
+        move |frame| {
+            let normalized = frame
+                .text()
+                .replace(['▏', '▎', '▌', '│', '┃', '●'], " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            normalized.contains(&needle)
+        },
+        INTERACTION_TIMEOUT,
+    )?;
     Ok(())
 }
 
@@ -491,12 +507,14 @@ fn compaction_tui_builder(
         .env("NO_ANIMATIONS", "1")
 }
 
-/// Regression for the v0.9.6 `/compact` freeze: a live turn stops draining the
-/// bounded engine op channel, `/subagents` refresh fills all 32 slots, and the
-/// manual compaction shortcut must still return immediately. The final marker
-/// proves keyboard input and rendering remain live after the full-mailbox path.
+/// Regression for the v0.9.6 `/compact` freeze, upgraded to the v0.9.7
+/// queue-behind-pressure contract: a live turn stops draining the bounded
+/// engine op channel and `/subagents` refresh fills all 32 slots. The manual
+/// compaction shortcut must still return immediately — and now queues behind
+/// the saturated mailbox instead of refusing with "engine is busy". The final
+/// marker proves keyboard input and rendering remain live afterward.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn release_compaction_full_mailbox_never_freezes_tui() -> Result<()> {
+async fn release_compaction_full_mailbox_queues_and_never_freezes_tui() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
     let responder =
@@ -530,16 +548,24 @@ async fn release_compaction_full_mailbox_never_freezes_tui() -> Result<()> {
 
     let compact_started = Instant::now();
     tui.send(keys::key::ctrl('l'))?;
-    tui.wait_for_text("engine is busy", Duration::from_secs(3))?;
+    tui.wait_for_text("Context compaction queued", Duration::from_secs(3))?;
     assert!(
         compact_started.elapsed() < Duration::from_secs(3),
         "full-mailbox compaction did not return within the liveness budget"
     );
+    // The queued request may not start while the saturating turn holds the
+    // mailbox; the deferred send waits for a free slot instead of racing it.
     assert_eq!(
         responder.compaction_requests.load(Ordering::SeqCst),
         0,
-        "a full mailbox must reject rather than start compaction"
+        "a queued manual request must wait behind the saturating turn"
     );
+    // A repeat during deferral is one queued pass, not a second receipt path.
+    tui.send(keys::key::ctrl('l'))?;
+    tui.wait_for_text(
+        "Context compaction is already in progress.",
+        Duration::from_secs(3),
+    )?;
 
     tui.send(keys::key::text("post-compact-full-mailbox-live"))?;
     tui.wait_for_text("post-compact-full-mailbox-live", Duration::from_secs(3))?;
@@ -552,7 +578,6 @@ async fn release_compaction_full_mailbox_never_freezes_tui() -> Result<()> {
 /// turn, starts exactly one provider compaction request, and owns its typed
 /// phase label beyond the five-second toast lifetime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "deferred to 0.9.7 (owner-approved): manual /compact must queue behind an active turn instead of refusing with 'engine is busy'"]
 async fn release_manual_compaction_serializes_and_label_persists() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
@@ -630,7 +655,6 @@ async fn release_manual_compaction_serializes_and_label_persists() -> Result<()>
 /// 272K route. Its typed auto label must remain visible beyond toast expiry,
 /// and the ordinary streamed turn may start only after compaction completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "deferred to 0.9.7 (owner-approved): blocked by the same compaction busy-queue bug as the manual scenario"]
 async fn release_auto_compaction_label_persists() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
@@ -703,7 +727,6 @@ async fn release_auto_compaction_label_persists() -> Result<()> {
 /// A second `/compact` must feed the committed summary back into the
 /// summarization request as the coalescing bridge (replace, not stack).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "deferred to 0.9.7 (owner-approved): blocked by the same compaction busy-queue bug as the manual scenario"]
 async fn release_idle_compaction_reports_outcome_in_transcript() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;

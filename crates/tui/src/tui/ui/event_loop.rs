@@ -691,6 +691,10 @@ pub(crate) async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
+        // A manual compaction deferred by a full engine mailbox retries here
+        // each iteration until a slot frees or a live pass supersedes it.
+        flush_deferred_manual_compaction(app, config, &engine_handle);
+
         while let Some(completion) = app.clipboard.poll_write_completion() {
             if let Err(err) = completion {
                 tracing::warn!(error = %err, "background terminal clipboard write failed");

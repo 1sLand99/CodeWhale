@@ -1870,6 +1870,11 @@ pub struct App {
     /// A manual compaction op accepted by the UI but waiting for the engine to
     /// finish the active turn and emit CompactionStarted.
     pub(crate) manual_compaction_queued: bool,
+    /// A manual compaction request that found the bounded engine mailbox full.
+    /// The event loop retries the send once a slot frees; any compaction that
+    /// starts or settles in the meantime supersedes it. Inner value is the
+    /// requested focus.
+    pub(crate) deferred_manual_compaction: Option<Option<String>>,
     /// Whether context purge is currently in progress.
     pub is_purging: bool,
     /// Set when the user scrolls up/down during a streaming turn so subsequent

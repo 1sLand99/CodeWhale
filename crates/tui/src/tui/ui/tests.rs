@@ -8080,7 +8080,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
 }
 
 #[test]
-fn full_engine_mailbox_rejects_manual_compaction_immediately() {
+fn full_engine_mailbox_defers_manual_compaction_and_flushes_once_drained() {
     let mut app = create_test_app();
     app.is_loading = true;
     let config = configure_manual_compaction_test_route(&mut app);
@@ -8092,18 +8092,81 @@ fn full_engine_mailbox_rejects_manual_compaction_immediately() {
             .expect("fill mock engine mailbox");
     }
 
+    try_queue_manual_compaction(
+        &mut app,
+        &config,
+        &engine.handle,
+        Some("preserve verification evidence".to_string()),
+    );
+    assert!(app.manual_compaction_queued);
+    assert!(app.deferred_manual_compaction.is_some());
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context compaction queued; it will run after the active turn.")
+    );
+
+    // A repeat during deferral is the single queued pass, not a second one.
     try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
-    assert!(!app.manual_compaction_queued);
-    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
-        toast.level == StatusToastLevel::Error && toast.text.contains("engine is busy")
-    }));
-    for _ in 0..32 {
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Context compaction is already in progress.")
+    );
+
+    // The mailbox is still full: the flush waits without dropping the request.
+    flush_deferred_manual_compaction(&mut app, &config, &engine.handle);
+    assert!(app.deferred_manual_compaction.is_some());
+
+    // One freed slot lets the deferred request enter the mailbox exactly once,
+    // with its original focus, behind the ops that were already queued.
+    assert!(matches!(
+        engine.rx_op.try_recv(),
+        Ok(crate::core::ops::Op::ListSubAgents)
+    ));
+    flush_deferred_manual_compaction(&mut app, &config, &engine.handle);
+    assert!(app.deferred_manual_compaction.is_none());
+    assert!(app.manual_compaction_queued);
+    for _ in 0..31 {
         assert!(matches!(
             engine.rx_op.try_recv(),
             Ok(crate::core::ops::Op::ListSubAgents)
         ));
     }
+    match engine.rx_op.try_recv().expect("one deferred compact op") {
+        crate::core::ops::Op::CompactContext { compaction, .. } => {
+            assert_eq!(
+                compaction.focus.as_deref(),
+                Some("preserve verification evidence")
+            );
+        }
+        other => panic!("expected CompactContext, got {other:?}"),
+    }
     assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[test]
+fn deferred_manual_compaction_is_superseded_by_a_live_pass() {
+    // An automatic pass starting drops the deferred request AND the queued
+    // flag, or `/compact` would report "already in progress" forever.
+    let mut app = create_test_app();
+    app.manual_compaction_queued = true;
+    app.deferred_manual_compaction = Some(None);
+    apply_compaction_started(&mut app, "compact-auto".to_string(), true);
+    assert!(app.deferred_manual_compaction.is_none());
+    assert!(!app.manual_compaction_queued);
+
+    // A pass settling (even one whose start event was lost) is equally
+    // authoritative: the context was just compacted.
+    let mut app = create_test_app();
+    app.manual_compaction_queued = true;
+    app.deferred_manual_compaction = Some(None);
+    apply_compaction_completed(
+        &mut app,
+        "compact-x",
+        true,
+        "Auto-compaction complete".to_string(),
+    );
+    assert!(app.deferred_manual_compaction.is_none());
+    assert!(!app.manual_compaction_queued);
 }
 
 #[test]

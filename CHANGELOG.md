@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Manual `/compact` during an active turn now queues even when the engine's
+  bounded op mailbox is saturated. The request defers client-side, the event
+  loop retries it as mailbox slots free, and a compaction that starts or
+  settles first supersedes it — a full mailbox no longer refuses with "engine
+  is busy". The three deferred release-runtime QA compaction scenarios are
+  re-enabled, and the full-mailbox liveness regression now proves the
+  queue-behind-pressure contract.
+
 ## [0.9.6] - 2026-08-09
 
 Codewhale v0.9.6 is a subtractive release: fewer runtime guards, one stable

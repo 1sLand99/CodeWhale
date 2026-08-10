@@ -2245,7 +2245,7 @@ pub(crate) fn try_queue_manual_compaction(
         }
     };
     let mut compaction = compaction_for_validated_route(app, &route);
-    compaction.focus = focus;
+    compaction.focus = focus.clone();
     let op = Op::CompactContext {
         route: Box::new(route.into_resolved()),
         compaction: Box::new(compaction),
@@ -2273,20 +2273,89 @@ pub(crate) fn try_queue_manual_compaction(
                 .is_some_and(|send_error| {
                     matches!(send_error, tokio::sync::mpsc::error::TrySendError::Full(_))
                 });
-            let id = if full {
-                MessageId::ContextCompactionQueueFull
+            if full {
+                // A saturated mailbox is a timing accident of the active turn,
+                // not a user error. Queue client-side and let the event loop
+                // retry once the engine drains a slot; the user sees the same
+                // queued receipt as the ordinary behind-a-turn path.
+                app.manual_compaction_queued = true;
+                app.deferred_manual_compaction = Some(focus);
+                let text = app.tr(MessageId::ContextCompactionQueued).into_owned();
+                add_compaction_receipt(app, &text);
+                set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
             } else {
-                MessageId::ContextCompactionQueueClosed
-            };
-            let text = app.tr(id).into_owned();
+                let text = app.tr(MessageId::ContextCompactionQueueClosed).into_owned();
+                add_compaction_receipt(app, &text);
+                set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
+            }
+        }
+    }
+}
+
+/// Retry a manual compaction that was deferred by a full engine mailbox.
+///
+/// Called once per event-loop iteration. Silent by design: the queued receipt
+/// was already written when the request was deferred, a still-full mailbox
+/// just waits for the next iteration, and a compaction that started or
+/// settled in the meantime supersedes the request entirely (handled by
+/// `apply_compaction_started`/`settle_compaction`).
+pub(crate) fn flush_deferred_manual_compaction(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+) {
+    if app.deferred_manual_compaction.is_none() || app.is_compacting {
+        return;
+    }
+    let route = match validated_app_runtime_route(app, config) {
+        Ok(route) => route,
+        Err(error) => {
+            app.deferred_manual_compaction = None;
+            app.manual_compaction_queued = false;
+            let text = app
+                .tr(MessageId::ContextCompactionRouteInvalid)
+                .replace("{error}", &error.to_string());
             add_compaction_receipt(app, &text);
             set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
+            return;
+        }
+    };
+    let focus = app.deferred_manual_compaction.clone().unwrap_or_default();
+    let mut compaction = compaction_for_validated_route(app, &route);
+    compaction.focus = focus;
+    let op = Op::CompactContext {
+        route: Box::new(route.into_resolved()),
+        compaction: Box::new(compaction),
+    };
+    match engine_handle.try_send(op) {
+        Ok(()) => {
+            app.deferred_manual_compaction = None;
+        }
+        Err(error) => {
+            let full = error
+                .downcast_ref::<tokio::sync::mpsc::error::TrySendError<Op>>()
+                .is_some_and(|send_error| {
+                    matches!(send_error, tokio::sync::mpsc::error::TrySendError::Full(_))
+                });
+            if !full {
+                app.deferred_manual_compaction = None;
+                app.manual_compaction_queued = false;
+                let text = app.tr(MessageId::ContextCompactionQueueClosed).into_owned();
+                add_compaction_receipt(app, &text);
+                set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
+            }
         }
     }
 }
 
 pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     if !auto {
+        app.manual_compaction_queued = false;
+    }
+    // A compaction is running; a deferred manual request is now redundant.
+    // Dropping it must also release the queued flag when the running pass is
+    // automatic, or `/compact` would report "already in progress" forever.
+    if app.deferred_manual_compaction.take().is_some() && auto {
         app.manual_compaction_queued = false;
     }
     app.active_compaction = Some(ActiveCompaction { id, auto });
@@ -2320,6 +2389,12 @@ fn settle_compaction(app: &mut App, id: &str, auto: bool) -> bool {
     app.active_compaction = None;
     app.is_compacting = false;
     if !auto {
+        app.manual_compaction_queued = false;
+    }
+    // A settled pass makes a still-deferred manual request redundant (the
+    // context was just compacted). Dropping it releases the queued flag so a
+    // later `/compact` is not rejected as "already in progress".
+    if app.deferred_manual_compaction.take().is_some() {
         app.manual_compaction_queued = false;
     }
     true
