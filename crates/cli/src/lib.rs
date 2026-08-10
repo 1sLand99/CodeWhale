@@ -215,7 +215,7 @@ struct Cli {
     api_key: Option<String>,
     #[arg(long)]
     base_url: Option<String>,
-    /// Workspace directory for TUI file tools
+    /// Workspace directory for Codewhale file tools.
     #[arg(short = 'C', long = "workspace", alias = "cd", value_name = "DIR")]
     workspace: Option<PathBuf>,
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
@@ -226,7 +226,7 @@ struct Cli {
     skip_onboarding: bool,
     /// Skip loading project-level config, including the workspace-specific
     /// `[workspace]`/`[projects]` overlay from user config. Must appear before
-    /// the subcommand; it is forwarded to the TUI ahead of the subcommand.
+    /// the subcommand; it is applied before subcommand dispatch.
     #[arg(long = "no-project-config")]
     no_project_config: bool,
     /// Legacy compatibility alias for Act + Full Access.
@@ -249,22 +249,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run interactive/non-interactive flows via the TUI binary.
+    /// Run an interactive or non-interactive task.
     Run(RunArgs),
     /// Run Codewhale diagnostics.
     Doctor(TuiPassthroughArgs),
-    /// List live provider API models via the TUI binary.
+    /// List live models from the selected provider.
     Models(TuiPassthroughArgs),
-    /// Generate speech audio with Xiaomi MiMo TTS models via the TUI binary.
+    /// Generate speech audio with Xiaomi MiMo TTS models.
     #[command(visible_alias = "tts")]
     Speech(TuiPassthroughArgs),
-    /// List saved TUI sessions.
+    /// List saved sessions.
     Sessions(TuiPassthroughArgs),
-    /// Resume a saved TUI session.
+    /// Resume a saved session.
     Resume(TuiPassthroughArgs),
     /// Launch an interactive session and hand it to the Codewhale web app.
     Rc(TuiPassthroughArgs),
-    /// Fork a saved TUI session.
+    /// Fork a saved session.
     Fork(TuiPassthroughArgs),
     /// Create a default AGENTS.md in the current directory.
     Init(TuiPassthroughArgs),
@@ -272,7 +272,7 @@ enum Commands {
     Setup(TuiPassthroughArgs),
     /// Generate a remote Codewhale agent deploy bundle (cloud + chat bridge).
     RemoteSetup(RemoteSetupArgs),
-    /// Run a non-interactive prompt through the TUI runtime.
+    /// Run a non-interactive prompt.
     #[command(after_help = "\
 Examples:
   codewhale exec \"explain this function\"
@@ -292,7 +292,7 @@ non-interactive filesystem/shell tool use, matching the supported automation
 path used by stream-json wrappers.
 ")]
     Exec(TuiPassthroughArgs),
-    /// Manage durable Agent Fleet runs via the TUI runtime.
+    /// Manage durable Agent Fleet runs.
     Fleet(TuiPassthroughArgs),
     /// Internal model-free Workflow tool dispatcher used by Lane Runtime.
     #[command(name = "workflow-tool", hide = true)]
@@ -337,13 +337,13 @@ lifecycle generation you observed.
     Review(TuiPassthroughArgs),
     /// Apply a patch file or stdin to the working tree.
     Apply(TuiPassthroughArgs),
-    /// Run the offline TUI evaluation harness.
+    /// Run the offline evaluation harness.
     Eval(TuiPassthroughArgs),
-    /// Manage TUI MCP servers.
+    /// Manage MCP servers.
     Mcp(TuiPassthroughArgs),
-    /// Inspect TUI feature flags.
+    /// Inspect feature flags.
     Features(TuiPassthroughArgs),
-    /// Run a local TUI server.
+    /// Run a local Codewhale server.
     #[command(after_help = "\
 Forwarded serve options:
       --mcp                 Start MCP server over stdio
@@ -368,7 +368,7 @@ New integrations should prefer `codewhale app-server`.")]
         after_help = "The browser receives a one-time loopback bootstrap capability, never the Runtime token.\nThe capability is exchanged for a bounded, process-local HttpOnly, SameSite=Strict web session and then invalidated."
     )]
     Web(WebArgs),
-    /// Generate shell completions for the TUI binary.
+    /// Generate shell completions.
     Completions(TuiPassthroughArgs),
     /// Configure provider credentials.
     Login(LoginArgs),
@@ -7887,6 +7887,15 @@ mod tests {
             telemetry_line.contains("CODEWHALE_TELEMETRY=0 always")
                 && telemetry_line.contains("wins"),
             "the help string must document the always-winning opt-out: {telemetry_line}"
+        );
+    }
+
+    #[test]
+    fn root_help_describes_product_actions_not_internal_tui_layers() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            !help.contains("TUI"),
+            "root help must describe what Codewhale does, not its internal UI/runtime layers:\n{help}"
         );
     }
 

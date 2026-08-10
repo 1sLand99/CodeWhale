@@ -37,6 +37,8 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - Wide terminals center the header, transcript, work strip, composer, and
   footer on one 112-column session rail. Compact terminals remain fluid and use
   their full available width.
+- Root CLI help describes product actions directly instead of exposing internal
+  TUI/runtime layers.
 - `Bash action="wait"` now blocks by default when a wait is requested; callers
   can still ask for a nonblocking snapshot, and persistent service ownership
   remains explicit.
