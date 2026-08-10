@@ -1,34 +1,77 @@
 # Plugin bundles
 
-Codewhale v0.9.1 supports a deliberately small plugin-bundle boundary. A
-bundle may contribute declarative Skills and MCP server configuration through
-Codewhale's existing engines. Discovery alone never executes, enables, trusts,
-downloads, updates, or installs anything. For the `/plugin install` on-ramp
-that places bundles onto disk, see [PLUGINS.md](PLUGINS.md).
+Codewhale supports a deliberately small plugin-bundle boundary. The boundary
+was drawn in v0.9.1 and is unchanged in shape as of v0.9.6: a bundle may
+contribute declarative Skills and MCP server configuration through Codewhale's
+existing engines, and nothing else activates. Discovery alone never executes,
+enables, trusts, downloads, updates, or installs anything.
+
+This document owns the bundle format (both manifest encodings), discovery,
+validation, and the trust/enable/runtime contract. [PLUGINS.md](PLUGINS.md)
+owns how bits get onto and off disk — the `/plugin install`, `update`,
+`uninstall`, and `suggest` on-ramp added in v0.9.4 (#5182). Claude Code
+plugin repositories are a different, unconverted format; that boundary is
+[CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md).
 
 ## Discovery and precedence
 
-Codewhale scans only its own roots:
+Codewhale scans only its own roots, looking in each `<name>/` directory for a
+manifest named `plugin.json` (the native Agent Plugins v1.0.0 format, since
+v0.9.4) or `plugin.toml` (the legacy Codewhale format, still fully readable):
 
-- User: `~/.codewhale/plugins/<name>/plugin.toml`
-- Workspace: `<workspace>/.codewhale/plugins/<name>/plugin.toml`
+- User: `~/.codewhale/plugins/<name>/`
+- Workspace: `<workspace>/.codewhale/plugins/<name>/`
 
-No built-in bundle ships in v0.9.1. The internal precedence order is built-in,
-user, then workspace; the first bundle with a given name wins. This prevents a
-repository from shadowing an explicitly installed user bundle. Symbolic-link
-roots, manifests, component paths, and nested component files fail closed.
+A bundle that dual-publishes both manifests is read through its `plugin.json`.
+No built-in bundle ships as of v0.9.6. The internal precedence order is
+built-in, user, then workspace; the first bundle with a given name wins. This
+prevents a repository from shadowing an explicitly installed user bundle.
+Symbolic-link roots, manifests, component paths, and nested component files
+fail closed.
 
 New user and workspace bundles are always untrusted and disabled. Discovery is
 read-only and does not inspect any other application's extension or credential
-directories.
+directories: ambient roots such as `.claude/plugins` or `.cursor/plugins` are
+never scanned.
 
-Pre-v0.9.1 `overrides.json` enablement is intentionally not imported as trust.
-Existing bundles therefore return to disabled until they receive the v1
-content and capability review.
+Pre-v0.9.1 `overrides.json` enablement was intentionally not imported as
+trust; every bundle activates only through the v1 content and capability
+review below.
 
 ## Manifest
 
-Every bundle uses a versioned `plugin.toml` and a semantic version:
+Both encodings parse into the same internal manifest, so validation, hashing,
+review, and runtime behavior are identical downstream. On-disk auto-migration
+between them is deliberately not performed; `/plugin export <name>
+<target-dir>` publishes a loaded bundle as a spec-valid Agent Plugins v1.0.0
+directory without modifying the installed one.
+
+### `plugin.json` (Agent Plugins v1.0.0)
+
+The standard's manifest root is closed: `$schema`, `name`, and the optional
+well-known fields (`version`, `description`, `author`, `homepage`,
+`repository`, `license`, `keywords`, `extensions`). An unknown root key is a
+parse error. Client-specific data lives under `extensions`, keyed by
+reverse-domain namespace: unknown vendor namespaces are ignored, never
+rejected — that is what lets a bundle authored for another client load here —
+while unknown keys inside Codewhale's own `extensions["net.codewhale"]`
+namespace are rejected rather than silently dropped.
+
+Names follow the standard's rule: 1–64 lowercase ASCII letters, digits, or
+internal single `-`/`.`, starting and ending alphanumeric, never `--` or `..`.
+A `skills/` directory in the bundle root is picked up automatically; other
+component locations, `capabilities`, `when`, and `display_name` ride in
+`extensions["net.codewhale"]`.
+
+MCP servers cannot live in `plugin.json` (the root is closed); they live in a
+sibling `mcp.json` under `mcpServers`, with `stdio`, `streamable-http`, or
+`sse` transports (`type` may be omitted and is inferred from `command` vs
+`url`). Codewhale-only server options — timeouts, tool filters, env-backed
+credentials, enablement — ride per-server under `extensions["net.codewhale"]`.
+The `env` names `PLUGIN_ROOT` and `PLUGIN_DATA` are reserved by the standard
+for the host runtime and are rejected in plugin definitions.
+
+### `plugin.toml` (legacy Codewhale format)
 
 ```toml
 schema_version = 1
@@ -58,6 +101,15 @@ os = ["macos", "linux", "windows"]
 binaries = ["node"]
 ```
 
+Legacy TOML names are 1–64 lowercase ASCII letters, digits, or internal
+hyphens. A pre-versioned manifest without `schema_version` still parses, with
+a migration warning from `/plugin validate` (and `0.0.0` displayed when
+`[plugin].version` is missing). An unknown top-level table or field is a
+parse error (`deny_unknown_fields`), reported by byte offset without echoing
+manifest values.
+
+### Validation (both formats)
+
 Component paths must be relative, contained, present, and free of symbolic
 links or Windows reparse points (including junctions and mount points). The v1
 schema rejects unknown MCP fields, ambiguous local/remote
@@ -72,10 +124,10 @@ the normalized host set used by its endpoints in
 `capabilities.network_hosts`; endpoint scheme, normalized host, port, and path
 remain bound to the review. Redirects are limited and must retain that exact
 normalized origin. Reviewed remote transports use an explicit no-proxy HTTP
-client: v1 bundles never read or use ambient `HTTP_PROXY`, `HTTPS_PROXY`, or
-`NO_PROXY` values, because proxy credentials and proxy observation are outside
-the reviewed authority. User-authored MCP configuration keeps its existing
-explicit proxy support.
+client: plugin bundles never read or use ambient `HTTP_PROXY`, `HTTPS_PROXY`,
+or `NO_PROXY` values, because proxy credentials and proxy observation are
+outside the reviewed authority. User-authored MCP configuration keeps its
+existing explicit proxy support.
 
 Local stdio environment entries must use exact `${SOURCE_ENV}` references.
 The review shows destination and source names, but never reads or prints their
@@ -89,27 +141,30 @@ staged paths before spawn.
 Every stdio argument is shown losslessly as a JSON string during review.
 Common credential-bearing flags and known literal token shapes are rejected
 from argv; credentials must instead use a reviewed environment mapping.
-Plugin-contributed MCP OAuth is disabled for v0.9.1, including discovery,
-login, refresh, and token storage.
+Plugin-contributed MCP OAuth has been disabled since v0.9.1 and remains
+disabled as of v0.9.6, including discovery, login, refresh, and token storage;
+a manifest declaring OAuth fields on a plugin MCP server fails validation.
 
-`[skills]` and `[mcp_servers.*]` are the only active component adapters in
-v0.9.1. The manifest can inventory the following future surfaces, but a bundle
-declaring any of them cannot be enabled yet:
+### Active and inactive component surfaces
+
+`[skills]` and `[mcp_servers.*]` are the only active component adapters as of
+v0.9.6. The manifest can additionally inventory the following future
+surfaces, but a bundle declaring any of them cannot be enabled yet:
 
 ```toml
 [commands]
 path = "commands"
 
-[agents]
+[agents]        # TOML alias: [profiles]
 path = "agents"
 
 [hooks]
 path = "hooks"
 
-[lsp]
+[lsp]           # TOML alias: [lsp_servers]
 path = "lsp"
 
-[native]
+[native]        # TOML alias: [native_extension]
 path = "native"
 
 [capabilities]
@@ -118,7 +173,29 @@ network_hosts = ["api.example.invalid"]
 lifecycle_mutation = true
 ```
 
-Remote MCP endpoint hosts must exactly match the displayed network inventory.
+(In a `plugin.json` bundle the same tables ride under
+`extensions["net.codewhale"]`.)
+
+The accept/reject behavior is deliberately loud, never silent:
+
+- A **recognized-but-inactive** declaration (`commands`, `agents`, `hooks`,
+  `lsp`, `native`, a non-empty `capabilities.filesystem_roots`, or
+  `capabilities.lifecycle_mutation = true`) parses and is validated like any
+  component (contained, present, link-free). It is counted in the inventory,
+  shown in the review as an inactive declaration, and blocks activation:
+  `/plugin enable` fails closed with an error naming each inactive surface
+  (the error text still says "v0.9.1-inactive capabilities"; the behavior is
+  unchanged), and such a bundle is never treated as active at runtime.
+- An **unrecognized** section or field is a validation failure, not an
+  inventory entry: unknown top-level TOML tables, unknown MCP server fields,
+  unknown `plugin.json` root keys, and unknown keys inside
+  `extensions["net.codewhale"]` are all rejected outright. The single
+  ignore-without-error case is another vendor's `extensions` namespace in the
+  Agent Plugins format, which the standard requires clients to skip.
+- `capabilities.network_hosts` is not a future surface: it is enforced today,
+  and must exactly match the normalized host set of the bundle's remote MCP
+  endpoints (so it cannot be declared without them, or omitted with them).
+
 A successful environment or health check is never treated as trust.
 
 ## Review, trust, and enablement
@@ -153,6 +230,11 @@ Then run `/plugin enable example` again. Trust and enablement are separate:
 - `/plugin reload` rebuilds the current workspace registry when files have
   changed on disk.
 
+(`/plugin install`, `update`, and `uninstall` place, replace, and remove the
+bits themselves and always drop into this same review — see
+[PLUGINS.md](PLUGINS.md). `/plugin suggest` only ranks what is already
+installed.)
+
 Trust, enable, disable, revoke, and reload rebuild the current workspace's
 Skill catalogue and MCP pool immediately. Each persisted transition advances a
 per-bundle generation under a stable cross-process lock. A generation change
@@ -183,7 +265,8 @@ through validated object handles on Windows. The capability hash covers the
 normalized component and permission inventory. A source or staged-content
 edit, capability change, or unsafe runtime-root replacement invalidates the
 receipt deterministically; an already-enabled bundle becomes inactive until
-it is reviewed again.
+it is reviewed again. This is the same invalidation `/plugin update` relies
+on: replaced bytes stop matching the receipt, forcing re-review.
 
 ## Runtime behavior
 
@@ -207,7 +290,7 @@ the host, free of validation errors, and limited to supported component kinds.
   operation is in flight, so disable, revoke, or another cross-process state
   transition cancels the operation and terminates a plugin stdio child. Full
   source and staged-tree hashes are revalidated at dispatch/catalogue
-  boundaries; v0.9.1 does not continuously re-hash those trees during an
+  boundaries; the runtime does not continuously re-hash those trees during an
   already-running MCP call. Source or stage drift therefore fails the next
   boundary and drops the stale connection/catalogue entry, but is not claimed
   to interrupt a call already executing. Every failure includes instructions
@@ -217,18 +300,21 @@ the host, free of validation errors, and limited to supported component kinds.
 - Constitution, repository instructions, permission rules, sandbox policy,
   and MCP tool approval continue to outrank plugin instructions.
 
-`/plugin list`, `show`, and `validate` perform no network requests, process
-launches, credential reads, or configuration writes. Reviews render structural
-argv as lossless JSON strings and environment provenance without values.
-Credential-bearing argv is rejected at manifest validation; plugin-originated
-errors suppress URL query, authentication, argv, and environment material.
-Legacy executable tools under `[tools].plugin_dir` remain a distinct system
-and are listed under `/plugin tools`.
+`/plugin list`, `show`, `suggest`, and `validate` perform no network requests,
+process launches, credential reads, or configuration writes. Reviews render
+structural argv as lossless JSON strings and environment provenance without
+values. Credential-bearing argv is rejected at manifest validation;
+plugin-originated errors suppress URL query, authentication, argv, and
+environment material. Legacy executable tools under `[tools].plugin_dir`
+remain a distinct system and are listed under `/plugin tools`.
 
-## Explicit non-goals for v0.9.1
+## Explicit non-goals as of v0.9.6
 
-There is no remote marketplace, install/update command, ambient compatibility
-discovery, automatic trust, hook adapter, command adapter, agent adapter, LSP
-adapter, native extension runtime, MCP subscription adapter, or migration of
-another application's bundle. These remain later work rather than implied
-capabilities.
+There is no remote marketplace or registry index (`/plugin install` fetches
+one reviewed source, and `/plugin suggest` ranks only what is already
+installed), no ambient compatibility discovery, no automatic trust, no
+plugin-contributed MCP OAuth, no hook adapter, command adapter, agent adapter,
+LSP adapter, native extension runtime, or MCP subscription adapter, no
+migration of another application's bundle, and no on-disk auto-migration of a
+legacy `plugin.toml` to `plugin.json`. These remain later work rather than
+implied capabilities.

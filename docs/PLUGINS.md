@@ -2,8 +2,9 @@
 
 This is the walkthrough for the `/plugin install` on-ramp (v0.9.4, #5182).
 [PLUGIN_BUNDLES.md](PLUGIN_BUNDLES.md) remains the contract for the bundle
-format, discovery, and the trust/enable lifecycle — this document covers how
-bits get onto disk in the first place.
+format (`plugin.json` or legacy `plugin.toml`), discovery, validation, and
+the trust/enable lifecycle — this document covers how bits get onto disk in
+the first place.
 
 `/plugin suggest <task>` is a local, read-only companion: it ranks already
 installed bundles by their validated name, description, bundled skill names,
@@ -28,9 +29,10 @@ gated by the per-domain network policy: an unknown host returns a
 "needs approval" error naming the host (`/network allow <host>`, then retry),
 a denied host aborts without touching disk.
 
-The fetched tree must contain **exactly one** `plugin.toml`; that file's
-directory becomes the bundle root. Bundles land in the user plugins root at
-`~/.codewhale/plugins/<name>/`, where `<name>` is the manifest `[plugin].name`.
+The fetched tree must contain **exactly one** bundle root — a directory
+holding a `plugin.json` (or legacy `plugin.toml`) manifest. Bundles land in
+the user plugins root at `~/.codewhale/plugins/<name>/`, where `<name>` is the
+manifest's plugin name.
 
 ## The guided flow
 
