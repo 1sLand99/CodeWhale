@@ -27,6 +27,7 @@
 //! happen *before* the view is constructed (see `tui/ui.rs`); this
 //! module always assumes the user is being asked.
 
+use crate::config::ApprovalDefaultSelection;
 use crate::localization::{Locale, MessageId, tr};
 use crate::sandbox::SandboxPolicy;
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
@@ -1416,10 +1417,24 @@ impl ApprovalView {
     }
 
     pub fn new_for_locale(request: ApprovalRequest, locale: Locale) -> Self {
-        // A fresh card must never turn a reflexive Enter into authorization.
-        // Resolve the semantic deny option because its numeric index differs
-        // for persistent-allow and workflow approval cards.
-        let selected = ApprovalOption::Deny.index_for(&request);
+        Self::new_with_default_selection(request, locale, ApprovalDefaultSelection::default())
+    }
+
+    /// `default_selection` is `[approval] default_selection` (#5293). Deny
+    /// stays the default so a fresh card never turns a reflexive Enter into
+    /// authorization; `allow_once` is a user opting out of that guard.
+    pub fn new_with_default_selection(
+        request: ApprovalRequest,
+        locale: Locale,
+        default_selection: ApprovalDefaultSelection,
+    ) -> Self {
+        // Resolve the semantic option because its numeric index differs for
+        // persistent-allow and workflow approval cards.
+        let selected = match default_selection {
+            ApprovalDefaultSelection::Deny => ApprovalOption::Deny,
+            ApprovalDefaultSelection::AllowOnce => ApprovalOption::ApproveOnce,
+        }
+        .index_for(&request);
         Self {
             request,
             selected,
@@ -3447,6 +3462,74 @@ diff --git a/src/b.rs b/src/b.rs
         assert_eq!(view.current_decision(), ReviewDecision::Denied);
         view.selected = 3;
         assert_eq!(view.current_decision(), ReviewDecision::Abort);
+    }
+
+    /// One request per row ordering in `ApprovalOption::order_for`, so an
+    /// index-based default would be caught drifting on at least one of them.
+    fn one_request_per_card_shape() -> Vec<ApprovalRequest> {
+        vec![
+            benign_request(),
+            shell_request(),
+            ApprovalRequest::new(
+                "wf-default",
+                "workflow",
+                "Launch workflow",
+                &json!({
+                    "action": "start",
+                    "plan": {
+                        "goal": "risky",
+                        "risk": "elevated",
+                        "children": [{ "prompt": "go", "type": "implementer" }]
+                    }
+                }),
+                "tool:workflow",
+            ),
+        ]
+    }
+
+    #[test]
+    fn default_selection_denies_on_every_card_shape() {
+        for request in one_request_per_card_shape() {
+            let view = ApprovalView::new_for_locale(request, Locale::En);
+            assert_eq!(view.current_option(), ApprovalOption::Deny);
+        }
+    }
+
+    #[test]
+    fn allow_once_default_selection_preselects_approve_once() {
+        for request in one_request_per_card_shape() {
+            let view = ApprovalView::new_with_default_selection(
+                request,
+                Locale::En,
+                ApprovalDefaultSelection::AllowOnce,
+            );
+            assert_eq!(view.current_option(), ApprovalOption::ApproveOnce);
+            assert_eq!(view.current_decision(), ReviewDecision::Approved);
+        }
+    }
+
+    #[test]
+    fn approval_config_resolves_default_selection() {
+        let bare: crate::config::Config = toml::from_str("").expect("empty config");
+        assert_eq!(
+            bare.approval_default_selection(),
+            ApprovalDefaultSelection::Deny
+        );
+
+        let opted_in: crate::config::Config =
+            toml::from_str("[approval]\ndefault_selection = \"allow_once\"")
+                .expect("approval table");
+        assert_eq!(
+            opted_in.approval_default_selection(),
+            ApprovalDefaultSelection::AllowOnce
+        );
+
+        assert!(
+            toml::from_str::<crate::config::Config>(
+                "[approval]\ndefault_selection = \"allow_always\""
+            )
+            .is_err()
+        );
     }
 
     // ========================================================================

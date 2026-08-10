@@ -2473,6 +2473,28 @@ impl UpdateConfig {
     }
 }
 
+/// Which approval option a freshly rendered approval card highlights.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDefaultSelection {
+    /// Highlight the deny option, so a reflexive Enter refuses the call.
+    #[default]
+    Deny,
+    /// Highlight "allow once", restoring the pre-v0.9.6 Enter-to-approve flow.
+    AllowOnce,
+}
+
+/// Approval-card presentation (`[approval]` table in config.toml). Approval
+/// *policy* stays the top-level `approval_policy` key; this table only governs
+/// how the card is presented once a prompt is already required.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+pub struct ApprovalConfig {
+    /// Option highlighted when an approval card first appears (#5293).
+    /// Default: `deny`.
+    #[serde(default)]
+    pub default_selection: ApprovalDefaultSelection,
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -2584,6 +2606,11 @@ pub struct Config {
     /// Desktop notification settings (OSC 9 / BEL on long turn completion).
     #[serde(default)]
     pub notifications: Option<NotificationsConfig>,
+
+    /// Approval-card presentation (`[approval]`). Absent means deny-by-default
+    /// preselection.
+    #[serde(default)]
+    pub approval: Option<ApprovalConfig>,
 
     /// Per-domain network policy (#135). When absent, network tools fall back
     /// to a permissive default that mirrors pre-v0.7.0 behavior.
@@ -6641,6 +6668,12 @@ impl Config {
         self.notifications.clone().unwrap_or_default()
     }
 
+    /// Resolve which approval option a fresh card highlights (#5293).
+    #[must_use]
+    pub fn approval_default_selection(&self) -> ApprovalDefaultSelection {
+        self.approval.unwrap_or_default().default_selection
+    }
+
     /// Resolve workspace side-git snapshot settings with defaults applied.
     #[must_use]
     pub fn snapshots_config(&self) -> SnapshotsConfig {
@@ -9217,6 +9250,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         providers: merge_providers(base.providers, override_cfg.providers),
         features: merge_features(base.features, override_cfg.features),
         notifications: override_cfg.notifications.or(base.notifications),
+        approval: override_cfg.approval.or(base.approval),
         network: override_cfg.network.or(base.network),
         verifier: override_cfg.verifier.or(base.verifier),
         advisor: override_cfg.advisor.or(base.advisor),

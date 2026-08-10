@@ -1699,6 +1699,17 @@ If you are upgrading from older releases:
   to expose shell. Plan mode always hides shell; Full Access enables shell and
   auto-approval.
 - `approval_policy` (string, optional): `on-request`, `untrusted`, or `never`. Runtime `approval_mode` editing in `/config` also accepts `on-request` and `untrusted` aliases.
+- `[approval] default_selection` (string, optional): which option an approval
+  card highlights when it first appears — `deny` (default) or `allow_once`.
+  `deny` means a reflexive Enter on a card you have not read refuses the call.
+  Set `allow_once` to restore the pre-v0.9.6 Enter-to-approve muscle memory
+  (#5293). It moves the highlight only: which calls are prompted for is still
+  `approval_policy` plus the rules in `permissions.toml`.
+
+  ```toml
+  [approval]
+  default_selection = "allow_once"
+  ```
 - `sandbox_mode` (string, optional): `read-only`, `workspace-write`, `danger-full-access`, `external-sandbox`.
   Platform support is not identical. macOS uses Seatbelt when its runtime
   probe succeeds. Linux uses bubblewrap only when `prefer_bwrap = true` and
