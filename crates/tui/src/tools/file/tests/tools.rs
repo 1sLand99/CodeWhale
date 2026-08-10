@@ -24,7 +24,15 @@ async fn test_read_file_tool() {
         .expect("execute");
 
     assert!(result.success);
-    assert_eq!(result.content, "hello world");
+    // #3979: a small-file read now leads with the snapshot hash the edit
+    // guard verifies against, then the contents verbatim.
+    assert_eq!(
+        result.content,
+        format!(
+            "content_hash=\"{}\"\nhello world",
+            super::content_hash(b"hello world")
+        )
+    );
 }
 
 // This test deliberately serializes process-global environment changes
@@ -68,7 +76,11 @@ async fn read_file_denies_codewhale_config_backups_and_secret_store() {
         .execute(json!({"path": "notes.txt"}), &ctx)
         .await
         .expect("ordinary workspace file should remain readable");
-    assert_eq!(ordinary.content, "ordinary workspace data");
+    assert!(
+        ordinary.content.ends_with("ordinary workspace data"),
+        "{}",
+        ordinary.content
+    );
 }
 
 #[tokio::test]
@@ -179,6 +191,11 @@ async fn read_file_small_file_returns_unwrapped_contents() {
     // the historical "return contents unchanged" behavior so
     // existing prompts don't suddenly see <file> tags appear.
     // Harvested from #1451 — pin the fast-path contract.
+    //
+    // #3979 added one `content_hash="…"` header line ahead of the contents:
+    // the guard is useless if the common read path cannot report a hash, and
+    // this branch has no `<file>` envelope to carry it as an attribute. The
+    // contents themselves are still verbatim and still unwrapped.
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());
     let file = tmp.path().join("small.txt");
@@ -189,7 +206,13 @@ async fn read_file_small_file_returns_unwrapped_contents() {
         .await
         .expect("execute");
     assert!(result.success);
-    assert_eq!(result.content, "line 1\nline 2\nline 3\n");
+    assert_eq!(
+        result.content,
+        format!(
+            "content_hash=\"{}\"\nline 1\nline 2\nline 3\n",
+            super::content_hash(b"line 1\nline 2\nline 3\n")
+        )
+    );
     assert!(
         !result.content.contains("<file"),
         "small-file fast path must not wrap output"
@@ -2146,4 +2169,255 @@ fn test_input_schemas() {
         .and_then(|value| value.as_array())
         .expect("list schema should include required array");
     assert!(required.is_empty()); // path is optional
+}
+
+// === Content-hash edit guards (#3979) ===
+//
+// The guard's whole value is that a stale hash stops the write *before* it
+// happens, so every rejection case asserts the file is byte-for-byte
+// unchanged — a clear error over a corrupted file is the point.
+
+/// Read the hash the model would actually see, the way the model sees it:
+/// parsed out of the tool result's content, never out of its metadata.
+async fn reported_content_hash(ctx: &ToolContext, path: &str) -> String {
+    let result = ReadFileTool
+        .execute(json!({ "path": path }), ctx)
+        .await
+        .expect("read");
+    let (_, rest) = result
+        .content
+        .split_once("content_hash=\"")
+        .unwrap_or_else(|| panic!("read output carries no content_hash: {}", result.content));
+    let (hash, _) = rest.split_once('"').expect("terminated content_hash");
+    hash.to_string()
+}
+
+#[tokio::test]
+async fn reported_hash_verifies_against_the_file_contents() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let body = "alpha\nbeta\ngamma\n";
+    fs::write(tmp.path().join("doc.txt"), body).expect("write");
+
+    let reported = reported_content_hash(&ctx, "doc.txt").await;
+    assert_eq!(reported, super::content_hash(body.as_bytes()));
+    assert!(reported.starts_with("sha256:"), "{reported}");
+    assert_eq!(reported.len(), "sha256:".len() + 64, "{reported}");
+}
+
+#[tokio::test]
+async fn windowed_read_reports_the_whole_file_hash_not_the_window() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let body: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+    fs::write(tmp.path().join("many.txt"), &body).expect("write");
+
+    // A partial read must still hand back a guard for the *file*, or the
+    // model could only ever guard edits to files it read in full.
+    let result = ReadFileTool
+        .execute(
+            json!({ "path": "many.txt", "start_line": 5, "max_lines": 3 }),
+            &ctx,
+        )
+        .await
+        .expect("read");
+    assert!(
+        result.content.contains("shown_lines=\"5-7\""),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains(&format!(
+            "content_hash=\"{}\"",
+            super::content_hash(body.as_bytes())
+        )),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn edit_with_matching_expected_hash_proceeds() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.txt");
+    fs::write(&path, "alpha\nbeta\n").expect("write");
+
+    let hash = reported_content_hash(&ctx, "doc.txt").await;
+    EditFileTool
+        .execute(
+            json!({
+                "path": "doc.txt",
+                "search": "alpha",
+                "replace": "delta",
+                "expected_hash": hash,
+            }),
+            &ctx,
+        )
+        .await
+        .expect("matching hash must not block the edit");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "delta\nbeta\n");
+}
+
+#[tokio::test]
+async fn edit_with_stale_expected_hash_rejects_without_writing() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.txt");
+    fs::write(&path, "alpha\nbeta\n").expect("write");
+
+    let stale = reported_content_hash(&ctx, "doc.txt").await;
+    // Someone else edits the file between the read and the edit.
+    fs::write(&path, "alpha\nbeta\ngamma\n").expect("concurrent write");
+    // Re-read so the *other* staleness gate (mtime/size) cannot be what
+    // rejects this — the hash must be doing the work.
+    read_before_edit(&ctx, "doc.txt").await;
+
+    let err = EditFileTool
+        .execute(
+            json!({
+                "path": "doc.txt",
+                "search": "alpha",
+                "replace": "delta",
+                "expected_hash": stale,
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("stale hash must reject");
+
+    let message = err.to_string();
+    assert!(message.contains("changed since it was read"), "{message}");
+    assert!(
+        message.contains("re-read") || message.contains("action=\"read\""),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "alpha\nbeta\ngamma\n",
+        "a rejected edit must not modify the file"
+    );
+}
+
+#[tokio::test]
+async fn edit_without_expected_hash_is_unchanged() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.txt");
+    fs::write(&path, "alpha\nbeta\n").expect("write");
+    read_before_edit(&ctx, "doc.txt").await;
+
+    EditFileTool
+        .execute(
+            json!({ "path": "doc.txt", "search": "alpha", "replace": "delta" }),
+            &ctx,
+        )
+        .await
+        .expect("absent expected_hash keeps the pre-#3979 behavior");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "delta\nbeta\n");
+}
+
+#[tokio::test]
+async fn write_with_stale_expected_hash_rejects_without_writing() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.txt");
+    fs::write(&path, "original\n").expect("write");
+
+    let stale = super::content_hash(b"something else entirely\n");
+    let err = WriteFileTool
+        .execute(
+            json!({ "path": "doc.txt", "content": "clobbered\n", "expected_hash": stale }),
+            &ctx,
+        )
+        .await
+        .expect_err("stale hash must reject");
+
+    assert!(
+        err.to_string().contains("changed since it was read"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "original\n",
+        "a rejected write must not modify the file"
+    );
+}
+
+#[tokio::test]
+async fn write_with_matching_expected_hash_proceeds() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.txt");
+    fs::write(&path, "original\n").expect("write");
+
+    let hash = reported_content_hash(&ctx, "doc.txt").await;
+    WriteFileTool
+        .execute(
+            json!({ "path": "doc.txt", "content": "replaced\n", "expected_hash": hash }),
+            &ctx,
+        )
+        .await
+        .expect("matching hash must not block the write");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "replaced\n");
+}
+
+#[tokio::test]
+async fn write_with_expected_hash_on_a_missing_file_fails_closed() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    // There is no snapshot to verify, so honoring the guard is impossible.
+    // Creating the file anyway would silently give back less safety than the
+    // caller asked for.
+    let err = WriteFileTool
+        .execute(
+            json!({
+                "path": "new.txt",
+                "content": "x\n",
+                "expected_hash": super::content_hash(b"anything"),
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("guarded write to a missing file must fail closed");
+
+    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert!(
+        !tmp.path().join("new.txt").exists(),
+        "a rejected write must not create the file"
+    );
+}
+
+#[tokio::test]
+async fn write_without_expected_hash_still_creates_files() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    WriteFileTool
+        .execute(json!({ "path": "new.txt", "content": "x\n" }), &ctx)
+        .await
+        .expect("absent expected_hash keeps the pre-#3979 behavior");
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("new.txt")).expect("read"),
+        "x\n"
+    );
+}
+
+#[tokio::test]
+async fn expected_hash_is_advertised_on_every_mutating_action() {
+    for schema in [
+        WriteFileTool.input_schema(),
+        EditFileTool.input_schema(),
+        crate::tools::apply_patch::ApplyPatchTool.input_schema(),
+    ] {
+        let description = schema["properties"]["expected_hash"]["description"]
+            .as_str()
+            .expect("expected_hash must be advertised");
+        assert!(description.contains("content_hash"), "{description}");
+    }
 }

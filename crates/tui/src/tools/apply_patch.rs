@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use super::diff_format::make_unified_diff;
-use super::file::{PATCH_PARAMS, PATH_ALIASES, apply_param_aliases};
+use super::file::{
+    EXPECTED_HASH_DESCRIPTION, PATCH_PARAMS, PATH_ALIASES, apply_param_aliases, content_hash,
+};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     lsp_diagnostics_for_paths, optional_bool, optional_str, optional_u64,
@@ -317,7 +319,7 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply a unified-diff patch (multi-hunk, multi-file). Use this instead of `git apply`, `patch`, or repeated `edit_file` calls in `Bash` — single transactional change with fuzzy matching and a rendered diff."
+        "Apply a unified-diff patch (multi-hunk, multi-file). Use this instead of `git apply`, `patch`, or repeated `edit_file` calls in `Bash` — single transactional change with fuzzy matching and a rendered diff. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the whole patch refused, with nothing written, if the target file changed since that read."
     }
 
     fn input_schema(&self) -> Value {
@@ -363,6 +365,12 @@ impl ToolSpec for ApplyPatchTool {
                 "create_if_missing": {
                     "type": "boolean",
                     "description": "Create the file if it doesn't exist (for new file patches)"
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": format!(
+                        "{EXPECTED_HASH_DESCRIPTION} Verifies the patch target — the `path` argument when given, otherwise the first file the patch touches; other files in a multi-file patch are not hash-checked."
+                    )
                 }
             },
             "oneOf": [
@@ -396,6 +404,7 @@ impl ToolSpec for ApplyPatchTool {
         let normalized = normalize_apply_patch_input(&input)?;
         let create_if_missing = optional_bool(&input, "create_if_missing", false)?;
         let preflight = preflight_apply_patch_plan(&input, normalized)?;
+        verify_patch_expected_hash(&input, &preflight.summary, context)?;
 
         if let NormalizedApplyPatchInput::Replacement {
             entries,
@@ -484,6 +493,65 @@ impl ToolSpec for ApplyPatchTool {
         }
         Ok(tool_result)
     }
+}
+
+/// Enforce the optional `expected_hash` precondition for a patch (#3979).
+///
+/// **This is a whole-patch precondition on a single target file, not a per-file
+/// guard.** A unified diff carries no place to attach a hash per file section,
+/// and `File action="patch"` flattens its arguments into one object, so there
+/// is no clean parameter shape for a hash-per-path map without inventing a
+/// syntax the model has never seen. The guarded file is therefore the patch's
+/// target: the explicit `path` argument when one is given, otherwise the first
+/// file the patch touches. A multi-file patch still verifies only that one
+/// file; for the rest, the existing hunk-context matching remains the check
+/// that a stale patch fails on.
+///
+/// Runs before any pending write is built or applied, so a mismatch leaves
+/// every file in the patch untouched.
+fn verify_patch_expected_hash(
+    input: &Value,
+    summary: &ApplyPatchPreflight,
+    context: &ToolContext,
+) -> Result<(), ToolError> {
+    let Some(expected) = optional_str(input, "expected_hash")? else {
+        return Ok(());
+    };
+
+    let Some(target) = summary
+        .path_override
+        .as_deref()
+        .or_else(|| summary.touched_files.first().map(String::as_str))
+    else {
+        return Err(ToolError::execution_failed(
+            "File `patch` refused: expected_hash was supplied but the patch names no target file to verify it against, so nothing was written.".to_string(),
+        ));
+    };
+
+    let resolved = context.resolve_path(target)?;
+    if !resolved.exists() {
+        // Fail closed, matching `write`: a hash describes a file that was
+        // read, so a missing target means the guard cannot be honored.
+        return Err(ToolError::execution_failed(format!(
+            "File `patch` refused: expected_hash was supplied but {target} does not exist, so there is no snapshot to verify and nothing was written. Recovery: drop `expected_hash` when creating files."
+        )));
+    }
+
+    let current = fs::read(&resolved).map_err(|e| {
+        ToolError::execution_failed(format!(
+            "File `patch` refused: could not read {target} to verify expected_hash ({e}); nothing was written."
+        ))
+    })?;
+    let actual = content_hash(&current);
+    if actual == expected {
+        return Ok(());
+    }
+    Err(ToolError::execution_failed(format!(
+        "File `patch` refused: {target} changed since it was read. \
+         expected_hash was {expected} but the file is now {actual}, so nothing was written. \
+         Recovery: call File with action=\"read\" path=\"{target}\" to get the current contents \
+         and its content_hash, then rebuild the patch against them."
+    )))
 }
 
 /// Parse `apply_patch` input into a reusable, no-mutation preflight summary.
@@ -2741,5 +2809,154 @@ diff --git a/b.txt b/b.txt
             edited.contains("int new_h = 107;"),
             "first edit must survive"
         );
+    }
+
+    // === Content-hash patch guard (#3979) ===
+    //
+    // The guard is a whole-patch precondition on the patch target, not a
+    // per-file check — see `verify_patch_expected_hash`. These pin that it
+    // fires before anything is written.
+
+    const GUARD_PATCH: &str = "--- a/test.txt
++++ b/test.txt
+@@ -1,3 +1,3 @@
+ line1
+-line2
++modified
+ line3
+";
+
+    #[tokio::test]
+    async fn patch_with_matching_expected_hash_proceeds() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let body = "line1\nline2\nline3\n";
+        fs::write(tmp.path().join("test.txt"), body).expect("write");
+
+        ApplyPatchTool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "patch": GUARD_PATCH,
+                    "expected_hash": content_hash(body.as_bytes()),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("matching hash must not block the patch");
+
+        let updated = fs::read_to_string(tmp.path().join("test.txt")).expect("read");
+        assert!(updated.contains("modified"), "{updated}");
+    }
+
+    #[tokio::test]
+    async fn patch_with_stale_expected_hash_rejects_without_writing() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let body = "line1\nline2\nline3\n";
+        fs::write(tmp.path().join("test.txt"), body).expect("write");
+
+        let err = ApplyPatchTool
+            .execute(
+                json!({
+                    "path": "test.txt",
+                    "patch": GUARD_PATCH,
+                    "expected_hash": content_hash(b"a different file entirely\n"),
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale hash must reject");
+
+        let message = err.to_string();
+        assert!(message.contains("changed since it was read"), "{message}");
+        assert!(message.contains("nothing was written"), "{message}");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("test.txt")).expect("read"),
+            body,
+            "a rejected patch must not modify the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_without_expected_hash_is_unchanged() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("test.txt"), "line1\nline2\nline3\n").expect("write");
+
+        ApplyPatchTool
+            .execute(json!({ "path": "test.txt", "patch": GUARD_PATCH }), &ctx)
+            .await
+            .expect("absent expected_hash keeps the pre-#3979 behavior");
+
+        let updated = fs::read_to_string(tmp.path().join("test.txt")).expect("read");
+        assert!(updated.contains("modified"), "{updated}");
+    }
+
+    #[tokio::test]
+    async fn multi_file_patch_guards_the_first_file_and_writes_nothing_on_mismatch() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("one.txt"), "one\n").expect("write");
+        fs::write(tmp.path().join("two.txt"), "two\n").expect("write");
+
+        let patch = "diff --git a/one.txt b/one.txt
+--- a/one.txt
++++ b/one.txt
+@@ -1 +1 @@
+-one
++ONE
+diff --git a/two.txt b/two.txt
+--- a/two.txt
++++ b/two.txt
+@@ -1 +1 @@
+-two
++TWO
+";
+
+        let err = ApplyPatchTool
+            .execute(
+                json!({
+                    "patch": patch,
+                    "expected_hash": content_hash(b"stale\n"),
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale hash on the first file must reject the whole patch");
+        assert!(err.to_string().contains("one.txt"), "{err}");
+
+        // Transactional: the unguarded second file must not have been
+        // written either.
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("one.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("two.txt")).unwrap(),
+            "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_expected_hash_on_a_missing_target_fails_closed() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let err = ApplyPatchTool
+            .execute(
+                json!({
+                    "path": "absent.txt",
+                    "patch": GUARD_PATCH,
+                    "create_if_missing": true,
+                    "expected_hash": content_hash(b"anything"),
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("guarded patch of a missing file must fail closed");
+
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        assert!(!tmp.path().join("absent.txt").exists());
     }
 }

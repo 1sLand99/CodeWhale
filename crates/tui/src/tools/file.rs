@@ -20,6 +20,96 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+// === Content-hash edit guards (#3979) ===
+
+/// Format a file snapshot's content hash as `sha256:<hex>`.
+///
+/// The prefixed shape (rather than a bare hex digest) is deliberate: it is
+/// self-describing in the transcript, and it makes an accidentally-truncated or
+/// hand-invented value fail the equality check instead of matching by luck.
+///
+/// A file's hash is taken over its raw bytes, always before any windowing,
+/// truncation, or rendering, so the value `read` reports is the value `write`,
+/// `edit`, and `patch` verify.
+pub(super) fn content_hash(bytes: &[u8]) -> String {
+    format!("sha256:{}", crate::hashing::sha256_hex(bytes))
+}
+
+/// Hash a file's bytes without holding the whole file in memory.
+///
+/// The read path streams a bounded window out of large files on purpose, so it
+/// never has the full contents to hash. Digesting through a separate streaming
+/// pass keeps that memory bound while still producing a hash over the entire
+/// file — the only value an edit guard can verify against.
+fn hash_file_streaming(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format!(
+        "sha256:{}",
+        crate::hashing::hex_bytes(hasher.finalize())
+    ))
+}
+
+/// The one-line header that reports a snapshot hash to the model.
+///
+/// This goes in `ToolResult::content`, not in `ToolResult::metadata`, and that
+/// placement is the whole point. `metadata` never reaches the model: the wire
+/// `ContentBlock::ToolResult` (`crates/core/src/request.rs`) has no field for
+/// it, and the turn loop builds the tool message from `output.content` alone
+/// (`crates/tui/src/core/engine/turn_loop.rs`). Metadata is for the TUI,
+/// telemetry, and the approval/mutation receipts. A hash the model cannot read
+/// is a guard the model cannot use, so it is rendered into the content — either
+/// as an attribute on the `<file …>` envelope, or as this header line for the
+/// unwrapped small-file read.
+fn content_hash_header(hash: &str) -> String {
+    format!("content_hash=\"{hash}\"\n")
+}
+
+/// Reject a mutation whose `expected_hash` does not describe the current file.
+///
+/// Callers must run this against the exact snapshot the mutation would be
+/// applied to, and before anything is written. `None` (parameter absent) keeps
+/// the pre-#3979 behavior untouched — the guard is opt-in.
+fn verify_expected_hash(
+    expected: Option<&str>,
+    current_bytes: &[u8],
+    action: &str,
+    path_str: &str,
+) -> Result<(), ToolError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = content_hash(current_bytes);
+    if expected == actual {
+        return Ok(());
+    }
+    Err(ToolError::execution_failed(format!(
+        "File `{action}` refused: {path_str} changed since it was read. \
+         expected_hash was {expected} but the file is now {actual}, so nothing was written. \
+         Recovery: call File with action=\"read\" path=\"{path_str}\" to get the current contents \
+         and its content_hash, then retry with the new hash."
+    )))
+}
+
+/// Shared schema text for the optional guard parameter.
+///
+/// `File` re-sends its schema every turn of every session and is held to a byte
+/// budget (`file_tool.rs::schema_stays_within_its_catalog_byte_budget`), so
+/// this is instruction only — what to pass and what happens on mismatch. The
+/// rationale lives in the doc comments here, which cost the model nothing.
+pub(super) const EXPECTED_HASH_DESCRIPTION: &str = "The `content_hash` from a prior read; the write is refused and the file left unchanged if it changed since";
+
 // === Cross-harness parameter aliases ===
 
 /// Rewrite well-known parameter spellings from other coding harnesses onto the
@@ -179,12 +269,15 @@ pub(super) const READ_PARAMS: ActionParams = params(
     &["path"],
 );
 
-pub(super) const WRITE_PARAMS: ActionParams =
-    params("write", &["path", "content"], &["path", "content"]);
+pub(super) const WRITE_PARAMS: ActionParams = params(
+    "write",
+    &["path", "content", "expected_hash"],
+    &["path", "content"],
+);
 
 pub(super) const EDIT_PARAMS: ActionParams = params(
     "edit",
-    &["path", "search", "replace"],
+    &["path", "search", "replace", "expected_hash"],
     &["path", "search", "replace"],
 );
 
@@ -219,6 +312,7 @@ pub(super) const PATCH_PARAMS: ActionParams = ActionParams {
         "changes",
         "fuzz",
         "create_if_missing",
+        "expected_hash",
     ],
     required: &["patch", "replace", "changes"],
     required_is_choice: true,
@@ -371,7 +465,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns up to 500 lines or 16KB, whichever comes first. If `truncated=\"true\"` and `next_start_line` is present, continue reading from there; a byte-limited window instead shows head + tail with a `[CONTENT TRUNCATED]` marker and its note says how to narrow the range. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. Text reads report the whole file's `content_hash=\"sha256:…\"`; pass that value back as `expected_hash` on a later `write`, `edit`, or `patch` to have the write refused if the file changed in between. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns up to 500 lines or 16KB, whichever comes first. If `truncated=\"true\"` and `next_start_line` is present, continue reading from there; a byte-limited window instead shows head + tail with a `[CONTENT TRUNCATED]` marker and its note says how to narrow the range. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -464,13 +558,21 @@ impl ToolSpec for ReadFileTool {
 
             let total_lines = contents.lines().count();
             if total_lines <= SMALL_FILE_LINES {
-                return Ok(ToolResult::success(contents).with_metadata(json!({
-                    "evidence_routing": "inline"
+                // The whole file is in hand, so hash it directly rather than
+                // re-reading it. Prefixed as a header line because this branch
+                // returns the contents unwrapped — there is no `<file …>` tag
+                // to hang the attribute on.
+                let hash = content_hash(contents.as_bytes());
+                let body = format!("{}{contents}", content_hash_header(&hash));
+                return Ok(ToolResult::success(body).with_metadata(json!({
+                    "evidence_routing": "inline",
+                    "content_hash": hash
                 })));
             }
 
             // Small in bytes but too many lines: render the default window
             // straight from the in-memory contents.
+            let hash = content_hash(contents.as_bytes());
             let window: Vec<String> = contents
                 .lines()
                 .take(DEFAULT_READ_LINES)
@@ -482,6 +584,7 @@ impl ToolSpec for ReadFileTool {
                 total_lines,
                 1,
                 DEFAULT_READ_LINES,
+                Some(hash.as_str()),
             ));
         }
 
@@ -533,18 +636,30 @@ impl ToolSpec for ReadFileTool {
             })?;
         context.note_file_read(&file_path);
 
+        // The window is a slice; the guard needs the whole file. A second
+        // streaming pass digests the rest without ever materializing it. A
+        // failure here only costs the guard — the read itself already
+        // succeeded, so the window is still returned, just without a hash to
+        // pass back to `edit`.
+        let hash = hash_file_streaming(&file_path).ok();
+
         // `start_line > total_lines` is not an error — it lets the model
         // page past the end without raising. Returns an empty-content
         // sentinel so subsequent reads can stop.
         if start_line > total_lines {
+            let hash_attr = hash
+                .as_deref()
+                .map(|hash| format!(" content_hash=\"{hash}\""))
+                .unwrap_or_default();
             let output = format!(
-                "<file path=\"{path_str}\" total_lines=\"{total_lines}\" shown_lines=\"none\" truncated=\"false\">\n\
+                "<file path=\"{path_str}\" total_lines=\"{total_lines}\" shown_lines=\"none\" truncated=\"false\"{hash_attr}>\n\
                  \n\
                  [NO CONTENT] start_line {start_line} is beyond total_lines {total_lines}.\n\
                  </file>"
             );
             return Ok(ToolResult::success(output).with_metadata(json!({
-                "evidence_routing": "inline"
+                "evidence_routing": "inline",
+                "content_hash": hash
             })));
         }
 
@@ -554,6 +669,7 @@ impl ToolSpec for ReadFileTool {
             total_lines,
             start_line,
             max_lines,
+            hash.as_deref(),
         ))
     }
 }
@@ -666,6 +782,7 @@ fn render_line_window(
     total_lines: usize,
     start_line: usize,
     max_lines: usize,
+    content_hash: Option<&str>,
 ) -> ToolResult {
     let zero_based_start = start_line - 1;
     let zero_based_end = std::cmp::min(zero_based_start + max_lines, total_lines);
@@ -700,6 +817,11 @@ fn render_line_window(
     if truncated_by_lines {
         attrs.push_str(&format!(" next_start_line=\"{next_start}\""));
     }
+    // Hashes the whole file, not the shown window — a partial read still
+    // yields a guard the model can pass to `edit`/`patch`.
+    if let Some(hash) = content_hash {
+        attrs.push_str(&format!(" content_hash=\"{hash}\""));
+    }
 
     let mut output = format!("<file {attrs}>\n{shown_content}");
     if truncated_by_lines {
@@ -728,7 +850,8 @@ fn render_line_window(
     // contract (`next_start_line`), so the large-output spillover envelope
     // must never re-wrap a read result with a second, weaker truncation.
     ToolResult::success(output).with_metadata(json!({
-        "evidence_routing": "inline"
+        "evidence_routing": "inline",
+        "content_hash": content_hash
     }))
 }
 
@@ -887,7 +1010,7 @@ impl ToolSpec for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created."
+        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the overwrite refused if the file changed since that read."
     }
 
     fn input_schema(&self) -> Value {
@@ -901,6 +1024,10 @@ impl ToolSpec for WriteFileTool {
                 "content": {
                     "type": "string",
                     "description": "Content to write"
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": EXPECTED_HASH_DESCRIPTION
                 }
             },
             "required": ["path", "content"]
@@ -926,6 +1053,7 @@ impl ToolSpec for WriteFileTool {
 
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
+        let expected_hash = optional_str(&input, "expected_hash")?;
 
         let file_path = context.resolve_path(path_str)?;
 
@@ -937,6 +1065,20 @@ impl ToolSpec for WriteFileTool {
         } else {
             String::new()
         };
+
+        // Content-hash guard (#3979), checked against the same snapshot the
+        // diff is rendered from and before any directory or file is touched.
+        if let Some(expected) = expected_hash {
+            if !existed_before {
+                // A hash describes a file that was read. Guarding a create is
+                // a contradiction, and silently creating the file anyway would
+                // defeat the guard the caller asked for — fail closed.
+                return Err(ToolError::execution_failed(format!(
+                    "File `write` refused: expected_hash was supplied but {path_str} does not exist, so there is no snapshot to verify and nothing was written. Recovery: drop `expected_hash` to create the file, or read the intended path first."
+                )));
+            }
+            verify_expected_hash(Some(expected), prior_contents.as_bytes(), "write", path_str)?;
+        }
 
         // Create parent directories if needed
         if let Some(parent) = file_path.parent() {
@@ -1006,7 +1148,7 @@ impl ToolSpec for EditFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. Returns a compact unified diff, not the full file. Pass `expected_hash` (the `content_hash` from that `read`) to have the edit refused, with the file untouched, if it changed in between. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
     }
 
     fn input_schema(&self) -> Value {
@@ -1024,6 +1166,10 @@ impl ToolSpec for EditFileTool {
                 "replace": {
                     "type": "string",
                     "description": "Text to replace with. Aliases: `new_string`, `new_str`, `newText`"
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": EXPECTED_HASH_DESCRIPTION
                 }
             },
             "required": ["path", "search", "replace"]
@@ -1057,6 +1203,7 @@ impl ToolSpec for EditFileTool {
         let path_str = required_str(&input, "path")?;
         let search = required_str(&input, "search")?;
         let replace = required_str(&input, "replace")?;
+        let expected_hash = optional_str(&input, "expected_hash")?;
 
         if search == replace {
             // #5003 — long-text edits repeatedly failed here because the model
@@ -1084,6 +1231,13 @@ impl ToolSpec for EditFileTool {
         let contents = fs::read_to_string(&file_path).map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
+
+        // Content-hash guard (#3979). Verified against `contents` — the exact
+        // snapshot every match below is computed from and that the write is
+        // derived from — and before any search/replace work, so a stale hash
+        // can never reach the filesystem regardless of what the search would
+        // have matched.
+        verify_expected_hash(expected_hash, contents.as_bytes(), "edit", path_str)?;
 
         // Models provide LF newlines even when the file on disk uses CRLF.
         // Match in a newline-normalized view, while retaining the sparse

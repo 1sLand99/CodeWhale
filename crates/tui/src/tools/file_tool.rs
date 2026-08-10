@@ -270,6 +270,10 @@ impl ToolSpec for FileTool {
                 "create_if_missing": {
                     "type": "boolean",
                     "description": "Create files if missing for action=patch"
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": describe(&edit, "expected_hash", "action=write/edit/patch")
                 }
             },
             "required": ["action"]
@@ -525,9 +529,14 @@ mod tests {
     /// descriptions buys accuracy with bytes; this bounds what that costs and
     /// prints the per-parameter breakdown when it trips, so the next increase
     /// is a decision rather than a drift.
+    ///
+    /// Raised 3000 → 3100 in v0.9.7 for the `expected_hash` content-hash guard
+    /// (#3979) — a new parameter on three actions, kept to instruction-only
+    /// text. That is a decision, not drift: the budget exists to price schema
+    /// bytes, not to forbid new capability.
     #[test]
     fn schema_stays_within_its_catalog_byte_budget() {
-        const BUDGET_BYTES: usize = 3_000;
+        const BUDGET_BYTES: usize = 3_100;
 
         let schema = FileTool::with_patch("File").input_schema();
         let mut rows: Vec<(usize, String)> = schema["properties"]
