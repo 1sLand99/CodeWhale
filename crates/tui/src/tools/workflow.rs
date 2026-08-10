@@ -5799,13 +5799,27 @@ permissions = "read_only"
             request.allowed_tools, None,
             "a tool-using member keeps full inheritance, narrowed by the deny list"
         );
-        for denied in ["Web", "web_search", "fetch_url", "mcp*"] {
+        // The Web family *name* survives so the read-only search/fetch actions
+        // stay reachable; every reaching spelling is denied by the list the
+        // child registry enforces.
+        for denied in [
+            "web.run",
+            "web_search",
+            "fetch_url",
+            "wait_for_dev_server",
+            "mcp*",
+        ] {
             assert!(
                 request.disallowed_tools.iter().any(|name| name == denied),
                 "{denied} must be denied: {:?}",
                 request.disallowed_tools
             );
         }
+        assert!(
+            !request.disallowed_tools.iter().any(|name| name == "Web"),
+            "the Web family name must stay reachable so search/fetch survive: {:?}",
+            request.disallowed_tools
+        );
     }
 
     /// A Router decision is paid for before the child exists. If the spawn then
