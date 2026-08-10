@@ -904,6 +904,9 @@ web_search = true
         .cwd(ws.workspace())
         .clear_env()
         .seal_home(ws.home())
+        // This is the one PTY scenario that deliberately exercises the
+        // first-run disclosure; override the harness-wide telemetry floor.
+        .env("CODEWHALE_TELEMETRY", "1")
         .env("RUST_LOG", "warn")
         .args([
             "--workspace",
@@ -914,11 +917,9 @@ web_search = true
         .spawn()?;
 
     // The first-run telemetry notice is the first thing an interactive launch
-    // shows, before the terminal enters raw mode. Enter takes the pre-selected
-    // "No thanks" — which is the whole point of the pre-selection, and is what
-    // this harness exercises: a user who presses Enter through onboarding never
-    // enables telemetry.
-    h.wait_for_text("Enable telemetry?", BOOT_TIMEOUT)?;
+    // shows, before the terminal enters raw mode. Enter keeps the plainly
+    // disclosed default enabled; explicit negative answers disable it.
+    h.wait_for_text("Keep anonymous usage counting on?", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Press Enter to continue", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
