@@ -797,6 +797,14 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(DiagnosticsTool))
     }
 
+    /// Include the `tui_help` command/keybinding reference (#1708). The
+    /// catalog it reads is compiled in, so there is nothing to probe.
+    #[must_use]
+    pub fn with_tui_help_tool(self) -> Self {
+        use super::tui_help::TuiHelpTool;
+        self.with_tool(Arc::new(TuiHelpTool))
+    }
+
     /// Include the `pandoc_convert` tool only when the `pandoc`
     /// binary is present on this host. Same probe-then-decide
     /// pattern v0.8.31 introduced for Python — when pandoc is
@@ -1159,6 +1167,7 @@ impl ToolRegistryBuilder {
             .with_git_tools()
             .with_git_history_tools()
             .with_diagnostics_tool()
+            .with_tui_help_tool()
             .with_lsp_tool()
             .with_project_tools()
             .with_skill_tools()

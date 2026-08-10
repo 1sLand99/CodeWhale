@@ -71,6 +71,7 @@ pub mod todo;
 pub mod tool_call_budget;
 pub mod tool_result_retrieval;
 pub mod truncate;
+pub mod tui_help;
 pub mod user_input;
 pub mod validate_data;
 pub mod verifier;
