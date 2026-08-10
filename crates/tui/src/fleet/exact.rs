@@ -36,11 +36,11 @@ use codewhale_workflow::{
     CapturedReasoningRouter, CredentialReadiness, EffectiveReasoning, EndpointIdentity,
     FleetDocument, FleetRouterRef, FleetSearchRoot, FleetSnapshot, FleetSnapshotMember,
     FleetTaskReceipt, NamedFleetError, PermissionCeiling, PreflightError, PreflightedRoute,
-    ProviderReasoningControl, QualifiedFleetId, ROUTER_MAX_OUTPUT_TOKENS, ReasoningCapability,
-    ReasoningRouterProfile, ReasoningTier, ResolvedReasoning, RoutePreflight, RouterAvailability,
-    RouterCallInput, RouterCallPlan, RouterIdentity, RoutingDisclosure, ShellCeiling,
-    bounded_routing_payload, captured_legacy_inline_router, parse_router_decision,
-    resolve_exact_member_reasoning, router_call_plan, router_system_prompt, router_user_message,
+    ProviderReasoningControl, QualifiedFleetId, ReasoningCapability, ReasoningRouterProfile,
+    ReasoningTier, ResolvedReasoning, RoutePreflight, RouterAvailability, RouterCallInput,
+    RouterCallPlan, RouterIdentity, RoutingDisclosure, ShellCeiling, bounded_routing_payload,
+    captured_legacy_inline_router, parse_router_decision, resolve_exact_member_reasoning,
+    router_call_plan, router_system_prompt, router_user_message,
 };
 
 use crate::config::{ApiProvider, Config};
@@ -96,16 +96,26 @@ pub(crate) fn load_fleet_document(
 pub(crate) const NETWORK_TOOL_DENYLIST: &[&str] = &[
     // Web search / fetch / browse, and the canonical family that fronts them.
     //
-    // `web*` is the load-bearing entry: the browsing surface is registered
-    // under several *distinct* names — the `Web` family, its `web_search` /
-    // `fetch_url` action aliases, and the separate `web.run` tool — and an
-    // exact-name deny list that stops at `Web` leaves `web.run` visible and
-    // callable, which is the entire browsing capability by another spelling.
-    // The explicit names below are kept because they document intent and
-    // because two of them (`fetch_url`, `wait_for_dev_server`) do not start
-    // with `web`.
-    "web*",
-    "Web",
+    // The `Web` family name itself is deliberately NOT denied. Its `search`
+    // and `fetch` actions are the read-only web surface a network-denied
+    // member is entitled to (parity with an ordinary scout), and the family
+    // is classified read-only at the capability envelope, so removing the
+    // *name* from this list grants exactly those two actions and nothing
+    // else. What this list removes is every other spelling of the browsing
+    // surface: the separate `web.run` browse tool, the legacy `web_search` /
+    // `fetch_url` / `wait_for_dev_server` action aliases, and the `web_*` /
+    // `web.*` name families, so a deny list that stops at `Web` can never
+    // leave `web.run` visible and callable, which is the entire browsing
+    // capability by another spelling. The explicit names are kept because
+    // they document intent and because two of them (`fetch_url`,
+    // `wait_for_dev_server`) are not matched by either glob.
+    //
+    // The child registry's action seam (`SubAgentToolRegistry::is_action_allowed`)
+    // lets a network-denied child keep exactly `Web{search, fetch}` past the
+    // denied aliases, and the URL-input guard refuses a URL-addressed
+    // `fetch` at dispatch, so the reach stays closed.
+    "web_*",
+    "web.*",
     "web.run",
     "web_run",
     "web_search",
@@ -151,8 +161,8 @@ pub(crate) const NETWORK_TOOL_DENYLIST: &[&str] = &[
 /// (through `worker_profile.denied_tools`), so posture is read back off the
 /// list rather than carried as a second field that could disagree with it.
 /// `fetch_url` is the sentinel because every network denial installs it and no
-/// narrower deny list does — the `web*` glob deliberately does not match it,
-/// which is why it is spelled out above.
+/// narrower deny list does — the `web_*` / `web.*` globs deliberately do not
+/// match it, which is why it is spelled out above.
 pub(crate) const NETWORK_DENIAL_SENTINEL: &str = "fetch_url";
 
 /// Tool names that mutate the workspace directly.
@@ -996,19 +1006,20 @@ impl FleetRouterCaller for LiveFleetRouter {
                     cache_control: None,
                 }],
             }],
-            // Compact, bounded output: one small JSON object, nothing else.
-            max_tokens: ROUTER_MAX_OUTPUT_TOKENS,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                self.provider,
+                &self.route.wire_model,
+                None,
+            ),
             system: Some(SystemPrompt::Text(router_system_prompt(input))),
             // A router receives no tools. Ever.
             tools: None,
             tool_choice: None,
             metadata: None,
             thinking: None,
-            // The operator-configured call tier, normalized against this
-            // route's real capability and disclosed on the receipt — then
-            // spelled the way *this* provider route actually expresses it, via
-            // the same normalizer the client uses. A bare tier label here would
-            // be a generic approximation of a specific route.
+            // The operator-configured call tier remains authoritative. The
+            // normal route allowance above leaves room for its hidden
+            // reasoning before the small JSON answer is emitted.
             reasoning_effort: Some(route_reasoning_setting(
                 self.provider,
                 &self.base_url,
@@ -1016,7 +1027,7 @@ impl FleetRouterCaller for LiveFleetRouter {
                 self.call.tier,
             )),
             stream: Some(false),
-            temperature: Some(0.0),
+            temperature: None,
             top_p: None,
         };
 
@@ -2437,7 +2448,10 @@ permissions = "read_only"
     }
 
     /// `network_tool = false` removes every model-visible network, browser,
-    /// search, and remote-MCP tool — even when `tools = true`.
+    /// and remote-MCP surface except the `Web` family's two read-only actions
+    /// — even when `tools = true`. The family *name* must survive the deny
+    /// list so the child registry's action seam can grant exactly
+    /// `search`/`fetch`; every other browsing spelling is denied.
     #[test]
     fn network_disabled_denies_every_network_surface_even_with_tools_enabled() {
         let member = PermissionCeiling::preset("read_write").expect("preset");
@@ -2450,7 +2464,15 @@ permissions = "read_only"
             authority.allowed_tools.is_none(),
             "a tool-using member keeps full inheritance, narrowed by the deny list"
         );
-        for expected in ["Web", "web_search", "fetch_url", "github", "mcp*"] {
+        for expected in [
+            "web.run",
+            "web_run",
+            "web_search",
+            "fetch_url",
+            "wait_for_dev_server",
+            "github",
+            "mcp*",
+        ] {
             assert!(
                 authority
                     .disallowed_tools
@@ -2460,6 +2482,13 @@ permissions = "read_only"
                 authority.disallowed_tools
             );
         }
+        // The canonical family name is what the read-only web surface
+        // dispatches under; only its reaching spellings are denied.
+        assert!(
+            !authority.disallowed_tools.iter().any(|name| name == "Web"),
+            "the Web family name must survive so search/fetch stay reachable: {:?}",
+            authority.disallowed_tools
+        );
 
         // A member that IS allowed a network tool gets no such deny list.
         let networked = ChildAuthority::clamp(
@@ -2471,9 +2500,10 @@ permissions = "read_only"
     }
 
     /// The browsing capability is registered under several names, and `web.run`
-    /// is the one an exact-name deny list stopping at `Web` leaves behind. A
-    /// network-denied member that can still call `web.run` is not
-    /// network-denied.
+    /// is the one a deny list stopping at the `Web` family name leaves behind.
+    /// A network-denied member that can still call `web.run` is not
+    /// network-denied, so every spelling *except* the family name itself —
+    /// which the action seam bounds to `search`/`fetch` — stays on the list.
     #[test]
     fn network_disabled_denies_the_canonical_web_run_surface_and_its_aliases() {
         let authority = ChildAuthority::clamp(
@@ -2493,12 +2523,13 @@ permissions = "read_only"
         for name in [
             "web.run",
             "web_run",
-            "Web",
             "web_search",
             "web.fetch",
             "web_fetch",
             "fetch_url",
             "wait_for_dev_server",
+            "browse",
+            "browser",
         ] {
             assert!(
                 denied(name),
@@ -2506,7 +2537,14 @@ permissions = "read_only"
                 authority.disallowed_tools
             );
         }
-        // The glob must not reach past the browsing family.
+        // The family name itself is what the read-only search/fetch surface
+        // dispatches under; the action seam and the URL-input guard bound it.
+        assert!(
+            !denied("Web"),
+            "the Web family name must survive a network denial: {:?}",
+            authority.disallowed_tools
+        );
+        // The globs must not reach past the browsing family.
         for name in ["read_file", "run_tests", "Git", "grep_files"] {
             assert!(!denied(name), "{name} is not a network surface");
         }
@@ -2582,6 +2620,49 @@ permissions = "read_only"
                 .iter()
                 .any(|rule| rule == NETWORK_DENIAL_SENTINEL)
         );
+    }
+
+    /// Every network-denied preset — read_only/recon included — leaves the
+    /// `Web` family name reachable and seals each of its reaching spellings.
+    /// This is the deny-list half of the read-only web-search contract; the
+    /// registry-side half (exactly `search`/`fetch`, with URL-addressed calls
+    /// refused) is asserted in `subagent/tests.rs`.
+    #[test]
+    fn every_network_denial_leaves_web_search_reachable_by_family_name() {
+        for preset in ["analyst", "read_only", "verifier", "read_write"] {
+            let authority = ChildAuthority::clamp(
+                PermissionCeiling::preset(preset).expect("preset"),
+                full_session(),
+            );
+            assert!(
+                !authority.ceiling.network_tool,
+                "{preset} is network-denied"
+            );
+            assert!(
+                !authority.disallowed_tools.iter().any(|rule| rule == "Web"),
+                "{preset} must keep the Web family name: {:?}",
+                authority.disallowed_tools
+            );
+            for sealed in [
+                "web_*",
+                "web.*",
+                "web.run",
+                "web_run",
+                "web_search",
+                "web.fetch",
+                "web_fetch",
+                "fetch_url",
+                "wait_for_dev_server",
+                "github",
+                "mcp*",
+            ] {
+                assert!(
+                    authority.disallowed_tools.iter().any(|rule| rule == sealed),
+                    "{preset} must deny {sealed}: {:?}",
+                    authority.disallowed_tools
+                );
+            }
+        }
     }
 
     /// A member saved as `write = false` must not receive a mutating surface —

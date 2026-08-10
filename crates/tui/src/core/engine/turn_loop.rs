@@ -14,6 +14,7 @@ use crate::runtime_handoff::{
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::tool_call_budget::ToolCallBudget;
+use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
@@ -458,10 +459,15 @@ impl Engine {
             // low-pressure steps; once pressure crosses the trigger, capture
             // once and reuse the same snapshot for eligibility and commit.
             let mut auto_compaction_config = self.config.compaction.clone();
-            let prepared = if crate::compaction::compaction_pressure_reached(
+            // Billing usage accumulates every parent step and child-model
+            // call. Only the most recent parent-route request describes the
+            // live message list whose pressure we are checking here.
+            let billed_input_tokens = turn.latest_parent_input_tokens.map(u64::from);
+            let prepared = if crate::compaction::compaction_pressure_reached_with_billed(
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &auto_compaction_config,
+                billed_input_tokens,
             ) {
                 let live = self.capture_compaction_live_state().await;
                 auto_compaction_config.live_state = (!live.is_empty()).then_some(live);
@@ -471,10 +477,11 @@ impl Engine {
             };
 
             if let Some(prepared) = prepared
-                && should_compact(
+                && crate::compaction::should_compact_with_billed(
                     &self.session.messages,
                     self.session.system_prompt.as_ref(),
                     &prepared,
+                    billed_input_tokens,
                 )
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -708,7 +715,7 @@ impl Engine {
                 }
             }
 
-            let mut request = MessageRequest {
+            let mut request = prepare_primary_turn_request(PrimaryTurnRequest {
                 model: self.session.model.clone(),
                 messages: self.request_messages_with_work_tail(work_state_tail.as_ref()),
                 max_tokens: effective_max_output_tokens_for_route(
@@ -727,13 +734,8 @@ impl Engine {
                 } else {
                     None
                 },
-                metadata: None,
-                thinking: None,
                 reasoning_effort: effective_reasoning_effort,
-                stream: Some(true),
-                temperature: None,
-                top_p: None,
-            };
+            });
             // Normalize images against the route this request is actually
             // going to. Session history keeps the real image so that switching
             // to a vision-capable model later makes it visible again; only the
@@ -1397,7 +1399,7 @@ impl Engine {
             // retry or accept it. A terminal stop reason followed by a
             // transport error is still a billed, incomplete response; it must
             // not be discarded and re-issued.
-            turn.add_usage(&usage);
+            turn.add_parent_usage(&usage);
             if usage_reported {
                 let _ = self
                     .tx_event
@@ -1583,25 +1585,15 @@ impl Engine {
                 stream_retry_attempts = 0;
             }
 
-            // Build content blocks. If this assistant turn produced tool
-            // calls, ensure a Thinking block is present even when the model
-            // didn't stream any reasoning text — DeepSeek's thinking-mode
-            // API requires `reasoning_content` to accompany every tool-call
-            // assistant message in the conversation history. Saving a
-            // placeholder here keeps the on-disk session structurally
-            // correct so subsequent requests won't 400.
-            let needs_thinking_block =
-                !tool_uses.is_empty() || tool_parser::has_tool_call_markers(&current_text_raw);
-            let thinking_to_persist = if !current_thinking.is_empty() {
-                Some(current_thinking.clone())
-            } else if needs_thinking_block {
-                Some(String::from("(reasoning omitted)"))
-            } else {
-                None
-            };
-            if let Some(thinking) = thinking_to_persist {
+            // Persist only reasoning the provider actually emitted. Some chat
+            // wires require a non-empty `reasoning_content` field when an
+            // assistant message carries tool calls; the route serializer adds
+            // that compatibility value to the outgoing JSON only. Persisting
+            // it here leaked an invented "(reasoning omitted)" block into the
+            // transcript and every provider-neutral session replay.
+            if !current_thinking.is_empty() {
                 content_blocks.push(ContentBlock::Thinking {
-                    thinking,
+                    thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
                 });
             }
@@ -3783,7 +3775,7 @@ pub(super) fn production_input_estimate_with_work_tail(
     let Some(tail) = work_tail else {
         return base_message_estimate;
     };
-    base_message_estimate.saturating_add(super::context::estimate_input_tokens_conservative(
+    base_message_estimate.saturating_add(crate::compaction::estimate_input_tokens_conservative(
         std::slice::from_ref(tail),
         None,
     ))

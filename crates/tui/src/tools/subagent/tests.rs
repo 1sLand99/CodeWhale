@@ -5666,8 +5666,7 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             case.agent_type
         );
         assert_eq!(
-            route.tuning.max_output_tokens,
-            Some(SUBAGENT_RESPONSE_MAX_TOKENS),
+            route.tuning.max_output_tokens, None,
             "{:?}",
             case.agent_type
         );
@@ -10301,10 +10300,11 @@ async fn auto_approved_parent_runs_required_tools_in_subagent() {
 }
 
 #[test]
-fn subagent_request_budget_allows_large_write_file_arguments() {
+fn subagent_request_budget_inherits_the_resolved_route_allowance() {
     assert_eq!(
-        SUBAGENT_RESPONSE_MAX_TOKENS, 16_384,
-        "non-streaming sub-agent tool calls need enough output budget for large write_file arguments"
+        subagent_request_tuning(Some("high")).max_output_tokens,
+        None,
+        "sub-agents must not impose a smaller internal output ceiling"
     );
 }
 
@@ -15311,10 +15311,12 @@ fn an_exact_member_with_tools_false_gets_no_model_tools_at_all() {
     }
 }
 
-/// `network_tool = false` must remove every model-visible network, browser,
-/// search, and remote-MCP surface — even though `tools = true`.
-#[test]
-fn an_exact_member_without_a_network_tool_really_loses_the_network_surface() {
+/// `network_tool = false` removes every model-visible network, browser, and
+/// remote-MCP surface — even though `tools = true` — while keeping exactly the
+/// `Web` family's two read-only actions (`search`/`fetch`), and refusing a
+/// URL-addressed `fetch` at dispatch.
+#[tokio::test]
+async fn an_exact_member_without_a_network_tool_really_loses_the_network_surface() {
     let tmp = tempdir().expect("tempdir");
     let authority = crate::fleet::exact::ChildAuthority::clamp(
         codewhale_workflow::PermissionCeiling::preset("read_write").expect("preset"),
@@ -15339,15 +15341,34 @@ fn an_exact_member_without_a_network_tool_really_loses_the_network_surface() {
         Arc::new(Mutex::new(PlanState::default())),
     );
 
-    let names = tool_names(registry.tools_for_model(&FleetRole::Builder));
-    for network in ["Web", "web_search", "fetch_url", "github"] {
+    let tools = registry.tools_for_model(&FleetRole::Builder);
+    let names = tool_names(tools.clone());
+    // The read-only web surface survives by its family name, narrowed to the
+    // two evidence actions — parity with what an ordinary scout holds.
+    let web = tools
+        .iter()
+        .find(|tool| tool.name == "Web")
+        .expect("Web must stay visible to a network-denied member");
+    assert_eq!(
+        web.input_schema["properties"]["action"]["enum"],
+        json!(["search", "fetch"]),
+        "only the read-only actions survive; got {names:?}"
+    );
+    assert!(registry.is_tool_allowed("Web"));
+    assert!(registry.is_action_allowed("Web", "search"));
+    assert!(registry.is_action_allowed("Web", "fetch"));
+    assert!(
+        !registry.is_action_allowed("Web", "wait"),
+        "Web{{wait}} probes a dev server and must stay denied"
+    );
+    for hidden in ["web.run", "web_run", "web_search", "fetch_url", "github"] {
         assert!(
-            !names.contains(network),
-            "{network} must not be visible to a member with no network tool; got {names:?}"
+            !names.contains(hidden),
+            "{hidden} must not be visible to a member with no network tool; got {names:?}"
         );
         assert!(
-            !registry.is_tool_allowed(network),
-            "{network} must not be callable either"
+            !registry.is_tool_allowed(hidden),
+            "{hidden} must not be callable either"
         );
     }
     // The `mcp*` glob covers remote MCP tools registered under runtime names.
@@ -15381,6 +15402,159 @@ fn an_exact_member_without_a_network_tool_really_loses_the_network_surface() {
     assert!(
         registry.network_is_denied(),
         "the deny list must read back as a network denial"
+    );
+    // The read-only web surface is bounded at dispatch, not just in the
+    // catalog: a `fetch` that names a remote address is refused before any
+    // fetch code runs, and the non-reach actions stay refused.
+    let refusal = registry
+        .execute(
+            "agent_builder",
+            "Web",
+            json!({"action": "fetch", "url": "https://example.test/doc"}),
+        )
+        .await
+        .expect_err("a URL-addressed fetch must be refused for a network-denied member")
+        .to_string();
+    assert!(
+        refusal.contains("no network capability"),
+        "the URL-input guard must name the posture: {refusal}"
+    );
+    assert!(
+        registry
+            .execute(
+                "agent_builder",
+                "Web",
+                json!({"action": "wait", "url": "http://localhost:8080"}),
+            )
+            .await
+            .is_err(),
+        "Web{{wait}} stays denied"
+    );
+    assert!(
+        registry
+            .execute(
+                "agent_builder",
+                "web.run",
+                json!({"search_query": [{"q": "x"}]})
+            )
+            .await
+            .is_err(),
+        "the standalone browse tool stays denied by name"
+    );
+}
+
+/// A recon Fleet member (scout role under a read_only ceiling) gets exactly
+/// the read-only web surface an ordinary scout holds — `Web` with
+/// `search`/`fetch` — while every reaching spelling (`web.run`, `fetch_url`,
+/// `github`, `mcp*`) stays denied, and a `full` member is untouched.
+#[tokio::test]
+async fn a_recon_fleet_member_gets_read_only_web_search_and_nothing_else() {
+    let tmp = tempdir().expect("tempdir");
+    let authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+        "scout",
+        codewhale_workflow::PermissionCeiling::preset("read_only").expect("preset"),
+        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
+    );
+    assert_eq!(authority.posture_role, "scout");
+    assert!(!authority.ceiling.network_tool);
+
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    runtime.worker_profile.denied_tools = authority.disallowed_tools.clone();
+
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        authority.allowed_tools.clone(),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+
+    let tools = registry.tools_for_model(&FleetRole::Scout);
+    let names = tool_names(tools.clone());
+    let web = tools
+        .iter()
+        .find(|tool| tool.name == "Web")
+        .expect("recon must keep the Web family");
+    assert_eq!(
+        web.input_schema["properties"]["action"]["enum"],
+        json!(["search", "fetch"]),
+        "recon Web must be exactly search/fetch; got {names:?}"
+    );
+    assert!(registry.is_action_allowed("Web", "search"));
+    assert!(registry.is_action_allowed("Web", "fetch"));
+    for denied in ["web.run", "web_run", "web_search", "fetch_url", "github"] {
+        assert!(
+            !names.contains(denied),
+            "recon must not see {denied}; got {names:?}"
+        );
+        assert!(
+            !registry.is_tool_allowed(denied),
+            "recon must not call {denied}"
+        );
+    }
+    for mcp in ["mcp__acme__search", "mcp_read_resource"] {
+        assert!(!registry.is_tool_allowed(mcp), "{mcp} stays denied by glob");
+    }
+    // The read-only contract holds at dispatch: URL-addressed fetch is refused
+    // before any fetch code runs.
+    let refusal = registry
+        .execute(
+            "agent_scout",
+            "Web",
+            json!({"action": "fetch", "url": "https://example.test/doc"}),
+        )
+        .await
+        .expect_err("URL-addressed fetch must be refused for recon")
+        .to_string();
+    assert!(
+        refusal.contains("no network capability"),
+        "the refusal must name the posture: {refusal}"
+    );
+    assert!(
+        registry.network_is_denied(),
+        "recon under a network_tool = false ceiling is network-denied"
+    );
+
+    // A `full` member keeps the whole family, browse tool included: the
+    // change grants recon nothing beyond search/fetch and takes nothing from
+    // the network ceiling.
+    let full_authority = crate::fleet::exact::ChildAuthority::clamp_for_role(
+        "builder",
+        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
+        codewhale_workflow::PermissionCeiling::preset("full").expect("preset"),
+    );
+    assert!(full_authority.ceiling.network_tool);
+    assert!(full_authority.disallowed_tools.is_empty());
+    let mut full_runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    full_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    full_runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+    let full_registry = SubAgentToolRegistry::new(
+        full_runtime,
+        FleetRole::Builder,
+        full_authority.allowed_tools.clone(),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    let full_tools = full_registry.tools_for_model(&FleetRole::Builder);
+    let full_names = tool_names(full_tools.clone());
+    assert!(full_names.contains("Web"), "full member keeps Web");
+    assert!(full_names.contains("web.run"), "full member keeps web.run");
+    assert!(
+        !full_registry.network_is_denied(),
+        "full member is not network-denied"
+    );
+    let full_web = full_tools
+        .iter()
+        .find(|tool| tool.name == "Web")
+        .expect("full Web");
+    assert_eq!(
+        full_web.input_schema["properties"]["action"]["enum"],
+        json!(["search", "fetch", "wait"]),
+        "full member keeps the whole Web enum"
     );
 }
 
@@ -15620,8 +15794,8 @@ fn a_shell_capable_read_only_member_keeps_test_selection_arguments() {
 
 /// The parent posture wins. A saved `full` member inside a read-only,
 /// no-network session runs with the session's ceiling, in the real registry.
-#[test]
-fn a_parent_read_only_session_narrows_a_full_exact_member_in_the_child_registry() {
+#[tokio::test]
+async fn a_parent_read_only_session_narrows_a_full_exact_member_in_the_child_registry() {
     let tmp = tempdir().expect("tempdir");
     let session = codewhale_workflow::PermissionCeiling {
         write: false,
@@ -15654,13 +15828,42 @@ fn a_parent_read_only_session_narrows_a_full_exact_member_in_the_child_registry(
         Arc::new(Mutex::new(PlanState::default())),
     );
 
-    let names = tool_names(registry.tools_for_model(&FleetRole::Scout));
-    for widened in ["Web", "web_search", "fetch_url", "write_file", "exec_shell"] {
+    let tools = registry.tools_for_model(&FleetRole::Scout);
+    let names = tool_names(tools.clone());
+    // The session's network denial narrows the family to its read-only pair
+    // (search/fetch) rather than removing it: the member may research, not
+    // reach. Everything that reaches, mutates, or executes stays outside.
+    let web = tools
+        .iter()
+        .find(|tool| tool.name == "Web")
+        .expect("a network-denied session must keep the read-only web surface for a recon member");
+    assert_eq!(
+        web.input_schema["properties"]["action"]["enum"],
+        json!(["search", "fetch"])
+    );
+    for widened in [
+        "web_search",
+        "fetch_url",
+        "web.run",
+        "write_file",
+        "exec_shell",
+    ] {
         assert!(
             !names.contains(widened),
             "a saved `full` member must not gain {widened} inside a read-only session; got {names:?}"
         );
     }
+    assert!(
+        registry
+            .execute(
+                "agent_scout",
+                "Web",
+                json!({"action": "fetch", "url": "https://example.test/doc"}),
+            )
+            .await
+            .is_err(),
+        "the URL-input guard stays deny-closed inside a read-only session"
+    );
 }
 
 /// The session ceiling is read off the live parent runtime, so a Fleet can
@@ -16070,7 +16273,14 @@ fn posture_denials_survive_a_child_that_declines_to_inherit() {
     let mut child = inherited.clone();
     child.retain(|rule| crate::fleet::exact::is_posture_denial(rule));
 
-    for sealed in ["fetch_url", "web*", "mcp*", "rlm_open", "rlm_eval"] {
+    for sealed in [
+        "fetch_url",
+        "web.run",
+        "web_*",
+        "mcp*",
+        "rlm_open",
+        "rlm_eval",
+    ] {
         assert!(
             child.iter().any(|rule| rule == sealed),
             "{sealed} expresses a ceiling and must survive; got {child:?}"

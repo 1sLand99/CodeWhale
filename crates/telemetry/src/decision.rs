@@ -1,16 +1,16 @@
-//! The one place that decides whether anything may be collected, and the token
-//! that makes that decision unforgeable.
+//! The one place that decides whether anonymous usage counting may run, and the
+//! token that makes that decision unforgeable.
 //!
 //! Every emitting surface calls [`decide`] and then, if and only if it gets
 //! [`TelemetryDecision::Enabled`], hands the contained [`TelemetryConsent`] to
 //! [`crate::init`]. `TelemetryConsent` has no `Default`, no public constructor,
 //! and cannot be built from a `bool`; `init` takes it **by value**. That is what
-//! makes consent enforceable by the type system rather than by six init sites
+//! makes the permission decision enforceable by the type system rather than by six init sites
 //! each remembering to re-check the same five-part predicate.
 
 use std::path::{Path, PathBuf};
 
-use codewhale_config::{ResolvedRuntimeOptions, SetupState, TELEMETRY_NOTICE_VERSION};
+use codewhale_config::{ResolvedRuntimeOptions, SetupState};
 
 use crate::buffer;
 use crate::event::Surface;
@@ -21,23 +21,23 @@ pub const TELEMETRY_DIR: &str = "telemetry";
 /// The outcome of the emit predicate.
 ///
 /// The split between [`Self::OptedOut`] and [`Self::ForcedOff`] is load-bearing,
-/// not cosmetic. "Telemetry resolved to false" is the *default* state of every
-/// installation, so a wipe keyed on it would delete a consenting user's identity
-/// and unflushed buffer every time they ran one `codewhale exec` with a
+/// not cosmetic. A run-scoped kill switch also resolves telemetry to false, so
+/// a wipe keyed on that value would delete a user's identity and unflushed
+/// buffer every time they ran one `codewhale exec` with a
 /// transient `CODEWHALE_TELEMETRY=0` — the recipe the runtime docs themselves
 /// prescribe.
 #[derive(Debug)]
 pub enum TelemetryDecision {
-    /// The user answered the notice and said yes, and nothing forces off.
+    /// Anonymous usage counting is enabled and nothing forces it off.
     Enabled(TelemetryConsent),
-    /// A human said no — `--telemetry false`, `CODEWHALE_TELEMETRY=0`,
-    /// `telemetry = false`, or declining the notice. **The only variant that
-    /// touches disk**: it wipes and leaves a tombstone.
+    /// A human persistently said no — `telemetry = false` in durable config or
+    /// declining the notice. **The only variant that touches disk**: it wipes
+    /// and leaves a tombstone. CLI and environment false values are run-scoped
+    /// kill switches and produce [`Self::ForcedOff`] instead.
     OptedOut,
-    /// Off for a reason that is not the user's answer: no notice decision
-    /// recorded, an unparseable env value, an unresolvable home, a rejected
-    /// endpoint, or a bumped notice version. Touches nothing, ever. Leaves
-    /// identity and buffer exactly as they were.
+    /// Off for a run-scoped or environmental reason: an unparseable env value,
+    /// an unresolvable home, or a rejected endpoint. Touches nothing, ever.
+    /// Leaves identity and buffer exactly as they were.
     ForcedOff,
 }
 
@@ -70,6 +70,7 @@ pub struct TelemetryConsent {
     endpoint: Option<String>,
     surface: Surface,
     config_path: Option<PathBuf>,
+    tombstone_generation: Option<buffer::TombstoneGeneration>,
 }
 
 impl TelemetryConsent {
@@ -108,6 +109,21 @@ impl TelemetryConsent {
     pub fn surface(&self) -> Surface {
         self.surface
     }
+
+    /// Exact opt-out generation this decision observed.
+    pub(crate) fn tombstone_generation(&self) -> Option<&buffer::TombstoneGeneration> {
+        self.tombstone_generation.as_ref()
+    }
+}
+
+enum TelemetryEvaluation {
+    Enabled {
+        root: PathBuf,
+        endpoint: Option<String>,
+        tombstone_generation: Option<buffer::TombstoneGeneration>,
+    },
+    OptedOut(Option<PathBuf>),
+    ForcedOff,
 }
 
 /// Why an endpoint was refused.
@@ -193,58 +209,100 @@ pub fn decide(
     decide_in_home(home.as_deref(), resolved, setup, surface)
 }
 
+/// Load the privacy-bearing setup record for a telemetry decision.
+///
+/// A genuinely missing record is a fresh installation and therefore uses the
+/// documented default. An existing record that cannot be read or parsed may
+/// contain a durable decline, so it fails closed instead of being replaced by
+/// a default-on value.
+#[must_use]
+pub fn load_setup_state_for_decision() -> Option<SetupState> {
+    let path = SetupState::path().ok()?;
+    load_setup_state_for_decision_at(&path)
+}
+
+/// Injectable form of [`load_setup_state_for_decision`] used by every surface
+/// and by regression tests.
+#[must_use]
+pub fn load_setup_state_for_decision_at(path: &Path) -> Option<SetupState> {
+    match path.try_exists() {
+        Ok(false) => Some(SetupState::default()),
+        Ok(true) => SetupState::load_from(path),
+        Err(_) => None,
+    }
+}
+
 /// Resolve the emit predicate against an explicit Codewhale home.
 ///
 /// The predicate, in order:
 ///
-/// 1. Telemetry resolved to `false` **and** a human said so → `OptedOut`;
-///    resolved `false` from the unset default → `ForcedOff`.
-/// 2. Notice decision recorded and declined → `OptedOut`.
-/// 3. No notice decision for the current notice version → `ForcedOff`. **A
-///    pre-existing `telemetry = true` is not consent**: the key has been
-///    settable and inert for a long time, so anyone who set it set a no-op. The
-///    notice record is an independent AND condition, never inferred from the
-///    bool.
-/// 4. No resolvable home → `ForcedOff`.
-/// 5. Endpoint configured but refused by [`validate_endpoint`] → `ForcedOff`.
-/// 6. Otherwise `Enabled`.
+/// 1. Telemetry resolved to `false` from persistent config → `OptedOut`;
+///    resolved `false` from a run-scoped or invalid-value floor → `ForcedOff`.
+/// 2. Any recorded notice decline → `OptedOut`, including a decline recorded
+///    by the former opt-in notice.
+/// 3. No resolvable home → `ForcedOff`.
+/// 4. Endpoint configured but refused by [`validate_endpoint`] → `ForcedOff`.
+/// 5. Otherwise `Enabled`.
 ///
-/// Consent is **machine-scoped**. The notice is only ever *rendered* on a TTY,
-/// but a decision recorded on a TTY authorizes later non-TTY runs on the same
-/// home. A fresh CI home has no decision, so step 3 fires and nothing is
-/// collected — and nothing is written to disk to find out.
+/// The notice is only ever *rendered* on a TTY. The interactive TUI explains
+/// the default in a native startup modal before telemetry is armed; headless
+/// surfaces use the same documented default and kill switches.
 pub fn decide_in_home(
     home: Option<&Path>,
     resolved: &ResolvedRuntimeOptions,
     setup: &SetupState,
     surface: Surface,
 ) -> TelemetryDecision {
+    match evaluate_in_home(home, resolved, setup) {
+        TelemetryEvaluation::Enabled {
+            root,
+            endpoint,
+            tombstone_generation,
+        } => TelemetryDecision::Enabled(TelemetryConsent {
+            root,
+            endpoint,
+            surface,
+            config_path: None,
+            tombstone_generation,
+        }),
+        TelemetryEvaluation::OptedOut(root) => opted_out(root.as_deref()),
+        TelemetryEvaluation::ForcedOff => TelemetryDecision::ForcedOff,
+    }
+}
+
+/// Evaluate the permission predicate without performing the opt-out wipe.
+///
+/// Keeping the classification pure lets `init` re-check it while holding the
+/// privacy lock. The public decision path maps `OptedOut` to the destructive
+/// wipe exactly once, outside that already-held lock.
+fn evaluate_in_home(
+    home: Option<&Path>,
+    resolved: &ResolvedRuntimeOptions,
+    setup: &SetupState,
+) -> TelemetryEvaluation {
     let root = home.map(|home| home.join(TELEMETRY_DIR));
 
-    // 1. An explicit "off" from a human is an answer and wipes; the unset
-    //    default is not an answer and must leave every byte alone.
+    // 1. An explicit persistent "off" is an opt-out and wipes. Run-scoped or
+    //    invalid-value false is only a kill switch and leaves disk alone.
     if !resolved.telemetry {
         if resolved.telemetry_explicit_off {
-            return opted_out(root.as_deref());
+            return TelemetryEvaluation::OptedOut(root);
         }
-        return TelemetryDecision::ForcedOff;
+        return TelemetryEvaluation::ForcedOff;
     }
 
-    // 2/3. The notice record is an independent condition. Declining is an
-    //      answer; never having been asked is not.
-    if setup.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION) {
-        return TelemetryDecision::ForcedOff;
-    }
-    if !setup.telemetry_opt_in {
-        return opted_out(root.as_deref());
+    // 2. A historical or current decline remains a durable opt-out. Notice
+    //    version bumps may update disclosure, never reverse a user's "no".
+    if setup.telemetry_opted_out() {
+        return TelemetryEvaluation::OptedOut(root);
     }
 
-    // 4. Nowhere to keep an install id or a buffer.
+    // 3. Nowhere to keep an install id or a buffer.
     let Some(root) = root else {
-        return TelemetryDecision::ForcedOff;
+        return TelemetryEvaluation::ForcedOff;
     };
 
-    // 5. A refused endpoint is a configuration error, not a user answer.
+    // 4. A refused endpoint is a configuration error, not a user answer.
     let endpoint = match resolved.telemetry_endpoint.as_deref() {
         Some(raw) if !raw.trim().is_empty() => match validate_endpoint(raw) {
             Ok(endpoint) => Some(endpoint),
@@ -253,18 +311,54 @@ pub fn decide_in_home(
                     "telemetry endpoint refused ({}); telemetry is off for this run",
                     error.label()
                 );
-                return TelemetryDecision::ForcedOff;
+                return TelemetryEvaluation::ForcedOff;
             }
         },
         _ => None,
     };
 
-    TelemetryDecision::Enabled(TelemetryConsent {
+    let Ok(tombstone_generation) = buffer::tombstone_generation(&root) else {
+        return TelemetryEvaluation::ForcedOff;
+    };
+    TelemetryEvaluation::Enabled {
         root,
         endpoint,
-        surface,
-        config_path: None,
-    })
+        tombstone_generation,
+    }
+}
+
+/// Re-check the current durable permission without wiping or clearing state.
+///
+/// Called only while `init` holds the telemetry privacy lock. A stale consent
+/// token may arm only when the config, setup-state answer, home, and endpoint
+/// still classify as enabled.
+pub(crate) fn permission_still_enabled(config_path: Option<&Path>, expected_root: &Path) -> bool {
+    let Ok(setup_path) = SetupState::path() else {
+        return false;
+    };
+    let home = codewhale_paths::codewhale_home().ok().flatten();
+    permission_still_enabled_in_home(config_path, &setup_path, home.as_deref(), expected_root)
+}
+
+pub(crate) fn permission_still_enabled_in_home(
+    config_path: Option<&Path>,
+    setup_path: &Path,
+    home: Option<&Path>,
+    expected_root: &Path,
+) -> bool {
+    let Ok(store) = codewhale_config::ConfigStore::load(config_path.map(Path::to_path_buf)) else {
+        return false;
+    };
+    let resolved = store
+        .config
+        .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
+    let Some(setup) = load_setup_state_for_decision_at(setup_path) else {
+        return false;
+    };
+    matches!(
+        evaluate_in_home(home, &resolved, &setup),
+        TelemetryEvaluation::Enabled { root, .. } if root == expected_root
+    )
 }
 
 /// Re-run the predicate from the filesystem, for the flush path.
@@ -275,13 +369,26 @@ pub fn decide_in_home(
 /// load fails: a flush is never the right place to guess.
 #[must_use]
 pub fn re_decide(config_path: Option<&Path>, surface: Surface) -> TelemetryDecision {
+    let Ok(setup_path) = SetupState::path() else {
+        return TelemetryDecision::ForcedOff;
+    };
+    re_decide_with_setup_path(config_path, &setup_path, surface)
+}
+
+pub(crate) fn re_decide_with_setup_path(
+    config_path: Option<&Path>,
+    setup_path: &Path,
+    surface: Surface,
+) -> TelemetryDecision {
     let Ok(store) = codewhale_config::ConfigStore::load(config_path.map(Path::to_path_buf)) else {
         return TelemetryDecision::ForcedOff;
     };
     let resolved = store
         .config
         .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
-    let setup = SetupState::load().ok().flatten().unwrap_or_default();
+    let Some(setup) = load_setup_state_for_decision_at(setup_path) else {
+        return TelemetryDecision::ForcedOff;
+    };
     decide(&resolved, &setup, surface)
 }
 

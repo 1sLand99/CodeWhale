@@ -203,7 +203,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "BOOL",
-        help = "Opt in to anonymous product telemetry for this run (default off; \
+        help = "Control anonymous usage counting for this run (default on; \
                 CODEWHALE_TELEMETRY=0 always wins)"
     )]
     telemetry: Option<bool>,
@@ -215,7 +215,7 @@ struct Cli {
     api_key: Option<String>,
     #[arg(long)]
     base_url: Option<String>,
-    /// Workspace directory for TUI file tools
+    /// Workspace directory for Codewhale file tools.
     #[arg(short = 'C', long = "workspace", alias = "cd", value_name = "DIR")]
     workspace: Option<PathBuf>,
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
@@ -226,7 +226,7 @@ struct Cli {
     skip_onboarding: bool,
     /// Skip loading project-level config, including the workspace-specific
     /// `[workspace]`/`[projects]` overlay from user config. Must appear before
-    /// the subcommand; it is forwarded to the TUI ahead of the subcommand.
+    /// the subcommand; it is applied before subcommand dispatch.
     #[arg(long = "no-project-config")]
     no_project_config: bool,
     /// Legacy compatibility alias for Act + Full Access.
@@ -249,22 +249,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Run interactive/non-interactive flows via the TUI binary.
+    /// Run an interactive or non-interactive task.
     Run(RunArgs),
     /// Run Codewhale diagnostics.
     Doctor(TuiPassthroughArgs),
-    /// List live provider API models via the TUI binary.
+    /// List live models from the selected provider.
     Models(TuiPassthroughArgs),
-    /// Generate speech audio with Xiaomi MiMo TTS models via the TUI binary.
+    /// Generate speech audio with Xiaomi MiMo TTS models.
     #[command(visible_alias = "tts")]
     Speech(TuiPassthroughArgs),
-    /// List saved TUI sessions.
+    /// List saved sessions.
     Sessions(TuiPassthroughArgs),
-    /// Resume a saved TUI session.
+    /// Resume a saved session.
     Resume(TuiPassthroughArgs),
     /// Launch an interactive session and hand it to the Codewhale web app.
     Rc(TuiPassthroughArgs),
-    /// Fork a saved TUI session.
+    /// Fork a saved session.
     Fork(TuiPassthroughArgs),
     /// Create a default AGENTS.md in the current directory.
     Init(TuiPassthroughArgs),
@@ -272,7 +272,7 @@ enum Commands {
     Setup(TuiPassthroughArgs),
     /// Generate a remote Codewhale agent deploy bundle (cloud + chat bridge).
     RemoteSetup(RemoteSetupArgs),
-    /// Run a non-interactive prompt through the TUI runtime.
+    /// Run a non-interactive prompt.
     #[command(after_help = "\
 Examples:
   codewhale exec \"explain this function\"
@@ -292,7 +292,7 @@ non-interactive filesystem/shell tool use, matching the supported automation
 path used by stream-json wrappers.
 ")]
     Exec(TuiPassthroughArgs),
-    /// Manage durable Agent Fleet runs via the TUI runtime.
+    /// Manage durable Agent Fleet runs.
     Fleet(TuiPassthroughArgs),
     /// Internal model-free Workflow tool dispatcher used by Lane Runtime.
     #[command(name = "workflow-tool", hide = true)]
@@ -337,13 +337,13 @@ lifecycle generation you observed.
     Review(TuiPassthroughArgs),
     /// Apply a patch file or stdin to the working tree.
     Apply(TuiPassthroughArgs),
-    /// Run the offline TUI evaluation harness.
+    /// Run the offline evaluation harness.
     Eval(TuiPassthroughArgs),
-    /// Manage TUI MCP servers.
+    /// Manage MCP servers.
     Mcp(TuiPassthroughArgs),
-    /// Inspect TUI feature flags.
+    /// Inspect feature flags.
     Features(TuiPassthroughArgs),
-    /// Run a local TUI server.
+    /// Run a local Codewhale server.
     #[command(after_help = "\
 Forwarded serve options:
       --mcp                 Start MCP server over stdio
@@ -368,7 +368,7 @@ New integrations should prefer `codewhale app-server`.")]
         after_help = "The browser receives a one-time loopback bootstrap capability, never the Runtime token.\nThe capability is exchanged for a bounded, process-local HttpOnly, SameSite=Strict web session and then invalidated."
     )]
     Web(WebArgs),
-    /// Generate shell completions for the TUI binary.
+    /// Generate shell completions.
     Completions(TuiPassthroughArgs),
     /// Configure provider credentials.
     Login(LoginArgs),
@@ -2030,8 +2030,8 @@ fn resolve_runtime_for_diagnostic_dispatch(
 /// process*.
 ///
 /// Existing at all is the permission: it is only ever constructed behind
-/// [`TelemetryDecision::Enabled`], and the default state of every installation —
-/// no notice answered — yields `None`.
+/// [`TelemetryDecision::Enabled`] after persistent and run-scoped opt-outs are
+/// applied.
 struct CliTelemetrySession {
     started: std::time::Instant,
 }
@@ -2043,25 +2043,39 @@ struct CliTelemetrySession {
 /// this dispatcher forwards — naming a surface here for a delegated command
 /// would report one run twice under two identities.
 ///
-/// The setup-state decision is an independent AND condition applied inside
-/// [`telemetry::decide`]; a pre-existing `telemetry = true` is not consent,
-/// because the key has been settable and inert for a long time.
+/// Persistent config and setup-state opt-outs are applied inside
+/// [`telemetry::decide`].
 fn start_cli_telemetry(
     resolved: &ResolvedRuntimeOptions,
     config_path: Option<PathBuf>,
     surface: Surface,
 ) -> Option<CliTelemetrySession> {
-    let setup = SetupState::load().ok().flatten().unwrap_or_default();
-    let TelemetryDecision::Enabled(consent) = telemetry::decide(resolved, &setup, surface) else {
-        return None;
-    };
-    telemetry::init(consent.with_config_path(config_path));
+    let consent = resolve_cli_telemetry_consent(
+        resolved,
+        config_path,
+        surface,
+        telemetry::load_setup_state_for_decision(),
+    )?;
+    telemetry::init(consent);
     telemetry::record(Event::SessionStart {
         source: SessionSource::Unknown,
     });
     Some(CliTelemetrySession {
         started: std::time::Instant::now(),
     })
+}
+
+fn resolve_cli_telemetry_consent(
+    resolved: &ResolvedRuntimeOptions,
+    config_path: Option<PathBuf>,
+    surface: Surface,
+    setup: Option<SetupState>,
+) -> Option<telemetry::TelemetryConsent> {
+    let setup = setup?;
+    let TelemetryDecision::Enabled(consent) = telemetry::decide(resolved, &setup, surface) else {
+        return None;
+    };
+    Some(consent.with_config_path(config_path))
 }
 
 /// Close the session opened by [`start_cli_telemetry`] and flush, bounded.
@@ -3856,14 +3870,7 @@ fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
-            // Turning telemetry on from the command line is still a consent
-            // moment, and it is the only one this surface can offer. The
-            // notice goes to stderr so `config set` stays pipeable, and it is
-            // shown *before* the write commits: declining writes nothing at
-            // all, not a value that a later notice would have to undo.
-            if !confirm_telemetry_opt_in_if_needed(&key, &value)? {
-                return Ok(());
-            }
+            clear_recorded_telemetry_opt_out_if_reenabled(&key, &value)?;
             store.config.set_value(&key, &value)?;
             store.save()?;
             println!("set {key}");
@@ -3896,64 +3903,24 @@ fn run_config_command(store: &mut ConfigStore, command: ConfigCommand) -> Result
     }
 }
 
-/// Show the telemetry notice and record the answer when `config set` is about
-/// to turn telemetry on.
-///
-/// Returns whether the caller should proceed with the write. `Ok(false)` means
-/// the user declined; the decline is recorded, so they are not asked again
-/// until the notice content itself changes.
-///
-/// Off a terminal this is a no-op and the value is written unchanged: the
-/// setup-state decision stays unrecorded, which leaves the switch inert. That
-/// is the shape of the whole feature — both halves are required, neither alone
-/// suffices, and a script that flips the key on a build machine has not
-/// consented on anyone's behalf.
-fn confirm_telemetry_opt_in_if_needed(key: &str, value: &str) -> Result<bool> {
-    use codewhale_telemetry::notice;
-
-    // The same spellings `ConfigToml::set_value` accepts for a boolean. An
-    // unrecognised value is left to the setter to reject.
+/// An explicit `telemetry = true` re-enables a machine that previously declined
+/// the notice. Fresh machines keep the notice owed, so the disclosure still
+/// appears on their first interactive launch.
+fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Result<()> {
     let turning_on = matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "enabled"
     );
     if key != "telemetry" || !turning_on {
-        return Ok(true);
+        return Ok(());
     }
-    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
-        return Ok(true);
+    if let Some(mut state) = SetupState::load()?
+        && state.telemetry_opted_out()
+    {
+        state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
+        state.save()?;
     }
-    let Ok(Some(mut state)) = SetupState::load().map(|state| Some(state.unwrap_or_default()))
-    else {
-        return Ok(true);
-    };
-    if !state.needs_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION) {
-        return Ok(true);
-    }
-
-    eprintln!("\n  {}\n", notice::NOTICE_HEADLINE);
-    for line in notice::NOTICE_BODY.lines() {
-        if line.is_empty() {
-            eprintln!();
-        } else {
-            eprintln!("  {line}");
-        }
-    }
-    eprint!("\n  {} ", notice::NOTICE_PROMPT);
-    io::stderr().flush().ok();
-
-    let mut answer = String::new();
-    // A failed read is not an answer. Enter is not an answer either — it is
-    // the pre-selected decline.
-    let opt_in = io::stdin().read_line(&mut answer).is_ok() && notice::answer_is_yes(&answer);
-
-    state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, opt_in);
-    if let Err(error) = state.save() {
-        eprintln!("  Could not record that decision ({error}); telemetry stays off.\n");
-        return Ok(false);
-    }
-    eprintln!("  {}\n", notice::decision_receipt(opt_in));
-    Ok(opt_in)
+    Ok(())
 }
 
 fn model_command_provider_hint(
@@ -7928,8 +7895,22 @@ mod tests {
             "expected a help string beside --telemetry, got: {telemetry_line}"
         );
         assert!(
-            telemetry_line.contains("off"),
-            "the help string must say the default is off: {telemetry_line}"
+            telemetry_line.contains("default on"),
+            "the help string must disclose the default: {telemetry_line}"
+        );
+        assert!(
+            telemetry_line.contains("CODEWHALE_TELEMETRY=0 always")
+                && telemetry_line.contains("wins"),
+            "the help string must document the always-winning opt-out: {telemetry_line}"
+        );
+    }
+
+    #[test]
+    fn root_help_describes_product_actions_not_internal_tui_layers() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            !help.contains("TUI"),
+            "root help must describe what Codewhale does, not its internal UI/runtime layers:\n{help}"
         );
     }
 
@@ -8168,5 +8149,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cli_telemetry_start_fails_closed_on_a_corrupt_setup_state() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let setup_path = dir.path().join("setup_state.json");
+        std::fs::write(&setup_path, b"{not-json").expect("write corrupt setup state");
+        let setup = telemetry::load_setup_state_for_decision_at(&setup_path);
+        assert!(setup.is_none(), "corrupt privacy state must not default on");
+
+        let resolved =
+            ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+        assert!(
+            resolve_cli_telemetry_consent(&resolved, None, Surface::Cli, setup).is_none(),
+            "CLI startup must not obtain permission from an unreadable privacy record"
+        );
     }
 }

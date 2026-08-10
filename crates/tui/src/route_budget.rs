@@ -291,6 +291,7 @@ mod tests {
             route_context_window_tokens(ApiProvider::OpenaiCodex, "gpt-5.5", None),
             128_000
         );
+        // 80% of the 128K window (102_400) fits under the input ceiling.
         assert_eq!(
             compaction_threshold_for_route_at_percent(
                 ApiProvider::OpenaiCodex,
@@ -298,7 +299,7 @@ mod tests {
                 None,
                 80.0,
             ),
-            98_304
+            102_400
         );
         assert!(auto_compact_default_for_route(
             ApiProvider::OpenaiCodex,
@@ -308,13 +309,15 @@ mod tests {
     }
 
     #[test]
-    fn v4_trigger_is_anchored_to_spendable_input() {
+    fn v4_trigger_is_window_percent_clamped_to_spendable_input() {
         let budget = route_context_budget(ApiProvider::Deepseek, "deepseek-v4-pro", None, 0)
             .expect("V4 route budget");
 
         assert_eq!(budget.window_tokens, 1_000_000);
         assert_eq!(budget.output_cap_tokens, u64::from(TURN_MAX_OUTPUT_TOKENS));
         assert_eq!(budget.input_budget_ceiling, 736_832);
+        // 80% of the 1M window (800_000) exceeds the spendable input, so the
+        // overflow clamp holds the trigger at the ceiling.
         assert_eq!(
             compaction_threshold_for_route_at_percent(
                 ApiProvider::Deepseek,
@@ -322,7 +325,7 @@ mod tests {
                 None,
                 80.0,
             ),
-            589_466
+            736_832
         );
     }
 
@@ -359,12 +362,10 @@ mod tests {
 
         assert_eq!(budget.output_cap_tokens, 32_768);
         assert_eq!(budget.input_budget_ceiling, 228_352);
-        assert_eq!(trigger, 182_682);
+        // 80% of the 262_144 window; fits under the 228_352 ceiling because
+        // the output reservation is the route-effective 32K request cap.
+        assert_eq!(trigger, 209_715);
         assert!(trigger as u64 <= budget.input_budget_ceiling);
-        assert!(
-            trigger < 209_715,
-            "must fire before the old window-relative trigger"
-        );
     }
 
     #[test]

@@ -2,19 +2,12 @@
 //!
 //! ## Per-cell revision caching
 //!
-//! Naive caching invalidates the whole transcript whenever ANY cell mutates.
-//! During streaming the assistant content cell mutates on every delta — that
-//! would force a re-wrap of every cell on every chunk. Codex avoids this by
-//! tracking a per-cell revision counter; we mirror that pattern here.
-//!
-//! Each cell index has a paired `revision: u64`. The cache stores
-//! `Vec<CachedCell>` with `(cell_index, revision, lines, line_meta)`. On
-//! `ensure`, walk the cells; if a cell's current `revision` matches the cached
-//! one (and width/options haven't changed), reuse the rendered lines.
-//! Otherwise re-render that cell only and reassemble.
-//!
-//! Width or render-option changes still bust the entire cache (correct: wrap
-//! layout depends on width and which cells are visible at all).
+//! A whole-transcript cache would re-wrap every cell whenever the streaming
+//! Assistant mutates. Instead each index has a paired revision and unchanged
+//! cells reuse their wrapped lines. Width, options, fold state, or destructive
+//! identity changes bust the affected cache. Streaming therefore scales with
+//! changed cells rather than history; width/option changes still bust all
+//! cells because wrapping and visibility depend on them.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,64 +17,50 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::localization::{MessageId, tr};
 use crate::tui::app::TranscriptSpacing;
-use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
+use crate::tui::history::{
+    HistoryCell, ReasoningAction, ReasoningActionTarget, TranscriptActionOwner,
+    TranscriptRenderOptions,
+};
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::CopyLineSeparator;
 
-/// Per-cell cached render output. Reused across `ensure` calls when the
-/// upstream cell's revision counter hasn't changed.
-///
-/// Lines are stored behind an `Arc` so that cloning a `CachedCell` during
-/// cache-ensure (which touches every cell every frame) is O(1) rather than
-/// O(rendered_line_count). Without this, scrolling on a long transcript
-/// pays the cost of deep-cloning every cell's `Vec<Line>` per frame, which
-/// is the surface-level symptom of issue #78. The flatten step uses
-/// `Arc::make_mut` to produce an owned `Vec` for the final `lines`
-/// assembly, so the only deep-clone occurs on the flattened output — once
-/// per frame instead of once per cell.
+/// Revision-bound render output. Arcs keep cache enumeration O(cells) instead
+/// of deep-cloning every rendered line on ambient frames (issue #78); the
+/// flattened output owns the only per-frame line copy.
 #[derive(Debug)]
 struct CachedCell {
-    /// Revision the cell was at when the lines/meta were rendered.
+    /// Revision at which lines and metadata were rendered.
     revision: u64,
-    /// Rendered lines for this cell (without trailing inter-cell spacers),
-    /// shared via `Arc` so cache enumeration is O(N) not O(N*lines).
+    /// Lines and aligned metadata; no inter-cell spacers. OSC 8 targets never
+    /// enter the ratatui cell buffer. Copy separators preserve source hard
+    /// newlines while allowing copy to remove visual soft-wrap breaks; prefix
+    /// widths strip visual rails. All four vectors remain index-aligned.
     lines: Arc<Vec<Line<'static>>>,
-    /// Hyperlinks aligned with `lines`, in display columns relative to each
-    /// line. Targets never enter the ratatui cell buffer.
     links: Arc<Vec<Vec<crate::tui::osc8::LineLink>>>,
-    /// Copy separators aligned with `lines`. These preserve source hard
-    /// newlines while allowing copy to remove visual soft-wrap breaks.
     copy_separators: Arc<Vec<CopyLineSeparator>>,
-    /// Display-column widths of visual prefixes that should be omitted from
-    /// clipboard text, aligned with `lines`.
     copy_prefix_widths: Arc<Vec<usize>>,
-    /// Whether this cell's rendered output was empty (e.g. Thinking hidden).
-    /// Cached so we can skip empty cells without re-rendering.
+    /// Empty/blank facts keep spacing decisions independent of rendered text.
+    /// A block ending blank has paid for separation and must not get another.
     is_empty: bool,
-    /// Whether the cell's last rendered line is blank. A cell that already
-    /// ends on a blank row must not also receive a separator row after it —
-    /// two stacked blanks look worse than none.
     ends_blank: bool,
-    /// Semantic role used by the transcript's explicit boundary matrix.
-    /// Keeping the role in the cache makes spacing independent of rendered
-    /// strings, theme colors, terminal depth, and animation state.
+    /// Semantic role and tool grouping feed the explicit boundary matrix, so
+    /// spacing never depends on strings, palette, terminal depth, or motion.
     kind: TranscriptBlockKind,
-    /// Whether this cell participates in the compact tool-card rail group.
     is_tool_groupable: bool,
-    /// Persistent parser/highlighter carry for the one changing Assistant
-    /// cell. Stable rendered lines remain in the vectors above and are
-    /// truncated only from the cache's replaceable-tail index.
+    reasoning_action: Option<ReasoningAction>,
+    /// Only the changing Assistant cell carries incremental parser state;
+    /// stable lines stay above its replaceable-tail index.
     incremental_markdown: Option<Box<crate::tui::markdown_render::IncrementalMarkdownRenderCache>>,
-    /// The hot-tail treatment mutates the last line for animation. Preserve
-    /// its settled form so the next append can restore it without re-rendering
-    /// the stable prefix.
+    /// Settled form of the animation-mutated hot tail, restored on append so
+    /// the stable prefix is not reparsed.
     hot_tail_original: Option<(usize, Line<'static>)>,
 }
 
-/// Provenance that one live Assistant cell's source stayed unchanged or only
-/// gained appended bytes. Visual-only revision bumps can therefore reuse it.
-/// Revisions use the same transformed keys passed to `ensure_*`.
+/// Proof that a live Assistant source only gained appended bytes. Visual-only
+/// revision bumps can therefore reuse it; revisions are transformed exactly
+/// as they are for `ensure_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StreamingSourceReceipt {
     pub cell_index: usize,
@@ -90,12 +69,6 @@ pub(crate) struct StreamingSourceReceipt {
     pub content_len: usize,
 }
 
-/// Visual role of one transcript cell.
-///
-/// Approval, question, Work-panel, and composer surfaces live outside the
-/// transcript cache and already own bounded panels/edges. This enum covers
-/// every in-transcript seam, including durable Work receipts emitted by plan,
-/// checklist, and workflow tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranscriptBlockKind {
     User,
@@ -121,70 +94,59 @@ impl TranscriptBlockKind {
     }
 }
 
-/// Rows a single visible block separation is worth.
-///
-/// One blank row — never two. The transcript scrolls inside a terminal
-/// viewport, so every separator row is a row of content the reader loses.
-/// One row is enough to read two blocks as two paragraphs; two rows halve
-/// the visible transcript for no extra legibility. `Turn` at `Spacious` is
-/// the sole deliberate exception, and it is opt-in.
+/// A visible boundary costs one row, because terminal separator rows displace
+/// content and two rows add no extra legibility. Only an opt-in spacious turn
+/// costs two.
 const BLOCK_SEPARATOR_ROWS: usize = 1;
 
-/// Strength of a visible boundary. These four levels are the complete
-/// transcript spacing vocabulary: no blanket per-cell padding is added.
+/// Complete transcript spacing vocabulary; no blanket per-cell padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranscriptBoundary {
-    /// Two cells are literally continuation of one another — successive
-    /// reasoning segments, or successive prose blocks of one answer.
+    /// Successive cells are literally one reasoning/answer phase.
     Joined,
-    /// Two cells sit inside one tool-card rail group. Separated by a rail
-    /// spacer (`│`) rather than a bare blank row so the card box survives.
+    /// Adjacent tool cells share one compact rail with no per-call padding.
     GroupedTool,
-    /// Transition between response phases, or into/out of tools, Work, or
-    /// notices.
+    /// Transition between response phases, tools, Work, or notices.
     Activity,
-    /// A human turn boundary; always visible, even at compact density.
+    /// Human turn boundary; visible even at compact density.
     Turn,
 }
 
-/// Cache of rendered transcript lines for the current viewport.
 #[derive(Debug)]
 pub struct TranscriptViewCache {
     width: u16,
     options: TranscriptRenderOptions,
-    /// Snapshot of folded_thinking indices from the last `ensure` call.
-    /// When this changes, all cells must be re-rendered because the fold
-    /// state affects the rendered output but not the cell revision.
+    /// Fold state affects rendering without changing cell revisions.
     folded_cells: HashSet<usize>,
-    /// Per-cell rendered output, indexed by current cell position.
-    /// Length always equals the cell count seen on the last `ensure` call.
+    reasoning_action_target: Option<ReasoningActionTarget>,
+    transcript_action_owner: Option<TranscriptActionOwner>,
+    identity_epoch: Option<u64>,
+    reasoning_action_rendered_cell: Option<usize>,
+    /// Per-cell renders plus flattened lines and index-aligned link/selection
+    /// metadata. Rail prefix widths strip decoration without glyph guessing
+    /// (#1163); deterministic counters measure the production cache path.
     per_cell: Vec<CachedCell>,
-    /// Flattened lines reassembled from `per_cell` plus spacers.
     lines: Vec<Line<'static>>,
-    /// Per-line hyperlink metadata aligned with `lines`.
     line_links: Vec<Vec<crate::tui::osc8::LineLink>>,
-    /// Per-line metadata aligned with `lines`.
     line_meta: Vec<TranscriptLineMeta>,
-    /// Per-line rail-prefix display-column count (`0` or `2`), aligned with
-    /// `lines`. Populated during flatten so that selection-to-text can shift
-    /// columns past visual-only decoration glyphs without guessing which
-    /// spans are decorative (#1163).
+    /// Visual-only prefix widths let selection copy strip rails without glyph guesses.
     rail_prefix_widths: Vec<usize>,
     streaming_source_receipt: Option<StreamingSourceReceipt>,
-    /// Deterministic receipt for actual flattened-line reconstruction work.
-    /// Kept in production state so tests measure the real path without hooks.
     streaming_lines_reflattened: u64,
     streaming_meta_rows_scanned: u64,
 }
 
 impl TranscriptViewCache {
-    /// Create an empty cache.
     #[must_use]
     pub fn new() -> Self {
         Self {
             width: 0,
             options: TranscriptRenderOptions::default(),
             folded_cells: HashSet::new(),
+            reasoning_action_target: None,
+            transcript_action_owner: None,
+            identity_epoch: None,
+            reasoning_action_rendered_cell: None,
             per_cell: Vec::new(),
             lines: Vec::new(),
             line_links: Vec::new(),
@@ -200,31 +162,26 @@ impl TranscriptViewCache {
         self.streaming_source_receipt = receipt;
     }
 
-    #[cfg(test)]
-    #[must_use]
-    fn streaming_lines_reflattened(&self) -> u64 {
-        self.streaming_lines_reflattened
+    pub(crate) fn take_transcript_action(
+        &mut self,
+    ) -> Option<(TranscriptActionOwner, Option<ReasoningActionTarget>)> {
+        Some((
+            self.transcript_action_owner.take()?,
+            self.reasoning_action_target.take(),
+        ))
     }
 
-    #[cfg(test)]
-    #[must_use]
-    fn streaming_meta_rows_scanned(&self) -> u64 {
-        self.streaming_meta_rows_scanned
+    pub(crate) fn retarget(
+        &mut self,
+        owner: Option<TranscriptActionOwner>,
+        original_index_map: Option<&[usize]>,
+    ) {
+        if let Some(first) = self.set_action_owner(owner, original_index_map) {
+            self.flatten_from(self.options.spacing, first.saturating_sub(1));
+        }
     }
 
-    /// Ensure cached lines match the provided cells/widths/per-cell revisions.
-    ///
-    /// Reuses rendered lines for cells whose `cell_revisions[i]` matches the
-    /// previously cached revision (when the cell shape — empty/spacer flags —
-    /// also matches). Width or option changes bust the entire cache.
-    ///
-    /// `cell_revisions.len()` is expected to equal `cells.len()`. If they
-    /// disagree (shouldn't happen in normal use) the cache treats every cell
-    /// as dirty.
-    ///
-    /// Retained for tests and external use; the live render path uses the
-    /// `ensure_split` variant to avoid concatenating history + active-cell
-    /// entries every frame.
+    /// Convenience entry point; the live path uses shards to avoid cloning.
     #[allow(dead_code)]
     pub fn ensure(
         &mut self,
@@ -240,20 +197,14 @@ impl TranscriptViewCache {
             options,
             &HashSet::new(),
             None,
+            None,
         );
     }
 
-    /// Ensure cached lines match the provided cell shards (logically
-    /// concatenated) plus per-cell revisions. Avoids the
-    /// `concat-into-Vec<HistoryCell>` clone the caller would otherwise pay
-    /// every frame on long transcripts.
-    ///
-    /// `folded_cells` contains original virtual indices of thinking cells
-    /// that should render in their folded (summary) form.
-    ///
-    /// `original_index_map` maps filtered (positional) indices to original
-    /// virtual indices. Required when `collapsed_cells` filtering is active
-    /// so that `folded_cells` lookups resolve to the correct original index.
+    /// Ensure logically concatenated shards without cloning history plus the
+    /// active tail each frame. Explicit cache inputs keep identity/fold/map indices
+    /// attached to original virtual cells even when filtering changes positions.
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure_split(
         &mut self,
         cell_shards: &[&[HistoryCell]],
@@ -262,6 +213,7 @@ impl TranscriptViewCache {
         options: TranscriptRenderOptions,
         folded_cells: &HashSet<usize>,
         original_index_map: Option<&[usize]>,
+        action_owner: Option<TranscriptActionOwner>,
     ) {
         let total_cells: usize = cell_shards.iter().map(|s| s.len()).sum();
         self.ensure_iter(
@@ -272,16 +224,14 @@ impl TranscriptViewCache {
             options,
             folded_cells,
             original_index_map,
+            action_owner,
         );
     }
 
-    /// `ensure_split` over an already-filtered list of borrowed cells.
-    ///
-    /// The collapse path substitutes synthetic tool-run summary cells and
-    /// skips collapsed cells, so it cannot hand over contiguous shard
-    /// slices. Accepting `&[&HistoryCell]` lets it pass borrows instead of
-    /// deep-cloning every visible cell into a fresh `Vec<HistoryCell>` each
-    /// frame (#3896).
+    /// Ensure an already-filtered list plus its original-index map. Collapse
+    /// may skip cells or substitute tool summaries, so the map is the contract
+    /// that keeps fold/action state attached to original virtual indices
+    /// rather than positional rendered indices (#3896).
     #[allow(clippy::too_many_arguments)]
     pub fn ensure_filtered(
         &mut self,
@@ -291,6 +241,7 @@ impl TranscriptViewCache {
         options: TranscriptRenderOptions,
         folded_cells: &HashSet<usize>,
         original_index_map: Option<&[usize]>,
+        action_owner: Option<TranscriptActionOwner>,
     ) {
         self.ensure_iter(
             cells.len(),
@@ -300,6 +251,7 @@ impl TranscriptViewCache {
             options,
             folded_cells,
             original_index_map,
+            action_owner,
         );
     }
 
@@ -313,8 +265,17 @@ impl TranscriptViewCache {
         options: TranscriptRenderOptions,
         folded_cells: &HashSet<usize>,
         original_index_map: Option<&[usize]>,
+        action_owner: Option<TranscriptActionOwner>,
     ) {
-        let layout_changed = self.width != width || self.options != options;
+        let identity_changed = action_owner.is_some_and(|owner| {
+            self.identity_epoch
+                .is_some_and(|epoch| epoch != owner.identity_epoch)
+        });
+        if let Some(owner) = action_owner {
+            self.identity_epoch = Some(owner.identity_epoch);
+        }
+        self.transcript_action_owner = action_owner;
+        let layout_changed = self.width != width || self.options != options || identity_changed;
         let folded_changed = self.folded_cells != *folded_cells;
         if layout_changed || folded_changed {
             self.per_cell.clear();
@@ -322,9 +283,12 @@ impl TranscriptViewCache {
         self.width = width;
         self.options = options;
         self.folded_cells = folded_cells.clone();
+        let previous_rendered_target = self.reasoning_action_rendered_cell;
 
-        // Track whether anything actually changed; if all cells are reused at
-        // the same indices, we can skip the reflatten.
+        // Same-index revision reuse is intentional: insert/remove shifts must
+        // cold-render rather than attach cached lines to another cell. The
+        // destructive identity epoch also prevents revision reuse after an
+        // index is removed and later filled by a different cell.
         let old_len = self.per_cell.len();
         let mut any_dirty = layout_changed || folded_changed || old_len != total_cells;
         let mut first_dirty: Option<usize> = if old_len != total_cells {
@@ -347,14 +311,12 @@ impl TranscriptViewCache {
             let current_rev = if revisions_match {
                 cell_revisions[idx]
             } else {
-                // No matching revisions — force a re-render this cycle.
+                // A mismatched revision vector is never trusted.
                 u64::MAX
             };
-
-            // Reuse cached entry if the revision matches AND it's at the
-            // same index (cells can shift on insert/remove, so we only
-            // reuse when the index is identical — a stricter invariant
-            // codex also uses for its active-cell tail).
+            let original_idx = original_index_map
+                .map(|m| *m.get(idx).unwrap_or(&idx))
+                .unwrap_or(idx);
             if !layout_changed
                 && revisions_match
                 && old_per_cell
@@ -380,9 +342,6 @@ impl TranscriptViewCache {
             } else {
                 width
             };
-            let original_idx = original_index_map
-                .map(|m| *m.get(idx).unwrap_or(&idx))
-                .unwrap_or(idx);
             let folded = folded_cells.contains(&original_idx);
 
             if matches!(
@@ -405,6 +364,7 @@ impl TranscriptViewCache {
                         ends_blank: false,
                         kind: TranscriptBlockKind::Answer,
                         is_tool_groupable: false,
+                        reasoning_action: None,
                         incremental_markdown: Some(Box::default()),
                         hot_tail_original: None,
                     });
@@ -449,15 +409,16 @@ impl TranscriptViewCache {
                 cached.ends_blank = last_line_is_blank(&cached.lines);
                 cached.kind = TranscriptBlockKind::Answer;
                 cached.is_tool_groupable = false;
-                // The hot-tail style also changes on the preceding settled
-                // line, so reflatten one line before the Markdown tail.
+                cached.reasoning_action = None;
+                // Hot-tail styling can affect the preceding settled line.
                 streaming_tail_update = Some((idx, replace_from.saturating_sub(1)));
                 new_per_cell.push(cached);
                 idx += 1;
                 continue;
             }
 
-            let rendered = cell.lines_with_copy_metadata_folded(render_width, options, folded);
+            let (rendered, reasoning_action) =
+                cell.lines_with_copy_metadata_folded(render_width, options, folded);
             let mut lines = Vec::with_capacity(rendered.len());
             let mut links = Vec::with_capacity(rendered.len());
             let mut copy_separators = Vec::with_capacity(rendered.len());
@@ -472,6 +433,15 @@ impl TranscriptViewCache {
                 copy_prefix_widths.push(rendered_line.copy_prefix_width);
                 copy_separators.push(rendered_line.copy_separator_after);
             }
+            if reasoning_action == Some(ReasoningAction::Expand)
+                && let Some(line) = lines.last()
+            {
+                let prefix = line.width().saturating_sub(compute_rail_prefix_width(line));
+                *copy_prefix_widths
+                    .last_mut()
+                    .expect("reasoning affordance line") = prefix;
+                links.last_mut().expect("reasoning affordance line").clear();
+            }
             let is_empty = lines.is_empty();
             let ends_blank = last_line_is_blank(&lines);
             new_per_cell.push(CachedCell {
@@ -484,6 +454,7 @@ impl TranscriptViewCache {
                 ends_blank,
                 kind: TranscriptBlockKind::for_cell(cell),
                 is_tool_groupable,
+                reasoning_action,
                 incremental_markdown: None,
                 hot_tail_original: None,
             });
@@ -491,15 +462,18 @@ impl TranscriptViewCache {
         }
 
         self.per_cell = new_per_cell;
+        if let Some(target_first) = self.set_action_owner(action_owner, original_index_map) {
+            any_dirty = true;
+            first_dirty = Some(first_dirty.map_or(target_first, |dirty| dirty.min(target_first)));
+        }
 
         if !any_dirty {
-            // All cells reused at the same indices: nothing to reflatten.
-            // (Width didn't change either, since that bumps `layout_changed`.)
             return;
         }
 
         if !layout_changed
             && !folded_changed
+            && previous_rendered_target == self.reasoning_action_rendered_cell
             && old_len == total_cells
             && dirty_cells == 1
             && let Some((cell_index, line_from)) = streaming_tail_update
@@ -514,9 +488,9 @@ impl TranscriptViewCache {
         } else {
             first_dirty.unwrap_or(0).saturating_sub(1)
         };
-        // A hidden cell has no line at which `flatten_from` can truncate.
-        // Walk back to the nearest visible predecessor so a cell appearing,
-        // disappearing, or changing kind cannot leave a stale spacer behind.
+        // A hidden cell has no line boundary at which to truncate. Rebuild from
+        // a visible predecessor so appearance/disappearance cannot leave its
+        // old spacer or the following cell's boundary behind.
         while rebuild_from > 0
             && self
                 .per_cell
@@ -528,7 +502,31 @@ impl TranscriptViewCache {
         self.flatten_from(options.spacing, rebuild_from);
     }
 
-    /// Reassemble flat `lines` / `line_meta` from `per_cell` plus spacers.
+    fn set_action_owner(
+        &mut self,
+        owner: Option<TranscriptActionOwner>,
+        original_index_map: Option<&[usize]>,
+    ) -> Option<usize> {
+        self.transcript_action_owner = owner;
+        let rendered = owner.and_then(|owner| match original_index_map {
+            Some(map) => map.iter().position(|&index| index == owner.cell_index),
+            None => (owner.cell_index < self.per_cell.len()).then_some(owner.cell_index),
+        });
+        self.reasoning_action_target = owner.and_then(|owner| {
+            Some(ReasoningActionTarget {
+                owner,
+                action: self.per_cell.get(rendered?)?.reasoning_action?,
+            })
+        });
+        let next = self
+            .reasoning_action_target
+            .filter(|target| target.action == ReasoningAction::Expand)
+            .and(rendered);
+        let previous = self.reasoning_action_rendered_cell;
+        self.reasoning_action_rendered_cell = next;
+        (previous != next).then(|| previous.into_iter().chain(next).min().unwrap_or(0))
+    }
+
     fn flatten(&mut self, spacing: TranscriptSpacing) {
         self.lines.clear();
         self.line_links.clear();
@@ -537,11 +535,10 @@ impl TranscriptViewCache {
         self.append_flattened_cells(spacing, 0);
     }
 
-    /// Reassemble only the suffix starting at `first_cell`.
-    ///
-    /// Streaming usually mutates the active tail cell. Rebuilding from the
-    /// previous cell preserves spacer correctness while avoiding a full
-    /// O(total transcript lines) flatten on every token chunk.
+    /// Rebuild only a suffix while preserving its predecessor spacer.
+    /// Streaming normally changes only the active tail; rebuilding from the
+    /// previous cell preserves boundary correctness without flattening all
+    /// transcript lines on every token chunk.
     fn flatten_from(&mut self, spacing: TranscriptSpacing, first_cell: usize) {
         if first_cell == 0 || self.lines.is_empty() || self.line_meta.is_empty() {
             self.flatten(spacing);
@@ -563,14 +560,10 @@ impl TranscriptViewCache {
         self.append_flattened_cells(spacing, first_cell);
     }
 
-    /// Replace only the changing tail of the final streaming cell in the
-    /// flattened viewport. Returns false when the prior cell had no visible
-    /// line at the requested boundary, in which case the caller performs the
-    /// canonical suffix rebuild.
+    /// Replace only the final streaming cell's changing Markdown tail. Search
+    /// backward from the old hot tail, so append-only updates scan the small
+    /// replaceable suffix; return false when no canonical boundary exists.
     fn flatten_streaming_tail(&mut self, cell_index: usize, line_from: usize) -> bool {
-        // Search backward: for append-only updates `line_from` is at the old
-        // hot tail, so this examines only the replaceable suffix rather than
-        // the full transcript prefix.
         let mut truncate_at = None;
         for (index, meta) in self.line_meta.iter().enumerate().rev() {
             self.streaming_meta_rows_scanned = self.streaming_meta_rows_scanned.saturating_add(1);
@@ -636,15 +629,29 @@ impl TranscriptViewCache {
     }
 
     fn append_flattened_cells(&mut self, spacing: TranscriptSpacing, start_cell: usize) {
+        let hint = format!(
+            "Space:{}",
+            tr(self.options.locale, MessageId::TranscriptReasoningExpand)
+        );
+        let hint_fits = unicode_width::UnicodeWidthStr::width(hint.as_str())
+            <= usize::from(self.width).saturating_sub(2);
         for (cell_index, cached) in self.per_cell.iter().enumerate().skip(start_cell) {
             if cached.is_empty {
                 continue;
             }
-            // Arc::make_mut would deep-clone only on write; since we just
-            // rebuilt `lines` from scratch we always need the owned data.
-            // Deref is zero-cost and gives us &[Line].
             let rendered_line_count = cached.lines.len();
             for (line_in_cell, line) in cached.lines.iter().enumerate() {
+                let is_hint = self.reasoning_action_rendered_cell == Some(cell_index)
+                    && line_in_cell + 1 == rendered_line_count
+                    && hint_fits;
+                let hinted = is_hint.then(|| {
+                    let mut hinted = line.clone();
+                    if let Some(span) = hinted.spans.last_mut() {
+                        span.content = hint.clone().into();
+                    }
+                    hinted
+                });
+                let line = hinted.as_ref().unwrap_or(line);
                 let rail = tool_group_rail(
                     self.per_cell.as_slice(),
                     cell_index,
@@ -652,23 +659,32 @@ impl TranscriptViewCache {
                     rendered_line_count,
                 );
                 let final_line = line_with_group_rail(line, rail, usize::from(self.width));
-                let final_links = links_with_group_rail(
-                    cached.links.get(line_in_cell).map_or(&[], Vec::as_slice),
-                    rail,
-                    usize::from(self.width),
-                );
-                self.rail_prefix_widths
-                    .push(compute_rail_prefix_width(&final_line));
+                let final_links = if is_hint {
+                    Vec::new()
+                } else {
+                    links_with_group_rail(
+                        cached.links.get(line_in_cell).map_or(&[], Vec::as_slice),
+                        rail,
+                        usize::from(self.width),
+                    )
+                };
+                let rail_prefix_width = compute_rail_prefix_width(&final_line);
+                let copy_prefix_width = if is_hint {
+                    final_line.width().saturating_sub(rail_prefix_width)
+                } else {
+                    cached
+                        .copy_prefix_widths
+                        .get(line_in_cell)
+                        .copied()
+                        .unwrap_or(0)
+                };
+                self.rail_prefix_widths.push(rail_prefix_width);
                 self.lines.push(final_line);
                 self.line_links.push(final_links);
                 self.line_meta.push(TranscriptLineMeta::CellLine {
                     cell_index,
                     line_in_cell,
-                    copy_prefix_width: cached
-                        .copy_prefix_widths
-                        .get(line_in_cell)
-                        .copied()
-                        .unwrap_or(0),
+                    copy_prefix_width,
                     copy_separator_after: cached
                         .copy_separators
                         .get(line_in_cell)
@@ -697,34 +713,26 @@ impl TranscriptViewCache {
         }
     }
 
-    /// Return cached lines.
     #[must_use]
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
     }
 
-    /// Return hyperlinks aligned with [`Self::lines`].
     #[must_use]
     pub fn line_links(&self) -> &[Vec<crate::tui::osc8::LineLink>] {
         &self.line_links
     }
 
-    /// Return cached line metadata.
     #[must_use]
     pub fn line_meta(&self) -> &[TranscriptLineMeta] {
         &self.line_meta
     }
 
-    /// Return total cached lines.
     #[must_use]
     pub fn total_lines(&self) -> usize {
         self.lines.len()
     }
 
-    /// Return the rail-prefix display-column count for the line at
-    /// `line_index`. Callers use this to shift selection coordinates past
-    /// visual-only decoration glyphs without guessing which spans are
-    /// decorative (#1163).
     #[must_use]
     pub fn rail_prefix_width(&self, line_index: usize) -> usize {
         self.rail_prefix_widths
@@ -734,11 +742,8 @@ impl TranscriptViewCache {
     }
 }
 
-/// Tool cells still render their own rail when used outside the transcript
-/// cache (pager, clipboard, focused detail). Inside the live transcript this
-/// cache owns grouping across adjacent cells, so retaining both rails produces
-/// doubled prefixes such as `╭ ╭`. Replace the cell-local decoration with the
-/// group rail added by `line_with_group_rail` during flattening.
+/// Strip the cell-local rail because the flat cache owns cross-cell grouping;
+/// retaining both produces doubled prefixes such as `╭ ╭`.
 fn strip_cell_local_tool_rail(line: &mut Line<'static>) {
     if line
         .spans
@@ -749,16 +754,12 @@ fn strip_cell_local_tool_rail(line: &mut Line<'static>) {
     }
 }
 
-/// Whether a cell's own render already ends on a visually blank row.
 fn last_line_is_blank(lines: &[Line<'static>]) -> bool {
     lines
         .last()
         .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
 }
 
-/// One block separation: how many rows, and whether those rows carry the
-/// tool-card rail. Kept as one value so the flatten loop cannot emit the row
-/// count from one rule and the decoration from another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlockSeparator {
     rows: usize,
@@ -776,9 +777,8 @@ fn separator_between(
         same_tool_activity_group(current, next),
     );
     let mut rows = spacer_rows_for_boundary(boundary, spacing);
-    // Never stack two blank rows. A cell whose own render already ends on a
-    // blank line has paid for the separation; adding another on top reads as
-    // a hole, and at Spacious it would be a three-row gap.
+    // A cell ending blank already paid for separation; a grouped tool rail is
+    // not blank and must remain continuous.
     if !current.ends_blank {
         return BlockSeparator {
             rows,
@@ -786,7 +786,6 @@ fn separator_between(
         };
     }
     if boundary == TranscriptBoundary::GroupedTool {
-        // A railed spacer is not a blank row — the rail must continue.
         return BlockSeparator { rows, railed: true };
     }
     rows = rows.saturating_sub(1);
@@ -796,11 +795,9 @@ fn separator_between(
     }
 }
 
-/// Adjacent tool cells share one rail only when they represent the same kind
-/// of activity. Durable Work receipts are persisted state, not another
-/// transient action, so crossing that semantic seam closes the current rail
-/// even at compact density where no blank row is available.
 fn same_tool_activity_group(current: &CachedCell, next: &CachedCell) -> bool {
+    // Durable Work receipts are persisted state, not another transient tool
+    // action; crossing that semantic seam closes the rail even at compact.
     current.is_tool_groupable && next.is_tool_groupable && current.kind == next.kind
 }
 
@@ -811,23 +808,20 @@ fn transcript_boundary(
 ) -> TranscriptBoundary {
     if same_tool_group {
         debug_assert_eq!(current, next);
-        // Two distinct tool calls that happen to share a rail are still two
-        // things the reader has to tell apart. Give them a rail spacer.
+        // Distinct calls sharing a rail are one compact activity group. The
+        // rail itself carries the grouping; padding every low-level call would
+        // recreate the density problem this boundary matrix exists to solve.
         return TranscriptBoundary::GroupedTool;
     }
 
-    // A user block is the only unambiguous turn delimiter available to the
-    // renderer. Keep it distinct from direct tool execution too: models may
-    // legitimately move from a prompt straight into a tool without first
-    // emitting answer prose.
+    // User cells are the only unambiguous turn delimiter. Keep prompt→tool
+    // distinct too: a model need not emit answer prose before acting.
     if current == TranscriptBlockKind::User || next == TranscriptBlockKind::User {
         return TranscriptBoundary::Turn;
     }
 
-    // Successive cells of the *same* model phase are one block split across
-    // cells — consecutive reasoning segments, or an answer whose settled and
-    // streaming halves live in separate cells. Blank rows appearing between
-    // those mid-stream would jitter the row budget, so keep them joined.
+    // Successive reasoning or answer cells are one phase split across cells;
+    // a blank row there would jitter the row budget during streaming.
     if current == next
         && matches!(
             current,
@@ -837,10 +831,9 @@ fn transcript_boundary(
         return TranscriptBoundary::Joined;
     }
 
-    // Everything else — including reasoning handing off to answer prose — is
-    // a boundary the reader needs to see. Reasoning running straight into the
-    // answer with no blank row was the specific density complaint this matrix
-    // exists to answer.
+    // Every other phase transition is reader-visible. In particular,
+    // reasoning running into final prose was the density bug this matrix
+    // exists to prevent.
     TranscriptBoundary::Activity
 }
 
@@ -849,12 +842,9 @@ const fn spacer_rows_for_boundary(
     spacing: TranscriptSpacing,
 ) -> usize {
     match (boundary, spacing) {
-        (TranscriptBoundary::Joined, _) => 0,
-        (
-            TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity,
-            TranscriptSpacing::Compact,
-        ) => 0,
-        (TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity, _) => BLOCK_SEPARATOR_ROWS,
+        (TranscriptBoundary::Joined | TranscriptBoundary::GroupedTool, _) => 0,
+        (TranscriptBoundary::Activity, TranscriptSpacing::Compact) => 0,
+        (TranscriptBoundary::Activity, _) => BLOCK_SEPARATOR_ROWS,
         (TranscriptBoundary::Turn, TranscriptSpacing::Compact | TranscriptSpacing::Comfortable) => {
             BLOCK_SEPARATOR_ROWS
         }

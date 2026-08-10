@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Opt-in product telemetry client for Codewhale"
+description = "Anonymous, user-disableable product usage counting for Codewhale"
 
 [dependencies]
 anyhow.workspace = true

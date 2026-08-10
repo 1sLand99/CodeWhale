@@ -126,6 +126,20 @@ pub enum MessageId {
     HistoryHintAccept,
     HistoryHintRestore,
     HistoryNoMatches,
+    TranscriptReasoningExpand,
+    // First-run anonymous usage disclosure.
+    TelemetryNoticeHeadline,
+    TelemetryNoticeBody,
+    TelemetryNoticeCompactBody,
+    TelemetryNoticeChoiceKeep,
+    TelemetryNoticeChoiceDisable,
+    TelemetryNoticeActionChoose,
+    TelemetryNoticeActionConfirm,
+    TelemetryNoticeActionExit,
+    TelemetryNoticeReceiptEnabled,
+    TelemetryNoticeReceiptDisabled,
+    TelemetryNoticeReceiptEnabledUnsaved,
+    TelemetryNoticeReceiptDisabledUnsaved,
     // StatusPicker — `/statusline` multi-select footer-item picker.
     StatusPickerTitle,
     StatusPickerInstruction,
@@ -408,6 +422,12 @@ pub enum MessageId {
     CmdQueueIndexMin,
     CmdRelayDescription,
     CmdRemoteControlDescription,
+    CmdRemoteEnvDescription,
+    CmdRemoteEnvOverview,
+    CmdRemoteEnvOpening,
+    CmdRemoteEnvUnavailable,
+    CmdRemoteEnvSourceCustodyPolicy,
+    CmdRemoteEnvBrowserLabel,
     CmdRenameDescription,
     CmdRestoreDescription,
     CmdRetryDescription,
@@ -1504,6 +1524,19 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::HistoryHintAccept,
     MessageId::HistoryHintRestore,
     MessageId::HistoryNoMatches,
+    MessageId::TranscriptReasoningExpand,
+    MessageId::TelemetryNoticeHeadline,
+    MessageId::TelemetryNoticeBody,
+    MessageId::TelemetryNoticeCompactBody,
+    MessageId::TelemetryNoticeChoiceKeep,
+    MessageId::TelemetryNoticeChoiceDisable,
+    MessageId::TelemetryNoticeActionChoose,
+    MessageId::TelemetryNoticeActionConfirm,
+    MessageId::TelemetryNoticeActionExit,
+    MessageId::TelemetryNoticeReceiptEnabled,
+    MessageId::TelemetryNoticeReceiptDisabled,
+    MessageId::TelemetryNoticeReceiptEnabledUnsaved,
+    MessageId::TelemetryNoticeReceiptDisabledUnsaved,
     MessageId::StatusPickerTitle,
     MessageId::StatusPickerInstruction,
     MessageId::StatusPickerActionToggle,
@@ -1783,6 +1816,12 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdQueueIndexMin,
     MessageId::CmdRelayDescription,
     MessageId::CmdRemoteControlDescription,
+    MessageId::CmdRemoteEnvDescription,
+    MessageId::CmdRemoteEnvOverview,
+    MessageId::CmdRemoteEnvOpening,
+    MessageId::CmdRemoteEnvUnavailable,
+    MessageId::CmdRemoteEnvSourceCustodyPolicy,
+    MessageId::CmdRemoteEnvBrowserLabel,
     MessageId::CmdRenameDescription,
     MessageId::CmdRestoreDescription,
     MessageId::CmdRetryDescription,
@@ -3491,6 +3530,37 @@ mod tests {
                 "{} defines key(s) en.json lacks: {extra:?}",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn remote_env_strings_are_explicitly_localized_in_every_complete_pack() {
+        let ids = [
+            MessageId::CmdRemoteEnvDescription,
+            MessageId::CmdRemoteEnvOverview,
+            MessageId::CmdRemoteEnvOpening,
+            MessageId::CmdRemoteEnvUnavailable,
+            MessageId::CmdRemoteEnvSourceCustodyPolicy,
+            MessageId::CmdRemoteEnvBrowserLabel,
+        ];
+
+        for locale in Locale::shipped_complete() {
+            let messages = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                locale_json_source(*locale),
+            )
+            .unwrap_or_else(|err| panic!("{} locale JSON should parse: {err}", locale.tag()));
+            for id in ids {
+                let key = format!("{id:?}");
+                let value = messages
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} must explicitly define {key}", locale.tag()));
+                assert!(
+                    !value.trim().is_empty(),
+                    "{} {key} must not be empty",
+                    locale.tag()
+                );
+            }
         }
     }
 

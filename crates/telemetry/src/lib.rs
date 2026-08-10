@@ -1,4 +1,4 @@
-//! Opt-in product telemetry for Codewhale.
+//! Default-on, user-disableable anonymous product usage counting for Codewhale.
 //!
 //! The whole of what this crate may ever send is [`event`]. The whole of what
 //! decides whether it may send anything is [`decision`]. Nothing else in the
@@ -9,7 +9,7 @@
 //!
 //! # The shape of the guarantee
 //!
-//! Consent is a **value**, not a convention. [`decide`] is the only constructor
+//! Permission is a **value**, not a convention. [`decide`] is the only constructor
 //! of [`TelemetryConsent`]; [`init`] takes one by value and there is no
 //! bool-taking sibling. Six init sites cannot each drift from the predicate,
 //! because they never see the predicate.
@@ -21,8 +21,8 @@
 //! construction empty until resolution completes. A disabled user's panic
 //! therefore writes nothing and creates no directory.
 //!
-//! Arming also **truncates** the buffer. No event recorded before consent can
-//! ever be in the batch that follows it.
+//! Arming also **truncates** any stale buffer before a newly permitted process
+//! begins recording.
 //!
 //! # Failure posture
 //!
@@ -53,7 +53,7 @@ pub use actor::{BATCH_MAX_BYTES, BATCH_MAX_EVENTS, FlushOutcome};
 pub use counters::{Counter, ErrorCounter, SessionCounters};
 pub use decision::{
     EndpointError, TELEMETRY_DIR, TelemetryConsent, TelemetryDecision, decide, decide_in_home,
-    re_decide, validate_endpoint,
+    load_setup_state_for_decision, load_setup_state_for_decision_at, re_decide, validate_endpoint,
 };
 pub use envelope::reduce_panic_site;
 pub use event::{
@@ -90,10 +90,16 @@ pub fn init(consent: TelemetryConsent) {
         return;
     }
     let root = consent.root().to_path_buf();
+    let observed_generation = consent.tombstone_generation().cloned();
+    let config_path = consent.config_path().map(std::path::Path::to_path_buf);
 
-    // Clear the tombstone and drop anything buffered before consent. A stale
-    // buffer is not evidence of this user's answer.
-    if let Err(error) = buffer::arm(&root) {
+    // Re-check durable permission under the same ordering lock as wipe. The
+    // generation match prevents consent resolved before a newer opt-out from
+    // clearing that opt-out; the fresh predicate preserves intentional
+    // `config set telemetry true` re-enablement.
+    if let Err(error) = buffer::arm(&root, observed_generation.as_ref(), || {
+        decision::permission_still_enabled(config_path.as_deref(), &root)
+    }) {
         tracing::debug!("telemetry could not prepare its buffer: {error}");
         return;
     }
@@ -210,18 +216,18 @@ pub fn record(event: Event) {
     armed.handle.record(event);
 }
 
-/// Write an event synchronously, without the writer thread and **without any
-/// lock**.
+/// Write an event synchronously, without the writer thread.
 ///
 /// The synchronous escape hatch for the three paths where the async world is
 /// gone or going: the panic hook, `record_caught_panic`, and the signal task
 /// immediately before `std::process::exit`. One `O_APPEND` `write(2)` under
 /// `PIPE_BUF`, a `sync_data`, and return — microseconds.
 ///
-/// Taking the compaction lock here would be a *blocking* acquisition on both of
-/// those paths. `flock` is per-fd within a process, so an actor panic while
-/// holding that lock would self-deadlock the hook, and a second Codewhale
-/// process sharing `CODEWHALE_HOME` would hang Ctrl-C.
+/// The append takes the shared privacy lock with `try_write()`, never a blocking
+/// acquisition. If the actor, a wipe, or another Codewhale process sharing
+/// `CODEWHALE_HOME` holds it, the event is dropped immediately. This preserves
+/// the panic/SIGINT liveness contract without allowing a write to race past a
+/// completed opt-out.
 ///
 /// A no-op when unarmed, which is what makes a disabled user's panic write
 /// nothing and create no directory.

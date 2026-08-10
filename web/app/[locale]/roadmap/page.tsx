@@ -34,7 +34,7 @@ const tracksEn = [
       { title: "OpenAI-compatible & local runtimes", note: "Generic `openai` route for any OpenAI-compatible gateway, plus vLLM, SGLang, and Ollama against your own localhost endpoints — no key required" },
       { title: "Multi-provider support", note: "Hot-swap between providers (DeepSeek, OpenAI, Anthropic, OpenRouter) per session" },
       { title: "Local web client", note: "Implemented in the v0.9.1 source candidate: `codewhale web` is a loopback-only browser client over the Runtime API behind a one-time bootstrap session boundary; approvals and user input recover across page reloads (#4423)" },
-      { title: "Opt-in product telemetry", note: "Off by default, and unanswered until a first-run notice asks — nothing is collected, and the telemetry directory is not even created, until you answer Enable. An enabled session posts counts and closed enums to the first-party endpoint https://telemetry.codewhale.net/v1/telemetry, a Cloudflare Worker whose full source is in the repo under telemetry-ingest/. Its storage has no IP, country, or geo column — that is structural, not a setting — nothing is logged, and Cloudflare's retention is a fixed three months. Set telemetry_endpoint = \"\" to stay enabled and contact nobody: batches then go to $CODEWHALE_HOME/telemetry/dryrun.jsonl and you can read exactly what would have been sent. Never prompts, completions, tool arguments, file contents, paths, repo or branch names, model ids, or credentials; the full schema is docs/TELEMETRY.md. Turn it off with `codewhale config set telemetry false` or CODEWHALE_TELEMETRY=0, which also deletes the random install id and every buffered event." },
+      { title: "Anonymous usage counting", note: "On by default with a clear first-run disclosure and a durable opt-out. It posts aggregate session, feature, and error counts and closed enums to the first-party endpoint https://telemetry.codewhale.net/v1/telemetry, a Cloudflare Worker whose full source is in the repo under telemetry-ingest/. Its storage has no IP, country, or geo column — that is structural, not a setting — nothing is logged, and Cloudflare's retention is a fixed three months. Set telemetry_endpoint = \"\" to contact nobody: batches then go to $CODEWHALE_HOME/telemetry/dryrun.jsonl and you can read exactly what would have been sent. Never conversations, code, prompts, files, file/repo/branch names, model content, credentials, or a per-turn/per-tool timeline; the full schema is docs/TELEMETRY.md. Turn it off with `codewhale config set telemetry false` or CODEWHALE_TELEMETRY=0." },
     ],
   },
   {
@@ -60,7 +60,7 @@ const tracksEn = [
   {
     title: "Ruled out",
     items: [
-      { title: "Always-on or silent product telemetry", note: "There is now a first-party telemetry endpoint (https://telemetry.codewhale.net/v1/telemetry) and it is the shipped default — but it decides where an already-enabled session sends, never whether one collects. Product telemetry stays opt-in and off by default; nothing is collected until the first-run notice is answered with Enable, and CODEWHALE_TELEMETRY=0, telemetry = false, and a recorded decline are all hard floors. What stays ruled out: an always-on mode, per-keystroke or per-tool-call phone-home, silent collection with no notice, and any third-party ad or analytics SDK in the runtime binary. A selected hosted provider still receives the context required for its model turn; loopback routes can keep inference local." },
+      { title: "Silent or content-level telemetry", note: "Anonymous usage counting is on by default, but the first-run disclosure and every opt-out are mandatory. What stays ruled out: conversations, code, prompts, files, model content, credentials, per-turn or per-tool timelines, collection hidden from the user, and any third-party ad or analytics SDK in the runtime binary. A selected hosted provider still receives the context required for its model turn; loopback routes can keep inference local." },
       { title: "Mandatory hosted relay for local sessions", note: "The local runtime and bring-your-own-provider routes continue to work without sending sessions through a Codewhale service" },
       { title: "Required account for the local runtime", note: "Installing and running Codewhale locally requires no account" },
       { title: "Sponsored model promotion", note: "Model picker stays neutral — no paid placement" },
@@ -93,7 +93,7 @@ const tracksZh = [
       { title: "OpenAI 兼容与本地运行时", note: "通用 `openai` 路由可接入任意 OpenAI 兼容网关；vLLM、SGLang、Ollama 直连本地端点，无需密钥" },
       { title: "多提供商支持", note: "按会话动态切换提供商（DeepSeek、OpenAI、Anthropic、OpenRouter）" },
       { title: "本地 Web 客户端", note: "v0.9.1 源码候选版已实现：`codewhale web` 是基于 Runtime API 与一次性引导会话边界的回环地址浏览器客户端；审批与用户输入可在页面刷新后恢复（#4423）" },
-      { title: "可选加入的产品遥测", note: "默认关闭，首次运行的提示未回答前不会收集任何内容——在你回答“启用”之前，连遥测目录都不会被创建。启用后的会话会把计数与封闭枚举 POST 到第一方端点 https://telemetry.codewhale.net/v1/telemetry，那是一个 Cloudflare Worker，完整源码就在仓库的 telemetry-ingest/ 目录里。它的存储中没有 IP、国家或任何地理位置列——这是结构上不存在，而不是某个可以改回来的开关——不写任何日志，Cloudflare 的保留期固定为三个月。若想保持启用但不联系任何服务器，设置 telemetry_endpoint = \"\"：批次会写入 $CODEWHALE_HOME/telemetry/dryrun.jsonl，你可以直接查看本应发送的全部内容。永远不收集 prompt、模型回复、工具参数、文件内容、路径、仓库或分支名、模型 id 与凭据；完整 schema 见 docs/TELEMETRY.md。用 `codewhale config set telemetry false` 或 CODEWHALE_TELEMETRY=0 关闭，同时会删除随机安装 id 与所有已缓冲事件。" },
+      { title: "匿名使用计数", note: "默认开启，首次运行会清楚说明，并提供永久关闭选项。它只会把聚合的会话、功能与错误计数以及封闭枚举 POST 到第一方端点 https://telemetry.codewhale.net/v1/telemetry；完整源码在 telemetry-ingest/。存储中没有 IP、国家或地理位置列，不写日志，Cloudflare 的保留期固定为三个月。设置 telemetry_endpoint = \"\" 可完全不联系服务器，批次只写入 $CODEWHALE_HOME/telemetry/dryrun.jsonl。永远不收集对话、代码、prompt、文件、文件/仓库/分支名、模型内容、凭据，也不发送逐轮或逐工具时间线；完整 schema 见 docs/TELEMETRY.md。用 `codewhale config set telemetry false` 或 CODEWHALE_TELEMETRY=0 关闭。" },
     ],
   },
   {
@@ -119,7 +119,7 @@ const tracksZh = [
   {
     title: "暂不考虑",
     items: [
-      { title: "默认开启或静默的产品遥测", note: "现在确实存在第一方遥测端点（https://telemetry.codewhale.net/v1/telemetry），并且它是随产品发布的默认值——但它决定的只是「已启用的会话把批次发到哪里」，而不是「是否收集」。产品遥测依然是可选加入且默认关闭的：在首次运行提示被回答为“启用”之前不会收集任何内容，而 CODEWHALE_TELEMETRY=0、telemetry = false 以及已记录的“拒绝”都是硬性下限。仍被排除在外的是：常开模式、按键级或按工具调用级的回传、没有任何提示的静默收集，以及运行时二进制中的任何第三方广告或分析 SDK。选用托管 provider 时仍会发送本轮所需上下文，回环地址路由可让推理保持本地。" },
+      { title: "静默或内容级遥测", note: "匿名使用计数默认开启，但首次运行说明与所有关闭选项都是强制的。仍被排除在外的是：对话、代码、prompt、文件、模型内容、凭据、逐轮或逐工具时间线、对用户隐藏的收集，以及运行时二进制中的任何第三方广告或分析 SDK。选用托管 provider 时仍会发送本轮所需上下文，回环地址路由可让推理保持本地。" },
       { title: "本地会话强制经过托管中继", note: "本地 Runtime 与自带提供商路由继续工作，无需把会话发送到 Codewhale 服务" },
       { title: "本地 Runtime 强制注册账户", note: "本地安装和运行 Codewhale 不需要账户" },
       { title: "赞助商模型推广", note: "模型选择器保持中立——无付费推荐位" },

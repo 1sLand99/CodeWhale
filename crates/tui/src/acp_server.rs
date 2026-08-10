@@ -572,21 +572,27 @@ impl AcpServer {
             crate::resolve_cli_auto_route(&self.config, &self.model, last_user_text).await?;
         let execution_config = crate::config_for_cli_route(&self.config, &route);
         let client = DeepSeekClient::new(&execution_config)?;
+        let model = route.model;
+        let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
         let reasoning_effort = route
             .reasoning_effort
             .and_then(|effort| {
                 effort.api_value_for_route(
                     execution_config.api_provider(),
                     &execution_config.deepseek_base_url(),
-                    &route.model,
+                    &model,
                 )
             })
             .map(str::to_string);
 
         let request = MessageRequest {
-            model: route.model,
+            model,
             messages: messages.to_vec(),
-            max_tokens: 4096,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                request_route.provider,
+                &request_route.model,
+                None,
+            ),
             system: Some(SystemPrompt::Text(
                 "You are a coding assistant inside an ACP-compatible editor. Give concise, actionable responses.".to_string(),
             )),
@@ -596,8 +602,8 @@ impl AcpServer {
             thinking: None,
             reasoning_effort,
             stream: Some(true),
-            temperature: Some(0.2),
-            top_p: Some(0.9),
+            temperature: None,
+            top_p: None,
         };
 
         client.create_message_stream(request).await

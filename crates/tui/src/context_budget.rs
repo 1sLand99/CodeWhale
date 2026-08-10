@@ -9,7 +9,8 @@
 //!   * **output token cap** — the output reservation actually used to compute
 //!     that budget (clamped so it never starves the window);
 //!   * **compaction trigger** — the input-token level at which compaction
-//!     should be suggested (default: ~75% of the spendable input ceiling);
+//!     should be suggested (default: ~75% of the full window, clamped to the
+//!     spendable input ceiling);
 //!   * **[`PressureLevel`]** — a coarse Low/Medium/High/Critical signal the UI
 //!     can render without re-deriving thresholds.
 //!
@@ -49,9 +50,9 @@ pub const DEFAULT_COMPACTION_TRIGGER_PERCENT: f64 = 75.0;
 pub const CRITICAL_PRESSURE_PERCENT: f64 = 90.0;
 
 /// Percentage of the window at or above which pressure is [`PressureLevel::High`].
-/// Pressure remains a window-relative UI signal. The actual compaction trigger
-/// is relative to the spendable input ceiling, so these thresholds can diverge
-/// when output reservation consumes a substantial part of the window.
+/// Pressure and the requested compaction trigger are window-relative. The
+/// trigger is clamped to the spendable input ceiling, so it can fire before
+/// this UI boundary when output reservation consumes substantial window space.
 pub const HIGH_PRESSURE_PERCENT: f64 = DEFAULT_COMPACTION_TRIGGER_PERCENT;
 
 /// Percentage of the window at or above which pressure is [`PressureLevel::Medium`].
@@ -147,14 +148,15 @@ pub struct ContextBudget {
     /// at least [`MIN_INPUT_BUDGET_TOKENS`] of input room.
     pub output_cap_tokens: u64,
     /// Spendable input ceiling for the turn (`window - output_cap - headroom`,
-    /// saturating at 0). Compaction percentages use this denominator rather
-    /// than the raw input-plus-output context window.
+    /// saturating at 0). Compaction percentages use the full window and clamp
+    /// their resulting token threshold to this ceiling.
     pub input_budget_ceiling: u64,
     /// Input tokens still available before hitting the reserved boundary
     /// (`input_budget_ceiling - input`, saturating at 0).
     pub available_input_tokens: u64,
     /// Input-token level at or above which compaction should be suggested
-    /// (`DEFAULT_COMPACTION_TRIGGER_PERCENT` of the input budget ceiling).
+    /// (`DEFAULT_COMPACTION_TRIGGER_PERCENT` of the window, clamped to the
+    /// input budget ceiling).
     pub compaction_trigger_tokens: u64,
     /// Coarse pressure level derived from window usage.
     pub pressure: PressureLevel,
@@ -182,7 +184,7 @@ impl ContextBudget {
         let available_input_tokens = input_budget_ceiling.saturating_sub(input_tokens);
 
         let compaction_trigger_tokens =
-            percent_of(input_budget_ceiling, DEFAULT_COMPACTION_TRIGGER_PERCENT);
+            percent_of(window_tokens, DEFAULT_COMPACTION_TRIGGER_PERCENT).min(input_budget_ceiling);
 
         let pressure =
             PressureLevel::from_usage_percent(usage_percent(window_tokens, input_tokens));
@@ -198,13 +200,25 @@ impl ContextBudget {
         }
     }
 
-    /// Derive a compaction trigger from the spendable input ceiling.
+    /// Derive a compaction trigger from a window percentage.
     ///
-    /// Applying a clamped percentage to the ceiling guarantees that the
-    /// trigger cannot sit beyond the input room available to the route.
+    /// The percentage means what the user-facing context meter says it means:
+    /// a fraction of the full route window (`80` on a 1M window is 800K input
+    /// tokens before the route ceiling clamp). One internal clamp applies:
+    ///
+    /// ```text
+    /// trigger = min(window × percent, window − output reservation − headroom)
+    /// ```
+    ///
+    /// so a late percentage can never push the trigger past the spendable
+    /// input ceiling and overflow the provider window. Previously the
+    /// percentage was applied to the ceiling itself, which silently pulled an
+    /// "80%" setting down to ~60% of the window on routes with large output
+    /// reservations; UI surfaces should disclose the clamp when it engages
+    /// instead of redefining what the percentage means.
     #[must_use]
     pub fn compaction_trigger_for_percent(&self, percent: f64) -> u64 {
-        percent_of(self.input_budget_ceiling, percent)
+        percent_of(self.window_tokens, percent).min(self.input_budget_ceiling)
     }
 
     /// Fraction of the window currently consumed by input, as a percentage in
@@ -330,16 +344,14 @@ mod tests {
     // -- Compaction trigger -------------------------------------------------
 
     #[test]
-    fn compaction_trigger_is_three_quarters_of_input_ceiling() {
+    fn compaction_trigger_is_window_percent_clamped_to_input_ceiling() {
         for &window in WINDOWS {
             let budget = ContextBudget::new(window, 0, 64_000);
-            let expected = percent_of(
-                budget.input_budget_ceiling,
-                DEFAULT_COMPACTION_TRIGGER_PERCENT,
-            );
+            let expected = percent_of(window, DEFAULT_COMPACTION_TRIGGER_PERCENT)
+                .min(budget.input_budget_ceiling);
             assert_eq!(
                 budget.compaction_trigger_tokens, expected,
-                "window {window}: trigger should be 75% of the input ceiling"
+                "window {window}: trigger should be 75% of the window, clamped to the ceiling"
             );
             assert!(budget.compaction_trigger_tokens <= budget.input_budget_ceiling);
         }

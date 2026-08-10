@@ -344,7 +344,7 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
         .map(|index| Message {
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
             content: vec![ContentBlock::Text {
-                text: "x".repeat(3_000),
+                text: "x".repeat(10_000),
                 cache_control: None,
             }],
         })
@@ -354,9 +354,9 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
     engine.session.system_prompt = Some(installed_prompt.clone());
 
     let installed_pressure =
-        crate::compaction::estimate_input_tokens_conservative(&messages, Some(&installed_prompt));
+        crate::compaction::estimate_input_tokens_for_pressure(&messages, Some(&installed_prompt));
     let planned_pressure =
-        crate::compaction::estimate_input_tokens_conservative(&messages, Some(&planned_prompt));
+        crate::compaction::estimate_input_tokens_for_pressure(&messages, Some(&planned_prompt));
     assert!(planned_pressure > installed_pressure);
     let compaction = crate::compaction::CompactionConfig {
         enabled: true,

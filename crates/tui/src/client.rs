@@ -1671,7 +1671,12 @@ fn translation_system_prompt(target_language: &str) -> String {
     )
 }
 
-fn translation_message_request(text: &str, model: String, target_language: &str) -> MessageRequest {
+fn translation_message_request(
+    text: &str,
+    model: String,
+    target_language: &str,
+    max_tokens: u32,
+) -> MessageRequest {
     MessageRequest {
         model,
         messages: vec![Message {
@@ -1681,7 +1686,7 @@ fn translation_message_request(text: &str, model: String, target_language: &str)
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens,
         system: Some(SystemPrompt::Text(translation_system_prompt(
             target_language,
         ))),
@@ -1691,7 +1696,7 @@ fn translation_message_request(text: &str, model: String, target_language: &str)
         thinking: None,
         reasoning_effort: Some("off".to_string()),
         stream: Some(false),
-        temperature: Some(0.1),
+        temperature: None,
         top_p: None,
     }
 }
@@ -1976,6 +1981,11 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
+        let max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
+            self.api_provider,
+            &model,
+            None,
+        );
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -1984,7 +1994,7 @@ impl DeepSeekClient {
             // deliberately does not claim to describe either
             // (see `docs/PREVIEW_REQUEST.md`).
             let prepared = self.prepare_outbound_request(
-                translation_message_request(text, model, target_language),
+                translation_message_request(text, model, target_language, max_tokens),
                 false,
             )?;
             let response = match prepared.dialect {
@@ -2012,8 +2022,7 @@ impl DeepSeekClient {
                     "content": text
                 }
             ],
-            "max_tokens": 4096,
-            "temperature": 0.1,
+            "max_tokens": max_tokens,
             "stream": false
         });
         chat::apply_route_reasoning_controls(
@@ -3559,6 +3568,8 @@ pub(crate) fn build_cache_warmup_request(request: &MessageRequest) -> MessageReq
     chat::build_cache_warmup_request(request)
 }
 
+pub(crate) use chat::CACHE_WARMUP_MAX_TOKENS;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3886,6 +3897,69 @@ mod tests {
         let path = requests[0].url.path().to_string();
         let body = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
         (path, body)
+    }
+
+    #[tokio::test]
+    async fn core_primary_request_preparation_matches_captured_transport_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request = codewhale_core::request::prepare_primary_turn_request(
+            codewhale_core::request::PrimaryTurnRequest {
+                model: "deepseek-v4-pro".to_string(),
+                messages: vec![Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "core request boundary".to_string(),
+                        cache_control: None,
+                    }],
+                }],
+                max_tokens: 64,
+                system: None,
+                tools: Some(vec![Tool {
+                    input_schema: json!({
+                        "zeta": {"type": "string"},
+                        "alpha": {"type": "number"},
+                        "type": "object",
+                    }),
+                    ..test_tool("lookup")
+                }]),
+                tool_choice: Some(json!({"type": "auto"})),
+                reasoning_effort: Some("off".to_string()),
+            },
+        );
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let prepared = client
+            .prepare_outbound_request(request.clone(), true)
+            .expect("core request prepares through the production seam");
+        let prepared_bytes = serde_json::to_vec(&prepared.body).expect("prepared body serializes");
+
+        let mut stream = client
+            .create_message_stream(request)
+            .await
+            .expect("production transport accepts the core request");
+        while let Some(event) = stream.next().await {
+            event.expect("captured SSE response remains valid");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body, prepared_bytes);
+        let captured = std::str::from_utf8(&requests[0].body).expect("request body is UTF-8 JSON");
+        assert!(
+            captured.contains(
+                r#""parameters":{"zeta":{"type":"string"},"alpha":{"type":"number"},"type":"object"}"#
+            ),
+            "nested core-owned JSON order drifted: {captured}"
+        );
     }
 
     // This synchronous guard deliberately spans every await: the assertions
@@ -4939,6 +5013,27 @@ mod tests {
         assert_k3_request_json_route_boundaries(true).await;
     }
 
+    #[tokio::test]
+    async fn kimi_code_compaction_shape_omits_sampling_parameters_on_wire() {
+        let mut request = k3_request_fixture(
+            crate::config::KIMI_CODE_K3_MODEL,
+            None,
+            /*stream*/ false,
+        );
+        request.temperature = None;
+        request.top_p = None;
+        let body = capture_moonshot_chat_request_body(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            request,
+        )
+        .await;
+
+        assert_eq!(body["model"], crate::config::KIMI_CODE_K3_MODEL);
+        assert!(body.get("temperature").is_none(), "{body}");
+        assert!(body.get("top_p").is_none(), "{body}");
+    }
+
     /// v0.9.1 kimi-k3 dogfood report: the id the user selects has to be the id on the wire. A
     /// dogfood user selecting `kimi-k3` was served `kimi-k2.7-code`, so this
     /// asserts the wire `model` field for each K3 product on its own endpoint,
@@ -5095,7 +5190,7 @@ mod tests {
     }
 
     fn minimal_zen_request(model: &str) -> MessageRequest {
-        translation_message_request("hello", model.to_string(), "English")
+        translation_message_request("hello", model.to_string(), "English", 4096)
     }
 
     fn assert_zen_bearer_without_codex_headers(request: &wiremock::Request) {
@@ -6439,6 +6534,21 @@ mod tests {
             "translation disables thinking: {body}"
         );
         assert!(
+            body.get("temperature").is_none() && body.get("top_p").is_none(),
+            "translation must not inject sampling controls: {body}"
+        );
+        assert_eq!(
+            body.get("max_tokens").and_then(Value::as_u64),
+            Some(u64::from(
+                crate::route_budget::effective_max_output_tokens_for_route(
+                    ApiProvider::DeepseekAnthropic,
+                    "deepseek-chat",
+                    None,
+                )
+            )),
+            "translation must inherit its resolved route allowance: {body}"
+        );
+        assert!(
             body.get("system")
                 .and_then(Value::as_str)
                 .is_some_and(|system| system.contains("Spanish")),
@@ -7235,8 +7345,9 @@ mod tests {
         let warmup = build_cache_warmup_request(&request);
 
         assert_eq!(warmup.max_tokens, 8);
-        assert_eq!(warmup.temperature, Some(0.0));
-        assert_eq!(warmup.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(warmup.temperature, None);
+        assert_eq!(warmup.top_p, None);
+        assert_eq!(warmup.reasoning_effort.as_deref(), Some("off"));
         assert_eq!(warmup.tools.as_ref().map(Vec::len), Some(1));
         assert_eq!(warmup.tool_choice, Some(json!("none")));
         assert_eq!(warmup.messages.len(), 2);

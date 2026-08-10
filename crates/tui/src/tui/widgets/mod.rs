@@ -25,7 +25,7 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppMode, ComposerDensity};
+use crate::tui::app::{App, AppMode, ComposerDensity, ViewportState};
 use crate::tui::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel,
     ToolCategory,
@@ -82,6 +82,34 @@ struct TranscriptScrollbar {
     top: usize,
     visible: usize,
     total: usize,
+}
+
+fn resolve_transcript_viewport_after_layout(
+    viewport: &mut ViewportState,
+    visible_lines: usize,
+) -> (usize, usize, bool) {
+    let total_lines = viewport.transcript_cache.total_lines();
+    let line_meta = viewport.transcript_cache.line_meta();
+    if viewport.pending_scroll_delta != 0 {
+        viewport.transcript_scroll = viewport.transcript_scroll.scrolled_by(
+            viewport.pending_scroll_delta,
+            line_meta,
+            visible_lines,
+        );
+        viewport.pending_scroll_delta = 0;
+    }
+
+    let max_start = total_lines.saturating_sub(visible_lines);
+    // Snapshot tail intent before resolve: clamping an out-of-range fixed
+    // offset can return `to_bottom()`, which must not masquerade as the user's
+    // choice to resume following a streaming tail (v0.8.11).
+    let was_explicit_tail = viewport.transcript_scroll.is_at_tail();
+    let (scroll_state, top) = viewport.transcript_scroll.resolve_top(line_meta, max_start);
+    viewport.transcript_scroll = scroll_state;
+    viewport.last_transcript_top = top;
+    viewport.last_transcript_visible = visible_lines;
+    viewport.last_transcript_total = total_lines;
+    (total_lines, top, was_explicit_tail)
 }
 
 impl ChatWidget {
@@ -240,6 +268,7 @@ impl ChatWidget {
                 }
             }),
         );
+        let provisional_action_owner = app.transcript_action_owner();
         let active_entries: &[HistoryCell] = app
             .active_cell
             .as_ref()
@@ -317,6 +346,7 @@ impl ChatWidget {
                 render_options,
                 &app.folded_thinking,
                 None,
+                provisional_action_owner,
             );
         } else {
             // Slow path: borrow non-collapsed cells into a filtered ref list
@@ -411,8 +441,15 @@ impl ChatWidget {
                 render_options,
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
+                provisional_action_owner,
             );
         }
+
+        let (total_lines, top, was_explicit_tail) =
+            resolve_transcript_viewport_after_layout(&mut app.viewport, visible_lines);
+        let owner = app.transcript_action_owner();
+        let index_map = has_collapsed.then_some(app.collapsed_cell_map.as_slice());
+        app.viewport.transcript_cache.retarget(owner, index_map);
 
         // The cache has now observed this revision (or the cell was filtered,
         // in which case a later reveal must cold-render). Start the next append
@@ -422,36 +459,8 @@ impl ChatWidget {
             receipt.from_revision = receipt.to_revision;
         }
 
-        let total_lines = app.viewport.transcript_cache.total_lines();
-
         let line_meta = app.viewport.transcript_cache.line_meta();
 
-        if app.viewport.pending_scroll_delta != 0 {
-            app.viewport.transcript_scroll = app.viewport.transcript_scroll.scrolled_by(
-                app.viewport.pending_scroll_delta,
-                line_meta,
-                visible_lines,
-            );
-            app.viewport.pending_scroll_delta = 0;
-        }
-
-        let max_start = total_lines.saturating_sub(visible_lines);
-        // v0.8.11 hotfix: snapshot whether the user's prior scroll state
-        // was *deliberately* tail BEFORE we resolve. `resolve_top` clamps
-        // out-of-range `at_line(N)` to `to_bottom()` (e.g. when content
-        // shrunk so `max_start < N`), and `scrolled_by` returns
-        // `to_bottom()` when the whole transcript fits in one screen
-        // even if the user just scrolled up. Either case would fool a
-        // post-resolve `is_at_tail()` check into thinking the user is
-        // tracking the tail and silently revoke `user_scrolled_during_
-        // stream` — the next stream chunk would then yank them back to
-        // bottom mid-read.
-        let was_explicit_tail = app.viewport.transcript_scroll.is_at_tail();
-        let (scroll_state, top) = app
-            .viewport
-            .transcript_scroll
-            .resolve_top(line_meta, max_start);
-        app.viewport.transcript_scroll = scroll_state;
         // If the user scrolled back to the live tail, the per-stream
         // "leave me alone" lock is over — new chunks should pin to bottom
         // again until they explicitly scroll up. Without this clear, content
@@ -469,9 +478,6 @@ impl ChatWidget {
         }
 
         app.viewport.last_transcript_area = Some(content_area);
-        app.viewport.last_transcript_top = top;
-        app.viewport.last_transcript_visible = visible_lines;
-        app.viewport.last_transcript_total = total_lines;
         app.viewport.last_transcript_padding_top = 0;
         let detail_target_cell = (!app.viewport.transcript_selection.is_active())
             .then(|| app.detail_cell_index_for_viewport(top, visible_lines, line_meta))
@@ -4151,7 +4157,7 @@ mod tests {
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
         App, AppMode, ComposerDensity, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
-        TuiOptions,
+        TranscriptSpacing, TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
@@ -4293,6 +4299,109 @@ mod tests {
         app.add_message(success_tool_cell("read_file"));
         app.add_message(success_tool_cell("list_dir"));
         app.add_message(success_tool_cell("web_search"));
+    }
+
+    fn spacer_rows_after_transcript_cell(app: &App, target_cell: usize) -> usize {
+        let mut saw_target = false;
+        let mut spacer_rows = 0;
+        for meta in app.viewport.transcript_cache.line_meta() {
+            match meta {
+                TranscriptLineMeta::CellLine { cell_index, .. } if *cell_index == target_cell => {
+                    saw_target = true;
+                    spacer_rows = 0;
+                }
+                TranscriptLineMeta::Spacer { .. } if saw_target => spacer_rows += 1,
+                TranscriptLineMeta::CellLine { .. } if saw_target => break,
+                TranscriptLineMeta::Spacer { .. } | TranscriptLineMeta::CellLine { .. } => {}
+            }
+        }
+        spacer_rows
+    }
+
+    #[test]
+    fn chat_widget_breathes_between_groups_without_padding_tool_rows_at_any_width() {
+        for (width, height) in [(40, 8), (120, 12)] {
+            let mut app = create_test_app();
+            app.low_motion = true;
+            app.fancy_animations = false;
+            app.transcript_spacing = TranscriptSpacing::Comfortable;
+
+            for turn in 0..4 {
+                app.add_message(HistoryCell::User {
+                    content: format!("turn {turn}: inspect the release receipts"),
+                });
+                app.add_message(HistoryCell::Assistant {
+                    content: format!("I will inspect receipt group {turn}."),
+                    streaming: false,
+                });
+                app.add_message(success_tool_cell(&format!("read_{turn}")));
+                app.add_message(success_tool_cell(&format!("verify_{turn}")));
+                app.add_message(HistoryCell::Assistant {
+                    content: format!("receipt group {turn} is complete"),
+                    streaming: false,
+                });
+            }
+
+            let area = Rect::new(0, 0, width, height);
+            app.viewport.transcript_scroll = TranscriptScroll::at_line(0);
+            let mut top_buf = Buffer::empty(area);
+            ChatWidget::new(&mut app, area).render(area, &mut top_buf);
+
+            assert_eq!(app.viewport.last_transcript_top, 0, "width={width}");
+            assert!(
+                app.viewport.last_transcript_total > usize::from(height),
+                "fixture must scroll at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 0),
+                1,
+                "the top-level user turn needs a breathing row at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 1),
+                1,
+                "answer to tool-group transition needs a breathing row at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 2),
+                0,
+                "calls inside one tool group must stay compact at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 3),
+                1,
+                "the completed tool group needs a breathing row at width={width}"
+            );
+            assert!(
+                buffer_text(&top_buf, area).contains("turn 0"),
+                "top scroll source drifted at width={width}"
+            );
+
+            let total = app.viewport.last_transcript_total;
+            app.viewport.transcript_scroll = TranscriptScroll::to_bottom();
+            let mut tail_buf = Buffer::empty(area);
+            ChatWidget::new(&mut app, area).render(area, &mut tail_buf);
+
+            assert_eq!(app.viewport.last_transcript_total, total, "width={width}");
+            assert!(app.viewport.last_transcript_top > 0, "width={width}");
+            assert!(
+                buffer_text(&tail_buf, area).contains("receipt group 3 is complete"),
+                "tail scroll lost the final source-backed cell at width={width}"
+            );
+            assert!(
+                app.viewport
+                    .transcript_cache
+                    .line_meta()
+                    .iter()
+                    .all(|meta| match meta {
+                        TranscriptLineMeta::CellLine { cell_index, .. } => {
+                            *cell_index < app.history.len()
+                        }
+                        TranscriptLineMeta::Spacer { .. } => true,
+                    }),
+                "spacing rows must not invent source-cell ownership at width={width}"
+            );
+        }
     }
 
     #[test]

@@ -221,10 +221,17 @@ Each member's `permissions` preset is a **ceiling**, never a grant: it is
 intersected with the live session posture, so a `read_write` member inside a
 read-only session runs read-only. The intersection becomes the child's real tool
 envelope — `permissions = "none"` leaves it with no tools at all, and a member
-without a network tool loses every web, fetch, browse, `web.run`, and MCP
-surface rather than merely being refused at call time. A member that cannot
-write loses the mutating file tools, and — when it kept `shell = "full"` so it
-can run checks — the raw shell as well, keeping the bounded verification tools
+without a network tool loses every reaching network surface — `web.run`,
+`fetch_url`, `web_search`, `github`, the `mcp*` families, and the reaching
+`rlm` actions — rather than merely being refused at call time. The one
+deliberate exception is the canonical `Web` family's `search`/`fetch` actions:
+they are the read-only web surface a recon/read-only member is entitled to
+(parity with an ordinary scout), so a network-denied member keeps exactly
+`Web {search, fetch}`. It stays read-only in fact, not just in name: a
+URL-addressed `fetch` is refused at dispatch, and nothing else on the surface
+is granted. A member that cannot write loses the mutating file tools, and —
+when it kept `shell = "full"` so it can run checks — the raw shell as well,
+keeping the bounded verification tools
 (`run_tests`, `run_verifiers`) it exists for: an arbitrary shell command mutates
 a workspace just as surely as `write_file`, so leaving it would make
 `write = false` untrue. That verification surface is bounded only in its

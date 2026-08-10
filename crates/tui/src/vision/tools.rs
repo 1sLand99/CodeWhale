@@ -13,8 +13,6 @@ use crate::tools::spec::{
     ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
 
-const DEFAULT_VISION_MAX_OUTPUT_TOKENS: u32 = 4096;
-
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
     client: reqwest::Client,
@@ -137,8 +135,7 @@ impl ImageAnalyzeTool {
                         }
                     ]
                 }
-            ],
-            "temperature": 0.7
+            ]
         });
 
         let token_limit_field = if Self::uses_max_completion_tokens(&self.config) {
@@ -146,7 +143,9 @@ impl ImageAnalyzeTool {
         } else {
             "max_tokens"
         };
-        payload[token_limit_field] = json!(DEFAULT_VISION_MAX_OUTPUT_TOKENS);
+        payload[token_limit_field] = json!(crate::route_budget::effective_max_output_tokens(
+            &self.config.model
+        ));
 
         payload
     }
@@ -345,8 +344,11 @@ mod tests {
 
         assert_eq!(
             payload.get("max_tokens").and_then(Value::as_u64),
-            Some(u64::from(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
+            Some(u64::from(crate::route_budget::effective_max_output_tokens(
+                &tool.config.model
+            )))
         );
+        assert!(payload.get("temperature").is_none());
         assert!(payload.get("max_completion_tokens").is_none());
     }
 
@@ -361,8 +363,11 @@ mod tests {
 
         assert_eq!(
             payload.get("max_completion_tokens").and_then(Value::as_u64),
-            Some(u64::from(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
+            Some(u64::from(crate::route_budget::effective_max_output_tokens(
+                &tool.config.model
+            )))
         );
+        assert!(payload.get("temperature").is_none());
         assert!(payload.get("max_tokens").is_none());
     }
 
@@ -377,7 +382,9 @@ mod tests {
 
         assert_eq!(
             payload.get("max_completion_tokens").and_then(Value::as_u64),
-            Some(u64::from(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
+            Some(u64::from(crate::route_budget::effective_max_output_tokens(
+                &tool.config.model
+            )))
         );
         assert!(payload.get("max_tokens").is_none());
     }

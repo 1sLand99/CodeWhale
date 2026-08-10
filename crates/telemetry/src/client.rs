@@ -3,8 +3,8 @@
 //! The shipped default endpoint is `codewhale_config::DEFAULT_TELEMETRY_ENDPOINT`,
 //! the first-party ingest service documented in `docs/TELEMETRY.md`. That
 //! default decides only *where* a batch goes, never *whether* one exists: this
-//! module is reached only by a session that resolved telemetry on, which
-//! requires the first-run notice to have been answered with Enable.
+//! module is reached only by a session that resolved telemetry on after every
+//! persistent and run-scoped opt-out was applied.
 //!
 //! `None` here is the dry-run sink, reachable by configuring an empty endpoint:
 //! batches are serialized with the same serializer a real endpoint would see and
@@ -35,12 +35,20 @@ pub enum SendOutcome {
 
 /// Serialize and deliver one batch.
 ///
-/// The tombstone is re-checked immediately before delivery, so a wipe that
-/// landed while the batch was being assembled still stops it.
+/// Network delivery holds the same non-blocking privacy lock as appends and
+/// wipe. A wipe waits for an already-started POST to finish; a POST that races
+/// a held or completed wipe is dropped before reaching the wire. Therefore no
+/// delivery can remain in flight after persistent opt-out returns.
 pub fn send(root: &Path, endpoint: Option<&str>, batch: &Batch) -> SendOutcome {
-    if buffer::tombstone_present(root) {
-        return SendOutcome::Dropped;
-    }
+    send_with_transport(root, endpoint, batch, post)
+}
+
+pub(crate) fn send_with_transport(
+    root: &Path,
+    endpoint: Option<&str>,
+    batch: &Batch,
+    transport: impl FnOnce(&str, &str, String) -> SendOutcome,
+) -> SendOutcome {
     let Ok(body) = serde_json::to_string(batch) else {
         return SendOutcome::Dropped;
     };
@@ -52,7 +60,15 @@ pub fn send(root: &Path, endpoint: Option<&str>, batch: &Batch) -> SendOutcome {
                 None => SendOutcome::Dropped,
             }
         }
-        Some(endpoint) => post(endpoint, &batch.app_version, body),
+        Some(endpoint) => buffer::try_with_lock(root, || {
+            if buffer::tombstone_present(root) {
+                return Ok(SendOutcome::Dropped);
+            }
+            Ok(transport(endpoint, &batch.app_version, body))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(SendOutcome::Dropped),
     }
 }
 

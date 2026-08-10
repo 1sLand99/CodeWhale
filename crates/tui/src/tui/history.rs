@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::deepseek_theme::active_theme;
+use crate::localization::Locale;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
 use crate::tools::plan::PlanSnapshot;
@@ -51,7 +52,7 @@ use message::{
     user_body_style, user_label_style,
 };
 #[cfg(test)]
-pub(super) use thinking::render_thinking_with_highlight;
+pub(super) use thinking::render_thinking_with_analysis;
 use thinking::{render_hidden_thinking_activity, render_thinking};
 use tool_output::{render_exec_output_mode, render_tool_output_mode, wrap_plain_line, wrap_text};
 
@@ -87,6 +88,25 @@ pub enum RenderMode {
     /// Full transcript view: every line of reasoning and tool output is
     /// emitted, no caps, no affordance.
     Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningAction {
+    Expand,
+    Collapse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TranscriptActionOwner {
+    pub cell_index: usize,
+    /// Rejects same-index replacements after destructive transcript changes.
+    pub identity_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReasoningActionTarget {
+    pub owner: TranscriptActionOwner,
+    pub action: ReasoningAction,
 }
 
 // === History Cells ===
@@ -162,6 +182,7 @@ impl SubAgentCell {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptRenderOptions {
+    pub locale: Locale,
     pub show_thinking: bool,
     pub thinking_default_expanded: bool,
     pub thinking_highlight: bool,
@@ -180,6 +201,7 @@ pub struct TranscriptRenderOptions {
 impl Default for TranscriptRenderOptions {
     fn default() -> Self {
         Self {
+            locale: Locale::En,
             show_thinking: true,
             thinking_highlight: true,
             thinking_default_expanded: false,
@@ -317,7 +339,7 @@ impl HistoryCell {
         width: u16,
         options: TranscriptRenderOptions,
     ) -> Vec<Line<'static>> {
-        self.lines_with_options_folded(width, options, false)
+        self.lines_with_options_folded(width, options, false).0
     }
 
     /// Render with an explicit per-cell fold override for thinking cells.
@@ -331,7 +353,8 @@ impl HistoryCell {
         width: u16,
         options: TranscriptRenderOptions,
         folded: bool,
-    ) -> Vec<Line<'static>> {
+    ) -> (Vec<Line<'static>>, Option<ReasoningAction>) {
+        let mut reasoning_action = None;
         let mut lines = match self {
             HistoryCell::Thinking {
                 streaming,
@@ -348,15 +371,24 @@ impl HistoryCell {
                 content,
                 streaming,
                 duration_secs,
-            } => thinking::render_thinking_with_highlight(
-                content,
-                width,
-                *streaming,
-                *duration_secs,
-                folded ^ !options.verbose ^ options.thinking_default_expanded,
-                options.low_motion,
-                options.thinking_highlight,
-            ),
+            } => {
+                let collapsed = folded ^ !options.verbose ^ options.thinking_default_expanded;
+                let (lines, expandable) = thinking::render_thinking_with_analysis(
+                    content,
+                    width,
+                    *streaming,
+                    *duration_secs,
+                    collapsed,
+                    options.low_motion,
+                    options.thinking_highlight,
+                );
+                reasoning_action = expandable.then_some(if collapsed {
+                    ReasoningAction::Expand
+                } else {
+                    ReasoningAction::Collapse
+                });
+                lines
+            }
             HistoryCell::Tool(ToolCell::PatchSummary(cell)) => cell.render(
                 width,
                 options.low_motion,
@@ -425,7 +457,7 @@ impl HistoryCell {
                 MotionMode::Full => {}
             }
         }
-        lines
+        (lines, reasoning_action)
     }
 
     #[allow(dead_code)]
@@ -435,6 +467,7 @@ impl HistoryCell {
         options: TranscriptRenderOptions,
     ) -> Vec<RenderedTranscriptLine> {
         self.lines_with_copy_metadata_folded(width, options, false)
+            .0
     }
 
     pub(crate) fn lines_with_copy_metadata_folded(
@@ -442,10 +475,13 @@ impl HistoryCell {
         width: u16,
         options: TranscriptRenderOptions,
         folded: bool,
-    ) -> Vec<RenderedTranscriptLine> {
-        match self {
-            // Prose cells wrap at the bounded measure; tool/status cells keep
-            // the caller's full width (see PROSE_MAX_MEASURE).
+    ) -> (Vec<RenderedTranscriptLine>, Option<ReasoningAction>) {
+        if matches!(self, HistoryCell::Thinking { .. }) {
+            let (lines, action) =
+                self.lines_with_options_folded(width.clamp(1, PROSE_MAX_MEASURE), options, folded);
+            return (hard_break_copy_lines(lines), action);
+        }
+        let lines = match self {
             HistoryCell::User { content } => hard_break_copy_lines(render_user_message(
                 content,
                 width.clamp(1, PROSE_MAX_MEASURE),
@@ -477,6 +513,7 @@ impl HistoryCell {
             }
             HistoryCell::Tool(_) => self
                 .lines_with_options_folded(width, options, folded)
+                .0
                 .into_iter()
                 .map(|line| {
                     let copy_prefix_width = tool_copy_prefix_width(&line);
@@ -488,15 +525,10 @@ impl HistoryCell {
                     }
                 })
                 .collect(),
-            // Reasoning blocks follow the prose measure: they are the longest
-            // single text surface at ultrawide sizes.
-            HistoryCell::Thinking { .. } => hard_break_copy_lines(self.lines_with_options_folded(
-                width.clamp(1, PROSE_MAX_MEASURE),
-                options,
-                folded,
-            )),
-            _ => hard_break_copy_lines(self.lines_with_options_folded(width, options, folded)),
-        }
+            HistoryCell::Thinking { .. } => unreachable!("reasoning handled above"),
+            _ => hard_break_copy_lines(self.lines_with_options_folded(width, options, folded).0),
+        };
+        (lines, None)
     }
 
     /// Render the cell in transcript mode: full content, no caps, no
@@ -621,6 +653,12 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
                 }
             }
             ContentBlock::Thinking { thinking, .. } => {
+                // Older sessions may contain this transport-only fallback from
+                // thinking-mode tool-call replay. It was never model output,
+                // so do not surface it when restoring their transcripts.
+                if thinking == "(reasoning omitted)" {
+                    continue;
+                }
                 if let Some(HistoryCell::Thinking { content, .. }) = cells.last_mut() {
                     if !content.is_empty() {
                         content.push('\n');

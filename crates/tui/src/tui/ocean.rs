@@ -346,9 +346,13 @@ impl OceanRamp {
             && theme.surface_bg == crate::palette::UI_THEME.surface_bg
         {
             return Some(Self {
-                surface: Color::Rgb(0x0e, 0x17, 0x29),
-                middle: Color::Rgb(0x08, 0x11, 0x1c),
-                deep: Color::Rgb(0x03, 0x07, 0x0d),
+                // Keep the authored Whale column unmistakably blue all the
+                // way to the floor. These restrained ocean shades sit between
+                // the shell's ink surfaces and its ambient blue: the empty
+                // field gains depth without becoming a saturated blue panel.
+                surface: Color::Rgb(0x10, 0x2a, 0x45),
+                middle: Color::Rgb(0x0a, 0x1e, 0x33),
+                deep: Color::Rgb(0x06, 0x13, 0x20),
                 ambient: Color::Rgb(0x26, 0x48, 0x66),
             });
         }
@@ -394,9 +398,11 @@ impl OceanRamp {
         }
         let position = f32::from(row.min(height - 1)) / f32::from(height - 1);
         if position <= 0.42 {
-            mix_colors(self.surface, self.middle, position / 0.42)
+            // Ease into each depth anchor so large empty regions read as calm
+            // water bands rather than a mechanically uniform color ramp.
+            mix_colors(self.surface, self.middle, smoothstep(position / 0.42))
         } else {
-            mix_colors(self.middle, self.deep, (position - 0.42) / 0.58)
+            mix_colors(self.middle, self.deep, smoothstep((position - 0.42) / 0.58))
         }
     }
 

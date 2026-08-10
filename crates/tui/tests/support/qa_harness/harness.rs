@@ -51,11 +51,15 @@ pub struct HarnessBuilder {
 
 impl HarnessBuilder {
     pub fn new(program: impl Into<PathBuf>) -> Self {
+        // PTY scenarios must never emit product telemetry merely because they
+        // launch a real binary in a fresh HOME. Tests that explicitly exercise
+        // the first-run disclosure can override this value on their builder.
+        let env = HashMap::from([("CODEWHALE_TELEMETRY".to_string(), "0".to_string())]);
         Self {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
-            env: HashMap::new(),
+            env,
             rows: 40,
             cols: 120,
             clear_env: false,

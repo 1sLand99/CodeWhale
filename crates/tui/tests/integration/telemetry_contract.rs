@@ -10,11 +10,11 @@
 //!
 //! Two disciplines make the zero-request assertions non-vacuous:
 //!
-//! 1. `enabled_and_accepted_posts_exactly_one_batch` proves the client works.
+//! 1. `default_on_posts_exactly_one_batch` proves the client works.
 //!    Without it every "sends zero requests" test would also pass against a
 //!    client that never sends anything at all.
-//! 2. Every off-test records the notice decision *and* points at a live
-//!    recorder, so it cannot pass through the consent gate by accident.
+//! 2. Every off-test points at a live recorder and exercises an explicit
+//!    persistent or run-scoped opt-out.
 //!
 //! The recorder is `http://127.0.0.1:<port>` — loopback, which is the one place
 //! `validate_endpoint` permits plaintext, and a packet that never leaves the
@@ -292,22 +292,24 @@ async fn assert_no_batches(server: &MockServer, why: &str) {
     );
 }
 
+async fn assert_one_batch(server: &MockServer, why: &str) -> Value {
+    let batches = recorded_batches(server).await;
+    assert_eq!(batches.len(), 1, "{why}: one session is one batch");
+    batches.into_iter().next().expect("one batch")
+}
+
 // ── The client works ─────────────────────────────────────────────────────
 
 /// Without this, every zero-request test below would also pass against a
 /// client that never sends anything.
 #[tokio::test(flavor = "current_thread")]
-async fn enabled_and_accepted_posts_exactly_one_batch() {
+async fn default_on_posts_exactly_one_batch() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
-    fixture.write_config("telemetry = true\n");
-    fixture.record_notice(true);
 
     fixture.run_completions();
 
-    let batches = recorded_batches(&server).await;
-    assert_eq!(batches.len(), 1, "one session is one batch");
-    let batch = &batches[0];
+    let batch = assert_one_batch(&server, "the documented default").await;
     assert_eq!(batch["schema_version"], 1);
     assert_eq!(batch["surface"], "cli");
     assert!(
@@ -394,31 +396,23 @@ async fn an_unparseable_telemetry_env_value_sends_zero_requests() {
     assert_no_batches(&server, "`CODEWHALE_TELEMETRY=maybe`").await;
 }
 
-/// The notice record is an independent AND condition. A pre-existing
-/// `telemetry = true` is not consent: the key has been settable and inert for
-/// a long time, so anyone who set it set a no-op.
+/// A fresh headless run follows the documented default even before the
+/// interactive disclosure has been shown.
 #[tokio::test(flavor = "current_thread")]
-async fn telemetry_enabled_without_notice_sends_zero_requests() {
+async fn telemetry_enabled_without_notice_posts_one_batch() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
-    fixture.write_config("telemetry = true\n");
     // Deliberately no `record_notice`.
 
     fixture.run_completions();
 
-    assert_no_batches(&server, "`telemetry = true` with no notice decision").await;
-    assert!(
-        !fixture.telemetry_root().exists(),
-        "a run that was never permitted to collect must not create {}",
-        fixture.telemetry_root().display()
-    );
+    assert_one_batch(&server, "default-on without a notice decision").await;
 }
 
-/// A decision recorded against a *different* notice version is stale: the
-/// content changed, so the answer is owed again and nothing is collected in
-/// the meantime.
+/// A prior acceptance does not pause counting when the disclosure version
+/// changes; the refreshed notice is still owed on the next interactive run.
 #[tokio::test(flavor = "current_thread")]
-async fn a_stale_notice_version_sends_zero_requests() {
+async fn a_stale_accepted_notice_version_posts_one_batch() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     fixture.write_config("telemetry = true\n");
@@ -430,7 +424,11 @@ async fn a_stale_notice_version_sends_zero_requests() {
 
     fixture.run_completions();
 
-    assert_no_batches(&server, "a decision recorded for an older notice version").await;
+    assert_one_batch(
+        &server,
+        "an acceptance recorded for an older notice version",
+    )
+    .await;
 }
 
 // ── Nothing survives a disable ───────────────────────────────────────────
@@ -469,9 +467,8 @@ async fn disabling_after_buffering_wipes_and_sends_nothing() {
     );
 }
 
-/// "Telemetry resolved to false" is the *default* state of every installation.
-/// A wipe keyed on it would delete a consenting user's identity and unflushed
-/// buffer every time they ran one command on a fresh machine profile.
+/// A non-persistent forced-off result must preserve an existing identity and
+/// unflushed buffer.
 #[tokio::test(flavor = "current_thread")]
 async fn forced_off_run_preserves_a_consenting_users_state() {
     let server = start_recorder().await;
@@ -479,11 +476,17 @@ async fn forced_off_run_preserves_a_consenting_users_state() {
     let root = fixture.telemetry_root();
     seed_consenting_home(&root);
     let before = snapshot(&root);
-    // No `telemetry` key at all, and no notice decision: forced off, not an
-    // answer.
-    fixture.write_config("");
-
-    fixture.run_completions();
+    let mut command = fixture.command();
+    command
+        .env("CODEWHALE_TELEMETRY", "not-a-bool")
+        .args([
+            "--config",
+            fixture.config_path.to_str().expect("config path"),
+            "completions",
+            "bash",
+        ])
+        .output()
+        .expect("run codewhale-tui completions");
 
     assert_no_batches(&server, "a forced-off run").await;
     assert_eq!(
@@ -568,9 +571,10 @@ async fn a_disabled_run_creates_no_telemetry_directory() {
 
 // ── The notice is never answered by silence ──────────────────────────────
 
-/// Deferral is not a decision. `--skip-onboarding` records nothing, prints
-/// nothing, and sends nothing — unlike the constitution checkpoint, which does
-/// persist a `Deferred` completion.
+/// Deferral is not a decision. `--skip-onboarding` records and prints no notice
+/// decision, while the non-interactive run still follows the documented
+/// default — unlike the constitution checkpoint, which persists a `Deferred`
+/// completion.
 #[tokio::test(flavor = "current_thread")]
 async fn skip_onboarding_writes_no_telemetry_decision() {
     let server = start_recorder().await;
@@ -605,7 +609,7 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
             "skip-onboarding must leave the telemetry decision unset"
         );
     }
-    assert_no_batches(&server, "`--skip-onboarding`").await;
+    assert_one_batch(&server, "`--skip-onboarding` follows the default").await;
 }
 
 // ── Payload red lines, through a real turn ───────────────────────────────

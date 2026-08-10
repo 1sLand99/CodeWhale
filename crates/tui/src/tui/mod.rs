@@ -92,6 +92,7 @@ pub mod startup_defaults;
 pub mod streaming;
 pub mod streaming_thinking;
 mod subagent_routing;
+pub(crate) mod telemetry_notice;
 pub mod theme_picker;
 mod tool_routing;
 pub mod transcript;

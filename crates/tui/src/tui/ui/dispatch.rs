@@ -143,6 +143,13 @@ pub(crate) async fn submit_initial_input_if_ready(
         return Ok(());
     }
 
+    if app
+        .view_stack
+        .contains_kind(crate::tui::views::ModalKind::TelemetryNotice)
+    {
+        return Ok(());
+    }
+
     if app.onboarding != OnboardingState::None {
         if app.status_message.is_none() && !app.input.trim().is_empty() {
             app.status_message = Some(INITIAL_PROMPT_DEFERRED_STATUS.to_string());
@@ -316,8 +323,15 @@ pub(crate) fn queued_message_content_for_app(
         app.mention_walk_depth,
         app.workspace_follow_symlinks,
     );
-    let user_request = crate::tui::file_mention::user_request_with_file_mentions_cached(
+    // Stabilize macOS screencapture temp references before anything else sees
+    // the text: macOS deletes those Temporary Items dirs minutes after capture.
+    let stabilization_dir = crate::tui::file_mention::screenshot_stabilization_dir(&app.workspace);
+    let display = crate::tui::file_mention::stabilize_screenshot_references(
         &message.display,
+        &stabilization_dir,
+    );
+    let user_request = crate::tui::file_mention::user_request_with_file_mentions_cached(
+        &display,
         &app.workspace,
         cwd,
         git_cache,
@@ -544,7 +558,6 @@ pub(crate) fn prepare_user_dispatch(
         history_len: app.history.len(),
         history_revisions_len: app.history_revisions.len(),
         history_version: app.history_version,
-        next_history_revision: app.next_history_revision,
         api_messages_len: app.api_messages.len(),
         last_send_at: app.last_send_at,
     };
@@ -858,6 +871,7 @@ pub(crate) fn build_dispatch_error_closure(
               _engine_handle: &EngineHandle,
               _config: &Config|
               -> anyhow::Result<()> {
+            app.remote_control.fail_active_dispatch(&error);
             app.dispatch_in_flight = false;
             // Roll back the optimistic sync prepare mutations.
             app.is_loading = prepare.snapshot.is_loading;
@@ -866,10 +880,10 @@ pub(crate) fn build_dispatch_error_closure(
             app.receipt_started_at = prepare.snapshot.receipt_started_at;
             app.tool_evidence = prepare.snapshot.tool_evidence.clone();
             app.history.truncate(prepare.snapshot.history_len);
+            app.prune_transcript_index_state(prepare.snapshot.history_len);
             app.history_revisions
                 .truncate(prepare.snapshot.history_revisions_len);
             app.history_version = prepare.snapshot.history_version;
-            app.next_history_revision = prepare.snapshot.next_history_revision;
             app.api_messages.truncate(prepare.snapshot.api_messages_len);
             app.last_send_at = prepare.snapshot.last_send_at;
             app.needs_redraw = true;

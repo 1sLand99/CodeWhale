@@ -2961,4 +2961,114 @@ mod tests {
             "a to-do row opens the work inspector: {action:?}"
         );
     }
+
+    /// Opening the sub-agent register must not hide the to-do list — both
+    /// durable surfaces stay visible together (owner report, 0.9.6).
+    #[test]
+    fn agents_panel_keeps_todos_visible_alongside_subagents() {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        app.work_surface.panel = super::RailPanel::Agents;
+        app.subagent_cache.push(cached_worker(
+            "agent-live",
+            "scout",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+        add_todos(&mut app, 2);
+
+        let rows = super::model::visible_rows_for_panel(&mut app);
+        let ids: Vec<String> = rows.iter().map(|row| row.id.0.clone()).collect();
+
+        assert!(
+            ids.iter().any(|id| id.starts_with("worker:")),
+            "the sub-agent register stays in the Agents panel: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("graph:")),
+            "opening the register must not hide the to-do list: {ids:?}"
+        );
+    }
+
+    /// The register header is a two-way door: open the Agents panel, then the
+    /// same click returns to Tasks, so the to-do list is never stranded.
+    #[test]
+    fn subagent_header_is_a_two_way_door() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-archived",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Completed,
+        ));
+
+        let click_header = |app: &mut App| -> SidebarRowAction {
+            let header_y = app
+                .work_surface
+                .hitboxes
+                .iter()
+                .find(|hit| hit.id.0 == "section:agents")
+                .expect("subagent header is a real hit target")
+                .row_y;
+            super::handle_mouse(
+                app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 2,
+                    row: header_y,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )
+            .action
+            .expect("subagent header dispatches its primary action")
+        };
+
+        let _ = render_text(&mut app, 100, 4);
+        let action = click_header(&mut app);
+        assert_eq!(action, SidebarRowAction::ShowSubagentsPanel);
+        crate::tui::mouse_ui::apply_sidebar_row_action(&mut app, action);
+        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+
+        let _ = render_text(&mut app, 100, 6);
+        let action = click_header(&mut app);
+        crate::tui::mouse_ui::apply_sidebar_row_action(&mut app, action);
+        assert_eq!(
+            app.work_surface.panel,
+            super::RailPanel::Tasks,
+            "clicking the header inside the register returns to Tasks"
+        );
+    }
+
+    /// ⌥V opens the selected work row's own details; the transcript pager is
+    /// only the fallback when no row is selected (owner report, 0.9.6).
+    #[test]
+    fn details_chord_opens_the_selected_work_row() {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        app.work_surface.panel = super::RailPanel::Agents;
+        add_todos(&mut app, 2);
+
+        let rows = super::model::visible_rows_for_panel(&mut app);
+        let todo_row = rows
+            .iter()
+            .find(|row| row.id.0.starts_with("graph:"))
+            .expect("a to-do row projects")
+            .clone();
+        app.work_surface.focused = true;
+        app.work_surface.selected = Some(todo_row.id.clone());
+
+        let handled = super::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+        );
+        assert!(
+            matches!(handled, Some(Some(SidebarRowAction::InspectWork { .. }))),
+            "⌥V opens the selected row's own details: {handled:?}"
+        );
+    }
 }

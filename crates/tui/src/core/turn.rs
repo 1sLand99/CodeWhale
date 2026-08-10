@@ -44,6 +44,11 @@ pub struct TurnContext {
     /// Usage for this turn
     pub usage: Usage,
 
+    /// Input tokens reported for the most recent parent-route model request.
+    /// This is deliberately separate from `usage`, which accumulates every
+    /// parent step and programmatic child call for billing.
+    pub(crate) latest_parent_input_tokens: Option<u32>,
+
     /// Route facts resolved for this turn but not timestamped until the first
     /// provider request is actually dispatched.
     pub(crate) pending_route: Option<TurnRoute>,
@@ -63,6 +68,7 @@ impl TurnContext {
                 output_tokens: 0,
                 ..Usage::default()
             },
+            latest_parent_input_tokens: None,
             pending_route: None,
         }
     }
@@ -120,6 +126,14 @@ impl TurnContext {
                 add_optional_usage(total.tool_search_requests, delta.tool_search_requests);
         }
     }
+
+    /// Record one parent-route response for both billing and live-context
+    /// pressure. Child-model usage must call [`Self::add_usage`] directly so
+    /// it cannot masquerade as the parent request's context size.
+    pub fn add_parent_usage(&mut self, usage: &Usage) {
+        self.latest_parent_input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
+        self.add_usage(usage);
+    }
 }
 
 fn add_optional_usage(total: Option<u32>, delta: Option<u32>) -> Option<u32> {
@@ -160,6 +174,54 @@ mod usage_tests {
         let server = turn.usage.server_tool_use.expect("server tool usage");
         assert_eq!(server.code_execution_requests, Some(u32::MAX));
         assert_eq!(server.tool_search_requests, Some(5));
+    }
+
+    fn below_threshold(messages: &[crate::models::Message], turn: &TurnContext) -> bool {
+        let config = crate::compaction::CompactionConfig {
+            enabled: true,
+            token_threshold: 100_000,
+            ..Default::default()
+        };
+        !crate::compaction::compaction_pressure_reached_with_billed(
+            messages,
+            None,
+            &config,
+            turn.latest_parent_input_tokens.map(u64::from),
+        )
+    }
+
+    #[test]
+    fn cumulative_low_context_parent_steps_cannot_trigger_compaction() {
+        let mut turn = TurnContext::new(4);
+        turn.add_parent_usage(&Usage {
+            input_tokens: 60_000,
+            ..Usage::default()
+        });
+        turn.add_parent_usage(&Usage {
+            input_tokens: 70_000,
+            ..Usage::default()
+        });
+
+        assert_eq!(turn.usage.input_tokens, 130_000);
+        assert_eq!(turn.latest_parent_input_tokens, Some(70_000));
+        assert!(below_threshold(&[], &turn));
+    }
+
+    #[test]
+    fn child_usage_cannot_replace_parent_context_pressure() {
+        let mut turn = TurnContext::new(4);
+        turn.add_parent_usage(&Usage {
+            input_tokens: 70_000,
+            ..Usage::default()
+        });
+        turn.add_usage(&Usage {
+            input_tokens: 250_000,
+            ..Usage::default()
+        });
+
+        assert_eq!(turn.usage.input_tokens, 320_000);
+        assert_eq!(turn.latest_parent_input_tokens, Some(70_000));
+        assert!(below_threshold(&[], &turn));
     }
 }
 

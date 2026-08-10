@@ -5,6 +5,26 @@
 
 use super::*;
 
+/// Keep compact terminals fully fluid, then introduce only a modest symmetric
+/// gutter as the canvas grows. One cell per twelve columns beyond the compact
+/// breakpoint gives wide sessions breathing room without turning the product
+/// into a narrow centered rail; the cap prevents ultra-wide terminals from
+/// accumulating large dead margins.
+const SESSION_SHELL_FLUID_WIDTH: u16 = 112;
+const SESSION_SHELL_GUTTER_STEP: u16 = 12;
+const SESSION_SHELL_MAX_SIDE_GUTTER: u16 = 16;
+
+pub(crate) fn session_shell_area(area: Rect) -> Rect {
+    let side_gutter = (area.width.saturating_sub(SESSION_SHELL_FLUID_WIDTH)
+        / SESSION_SHELL_GUTTER_STEP)
+        .min(SESSION_SHELL_MAX_SIDE_GUTTER);
+    Rect {
+        x: area.x.saturating_add(side_gutter),
+        width: area.width.saturating_sub(side_gutter.saturating_mul(2)),
+        ..area
+    }
+}
+
 /// Snapshot the posture a real `Op::SendMessage` would carry, and — when the
 /// user supplied a hypothetical prompt — resolve the next turn's route with
 /// the **same shared planner** dispatch uses (#1004).
@@ -666,6 +686,7 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
 
 pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let size = f.area();
+    let shell_area = session_shell_area(size);
     // Keep the view stack's focus-context texture prototype (#4823) in step
     // with the parsed setting each frame: a plain enum/theme copy, no
     // allocation. `Off` leaves the render byte-identical to before.
@@ -684,10 +705,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // Show onboarding screen if needed
     if app.onboarding != OnboardingState::None {
         onboarding::render(f, size, app);
-        // The provider step hosts the canonical setup picker as a modal on
-        // top of the onboarding backdrop; without this the pushed view is
-        // invisible and recovery appears to hang on an empty legacy screen.
-        if app.onboarding == OnboardingState::Provider && !app.view_stack.is_empty() {
+        // Onboarding is a backdrop, not a separate screen manager. Render any
+        // native view above every onboarding step so shared pickers and the
+        // first-run privacy disclosure cannot become invisible outside the
+        // Provider step.
+        if !app.view_stack.is_empty() {
             let buf = f.buffer_mut();
             app.view_stack.render(size, buf);
         }
@@ -695,6 +717,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     }
 
     if app.launch.visible {
+        // Launch is a distinct full-canvas choice state, not a reading column.
+        // Keep it edge-to-edge so opening Codewhale never recreates black side
+        // banks before the responsive session ocean takes over.
         crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
         crate::tui::underwater::record_launch_row_areas(size, &mut app.launch);
         if !app.view_stack.is_empty() {
@@ -721,9 +746,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // ocean draws its brand mark (in ChatWidget); calling it twice would let
     // the reservation and the render disagree inside a single frame.
     let idle_empty = crate::tui::widgets::should_render_empty_state(app);
-    let rail_budget = rail_row_budget(app, size.width, size.height, idle_empty);
+    let rail_budget = rail_row_budget(app, shell_area.width, shell_area.height, idle_empty);
     let top_work_strip_height =
-        crate::tui::work_surface::height(app, size.width, size.height, rail_budget);
+        crate::tui::work_surface::height(app, shell_area.width, shell_area.height, rail_budget);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
     // then split the remaining body area for chat / preview / composer /
@@ -735,7 +760,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             .direction(Direction::Vertical)
             .flex(ratatui::layout::Flex::Start)
             .constraints([Constraint::Length(header_height), Constraint::Min(1)])
-            .split(size);
+            .split(shell_area);
         (split[0], split[1])
     };
 
@@ -750,7 +775,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             &slash_menu_entries,
             &mention_menu_entries,
         );
-        composer_widget.desired_height(size.width)
+        composer_widget.desired_height(shell_area.width)
     };
 
     // Pending-input preview (queued / steered messages). Empty when nothing's
@@ -758,7 +783,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // "messages typed during a running turn vanish" complaint by giving the
     // user immediate visible feedback above the composer.
     let pending_preview = build_pending_input_preview(app);
-    let desired_preview_height = pending_preview.desired_height(size.width);
+    let desired_preview_height = pending_preview.desired_height(shell_area.width);
 
     // Persistent background-work indicator (#5286): one pinned row above the
     // composer while shells / durable tasks / sub-agents are in flight. The
@@ -782,7 +807,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         .workflow_panel
         .as_ref()
         .filter(|panel| panel.expanded)
-        .map(|panel| panel.desired_height(size.width))
+        .map(|panel| panel.desired_height(shell_area.width))
         .unwrap_or(0);
     let auxiliary_budget = body_height
         .saturating_sub(
@@ -1016,6 +1041,12 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // backgrounds such as selection, hover, errors, and code blocks do not
     // match these base colors and therefore remain intact.
     if let Some(column) = shell_ocean {
+        // The working canvas may keep a small responsive gutter, but the water
+        // does not stop at that content edge. Paint the cleared terminal floor
+        // first so wide layouts read as one ocean rather than a blue card
+        // floating between black banks. `paint_matching` leaves every semantic
+        // widget background untouched.
+        column.paint_matching(size, f.buffer_mut(), app.ui_theme.surface_bg);
         column.paint_matching(header_area, f.buffer_mut(), app.ui_theme.header_bg);
         if top_work_strip_height > 0 {
             column.paint_matching(body_chunks[0], f.buffer_mut(), app.ui_theme.surface_bg);

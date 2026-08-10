@@ -277,7 +277,6 @@ fn child_wall_time_exhausted_reason(limit: Duration) -> String {
 // Non-streaming sub-agents need enough response budget to carry large tool-call
 // arguments, especially write_file content. The API bills generated tokens, not
 // the requested ceiling.
-const SUBAGENT_RESPONSE_MAX_TOKENS: u32 = 16_384;
 const SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES: u32 = 2;
 const SUBAGENT_TRANSIENT_PROVIDER_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 /// Per-step API-call timeout retry budget. A `create_message` call that
@@ -10010,10 +10009,17 @@ async fn run_subagent(
         // checkpoints, live inspection) stays byte-identical, so no retry or
         // later step can accumulate a second block.
         let request_messages = subagent_request_messages(&messages, &work_state_source).await;
+        let request_route = runtime
+            .client
+            .effective_route_envelope(&runtime.model, chrono::Utc::now());
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            max_tokens: SUBAGENT_RESPONSE_MAX_TOKENS,
+            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+                request_route.provider,
+                &request_route.model,
+                None,
+            ),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: has_tools.then(|| json!({ "type": "auto" })),
@@ -12051,7 +12057,7 @@ fn assignment_model_route(
 fn subagent_request_tuning(reasoning_effort: Option<&str>) -> RequestTuning {
     RequestTuning {
         reasoning_effort: reasoning_effort.map(ReasoningEffort::from_setting),
-        max_output_tokens: Some(SUBAGENT_RESPONSE_MAX_TOKENS),
+        max_output_tokens: None,
     }
 }
 
@@ -12793,8 +12799,22 @@ impl SubAgentToolRegistry {
         let bounded_recon_bash = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
             && family.eq_ignore_ascii_case("Bash")
             && action == "run";
+        // A network-denied child keeps the `Web` family's two read-only
+        // actions even though their legacy aliases (`web_search`, `fetch_url`)
+        // are on the deny list: the aliases deny the *standalone* spellings,
+        // while the family's `search`/`fetch` are the evidence surface a recon
+        // member is entitled to (parity with an ordinary scout). Deny still
+        // wins when the family name itself is denied, `wait` stays denied
+        // through `wait_for_dev_server`, and a URL-addressed `fetch` is
+        // refused at dispatch by `reject_network_reaching_input`, so the
+        // carve-out never re-opens the reach.
+        let web_readonly_action = family.eq_ignore_ascii_case("Web")
+            && matches!(action, "search" | "fetch")
+            && self.network_is_denied();
         if self.is_tool_denied(family)
-            || !bounded_recon_bash && alias.is_some_and(|name| self.is_tool_denied(name))
+            || !bounded_recon_bash
+                && !web_readonly_action
+                && alias.is_some_and(|name| self.is_tool_denied(name))
         {
             return false;
         }

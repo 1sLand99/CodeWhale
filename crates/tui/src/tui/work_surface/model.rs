@@ -651,7 +651,9 @@ fn plan_step_row_ids(app: &App) -> HashSet<String> {
 /// in.
 ///
 /// - `Tasks` — the full live projection ([`project_visible`]).
-/// - `Agents` — the sub-agent rows only, under the `▾ Subagents N` header.
+/// - `Agents` — the full sub-agent register under the `▾ Subagents N` header,
+///   followed by the durable to-do checklist: opening the register never hides
+///   the list.
 /// - `Pinned` — the goal, the sub-agent group, then the plan-step to-dos.
 /// - `Context` — empty: session facts are a line list, not work rows, and
 ///   render outside the row machinery.
@@ -673,17 +675,27 @@ pub(super) fn visible_rows_for_panel(app: &mut App) -> Vec<WorkRow> {
         RailPanel::Tasks => project_visible(app),
         RailPanel::Agents => {
             let rows = project(app);
-            let agents: Vec<WorkRow> = rows
-                .into_iter()
-                .filter(|row| row.id.0.starts_with("worker:"))
-                .collect();
-            let mut out = Vec::with_capacity(agents.len() + 1);
+            let todo_ids = plan_step_row_ids(app);
+            let mut agents = Vec::new();
+            let mut todos = Vec::new();
+            for row in rows {
+                if row.id.0.starts_with("worker:") {
+                    agents.push(row);
+                } else if todo_ids.contains(&row.id.0) {
+                    todos.push(row);
+                }
+            }
+            let mut out = Vec::with_capacity(agents.len() + todos.len() + 2);
             if !agents.is_empty() {
                 out.push(agents_section_heading(&format!(
                     "Subagents {}",
                     agents.len()
                 )));
                 out.extend(agents);
+            }
+            if !todos.is_empty() {
+                out.push(section_heading("tasks", "Tasks", "Durable to-do checklist"));
+                out.extend(todos);
             }
             app.work_surface.latest_rows = out.clone();
             out

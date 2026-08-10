@@ -44,6 +44,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<SidebarRowActio
         return None;
     }
 
+    // The details chord opens the selected row's own world; the transcript
+    // pager owns ⌥V only when no work row is selected.
+    if crate::tui::shell_key_routing::is_tool_details_shortcut(&key) {
+        let action = selected_row(app, &rows)
+            .and_then(|row| activate_primary(app, &row.id, row.primary_action.clone()));
+        if action.is_some() {
+            app.work_surface.clamp_selection(&rows);
+            app.needs_redraw = true;
+            return Some(action);
+        }
+        return None;
+    }
+
     let action = match key.code {
         KeyCode::Esc => {
             if app.work_surface.opened.is_some() {

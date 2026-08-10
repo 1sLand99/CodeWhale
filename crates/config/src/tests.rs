@@ -8297,9 +8297,9 @@ fn telemetry_env_invalid_is_recorded_rather_than_swallowed() {
 fn telemetry_explicit_off_distinguishes_an_answer_from_the_default() {
     let _guard = TelemetryEnvGuard::take();
 
-    // Nobody said anything: off, but not an answer.
+    // Nobody said anything: default on, with no explicit opt-out.
     let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
-    assert!(!resolved.telemetry);
+    assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 
     // The config file says no.
@@ -8352,10 +8352,9 @@ fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
         "an unconfigured endpoint must resolve to the shipped default"
     );
 
-    // …and it decides only *where*, never *whether*. The default endpoint must
-    // not have made an unconfigured install start collecting: telemetry is
-    // still off, and still not an answer anyone gave.
-    assert!(!resolved.telemetry);
+    // …and the product default is anonymous usage counting on unless one of
+    // the documented kill switches says otherwise.
+    assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 }
 
@@ -8561,8 +8560,8 @@ fn telemetry_notice_is_owed_until_it_is_answered_out_loud() {
     assert!(!state.telemetry_declined(TELEMETRY_NOTICE_VERSION));
 
     // A decision recorded against different notice content is stale: the
-    // notice is owed again, and the stale `true` is not consent to the new
-    // content.
+    // notice is owed again. The stale `true` still means the user did not opt
+    // out; this helper only describes whether the current wording was shown.
     state.record_telemetry_notice("0", true);
     assert!(state.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION));
     assert!(!state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
@@ -8612,7 +8611,7 @@ fn telemetry_notice_fields_round_trip_and_stay_absent_when_unanswered() {
     );
     assert!(
         !rendered.contains("telemetry_opt_in"),
-        "a false opt-in must not write a field: {rendered}"
+        "the default false compatibility field must not be serialized: {rendered}"
     );
 
     state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);

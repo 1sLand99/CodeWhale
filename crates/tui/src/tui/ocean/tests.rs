@@ -33,14 +33,78 @@ fn contrast_ratio(foreground: Color, background: Color) -> f64 {
 #[test]
 fn whale_ramp_is_perceptibly_deep_not_merely_non_equal() {
     let ramp = OceanRamp::for_theme(&crate::palette::UI_THEME).expect("RGB theme");
-    assert_eq!(ramp.surface, Color::Rgb(0x0e, 0x17, 0x29));
-    assert_eq!(ramp.middle, Color::Rgb(0x08, 0x11, 0x1c));
-    assert_eq!(ramp.deep, Color::Rgb(0x03, 0x07, 0x0d));
+    assert_eq!(ramp.surface, Color::Rgb(0x10, 0x2a, 0x45));
+    assert_eq!(ramp.middle, Color::Rgb(0x0a, 0x1e, 0x33));
+    assert_eq!(ramp.deep, Color::Rgb(0x06, 0x13, 0x20));
     assert!(
         distance(ramp.surface, ramp.deep) >= 32,
         "the selected underwater treatment must read at a glance"
     );
     assert_ne!(ramp.color_at(0, 20), ramp.color_at(19, 20));
+}
+
+#[test]
+fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
+    let theme = crate::palette::UI_THEME;
+    let ramp = OceanRamp::for_theme(&theme).expect("RGB theme");
+    let mut previous = ramp.color_at(0, 80);
+
+    for row in 0..80 {
+        let current = ramp.color_at(row, 80);
+        let (red, green, blue) = rgb(current).expect("RGB ocean color");
+        assert!(
+            blue > green && green > red,
+            "row {row} lost the authored blue-ocean ordering: {current:?}"
+        );
+        assert!(
+            relative_luminance(current) > relative_luminance(theme.surface_bg),
+            "row {row} fell back into the near-black shell field"
+        );
+        assert!(
+            distance(previous, current) <= 4,
+            "row {row} introduced a hard depth seam"
+        );
+        previous = current;
+    }
+
+    assert_eq!(ramp.color_at(0, 80), ramp.surface);
+    assert_eq!(ramp.color_at(79, 80), ramp.deep);
+}
+
+#[test]
+fn whale_ocean_keeps_text_and_semantic_roles_readable() {
+    let theme = crate::palette::UI_THEME;
+    let ramp = OceanRamp::for_theme(&theme).expect("RGB theme");
+    let foregrounds = [
+        ("body", theme.text_body),
+        ("soft", theme.text_soft),
+        ("muted", theme.text_muted),
+        ("hint", theme.text_hint),
+        ("action", theme.accent_primary),
+        ("live", theme.status_working),
+        ("human", theme.accent_action),
+        ("warning", theme.warning),
+        ("danger", theme.error_fg),
+        ("act mode", theme.mode_agent),
+        ("plan mode", theme.mode_plan),
+        ("operate", theme.mode_operate),
+        ("full-access mode", theme.mode_yolo),
+        ("success", theme.success),
+    ];
+
+    for (background_name, background) in [
+        ("ocean surface", ramp.surface),
+        ("ocean middle", ramp.middle),
+        ("ocean deep", ramp.deep),
+    ] {
+        for (foreground_name, foreground) in foregrounds {
+            let ratio = contrast_ratio(foreground, background);
+            assert!(
+                ratio >= 4.5,
+                "Whale {foreground_name} on {background_name} contrast {ratio:.2} is below 4.50"
+            );
+        }
+    }
 }
 
 #[test]
@@ -195,9 +259,9 @@ fn ambient_ink_matches_sunk_sky_shades_and_survives_reset_surfaces() {
 fn shimmer_is_subtle_and_concentrated_near_the_surface() {
     let ramp = OceanRamp::for_theme(&crate::palette::UI_THEME).expect("RGB theme");
     let surface_a = ramp.color_at_phase(0, 20, 0, ShellPhase::Idle);
-    let surface_b = ramp.color_at_phase(0, 20, 3_000, ShellPhase::Idle);
+    let surface_b = ramp.color_at_phase(0, 20, 22_500, ShellPhase::Idle);
     let deep_a = ramp.color_at_phase(19, 20, 0, ShellPhase::Idle);
-    let deep_b = ramp.color_at_phase(19, 20, 3_000, ShellPhase::Idle);
+    let deep_b = ramp.color_at_phase(19, 20, 22_500, ShellPhase::Idle);
 
     let surface_shift = distance(surface_a, surface_b);
     assert!(
@@ -395,6 +459,34 @@ fn split_shell_surfaces_share_one_absolute_row_column() {
         buf[(4, 10)].bg,
         theme.selection_bg,
         "semantic surfaces must survive the shell ombre pass"
+    );
+}
+
+#[test]
+fn full_viewport_water_column_reaches_both_terminal_edges() {
+    let theme = crate::palette::UI_THEME;
+    let ramp = OceanRamp::for_theme(&theme).expect("RGB theme");
+    let viewport = Rect::new(0, 0, 120, 32);
+    let mut buf = Buffer::empty(viewport);
+    for y in viewport.top()..viewport.bottom() {
+        for x in viewport.left()..viewport.right() {
+            buf[(x, y)].set_bg(theme.surface_bg);
+        }
+    }
+    buf[(60, 16)].set_bg(theme.selection_bg);
+
+    let column = OceanColumn::new(ramp, viewport, 0, None, ShellPhase::Idle, false, 0);
+    column.paint_matching(viewport, &mut buf, theme.surface_bg);
+
+    for y in viewport.top()..viewport.bottom() {
+        let expected = ramp.color_at(y, viewport.height);
+        assert_eq!(buf[(viewport.left(), y)].bg, expected);
+        assert_eq!(buf[(viewport.right() - 1, y)].bg, expected);
+    }
+    assert_eq!(
+        buf[(60, 16)].bg,
+        theme.selection_bg,
+        "semantic surfaces must remain protected inside the full-width water column"
     );
 }
 

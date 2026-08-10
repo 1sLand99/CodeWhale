@@ -17,7 +17,10 @@ use codewhale_config::{
 use serde_json::Value;
 
 use crate::buffer;
-use crate::decision::{EndpointError, TelemetryDecision, decide_in_home, validate_endpoint};
+use crate::decision::{
+    EndpointError, TelemetryDecision, decide_in_home, load_setup_state_for_decision_at,
+    permission_still_enabled_in_home, re_decide_with_setup_path, validate_endpoint,
+};
 use crate::envelope;
 use crate::event::*;
 
@@ -57,6 +60,46 @@ fn stale_setup() -> SetupState {
     let mut setup = SetupState::default();
     setup.record_telemetry_notice("0", true);
     setup
+}
+
+#[test]
+fn setup_state_loader_defaults_only_when_the_privacy_record_is_absent() {
+    let home = temp_home();
+    let path = home.path().join("setup_state.json");
+
+    assert!(
+        load_setup_state_for_decision_at(&path).is_some(),
+        "a genuinely fresh install uses the documented default"
+    );
+
+    std::fs::write(&path, b"{not-json").expect("write corrupt setup state");
+    assert!(
+        load_setup_state_for_decision_at(&path).is_none(),
+        "an existing unreadable privacy record must fail closed"
+    );
+
+    accepted_setup()
+        .save_to(&path)
+        .expect("write valid setup state");
+    assert!(
+        load_setup_state_for_decision_at(&path)
+            .is_some_and(|setup| setup.telemetry_accepted(TELEMETRY_NOTICE_VERSION)),
+        "a valid setup state remains usable"
+    );
+}
+
+#[test]
+fn flush_redecision_fails_closed_on_a_corrupt_setup_state() {
+    let home = temp_home();
+    let config_path = home.path().join("config.toml");
+    let setup_path = home.path().join("setup_state.json");
+    std::fs::write(&config_path, "telemetry = true\n").expect("write config");
+    std::fs::write(&setup_path, b"{not-json").expect("write corrupt setup state");
+
+    assert!(matches!(
+        re_decide_with_setup_path(Some(&config_path), &setup_path, Surface::Exec),
+        TelemetryDecision::ForcedOff
+    ));
 }
 
 /// One instance of every event variant, populated with the most adversarial
@@ -513,15 +556,15 @@ fn decision_matrix_is_exhaustive() {
     let home = temp_home();
     let path = home.path();
 
-    // Row: nobody has said anything. Default off is not an answer.
+    // Row: nobody has said anything. Anonymous usage counting is default-on.
     assert!(matches!(
         decide_in_home(
             Some(path),
-            &resolved(false, false, None),
+            &resolved(true, false, None),
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: a human said off. That is an answer.
@@ -535,8 +578,7 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::OptedOut
     ));
 
-    // Row: on, but never asked. A pre-existing `telemetry = true` is not
-    // consent — the key has been settable and inert for a long time.
+    // Row: on, notice not yet shown. Headless/default-on still works.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -544,7 +586,7 @@ fn decision_matrix_is_exhaustive() {
             &SetupState::default(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: on, asked, declined.
@@ -558,7 +600,8 @@ fn decision_matrix_is_exhaustive() {
         TelemetryDecision::OptedOut
     ));
 
-    // Row: on, but the notice content changed since they answered.
+    // Row: on, but the notice content changed since they answered yes. A
+    // disclosure refresh does not pause usage counting.
     assert!(matches!(
         decide_in_home(
             Some(path),
@@ -566,7 +609,7 @@ fn decision_matrix_is_exhaustive() {
             &stale_setup(),
             Surface::Tui
         ),
-        TelemetryDecision::ForcedOff
+        TelemetryDecision::Enabled(_)
     ));
 
     // Row: on and accepted, no home to keep state in.
@@ -619,19 +662,18 @@ fn decision_matrix_is_exhaustive() {
         .is_enabled()
     );
 
-    // Row: every headless surface is reachable, because consent is
-    // machine-scoped: a TTY-recorded decision authorizes later exec, cli,
-    // app-server, mcp-server, and serve runs on the same home.
+    // Row: every headless surface uses the same documented default and kill
+    // switches.
     for surface in Surface::ALL {
         assert!(
             decide_in_home(
                 Some(path),
                 &resolved(true, false, None),
-                &accepted_setup(),
+                &SetupState::default(),
                 *surface
             )
             .is_enabled(),
-            "{surface:?} must be able to emit on a consenting machine"
+            "{surface:?} must be able to emit by default"
         );
     }
 }
@@ -670,8 +712,6 @@ fn only_opt_out_touches_disk() {
     // have broken: `false` is the *default*, so it fired on every ordinary run.
     let forced_off_rows: Vec<(ResolvedRuntimeOptions, SetupState)> = vec![
         (resolved(false, false, None), accepted_setup()),
-        (resolved(true, false, None), SetupState::default()),
-        (resolved(true, false, None), stale_setup()),
         (
             resolved(true, false, Some("http://example.com/t")),
             accepted_setup(),
@@ -762,21 +802,23 @@ fn the_tombstone_outlives_every_run_the_opt_out_covers() {
             !buffer::install_id_path(&root).exists(),
             "{surface:?} minted a new identity for an opted-out machine"
         );
+        assert!(!buffer::state_path(&root).exists());
+        assert!(buffer::read_lines(&buffer::buffer_path(&root)).is_empty());
+        assert!(buffer::read_lines(&buffer::dryrun_path(&root)).is_empty());
         assert_eq!(snapshot(&root), after_wipe, "{surface:?} touched disk");
     }
 
     // Only writing the setting back turns collection on again, and that is the
     // one path allowed to clear the tombstone.
-    assert!(
-        decide_in_home(
-            Some(home.path()),
-            &resolved(true, false, None),
-            &accepted_setup(),
-            Surface::Tui,
-        )
-        .is_enabled()
-    );
-    buffer::arm(&root).expect("re-consent arms");
+    let TelemetryDecision::Enabled(consent) = decide_in_home(
+        Some(home.path()),
+        &resolved(true, false, None),
+        &accepted_setup(),
+        Surface::Tui,
+    ) else {
+        panic!("an explicit re-enable must produce consent");
+    };
+    buffer::arm(&root, consent.tombstone_generation(), || true).expect("re-consent arms");
     assert!(!buffer::tombstone_present(&root));
 }
 
@@ -827,7 +869,7 @@ fn an_opt_out_on_a_fresh_home_creates_nothing() {
     assert!(matches!(decision, TelemetryDecision::OptedOut));
     assert!(
         !root.exists(),
-        "a user who never opted in must not get a telemetry directory for saying no"
+        "a fresh user who opts out must not get a telemetry directory"
     );
 }
 
@@ -1081,7 +1123,7 @@ fn drain_skips_a_torn_trailing_line() {
 }
 
 #[test]
-fn append_never_blocks_on_a_held_lock() {
+fn append_drops_without_blocking_on_a_held_privacy_lock() {
     let home = temp_home();
     let root = root_of(&home);
     buffer::ensure_dir(&root).expect("create root");
@@ -1102,16 +1144,20 @@ fn append_never_blocks_on_a_held_lock() {
 
     held.wait();
     let started = Instant::now();
-    buffer::append(&root, &path, &line(7)).expect("append under a held lock");
+    let outcome = buffer::append(&root, &path, &line(7));
     let elapsed = started.elapsed();
     release.wait();
     holder.join().expect("holder thread").expect("holder lock");
 
+    assert!(outcome.is_none(), "a contended append must be dropped");
     assert!(
         elapsed < Duration::from_millis(250),
-        "an append waited {elapsed:?} on a lock it must never take"
+        "an append waited {elapsed:?} on the privacy lock"
     );
-    assert_eq!(buffer::read_lines(&path).len(), 1);
+    assert!(
+        buffer::read_lines(&path).is_empty(),
+        "the panic-safe path bypassed the privacy lock"
+    );
 }
 
 #[test]
@@ -1135,9 +1181,105 @@ fn arming_truncates_a_pre_consent_buffer() {
     buffer::append(&root, &buffer::buffer_path(&root), &line(1)).expect("append");
     buffer::wipe(&root).expect("wipe");
 
-    buffer::arm(&root).expect("arm");
+    let generation = buffer::tombstone_generation(&root).expect("read wipe generation");
+    buffer::arm(&root, generation.as_ref(), || true).expect("arm");
     assert!(!buffer::tombstone_present(&root));
     assert!(buffer::read_lines(&buffer::buffer_path(&root)).is_empty());
+}
+
+#[test]
+fn stale_consent_cannot_clear_a_newer_opt_out_but_fresh_reenable_can() {
+    let home = temp_home();
+    let root = root_of(&home);
+    let config_path = home.path().join("config.toml");
+    let setup_path = home.path().join("setup_state.json");
+    accepted_setup()
+        .save_to(&setup_path)
+        .expect("write accepted setup state");
+
+    // This process resolved the old enabled config before another process
+    // persisted an opt-out and completed its wipe.
+    let stale_resolved = resolved(true, false, None);
+    let TelemetryDecision::Enabled(pre_wipe_consent) = decide_in_home(
+        Some(home.path()),
+        &stale_resolved,
+        &accepted_setup(),
+        Surface::Tui,
+    ) else {
+        panic!("pre-wipe enabled facts must produce consent");
+    };
+    std::fs::write(&config_path, "telemetry = false\n").expect("persist opt-out");
+    buffer::ensure_dir(&root).expect("create telemetry root");
+    buffer::wipe(&root).expect("complete newer wipe");
+    assert!(
+        buffer::arm(&root, pre_wipe_consent.tombstone_generation(), || true).is_err(),
+        "an old consent token cleared a newer tombstone generation"
+    );
+    assert!(buffer::tombstone_present(&root));
+
+    // Even the difficult ordering — stale config facts combined with the new
+    // tombstone generation — cannot arm, because arm re-reads the durable
+    // predicate while holding the wipe lock.
+    let TelemetryDecision::Enabled(stale_consent) = decide_in_home(
+        Some(home.path()),
+        &stale_resolved,
+        &accepted_setup(),
+        Surface::Tui,
+    ) else {
+        panic!("fixture must carry stale enabled facts");
+    };
+    assert!(
+        buffer::arm(&root, stale_consent.tombstone_generation(), || {
+            permission_still_enabled_in_home(
+                Some(&config_path),
+                &setup_path,
+                Some(home.path()),
+                &root,
+            )
+        })
+        .is_err(),
+        "stale consent cleared a completed opt-out"
+    );
+    assert!(buffer::tombstone_present(&root));
+
+    // The documented explicit re-enable updates the durable register first. A
+    // fresh consent observes both that value and the current generation, so it
+    // may clear exactly that tombstone.
+    std::fs::write(&config_path, "telemetry = true\n").expect("persist re-enable");
+    let TelemetryDecision::Enabled(fresh_consent) = decide_in_home(
+        Some(home.path()),
+        &resolved(true, false, None),
+        &accepted_setup(),
+        Surface::Tui,
+    ) else {
+        panic!("fresh re-enable must produce consent");
+    };
+    buffer::arm(&root, fresh_consent.tombstone_generation(), || {
+        permission_still_enabled_in_home(Some(&config_path), &setup_path, Some(home.path()), &root)
+    })
+    .expect("fresh re-enable arms");
+    assert!(!buffer::tombstone_present(&root));
+}
+
+#[test]
+fn completed_wipe_blocks_identity_and_state_recreation() {
+    let home = temp_home();
+    let root = root_of(&home);
+    buffer::ensure_dir(&root).expect("create telemetry root");
+    envelope::read_or_create_install_id(&root).expect("seed install id");
+    envelope::write_state(&root, &envelope::TelemetryState::default()).expect("seed state");
+    buffer::wipe(&root).expect("wipe telemetry home");
+
+    assert!(
+        envelope::read_or_create_install_id(&root).is_err(),
+        "an in-flight flush recreated the deleted install id"
+    );
+    assert!(
+        envelope::write_state(&root, &envelope::TelemetryState::default()).is_err(),
+        "an in-flight flush recreated state after opt-out"
+    );
+    assert!(!buffer::install_id_path(&root).exists());
+    assert!(!buffer::state_path(&root).exists());
 }
 
 // ------------------------------------------------------------ unarmed gate --
@@ -1197,6 +1339,62 @@ fn a_tombstoned_home_sends_nothing_even_with_an_endpoint() {
         crate::client::SendOutcome::Dropped
     );
     assert!(buffer::read_lines(&buffer::dryrun_path(&root)).is_empty());
+}
+
+#[test]
+fn wipe_and_delivery_share_one_ordering_boundary() {
+    let home = temp_home();
+    let root = root_of(&home);
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let send_root = root.clone();
+    let send_entered = entered.clone();
+    let send_release = release.clone();
+    let send = std::thread::spawn(move || {
+        crate::client::send_with_transport(
+            &send_root,
+            Some("https://telemetry.codewhale.ai/v1/batch"),
+            &every_field_batch(),
+            move |_, _, _| {
+                send_entered.wait();
+                send_release.wait();
+                crate::client::SendOutcome::Accepted
+            },
+        )
+    });
+    entered.wait();
+
+    // The real send path is paused inside its transport callback. A
+    // non-blocking probe must observe the same lock that wipe takes; this
+    // deterministically pins the entire delivery inside the boundary without
+    // depending on loopback networking in a restricted test sandbox.
+    assert!(
+        buffer::try_with_lock(&root, || Ok(()))
+            .expect("probe privacy lock")
+            .is_none(),
+        "network delivery did not hold the wipe lock"
+    );
+
+    // Start the real blocking wipe while the POST is still in flight. It can
+    // only complete after the response releases the sender's privacy guard.
+    let wipe_root = root.clone();
+    let wipe = std::thread::spawn(move || buffer::wipe(&wipe_root));
+    release.wait();
+    assert_eq!(
+        send.join().expect("send thread"),
+        crate::client::SendOutcome::Accepted
+    );
+
+    wipe.join()
+        .expect("wipe thread")
+        .expect("wipe after delivery");
+    assert!(buffer::tombstone_present(&root));
+    assert_eq!(
+        crate::client::send(&root, Some("http://127.0.0.1:1/t"), &every_field_batch()),
+        crate::client::SendOutcome::Dropped,
+        "a send crossed the completed wipe boundary"
+    );
 }
 
 // ----------------------------------------------------------------- buckets --
@@ -1293,12 +1491,11 @@ fn no_public_api_accepts_a_bare_bool() {
     let init: fn(crate::TelemetryConsent) = crate::init;
     let _ = init;
 
-    // The only source of one is `decide`, which needs both a resolved config
-    // and a setup-state record — neither of which a caller can fake into "yes"
-    // without the user having answered.
+    // The only source of one is `decide`, which still applies every persistent
+    // and run-scoped opt-out before constructing the capability.
     let home = temp_home();
     assert!(
-        !decide_in_home(
+        decide_in_home(
             Some(home.path()),
             &resolved(true, false, None),
             &SetupState::default(),
@@ -1593,24 +1790,27 @@ fn an_install_or_upgrade_is_reported_once_per_version() {
 }
 
 #[test]
-fn the_notice_promises_exactly_what_the_schema_collects() {
+fn the_notice_summarizes_what_the_schema_collects_and_states_every_red_line() {
     use crate::notice;
 
     let body = notice::NOTICE_BODY;
 
-    // Everything the envelope carries has to be described. `install_id` is
-    // "a random ID stored on this machine"; the rest are named directly.
+    // The modal names the useful product categories and links the exact
+    // field-by-field schema. `install_id` is "a random ID stored on this
+    // machine"; transport metadata remains in the linked document. The body
+    // wraps at 72 columns, so multi-word claims are matched across the
+    // reflowed whitespace.
+    let flat: String = body.split_whitespace().collect();
     for claim in [
-        "which version you run",
+        "version",
         "OS and CPU family",
-        "which features you used",
-        "how long sessions ran",
-        "how they ended",
+        "session duration and outcome",
+        "aggregate feature and error counters",
         "random ID stored on this machine",
         "every 90 days",
     ] {
         assert!(
-            body.contains(claim),
+            flat.contains(&claim.split_whitespace().collect::<String>()),
             "the notice does not describe: {claim}"
         );
     }
@@ -1618,50 +1818,26 @@ fn the_notice_promises_exactly_what_the_schema_collects() {
     // And every red line has to be stated as *not collected*, not as
     // anonymized or sampled — two promises this client does not make.
     for red_line in [
-        "prompts",
+        "conversations",
         "code",
-        "file names",
-        "paths",
+        "prompts",
+        "files",
         "repo or branch names",
-        "model output",
-        "model names",
+        "model content",
         "credentials",
+        "per-turn or per-tool timeline",
     ] {
         assert!(
-            body.contains(red_line),
+            flat.contains(&red_line.split_whitespace().collect::<String>()),
             "the notice does not disclaim: {red_line}"
         );
     }
-    assert!(body.contains("Not sampled, not hashed"));
     assert!(!body.to_ascii_lowercase().contains("anonymized"));
 
-    // The two documented ways out, both of which are real.
+    // The modal names the persistent opt-out because that is the switch that
+    // also fulfils its deletion promise. Run-only kill switches stay in the
+    // linked schema document, which explains that they erase nothing.
     assert!(body.contains("codewhale config set telemetry false"));
-    assert!(body.contains("CODEWHALE_TELEMETRY=0"));
+    assert!(!body.contains("CODEWHALE_TELEMETRY=0"));
     assert!(body.contains("docs/TELEMETRY.md"));
-}
-
-#[test]
-fn only_an_affirmative_answer_is_an_answer() {
-    use crate::notice::answer_is_yes;
-
-    assert!(answer_is_yes("y"));
-    assert!(answer_is_yes("Y\n"));
-    assert!(answer_is_yes(" yes \n"));
-    // Enter, EOF, a typo, and a stray keystroke all decline. The default is
-    // the safe direction and it is reachable without aiming.
-    assert!(!answer_is_yes(""));
-    assert!(!answer_is_yes("\n"));
-    assert!(!answer_is_yes("n"));
-    assert!(!answer_is_yes("ye"));
-    assert!(!answer_is_yes("1"));
-    assert!(!answer_is_yes("true"));
-}
-
-#[test]
-fn the_notice_prompt_capitalises_the_declining_default() {
-    // `[y/N]`, not `[Y/n]` and not `[y/n]`. The shape of the prompt is the
-    // first thing a user reads about which way Enter goes.
-    assert!(crate::notice::NOTICE_PROMPT.contains("[y/N]"));
-    assert!(!crate::notice::NOTICE_PROMPT.contains("[Y/n]"));
 }

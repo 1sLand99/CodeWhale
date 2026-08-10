@@ -1631,7 +1631,9 @@ pub(crate) fn build_runtime() -> Result<tokio::runtime::Runtime> {
 fn telemetry_surface(command: Option<&Commands>) -> codewhale_telemetry::Surface {
     use codewhale_telemetry::Surface;
     match command {
-        None | Some(Commands::Resume { .. } | Commands::Fork { .. }) => Surface::Tui,
+        None | Some(Commands::Resume { .. } | Commands::Fork { .. } | Commands::Pr { .. }) => {
+            Surface::Tui
+        }
         Some(Commands::Exec(_)) => Surface::Exec,
         Some(Commands::Serve(args)) => {
             if args.mcp {
@@ -1648,12 +1650,20 @@ fn telemetry_surface(command: Option<&Commands>) -> codewhale_telemetry::Surface
 fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::SessionSource {
     use codewhale_telemetry::SessionSource;
     match command {
-        None => SessionSource::Interactive,
+        None | Some(Commands::Pr { .. }) => SessionSource::Interactive,
         Some(Commands::Resume { .. }) => SessionSource::Resume,
         Some(Commands::Fork { .. }) => SessionSource::Fork,
         Some(Commands::Serve(_)) => SessionSource::Api,
         Some(_) => SessionSource::Unknown,
     }
+}
+
+/// Read-only commands must not create telemetry state as a side effect.
+fn telemetry_command_is_read_only(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Doctor(_) | Commands::SessionDiagnostics(_) | Commands::Sessions { .. })
+    ) || matches!(command, Some(Commands::Setup(args)) if args.status)
 }
 
 /// Resolve the emit predicate and arm, once, before anything can record.
@@ -1669,18 +1679,28 @@ fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::
 /// re-reading `CODEWHALE_TELEMETRY` inside the telemetry crate would fork
 /// `parse_bool`, the `DEEPSEEK_TELEMETRY` alias, and the floor into a second
 /// source of truth.
-fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
-    let surface = telemetry_surface(command);
-    let Ok(store) = codewhale_config::ConfigStore::load(cli.config.clone()) else {
+fn arm_telemetry_with_setup(
+    config_path: Option<PathBuf>,
+    surface: codewhale_telemetry::Surface,
+    source: codewhale_telemetry::SessionSource,
+    setup_override: Option<&codewhale_config::SetupState>,
+) {
+    let Ok(store) = codewhale_config::ConfigStore::load(config_path) else {
         return;
     };
     let resolved = store
         .config
         .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
-    let setup = codewhale_config::SetupState::load()
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let setup = if let Some(setup) = setup_override {
+        setup.clone()
+    } else {
+        let Some(setup) = codewhale_telemetry::load_setup_state_for_decision() else {
+            // An existing unreadable privacy record may contain a decline.
+            // Failing closed is safer than replacing it with default-on.
+            return;
+        };
+        setup
+    };
     let codewhale_telemetry::TelemetryDecision::Enabled(consent) =
         codewhale_telemetry::decide(&resolved, &setup, surface)
     else {
@@ -1688,9 +1708,37 @@ fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
     };
     codewhale_telemetry::init(consent.with_config_path(Some(store.path().to_path_buf())));
     let _ = TELEMETRY_SESSION_START.set(std::time::Instant::now());
-    codewhale_telemetry::record(codewhale_telemetry::Event::SessionStart {
-        source: telemetry_session_source(command),
-    });
+    codewhale_telemetry::record(codewhale_telemetry::Event::SessionStart { source });
+}
+
+fn arm_telemetry(cli: &Cli, command: Option<&Commands>) {
+    if telemetry_command_is_read_only(command) {
+        return;
+    }
+    arm_telemetry_with_setup(
+        cli.config.clone(),
+        telemetry_surface(command),
+        telemetry_session_source(command),
+        None,
+    );
+}
+
+/// Apply the choice made in the native TUI disclosure.
+///
+/// The in-memory setup state is authoritative for this process. In particular,
+/// a Disable choice reaches `decide` as an opt-out even when neither durable
+/// write landed, so the current launch cannot arm and any existing buffer is
+/// wiped whenever the telemetry home remains reachable.
+pub(crate) fn apply_tui_telemetry_decision(
+    pending: &crate::telemetry_notice::PendingTelemetryNotice,
+    setup: &codewhale_config::SetupState,
+) {
+    arm_telemetry_with_setup(
+        pending.config_path.clone(),
+        codewhale_telemetry::Surface::Tui,
+        pending.session_source,
+        Some(setup),
+    );
 }
 
 /// Close the armed session and flush, bounded.
@@ -1747,23 +1795,34 @@ async fn run_async_main_inner(
     // ahead of it collects nothing.
     spawn_signal_cleanup_task();
 
-    // Arming is what makes the panic hook installed back in `main` — and every
-    // other write path — stop being a no-op. Nothing before this line can
-    // record anything, which is precisely how a disabled user's panic writes
-    // nothing and creates no directory.
-    // The notice runs before arming, and only on the interactive surface: it
-    // is the one surface that owns a terminal it can ask on, and asking before
-    // `arm_telemetry` is what lets a user who says yes be counted from this
-    // session rather than the next one.
-    //
-    // Every path that does not render and answer it leaves the decision unset,
-    // and unset means nothing is ever collected. `--skip-onboarding` and a
-    // non-TTY stdin both take that path, on purpose.
-    if telemetry_surface(command.as_ref()) == codewhale_telemetry::Surface::Tui {
-        crate::telemetry_notice::prompt_if_due(cli.skip_onboarding, cli.config.clone());
+    // A due interactive disclosure belongs to the first native TUI frame. In
+    // that one case arming is deferred until its decision event; every other
+    // surface keeps the ordinary pre-dispatch predicate. This is what lets an
+    // immediate Disable choice stop this very session without printing or
+    // blocking on a shell questionnaire first.
+    let surface = telemetry_surface(command.as_ref());
+    let telemetry_notice_plan = if surface == codewhale_telemetry::Surface::Tui {
+        crate::telemetry_notice::plan_if_due(
+            cli.config.clone(),
+            telemetry_session_source(command.as_ref()),
+        )
+    } else {
+        crate::telemetry_notice::TelemetryNoticePlan::NotDue
+    };
+    let should_arm_before_dispatch = surface != codewhale_telemetry::Surface::Tui
+        || telemetry_notice_plan.should_arm_before_tui();
+    let pending_telemetry_notice = telemetry_notice_plan.into_pending();
+    if should_arm_before_dispatch {
+        arm_telemetry(&cli, command.as_ref());
     }
-    arm_telemetry(&cli, command.as_ref());
-    let outcome = run_async_main_dispatch(cli, command, plugin_discovery, plugin_registry).await;
+    let outcome = run_async_main_dispatch(
+        cli,
+        command,
+        plugin_discovery,
+        plugin_registry,
+        pending_telemetry_notice,
+    )
+    .await;
     finish_telemetry(&outcome).await;
     outcome
 }
@@ -1773,6 +1832,7 @@ async fn run_async_main_dispatch(
     command: Option<Commands>,
     plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
+    mut pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
 ) -> Result<()> {
     logging::set_verbose(cli.verbose || logging::env_requests_verbose_logging());
 
@@ -2021,6 +2081,7 @@ async fn run_async_main_dispatch(
                     number,
                     repo.as_deref(),
                     checkout,
+                    pending_telemetry_notice.take(),
                     Arc::clone(&plugin_registry),
                 )
                 .await
@@ -2100,6 +2161,7 @@ async fn run_async_main_dispatch(
                     &config,
                     Some(resume_id),
                     None,
+                    pending_telemetry_notice.take(),
                     std::sync::Arc::clone(&plugin_registry),
                 )
                 .await
@@ -2113,6 +2175,7 @@ async fn run_async_main_dispatch(
                     &config,
                     Some(new_session_id),
                     None,
+                    pending_telemetry_notice.take(),
                     std::sync::Arc::clone(&plugin_registry),
                 )
                 .await
@@ -2130,6 +2193,7 @@ async fn run_async_main_dispatch(
             &config,
             None,
             Some(initial_input),
+            pending_telemetry_notice.take(),
             std::sync::Arc::clone(&plugin_registry),
         )
         .await;
@@ -2167,6 +2231,7 @@ async fn run_async_main_dispatch(
         resume_session_id,
         None,
         startup_notice,
+        pending_telemetry_notice.take(),
         plugin_registry,
     )
     .await
@@ -7188,7 +7253,8 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
         tool_choice: None,
         metadata: None,
         thinking: None,
-        reasoning_effort: None,
+        // This is a one-token transport probe, not a reasoning task.
+        reasoning_effort: Some("off".to_string()),
         stream: Some(false),
         temperature: None,
         top_p: None,
@@ -7592,6 +7658,7 @@ Provide findings ordered by severity with file references, then open questions, 
             .to_string(),
     );
     let client = DeepSeekClient::new(&execution_config)?;
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
@@ -7601,7 +7668,11 @@ Provide findings ordered by severity with file references, then open questions, 
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: Some(system),
         tools: None,
         tool_choice: None,
@@ -7609,8 +7680,8 @@ Provide findings ordered by severity with file references, then open questions, 
         thinking: None,
         reasoning_effort,
         stream: Some(false),
-        temperature: Some(0.2),
-        top_p: Some(0.9),
+        temperature: None,
+        top_p: None,
     };
 
     let response = client.create_message(request).await?;
@@ -7785,6 +7856,7 @@ async fn run_pr(
     number: u32,
     repo: Option<&str>,
     checkout: bool,
+    pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     if !is_command_available("gh") {
@@ -7819,6 +7891,7 @@ async fn run_pr(
         config,
         resume_session_id,
         Some(tui::InitialInput::Prefill(prompt)),
+        pending_telemetry_notice,
         plugin_registry,
     )
     .await
@@ -9346,6 +9419,7 @@ async fn run_interactive(
     config: &Config,
     resume_session_id: Option<String>,
     initial_input: Option<tui::InitialInput>,
+    pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     run_interactive_with_notice(
@@ -9354,6 +9428,7 @@ async fn run_interactive(
         resume_session_id,
         initial_input,
         None,
+        pending_telemetry_notice,
         plugin_registry,
     )
     .await
@@ -9368,6 +9443,7 @@ async fn run_interactive_with_notice(
     resume_session_id: Option<String>,
     initial_input: Option<tui::InitialInput>,
     startup_notice: Option<String>,
+    pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     let initial_input = if cli.remote_control {
@@ -9520,6 +9596,7 @@ async fn run_interactive_with_notice(
             max_subagents,
         },
         plugin_registry,
+        pending_telemetry_notice,
     )
     .await
 }
@@ -9718,9 +9795,11 @@ async fn run_one_shot(
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort, prompt)
     });
+    let model = route.model;
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
 
     let request = MessageRequest {
-        model: route.model,
+        model,
         messages: vec![Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
@@ -9728,7 +9807,11 @@ async fn run_one_shot(
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: None,
         tools: None,
         tool_choice: None,
@@ -9779,6 +9862,7 @@ async fn run_one_shot_json(
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, prompt)
     });
+    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
@@ -9788,7 +9872,11 @@ async fn run_one_shot_json(
                 cache_control: None,
             }],
         }],
-        max_tokens: 4096,
+        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
+            request_route.provider,
+            &request_route.model,
+            None,
+        ),
         system: Some(SystemPrompt::Text(
             "You are a coding assistant. Give concise, actionable responses.".to_string(),
         )),
@@ -9798,8 +9886,8 @@ async fn run_one_shot_json(
         thinking: None,
         reasoning_effort,
         stream: Some(false),
-        temperature: Some(0.2),
-        top_p: Some(0.9),
+        temperature: None,
+        top_p: None,
     };
 
     let response = client.create_message(request).await?;

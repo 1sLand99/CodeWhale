@@ -233,7 +233,7 @@ pub(crate) fn profile_drafting_request(
         thinking: None,
         reasoning_effort: Some("off".to_string()),
         stream: Some(false),
-        temperature: Some(0.2),
+        temperature: None,
         top_p: None,
     }
 }

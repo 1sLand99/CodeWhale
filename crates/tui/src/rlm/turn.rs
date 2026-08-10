@@ -30,13 +30,11 @@ const MAX_RLM_ITERATIONS: u32 = 25;
 /// not the RLM contract.
 const MAX_CONSECUTIVE_NO_CODE: u32 = 3;
 /// Max output tokens for the root LLM — it just needs to generate code.
-const ROOT_MAX_TOKENS: u32 = 4096;
 /// Max chars of stdout shown as metadata to the root LLM in next iteration.
 const STDOUT_METADATA_PREVIEW_LEN: usize = 800;
 /// Max chars of `context` shown as a preview in the metadata.
 const PROMPT_PREVIEW_LEN: usize = 500;
 /// Temperature for root LLM calls.
-const ROOT_TEMPERATURE: f32 = 0.3;
 /// Bound on conversation history we keep across iterations.
 const MAX_HISTORY_MESSAGES: usize = 20;
 
@@ -270,7 +268,17 @@ async fn run_rlm_turn_impl(
                 .await;
 
             // 4a. Root LLM generates code from metadata-only context.
-            let request = build_root_request(&model, &messages, &system);
+            let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
+            let request = build_root_request(
+                &model,
+                &messages,
+                &system,
+                crate::route_budget::effective_max_output_tokens_for_route(
+                    request_route.provider,
+                    &request_route.model,
+                    None,
+                ),
+            );
 
             let response = match client.create_message_boxed(request).await {
                 Ok(r) => r,
@@ -639,11 +647,16 @@ fn write_context_file(prompt: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-fn build_root_request(model: &str, messages: &[Message], system: &SystemPrompt) -> MessageRequest {
+fn build_root_request(
+    model: &str,
+    messages: &[Message],
+    system: &SystemPrompt,
+    max_tokens: u32,
+) -> MessageRequest {
     MessageRequest {
         model: model.to_string(),
         messages: messages.to_vec(),
-        max_tokens: ROOT_MAX_TOKENS,
+        max_tokens,
         system: Some(system.clone()),
         tools: None,
         tool_choice: None,
@@ -651,8 +664,8 @@ fn build_root_request(model: &str, messages: &[Message], system: &SystemPrompt) 
         thinking: None,
         reasoning_effort: None,
         stream: Some(false),
-        temperature: Some(ROOT_TEMPERATURE),
-        top_p: Some(0.9_f32),
+        temperature: None,
+        top_p: None,
     }
 }
 
@@ -1055,9 +1068,12 @@ mod tests {
             None,
         )];
 
-        let request = build_root_request("root-model", &messages, &rlm_system_prompt());
+        let request = build_root_request("root-model", &messages, &rlm_system_prompt(), 8192);
         let payload = serde_json::to_string(&request).expect("request should serialize");
 
+        assert_eq!(request.max_tokens, 8192);
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.top_p, None);
         assert!(payload.contains(&format!("- Length: {} chars", prompt.chars().count())));
         assert!(
             !payload.contains(secret_tail),

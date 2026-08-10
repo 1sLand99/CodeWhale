@@ -59,24 +59,29 @@ pub struct TelemetryState {
 /// always the safe direction — the cost is one rotation, and the docs already
 /// say no count derived from `install_id` is a user count.
 pub fn read_or_create_install_id(root: &Path) -> Result<InstallId> {
-    let path = buffer::install_id_path(root);
-    let existing = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|body| serde_json::from_str::<InstallId>(&body).ok())
-        .filter(|record| uuid::Uuid::parse_str(record.install_id.trim()).is_ok())
-        .filter(|record| !is_expired(&record.rotated_at));
-    if let Some(record) = existing {
-        return Ok(record);
-    }
-    let record = InstallId {
-        schema_version: 1,
-        install_id: uuid::Uuid::new_v4().to_string(),
-        rotated_at: now_rfc3339(),
-    };
-    buffer::ensure_dir(root)?;
-    codewhale_config::persistence::atomic_write_json(&path, &record)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(record)
+    buffer::try_with_lock(root, || {
+        if buffer::tombstone_present(root) {
+            anyhow::bail!("telemetry is disabled");
+        }
+        let path = buffer::install_id_path(root);
+        let existing = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<InstallId>(&body).ok())
+            .filter(|record| uuid::Uuid::parse_str(record.install_id.trim()).is_ok())
+            .filter(|record| !is_expired(&record.rotated_at));
+        if let Some(record) = existing {
+            return Ok(record);
+        }
+        let record = InstallId {
+            schema_version: 1,
+            install_id: uuid::Uuid::new_v4().to_string(),
+            rotated_at: now_rfc3339(),
+        };
+        codewhale_config::persistence::atomic_write_json(&path, &record)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(record)
+    })?
+    .ok_or_else(|| anyhow::anyhow!("telemetry privacy lock is held"))
 }
 
 fn is_expired(rotated_at: &str) -> bool {
@@ -100,10 +105,15 @@ pub fn read_state(root: &Path) -> TelemetryState {
 
 /// Write `state.json`.
 pub fn write_state(root: &Path, state: &TelemetryState) -> Result<()> {
-    buffer::ensure_dir(root)?;
-    let path = buffer::state_path(root);
-    codewhale_config::persistence::atomic_write_json(&path, state)
-        .with_context(|| format!("failed to write {}", path.display()))
+    buffer::try_with_lock(root, || {
+        if buffer::tombstone_present(root) {
+            anyhow::bail!("telemetry is disabled");
+        }
+        let path = buffer::state_path(root);
+        codewhale_config::persistence::atomic_write_json(&path, state)
+            .with_context(|| format!("failed to write {}", path.display()))
+    })?
+    .ok_or_else(|| anyhow::anyhow!("telemetry privacy lock is held"))
 }
 
 /// RFC3339 UTC at second precision. The only timestamp this crate produces, and

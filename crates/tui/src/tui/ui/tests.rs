@@ -36,6 +36,34 @@ use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
 #[test]
+fn session_shell_area_keeps_compact_geometry_and_uses_most_of_wide_terminals() {
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (112, 40)] {
+        let fluid = Rect::new(4, 3, width, height);
+        assert_eq!(frame::session_shell_area(fluid), fluid);
+    }
+
+    for (width, height, side_gutter) in [(140, 40, 2), (200, 50, 7), (240, 60, 10)] {
+        let host = Rect::new(4, 3, width, height);
+        let shell = frame::session_shell_area(host);
+        assert_eq!(shell.x, host.x + side_gutter, "{width} columns");
+        assert_eq!(
+            shell.right() + side_gutter,
+            host.right(),
+            "{width} columns must retain symmetric gutters"
+        );
+        assert_eq!(shell.height, host.height);
+        assert!(
+            u32::from(shell.width) * 100 >= u32::from(host.width) * 85,
+            "{width} columns left only {}% usable",
+            u32::from(shell.width) * 100 / u32::from(host.width)
+        );
+    }
+
+    let ultra_wide = frame::session_shell_area(Rect::new(0, 0, 400, 60));
+    assert_eq!(ultra_wide, Rect::new(16, 0, 368, 60));
+}
+
+#[test]
 fn remote_control_escape_commands_match_dispatcher_case_rules() {
     for input in [
         "/rc stop",
@@ -3425,13 +3453,696 @@ fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String 
     terminal
         .draw(|frame| render(frame, app, &config))
         .expect("render underwater shell");
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_canvas() {
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::User {
+        content: "A deliberately short prompt.".to_string(),
+    }];
+    app.resync_history_revisions();
+
+    let _ = render_underwater_test_app(&mut app, 160, 32);
+
+    let transcript = app.viewport.last_transcript_area.expect("transcript area");
+    let composer = app.viewport.last_composer_area.expect("composer area");
+    assert_eq!((transcript.x, transcript.width), (4, 152));
+    assert_eq!((composer.x, composer.width), (4, 152));
+}
+
+#[test]
+fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
+    let mut app = create_test_app();
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding = OnboardingState::None;
+    let surface_bg = app.ui_theme.surface_bg;
+    let config = Config::default();
+    let mut terminal = Terminal::new(TestBackend::new(200, 32)).expect("wide test terminal");
     terminal
-        .backend()
-        .buffer()
-        .content()
+        .draw(|frame| render(frame, &mut app, &config))
+        .expect("render wide ocean canvas");
+    let buffer = terminal.backend().buffer();
+
+    let mut ocean_tint_seen = false;
+    for y in 0..buffer.area.height {
+        let left = buffer[(0, y)].bg;
+        let right = buffer[(buffer.area.width - 1, y)].bg;
+        assert_eq!(left, right, "row {y} split into mismatched outer banks");
+        ocean_tint_seen |= left != surface_bg;
+    }
+    assert!(
+        ocean_tint_seen,
+        "wide gutters retained the flat terminal floor instead of the shared ocean"
+    );
+}
+
+fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
+    HistoryCell::Thinking {
+        content: (1..=20)
+            .map(|line| format!("{label} line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        streaming,
+        duration_secs: (!streaming).then_some(1.0),
+    }
+}
+
+fn reasoning_hint_cells(app: &App) -> Vec<usize> {
+    app.viewport
+        .transcript_cache
+        .lines()
         .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>()
+        .zip(app.viewport.transcript_cache.line_meta())
+        .filter(|(line, _)| line.to_string().contains("Space:expand"))
+        .filter_map(|(_, meta)| meta.cell_line().map(|(cell, _)| cell))
+        .map(|cell| app.original_cell_index_for_rendered(cell))
+        .collect()
+}
+
+fn select_original_cell(app: &mut App, original: usize) {
+    let rendered = app
+        .collapsed_cell_map
+        .iter()
+        .position(|&cell| cell == original)
+        .unwrap_or(original);
+    let point = TranscriptSelectionPoint {
+        line_index: first_line_for_cell(app, rendered),
+        column: 0,
+    };
+    app.viewport.transcript_selection.anchor = Some(point);
+    app.viewport.transcript_selection.head = Some(point);
+}
+
+fn mouse_on_cell(app: &App, cell: usize, kind: MouseEventKind) -> MouseEvent {
+    let area = app.viewport.last_transcript_area.expect("transcript area");
+    let visible_line = first_line_for_cell(app, cell)
+        .saturating_sub(app.viewport.last_transcript_top)
+        .saturating_add(app.viewport.last_transcript_padding_top);
+    MouseEvent {
+        kind,
+        column: area.x,
+        row: area.y + u16::try_from(visible_line).expect("visible transcript line"),
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn running_exec_cell() -> HistoryCell {
+    HistoryCell::Tool(ToolCell::Exec(ExecCell {
+        command: "gh issue view 5291".to_string(),
+        status: ToolStatus::Success,
+        output: Some("issue loaded".to_string()),
+        live_output: None,
+        shell_task_id: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: Some(20),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    }))
+}
+
+#[test]
+fn completed_answer_clears_stale_reasoning_expand_hint() {
+    let mut app = create_test_app();
+    app.history = vec![
+        long_reasoning("reasoning", false),
+        HistoryCell::Assistant {
+            content: "The answer is complete.".to_string(),
+            streaming: false,
+        },
+    ];
+    app.resync_history_revisions();
+
+    let surface = render_underwater_test_app(&mut app, 100, 32);
+
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1),
+        "Space dispatch targets the completed assistant cell"
+    );
+    assert!(
+        !surface.contains("Space:expand"),
+        "a reasoning cell must not advertise Space while cell 1 owns the key: {surface}"
+    );
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.collapsed_cells.contains(&1));
+}
+
+#[test]
+fn selected_reasoning_hint_and_space_share_one_owner() {
+    let mut app = create_test_app();
+    app.history = vec![long_reasoning("selected", false)];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    select_original_cell(&mut app, 0);
+    let collapsed = render_underwater_test_app(&mut app, 100, 32);
+
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert!(collapsed.contains("Space:expand"));
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index: 0,
+        column: 0,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index: app
+            .viewport
+            .transcript_cache
+            .total_lines()
+            .saturating_sub(1),
+        column: 100,
+    });
+    let copied = selection_to_text(&app).expect("reasoning selection");
+    assert!(copied.contains("selected line"));
+    assert!(
+        !copied.contains("Space:") && !copied.contains('…'),
+        "{copied}"
+    );
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&0));
+    assert!(!handle_transcript_space(&mut app));
+    assert!(
+        app.folded_thinking.contains(&0),
+        "rendered action is single-use"
+    );
+
+    let expanded = render_underwater_test_app(&mut app, 100, 32);
+    assert!(expanded.contains("selected line 20"));
+    assert!(!expanded.contains("Space:expand"));
+    assert!(!expanded.contains("Space:collapse"));
+    assert_eq!(
+        app.viewport.transcript_cache.reasoning_action_target(),
+        Some(crate::tui::history::ReasoningActionTarget {
+            owner: crate::tui::history::TranscriptActionOwner {
+                cell_index: 0,
+                identity_epoch: app.transcript_identity_epoch,
+            },
+            action: crate::tui::history::ReasoningAction::Collapse,
+        })
+    );
+
+    assert!(handle_transcript_space(&mut app));
+    assert!(!app.folded_thinking.contains(&0));
+    let collapsed_again = render_underwater_test_app(&mut app, 100, 32);
+    assert!(collapsed_again.contains("Space:expand"));
+}
+
+#[test]
+fn mouse_selection_redraws_and_retargets_reasoning_with_unchanged_revisions() {
+    let mut app = create_test_app();
+    app.history = vec![
+        long_reasoning("first", false),
+        long_reasoning("second", false),
+    ];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+
+    app.needs_redraw = false;
+    let down_first = mouse_on_cell(&app, 0, MouseEventKind::Down(MouseButton::Left));
+    handle_mouse_event(&mut app, down_first);
+    assert!(app.needs_redraw, "mouse Down must schedule owner redraw");
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+
+    app.needs_redraw = false;
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: u16::MAX,
+            row: u16::MAX,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(app.needs_redraw, "click outside must clear + redraw");
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+
+    let down_second = mouse_on_cell(&app, 1, MouseEventKind::Down(MouseButton::Left));
+    handle_mouse_event(&mut app, down_second);
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    app.needs_redraw = false;
+    let drag_first = mouse_on_cell(&app, 0, MouseEventKind::Drag(MouseButton::Left));
+    handle_mouse_event(&mut app, drag_first);
+    assert!(app.needs_redraw, "mouse Drag must schedule owner redraw");
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&0));
+}
+
+#[test]
+fn mouse_up_preserves_the_single_click_action_and_detail_owner() {
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::Error {
+            message: "selected error".into(),
+            severity: crate::error_taxonomy::ErrorSeverity::Error,
+        },
+        running_exec_cell(),
+    ];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    let down = mouse_on_cell(&app, 0, MouseEventKind::Down(MouseButton::Left));
+    handle_mouse_event(&mut app, down);
+    let up = mouse_on_cell(&app, 0, MouseEventKind::Up(MouseButton::Left));
+    handle_mouse_event(&mut app, up);
+
+    assert!(
+        app.viewport
+            .transcript_selection
+            .ordered_endpoints()
+            .is_some()
+    );
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(0)
+    );
+    assert_eq!(detail_target_cell_index(&app), Some(0));
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.collapsed_cells.contains(&0));
+    assert!(!app.collapsed_cells.contains(&1));
+}
+
+#[test]
+fn latest_streaming_reasoning_owns_space_after_an_older_tool() {
+    let mut app = create_test_app();
+    app.history = vec![running_exec_cell(), long_reasoning("live", true)];
+    app.resync_history_revisions();
+
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+    assert!(surface.contains("Space:expand"));
+
+    app.history[1] = long_reasoning("done", false);
+    app.bump_history_cell(1);
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "final answer".to_string(),
+        streaming: false,
+    });
+    let completed = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(2)
+    );
+    assert!(reasoning_hint_cells(&app).is_empty());
+    assert!(!completed.contains("Space:expand"));
+}
+
+#[test]
+fn active_streaming_reasoning_keeps_its_visible_owner_across_a_delta() {
+    let mut app = create_test_app();
+    app.push_history_cell(running_exec_cell());
+    let entry = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
+    crate::tui::streaming_thinking::append(
+        &mut app,
+        entry,
+        &(1..=20)
+            .map(|line| format!("active line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let rendered_epoch = app.transcript_identity_epoch;
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+
+    crate::tui::streaming_thinking::append(&mut app, entry, "\nnew delta before redraw");
+    let rendered_version = app.history_version;
+    app.bump_active_cell_revision();
+    assert_ne!(app.history_version, rendered_version);
+    assert_eq!(app.transcript_identity_epoch, rendered_epoch);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&1));
+}
+
+#[test]
+fn interrupted_active_reasoning_remains_actionable_after_flush() {
+    let mut app = create_test_app();
+    let entry = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
+    crate::tui::streaming_thinking::append(
+        &mut app,
+        entry,
+        &(1..=20)
+            .map(|line| format!("interrupted line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert!(surface.contains("Space:expand"));
+    let epoch = app.transcript_identity_epoch;
+    app.finalize_active_cell_as_interrupted();
+    assert!(app.active_cell.is_none());
+    assert_eq!(app.transcript_identity_epoch, epoch);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&0));
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+}
+
+#[test]
+fn pending_scroll_retargets_reasoning_in_the_same_frame() {
+    let mut app = create_test_app();
+    app.history = vec![
+        long_reasoning("first", false),
+        long_reasoning("second", false),
+    ];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 8);
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+    app.viewport.pending_scroll_delta = -1_000_000;
+    let _ = render_underwater_test_app(&mut app, 60, 8);
+    assert_eq!(app.viewport.last_transcript_top, 0);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert_eq!(
+        app.viewport
+            .transcript_cache
+            .reasoning_action_target()
+            .map(|target| target.owner.cell_index),
+        Some(0)
+    );
+}
+
+#[test]
+fn visible_older_reasoning_owns_space_over_a_newer_offscreen_tool() {
+    let mut app = create_test_app();
+    app.history = vec![long_reasoning("visible", false), running_exec_cell()];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 8);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+
+    app.viewport.transcript_scroll = TranscriptScroll::at_line(9);
+    let surface = render_underwater_test_app(&mut app, 60, 8);
+    assert_eq!(app.viewport.last_transcript_top, 9);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert!(surface.contains("Space:expand"), "{surface}");
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(0)
+    );
+    assert_eq!(detail_target_cell_index(&app), Some(1));
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&0));
+    assert!(!app.collapsed_cells.contains(&1) && app.expanded_tool_runs.is_empty());
+}
+
+#[test]
+fn hidden_reasoning_is_unhidden_instead_of_folded() {
+    let mut app = create_test_app();
+    app.history = vec![long_reasoning("hidden", false)];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+
+    // Context-menu hide can happen between frames while the old hint owner is
+    // still cached. Space must honor the new hidden state before that target.
+    app.collapsed_cells.insert(0);
+    assert!(handle_transcript_space(&mut app));
+    assert!(!app.collapsed_cells.contains(&0));
+    assert!(!app.folded_thinking.contains(&0));
+
+    app.collapsed_cells.insert(0);
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(!surface.contains("Space:expand"));
+    assert!(
+        app.viewport
+            .transcript_cache
+            .reasoning_action_target()
+            .is_none()
+    );
+
+    assert!(handle_transcript_space(&mut app));
+    assert!(!app.collapsed_cells.contains(&0));
+    assert!(!app.folded_thinking.contains(&0));
+    let visible = render_underwater_test_app(&mut app, 60, 16);
+    assert!(visible.contains("Space:expand"));
+}
+
+#[test]
+fn stale_rendered_reasoning_owner_cannot_toggle_replacement() {
+    let mut app = create_test_app();
+    app.push_history_cell(long_reasoning("old", false));
+    let _ = render_underwater_test_app(&mut app, 80, 24);
+    let rendered_epoch = app.transcript_identity_epoch;
+
+    app.clear_history();
+    app.push_history_cell(long_reasoning("replacement", false));
+    assert_ne!(app.transcript_identity_epoch, rendered_epoch);
+    assert!(!handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.is_empty());
+
+    let _ = render_underwater_test_app(&mut app, 80, 24);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&0));
+}
+
+#[test]
+fn pop_and_truncate_prune_index_state_before_replacement() {
+    let mut app = create_test_app();
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "kept".into(),
+        streaming: false,
+    });
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "old tail".into(),
+        streaming: false,
+    });
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    for set in [
+        &mut app.collapsed_cells,
+        &mut app.folded_thinking,
+        &mut app.expanded_tool_runs,
+    ] {
+        set.insert(1);
+    }
+    app.collapsed_cell_map = vec![0, 1];
+    app.pop_history();
+    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(app.expanded_tool_runs.is_empty() && app.collapsed_cell_map.is_empty());
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "after pop".into(),
+        streaming: false,
+    });
+    assert!(!handle_transcript_space(&mut app));
+    let first = render_underwater_test_app(&mut app, 60, 16);
+    assert!(first.contains("after pop") && !first.contains("old tail"));
+
+    for set in [
+        &mut app.collapsed_cells,
+        &mut app.folded_thinking,
+        &mut app.expanded_tool_runs,
+    ] {
+        set.insert(1);
+    }
+    app.truncate_history_to(1);
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "after truncate".into(),
+        streaming: false,
+    });
+    assert!(!handle_transcript_space(&mut app));
+    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(render_underwater_test_app(&mut app, 60, 16).contains("after truncate"));
+}
+
+#[test]
+fn dispatch_rollback_prunes_tail_state_and_keeps_revisions_monotonic() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let prepare = prepare_user_dispatch(
+        &mut app,
+        &config,
+        QueuedMessage::new("optimistic".into(), None),
+    )
+    .expect("prepare");
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    app.collapsed_cells.insert(0);
+    app.folded_thinking.insert(0);
+    app.expanded_tool_runs.insert(0);
+    app.collapsed_cell_map.push(0);
+    let next_revision = app.next_history_revision;
+    let apply = build_dispatch_error_closure(prepare, DispatchRecovery::Immediate, "failed".into());
+    let engine = mock_engine_handle();
+    let error = apply(&mut app, &engine.handle, &config).expect_err("dispatch fails");
+    assert_eq!(error.to_string(), "failed");
+    assert_eq!(app.next_history_revision, next_revision);
+    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(app.expanded_tool_runs.is_empty() && app.collapsed_cell_map.is_empty());
+    app.push_history_cell(HistoryCell::Assistant {
+        content: "replacement".into(),
+        streaming: false,
+    });
+    assert!(!handle_transcript_space(&mut app));
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    let transcript = app
+        .viewport
+        .transcript_cache
+        .lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(transcript.contains("replacement"), "{transcript}");
+    assert!(!transcript.contains("optimistic"), "{transcript}");
+}
+
+#[test]
+fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
+    let mut app = create_test_app();
+    app.push_history_cell(long_reasoning("old session", false));
+    app.folded_thinking.insert(0);
+    let _ = render_underwater_test_app(&mut app, 80, 24);
+    let old_epoch = app.transcript_identity_epoch;
+    let session = saved_session_with_messages(vec![crate::models::Message {
+        role: "assistant".to_string(),
+        content: vec![
+            crate::models::ContentBlock::Thinking {
+                thinking: (1..=20)
+                    .map(|line| format!("restored line {line:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                signature: None,
+            },
+            crate::models::ContentBlock::Text {
+                text: "restored final answer".to_string(),
+                cache_control: None,
+            },
+        ],
+    }]);
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+    assert!(app.folded_thinking.is_empty());
+    assert_ne!(app.transcript_identity_epoch, old_epoch);
+    assert!(matches!(
+        app.history.first(),
+        Some(HistoryCell::Thinking { .. })
+    ));
+    assert!(matches!(
+        app.history.get(1),
+        Some(HistoryCell::Assistant { .. })
+    ));
+    let restored = render_underwater_test_app(&mut app, 80, 24);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+    assert!(!restored.contains("Space:expand"));
+}
+
+#[test]
+fn error_or_interruption_transfers_reasoning_ownership_truthfully() {
+    let mut interrupted = long_reasoning("interrupted", false);
+    if let HistoryCell::Thinking { duration_secs, .. } = &mut interrupted {
+        *duration_secs = None;
+    }
+    let mut app = create_test_app();
+    app.history = vec![
+        interrupted,
+        HistoryCell::Error {
+            message: "provider disconnected".to_string(),
+            severity: crate::error_taxonomy::ErrorSeverity::Error,
+        },
+    ];
+    app.resync_history_revisions();
+    let failed = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+    assert!(!failed.contains("Space:expand"));
+
+    select_original_cell(&mut app, 0);
+    let selected = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(reasoning_hint_cells(&app), vec![0]);
+    assert!(selected.contains("Space:expand"));
+    assert!(handle_transcript_space(&mut app));
+}
+
+#[test]
+fn filtered_selection_toggles_the_original_reasoning_index() {
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::User {
+            content: "hidden predecessor".to_string(),
+        },
+        long_reasoning("mapped", false),
+    ];
+    app.resync_history_revisions();
+    app.collapsed_cells.insert(0);
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(app.collapsed_cell_map, vec![1]);
+    select_original_cell(&mut app, 1);
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    assert_eq!(reasoning_hint_cells(&app), vec![1]);
+    assert!(handle_transcript_space(&mut app));
+    assert!(app.folded_thinking.contains(&1));
+    assert!(!app.folded_thinking.contains(&0));
+}
+
+#[test]
+fn stale_selection_and_zero_height_fall_back_to_the_latest_cell() {
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::Assistant {
+            content: "first".to_string(),
+            streaming: false,
+        },
+        HistoryCell::Assistant {
+            content: "latest".to_string(),
+            streaming: false,
+        },
+    ];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    let stale = TranscriptSelectionPoint {
+        line_index: usize::MAX,
+        column: 0,
+    };
+    app.viewport.transcript_selection.anchor = Some(stale);
+    app.viewport.transcript_selection.head = Some(stale);
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+
+    app.viewport.last_transcript_visible = 0;
+    assert_eq!(
+        app.transcript_action_owner().map(|owner| owner.cell_index),
+        Some(1)
+    );
+}
+
+#[test]
+fn reasoning_hint_fits_representative_compact_frames() {
+    for (width, height) in [(40, 12), (60, 16)] {
+        let mut app = create_test_app();
+        app.history = vec![long_reasoning("compact", false)];
+        app.resync_history_revisions();
+        let surface = render_underwater_test_app(&mut app, width, height);
+        assert_eq!(reasoning_hint_cells(&app), vec![0], "{width}x{height}");
+        assert!(
+            surface.contains("Space:expand"),
+            "{width}x{height}: {surface}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -6943,6 +7654,40 @@ async fn immediate_submit_custom_provider_preflight_restores_exact_message() {
             .contains("Failed to configure provider route lm-studio / local-model."),
         "sticky error should keep provider/model route context: {}",
         sticky.text
+    );
+}
+
+#[tokio::test]
+async fn remote_preflight_failure_releases_the_account_owned_run() {
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    app.remote_control
+        .activate_prompt("run_remote_fixture", "turn_remote_fixture");
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &handle,
+        QueuedMessage::new("remote preflight failure".to_string(), None),
+    )
+    .await
+    .expect_err("provider preflight must fail before engine dispatch");
+
+    assert!(
+        !app.remote_control.has_active_run(),
+        "a terminal pre-dispatch failure must not strand the remote run"
     );
 }
 
@@ -12120,6 +12865,50 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
 }
 
 #[tokio::test]
+async fn startup_prompt_waits_for_native_telemetry_decision_then_dispatches() {
+    let mut app = create_test_app();
+    app.input = "inspect the workspace".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    app.onboarding = OnboardingState::None;
+    app.view_stack
+        .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
+            crate::telemetry_notice::PendingTelemetryNotice {
+                config_path: Some("config.toml".into()),
+                setup_state_path: "setup_state.json".into(),
+                session_source: codewhale_telemetry::SessionSource::Interactive,
+            },
+            app.ui_locale,
+        ));
+    let config = Config::default();
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .expect("defer for disclosure");
+
+    assert!(app.auto_submit_initial_input);
+    assert_eq!(app.input, "inspect the workspace");
+    assert!(engine.rx_op.try_recv().is_err());
+
+    assert_eq!(
+        app.view_stack.pop().map(|view| view.kind()),
+        Some(ModalKind::TelemetryNotice)
+    );
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .expect("submit after disclosure");
+
+    assert!(!app.auto_submit_initial_input);
+    match engine.rx_op.recv().await.expect("send message op") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert!(content.contains("inspect the workspace"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn steer_user_message_records_prompt_for_cancel_restore() {
     let mut app = create_test_app();
     let mut engine = crate::core::engine::mock_engine_handle();
@@ -13028,6 +13817,7 @@ fn open_tool_details_pager_supports_active_virtual_tool_cell() {
         100,
         app.transcript_render_options(),
         &app.folded_thinking,
+        None,
         None,
     );
     app.viewport.last_transcript_top = 0;

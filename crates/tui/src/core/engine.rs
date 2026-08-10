@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::client::DeepSeekClient;
 use crate::compaction::{
     CompactionConfig, CompactionLiveState, PreparedCompactionEnvelope, compact_messages_safe,
-    merge_system_prompts, should_compact, strip_active_operation_reanchor,
+    merge_system_prompts, strip_active_operation_reanchor,
 };
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
@@ -36,8 +36,8 @@ use crate::mcp::{McpConfig, McpPool};
 #[cfg(test)]
 use crate::models::ToolCaller;
 use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
-    Tool, Usage, is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
+    ContentBlock, ContentBlockStart, Delta, Message, StreamEvent, SystemPrompt, Tool, Usage,
+    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
 };
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
@@ -4472,6 +4472,15 @@ impl Engine {
         config
             .workspace
             .get_or_insert_with(|| self.config.workspace.clone());
+        // Carry the committed summary into the summarization request so a
+        // repeat compaction coalesces it; the commit replaces it afterwards.
+        config.prior_summary = crate::compaction::strip_active_operation_reanchor(
+            self.session.compaction_summary_prompt.as_ref(),
+        )
+        .as_ref()
+        .map(crate::compaction::summary_prompt_text)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
         let successor_reanchor = self
             .config
             .runtime_services
@@ -5327,11 +5336,15 @@ impl Engine {
         };
         let summary_prompt = merge_system_prompts(Some(&summary_prompt), successor_reanchor)
             .or(Some(summary_prompt));
-        let prior_compaction =
-            strip_active_operation_reanchor(self.session.compaction_summary_prompt.as_ref());
-        self.session.compaction_summary_prompt =
-            merge_system_prompts(prior_compaction.as_ref(), summary_prompt.clone());
-        let prior_system = strip_active_operation_reanchor(self.session.system_prompt.as_ref());
+        // Exactly one committed summary is live at a time. The new summary
+        // coalesced the previous one via the summarization bridge, so the old
+        // block is REPLACED here — appending it again grew the stable prefix
+        // by a full summary per pass, which re-latched compaction pressure
+        // and retriggered compaction on every subsequent turn.
+        self.session.compaction_summary_prompt = summary_prompt.clone();
+        let prior_system = crate::compaction::strip_compaction_summaries(
+            strip_active_operation_reanchor(self.session.system_prompt.as_ref()).as_ref(),
+        );
         let merged = merge_system_prompts(prior_system.as_ref(), summary_prompt);
         self.session.last_system_prompt_hash = Some(system_prompt_hash(merged.as_ref()));
         self.session.system_prompt = merged;
@@ -6094,6 +6107,7 @@ mod approval;
 mod context;
 mod handle;
 pub mod preview;
+use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]
 pub(crate) use context::compact_tool_result_for_context;
 pub(crate) use context::compact_tool_result_for_route;
@@ -6104,9 +6118,8 @@ pub use context::context_input_budget_for_route;
 use context::route_context_budget_for_provider;
 use context::{
     MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
-    effective_max_output_tokens_for_route, estimate_input_tokens_conservative,
-    extract_compaction_summary_prompt, is_context_length_error_message,
-    route_context_budget_for_route, summarize_text,
+    effective_max_output_tokens_for_route, extract_compaction_summary_prompt,
+    is_context_length_error_message, route_context_budget_for_route, summarize_text,
 };
 #[cfg(test)]
 use context::{context_input_budget_for_provider, effective_max_output_tokens};

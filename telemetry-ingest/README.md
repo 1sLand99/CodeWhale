@@ -13,11 +13,10 @@ and coupling the two would mean a telemetry change rebuilding the marketing site
 is the shipped default for `telemetry_endpoint`. workers.dev is disabled; that
 hostname is the only way in.
 
-That default decides where an *already enabled* session's batches go. It is not
-a consent change: Codewhale telemetry is still opt-in and off by default, and
-nothing is collected until the first-run notice is answered with Enable. A user
-who wants to stay enabled and contact nobody sets `telemetry_endpoint = ""`,
-which writes batches to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` instead.
+Anonymous usage counting is on by default in v0.9.6, with a clear first-run
+disclosure and a durable opt-out. Prior declines remain off. A user who wants
+to contact nobody sets `telemetry_endpoint = ""`, which writes batches to
+`$CODEWHALE_HOME/telemetry/dryrun.jsonl` instead.
 
 ---
 
@@ -217,10 +216,30 @@ the moment it goes over.
 
 ---
 
-## The two queries
+## Owner reports and queries
 
-Both are one query each, which is what the column layout was chosen for. Run
-them against the SQL API:
+The routine daily-active report is a checked-in command rather than SQL copied
+from a chat:
+
+```sh
+CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:dau -- --days 14
+CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:dau -- --days 14 --json
+```
+
+It reports **observed active installs by UTC day**, defined as distinct random
+`install_id` values that produced a `session_start` event that day, plus the
+weighted number of sessions started. This is not a person count: the id is per
+installation, rotates every 90 days, and is deleted on opt-out. Before v0.9.6
+the metric is an opt-in lower bound; v0.9.6 makes it default-on but it remains a
+lower bound because opt-outs, offline shutdowns, dropped flushes, old binaries,
+and Analytics Engine sampling can all remove observations.
+
+The token needs **Account → Account Analytics → Read**. The report performs one
+read-only SQL request, does not print credentials, and rejects windows beyond
+Analytics Engine's fixed 90-day retention.
+
+The underlying ad-hoc queries are one query each, which is what the column
+layout was chosen for. Run them against the SQL API:
 
 ```sh
 query() {

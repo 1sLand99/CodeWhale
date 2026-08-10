@@ -7,157 +7,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Mistral AI (la Plateforme) is now a first-class OpenAI-compatible provider
-  route. Select it with `provider = "mistral"`, `CODEWHALE_PROVIDER=mistral`,
-  or `codewhale --provider mistral`. Aliases `mistral-ai`, `mistralai`, and
-  `la-plateforme` resolve to the same route. Authenticate with
-  `MISTRAL_API_KEY` (get one at <https://console.mistral.ai/api-keys>), or
-  via `[providers.mistral].api_key` / `codewhale auth set --provider mistral`.
-  Endpoint defaults to `https://api.mistral.ai/v1`; model defaults to
-  `mistral-code-latest` (Codestral coding model, 256K context; the historical
-  `codestral-latest` slug is accepted as an alias). The current static picker
-  ships `mistral-code-latest`, `mistral-medium-latest`,
-  `mistral-small-latest`, and `mistral-large-latest` with 256K-class windows.
-  Adjustable reasoning is wired end-to-end for `mistral-medium-latest` and
-  `mistral-small-latest`: Codewhale sends `reasoning_effort` (`none` or `high`
-  only — intermediate tiers get HTTP 400 code 3051), parses the polymorphic
-  `content: [{type: thinking, thinking: [{type: text, text: ...}], closed:
-  bool}, {type: text, text: ...}]` shape emitted during reasoning, and
-  replays the thinking trace back into multi-turn history per the
-  [official reasoning guide](https://docs.mistral.ai/studio-api/conversations/reasoning).
-  Deprecated native Magistral IDs remain accepted
-  when configured explicitly, always replay thinking, and never receive the
-  adjustable effort field. Non-reasoning models (`mistral-code-latest`,
-  `mistral-large-latest`) never receive it. Mistral-specific reasoning wire
-  behavior is limited to the documented first-party HTTPS `/v1` hosts; custom
-  compatible gateways keep the generic Chat contract. FIM
-  (`/v1/fim/completions`) is not wired.
-
 ## [0.9.6] - 2026-08-09
 
-Codewhale v0.9.6 is a subtractive release. The runtime stopped supervising the
-model and started getting out of its way: the guards that interrupted live work
-are gone, mode-specific prompt doctrine is gone, compaction was rebuilt on a
-much smaller design, and a truncated provider response can no longer be
-recorded as a finished answer.
-
-Most of these were found by running the v0.9.5 binary against Terminal-Bench
-2.1 beside Pi 0.8.41 on the same model, effort, endpoint, and task digests, and
-then reading the trials Codewhale lost.
+Codewhale v0.9.6 is a subtractive release: fewer runtime guards, one stable
+prompt, truthful provider endings, and a smaller compaction path that preserves
+the provider cache. The changes were grounded by matched Terminal-Bench 2.1
+runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 ### Added
 
-- Mistral AI (la Plateforme) is now a first-class OpenAI-compatible provider
-  route. Select it with `provider = "mistral"`, `CODEWHALE_PROVIDER=mistral`,
-  or `codewhale --provider mistral`. Aliases `mistral-ai`, `mistralai`, and
-  `la-plateforme` resolve to the same route. Authenticate with
-  `MISTRAL_API_KEY` (get one at <https://console.mistral.ai/api-keys>), or
-  via `[providers.mistral].api_key` / `codewhale auth set --provider mistral`.
-  Endpoint defaults to `https://api.mistral.ai/v1`; model defaults to
-  `mistral-code-latest` (Codestral coding model, 256K context; the historical
-  `codestral-latest` slug is accepted as an alias). The current static picker
-  ships `mistral-code-latest`, `mistral-medium-latest`,
-  `mistral-small-latest`, and `mistral-large-latest` with 256K-class windows.
-  Adjustable reasoning is wired end-to-end for `mistral-medium-latest` and
-  `mistral-small-latest`: Codewhale sends `reasoning_effort` (`none` or `high`
-  only — intermediate tiers get HTTP 400 code 3051), parses the polymorphic
-  `content: [{type: thinking, thinking: [{type: text, text: ...}], closed:
-  bool}, {type: text, text: ...}]` shape emitted during reasoning, and
-  replays the thinking trace back into multi-turn history per the
-  [official reasoning guide](https://docs.mistral.ai/studio-api/conversations/reasoning).
-  Deprecated native Magistral IDs remain accepted
-  when configured explicitly, always replay thinking, and never receive the
-  adjustable effort field. Non-reasoning models (`mistral-code-latest`,
-  `mistral-large-latest`) never receive it. Mistral-specific reasoning wire
-  behavior is limited to the documented first-party HTTPS `/v1` hosts; custom
-  compatible gateways keep the generic Chat contract. FIM
-  (`/v1/fim/completions`) is not wired.
-- **Persistent background services for headless exec.** `Bash` accepts
-  `persist: true` (Unix, real `codewhale exec`, explicit
-  `--sandbox danger-full-access`, `background: true` only). The service starts
-  with null stdio in its own process group; a successful exec transfers
-  ownership and emits a release receipt naming the pid. Failure, cancellation,
-  a terminating signal, or engine-channel EOF kills it and exits nonzero.
-  Ordinary background jobs keep their existing kill-on-drop lifetime. Before
-  this, a server the model started and verified died when the exec that
-  started it succeeded, and the external verifier got connection refused.
-- **Static Linux ARM64 binaries.** Release and nightly now build
-  `aarch64-unknown-linux-musl` on the native ARM runner, with a static check
-  (no ELF interpreter) and a launch smoke on the matching runner. The previous
-  GNU build inherited the builder's `GLIBC_2.39` floor and would not start on
-  Ubuntu 22.04 ARM64 and similar images.
+- Mistral AI is a first-class provider route, including Codestral models,
+  first-party reasoning support, authentication, picker entries, and aliases.
+- Headless `Bash` can transfer explicitly requested persistent Unix services
+  out of an exec run, with ownership and cleanup receipts.
+- `/remote-env` opens hosted Work from the current GitHub or CNB branch tip and
+  states exactly which unpushed, dirty, ignored, secret, and session state stays
+  local.
+- Linux ARM64 release and nightly assets are static musl builds with native
+  launch checks.
+- Maintainers can report observed daily active installs from the same anonymous,
+  aggregate telemetry dataset; no additional client data is collected.
+- Fleet-dispatched members under a read-only/recon (no-network) ceiling now
+  keep the `Web` tool's read-only `search` and `fetch` actions — parity with an
+  ordinary scout — while every reaching surface (`web.run`, `fetch_url`,
+  `github`, MCP) stays denied and the sentinel-backed capability envelope
+  remains the fail-closed backstop.
 
 ### Changed
 
-- **`Bash action="wait"` blocks by default.** It previously computed blocking
-  from a separate `wait` boolean defaulting to false, so
-  `{"action":"wait","task_id":...,"timeout_ms":600000}` returned immediately
-  and ignored the timeout. Pass `wait: false` for a nonblocking snapshot.
-  `task_shell_wait` keeps its documented nonblocking default, including when
-  `wait`/`block` arrive as null.
-- **Compaction rebuilt on the Codex design.** One summary request that is the
-  live conversation plus a final handoff-summary message, so the provider's
-  prefix cache covers everything already sent; a committed summary; and a
-  replacement history of the recent user messages within a fixed token budget.
-  On context-window overflow it drops the oldest history item and retries.
-  Sessions saved under the previous format still restore their committed
-  summary. Manual compaction remains nonblocking and serialized, both
-  lifecycle labels persist for the real lifecycle, and the successor request
-  carries the committed summary.
-- **One prompt for every mode.** Plan, Agent, and Operate previously shipped
-  separate doctrine prompts that were prepended to the constitution, so a mode
-  change rewrote the stable prefix. Modes differ in permissions and available
-  tools, which runtime policy and the live tool catalog already express per
-  turn. Headless hosts get a compact constitution; interactive hosts keep the
-  full base; explicit embedder and base-prompt overrides still win.
-- **Goals are no longer bounded from inside the runtime.** The three-per-turn
-  continuation cap, the auto-pause after three identical verifier gap sets, and
-  the instruction to stop at any unanswered question are gone. `max_steps`,
-  the opt-in `[goal] max_continuations` circuit breaker, and terminal
-  complete/blocked status remain the ways a goal run ends.
-- `todo_write` is documented as an optional progress surface. Its description
-  no longer instructs the model to keep the list live or never batch
-  completions.
+- Anonymous usage counting is on by default for fresh installs and disclosed in
+  a native first-run Codewhale modal with an immediate opt-out. Prior declines
+  remain off. Codewhale does not collect conversations, code, prompts, files,
+  repo or branch names, credentials, model content, or per-turn activity
+  timelines.
+- Wide terminals use a responsive, full-screen ocean canvas with modest
+  gutters: prose keeps a readable measure while tools, diffs, work surfaces,
+  the composer, and status chrome can use the available width. Turn and major
+  activity seams breathe without padding every call inside a tool group.
+- Root CLI help describes product actions directly instead of exposing internal
+  TUI/runtime layers.
+- `Bash action="wait"` now blocks by default when a wait is requested; callers
+  can still ask for a nonblocking snapshot, and persistent service ownership
+  remains explicit.
+- Compaction is one cache-stable summary request followed by one committed
+  replacement summary and a bounded recent-message tail. Older saved sessions
+  still restore.
+- Plan, Act, and Operate share one stable base prompt. Modes continue to differ
+  through permissions and the live tool catalog.
+- Goal runs no longer stop because of internal continuation, repeated-gap, or
+  unanswered-question guards. Explicit user limits and terminal goal states
+  remain authoritative.
+- Account-owned `/rc` remote control now keeps exclusive ownership and a
+  crash-recoverable delivery journal until the server acknowledges terminal,
+  approval, failure, and snapshot state.
+- `todo_write` is an optional progress surface rather than required model
+  ceremony.
 
 ### Fixed
 
-- **A truncated response is a failure, not an answer.** The turn loop read
-  usage from the message delta and discarded its stop reason; trials that spent
-  their whole output allowance on reasoning and emitted no answer were recorded
-  `status=completed`, `termination_reason=resolved`. The stop reason is now
-  retained end to end. On an incomplete stop the runtime charges the billed
-  usage, keeps the visible fragment as interrupted rather than as a completed
-  assistant message, closes every opened tool lifecycle without executing the
-  call, and fails the turn with the provider's own reason. The Responses
-  adapter preserves `incomplete_details.reason` instead of flattening it, so an
-  unknown future reason cannot be mistaken for a finished answer.
-- The same rule now covers every remaining direct model consumer: compaction,
-  the `review` and `verify` tools, MCP thread handling, purge, the advisor, the
-  auto-route classifier, the fleet router, both setup drafts, and
-  `codewhale review`.
-- **Step-budget exhaustion is a typed failure.** Reaching `max_steps` before
-  completion is `Failed` / `BudgetExhausted` and cannot release a pending
-  persistent service. A goal continuation injected on the final step no longer
-  relabels an already delivered answer as a step-budget failure.
-- Cancellation arriving after the provider reported terminal usage still
-  charges the turn.
+- First-run usage disclosure now opens as a native Codewhale modal instead of a
+  shell questionnaire before application startup. Telemetry remains unarmed
+  until the native choice is made, and an in-memory Disable choice governs the
+  current session even when its preference cannot be saved.
+- `/compact` completion, failure, queued, duplicate, and mailbox outcomes are
+  durable transcript receipts instead of short-lived toasts. A stray terminal
+  event can no longer leave every later compaction stuck as already running.
+- Repeat compactions replace the previous committed summary rather than stack
+  summaries. The prior summary is coalesced only in the final instruction, so
+  the original conversation prefix remains cacheable.
+- Automatic compaction uses a percentage of the real context window, clamped to
+  the route's spendable ceiling. Pressure comes from the current parent-route
+  prompt, not cumulative billing or child-model usage.
+- Compaction, review, verify, routing, setup, Fleet, MCP, RLM, vision,
+  translation, and sub-agent calls inherit the resolved route's normal output,
+  sampling, and reasoning policy. Small internal-task token caps no longer
+  truncate thinking routes or special-case individual providers.
+- Incomplete provider responses fail truthfully across ordinary turns and every
+  internal model consumer. Partial text stays interrupted, pending tool calls do
+  not execute, and billed usage is retained.
+- Transport-only `(reasoning omitted)` placeholders no longer enter new
+  transcripts and are filtered from restored sessions. Reasoning expand/collapse
+  actions stay attached to the exact rendered cell, including after replacement,
+  restore, filtering, and resize (#5291).
+- Step-budget exhaustion is a typed failure and cannot release a pending
+  persistent service. Cancellation after terminal usage still charges the turn.
+- Website setup, provider, diagnostics, Fleet, and single-runtime claims now
+  match the source candidate.
+- Opening the sub-agent register no longer hides the to-do list: the Agents
+  panel shows the full register and the durable checklist together, and the
+  register header is a two-way door that returns to Tasks on a second click.
+- The ⌥V / Alt+V details chord opens the selected work-surface row's own
+  inspector instead of the transcript's nearest tool cell, so a selected
+  to-do row shows its own content rather than the latest reasoning.
+- The first-run usage disclosure now asks a clear question — "Help improve
+  Codewhale?" — with unambiguous "Yes, keep anonymous counts" / "No, turn off
+  tracking" choices in every shipped locale, and states the persistent opt-out
+  command. Consent semantics are unchanged: telemetry stays unarmed until a
+  choice is made.
+- macOS screencapture screenshots referenced in a message are copied to a
+  stable attachments directory the moment the message is received, and the
+  reference is rewritten to the stable path, so the image still exists when
+  the agent reads it. Only files under a screencapture "Temporary Items"
+  directory are touched; copies are idempotent and a failed copy keeps the
+  original reference.
 
 ### Removed
 
-- **The no-progress stuck guard.** It fingerprinted steps by tool name and
-  arguments with no result digest, so polling a live background job looked
-  identical every time. It stopped `filter-js-from-html` while the task it was
-  waiting on went on to pass, and stopped `llm-inference-batching-scheduler`
-  and `mcmc-sampling-stan` mid-optimizer and mid-compile.
-- **The read-repeat guard.** It coalesced same-batch duplicate reads onto one
-  execution and, past a threshold, replaced results with a receipt pointing at
-  a prior tool-use id. A model that asks to read a file twice now reads it
-  twice.
-- **Tool-error strategy coaching.** Errors were rewritten to append fallback
-  advice, and a degradation hint fired after two consecutive error steps.
-  Errors now return as the tool produced them.
+- The no-progress guard, repeated-read guard, and injected tool-error strategy
+  coaching. Productive polling, repeated inspection, and model-owned recovery
+  are no longer interrupted by runtime heuristics.
+
+### Known issues
+
+- A resumed session can still display the startup provider/model instead of the
+  restored route identity. This drift is explicitly unresolved and is separate
+  from the fixed, provider-neutral compaction path.
+- Manual `/compact` during an active turn is refused with "engine is busy"
+  instead of queueing behind the turn; idle and between-turn compaction work
+  correctly. Deferred to v0.9.7 by owner decision, and the three
+  release-runtime QA scenarios that pin the required lifecycle are marked
+  ignored with a tracking reason until the fix lands.
 
 ### Contributors
 

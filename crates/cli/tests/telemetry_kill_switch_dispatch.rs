@@ -17,9 +17,8 @@ use tempfile::TempDir;
 
 /// `CODEWHALE_TELEMETRY=0` beats `--telemetry true`, end to end.
 ///
-/// The notice decision is recorded on this home on purpose: without it the run
-/// would be off for want of consent, and the test would pass without the kill
-/// switch ever being consulted.
+/// The positive control proves the runtime is enabled before the kill switch is
+/// applied, so the zero-state assertion cannot pass vacuously.
 #[test]
 fn env_off_beats_cli_on_end_to_end() {
     // Positive control first: the flag reaches the in-process runtime and
@@ -28,7 +27,7 @@ fn env_off_beats_cli_on_end_to_end() {
     let on = dispatch_and_read_telemetry(None);
     let dry_run = on
         .dry_run
-        .expect("`--telemetry true` with recorded consent must write the dry-run sink");
+        .expect("`--telemetry true` must write the dry-run sink");
     assert!(
         dry_run.contains("\"event\":\"session_start\"")
             && dry_run.contains("\"event\":\"session_end\""),
@@ -53,6 +52,62 @@ fn an_unparseable_telemetry_env_value_keeps_the_in_process_runtime_off() {
     );
 }
 
+/// Re-enabling through the documented settings command must clear a decline
+/// recorded by the former opt-in notice as well as the config-file floor.
+#[test]
+fn config_set_true_reenables_a_historical_decline() {
+    let fixture = TempDir::new().expect("fixture root");
+    let home = fixture.path().join("home");
+    let codewhale_home = fixture.path().join("codewhale-home");
+    let workspace = fixture.path().join("workspace");
+    for dir in [&home, &codewhale_home, &workspace] {
+        fs::create_dir_all(dir).expect("create fixture dir");
+    }
+
+    let mut state = SetupState::default();
+    state.record_telemetry_notice("1", false);
+    let state_path = codewhale_home.join("setup_state.json");
+    state
+        .save_to(&state_path)
+        .expect("write historical decline");
+
+    let config_path = fixture.path().join("config.toml");
+    fs::write(&config_path, "telemetry = false\n").expect("write config");
+
+    let output = Command::new(codewhale_binary())
+        .current_dir(&workspace)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").expect("PATH"))
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("CODEWHALE_HOME", &codewhale_home)
+        .env("CODEWHALE_SECRET_BACKEND", "file")
+        .args([
+            "--config",
+            config_path.to_str().expect("config path"),
+            "config",
+            "set",
+            "telemetry",
+            "true",
+        ])
+        .output()
+        .expect("run config set");
+    assert!(
+        output.status.success(),
+        "config set failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("telemetry = true")
+    );
+    let state = SetupState::load_from(&state_path).expect("read setup state");
+    assert!(state.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
+    assert!(!state.telemetry_opted_out());
+}
+
 struct DispatchEvidence {
     telemetry_dir_exists: bool,
     dry_run: Option<String>,
@@ -68,13 +123,6 @@ fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence 
     for dir in [&home, &codewhale_home, &workspace] {
         fs::create_dir_all(dir).expect("create fixture dir");
     }
-
-    // A recorded acceptance, so the run is not off for want of consent.
-    let mut state = SetupState::default();
-    state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
-    state
-        .save_to(&codewhale_home.join("setup_state.json"))
-        .expect("write setup state");
 
     let config_path = fixture.path().join("config.toml");
     fs::write(

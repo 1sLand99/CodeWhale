@@ -1433,15 +1433,18 @@ impl<'a> PromptBuilder<'a> {
         MessageRequest {
             model: self.model.to_string(),
             messages,
-            max_tokens: 8,
+            max_tokens: CACHE_WARMUP_MAX_TOKENS,
             system,
             tools,
             tool_choice,
             metadata: None,
             thinking: None,
-            reasoning_effort: self.reasoning_effort.map(str::to_string),
+            // Warmup has an intentionally tiny answer contract ("OK"). Do not
+            // let hidden reasoning consume that allowance before the cacheable
+            // prefix is accepted by the provider.
+            reasoning_effort: Some("off".to_string()),
             stream: None,
-            temperature: Some(0.0),
+            temperature: None,
             top_p: None,
         }
     }
@@ -1544,6 +1547,7 @@ fn push_text_part(parts: &mut Vec<Value>, text: &str) {
 }
 
 pub(crate) const CACHE_WARMUP_USER_TAIL: &str = "请只回复 OK";
+pub(crate) const CACHE_WARMUP_MAX_TOKENS: u32 = 8;
 const TOOL_RESULT_SENT_CHAR_BUDGET: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;

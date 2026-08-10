@@ -743,8 +743,8 @@ pub struct ConfigToml {
     /// [`DEFAULT_TELEMETRY_ENDPOINT`] — not "send nowhere". Setting it to the
     /// empty string is the way to say send nowhere: that resolves to no
     /// endpoint, which appends batches to `dryrun.jsonl` and constructs no HTTP
-    /// client. Either way nothing is sent until telemetry is enabled *and* the
-    /// first-run notice has been answered with Enable.
+    /// client. Either way a persistent or run-scoped opt-out still prevents any
+    /// batch from being constructed.
     ///
     /// Kept as a scalar sibling of `telemetry` rather than folded into a
     /// `[telemetry]` table. `telemetry` is already a scalar and every section
@@ -3358,7 +3358,7 @@ impl ConfigToml {
             .telemetry
             .or(env.telemetry)
             .or(self.telemetry)
-            .unwrap_or(false);
+            .unwrap_or(true);
         // `telemetry = false` written to the config file is the off switch the
         // first-run notice and `docs/TELEMETRY.md` both advertise as the
         // *persistent* one, so it is a floor and not merely the last term of a
@@ -3394,10 +3394,9 @@ impl ConfigToml {
         // missing value — it is the local dry-run sink, and it stays reachable
         // by resolving to `None` instead of falling through to the default.
         //
-        // None of this is a consent decision. A session only reaches an
-        // endpoint after `telemetry` above resolved true, which requires the
-        // first-run notice to have been answered with Enable; the kill switches
-        // are all upstream of this line.
+        // None of this changes the user's opt-out. A session only reaches an
+        // endpoint after `telemetry` above resolved true; every persistent and
+        // run-scoped kill switch is upstream of this line.
         let telemetry_endpoint = match env
             .telemetry_endpoint
             .clone()
@@ -3460,11 +3459,9 @@ fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &Provi
 /// Analytics Engine and stores nothing else. See `docs/TELEMETRY.md` for what a
 /// batch contains and `telemetry-ingest/` for the handler.
 ///
-/// This is a *default*, not a floor, and it changes nothing about consent: it is
-/// only ever consulted for a session that is already enabled, which requires the
-/// first-run notice to have been answered with Enable. `CODEWHALE_TELEMETRY=0`,
-/// `telemetry = false`, and a recorded decline all stop the session long before
-/// an endpoint is read.
+/// This is a *default*, not a floor, and it changes nothing about permission:
+/// `CODEWHALE_TELEMETRY=0`, `telemetry = false`, and a recorded decline all
+/// stop the session long before an endpoint is read.
 ///
 /// An explicit value — `CODEWHALE_TELEMETRY_ENDPOINT` or `telemetry_endpoint` in
 /// the config file — wins outright, and an explicit *empty* value resolves to no
@@ -4829,11 +4826,10 @@ pub struct ResolvedRuntimeOptions {
     /// A human wrote `telemetry = false` into the config file.
     ///
     /// This is the *persistent* opt-out, and it is deliberately narrower than
-    /// "telemetry resolved to false". `false` is also the value when nobody has
-    /// said anything at all, and it is what the dispatcher forwards to the TUI
-    /// on every ordinary run; a consumer that reads those as a revocation would
-    /// destroy the identity and buffered events of a consenting user who merely
-    /// set `CODEWHALE_TELEMETRY=0` for one command. Run-scoped kill switches
+    /// "telemetry resolved to false". A run-scoped kill switch also resolves
+    /// false; treating that as a revocation would destroy the identity and
+    /// buffered events of a user who merely set `CODEWHALE_TELEMETRY=0` for one
+    /// command. Run-scoped kill switches
     /// (`--telemetry false`, the environment variable) stop the run and leave
     /// every byte on disk alone; only this flag authorizes the wipe.
     pub telemetry_explicit_off: bool,

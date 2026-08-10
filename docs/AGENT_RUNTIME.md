@@ -249,12 +249,10 @@ A reproducible headless launch uses only existing generic surfaces:
   contains only the task servers the harness supplies
   (`{"mcpServers":{"task-tools":{"url":""}}}`; the `mcpServers` alias and
   URL-based Streamable HTTP / SSE transports already exist);
-- `CODEWHALE_MEMORY=false` and `CODEWHALE_TELEMETRY=false`. Product telemetry
-  is already opt-in and off by default, and a fresh `CODEWHALE_HOME` carries no
-  first-run notice decision, so a sealed harness run collects nothing either
-  way; setting the variable makes that explicit and survives a home the caller
-  reuses — which is the case that now matters, because a reused home whose owner
-  answered the first-run notice with Enable sends to a live endpoint
+- `CODEWHALE_MEMORY=false` and `CODEWHALE_TELEMETRY=false`. Anonymous usage
+  counting is on by default, so every sealed harness sets the run-scoped kill
+  switch explicitly. It also protects a home the caller reuses, whose ordinary
+  sessions send aggregate counts to a live endpoint
   (`https://telemetry.codewhale.net/v1/telemetry`, the shipped default) rather
   than to a local file. It is a hard floor — an explicit "off" in the
   environment beats `--telemetry true` and `telemetry = true` in config. Set

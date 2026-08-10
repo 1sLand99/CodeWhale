@@ -40,10 +40,11 @@ pub const SETUP_STATE_FILE_NAME: &str = "setup_state.json";
 ///
 /// The notice is owed whenever
 /// [`SetupState::telemetry_notice_decided_for`] does not match this string.
-/// Bumping it re-asks everyone, so it is bumped only when what would be
-/// collected materially changes. Keying it to the app version would re-prompt
-/// every release, which is nagging with extra steps.
-pub const TELEMETRY_NOTICE_VERSION: &str = "1";
+/// Bumping it re-asks prior acceptors and unanswered users, so it is bumped only
+/// when the collection policy, schema, or disclosure materially changes. Prior
+/// declines remain off. Keying it to the app version would re-prompt every
+/// release, which is nagging with extra steps.
+pub const TELEMETRY_NOTICE_VERSION: &str = "3";
 
 /// Canonical setup step ids. The ordering matches the first-run spine so a
 /// `BTreeMap<SetupStep, _>` renders in wizard order.
@@ -335,8 +336,8 @@ pub struct SetupState {
     /// Never auto-completed and never deferred-completed: unlike the
     /// constitution checkpoint, which records a `Deferred` completion on the
     /// skip-onboarding path, a telemetry notice that was not rendered and
-    /// answered leaves this `None`. Silence is not consent, so the failure
-    /// mode of a missing notice is that nothing is ever collected.
+    /// answered leaves this `None`. Collection follows the documented default
+    /// while the notice remains owed on the next interactive launch.
     ///
     /// These are *fields* rather than a new [`SetupStep`] variant on purpose:
     /// an unknown enum variant fails the whole record parse and silently drops
@@ -344,9 +345,9 @@ pub struct SetupState {
     /// checkpoint — while unknown fields are ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_notice_decided_for: Option<String>,
-    /// The user's answer to the notice. Only meaningful when
-    /// [`Self::telemetry_notice_decided_for`] matches the current
-    /// [`TELEMETRY_NOTICE_VERSION`].
+    /// The user's answer to the notice. `false` with any recorded notice
+    /// version is a durable opt-out; `true` records acknowledgment of that
+    /// version's disclosure.
     #[serde(default, skip_serializing_if = "is_false")]
     pub telemetry_opt_in: bool,
 }
@@ -505,12 +506,7 @@ impl SetupState {
         self
     }
 
-    /// True when the user was asked the current notice and said yes.
-    ///
-    /// This is one half of the emit condition; the other is `telemetry = true`
-    /// in config. Neither alone suffices, which is what makes a stale
-    /// pre-existing `telemetry = true` — settable and inert for a long time —
-    /// not consent.
+    /// True when the user was asked the current notice and kept counting on.
     #[must_use]
     pub fn telemetry_accepted(&self, version: &str) -> bool {
         !self.needs_telemetry_notice(version) && self.telemetry_opt_in
@@ -518,11 +514,21 @@ impl SetupState {
 
     /// True when the user was asked the current notice and said no.
     ///
-    /// Distinct from "never asked": only a recorded decline is an answer, and
-    /// only an answer may be acted on destructively.
+    /// Distinct from "never asked": only a recorded decline is an opt-out, and
+    /// only an opt-out may be acted on destructively.
     #[must_use]
     pub fn telemetry_declined(&self, version: &str) -> bool {
         !self.needs_telemetry_notice(version) && !self.telemetry_opt_in
+    }
+
+    /// Whether any recorded telemetry notice was explicitly declined.
+    ///
+    /// Declines recorded by the former opt-in notice remain durable opt-outs
+    /// after telemetry becomes default-on. A notice-version bump may explain a
+    /// changed policy, but it must never erase a user's earlier "no".
+    #[must_use]
+    pub fn telemetry_opted_out(&self) -> bool {
+        self.telemetry_notice_decided_for.is_some() && !self.telemetry_opt_in
     }
 
     /// Derive a safe inherited state for an existing user with no persisted

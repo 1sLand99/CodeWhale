@@ -6,6 +6,46 @@
 
 use super::*;
 
+/// Apply Space only to the owner stored by the final render pass.
+pub(super) fn handle_transcript_space(app: &mut App) -> bool {
+    let Some((owner, reasoning_target)) = app.viewport.transcript_cache.take_transcript_action()
+    else {
+        return false;
+    };
+    let idx = owner.cell_index;
+    if owner.identity_epoch != app.transcript_identity_epoch {
+        return false;
+    }
+    let Some(cell) = app.cell_at_virtual_index(idx) else {
+        return false;
+    };
+    let is_thinking = matches!(cell, HistoryCell::Thinking { .. });
+    if let Some(target) = reasoning_target.filter(|_| !app.collapsed_cells.contains(&idx)) {
+        if target.owner != owner {
+            return false;
+        }
+        if !app.show_thinking || !is_thinking {
+            return false;
+        }
+        let options = app.transcript_render_options();
+        let folded = (!options.verbose ^ options.thinking_default_expanded)
+            ^ (target.action == ReasoningAction::Collapse);
+        app.folded_thinking.remove(&idx);
+        if folded {
+            app.folded_thinking.insert(idx);
+        }
+    } else if app.toggle_tool_run_expansion_at(idx) {
+        return true;
+    } else if !app.collapsed_cells.remove(&idx) {
+        if is_thinking {
+            return false;
+        }
+        app.collapsed_cells.insert(idx);
+    }
+    app.mark_history_updated();
+    true
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -21,6 +61,7 @@ pub async fn run_tui(
     config: &Config,
     options: TuiOptions,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+    pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
 ) -> Result<()> {
     let use_alt_screen = options.use_alt_screen;
     let use_mouse_capture = options.use_mouse_capture;
@@ -418,7 +459,21 @@ pub async fn run_tui(
         tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
     app.dispatch_completion_tx = Some(dispatch_completion_tx);
 
-    if std::mem::take(&mut app.start_remote_control_on_launch) {
+    // The disclosure is the final startup view pushed, so setup/provider
+    // surfaces remain ready underneath but nothing can appear above the
+    // privacy decision. This also makes the first visible frame a native
+    // Codewhale surface instead of a shell questionnaire.
+    if let Some(pending) = pending_telemetry_notice {
+        app.view_stack
+            .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
+                pending,
+                app.ui_locale,
+            ));
+    }
+
+    if app.view_stack.top_kind() != Some(ModalKind::TelemetryNotice)
+        && std::mem::take(&mut app.start_remote_control_on_launch)
+    {
         start_remote_control_session(&mut app);
     }
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
@@ -912,6 +967,12 @@ pub(crate) async fn run_event_loop(
                 }
                 if !matches!(event, EngineEvent::ApprovalRequired { .. }) {
                     app.remote_control.observe_engine_event(&event);
+                    // A terminal boundary reached after deltas were shed under
+                    // pressure repairs account truth with a bounded snapshot.
+                    while let Some(resync_run) = app.remote_control.take_pending_resync() {
+                        app.remote_control
+                            .upload_resync_snapshot(&resync_run, &app.api_messages);
+                    }
                 }
                 record_turn_activity(app, &event, Instant::now());
                 match event {
@@ -1879,12 +1940,9 @@ pub(crate) async fn run_event_loop(
                         {
                             if let Ok(session) = build_session_snapshot(app, &manager) {
                                 app.session_title = Some(session.metadata.title.clone());
-                                // Pin the id so every checkpoint of this
-                                // session lands in the same per-session file
-                                // and the eventual clear targets it.
-                                if app.current_session_id.is_none() {
-                                    app.current_session_id = Some(session.metadata.id.clone());
-                                }
+                                // The engine's session id was pinned above, so
+                                // every checkpoint of this session lands in the
+                                // same per-session file.
                                 if let Err(err) = persist_with_pending_work_boundary(
                                     app,
                                     PersistRequest::SaveCheckpoint { session },
@@ -3326,6 +3384,30 @@ pub(crate) async fn run_event_loop(
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
 
+            // The first-run disclosure is the launch's decision boundary. It
+            // owns every key before Help, Settings, onboarding, decision
+            // cards, or the composer can see it; Esc/Ctrl+C exit without
+            // recording a choice, and Enter/Y/N are handled by the native
+            // view itself.
+            if app.view_stack.top_kind() == Some(ModalKind::TelemetryNotice) {
+                let events = app.view_stack.handle_key(key);
+                app.needs_redraw = true;
+                if handle_view_events_boxed(
+                    terminal,
+                    app,
+                    config,
+                    &task_manager,
+                    &mut engine_handle,
+                    &mut web_config_session,
+                    events,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+
             // A route change made in-session is temporary and stays that way
             // until the user EXPLICITLY persists it with a command
             // (/fleet save updates the selected Fleet, /fleet save-as saves a
@@ -4136,31 +4218,7 @@ pub(crate) async fn run_event_loop(
                 KeyCode::Char(' ')
                     if key.modifiers == KeyModifiers::NONE && app.input.is_empty() =>
                 {
-                    if let Some(idx) = detail_target_cell_index(app) {
-                        if app.toggle_tool_run_expansion_at(idx) {
-                            continue;
-                        }
-                        let is_thinking = app
-                            .cell_at_virtual_index(idx)
-                            .is_some_and(|c| matches!(c, HistoryCell::Thinking { .. }));
-                        if is_thinking {
-                            if app.folded_thinking.contains(&idx) {
-                                app.folded_thinking.remove(&idx);
-                                app.status_message = Some("Thinking block expanded".to_string());
-                            } else {
-                                app.folded_thinking.insert(idx);
-                                app.status_message = Some("Thinking block folded".to_string());
-                            }
-                        } else if app.collapsed_cells.contains(&idx) {
-                            app.collapsed_cells.remove(&idx);
-                            app.status_message = Some("Cell expanded".to_string());
-                        } else {
-                            app.collapsed_cells.insert(idx);
-                            app.status_message = Some("Cell collapsed".to_string());
-                        }
-                        app.mark_history_updated();
-                        app.needs_redraw = true;
-                    }
+                    let _ = handle_transcript_space(app);
                     continue;
                 }
                 KeyCode::Char('t') | KeyCode::Char('T')
@@ -4276,7 +4334,7 @@ pub(crate) async fn run_event_loop(
                     match ctrl_c_disposition(app) {
                         CtrlCDisposition::CopySelection => {
                             copy_active_selection(app);
-                            app.viewport.transcript_selection.clear();
+                            clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
                             engine_handle.cancel();
@@ -5115,7 +5173,7 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
     let request = MessageRequest {
         model: route.model.clone(),
         messages: app.api_messages.clone(),
-        max_tokens: 1024,
+        max_tokens: CACHE_WARMUP_MAX_TOKENS,
         system: app.system_prompt.clone(),
         tools: app.session.last_tool_catalog.clone(),
         tool_choice: None,

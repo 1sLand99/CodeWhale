@@ -48,8 +48,8 @@ use windows::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMo
 use crate::audit::log_sensitive_event;
 use crate::automation_manager::{AutomationManager, AutomationSchedulerConfig, spawn_scheduler};
 use crate::client::{
-    CacheWarmupKey, DeepSeekClient, PromptInspection, build_cache_warmup_request,
-    inspect_prompt_for_request,
+    CACHE_WARMUP_MAX_TOKENS, CacheWarmupKey, DeepSeekClient, PromptInspection,
+    build_cache_warmup_request, inspect_prompt_for_request,
 };
 use crate::commands;
 use crate::compaction::CompactionConfig;
@@ -148,7 +148,8 @@ use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
 };
 use super::history::{
-    ExecCell, HistoryCell, ToolCell, ToolStatus, history_cells_from_message, summarize_tool_output,
+    ExecCell, HistoryCell, ReasoningAction, ToolCell, ToolStatus, history_cells_from_message,
+    summarize_tool_output,
 };
 use super::slash_menu::{
     apply_slash_menu_selection, partial_inline_skill_mention_at_cursor,
@@ -707,8 +708,11 @@ async fn drain_remote_control_events(
             crate::remote_control::RemoteEvent::Connected {
                 account_ref,
                 runner_id,
+                attachment,
                 ..
             } => {
+                app.remote_control
+                    .upload_snapshot(&attachment.run_id, &app.api_messages);
                 let status = format!(
                     "REMOTE CONTROL · account {account_ref} · runner {runner_id} · /rc stop returns input here"
                 );
@@ -719,6 +723,16 @@ async fn drain_remote_control_events(
                 });
                 app.status_message = Some(status.clone());
                 app.sticky_status = Some(StatusToast::new(status, StatusToastLevel::Warning, None));
+            }
+            crate::remote_control::RemoteEvent::Attachment { attachment } => {
+                // Reconnect responses carry the server's current cursor and
+                // snapshot receipt. `try_next_event` applies that truth before
+                // this handler, so this is either a no-op or one bounded retry.
+                app.remote_control
+                    .upload_snapshot(&attachment.run_id, &app.api_messages);
+            }
+            crate::remote_control::RemoteEvent::RuntimeCursor { .. } => {
+                // The controller has already retired the acknowledged prefix.
             }
             crate::remote_control::RemoteEvent::Failed(error) => {
                 let status = format!(
@@ -806,6 +820,9 @@ async fn drain_remote_control_events(
                                     .acknowledge(&run_id, seq, &command, "applied", None);
                             }
                             Ok(()) => {
+                                app.remote_control.fail_active_dispatch(
+                                    "The remote prompt was blocked before dispatch.",
+                                );
                                 app.remote_control.acknowledge(
                                     &run_id,
                                     seq,
@@ -818,6 +835,7 @@ async fn drain_remote_control_events(
                                 );
                             }
                             Err(error) => {
+                                app.remote_control.fail_active_dispatch(&error.to_string());
                                 app.remote_control.acknowledge(
                                     &run_id,
                                     seq,
@@ -904,6 +922,20 @@ fn start_remote_control_session(app: &mut App) {
     let runtime_commit = option_env!("CODEWHALE_BUILD_COMMIT")
         .unwrap_or("")
         .to_string();
+    // The crash-recoverable delivery journal is mandatory outside tests: it is
+    // what lets an interrupted session prove which terminal/approval events
+    // never reached the account before handing the session back.
+    let journal_dir = match codewhale_config::codewhale_home() {
+        Ok(home) => home.join("remote-control"),
+        Err(_) => {
+            let error =
+                "Remote control needs a writable Codewhale home directory for its delivery journal."
+                    .to_string();
+            app.status_message = Some(error.clone());
+            app.push_status_toast(error, StatusToastLevel::Error, Some(12_000));
+            return;
+        }
+    };
     match app
         .remote_control
         .start(crate::remote_control::RemoteStart {
@@ -912,6 +944,7 @@ fn start_remote_control_session(app: &mut App) {
             session_id,
             runtime_version: env!("CARGO_PKG_VERSION").to_string(),
             runtime_commit,
+            journal_dir: Some(journal_dir),
         }) {
         Ok(()) => {
             let status = app.remote_control.status_line();
@@ -2063,7 +2096,6 @@ struct UserDispatchSnapshot {
     history_len: usize,
     history_revisions_len: usize,
     history_version: u64,
-    next_history_revision: u64,
     api_messages_len: usize,
     last_send_at: Option<Instant>,
 }
@@ -2196,6 +2228,7 @@ pub(crate) fn try_queue_manual_compaction(
         let text = app
             .tr(MessageId::ContextCompactionAlreadyRunning)
             .into_owned();
+        add_compaction_receipt(app, &text);
         set_explicit_compaction_status(app, text, StatusToastLevel::Warning, false);
         return;
     }
@@ -2206,6 +2239,7 @@ pub(crate) fn try_queue_manual_compaction(
             let text = app
                 .tr(MessageId::ContextCompactionRouteInvalid)
                 .replace("{error}", &error.to_string());
+            add_compaction_receipt(app, &text);
             set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
             return;
         }
@@ -2226,6 +2260,11 @@ pub(crate) fn try_queue_manual_compaction(
                 MessageId::ContextManualCompacting
             };
             let text = app.tr(id).into_owned();
+            // Queued-behind-a-turn is a state the user must be able to find
+            // again after the 5s toast: leave it in the transcript too.
+            if app.is_loading {
+                add_compaction_receipt(app, &text);
+            }
             set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
         }
         Err(error) => {
@@ -2240,6 +2279,7 @@ pub(crate) fn try_queue_manual_compaction(
                 MessageId::ContextCompactionQueueClosed
             };
             let text = app.tr(id).into_owned();
+            add_compaction_receipt(app, &text);
             set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
         }
     }
@@ -2260,11 +2300,20 @@ pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
 }
 
-fn take_matching_compaction(app: &mut App, id: &str, auto: bool) -> bool {
-    if !app
+/// Clear the compaction-in-flight state for a terminal lifecycle event.
+///
+/// An exact id match clears normally. A terminal event with NO tracked
+/// compaction is still authoritative (the started event can be lost to a
+/// dropped drain or session switch): without this, `is_compacting`/
+/// `manual_compaction_queued` stayed latched and every later `/compact` was
+/// silently rejected as "already in progress". A stale event while a NEWER
+/// compaction is live must not clear it (or report anything) — that live
+/// pass gets its own terminal event. Returns whether the event settled.
+fn settle_compaction(app: &mut App, id: &str, auto: bool) -> bool {
+    if app
         .active_compaction
         .as_ref()
-        .is_some_and(|active| active.id == id && active.auto == auto)
+        .is_some_and(|active| active.id != id || active.auto != auto)
     {
         return false;
     }
@@ -2276,14 +2325,29 @@ fn take_matching_compaction(app: &mut App, id: &str, auto: bool) -> bool {
     true
 }
 
+/// Durable transcript receipt for a compaction outcome.
+///
+/// Outcome feedback used to be toast-only, and the engine emits
+/// `TurnComplete` immediately after the compaction event — both land in the
+/// same UI drain batch, so the turn's "done" status replaced the completion
+/// toast before a single frame was drawn. `/compact` looked like a no-op
+/// even when the summary committed (the v0.9.6 release blocker).
+fn add_compaction_receipt(app: &mut App, message: &str) {
+    app.add_message(HistoryCell::System {
+        content: message.to_string(),
+    });
+}
+
 pub(crate) fn apply_compaction_completed(app: &mut App, id: &str, auto: bool, message: String) {
-    if take_matching_compaction(app, id, auto) {
+    if settle_compaction(app, id, auto) {
+        add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Success, false);
     }
 }
 
 pub(crate) fn apply_compaction_failed(app: &mut App, id: &str, auto: bool, message: String) {
-    if take_matching_compaction(app, id, auto) {
+    if settle_compaction(app, id, auto) {
+        add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
     }
 }
@@ -2307,6 +2371,7 @@ mod config_update_tests {
             live_state: None,
             runtime_cost_owner: None,
             workspace: None,
+            prior_summary: None,
         };
 
         assert!(try_apply_model_and_compaction_update(
