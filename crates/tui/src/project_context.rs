@@ -14,13 +14,17 @@
 //! block. The loaded content is injected into the system prompt to give the
 //! agent context about the project's conventions, structure, and requirements.
 
+mod types;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+
+pub use self::types::ProjectContext;
+use self::types::ProjectContextError;
 
 /// Names of project context files to look for, in priority order.
 ///
@@ -117,126 +121,6 @@ const PACK_IGNORED_FILE_EXTENSIONS: &[&str] = &[
     "7z", "avif", "db", "gif", "gz", "ico", "jpeg", "jpg", "log", "mov", "mp3", "mp4", "pdf",
     "png", "sqlite", "tar", "tgz", "wav", "webp", "zip",
 ];
-
-// === Errors ===
-
-#[derive(Debug, Error)]
-enum ProjectContextError {
-    #[error("Failed to read context metadata for {path}: {source}")]
-    Metadata {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("Refusing symlinked context file {path}")]
-    Symlink { path: PathBuf },
-    #[error("Context path {path} is not a regular file")]
-    NotFile { path: PathBuf },
-    #[error("Context file {path} is too large ({size} bytes, max {max})")]
-    TooLarge {
-        path: PathBuf,
-        size: u64,
-        max: usize,
-    },
-    #[error("Failed to read context file {path}: {source}")]
-    Read {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("Context file {path} is empty")]
-    Empty { path: PathBuf },
-}
-
-/// Result of loading project context
-#[derive(Debug, Clone)]
-pub struct ProjectContext {
-    /// The loaded instructions content
-    pub instructions: Option<String>,
-    /// Auto-discovered rules from `.codewhale/rules/` / `.claude/rules/`.
-    /// Kept separate from `instructions` so rules alone don't block
-    /// parent-directory AGENTS.md discovery via `has_instructions()`.
-    pub rules_block: Option<String>,
-    /// Path to the loaded file (for display)
-    pub source_path: Option<PathBuf>,
-    /// Any warnings during loading
-    pub warnings: Vec<String>,
-    /// Rendered `.codewhale/constitution.json` authority block, if present.
-    /// Codewhale-specific repo authority/prioritization policy — distinct from
-    /// the cross-agent prose in `instructions`.
-    pub constitution_block: Option<String>,
-    /// Path to the repo constitution file that produced `constitution_block`.
-    pub constitution_source_path: Option<PathBuf>,
-    /// Project root directory
-    #[allow(dead_code)] // Part of ProjectContext public interface
-    pub project_root: PathBuf,
-    /// Whether this is a trusted project
-    pub is_trusted: bool,
-}
-
-impl ProjectContext {
-    /// Create an empty project context
-    pub fn empty(project_root: PathBuf) -> Self {
-        Self {
-            instructions: None,
-            rules_block: None,
-            source_path: None,
-            warnings: Vec::new(),
-            constitution_block: None,
-            constitution_source_path: None,
-            project_root,
-            is_trusted: false,
-        }
-    }
-
-    /// Check if any instructions were loaded
-    pub fn has_instructions(&self) -> bool {
-        self.instructions.is_some()
-    }
-
-    /// Get the instructions as a formatted block for system prompt.
-    ///
-    /// The Codewhale repo constitution (`.codewhale/constitution.json`), when
-    /// present, is emitted first as a higher-authority block, followed by the
-    /// cross-agent `<project_instructions>` prose. Either may be absent.
-    pub fn as_system_block(&self) -> Option<String> {
-        let instructions_block = self.instructions.as_ref().map(|content| {
-            let source = self
-                .source_path
-                .as_ref()
-                .map_or_else(|| "project".to_string(), |p| p.display().to_string());
-
-            let mut block = format!(
-                "<project_instructions source=\"{source}\">\n{content}\n</project_instructions>"
-            );
-            // Append rules after instructions, inside the same logical block.
-            // Rules are kept separate from `instructions` so they don't block
-            // parent-directory AGENTS.md discovery via `has_instructions()`.
-            if let Some(rules) = &self.rules_block {
-                block.push('\n');
-                block.push_str(rules);
-            }
-            block
-        });
-
-        match (self.constitution_block.as_ref(), instructions_block) {
-            (Some(constitution), Some(instructions)) => {
-                Some(format!("{constitution}\n\n{instructions}"))
-            }
-            (Some(constitution), None) => {
-                // Constitution present but no main instructions — still emit rules if any
-                if let Some(rules) = &self.rules_block {
-                    Some(format!("{constitution}\n\n{rules}"))
-                } else {
-                    Some(constitution.clone())
-                }
-            }
-            (None, Some(instructions)) => Some(instructions),
-            (None, None) => {
-                // No main instructions, but rules may exist on their own
-                self.rules_block.clone()
-            }
-        }
-    }
-}
 
 /// Codewhale-specific repo authority/prioritization policy, loaded from
 /// `.codewhale/constitution.json`. All fields are optional so a minimal file
@@ -1508,21 +1392,6 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore
     Ok(agents_path)
 }
 
-/// Merge multiple project contexts (e.g., from nested directories)
-#[allow(dead_code)] // Public API for monorepo context merging
-pub fn merge_contexts(contexts: &[ProjectContext]) -> Option<String> {
-    let non_empty: Vec<_> = contexts
-        .iter()
-        .filter_map(ProjectContext::as_system_block)
-        .collect();
-
-    if non_empty.is_empty() {
-        None
-    } else {
-        Some(non_empty.join("\n\n"))
-    }
-}
-
 // === Unit Tests ===
 
 #[cfg(test)]
@@ -1752,22 +1621,6 @@ mod tests {
                 .unwrap()
                 .contains("Parent instructions")
         );
-    }
-
-    #[test]
-    fn test_merge_contexts() {
-        let mut ctx1 = ProjectContext::empty(PathBuf::from("/a"));
-        ctx1.instructions = Some("Instructions A".to_string());
-        ctx1.source_path = Some(PathBuf::from("/a/AGENTS.md"));
-
-        let mut ctx2 = ProjectContext::empty(PathBuf::from("/b"));
-        ctx2.instructions = Some("Instructions B".to_string());
-        ctx2.source_path = Some(PathBuf::from("/b/AGENTS.md"));
-
-        let merged = merge_contexts(&[ctx1, ctx2]).expect("merge");
-
-        assert!(merged.contains("Instructions A"));
-        assert!(merged.contains("Instructions B"));
     }
 
     #[test]
