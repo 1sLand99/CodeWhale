@@ -339,8 +339,9 @@ fn session_with_todos(ws: &SealedWorkspace, count: usize) -> Result<std::path::P
 }
 
 /// Baseline: with nothing competing for strip rows, a running sub-agent must
-/// appear in the top bar, a real SGR click must open its detail, and keyboard
-/// Enter must open the same door.
+/// appear in the top bar, a real SGR click must open its transcript (the
+/// primary destination since v0.9.7 "one agent, one destination"), and
+/// keyboard Enter must open the same door.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_bar_lists_a_running_subagent_and_opens_it_by_click_and_enter() -> Result<()> {
     let _guard = WORK_BAR_PTY_LOCK.lock().await;
@@ -386,30 +387,30 @@ async fn work_bar_lists_a_running_subagent_and_opens_it_by_click_and_enter() -> 
         )
     })?;
 
-    // Click the row: the door must open.
+    // Click the row: the door must open onto the agent's transcript.
     tui.send(keys::mouse::click(row, col))?;
-    tui.wait_for_text("Agent Details", Duration::from_secs(5))
+    tui.wait_for_text("Agent transcript", Duration::from_secs(5))
         .map_err(|_| {
             anyhow!(
-                "clicking the sub-agent row did not open its detail\n{}",
+                "clicking the sub-agent row did not open its transcript\n{}",
                 tui.debug_dump()
             )
         })?;
 
     // Close, then prove keyboard parity: Alt+W focuses the strip, End selects
-    // the last selectable row (a worker), Enter opens the same detail.
+    // the last selectable row (a worker), Enter opens the same transcript.
     tui.send(keys::key::esc())?;
     tui.wait_for(
-        |frame| !frame.text().contains("Agent Details"),
+        |frame| !frame.text().contains("Agent transcript"),
         Duration::from_secs(5),
     )?;
     tui.send(keys::key::alt('w'))?;
     tui.send(b"\x1b[F")?; // End
     tui.send(keys::key::enter())?;
-    tui.wait_for_text("Agent Details", Duration::from_secs(5))
+    tui.wait_for_text("Agent transcript", Duration::from_secs(5))
         .map_err(|_| {
             anyhow!(
-                "Enter on the selected work-bar row did not open the detail a click opens\n{}",
+                "Enter on the selected work-bar row did not open the transcript a click opens\n{}",
                 tui.debug_dump()
             )
         })?;
@@ -469,10 +470,10 @@ async fn work_bar_still_shows_subagents_when_todos_are_present() -> Result<()> {
     );
     let (row, col) = worker.expect("checked above");
     tui.send(keys::mouse::click(row, col))?;
-    tui.wait_for_text("Agent Details", Duration::from_secs(5))
+    tui.wait_for_text("Agent transcript", Duration::from_secs(5))
         .map_err(|_| {
             anyhow!(
-                "clicking the sub-agent row did not open its detail\n{}",
+                "clicking the sub-agent row did not open its transcript\n{}",
                 tui.debug_dump()
             )
         })?;
@@ -536,10 +537,10 @@ async fn work_bar_shows_a_running_subagent_under_the_pinned_rail_panel() -> Resu
     );
     let (row, col) = worker.expect("checked above");
     tui.send(keys::mouse::click(row, col))?;
-    tui.wait_for_text("Agent Details", Duration::from_secs(5))
+    tui.wait_for_text("Agent transcript", Duration::from_secs(5))
         .map_err(|_| {
             anyhow!(
-                "clicking the sub-agent row did not open its detail\n{}",
+                "clicking the sub-agent row did not open its transcript\n{}",
                 tui.debug_dump()
             )
         })?;
@@ -551,7 +552,7 @@ async fn work_bar_shows_a_running_subagent_under_the_pinned_rail_panel() -> Resu
 /// A finished agent collapses out of the Top strip (so fan-outs do not
 /// permanently eat the transcript) but stays counted in the header. The
 /// Agents panel remains the standing register — see
-/// `agents_panel_click_opens_details_even_for_finished_agents`.
+/// `agents_panel_click_opens_the_transcript_even_for_finished_agents`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_bar_collapses_a_finished_subagent_into_the_header() -> Result<()> {
     let _guard = WORK_BAR_PTY_LOCK.lock().await;
@@ -592,6 +593,120 @@ async fn work_bar_collapses_a_finished_subagent_into_the_header() -> Result<()> 
         "a finished sub-agent must leave the Top strip rows; strip:\n{strip}\n---full---\n{}",
         tui.debug_dump()
     );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// A strip row between the work-bar rules whose text contains any of the
+/// given needles. Returns `(row, column)` for a real SGR click.
+fn strip_row_containing(harness: &mut Harness, needles: &[&str]) -> Option<(u16, u16)> {
+    let frame = harness.frame();
+    let rows = frame.rows();
+    let dividers: Vec<u16> = (0..rows).filter(|&y| is_divider_row(frame, y)).collect();
+    let (start, end) = match dividers.as_slice() {
+        [first, second, ..] => (first.saturating_add(1), *second),
+        _ => (0, rows),
+    };
+    (start..end).find_map(|y| {
+        let text = frame.row(y);
+        if !needles.iter().any(|needle| text.contains(needle)) {
+            return None;
+        }
+        let trimmed = text.trim_start();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let col = u16::try_from(text.len() - trimmed.len()).ok()?;
+        Some((y, col.saturating_add(2)))
+    })
+}
+
+/// v0.9.7 "one agent, one destination": activating a COMPLETED child agent's
+/// row in the standing Agents register lands directly in that agent's durable
+/// transcript, and the Alt+V secondary affordance still reaches the bounded
+/// Agent Details projection from there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_agent_row_opens_its_transcript_and_alt_v_reaches_details() -> Result<()> {
+    let _guard = WORK_BAR_PTY_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server).await;
+    let child_requests = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ProbeResponder {
+            child_requests: Arc::clone(&child_requests),
+            parent_turns: Arc::new(AtomicUsize::new(0)),
+            workers: 1,
+            child_hold: Duration::from_millis(0),
+        })
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    std::fs::write(
+        ws.home().join(".codewhale").join("config.toml"),
+        "[subagents]\nmax_concurrent = 2\nlaunch_concurrency = 2\nmax_admitted = 2\n",
+    )?;
+    let mut tui = tui_builder(&ws, &server.uri()).spawn()?;
+    tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    type_and_submit(&mut tui, PARENT_PROMPT)?;
+    wait_for_counter(&mut tui, &child_requests, 1, INTERACTION_TIMEOUT)?;
+    // Let the child settle terminal and the parent turn finish.
+    tui.wait_for_idle(Duration::from_millis(300), Duration::from_secs(10))?;
+    tui.wait_for(
+        |frame| frame.text().contains("Archived 1"),
+        Duration::from_secs(10),
+    )?;
+
+    // The finished agent has left the Top strip; the Agents panel is the
+    // standing register. The Subagents group header is the two-way door.
+    let header = subagents_header_row(&mut tui).ok_or_else(|| {
+        anyhow!(
+            "no Subagents header to open the Agents register from\n{}",
+            tui.debug_dump()
+        )
+    })?;
+    let frame = tui.frame();
+    let header_text = frame.row(header);
+    let header_col = u16::try_from(header_text.len() - header_text.trim_start().len()).unwrap_or(0);
+    tui.send(keys::mouse::click(header, header_col.saturating_add(2)))?;
+
+    // The register row carries the worker's objective/role; wait for it.
+    let deadline = Instant::now() + INTERACTION_TIMEOUT;
+    let (row, col) = loop {
+        tui.pump();
+        if let Some(hit) = strip_row_containing(&mut tui, &[CHILD_MARKER, "explorer"]) {
+            break hit;
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "the finished worker never appeared in the Agents register\n{}",
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    };
+
+    // Activation lands in the transcript directly — no details detour.
+    tui.send(keys::mouse::click(row, col))?;
+    tui.wait_for_text("Agent transcript", Duration::from_secs(5))
+        .map_err(|_| {
+            anyhow!(
+                "clicking the finished agent row did not open its transcript\n{}",
+                tui.debug_dump()
+            )
+        })?;
+
+    // The secondary affordance still reaches the bounded details projection.
+    tui.send(keys::key::alt('v'))?;
+    tui.wait_for_text("Agent Details", Duration::from_secs(5))
+        .map_err(|_| {
+            anyhow!(
+                "Alt+V from the transcript did not open Agent Details\n{}",
+                tui.debug_dump()
+            )
+        })?;
 
     let _ = tui.shutdown();
     Ok(())

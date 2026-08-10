@@ -13,7 +13,6 @@ use crate::tui::command_palette::{
 };
 use crate::tui::context_menu::{ContextMenuEntry, ContextMenuView};
 use crate::tui::history::HistoryCell;
-use crate::tui::pager::PagerView;
 use crate::tui::scrolling::{ScrollDirection, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use crate::tui::ui_text::{
@@ -660,9 +659,9 @@ pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) 
             Vec::new()
         }
         SidebarRowAction::OpenAgentTranscript { agent_id } => {
-            if !open_agent_chat_pager(app, &agent_id) {
-                app.status_message = Some("Exact agent transcript is unavailable".to_string());
-            }
+            // The primary agent destination. Always opens; the surface itself
+            // explains a missing capture instead of dead-ending the click.
+            crate::tui::agent_transcript::open_agent_transcript(app, &agent_id);
             app.needs_redraw = true;
             Vec::new()
         }
@@ -709,15 +708,7 @@ pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) 
     }
 }
 
-pub(crate) fn open_agent_chat_pager(app: &mut App, agent_id: &str) -> bool {
-    let Some(text) = resolve_agent_transcript_text(app, agent_id) else {
-        return false;
-    };
-    push_agent_chat_pager(app, agent_id, &text);
-    true
-}
-
-fn resolve_agent_transcript_text(app: &App, agent_id: &str) -> Option<String> {
+pub(crate) fn resolve_agent_transcript_text(app: &App, agent_id: &str) -> Option<String> {
     use crate::tools::handle::{HandleValue, VarHandle};
 
     let lookup = VarHandle {
@@ -804,20 +795,6 @@ pub(crate) fn resident_agent_transcript_available(app: &App, agent_id: &str) -> 
 
 pub(crate) fn agent_transcript_evidence_available(app: &App, agent_id: &str) -> bool {
     resolve_agent_transcript_text(app, agent_id).is_some()
-}
-
-fn push_agent_chat_pager(app: &mut App, agent_id: &str, text: &str) {
-    let width = app
-        .viewport
-        .last_transcript_area
-        .map(|area| area.width)
-        .unwrap_or(80);
-    let display_name = crate::tui::agent_details::safe_agent_display_name(app, agent_id);
-    app.view_stack.push(PagerView::from_text(
-        format!("Agent transcript — {display_name}"),
-        text,
-        width.saturating_sub(2),
-    ));
 }
 
 /// Turn the agent transcript handle into a readable conversation. The worker
@@ -1596,16 +1573,12 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        agent_transcript_text, build_context_menu_entries, open_agent_chat_pager,
-        sidebar_click_action,
-    };
+    use super::{agent_transcript_text, build_context_menu_entries, sidebar_click_action};
     use crate::config::Config;
     use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
         App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
     };
-    use crate::tui::pager::PagerView;
     use crate::tui::views::ContextMenuAction;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
@@ -1974,12 +1947,12 @@ mod tests {
             );
         }
 
-        assert!(open_agent_chat_pager(&mut app, agent_id));
+        crate::tui::agent_transcript::open_agent_transcript(&mut app, agent_id);
         let mut view = app.view_stack.pop().expect("agent chat pager");
         let pager = view
             .as_any_mut()
-            .downcast_mut::<PagerView>()
-            .expect("Open should push a pager");
+            .downcast_mut::<crate::tui::agent_transcript::AgentTranscriptView>()
+            .expect("Open should push the agent transcript surface");
         let body = pager.body_text();
         assert!(body.contains("EARLY-OPEN-MARKER"));
         assert!(body.contains("LAST-OPEN-MARKER"));

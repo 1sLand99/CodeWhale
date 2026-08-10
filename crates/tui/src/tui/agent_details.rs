@@ -1,7 +1,10 @@
 //! Safe, bounded Agent Details projection (#2889).
 //!
-//! The default route intentionally does not expose the child transcript. Exact
-//! evidence remains behind an explicit artifact-first action.
+//! Since the v0.9.7 "one agent, one destination" inversion, activating an
+//! agent row opens the agent's transcript surface directly
+//! (`crate::tui::agent_transcript`); this bounded projection is the secondary
+//! action, reached from the transcript via the same Alt+V chord that opens
+//! the transcript from here.
 
 use std::path::{Component, Path};
 
@@ -786,15 +789,18 @@ mod tests {
             events.as_slice(),
             [ViewEvent::OpenAgentTranscript { agent_id: id }] if id == agent_id
         ));
-        assert!(crate::tui::mouse_ui::open_agent_chat_pager(
-            &mut app, agent_id
-        ));
+        crate::tui::agent_transcript::open_agent_transcript(&mut app, agent_id);
         assert!(
-            app.view_stack
-                .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-                .is_empty(),
-            "transcript Esc closes only the top pager"
+            matches!(
+                app.view_stack
+                    .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    .as_slice(),
+                [ViewEvent::AgentTranscriptClosed { agent_id: id }] if id == agent_id
+            ),
+            "transcript Esc closes only the top pager, with its own receipt"
         );
+        // The details view underneath survives and its chord still points at
+        // the transcript.
         assert!(matches!(
             app.view_stack
                 .handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT))

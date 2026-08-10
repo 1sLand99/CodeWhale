@@ -683,13 +683,25 @@ pub enum ViewEvent {
     SidebarAgentCancel {
         agent_id: String,
     },
-    /// Agent Details requests the existing artifact-first exact transcript.
+    /// An agent row activation (Work strip, sidebar dossier, `/agents`) or
+    /// Alt+V from Agent Details requests the agent's transcript — the primary
+    /// destination since the v0.9.7 "one agent, one destination" inversion.
     OpenAgentTranscript {
+        agent_id: String,
+    },
+    /// The transcript surface requests the bounded Agent Details projection —
+    /// the secondary action behind the same Alt+V chord.
+    OpenAgentDetails {
         agent_id: String,
     },
     /// Agent Details was popped with Esc/q/Left. The Work surface uses this
     /// to release only its detail-open owner while retaining selection.
     AgentDetailsClosed {
+        agent_id: String,
+    },
+    /// The agent transcript surface was popped with Esc/q/Left. Releases the
+    /// same Work-surface detail-open owner as `AgentDetailsClosed`.
+    AgentTranscriptClosed {
         agent_id: String,
     },
     /// Emitted by the file picker (`Ctrl+P`) when the user presses Enter on a
@@ -3953,6 +3965,20 @@ pub use help::HelpView;
 pub struct SubAgentsView {
     agents: Vec<SubAgentResult>,
     scroll: usize,
+    /// Index into the render-ordered agent list (`ordered` on `grouped`).
+    /// Enter/click open the selected agent's transcript — the same primary
+    /// destination every other agent surface resolves to (v0.9.7).
+    selected: usize,
+    /// Rendered agent blocks from the last frame: `(first_line, line_count,
+    /// agent_id)` in render order. Interior-mutable because `render` takes
+    /// `&self`; consumed by click resolution and selection scroll-follow.
+    row_lines: std::cell::RefCell<Vec<(usize, usize, String)>>,
+    /// Body area of the last render, for mapping click rows onto lines.
+    body_area: std::cell::Cell<Rect>,
+    /// Effective (clamped) scroll of the last render.
+    last_render_scroll: std::cell::Cell<usize>,
+    /// Visible body height of the last render.
+    last_visible_lines: std::cell::Cell<usize>,
 }
 
 /// Build the agent rows shown by `/subagents`.
@@ -4091,7 +4117,75 @@ fn live_subagent_result(
 
 impl SubAgentsView {
     pub fn new(agents: Vec<SubAgentResult>) -> Self {
-        Self { agents, scroll: 0 }
+        Self {
+            agents,
+            scroll: 0,
+            selected: 0,
+            row_lines: std::cell::RefCell::new(Vec::new()),
+            body_area: std::cell::Cell::new(Rect::default()),
+            last_render_scroll: std::cell::Cell::new(0),
+            last_visible_lines: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The five status groups in render order, each sorted the way the view
+    /// paints them. Selection, Enter, and click resolution all consume this
+    /// so the highlighted row and the opened agent can never diverge.
+    fn grouped(agents: &[SubAgentResult]) -> [Vec<&SubAgentResult>; 5] {
+        let mut running = Vec::new();
+        let mut completed = Vec::new();
+        let mut interrupted = Vec::new();
+        let mut failed = Vec::new();
+        let mut cancelled = Vec::new();
+
+        for agent in agents {
+            match agent.status {
+                SubAgentStatus::Running => running.push(agent),
+                SubAgentStatus::Completed => completed.push(agent),
+                SubAgentStatus::Interrupted(_) => interrupted.push(agent),
+                SubAgentStatus::Failed(_) => failed.push(agent),
+                SubAgentStatus::Cancelled => cancelled.push(agent),
+                SubAgentStatus::BudgetExhausted => failed.push(agent),
+            }
+        }
+        for group in [
+            &mut running,
+            &mut completed,
+            &mut interrupted,
+            &mut failed,
+            &mut cancelled,
+        ] {
+            group.sort_by(|a, b| {
+                agent_type_order(&a.agent_type)
+                    .cmp(&agent_type_order(&b.agent_type))
+                    .then_with(|| a.agent_id.cmp(&b.agent_id))
+            });
+        }
+        [running, completed, interrupted, failed, cancelled]
+    }
+
+    fn ordered_agent_ids(&self) -> Vec<String> {
+        Self::grouped(&self.agents)
+            .iter()
+            .flatten()
+            .map(|agent| agent.agent_id.clone())
+            .collect()
+    }
+
+    /// Keep the selected agent's block inside the visible body, using the
+    /// last render's layout (stale by at most one frame).
+    fn follow_selection(&mut self) {
+        let row_lines = self.row_lines.borrow();
+        let Some((first, count, _)) = row_lines.get(self.selected) else {
+            return;
+        };
+        let visible = self.last_visible_lines.get().max(1);
+        let end = first + count;
+        if *first < self.scroll {
+            self.scroll = *first;
+        } else if end > self.scroll + visible {
+            self.scroll = end.saturating_sub(visible);
+        }
     }
 }
 
@@ -4109,7 +4203,14 @@ impl ModalView for SubAgentsView {
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
-            KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => {
+            // Enter opens the selected agent's transcript — the same primary
+            // destination the Work strip and sidebar resolve to (v0.9.7). On
+            // an empty register Enter keeps its old refresh meaning.
+            KeyCode::Enter => match self.ordered_agent_ids().get(self.selected).cloned() {
+                Some(agent_id) => ViewAction::Emit(ViewEvent::OpenAgentTranscript { agent_id }),
+                None => ViewAction::Emit(ViewEvent::SubAgentsRefresh),
+            },
+            KeyCode::Char('r') | KeyCode::Char('R') => {
                 ViewAction::Emit(ViewEvent::SubAgentsRefresh)
             }
             KeyCode::Char('f') | KeyCode::Char('F') => {
@@ -4120,12 +4221,58 @@ impl ModalView for SubAgentsView {
                 })
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.scroll = self.scroll.saturating_sub(1);
+                self.selected = self.selected.saturating_sub(1);
+                self.follow_selection();
                 ViewAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.scroll = self.scroll.saturating_add(1);
+                self.selected = self
+                    .selected
+                    .saturating_add(1)
+                    .min(self.agents.len().saturating_sub(1));
+                self.follow_selection();
                 ViewAction::None
+            }
+            _ => ViewAction::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll = self.scroll.saturating_sub(3);
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                // Clamped to the real maximum at render time.
+                self.scroll = self.scroll.saturating_add(3);
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let area = self.body_area.get();
+                if mouse.column < area.x
+                    || mouse.column >= area.x.saturating_add(area.width)
+                    || mouse.row < area.y
+                    || mouse.row >= area.y.saturating_add(area.height)
+                {
+                    return ViewAction::None;
+                }
+                let line = usize::from(mouse.row - area.y) + self.last_render_scroll.get();
+                let hit = self
+                    .row_lines
+                    .borrow()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (first, count, _))| line >= *first && line < first + count)
+                    .map(|(index, (_, _, agent_id))| (index, agent_id.clone()));
+                match hit {
+                    Some((index, agent_id)) => {
+                        self.selected = index;
+                        // Click opens the same door Enter does.
+                        ViewAction::Emit(ViewEvent::OpenAgentTranscript { agent_id })
+                    }
+                    None => ViewAction::None,
+                }
             }
             _ => ViewAction::None,
         }
@@ -4133,7 +4280,9 @@ impl ModalView for SubAgentsView {
 
     fn update_subagents(&mut self, agents: &[SubAgentResult]) -> bool {
         self.agents = agents.to_vec();
-        self.scroll = self.scroll.min(self.agents.len().saturating_sub(1));
+        let last = self.agents.len().saturating_sub(1);
+        self.scroll = self.scroll.min(last);
+        self.selected = self.selected.min(last);
         true
     }
 
@@ -4144,6 +4293,7 @@ impl ModalView for SubAgentsView {
             .render(area, buf);
 
         let mut lines: Vec<Line> = Vec::new();
+        let mut row_lines: Vec<(usize, usize, String)> = Vec::new();
         let content_width = area.width.saturating_sub(4) as usize;
 
         if self.agents.is_empty() {
@@ -4156,22 +4306,12 @@ impl ModalView for SubAgentsView {
                 Style::default().fg(palette::TEXT_DIM),
             )));
         } else {
-            let mut running = Vec::new();
-            let mut completed = Vec::new();
-            let mut interrupted = Vec::new();
-            let mut failed = Vec::new();
-            let mut cancelled = Vec::new();
-
-            for agent in &self.agents {
-                match agent.status {
-                    SubAgentStatus::Running => running.push(agent),
-                    SubAgentStatus::Completed => completed.push(agent),
-                    SubAgentStatus::Interrupted(_) => interrupted.push(agent),
-                    SubAgentStatus::Failed(_) => failed.push(agent),
-                    SubAgentStatus::Cancelled => cancelled.push(agent),
-                    SubAgentStatus::BudgetExhausted => failed.push(agent),
-                }
-            }
+            let [running, completed, interrupted, failed, cancelled] = Self::grouped(&self.agents);
+            let selected_id = self
+                .ordered_agent_ids()
+                .get(self.selected)
+                .cloned()
+                .unwrap_or_default();
 
             let status_summary = [
                 ("Running", running.len(), palette::STATUS_WARNING),
@@ -4211,62 +4351,27 @@ impl ModalView for SubAgentsView {
                 Style::default().fg(palette::TEXT_DIM),
             )));
 
-            running.sort_by(|a, b| {
-                let order = agent_type_order(&a.agent_type).cmp(&agent_type_order(&b.agent_type));
-                order.then_with(|| a.agent_id.cmp(&b.agent_id))
-            });
-            completed.sort_by(|a, b| {
-                let order = agent_type_order(&a.agent_type).cmp(&agent_type_order(&b.agent_type));
-                order.then_with(|| a.agent_id.cmp(&b.agent_id))
-            });
-            interrupted.sort_by(|a, b| {
-                let order = agent_type_order(&a.agent_type).cmp(&agent_type_order(&b.agent_type));
-                order.then_with(|| a.agent_id.cmp(&b.agent_id))
-            });
-            failed.sort_by(|a, b| {
-                let order = agent_type_order(&a.agent_type).cmp(&agent_type_order(&b.agent_type));
-                order.then_with(|| a.agent_id.cmp(&b.agent_id))
-            });
-            cancelled.sort_by(|a, b| {
-                let order = agent_type_order(&a.agent_type).cmp(&agent_type_order(&b.agent_type));
-                order.then_with(|| a.agent_id.cmp(&b.agent_id))
-            });
-
-            append_subagent_group(
-                &mut lines,
-                "Running",
-                palette::STATUS_WARNING.into(),
-                &running,
-                content_width,
-            );
-            append_subagent_group(
-                &mut lines,
-                "Completed",
-                palette::STATUS_SUCCESS.into(),
-                &completed,
-                content_width,
-            );
-            append_subagent_group(
-                &mut lines,
-                "Interrupted",
-                palette::STATUS_WARNING.into(),
-                &interrupted,
-                content_width,
-            );
-            append_subagent_group(
-                &mut lines,
-                "Failed",
-                palette::WHALE_ERROR.into(),
-                &failed,
-                content_width,
-            );
-            append_subagent_group(
-                &mut lines,
-                "Cancelled",
-                palette::TEXT_MUTED.into(),
-                &cancelled,
-                content_width,
-            );
+            for (title, style, group) in [
+                (
+                    "Running",
+                    ratatui::style::Style::from(palette::STATUS_WARNING),
+                    &running,
+                ),
+                ("Completed", palette::STATUS_SUCCESS.into(), &completed),
+                ("Interrupted", palette::STATUS_WARNING.into(), &interrupted),
+                ("Failed", palette::WHALE_ERROR.into(), &failed),
+                ("Cancelled", palette::TEXT_MUTED.into(), &cancelled),
+            ] {
+                append_subagent_group(
+                    &mut lines,
+                    &mut row_lines,
+                    title,
+                    style,
+                    group,
+                    content_width,
+                    &selected_id,
+                );
+            }
         }
 
         let content = render_modal_footer(
@@ -4274,6 +4379,8 @@ impl ModalView for SubAgentsView {
             buf,
             &[
                 ActionHint::new("Esc", "close"),
+                ActionHint::new("↑/↓", "select"),
+                ActionHint::new("Enter", "transcript"),
                 ActionHint::new("R", "refresh"),
                 ActionHint::new("F", "roster/setup"),
             ],
@@ -4315,18 +4422,27 @@ impl ModalView for SubAgentsView {
         let max_scroll = total_lines.saturating_sub(visible_lines);
         let scroll = self.scroll.min(max_scroll);
 
+        // Cache the layout for Enter/click resolution and scroll-follow.
+        self.row_lines.replace(row_lines);
+        self.body_area.set(shell[1]);
+        self.last_render_scroll.set(scroll);
+        self.last_visible_lines.set(visible_lines);
+
         Paragraph::new(lines)
             .scroll((scroll as u16, 0))
             .render(shell[1], buf);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_subagent_group(
     lines: &mut Vec<ratatui::text::Line<'static>>,
+    row_lines: &mut Vec<(usize, usize, String)>,
     title: &str,
     section_style: ratatui::style::Style,
     agents: &[&SubAgentResult],
     content_width: usize,
+    selected_id: &str,
 ) {
     use ratatui::{
         style::Style,
@@ -4342,6 +4458,8 @@ fn append_subagent_group(
     )));
 
     for agent in agents {
+        let block_start = lines.len();
+        let is_selected = agent.agent_id == selected_id;
         let id = truncate_view_text(&agent.agent_id, 11);
         let display_name = agent
             .nickname
@@ -4351,9 +4469,19 @@ fn append_subagent_group(
         let kind = format_agent_type(&agent.agent_type);
         let (status, status_style, status_detail) = format_agent_status(&agent.status);
 
+        let name_style = if is_selected {
+            Style::default().fg(palette::WHALE_ACTION).bold()
+        } else {
+            Style::default().fg(palette::TEXT_PRIMARY)
+        };
         lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(display_name, Style::default().fg(palette::TEXT_PRIMARY)),
+            // The selection cursor: Enter (or a click) opens this agent's
+            // transcript, matching every other agent surface.
+            Span::styled(
+                if is_selected { "\u{25B8} " } else { "  " },
+                Style::default().fg(palette::WHALE_ACTION),
+            ),
+            Span::styled(display_name, name_style),
             Span::raw(" "),
             Span::styled(format!("{id:<11}"), Style::default().fg(palette::TEXT_DIM)),
             Span::styled(
@@ -4441,6 +4569,12 @@ fn append_subagent_group(
                 Span::styled(preview, Style::default().fg(palette::TEXT_DIM)),
             ]));
         }
+
+        row_lines.push((
+            block_start,
+            lines.len() - block_start,
+            agent.agent_id.clone(),
+        ));
     }
 
     lines.push(Line::from(""));
@@ -5085,6 +5219,98 @@ mod tests {
             }) => assert_eq!(command, "/fleet"),
             other => panic!("expected /fleet jump action, got {other:?}"),
         }
+    }
+
+    /// One agent, one destination (v0.9.7): Enter on a `/agents` row opens
+    /// the selected agent's transcript — the same destination the Work strip
+    /// and sidebar resolve to. Selection follows render order (running before
+    /// completed), and an empty register keeps Enter's refresh meaning.
+    #[test]
+    fn subagents_enter_opens_the_selected_agents_transcript() {
+        let mut view = SubAgentsView::new(vec![
+            manager_agent("agent_done", SubAgentStatus::Completed),
+            manager_agent("agent_live", SubAgentStatus::Running),
+        ]);
+
+        // Render order groups running first, so the initial selection is the
+        // running agent even though the completed one was pushed first.
+        match view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            ViewAction::Emit(ViewEvent::OpenAgentTranscript { agent_id }) => {
+                assert_eq!(agent_id, "agent_live");
+            }
+            other => panic!("expected transcript open, got {other:?}"),
+        }
+
+        let _ = view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        match view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            ViewAction::Emit(ViewEvent::OpenAgentTranscript { agent_id }) => {
+                assert_eq!(agent_id, "agent_done");
+            }
+            other => panic!("expected transcript open, got {other:?}"),
+        }
+
+        let mut empty = SubAgentsView::new(Vec::new());
+        assert!(matches!(
+            empty.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::Emit(ViewEvent::SubAgentsRefresh)
+        ));
+    }
+
+    /// A click on a rendered `/agents` row opens the clicked agent's
+    /// transcript and moves the selection cursor onto it.
+    #[test]
+    fn subagents_click_opens_the_clicked_agents_transcript() {
+        let mut view = SubAgentsView::new(vec![
+            manager_agent("agent_done", SubAgentStatus::Completed),
+            manager_agent("agent_live", SubAgentStatus::Running),
+        ]);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+
+        // Resolve the completed agent's on-screen row from the recorded
+        // layout, exactly as a click does in reverse.
+        let (first_line, _, agent_id) = view
+            .row_lines
+            .borrow()
+            .iter()
+            .find(|(_, _, id)| id == "agent_done")
+            .cloned()
+            .expect("completed agent block recorded");
+        assert_eq!(agent_id, "agent_done");
+        let body = view.body_area.get();
+        let scroll = view.last_render_scroll.get();
+        let click_row = body.y + u16::try_from(first_line - scroll).expect("visible row");
+
+        let action = view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.x + 2,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        });
+        match action {
+            ViewAction::Emit(ViewEvent::OpenAgentTranscript { agent_id }) => {
+                assert_eq!(agent_id, "agent_done");
+            }
+            other => panic!("expected transcript open, got {other:?}"),
+        }
+        assert_eq!(view.ordered_agent_ids()[view.selected], "agent_done");
+
+        // The selection cursor is visible after a re-render.
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains('\u{25B8}'),
+            "selection cursor missing:\n{text}"
+        );
     }
 
     fn visible_section_labels(view: &ConfigView) -> Vec<Cow<'static, str>> {

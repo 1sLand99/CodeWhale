@@ -1422,7 +1422,10 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                         detail: facts.join(" · "),
                         tone: bucket_tone(bucket),
                         selectable: true,
-                        primary_action: Some(SidebarRowAction::OpenAgentDetail {
+                        // One agent, one destination (v0.9.7): activation
+                        // opens the agent's transcript directly; Agent
+                        // Details is the secondary action from there.
+                        primary_action: Some(SidebarRowAction::OpenAgentTranscript {
                             agent_id: agent.agent_id.clone(),
                         }),
                         agent: Some(AgentRowFacts {
@@ -1499,7 +1502,8 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             detail: facts.join(" · "),
                             tone: bucket_tone(bucket),
                             selectable: true,
-                            primary_action: Some(SidebarRowAction::OpenAgentDetail {
+                            // Same destination as the cached-seed rows above.
+                            primary_action: Some(SidebarRowAction::OpenAgentTranscript {
                                 agent_id: id.clone(),
                             }),
                             agent: Some(AgentRowFacts {

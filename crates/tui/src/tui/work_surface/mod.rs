@@ -50,7 +50,7 @@
 //!
 //! Tasks, Agents, and Pinned all render through one row/hitbox pipeline:
 //! every visible work row is selectable, hoverable, and clickable, and its
-//! primary action opens the row's world (agent details / work inspector).
+//! primary action opens the row's world (agent transcript / work inspector).
 //! Keyboard Enter and mouse click dispatch identically. Context is the one
 //! line-list panel; it holds facts, not rows.
 //!
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_rows_show_role_assignment_and_open_real_agent_details() {
+    fn agent_rows_show_role_assignment_and_open_the_agent_transcript() {
         let mut app = app();
         app.current_session_id = Some(SESSION.to_string());
         app.subagent_cache.push(SubAgentResult {
@@ -1007,9 +1007,11 @@ mod tests {
         assert!(row.detail.contains("using File.apply_patch"));
         assert!(row.detail.contains("step 2"));
         assert!(row.detail.contains("2 files changed"));
+        // One agent, one destination (v0.9.7): activation opens the agent's
+        // transcript directly; Agent Details is the secondary action.
         assert_eq!(
             row.primary_action,
-            Some(SidebarRowAction::OpenAgentDetail {
+            Some(SidebarRowAction::OpenAgentTranscript {
                 agent_id: "agent_worker".to_string(),
             })
         );
@@ -1629,7 +1631,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_details_keyboard_mouse_and_return_selection_converge() {
+    fn agent_transcript_keyboard_mouse_and_return_selection_converge() {
         fn add_worker(app: &mut App) {
             app.current_session_id = Some(SESSION.to_string());
             app.subagent_cache.push(SubAgentResult {
@@ -1673,7 +1675,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         )
         .expect("Work key handled")
-        .expect("agent details action");
+        .expect("agent transcript action");
         let keyboard_selection = keyboard.work_surface.selected.clone();
 
         let mut mouse = app();
@@ -1696,7 +1698,7 @@ mod tests {
             },
         )
         .action
-        .expect("mouse agent details action");
+        .expect("mouse agent transcript action");
         assert_eq!(mouse_action, keyboard_action);
         assert_eq!(mouse.work_surface.selected, keyboard_selection);
 
@@ -1705,9 +1707,9 @@ mod tests {
         let events = mouse
             .view_stack
             .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        let [crate::tui::views::ViewEvent::AgentDetailsClosed { agent_id }] = events.as_slice()
+        let [crate::tui::views::ViewEvent::AgentTranscriptClosed { agent_id }] = events.as_slice()
         else {
-            panic!("Left should close Agent Details with a receipt: {events:?}");
+            panic!("Left should close the agent transcript with a receipt: {events:?}");
         };
         super::interaction::agent_details_closed(&mut mouse, agent_id);
         assert_eq!(mouse.work_surface.selected, selected_before_close);
@@ -2883,9 +2885,11 @@ mod tests {
 
     /// Acceptance for owner regression A2: an agent row is a door in the
     /// Agents panel too, and a FINISHED agent's world still opens — the
-    /// panel is a standing register, not a live-only view.
+    /// panel is a standing register, not a live-only view. Since v0.9.7 the
+    /// door leads to the agent's transcript (which explains itself when no
+    /// capture exists yet), not to the details projection.
     #[test]
-    fn agents_panel_click_opens_details_even_for_finished_agents() {
+    fn agents_panel_click_opens_the_transcript_even_for_finished_agents() {
         let mut app = app();
         app.work_surface.panel = super::RailPanel::Agents;
         app.current_session_id = Some(SESSION.to_string());
@@ -2918,14 +2922,14 @@ mod tests {
         .expect("click on a finished agent row must dispatch its primary action");
         assert_eq!(
             action,
-            SidebarRowAction::OpenAgentDetail {
+            SidebarRowAction::OpenAgentTranscript {
                 agent_id: "agent-finished".to_string()
             }
         );
         crate::tui::mouse_ui::apply_sidebar_row_action(&mut app, action);
         assert!(
             !app.view_stack.is_empty(),
-            "the finished agent's details must actually open"
+            "the finished agent's transcript must actually open"
         );
     }
 

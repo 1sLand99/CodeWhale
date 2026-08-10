@@ -1592,12 +1592,20 @@ pub(crate) async fn handle_view_events(
                 }
             }
             ViewEvent::OpenAgentTranscript { agent_id } => {
-                if !crate::tui::mouse_ui::open_agent_chat_pager(app, &agent_id) {
-                    app.status_message = Some("Exact agent transcript is unavailable".to_string());
+                // Always opens: the transcript surface itself explains a
+                // missing capture, so every entry point lands on the same
+                // destination for the same agent id.
+                crate::tui::agent_transcript::open_agent_transcript(app, &agent_id);
+                app.needs_redraw = true;
+            }
+            ViewEvent::OpenAgentDetails { agent_id } => {
+                if !crate::tui::agent_details::open_agent_details(app, &agent_id) {
+                    app.status_message = Some("Agent details are unavailable".to_string());
                 }
                 app.needs_redraw = true;
             }
-            ViewEvent::AgentDetailsClosed { agent_id } => {
+            ViewEvent::AgentDetailsClosed { agent_id }
+            | ViewEvent::AgentTranscriptClosed { agent_id } => {
                 crate::tui::work_surface::agent_details_closed(app, &agent_id);
             }
             ViewEvent::FilePickerSelected { path } => {

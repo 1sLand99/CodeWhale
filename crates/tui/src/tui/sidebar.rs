@@ -938,34 +938,35 @@ fn subagent_panel_rows(
             indented_detail_line("  ", &detail_parts.join(" \u{00B7} "), content_width.max(1)),
             Style::default().fg(theme.text_dim),
         )));
-        // Clicking the expanded dossier opens the bounded Agent Details
-        // projection. The label row above keeps its expand/collapse toggle.
-        actions.push(Some(SidebarRowAction::OpenAgentDetail {
+        // One agent, one destination (v0.9.7): clicking the expanded dossier
+        // opens the agent's transcript directly. The label row above keeps
+        // its expand/collapse toggle. The transcript surface stays bounded —
+        // #4094's inline-dump freeze risk does not return with this route.
+        actions.push(Some(SidebarRowAction::OpenAgentTranscript {
             agent_id: row.id.clone(),
         }));
 
-        // #4094: hand the user a copyable bounded projection instead of
-        // dumping the transcript inline — the inline dump is this issue's
-        // freeze/emptiness risk. Clicking the row opens the complete private
-        // artifact; handle_read exposes bounded slices and its artifact path.
-        // Guarded by `max_rows` so the panel stays bounded, and width-clamped so
-        // narrow terminals never overflow.
-        if let Some(handle) = subagent_output_handle(row) {
-            if lines.len() >= max_rows {
-                break;
-            }
-            lines.push(Line::from(Span::styled(
-                indented_detail_line(
-                    "  ",
-                    &format!("\u{25B8} complete chat: open \u{00B7} handle_read {handle}"),
-                    content_width.max(1),
-                ),
-                Style::default().fg(theme.text_muted),
-            )));
-            actions.push(Some(SidebarRowAction::OpenAgentTranscript {
-                agent_id: row.id.clone(),
-            }));
+        // Secondary action: the bounded Agent Details projection. When the
+        // worker has inspectable output, keep the handle_read hint so exact
+        // bounded slices stay one command away. Guarded by `max_rows` so the
+        // panel stays bounded, and width-clamped so narrow terminals never
+        // overflow.
+        if lines.len() >= max_rows {
+            break;
         }
+        let details_line = match subagent_output_handle(row) {
+            Some(handle) => {
+                format!("\u{25B8} details: open \u{00B7} handle_read {handle}")
+            }
+            None => "\u{25B8} details: open".to_string(),
+        };
+        lines.push(Line::from(Span::styled(
+            indented_detail_line("  ", &details_line, content_width.max(1)),
+            Style::default().fg(theme.text_muted),
+        )));
+        actions.push(Some(SidebarRowAction::OpenAgentDetail {
+            agent_id: row.id.clone(),
+        }));
     }
 
     if summary.foreground_rlm_running {
@@ -2208,6 +2209,63 @@ mod tests {
                         if agent_id == "agent_e0b2dcf1"
                 ),
                 "width {content_width}: CJK row must still resolve to its agent id"
+            );
+        }
+    }
+
+    /// One agent, one destination (v0.9.7): the expanded dossier line opens
+    /// the agent's transcript directly; the bounded Agent Details projection
+    /// demotes to the labelled secondary line beneath it. With exact resident
+    /// evidence the secondary line keeps the copyable `handle_read` hint.
+    #[test]
+    fn expanded_dossier_opens_transcript_and_details_line_is_secondary() {
+        let summary = single_worker_summary(1);
+        let mut row = cjk_running_implementer_row();
+        row.expanded = true;
+
+        for transcript_available in [false, true] {
+            row.transcript_available = transcript_available;
+            let (lines, actions) = subagent_panel_rows(
+                &summary,
+                &[row.clone()],
+                Locale::En,
+                80,
+                8,
+                &palette::UI_THEME,
+            );
+            let text = lines_to_text(&lines);
+
+            // The dossier is the indented detail line that leads with the
+            // status word (its tail is width-truncated, so no tail anchor).
+            let dossier_idx = text
+                .iter()
+                .position(|line| line.trim_start().starts_with("running \u{00B7}"))
+                .expect("expanded dossier line");
+            assert!(
+                matches!(
+                    actions[dossier_idx],
+                    Some(SidebarRowAction::OpenAgentTranscript { ref agent_id })
+                        if agent_id == "agent_e0b2dcf1"
+                ),
+                "dossier click must open the transcript: {text:?}"
+            );
+
+            let details_idx = text
+                .iter()
+                .position(|line| line.contains("details: open"))
+                .expect("secondary details line");
+            assert!(
+                matches!(
+                    actions[details_idx],
+                    Some(SidebarRowAction::OpenAgentDetail { ref agent_id })
+                        if agent_id == "agent_e0b2dcf1"
+                ),
+                "details line must open the bounded projection: {text:?}"
+            );
+            assert_eq!(
+                text[details_idx].contains("handle_read"),
+                transcript_available,
+                "handle hint must track exact evidence: {text:?}"
             );
         }
     }
