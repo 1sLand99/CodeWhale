@@ -12799,8 +12799,22 @@ impl SubAgentToolRegistry {
         let bounded_recon_bash = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
             && family.eq_ignore_ascii_case("Bash")
             && action == "run";
+        // A network-denied child keeps the `Web` family's two read-only
+        // actions even though their legacy aliases (`web_search`, `fetch_url`)
+        // are on the deny list: the aliases deny the *standalone* spellings,
+        // while the family's `search`/`fetch` are the evidence surface a recon
+        // member is entitled to (parity with an ordinary scout). Deny still
+        // wins when the family name itself is denied, `wait` stays denied
+        // through `wait_for_dev_server`, and a URL-addressed `fetch` is
+        // refused at dispatch by `reject_network_reaching_input`, so the
+        // carve-out never re-opens the reach.
+        let web_readonly_action = family.eq_ignore_ascii_case("Web")
+            && matches!(action, "search" | "fetch")
+            && self.network_is_denied();
         if self.is_tool_denied(family)
-            || !bounded_recon_bash && alias.is_some_and(|name| self.is_tool_denied(name))
+            || !bounded_recon_bash
+                && !web_readonly_action
+                && alias.is_some_and(|name| self.is_tool_denied(name))
         {
             return false;
         }
