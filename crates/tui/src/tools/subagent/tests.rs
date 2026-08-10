@@ -3793,8 +3793,8 @@ fn test_child_max_spawn_depth_profile_hint_only_narrows() {
     assert_eq!(child_max_spawn_depth_for_spawn(2, 0, None, Some(6)), 2);
     // Explicit request takes the min with the hint.
     assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), Some(1)), 1);
-    // Explicit request alone keeps its existing widen-up-to-ceiling semantics.
-    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), None), 3);
+    // Explicit request alone still cannot widen past the inherited budget (#5253).
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), None), 2);
     assert_eq!(
         child_max_spawn_depth_for_spawn(
             2,
@@ -3802,10 +3802,36 @@ fn test_child_max_spawn_depth_profile_hint_only_narrows() {
             Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING),
             None
         ),
-        codewhale_config::MAX_SPAWN_DEPTH_CEILING
+        2
     );
     // Neither request nor hint: inherit unchanged.
     assert_eq!(child_max_spawn_depth_for_spawn(5, 2, None, None), 5);
+}
+
+/// A descendant subagent must not widen the absolute recursion budget its root
+/// session selected by supplying an explicit `max_depth` on a nested spawn
+/// (#5253). The inherited budget is a hard cap even when the request (clamped
+/// to the global ceiling) is larger.
+#[test]
+fn test_child_max_spawn_depth_request_cannot_widen_inherited_budget() {
+    // Root chose an absolute max_spawn_depth of 2; a nested child at
+    // spawn_depth 2 requesting the global ceiling must stay bounded by 2,
+    // not jump to the ceiling. Before the fix this returned
+    // MAX_SPAWN_DEPTH_CEILING (8), letting the descendant keep spawning past
+    // the root's chosen boundary.
+    assert_eq!(
+        child_max_spawn_depth_for_spawn(
+            2,
+            2,
+            Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING),
+            None
+        ),
+        2
+    );
+    // The inherited budget also caps an explicit request paired with a hint.
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 1, Some(8), Some(6)), 2);
+    // A request below the inherited budget is still honored (clamp, don't force).
+    assert_eq!(child_max_spawn_depth_for_spawn(5, 0, Some(3), None), 3);
 }
 
 #[test]
