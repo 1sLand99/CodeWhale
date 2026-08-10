@@ -1,4 +1,6 @@
 use super::headers::{MCP_HTTP_ACCEPT, is_safe_custom_header, with_default_mcp_http_headers};
+use super::http::{HttpTransport, McpHttpAuth};
+use super::streamable_http::StreamableHttpTransport;
 use super::*;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use std::collections::VecDeque;
