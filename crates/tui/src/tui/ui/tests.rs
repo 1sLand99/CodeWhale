@@ -36,6 +36,23 @@ use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
 #[test]
+fn session_shell_area_stays_fluid_until_wide_then_centers_on_a_readable_rail() {
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (112, 40)] {
+        let fluid = Rect::new(4, 3, width, height);
+        assert_eq!(frame::session_shell_area(fluid), fluid);
+    }
+
+    assert_eq!(
+        frame::session_shell_area(Rect::new(4, 3, 140, 40)),
+        Rect::new(18, 3, 112, 40)
+    );
+    assert_eq!(
+        frame::session_shell_area(Rect::new(4, 3, 200, 50)),
+        Rect::new(48, 3, 112, 50)
+    );
+}
+
+#[test]
 fn remote_control_escape_commands_match_dispatcher_case_rules() {
     for input in [
         "/rc stop",
@@ -3434,6 +3451,22 @@ fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String 
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_rail() {
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::User {
+        content: "A deliberately short prompt.".to_string(),
+    }];
+    app.resync_history_revisions();
+
+    let _ = render_underwater_test_app(&mut app, 160, 32);
+
+    let transcript = app.viewport.last_transcript_area.expect("transcript area");
+    let composer = app.viewport.last_composer_area.expect("composer area");
+    assert_eq!((transcript.x, transcript.width), (24, 112));
+    assert_eq!((composer.x, composer.width), (24, 112));
 }
 
 fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {

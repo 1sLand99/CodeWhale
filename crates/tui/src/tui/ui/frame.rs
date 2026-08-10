@@ -5,6 +5,21 @@
 
 use super::*;
 
+/// Keep the working shell readable on wide terminals without introducing
+/// separate geometry for the transcript, composer, and chrome. Dense content
+/// still has 112 columns; additional terminal width becomes calm, symmetric
+/// breathing room instead of ever-longer prose lines.
+const SESSION_SHELL_MAX_WIDTH: u16 = 112;
+
+pub(crate) fn session_shell_area(area: Rect) -> Rect {
+    let width = area.width.min(SESSION_SHELL_MAX_WIDTH);
+    Rect {
+        x: area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        width,
+        ..area
+    }
+}
+
 /// Snapshot the posture a real `Op::SendMessage` would carry, and — when the
 /// user supplied a hypothetical prompt — resolve the next turn's route with
 /// the **same shared planner** dispatch uses (#1004).
@@ -666,6 +681,7 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
 
 pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let size = f.area();
+    let shell_area = session_shell_area(size);
     // Keep the view stack's focus-context texture prototype (#4823) in step
     // with the parsed setting each frame: a plain enum/theme copy, no
     // allocation. `Off` leaves the render byte-identical to before.
@@ -695,8 +711,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     }
 
     if app.launch.visible {
-        crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
-        crate::tui::underwater::record_launch_row_areas(size, &mut app.launch);
+        crate::tui::underwater::render_launch_screen(shell_area, f.buffer_mut(), app);
+        crate::tui::underwater::record_launch_row_areas(shell_area, &mut app.launch);
         if !app.view_stack.is_empty() {
             if app.view_stack.top_kind() == Some(ModalKind::Approval) {
                 app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
@@ -721,9 +737,9 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // ocean draws its brand mark (in ChatWidget); calling it twice would let
     // the reservation and the render disagree inside a single frame.
     let idle_empty = crate::tui::widgets::should_render_empty_state(app);
-    let rail_budget = rail_row_budget(app, size.width, size.height, idle_empty);
+    let rail_budget = rail_row_budget(app, shell_area.width, shell_area.height, idle_empty);
     let top_work_strip_height =
-        crate::tui::work_surface::height(app, size.width, size.height, rail_budget);
+        crate::tui::work_surface::height(app, shell_area.width, shell_area.height, rail_budget);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
     // then split the remaining body area for chat / preview / composer /
@@ -735,7 +751,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             .direction(Direction::Vertical)
             .flex(ratatui::layout::Flex::Start)
             .constraints([Constraint::Length(header_height), Constraint::Min(1)])
-            .split(size);
+            .split(shell_area);
         (split[0], split[1])
     };
 
@@ -750,7 +766,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             &slash_menu_entries,
             &mention_menu_entries,
         );
-        composer_widget.desired_height(size.width)
+        composer_widget.desired_height(shell_area.width)
     };
 
     // Pending-input preview (queued / steered messages). Empty when nothing's
@@ -758,7 +774,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     // "messages typed during a running turn vanish" complaint by giving the
     // user immediate visible feedback above the composer.
     let pending_preview = build_pending_input_preview(app);
-    let desired_preview_height = pending_preview.desired_height(size.width);
+    let desired_preview_height = pending_preview.desired_height(shell_area.width);
 
     // Persistent background-work indicator (#5286): one pinned row above the
     // composer while shells / durable tasks / sub-agents are in flight. The
@@ -782,7 +798,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         .workflow_panel
         .as_ref()
         .filter(|panel| panel.expanded)
-        .map(|panel| panel.desired_height(size.width))
+        .map(|panel| panel.desired_height(shell_area.width))
         .unwrap_or(0);
     let auxiliary_budget = body_height
         .saturating_sub(
