@@ -7880,8 +7880,13 @@ mod tests {
             "expected a help string beside --telemetry, got: {telemetry_line}"
         );
         assert!(
-            telemetry_line.contains("off"),
-            "the help string must say the default is off: {telemetry_line}"
+            telemetry_line.contains("default on"),
+            "the help string must disclose the default: {telemetry_line}"
+        );
+        assert!(
+            telemetry_line.contains("CODEWHALE_TELEMETRY=0 always")
+                && telemetry_line.contains("wins"),
+            "the help string must document the always-winning opt-out: {telemetry_line}"
         );
     }
 
