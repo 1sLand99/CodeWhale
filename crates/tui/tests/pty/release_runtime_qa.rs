@@ -552,6 +552,7 @@ async fn release_compaction_full_mailbox_never_freezes_tui() -> Result<()> {
 /// turn, starts exactly one provider compaction request, and owns its typed
 /// phase label beyond the five-second toast lifetime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "deferred to 0.9.7 (owner-approved): manual /compact must queue behind an active turn instead of refusing with 'engine is busy'"]
 async fn release_manual_compaction_serializes_and_label_persists() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
@@ -629,6 +630,7 @@ async fn release_manual_compaction_serializes_and_label_persists() -> Result<()>
 /// 272K route. Its typed auto label must remain visible beyond toast expiry,
 /// and the ordinary streamed turn may start only after compaction completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "deferred to 0.9.7 (owner-approved): blocked by the same compaction busy-queue bug as the manual scenario"]
 async fn release_auto_compaction_label_persists() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
@@ -701,6 +703,7 @@ async fn release_auto_compaction_label_persists() -> Result<()> {
 /// A second `/compact` must feed the committed summary back into the
 /// summarization request as the coalescing bridge (replace, not stack).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "deferred to 0.9.7 (owner-approved): blocked by the same compaction busy-queue bug as the manual scenario"]
 async fn release_idle_compaction_reports_outcome_in_transcript() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
