@@ -124,7 +124,7 @@ impl PluginPathSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCapabilities {
-    /// Requested filesystem roots are inventory-only in v0.9.1. Declaring any
+    /// Requested filesystem roots are inventory-only. Declaring any
     /// keeps the bundle inactive until a later permission adapter exists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_roots: Vec<String>,
@@ -132,7 +132,7 @@ pub struct PluginCapabilities {
     /// effective capability inventory automatically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_hosts: Vec<String>,
-    /// Lifecycle mutation is inventoried but unsupported in v0.9.1.
+    /// Lifecycle mutation is inventoried but unsupported.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lifecycle_mutation: bool,
 }
@@ -679,7 +679,7 @@ impl PluginManifest {
                         || server.oauth_resource.is_some()
                     {
                         return Err(format!(
-                            "remote MCP server `{name}` may not declare OAuth fields because plugin OAuth is disabled in v0.9.1; use env_headers or bearer_token_env_var"
+                            "remote MCP server `{name}` may not declare OAuth fields because plugin OAuth is disabled; use env_headers or bearer_token_env_var"
                         ));
                     }
                     let parsed = reqwest::Url::parse(url)
@@ -1324,7 +1324,7 @@ fn hash_path(
         budget.files += 1;
         if budget.files > MAX_HASHED_FILES {
             return Err(format!(
-                "plugin bundle content exceeds the v0.9.1 review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
+                "plugin bundle content exceeds the plugin review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
             ));
         }
         hasher.update(b"F\0");
@@ -1356,7 +1356,7 @@ fn hash_path(
             budget.bytes = budget.bytes.saturating_add(read as u64);
             if budget.bytes > MAX_HASHED_BYTES {
                 return Err(format!(
-                    "plugin bundle content exceeds the v0.9.1 review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
+                    "plugin bundle content exceeds the plugin review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
                 ));
             }
             hasher.update(&buffer[..read]);
@@ -1965,8 +1965,8 @@ network_hosts = ["example.invalid"]
                 ),
             );
             let error = PluginManifest::validate_from_path(&path)
-                .expect_err("plugin OAuth authority must remain disabled in v0.9.1");
-            assert!(error.contains("plugin OAuth is disabled in v0.9.1"));
+                .expect_err("plugin OAuth authority must remain disabled");
+            assert!(error.contains("plugin OAuth is disabled"));
         }
     }
 

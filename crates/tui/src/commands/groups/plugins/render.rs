@@ -179,7 +179,7 @@ fn render_mcp_inventory(plugin: &LoadedPlugin) -> String {
                     "streamable-http with same-origin SSE fallback",
                 );
                 format!(
-                    "{}: transport={} endpoint={} redirects=same-origin-only env_headers=[{}] bearer_env={} oauth=disabled-v0.9.1 timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] {enabled}",
+                    "{}: transport={} endpoint={} redirects=same-origin-only env_headers=[{}] bearer_env={} oauth=disabled timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] {enabled}",
                     escape_review_text(name),
                     escape_review_text(transport),
                     endpoint,

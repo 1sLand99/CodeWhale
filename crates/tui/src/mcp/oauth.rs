@@ -437,7 +437,7 @@ pub async fn perform_oauth_login_for_server_with_cancel(
 ) -> Result<()> {
     if server.reviewed_plugin.is_some() {
         bail!(
-            "OAuth is disabled for plugin-contributed MCP servers in v0.9.1; use a reviewed environment-backed header or bearer token"
+            "OAuth is disabled for plugin-contributed MCP servers; use a reviewed environment-backed header or bearer token"
         );
     }
     run_cancellable_oauth(
@@ -555,7 +555,7 @@ async fn perform_oauth_login(
 
 pub fn delete_oauth_tokens_for_server(name: &str, server: &McpServerConfig) -> Result<bool> {
     if server.reviewed_plugin.is_some() {
-        bail!("OAuth storage is disabled for plugin-contributed MCP servers in v0.9.1");
+        bail!("OAuth storage is disabled for plugin-contributed MCP servers");
     }
     let Some(url) = server.url.as_deref() else {
         bail!("OAuth logout is only supported for URL-based MCP servers");

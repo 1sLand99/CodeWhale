@@ -231,7 +231,7 @@ fn mcp_review_discloses_host_authority_and_names_without_secret_values() {
     assert!(review.contains("#2 value=\"--mode=worker\""));
     assert!(review.contains("#3 value=\"-e\""));
     assert!(review.contains("#4 value=\"console.log('ready')\""));
-    assert!(review.contains("oauth=disabled-v0.9.1"));
+    assert!(review.contains("oauth=disabled"));
 }
 
 #[test]

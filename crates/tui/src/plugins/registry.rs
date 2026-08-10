@@ -401,7 +401,7 @@ impl PluginRegistry {
         let unsupported = plugin.inventory.unsupported_labels();
         if !unsupported.is_empty() {
             return Err(format!(
-                "Plugin bundle `{}` declares v0.9.1-inactive capabilities: {}",
+                "Plugin bundle `{}` declares inactive capabilities: {}",
                 plugin.name(),
                 unsupported.join(", ")
             ));
