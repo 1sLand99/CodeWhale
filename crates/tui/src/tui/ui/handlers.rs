@@ -1062,10 +1062,18 @@ pub(crate) async fn handle_view_events(
                                 config: app.compaction_config(),
                             })
                             .await;
-                        app.status_message = Some(format!(
-                            "Session loaded (ID: {})",
-                            crate::session_manager::truncate_id(&session_id)
-                        ));
+                        // Durable receipt, matching `/load`: the status toast
+                        // alone is replaced by the next footer update, leaving
+                        // no findable record that the resume happened.
+                        let loaded_message = format!(
+                            "Session loaded (ID: {}, {} messages)",
+                            crate::session_manager::truncate_id(&session_id),
+                            session.metadata.message_count
+                        );
+                        app.add_message(HistoryCell::System {
+                            content: loaded_message.clone(),
+                        });
+                        app.status_message = Some(loaded_message);
                         app.launch.visible = false;
                         app.launch.status = None;
                     }

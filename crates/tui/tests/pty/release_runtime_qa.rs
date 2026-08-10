@@ -2420,9 +2420,10 @@ async fn release_session_picker_restores_route_identity() -> Result<()> {
     std::thread::sleep(PASTE_GUARD_SETTLE);
     tui.pump();
     tui.send(keys::key::enter())?; // resume the selected session
-    // The restored transcript is the durable receipt that the swap happened
-    // (the "Session loaded" status message is transient footer state).
     tui.wait_for_text("restored route dialogue item 00", INTERACTION_TIMEOUT)?;
+    // Picker resume owns a durable transcript receipt, matching `/load` —
+    // the transient status toast alone loses the record to footer churn.
+    tui.wait_for_text("Session loaded (ID:", INTERACTION_TIMEOUT)?;
 
     // Displayed identity after the picker swap.
     let restored_route_label = format!("{RESTORED_PROVIDER_KEY} · {RESTORED_TEST_MODEL}");
