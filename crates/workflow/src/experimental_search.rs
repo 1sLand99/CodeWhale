@@ -13,15 +13,102 @@ use thiserror::Error;
 use crate::{DEFAULT_FLEET_WORKFLOW_MAX_AGENTS, experimental_search::SearchSpecError::*};
 
 pub const WORKFLOW_SEARCH_SCHEMA_VERSION: u32 = 1;
-/// Live-worker ceiling for one search admission batch.
+/// Fallback live-worker ceiling for one search admission batch.
 ///
-/// 16 matches the Workflow host's live-child ceiling today
-/// (`codewhale_workflow_js::WORKFLOW_MAX_CONCURRENT`, from which the tui
+/// This is the answer when the host resolves no Fleet concurrency limit at
+/// all — not a second knob. 16 matches the Workflow host's live-child ceiling
+/// today (`codewhale_workflow_js::WORKFLOW_MAX_CONCURRENT`, from which the tui
 /// driver sizes its per-run admission semaphore). This crate cannot import
 /// that constant directly because `codewhale-workflow-js` depends on
-/// `codewhale-workflow`, so 16 is documented here as today's default — not a
-/// new configuration knob. Keep it in sync with the host constant.
-pub const WORKFLOW_SEARCH_MAX_CONCURRENT: u16 = 16;
+/// `codewhale-workflow`.
+///
+/// Prefer passing the live limit: every validation entry point has a
+/// `*_with_limit` twin that takes the resolved Fleet ceiling, and the frozen
+/// receipt records which of the two actually bounded the search.
+pub const WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT: u16 = 16;
+
+/// Where a search's live-worker ceiling came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchConcurrencySource {
+    /// Resolved from the host's Fleet concurrency configuration.
+    FleetLimit,
+    /// No Fleet limit resolved, so [`WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT`]
+    /// applied.
+    #[default]
+    Default,
+}
+
+/// The live-worker ceiling that bounded a search, plus where it came from.
+///
+/// Carried on the frozen receipt so an operator reading a run can tell a
+/// deliberately small Fleet pool from this crate's fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSearchConcurrency {
+    pub limit: u16,
+    pub source: SearchConcurrencySource,
+}
+
+impl Default for ResolvedSearchConcurrency {
+    fn default() -> Self {
+        Self::resolve(None)
+    }
+}
+
+impl ResolvedSearchConcurrency {
+    /// Resolve the ceiling from an already-resolved Fleet limit.
+    ///
+    /// `None` — and a nonsensical `Some(0)`, which would admit nothing — fall
+    /// back to [`WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT`].
+    #[must_use]
+    pub fn resolve(fleet_limit: Option<u16>) -> Self {
+        match fleet_limit.filter(|limit| *limit > 0) {
+            Some(limit) => Self {
+                limit,
+                source: SearchConcurrencySource::FleetLimit,
+            },
+            None => Self {
+                limit: WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT,
+                source: SearchConcurrencySource::Default,
+            },
+        }
+    }
+
+    /// Resolve straight from the two config seams the host already owns:
+    /// `[workflow] max_concurrent` (the per-run live-agent ceiling, see
+    /// `codewhale_config::WorkflowConfigToml::max_concurrent`) and a Fleet
+    /// profile's `delegation.max_concurrency` hint
+    /// (`codewhale_config::FleetDelegationHints::max_concurrency`).
+    ///
+    /// The lower of the present values wins: a profile that asks for fewer
+    /// workers than the run allows is a real bound, and a run ceiling below a
+    /// profile hint is the admission the host will actually grant.
+    #[must_use]
+    pub fn from_fleet_config(
+        workflow_max_concurrent: Option<u32>,
+        profile_max_concurrency: Option<usize>,
+    ) -> Self {
+        let workflow =
+            workflow_max_concurrent.map(|value| u16::try_from(value).unwrap_or(u16::MAX));
+        let profile = profile_max_concurrency.map(|value| u16::try_from(value).unwrap_or(u16::MAX));
+        let resolved = match (workflow.filter(|v| *v > 0), profile.filter(|v| *v > 0)) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        Self::resolve(resolved)
+    }
+
+    /// One-line receipt copy naming the ceiling and its origin.
+    #[must_use]
+    pub fn receipt_line(&self) -> String {
+        let origin = match self.source {
+            SearchConcurrencySource::FleetLimit => "resolved Fleet limit",
+            SearchConcurrencySource::Default => "default, no Fleet limit resolved",
+        };
+        format!("live-worker ceiling {limit} ({origin})", limit = self.limit)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowSearchSpec {
@@ -44,13 +131,33 @@ pub struct WorkflowSearchSpec {
 }
 
 impl WorkflowSearchSpec {
+    /// Parse and validate against the fallback ceiling. Hosts that know their
+    /// Fleet limit should call [`Self::from_toml_with_limit`].
     pub fn from_toml(source: &str) -> Result<Self, SearchSpecError> {
+        Self::from_toml_with_limit(source, None)
+    }
+
+    /// Parse and validate against the resolved Fleet concurrency limit.
+    pub fn from_toml_with_limit(
+        source: &str,
+        fleet_limit: Option<u16>,
+    ) -> Result<Self, SearchSpecError> {
         let spec: Self = toml::from_str(source).map_err(|error| Parse(error.to_string()))?;
-        spec.validate()?;
+        spec.validate_with_limit(fleet_limit)?;
         Ok(spec)
     }
 
     pub fn validate(&self) -> Result<(), SearchSpecError> {
+        self.validate_with_limit(None).map(|_| ())
+    }
+
+    /// Validate against the resolved Fleet concurrency limit, returning the
+    /// ceiling that applied so the caller can echo it in a receipt.
+    pub fn validate_with_limit(
+        &self,
+        fleet_limit: Option<u16>,
+    ) -> Result<ResolvedSearchConcurrency, SearchSpecError> {
+        let concurrency_ceiling = ResolvedSearchConcurrency::resolve(fleet_limit);
         if self.schema_version != WORKFLOW_SEARCH_SCHEMA_VERSION {
             return Err(UnsupportedSchemaVersion(self.schema_version));
         }
@@ -60,12 +167,13 @@ impl WorkflowSearchSpec {
             return Err(InvalidPopulation(self.population));
         }
         if self.concurrency == 0
-            || self.concurrency > WORKFLOW_SEARCH_MAX_CONCURRENT
+            || self.concurrency > concurrency_ceiling.limit
             || self.concurrency > self.population
         {
             return Err(InvalidConcurrency {
                 concurrency: self.concurrency,
                 population: self.population,
+                limit: concurrency_ceiling.limit,
             });
         }
         validate_rounds(self.population, &self.rounds)?;
@@ -102,7 +210,7 @@ impl WorkflowSearchSpec {
         if self.score.tie_breakers.is_empty() {
             return Err(MissingTieBreakers);
         }
-        Ok(())
+        Ok(concurrency_ceiling)
     }
 
     /// Freeze the exact public inputs and evaluator identity before admission.
@@ -114,7 +222,31 @@ impl WorkflowSearchSpec {
         public_evidence: &[u8],
         evaluator: &[u8],
     ) -> Result<FrozenWorkflowSearch, SearchSpecError> {
-        self.validate()?;
+        self.freeze_with_limit(
+            baseline_commit,
+            resolved_model,
+            public_evidence,
+            evaluator,
+            None,
+        )
+    }
+
+    /// Freeze against the resolved Fleet concurrency limit.
+    ///
+    /// The resolved ceiling is recorded on the receipt but deliberately kept
+    /// out of the preregistration hash: the hash freezes the scientific inputs
+    /// (spec, model, public evidence, evaluator identity), and how many
+    /// workers the operator's pool happened to allow is an operational fact
+    /// about the run, not part of what was preregistered.
+    pub fn freeze_with_limit(
+        &self,
+        baseline_commit: &str,
+        resolved_model: &str,
+        public_evidence: &[u8],
+        evaluator: &[u8],
+        fleet_limit: Option<u16>,
+    ) -> Result<FrozenWorkflowSearch, SearchSpecError> {
+        let resolved_concurrency = self.validate_with_limit(fleet_limit)?;
         validate_commit(baseline_commit)?;
         validate_text("resolved_model", resolved_model, 256)?;
         if evaluator.is_empty() {
@@ -146,6 +278,7 @@ impl WorkflowSearchSpec {
             requested_model: self.worker.model.clone(),
             resolved_model: resolved_model.to_string(),
             candidate_ids: self.candidate_ids(),
+            resolved_concurrency,
         })
     }
 
@@ -160,7 +293,16 @@ impl WorkflowSearchSpec {
     /// Deterministic admission batches. Fleet owns actual scheduling and may
     /// run fewer workers when its configured pool or provider quota is lower.
     pub fn admission_batches(&self) -> Result<Vec<Vec<String>>, SearchSpecError> {
-        self.validate()?;
+        self.admission_batches_with_limit(None)
+    }
+
+    /// Deterministic admission batches, validated against the resolved Fleet
+    /// concurrency limit.
+    pub fn admission_batches_with_limit(
+        &self,
+        fleet_limit: Option<u16>,
+    ) -> Result<Vec<Vec<String>>, SearchSpecError> {
+        self.validate_with_limit(fleet_limit)?;
         Ok(self
             .candidate_ids()
             .chunks(usize::from(self.concurrency))
@@ -303,6 +445,19 @@ pub struct FrozenWorkflowSearch {
     pub requested_model: String,
     pub resolved_model: String,
     pub candidate_ids: Vec<String>,
+    /// The live-worker ceiling that bounded this search, and whether it came
+    /// from Fleet config or the crate fallback. `#[serde(default)]` so
+    /// receipts written before the bound was recorded still load.
+    #[serde(default)]
+    pub resolved_concurrency: ResolvedSearchConcurrency,
+}
+
+impl FrozenWorkflowSearch {
+    /// Receipt line naming the ceiling that actually bounded this run.
+    #[must_use]
+    pub fn concurrency_receipt_line(&self) -> String {
+        self.resolved_concurrency.receipt_line()
+    }
 }
 
 #[derive(Serialize)]
@@ -328,9 +483,13 @@ pub enum SearchSpecError {
     #[error("population {0} must be between 2 and 1000")]
     InvalidPopulation(u16),
     #[error(
-        "concurrency {concurrency} must be between 1 and 16 and no greater than population {population}"
+        "concurrency {concurrency} must be between 1 and {limit} (resolved live-worker ceiling) and no greater than population {population}"
     )]
-    InvalidConcurrency { concurrency: u16, population: u16 },
+    InvalidConcurrency {
+        concurrency: u16,
+        population: u16,
+        limit: u16,
+    },
     #[error("rounds must start at population, decrease strictly, and end at 1")]
     InvalidRounds,
     #[error("write-capable search workers require write_roots or exact_files")]
@@ -578,8 +737,148 @@ retain_diversity = true
             Err(SearchSpecError::InvalidConcurrency {
                 concurrency: 17,
                 population: 32,
+                limit: 16,
             })
         );
+    }
+
+    #[test]
+    fn ceiling_follows_the_resolved_fleet_limit() {
+        let mut spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
+
+        // A smaller Fleet pool rejects the spec's 16-wide batches...
+        assert_eq!(
+            spec.validate_with_limit(Some(8)),
+            Err(SearchSpecError::InvalidConcurrency {
+                concurrency: 16,
+                population: 32,
+                limit: 8,
+            })
+        );
+
+        // ...and a larger one admits concurrency the fallback would refuse.
+        spec.concurrency = 24;
+        let resolved = spec
+            .validate_with_limit(Some(32))
+            .expect("24 workers fit a 32-wide Fleet limit");
+        assert_eq!(
+            resolved,
+            ResolvedSearchConcurrency {
+                limit: 32,
+                source: SearchConcurrencySource::FleetLimit,
+            }
+        );
+        let batches = spec
+            .admission_batches_with_limit(Some(32))
+            .expect("validated admission");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 24);
+    }
+
+    #[test]
+    fn fallback_ceiling_stays_sixteen_when_no_limit_resolves() {
+        let mut spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
+        assert_eq!(
+            spec.validate_with_limit(None),
+            Ok(ResolvedSearchConcurrency {
+                limit: WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT,
+                source: SearchConcurrencySource::Default,
+            })
+        );
+        assert_eq!(WORKFLOW_SEARCH_DEFAULT_MAX_CONCURRENT, 16);
+
+        // A zero limit is not a ceiling of zero — it is an unresolved one.
+        assert_eq!(
+            spec.validate_with_limit(Some(0)),
+            spec.validate_with_limit(None)
+        );
+
+        spec.concurrency = 17;
+        assert_eq!(
+            spec.validate_with_limit(None),
+            Err(SearchSpecError::InvalidConcurrency {
+                concurrency: 17,
+                population: 32,
+                limit: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn fleet_config_seam_takes_the_lower_present_bound() {
+        assert_eq!(
+            ResolvedSearchConcurrency::from_fleet_config(Some(16), Some(4)),
+            ResolvedSearchConcurrency {
+                limit: 4,
+                source: SearchConcurrencySource::FleetLimit,
+            }
+        );
+        assert_eq!(
+            ResolvedSearchConcurrency::from_fleet_config(Some(6), None),
+            ResolvedSearchConcurrency {
+                limit: 6,
+                source: SearchConcurrencySource::FleetLimit,
+            }
+        );
+        assert_eq!(
+            ResolvedSearchConcurrency::from_fleet_config(None, None),
+            ResolvedSearchConcurrency::default()
+        );
+        assert_eq!(
+            ResolvedSearchConcurrency::default().source,
+            SearchConcurrencySource::Default
+        );
+    }
+
+    #[test]
+    fn freeze_receipt_echoes_the_bound_that_applied() {
+        let spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
+
+        let fallback = spec
+            .freeze("33bc6a98", "DeepSeek-V4-Flash-0731", b"evidence", b"eval")
+            .expect("freeze succeeds");
+        assert_eq!(
+            fallback.resolved_concurrency,
+            ResolvedSearchConcurrency {
+                limit: 16,
+                source: SearchConcurrencySource::Default,
+            }
+        );
+        assert_eq!(
+            fallback.concurrency_receipt_line(),
+            "live-worker ceiling 16 (default, no Fleet limit resolved)"
+        );
+
+        let bounded = spec
+            .freeze_with_limit(
+                "33bc6a98",
+                "DeepSeek-V4-Flash-0731",
+                b"evidence",
+                b"eval",
+                Some(16),
+            )
+            .expect("freeze succeeds");
+        assert_eq!(
+            bounded.resolved_concurrency,
+            ResolvedSearchConcurrency {
+                limit: 16,
+                source: SearchConcurrencySource::FleetLimit,
+            }
+        );
+        assert_eq!(
+            bounded.concurrency_receipt_line(),
+            "live-worker ceiling 16 (resolved Fleet limit)"
+        );
+
+        // The preregistration identity is unchanged by the operational bound.
+        assert_eq!(
+            fallback.preregistration_hash, bounded.preregistration_hash,
+            "the resolved ceiling must not perturb the preregistration hash"
+        );
+
+        let receipt = serde_json::to_value(&bounded).expect("receipt serializes");
+        assert_eq!(receipt["resolved_concurrency"]["limit"], 16);
+        assert_eq!(receipt["resolved_concurrency"]["source"], "fleet_limit");
     }
 
     #[test]
@@ -592,6 +891,7 @@ retain_diversity = true
             Err(SearchSpecError::InvalidConcurrency {
                 concurrency: 0,
                 population: 32,
+                limit: 16,
             })
         );
     }
