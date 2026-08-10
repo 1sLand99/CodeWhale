@@ -492,6 +492,7 @@ impl Engine {
                 )
                 .await;
                 let auto_messages_before = self.session.messages.len();
+                let auto_tokens_before = self.estimated_input_tokens();
                 match compact_messages_safe(
                     client.as_ref(),
                     &self.session.messages,
@@ -512,14 +513,14 @@ impl Engine {
                             );
                             self.emit_session_updated().await;
                             let removed = auto_messages_before.saturating_sub(auto_messages_after);
+                            let auto_tokens_after = self.estimated_input_tokens();
                             let status = if retries_used > 0 {
                                 format!(
-                                    "Auto-compaction complete: {auto_messages_before} → {auto_messages_after} messages ({removed} removed, {} retries)",
-                                    retries_used
+                                    "Auto-compaction complete: {auto_messages_before} → {auto_messages_after} messages ({removed} removed, {retries_used} retries), ~{auto_tokens_before} → ~{auto_tokens_after} tokens"
                                 )
                             } else {
                                 format!(
-                                    "Auto-compaction complete: {auto_messages_before} → {auto_messages_after} messages ({removed} removed)"
+                                    "Auto-compaction complete: {auto_messages_before} → {auto_messages_after} messages ({removed} removed), ~{auto_tokens_before} → ~{auto_tokens_after} tokens"
                                 )
                             };
                             self.emit_compaction_completed(

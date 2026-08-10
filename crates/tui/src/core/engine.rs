@@ -4546,6 +4546,10 @@ impl Engine {
         };
 
         let messages_before = self.session.messages.len();
+        // Message counts alone do not show the win the user cares about: a
+        // compaction that drops few but enormous messages reads as a no-op.
+        // The emergency path already reports tokens; manual and auto now match.
+        let tokens_before = self.estimated_input_tokens();
         let mut turn_status = TurnOutcomeStatus::Completed;
         let mut turn_error = None;
 
@@ -4570,14 +4574,14 @@ impl Engine {
                     self.merge_compaction_summary(result.summary_prompt, result.successor_reanchor);
                     self.emit_session_updated().await;
                     let removed = messages_before.saturating_sub(messages_after);
+                    let tokens_after = self.estimated_input_tokens();
                     let message = if retries_used > 0 {
                         format!(
-                            "Compaction complete: {messages_before} → {messages_after} messages ({removed} removed, {} retries)",
-                            retries_used
+                            "Compaction complete: {messages_before} → {messages_after} messages ({removed} removed, {retries_used} retries), ~{tokens_before} → ~{tokens_after} tokens"
                         )
                     } else {
                         format!(
-                            "Compaction complete: {messages_before} → {messages_after} messages ({removed} removed)"
+                            "Compaction complete: {messages_before} → {messages_after} messages ({removed} removed), ~{tokens_before} → ~{tokens_after} tokens"
                         )
                     };
                     self.emit_compaction_completed(
