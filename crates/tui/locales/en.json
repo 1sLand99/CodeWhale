@@ -275,6 +275,7 @@
   "CmdModelsDescription": "Fetch live model IDs from the active API",
   "CmdModelDbDescription": "Browse the bundled model database",
   "CmdNetworkDescription": "Manage network allow and deny rules",
+  "CmdUpdateDescription": "Check for and install a new CodeWhale release",
   "CmdNoteDescription": "Add, list, edit, or remove workspace notes",
   "CmdThemeDescription": "Switch theme or open the theme picker",
   "CmdProviderDescription": "Switch the active provider and/or model",

@@ -272,6 +272,7 @@
   "CmdModelsDescription": "Récupérer les IDs de modèles en direct depuis l'API active",
   "CmdModelDbDescription": "Parcourir la base de modèles intégrée",
   "CmdNetworkDescription": "Gérer les règles réseau d'autorisation et de refus",
+  "CmdUpdateDescription": "Rechercher et installer une nouvelle version de CodeWhale",
   "CmdNoteDescription": "Ajouter, lister, modifier ou supprimer des notes du workspace",
   "CmdThemeDescription": "Changer de thème ou ouvrir le sélecteur de thème",
   "CmdProviderDescription": "Changer le fournisseur et/ou le modèle actif",

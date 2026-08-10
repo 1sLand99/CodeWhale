@@ -272,6 +272,7 @@
   "CmdModelsDescription": "Live-Modell-IDs von der aktiven API abrufen",
   "CmdModelDbDescription": "Mitgelieferte Modelldatenbank durchsuchen",
   "CmdNetworkDescription": "Netzwerk-Allow- und Deny-Regeln verwalten",
+  "CmdUpdateDescription": "Neue CodeWhale-Version suchen und installieren",
   "CmdNoteDescription": "Workspace-Notizen hinzufügen, auflisten, bearbeiten oder entfernen",
   "CmdThemeDescription": "Theme wechseln oder Theme-Auswahl öffnen",
   "CmdProviderDescription": "Aktiven Provider und/oder Modell wechseln",

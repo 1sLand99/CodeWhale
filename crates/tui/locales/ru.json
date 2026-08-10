@@ -272,6 +272,7 @@
   "CmdModelsDescription": "Получить актуальные ID моделей из активного API",
   "CmdModelDbDescription": "Просмотр встроенной базы моделей",
   "CmdNetworkDescription": "Управление правилами разрешения и запрета сети",
+  "CmdUpdateDescription": "Проверить и установить новый выпуск CodeWhale",
   "CmdNoteDescription": "Добавить, показать, изменить или удалить заметки рабочей области",
   "CmdThemeDescription": "Сменить тему или открыть выбор темы",
   "CmdProviderDescription": "Сменить активного провайдера и/или модель",

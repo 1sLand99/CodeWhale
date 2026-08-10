@@ -1,5 +1,5 @@
-//! Utility command area: attachments, background tasks, jobs, MCP, and
-//! network inspection.
+//! Utility command area: attachments, background tasks, jobs, MCP, network
+//! inspection, and self-update.
 
 mod attachment;
 mod automation;
@@ -7,6 +7,7 @@ mod jobs;
 mod mcp;
 mod network;
 mod task;
+mod update;
 
 use crate::commands::traits::{Command, CommandGroup, FunctionCommand, RegisterCommand};
 
@@ -38,6 +39,10 @@ impl CommandGroup for UtilityCommands {
             Box::new(FunctionCommand::new(
                 network::NetworkCmd::info(),
                 network::NetworkCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                update::UpdateCmd::info(),
+                update::UpdateCmd::execute,
             )),
         ])
     }

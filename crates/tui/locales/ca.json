@@ -272,6 +272,7 @@
   "CmdModelsDescription": "Obtén els IDs de model en viu de l'API activa",
   "CmdModelDbDescription": "Explora la base de dades de models inclosa",
   "CmdNetworkDescription": "Gestiona les regles de xarxa de permís i denegació",
+  "CmdUpdateDescription": "Comprova i instal·la una nova versió de CodeWhale",
   "CmdNoteDescription": "Afegeix, llista, edita o elimina notes de l'espai de treball",
   "CmdThemeDescription": "Canvia de tema o obre el selector de temes",
   "CmdProviderDescription": "Canvia el proveïdor i/o model actiu",

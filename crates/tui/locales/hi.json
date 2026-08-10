@@ -272,6 +272,7 @@
   "CmdModelsDescription": "सक्रिय API से लाइव मॉडल ID लाएँ",
   "CmdModelDbDescription": "बंडल किया मॉडल डेटाबेस ब्राउज़ करें",
   "CmdNetworkDescription": "नेटवर्क अनुमति और निषेध नियम प्रबंधित करें",
+  "CmdUpdateDescription": "नया CodeWhale रिलीज़ जाँचें और इंस्टॉल करें",
   "CmdNoteDescription": "वर्कस्पेस नोट जोड़ें, सूचीबद्ध करें, संपादित करें या हटाएँ",
   "CmdThemeDescription": "थीम बदलें या थीम चयनकर्ता खोलें",
   "CmdProviderDescription": "सक्रिय प्रोवाइडर और/या मॉडल बदलें",

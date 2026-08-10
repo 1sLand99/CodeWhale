@@ -275,6 +275,7 @@
   "CmdModelsDescription": "Lấy ID mô hình trực tiếp từ API đang dùng",
   "CmdModelDbDescription": "Duyệt cơ sở dữ liệu mô hình tích hợp",
   "CmdNetworkDescription": "Quản lý các quy tắc cho phép và từ chối mạng",
+  "CmdUpdateDescription": "Kiểm tra và cài đặt bản phát hành CodeWhale mới",
   "CmdNoteDescription": "Thêm, liệt kê, sửa hoặc xóa ghi chú trong không gian làm việc",
   "CmdThemeDescription": "Chuyển đổi giao diện hoặc mở bảng chọn giao diện",
   "CmdProviderDescription": "Chuyển đổi hoặc xem backend LLM đang hoạt động (deepseek | nvidia-nim | ollama)",

@@ -272,6 +272,7 @@
   "CmdModelsDescription": "Ambil ID model langsung dari API aktif",
   "CmdModelDbDescription": "Telusuri database model bawaan",
   "CmdNetworkDescription": "Kelola aturan izinkan dan tolak jaringan",
+  "CmdUpdateDescription": "Periksa dan pasang rilis CodeWhale baru",
   "CmdNoteDescription": "Tambah, tampilkan, edit, atau hapus catatan workspace",
   "CmdThemeDescription": "Ganti tema atau buka pemilih tema",
   "CmdProviderDescription": "Ganti penyedia dan/atau model aktif",

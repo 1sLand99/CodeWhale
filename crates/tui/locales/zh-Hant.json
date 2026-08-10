@@ -204,6 +204,7 @@
   "CmdModelDescription": "切換或檢視目前模型",
   "CmdModelsDescription": "工具箱：從目前 API 取得實時模型 ID",
   "CmdNetworkDescription": "管理網路允許和拒絕規則",
+  "CmdUpdateDescription": "檢查並安裝新的 CodeWhale 版本",
   "CmdNewDescription": "開始一個新的已儲存工作階段",
   "CmdNoteDescription": "添加、列出、編輯或刪除工作區筆記",
   "CmdPermissionsDescription": "列出並安全刪除權限規則",

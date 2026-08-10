@@ -275,6 +275,7 @@
   "CmdModelsDescription": "Buscar IDs de modelo ao vivo da API ativa",
   "CmdModelDbDescription": "Navegar pelo banco de dados de modelos integrado",
   "CmdNetworkDescription": "Gerenciar regras de rede permitidas e bloqueadas",
+  "CmdUpdateDescription": "Verificar e instalar uma nova versão do CodeWhale",
   "CmdNoteDescription": "Adicionar, listar, editar ou remover notas do workspace",
   "CmdThemeDescription": "Alternar tema: escuro, claro, tons de cinza ou sistema",
   "CmdProviderDescription": "Trocar ou exibir o backend LLM ativo (deepseek | nvidia-nim | ollama)",
