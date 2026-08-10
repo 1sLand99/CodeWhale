@@ -493,6 +493,19 @@ pub(crate) fn foreground_rlm_running(app: &App) -> bool {
     })
 }
 
+/// The name a sub-agent was dispatched under, when it has one (#5287).
+///
+/// `SubAgentResult::name` carries the session name, which the manager seeds
+/// with the agent id and only replaces when the dispatch supplied a name. An
+/// id is a lookup handle, never the identity an operator dispatched by, so it
+/// is reported as absent here and the caller falls back to its own chain.
+pub(crate) fn dispatched_agent_name(
+    agent: &crate::tools::subagent::SubAgentResult,
+) -> Option<&str> {
+    let name = agent.name.trim();
+    (!name.is_empty() && name != agent.agent_id).then_some(name)
+}
+
 pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
     let cached_ids: std::collections::HashSet<&str> = app
         .subagent_cache
@@ -514,11 +527,12 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                 .get(&agent.agent_id)
                 .and_then(|meta| meta.current_activity.as_ref());
             let progress = current_activity.map(sidebar_current_activity_text);
-            // Generated whales are locale-derived from the neutral agent id;
-            // never replay a persisted label from another language.
-            let display_name = display_names
-                .get(&agent.agent_id)
-                .cloned()
+            // The dispatch name leads (#5287). Generated whales name the
+            // agents that have none, locale-derived from the neutral agent
+            // id; never replay a persisted label from another language.
+            let display_name = dispatched_agent_name(agent)
+                .map(str::to_string)
+                .or_else(|| display_names.get(&agent.agent_id).cloned())
                 .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned())
                 .unwrap_or_else(|| agent.name.clone());
             SidebarAgentRow {
@@ -1902,7 +1916,9 @@ mod tests {
         nickname: Option<&str>,
     ) -> crate::tools::subagent::SubAgentResult {
         crate::tools::subagent::SubAgentResult {
-            name: "implementation-worker".to_string(),
+            // An unnamed dispatch: the manager seeds `name` with the agent id
+            // and only replaces it when the caller supplied one.
+            name: agent_id.to_string(),
             agent_id: agent_id.to_string(),
             context_mode: "fresh".to_string(),
             fork_context: false,
@@ -2074,6 +2090,21 @@ mod tests {
             rows[0].name,
             crate::tools::subagent::whale_name_for_id_in_locale(agent_id, "en")
         );
+    }
+
+    #[test]
+    fn sidebar_agent_rows_lead_with_the_dispatch_name() {
+        // #5287: operators dispatch by name and think by name, so the session
+        // name outranks both the generated whale and the Agent-N label.
+        let mut app = create_test_app();
+        let agent_id = "agent_cafe0123";
+        app.ensure_agent_label(agent_id);
+        let mut agent = cached_agent(agent_id, Some("Blue Whale"));
+        agent.name = "branch-triage".to_string();
+        app.subagent_cache.push(agent);
+
+        let rows = super::sidebar_agent_rows(&app);
+        assert_eq!(rows[0].name, "branch-triage");
     }
 
     #[test]

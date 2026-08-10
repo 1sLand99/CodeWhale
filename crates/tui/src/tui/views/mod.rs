@@ -4054,7 +4054,12 @@ pub(crate) fn subagent_view_agents(
         app.ui_locale.tag(),
     );
     for agent in &mut agents[..manager_agent_count] {
-        agent.nickname = display_names.remove(&agent.agent_id);
+        // The row headline reads `nickname`, so the dispatch name lands there
+        // when the agent has one; the generated whale names the rest (#5287).
+        let display_name = crate::tui::sidebar::dispatched_agent_name(agent)
+            .map(str::to_string)
+            .or_else(|| display_names.remove(&agent.agent_id));
+        agent.nickname = display_name;
     }
     for agent in &mut agents[manager_agent_count..] {
         // Progress and transcript rows can arrive before ListSubAgents. Keep
@@ -5171,6 +5176,27 @@ mod tests {
         assert_eq!(
             manager_backed[0].nickname.as_deref(),
             Some(crate::tools::subagent::whale_name_for_id_in_locale("agent_live", "en").as_str())
+        );
+    }
+
+    #[test]
+    fn subagent_view_headlines_the_dispatch_name_over_the_whale() {
+        // #5287: `/subagents` spells the identity column from `nickname`, so a
+        // named dispatch lands there and only an unnamed one gets a whale.
+        let mut app = create_test_app();
+        app.ui_locale = Locale::En;
+        let mut named = manager_agent("agent_named_lane", SubAgentStatus::Running);
+        named.name = "branch-triage".to_string();
+        let plain = manager_agent("agent_plain_lane", SubAgentStatus::Running);
+
+        let agents = subagent_view_agents(&app, &[named, plain]);
+        assert_eq!(agents[0].nickname.as_deref(), Some("branch-triage"));
+        assert_eq!(
+            agents[1].nickname.as_deref(),
+            Some(
+                crate::tools::subagent::whale_name_for_id_in_locale("agent_plain_lane", "en")
+                    .as_str()
+            )
         );
     }
 

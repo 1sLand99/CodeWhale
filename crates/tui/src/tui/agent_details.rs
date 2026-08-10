@@ -118,9 +118,12 @@ pub(crate) fn safe_agent_display_name(app: &App, agent_id: &str) -> String {
             .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
         app.ui_locale.tag(),
     );
-    generated
-        .get(agent_id)
-        .cloned()
+    app.subagent_cache
+        .iter()
+        .find(|agent| agent.agent_id == agent_id)
+        .and_then(crate::tui::sidebar::dispatched_agent_name)
+        .map(str::to_string)
+        .or_else(|| generated.get(agent_id).cloned())
         .or_else(|| app.agent_label_map.get(agent_id).cloned())
         .and_then(|name| safe_child_value(app, &name))
         .unwrap_or_else(|| "Agent".to_string())
@@ -647,6 +650,33 @@ mod tests {
         )));
         assert!(details.body.contains("Model: kimi-k3"));
         assert!(!details.body.contains("stale-meta-model"));
+    }
+
+    #[test]
+    fn display_name_prefers_the_dispatch_name_over_the_whale() {
+        // #5287: the lane was dispatched as `branch-triage`; that is the
+        // identity the operator glances for. An unnamed sibling keeps its
+        // generated whale rather than showing a bare id.
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let mut named = agent("agent_named_lane", SubAgentStatus::Running);
+        named.name = "branch-triage".to_string();
+        app.subagent_cache.push(named);
+        let mut unnamed = agent("agent_plain_lane", SubAgentStatus::Running);
+        unnamed.nickname = None;
+        app.subagent_cache.push(unnamed);
+
+        assert_eq!(
+            safe_agent_display_name(&app, "agent_named_lane"),
+            "branch-triage"
+        );
+        assert_eq!(
+            safe_agent_display_name(&app, "agent_plain_lane"),
+            crate::tools::subagent::whale_name_for_id_in_locale(
+                "agent_plain_lane",
+                app.ui_locale.tag()
+            )
+        );
     }
 
     #[test]

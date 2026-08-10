@@ -195,10 +195,15 @@ pub fn pending_work_from_app(app: &App) -> PendingWork {
             .as_deref()
             .filter(|role| !role.trim().is_empty())
             .unwrap_or_else(|| agent.agent_type.as_str());
-        let name = agent
-            .nickname
-            .as_deref()
-            .filter(|name| !name.trim().is_empty() && *name != agent.agent_id)
+        // The name this lane was dispatched under is what the operator
+        // thinks in; the whale nickname only names an unnamed one (#5287).
+        let name = crate::tui::sidebar::dispatched_agent_name(agent)
+            .or_else(|| {
+                agent
+                    .nickname
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty() && *name != agent.agent_id)
+            })
             .or_else(|| app.agent_label_map.get(&agent.agent_id).map(String::as_str));
         let label = match name {
             Some(name) if name != role => format!("{name}·{role}"),
@@ -427,5 +432,51 @@ mod tests {
         app.agent_progress.clear();
         let cleared = pending_work_from_app(&app);
         assert!(cleared.is_empty(), "completion clears the indicator");
+    }
+
+    #[test]
+    fn pending_agents_are_labelled_by_the_name_they_were_dispatched_under() {
+        use crate::tools::subagent::{
+            FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus,
+        };
+        let options = crate::test_support::test_tui_options(std::path::PathBuf::from("."));
+        let mut app = crate::test_support::test_app_with_options(options);
+        let running = |agent_id: &str, name: &str| SubAgentResult {
+            name: name.to_string(),
+            agent_id: agent_id.to_string(),
+            context_mode: "fresh".to_string(),
+            fork_context: false,
+            workspace: None,
+            git_branch: None,
+            agent_type: FleetRole::Worker,
+            assignment: SubAgentAssignment {
+                objective: "sweep the lane".to_string(),
+                role: Some("builder".to_string()),
+            },
+            model: "test-model".to_string(),
+            nickname: Some("Blue Whale".to_string()),
+            status: SubAgentStatus::Running,
+            worker_status: None,
+            runtime_permissions: None,
+            parent_run_id: None,
+            spawn_depth: 0,
+            result: None,
+            steps_taken: 1,
+            checkpoint: None,
+            needs_input: None,
+            duration_ms: 100,
+            started_at: None,
+            from_prior_session: false,
+        };
+        app.subagent_cache
+            .push(running("agent_named_lane", "branch-triage"));
+        // An unnamed dispatch: `name` is still the agent id, so the whale
+        // nickname stays the honest label (#5287).
+        app.subagent_cache
+            .push(running("agent_plain_lane", "agent_plain_lane"));
+
+        let work = pending_work_from_app(&app);
+        let labels: Vec<&str> = work.items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["branch-triage·builder", "Blue Whale·builder"]);
     }
 }

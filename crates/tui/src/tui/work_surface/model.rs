@@ -1368,13 +1368,18 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 .filter(|role| !role.trim().is_empty())
                 .unwrap_or_else(|| agent.agent_type.as_str())
                 .to_string();
-            // A name is a nickname or stable label — never `agent.name`,
-            // which is the raw session id hash (#36). Absent rather than
-            // fabricated, so the identity column falls back to the role.
-            let name = agent
-                .nickname
-                .clone()
-                .filter(|name| !name.trim().is_empty() && name != &agent.agent_id)
+            // The dispatch name leads (#5287); a nickname or stable label
+            // names the agents dispatched without one. Never the bare agent
+            // id (#36) — absent rather than fabricated, so the identity
+            // column falls back to the role.
+            let name = crate::tui::sidebar::dispatched_agent_name(agent)
+                .map(str::to_string)
+                .or_else(|| {
+                    agent
+                        .nickname
+                        .clone()
+                        .filter(|name| !name.trim().is_empty() && name != &agent.agent_id)
+                })
                 .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned());
             let terminal = agent_is_terminal(agent, meta);
             let objective = summarize_assignment(&agent.assignment.objective);
@@ -2486,6 +2491,59 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn running_agent(agent_id: &str) -> SubAgentResult {
+        SubAgentResult {
+            name: agent_id.to_string(),
+            agent_id: agent_id.to_string(),
+            context_mode: "fresh".to_string(),
+            fork_context: false,
+            workspace: None,
+            git_branch: None,
+            agent_type: crate::tools::subagent::FleetRole::Worker,
+            assignment: crate::tools::subagent::SubAgentAssignment {
+                objective: "sweep the lane".to_string(),
+                role: Some("builder".to_string()),
+            },
+            model: "test-model".to_string(),
+            nickname: Some("Blue Whale".to_string()),
+            status: SubAgentStatus::Running,
+            worker_status: None,
+            runtime_permissions: None,
+            parent_run_id: None,
+            spawn_depth: 0,
+            result: None,
+            steps_taken: 1,
+            checkpoint: None,
+            needs_input: None,
+            duration_ms: 100,
+            started_at: None,
+            from_prior_session: false,
+        }
+    }
+
+    /// #5287: the identity column leads with the name the lane was dispatched
+    /// under; the whale only names an agent that was dispatched without one.
+    #[test]
+    fn agent_identity_column_leads_with_the_dispatch_name() {
+        let mut app = test_app();
+        let mut named = running_agent("agent_named_lane");
+        named.name = "branch-triage".to_string();
+        app.subagent_cache.push(named);
+        app.subagent_cache.push(running_agent("agent_plain_lane"));
+
+        let rows = agent_rows(&app);
+        let label = |id: &str| {
+            rows.iter()
+                .find(|ranked| ranked.row.id.0 == format!("worker:{id}"))
+                .unwrap_or_else(|| panic!("row for {id}"))
+                .row
+                .label
+                .clone()
+        };
+        assert_eq!(label("agent_named_lane"), "branch-triage");
+        assert_eq!(label("agent_plain_lane"), "Blue Whale");
     }
 
     /// After the recent-only TTL suppresses transient receipts, the live
