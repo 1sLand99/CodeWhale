@@ -61,6 +61,7 @@ pub async fn run_tui(
     config: &Config,
     options: TuiOptions,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+    pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
 ) -> Result<()> {
     let use_alt_screen = options.use_alt_screen;
     let use_mouse_capture = options.use_mouse_capture;
@@ -458,7 +459,21 @@ pub async fn run_tui(
         tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
     app.dispatch_completion_tx = Some(dispatch_completion_tx);
 
-    if std::mem::take(&mut app.start_remote_control_on_launch) {
+    // The disclosure is the final startup view pushed, so setup/provider
+    // surfaces remain ready underneath but nothing can appear above the
+    // privacy decision. This also makes the first visible frame a native
+    // Codewhale surface instead of a shell questionnaire.
+    if let Some(pending) = pending_telemetry_notice {
+        app.view_stack
+            .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
+                pending,
+                app.ui_locale,
+            ));
+    }
+
+    if app.view_stack.top_kind() != Some(ModalKind::TelemetryNotice)
+        && std::mem::take(&mut app.start_remote_control_on_launch)
+    {
         start_remote_control_session(&mut app);
     }
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
@@ -3368,6 +3383,30 @@ pub(crate) async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
+
+            // The first-run disclosure is the launch's decision boundary. It
+            // owns every key before Help, Settings, onboarding, decision
+            // cards, or the composer can see it; Esc/Ctrl+C exit without
+            // recording a choice, and Enter/Y/N are handled by the native
+            // view itself.
+            if app.view_stack.top_kind() == Some(ModalKind::TelemetryNotice) {
+                let events = app.view_stack.handle_key(key);
+                app.needs_redraw = true;
+                if handle_view_events_boxed(
+                    terminal,
+                    app,
+                    config,
+                    &task_manager,
+                    &mut engine_handle,
+                    &mut web_config_session,
+                    events,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
 
             // A route change made in-session is temporary and stays that way
             // until the user EXPLICITLY persists it with a command

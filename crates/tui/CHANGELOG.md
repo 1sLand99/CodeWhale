@@ -30,13 +30,15 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 ### Changed
 
-- Anonymous usage counting is on by default for fresh installs, clearly
-  disclosed, and immediately opt-out. Prior declines remain off. Codewhale does
-  not collect conversations, code, prompts, files, repo or branch names,
-  credentials, model content, or per-turn activity timelines.
-- Wide terminals center the header, transcript, work strip, composer, and
-  footer on one 112-column session rail. Compact terminals remain fluid and use
-  their full available width.
+- Anonymous usage counting is on by default for fresh installs and disclosed in
+  a native first-run Codewhale modal with an immediate opt-out. Prior declines
+  remain off. Codewhale does not collect conversations, code, prompts, files,
+  repo or branch names, credentials, model content, or per-turn activity
+  timelines.
+- Wide terminals use a responsive, full-screen ocean canvas with modest
+  gutters: prose keeps a readable measure while tools, diffs, work surfaces,
+  the composer, and status chrome can use the available width. Turn and major
+  activity seams breathe without padding every call inside a tool group.
 - Root CLI help describes product actions directly instead of exposing internal
   TUI/runtime layers.
 - `Bash action="wait"` now blocks by default when a wait is requested; callers
@@ -58,6 +60,10 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 ### Fixed
 
+- First-run usage disclosure now opens as a native Codewhale modal instead of a
+  shell questionnaire before application startup. Telemetry remains unarmed
+  until the native choice is made, and an in-memory Disable choice governs the
+  current session even when its preference cannot be saved.
 - `/compact` completion, failure, queued, duplicate, and mailbox outcomes are
   durable transcript receipts instead of short-lived toasts. A stray terminal
   event can no longer leave every later compaction stuck as already running.

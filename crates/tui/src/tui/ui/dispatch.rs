@@ -143,6 +143,13 @@ pub(crate) async fn submit_initial_input_if_ready(
         return Ok(());
     }
 
+    if app
+        .view_stack
+        .contains_kind(crate::tui::views::ModalKind::TelemetryNotice)
+    {
+        return Ok(());
+    }
+
     if app.onboarding != OnboardingState::None {
         if app.status_message.is_none() && !app.input.trim().is_empty() {
             app.status_message = Some(INITIAL_PROMPT_DEFERRED_STATUS.to_string());

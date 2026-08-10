@@ -4157,7 +4157,7 @@ mod tests {
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
         App, AppMode, ComposerDensity, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
-        TuiOptions,
+        TranscriptSpacing, TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
@@ -4299,6 +4299,109 @@ mod tests {
         app.add_message(success_tool_cell("read_file"));
         app.add_message(success_tool_cell("list_dir"));
         app.add_message(success_tool_cell("web_search"));
+    }
+
+    fn spacer_rows_after_transcript_cell(app: &App, target_cell: usize) -> usize {
+        let mut saw_target = false;
+        let mut spacer_rows = 0;
+        for meta in app.viewport.transcript_cache.line_meta() {
+            match meta {
+                TranscriptLineMeta::CellLine { cell_index, .. } if *cell_index == target_cell => {
+                    saw_target = true;
+                    spacer_rows = 0;
+                }
+                TranscriptLineMeta::Spacer { .. } if saw_target => spacer_rows += 1,
+                TranscriptLineMeta::CellLine { .. } if saw_target => break,
+                TranscriptLineMeta::Spacer { .. } | TranscriptLineMeta::CellLine { .. } => {}
+            }
+        }
+        spacer_rows
+    }
+
+    #[test]
+    fn chat_widget_breathes_between_groups_without_padding_tool_rows_at_any_width() {
+        for (width, height) in [(40, 8), (120, 12)] {
+            let mut app = create_test_app();
+            app.low_motion = true;
+            app.fancy_animations = false;
+            app.transcript_spacing = TranscriptSpacing::Comfortable;
+
+            for turn in 0..4 {
+                app.add_message(HistoryCell::User {
+                    content: format!("turn {turn}: inspect the release receipts"),
+                });
+                app.add_message(HistoryCell::Assistant {
+                    content: format!("I will inspect receipt group {turn}."),
+                    streaming: false,
+                });
+                app.add_message(success_tool_cell(&format!("read_{turn}")));
+                app.add_message(success_tool_cell(&format!("verify_{turn}")));
+                app.add_message(HistoryCell::Assistant {
+                    content: format!("receipt group {turn} is complete"),
+                    streaming: false,
+                });
+            }
+
+            let area = Rect::new(0, 0, width, height);
+            app.viewport.transcript_scroll = TranscriptScroll::at_line(0);
+            let mut top_buf = Buffer::empty(area);
+            ChatWidget::new(&mut app, area).render(area, &mut top_buf);
+
+            assert_eq!(app.viewport.last_transcript_top, 0, "width={width}");
+            assert!(
+                app.viewport.last_transcript_total > usize::from(height),
+                "fixture must scroll at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 0),
+                1,
+                "the top-level user turn needs a breathing row at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 1),
+                1,
+                "answer to tool-group transition needs a breathing row at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 2),
+                0,
+                "calls inside one tool group must stay compact at width={width}"
+            );
+            assert_eq!(
+                spacer_rows_after_transcript_cell(&app, 3),
+                1,
+                "the completed tool group needs a breathing row at width={width}"
+            );
+            assert!(
+                buffer_text(&top_buf, area).contains("turn 0"),
+                "top scroll source drifted at width={width}"
+            );
+
+            let total = app.viewport.last_transcript_total;
+            app.viewport.transcript_scroll = TranscriptScroll::to_bottom();
+            let mut tail_buf = Buffer::empty(area);
+            ChatWidget::new(&mut app, area).render(area, &mut tail_buf);
+
+            assert_eq!(app.viewport.last_transcript_total, total, "width={width}");
+            assert!(app.viewport.last_transcript_top > 0, "width={width}");
+            assert!(
+                buffer_text(&tail_buf, area).contains("receipt group 3 is complete"),
+                "tail scroll lost the final source-backed cell at width={width}"
+            );
+            assert!(
+                app.viewport
+                    .transcript_cache
+                    .line_meta()
+                    .iter()
+                    .all(|meta| match meta {
+                        TranscriptLineMeta::CellLine { cell_index, .. } => {
+                            *cell_index < app.history.len()
+                        }
+                        TranscriptLineMeta::Spacer { .. } => true,
+                    }),
+                "spacing rows must not invent source-cell ownership at width={width}"
+            );
+        }
     }
 
     #[test]

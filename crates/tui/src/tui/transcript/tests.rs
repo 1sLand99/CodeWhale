@@ -538,13 +538,12 @@ fn adjacent_tool_cells_render_as_one_railed_group() {
         "adjacent tool cells must never be separated by a bare blank row — that \
          would tear the card box open: {lines:?}"
     );
-    // They are separated, though: by a rail-carrying spacer, so two distinct
-    // commands read as two blocks without the group losing its outline.
     assert!(
-        lines.iter().any(|line| line.trim_end() == "\u{2502}"),
-        "distinct tool cells inside one rail group need a rail spacer between \
-         them: {lines:?}"
+        !lines.iter().any(|line| line.trim_end() == "\u{2502}"),
+        "one tool group must stay compact instead of padding every call: {lines:?}"
     );
+    assert_eq!(spacer_rows_after_cell(&cache, 0), 0);
+    assert_eq!(spacer_rows_after_cell(&cache, 1), 0);
 }
 
 #[test]
@@ -612,12 +611,13 @@ fn semantic_boundary_matrix_has_four_deliberate_rhythm_levels() {
     );
     assert_eq!(
         spacer_rows_for_boundary(GroupedTool, TranscriptSpacing::Comfortable),
-        1
+        0,
+        "the shared rail carries grouping without a row per tool call"
     );
     assert_eq!(
         spacer_rows_for_boundary(GroupedTool, TranscriptSpacing::Spacious),
-        1,
-        "one row is the whole vocabulary above compact — never two"
+        0,
+        "even spacious mode breathes around the group, not inside it"
     );
 }
 
@@ -741,8 +741,8 @@ fn durable_work_starts_a_new_activity_rail_without_wasting_compact_rows() {
     );
     assert_eq!(
         spacer_rows_after_cell(&comfortable, 0),
-        1,
-        "two distinct commands sharing a rail still need one row between them"
+        0,
+        "two commands inside one activity rail must remain compact"
     );
     assert_eq!(
         spacer_rows_after_cell(&comfortable, 1),

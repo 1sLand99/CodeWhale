@@ -12,12 +12,14 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::qa_harness::harness::{Harness, make_sealed_workspace};
 use crate::qa_harness::keys;
+use crate::qa_harness::modes::mode;
 use sha2::{Digest, Sha256};
 use unicode_width::UnicodeWidthStr;
 
@@ -25,7 +27,35 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(15);
 const KEY_TIMEOUT: Duration = Duration::from_secs(5);
 const SKILL_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPOSER_READY_TEXT: &str = "Write a task";
-const SESSION_SHELL_MAX_WIDTH: u16 = 112;
+// Keep this geometry oracle in step with `tui::ui::frame::session_shell_area`.
+// Integration tests cannot import that private renderer helper, so the PTY
+// contract repeats only its three public-facing constants.
+const SESSION_SHELL_FLUID_WIDTH: u16 = 112;
+const SESSION_SHELL_GUTTER_STEP: u16 = 12;
+const SESSION_SHELL_MAX_SIDE_GUTTER: u16 = 16;
+
+fn expected_session_shell_side_gutter(cols: u16) -> u16 {
+    (cols.saturating_sub(SESSION_SHELL_FLUID_WIDTH) / SESSION_SHELL_GUTTER_STEP)
+        .min(SESSION_SHELL_MAX_SIDE_GUTTER)
+}
+
+fn expected_session_shell_width(cols: u16) -> u16 {
+    cols.saturating_sub(expected_session_shell_side_gutter(cols).saturating_mul(2))
+}
+
+#[test]
+fn pty_geometry_oracle_keeps_wide_canvas_above_the_release_floor() {
+    for (cols, expected_gutter) in [(140, 2), (200, 7), (240, 10)] {
+        let gutter = expected_session_shell_side_gutter(cols);
+        let width = expected_session_shell_width(cols);
+        assert_eq!(gutter, expected_gutter, "{cols} columns");
+        assert!(
+            u32::from(width) * 100 >= u32::from(cols) * 85,
+            "{cols} columns left only {}% usable",
+            u32::from(width) * 100 / u32::from(cols)
+        );
+    }
+}
 
 /// Operate-mode composer placeholder, pinned as shipped copy since the
 /// goal-first placeholder rewording (bf0478395): the mode ramp legs below
@@ -100,6 +130,28 @@ fn spawn_minimal_with_env(
 /// retain the separate launch surface, covered by unit rendering tests.
 fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
     h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    Ok(())
+}
+
+fn wait_for_native_telemetry_notice(h: &mut Harness, home: &Path) -> anyhow::Result<()> {
+    h.wait_for_text("Anonymous usage counting", BOOT_TIMEOUT)?;
+    h.wait_for_text("Keep anonymous usage on", KEY_TIMEOUT)?;
+    h.wait_for_text("Disable anonymous usage", KEY_TIMEOUT)?;
+    assert_eq!(
+        h.terminal_modes().state(mode::ALT_SCREEN),
+        Some(true),
+        "the disclosure must be inside the native TUI, not printed before it\n{}",
+        h.terminal_modes().debug_dump()
+    );
+    assert!(
+        !h.frame().contains("[Y/n]"),
+        "the retired shell questionnaire leaked into the native frame\n{}",
+        h.debug_dump()
+    );
+    assert!(
+        !home.join(".codewhale/telemetry/state.json").exists(),
+        "telemetry armed before the disclosure was answered"
+    );
     Ok(())
 }
 
@@ -288,7 +340,7 @@ fn foreground_at_text(
 fn composer_edge_rows(frame: &crate::qa_harness::Frame, placeholder: &str) -> (u16, u16) {
     let input_row = visible_row_with_text(frame, placeholder)
         .unwrap_or_else(|| panic!("composer placeholder {placeholder:?} missing"));
-    let minimum_rule_cells = usize::from(frame.cols().min(SESSION_SHELL_MAX_WIDTH) / 2);
+    let minimum_rule_cells = usize::from(expected_session_shell_width(frame.cols()) / 2);
     let is_rule = |row: u16| {
         frame
             .row(row)
@@ -948,12 +1000,24 @@ web_search = true
         .size(40, 140)
         .spawn()?;
 
-    // The first-run telemetry notice is the first thing an interactive launch
-    // shows, before the terminal enters raw mode. Enter keeps the plainly
-    // disclosed default enabled; explicit negative answers disable it.
-    h.wait_for_text("Keep anonymous usage counting on?", BOOT_TIMEOUT)?;
+    // The first visible decision is a native Codewhale modal. Nothing is armed
+    // until Enter keeps the plainly disclosed default enabled.
+    wait_for_native_telemetry_notice(&mut h, ws.home())?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Press Enter to continue", BOOT_TIMEOUT)?;
+    let setup_state =
+        codewhale_config::SetupState::load_from(&ws.home().join(".codewhale/setup_state.json"))
+            .expect("native Keep choice must be recorded");
+    assert!(setup_state.telemetry_accepted(codewhale_config::TELEMETRY_NOTICE_VERSION));
+    assert!(
+        !std::fs::read_to_string(ws.home().join(".codewhale/config.toml"))?
+            .contains("telemetry = false"),
+        "keeping the default must not rewrite the config as an opt-out"
+    );
+    assert!(
+        ws.home().join(".codewhale/telemetry/state.json").exists(),
+        "telemetry should arm only after the native Keep choice"
+    );
     h.send(keys::key::enter())?;
     h.wait_for_text("Choose your language", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
@@ -961,7 +1025,10 @@ web_search = true
     // keeps the current theme and advances. This is also the only PTY-level
     // execution of that step's event-loop wiring, so a hang here is a real
     // wiring bug, not a script gap.
-    h.wait_for_text("Make It Yours", BOOT_TIMEOUT)?;
+    // The shared view stack now renders above every onboarding state, so wait
+    // for the actual native picker (not the Appearance backdrop underneath)
+    // before sending its commit key.
+    h.wait_for_text("theme · live preview", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Know this workspace", BOOT_TIMEOUT)?;
     h.wait_for_text("Press 1/Y to trust and continue", BOOT_TIMEOUT)?;
@@ -974,6 +1041,100 @@ web_search = true
     // the process.
     h.send(keys::key::ch('3'))?;
     assert_eq!(h.wait_for_exit(KEY_TIMEOUT), Some(0));
+    Ok(())
+}
+
+#[test]
+fn native_telemetry_notice_disable_is_durable_and_never_arms() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let config_path = ws.home().join(".codewhale/config.toml");
+    std::fs::write(&config_path, "# telemetry native-modal test\n")?;
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+        .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+        .env("CODEWHALE_TELEMETRY", "1")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+        ])
+        .size(40, 140)
+        .spawn()?;
+
+    wait_for_native_telemetry_notice(&mut h, ws.home())?;
+    h.send(keys::key::right())?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+
+    let setup_state =
+        codewhale_config::SetupState::load_from(&ws.home().join(".codewhale/setup_state.json"))
+            .expect("native Disable choice must be recorded");
+    assert!(setup_state.telemetry_declined(codewhale_config::TELEMETRY_NOTICE_VERSION));
+    assert!(
+        std::fs::read_to_string(&config_path)?.contains("telemetry = false"),
+        "Disable must persist the root config opt-out"
+    );
+    assert!(
+        !ws.home().join(".codewhale/telemetry/state.json").exists(),
+        "Disable must not arm the current session"
+    );
+    assert!(
+        !ws.home()
+            .join(".codewhale/telemetry/install_id.json")
+            .exists(),
+        "Disable must not create an anonymous install identity"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+#[test]
+fn native_telemetry_notice_escape_defers_without_leaking_terminal_modes() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let config_path = ws.home().join(".codewhale/config.toml");
+    let config_before = "# leave this byte-identical\n";
+    std::fs::write(&config_path, config_before)?;
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+        .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+        .env("CODEWHALE_TELEMETRY", "1")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+        ])
+        .size(40, 140)
+        .spawn()?;
+
+    wait_for_native_telemetry_notice(&mut h, ws.home())?;
+    h.send(keys::key::esc())?;
+    assert_eq!(h.wait_for_exit(KEY_TIMEOUT), Some(0));
+    assert_eq!(std::fs::read_to_string(&config_path)?, config_before);
+    let setup_state_path = ws.home().join(".codewhale/setup_state.json");
+    if let Some(state) = codewhale_config::SetupState::load_from(&setup_state_path) {
+        assert!(state.needs_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION));
+    }
+    assert!(!ws.home().join(".codewhale/telemetry/state.json").exists());
+    assert!(
+        h.terminal_modes().leaked_modes().is_empty(),
+        "Esc left terminal modes enabled\n{}",
+        h.terminal_modes().debug_dump()
+    );
     Ok(())
 }
 
@@ -3764,12 +3925,12 @@ fn horizontal_rule_fills_session_shell(
     cols: u16,
 ) -> bool {
     let text = frame.row(row);
-    let shell_width = cols.min(SESSION_SHELL_MAX_WIDTH);
-    let shell_start = (cols.saturating_sub(shell_width)) / 2;
+    let shell_start = expected_session_shell_side_gutter(cols);
+    let shell_width = expected_session_shell_width(cols);
     let shell_end = shell_start.saturating_add(shell_width);
     let chars = text.chars().collect::<Vec<_>>();
-    // Frame rows omit trailing blank cells. A centered rail therefore ends at
-    // `shell_end`, while a fluid rail still reaches the terminal edge.
+    // Frame rows omit trailing blank cells. A responsive canvas therefore ends
+    // at `shell_end`, including its modest symmetric wide-terminal gutters.
     UnicodeWidthStr::width(text.as_str()) == usize::from(shell_end)
         && chars
             .iter()

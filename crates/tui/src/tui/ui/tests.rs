@@ -36,20 +36,31 @@ use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
 #[test]
-fn session_shell_area_stays_fluid_until_wide_then_centers_on_a_readable_rail() {
+fn session_shell_area_keeps_compact_geometry_and_uses_most_of_wide_terminals() {
     for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (112, 40)] {
         let fluid = Rect::new(4, 3, width, height);
         assert_eq!(frame::session_shell_area(fluid), fluid);
     }
 
-    assert_eq!(
-        frame::session_shell_area(Rect::new(4, 3, 140, 40)),
-        Rect::new(18, 3, 112, 40)
-    );
-    assert_eq!(
-        frame::session_shell_area(Rect::new(4, 3, 200, 50)),
-        Rect::new(48, 3, 112, 50)
-    );
+    for (width, height, side_gutter) in [(140, 40, 2), (200, 50, 7), (240, 60, 10)] {
+        let host = Rect::new(4, 3, width, height);
+        let shell = frame::session_shell_area(host);
+        assert_eq!(shell.x, host.x + side_gutter, "{width} columns");
+        assert_eq!(
+            shell.right() + side_gutter,
+            host.right(),
+            "{width} columns must retain symmetric gutters"
+        );
+        assert_eq!(shell.height, host.height);
+        assert!(
+            u32::from(shell.width) * 100 >= u32::from(host.width) * 85,
+            "{width} columns left only {}% usable",
+            u32::from(shell.width) * 100 / u32::from(host.width)
+        );
+    }
+
+    let ultra_wide = frame::session_shell_area(Rect::new(0, 0, 400, 60));
+    assert_eq!(ultra_wide, Rect::new(16, 0, 368, 60));
 }
 
 #[test]
@@ -3454,7 +3465,7 @@ fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String 
 }
 
 #[test]
-fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_rail() {
+fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_canvas() {
     let mut app = create_test_app();
     app.history = vec![HistoryCell::User {
         content: "A deliberately short prompt.".to_string(),
@@ -3465,8 +3476,34 @@ fn wide_underwater_shell_aligns_transcript_and_composer_on_the_shared_rail() {
 
     let transcript = app.viewport.last_transcript_area.expect("transcript area");
     let composer = app.viewport.last_composer_area.expect("composer area");
-    assert_eq!((transcript.x, transcript.width), (24, 112));
-    assert_eq!((composer.x, composer.width), (24, 112));
+    assert_eq!((transcript.x, transcript.width), (4, 152));
+    assert_eq!((composer.x, composer.width), (4, 152));
+}
+
+#[test]
+fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
+    let mut app = create_test_app();
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding = OnboardingState::None;
+    let surface_bg = app.ui_theme.surface_bg;
+    let config = Config::default();
+    let mut terminal = Terminal::new(TestBackend::new(200, 32)).expect("wide test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app, &config))
+        .expect("render wide ocean canvas");
+    let buffer = terminal.backend().buffer();
+
+    let mut ocean_tint_seen = false;
+    for y in 0..buffer.area.height {
+        let left = buffer[(0, y)].bg;
+        let right = buffer[(buffer.area.width - 1, y)].bg;
+        assert_eq!(left, right, "row {y} split into mismatched outer banks");
+        ocean_tint_seen |= left != surface_bg;
+    }
+    assert!(
+        ocean_tint_seen,
+        "wide gutters retained the flat terminal floor instead of the shared ocean"
+    );
 }
 
 fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
@@ -12822,6 +12859,50 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage { content, .. } => {
             assert!(content.contains("阅读项目 and wait"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn startup_prompt_waits_for_native_telemetry_decision_then_dispatches() {
+    let mut app = create_test_app();
+    app.input = "inspect the workspace".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    app.onboarding = OnboardingState::None;
+    app.view_stack
+        .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
+            crate::telemetry_notice::PendingTelemetryNotice {
+                config_path: Some("config.toml".into()),
+                setup_state_path: "setup_state.json".into(),
+                session_source: codewhale_telemetry::SessionSource::Interactive,
+            },
+            app.ui_locale,
+        ));
+    let config = Config::default();
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .expect("defer for disclosure");
+
+    assert!(app.auto_submit_initial_input);
+    assert_eq!(app.input, "inspect the workspace");
+    assert!(engine.rx_op.try_recv().is_err());
+
+    assert_eq!(
+        app.view_stack.pop().map(|view| view.kind()),
+        Some(ModalKind::TelemetryNotice)
+    );
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .expect("submit after disclosure");
+
+    assert!(!app.auto_submit_initial_input);
+    match engine.rx_op.recv().await.expect("send message op") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert!(content.contains("inspect the workspace"));
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }

@@ -2050,17 +2050,32 @@ fn start_cli_telemetry(
     config_path: Option<PathBuf>,
     surface: Surface,
 ) -> Option<CliTelemetrySession> {
-    let setup = SetupState::load().ok().flatten().unwrap_or_default();
-    let TelemetryDecision::Enabled(consent) = telemetry::decide(resolved, &setup, surface) else {
-        return None;
-    };
-    telemetry::init(consent.with_config_path(config_path));
+    let consent = resolve_cli_telemetry_consent(
+        resolved,
+        config_path,
+        surface,
+        telemetry::load_setup_state_for_decision(),
+    )?;
+    telemetry::init(consent);
     telemetry::record(Event::SessionStart {
         source: SessionSource::Unknown,
     });
     Some(CliTelemetrySession {
         started: std::time::Instant::now(),
     })
+}
+
+fn resolve_cli_telemetry_consent(
+    resolved: &ResolvedRuntimeOptions,
+    config_path: Option<PathBuf>,
+    surface: Surface,
+    setup: Option<SetupState>,
+) -> Option<telemetry::TelemetryConsent> {
+    let setup = setup?;
+    let TelemetryDecision::Enabled(consent) = telemetry::decide(resolved, &setup, surface) else {
+        return None;
+    };
+    Some(consent.with_config_path(config_path))
 }
 
 /// Close the session opened by [`start_cli_telemetry`] and flush, bounded.
@@ -8134,5 +8149,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cli_telemetry_start_fails_closed_on_a_corrupt_setup_state() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let setup_path = dir.path().join("setup_state.json");
+        std::fs::write(&setup_path, b"{not-json").expect("write corrupt setup state");
+        let setup = telemetry::load_setup_state_for_decision_at(&setup_path);
+        assert!(setup.is_none(), "corrupt privacy state must not default on");
+
+        let resolved =
+            ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+        assert!(
+            resolve_cli_telemetry_consent(&resolved, None, Surface::Cli, setup).is_none(),
+            "CLI startup must not obtain permission from an unreadable privacy record"
+        );
     }
 }

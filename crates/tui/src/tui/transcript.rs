@@ -104,7 +104,7 @@ const BLOCK_SEPARATOR_ROWS: usize = 1;
 enum TranscriptBoundary {
     /// Successive cells are literally one reasoning/answer phase.
     Joined,
-    /// Adjacent tool cells share a rail; separation keeps that rail visible.
+    /// Adjacent tool cells share one compact rail with no per-call padding.
     GroupedTool,
     /// Transition between response phases, tools, Work, or notices.
     Activity,
@@ -808,7 +808,9 @@ fn transcript_boundary(
 ) -> TranscriptBoundary {
     if same_tool_group {
         debug_assert_eq!(current, next);
-        // Distinct calls sharing a rail still need a railed separator.
+        // Distinct calls sharing a rail are one compact activity group. The
+        // rail itself carries the grouping; padding every low-level call would
+        // recreate the density problem this boundary matrix exists to solve.
         return TranscriptBoundary::GroupedTool;
     }
 
@@ -840,12 +842,9 @@ const fn spacer_rows_for_boundary(
     spacing: TranscriptSpacing,
 ) -> usize {
     match (boundary, spacing) {
-        (TranscriptBoundary::Joined, _) => 0,
-        (
-            TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity,
-            TranscriptSpacing::Compact,
-        ) => 0,
-        (TranscriptBoundary::GroupedTool | TranscriptBoundary::Activity, _) => BLOCK_SEPARATOR_ROWS,
+        (TranscriptBoundary::Joined | TranscriptBoundary::GroupedTool, _) => 0,
+        (TranscriptBoundary::Activity, TranscriptSpacing::Compact) => 0,
+        (TranscriptBoundary::Activity, _) => BLOCK_SEPARATOR_ROWS,
         (TranscriptBoundary::Turn, TranscriptSpacing::Compact | TranscriptSpacing::Comfortable) => {
             BLOCK_SEPARATOR_ROWS
         }

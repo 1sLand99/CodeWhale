@@ -1,11 +1,13 @@
 # Codewhale product telemetry
 
 **Status for 0.9.6: anonymous usage counting is on by default and can be
-disabled immediately.** The first interactive launch says exactly what is
-counted and preselects "Keep on"; `n`, `no`, `off`, or `disable` records a
-durable opt-out. Headless surfaces follow the same documented default without
-pretending an interactive notice was shown. Every decline recorded by the
-former 0.9.4 opt-in notice remains off after upgrade.
+disabled immediately.** The first interactive launch summarizes what is counted,
+links the exact field-by-field schema, and preselects "Keep on" in a native
+startup modal. Arrow keys or Tab choose, Enter confirms, and `Y`/`N` are direct
+shortcuts. Telemetry remains unarmed until that choice. Headless surfaces follow
+the same documented default without pretending an interactive notice was shown.
+Every decline recorded by the former 0.9.4 opt-in notice remains off after
+upgrade.
 
 Codewhale does not collect conversations, code, prompts, files, file/repo/branch
 names, model content, or credentials. It sends no per-turn or per-tool timeline.
@@ -44,14 +46,15 @@ codewhale --telemetry false              # the same kill switch, for one command
 **`telemetry = false` in the config file is the opt-out.** It is a floor:
 `--telemetry true` and `CODEWHALE_TELEMETRY=1` both lose to it, because a
 setting you can undo by accident from a wrapper script is not a setting. It
-deletes the random install id, truncates every buffered event and every
-dry-run record, and writes a tombstone that a session already running re-checks
-before it appends anything and before it sends anything. If any part of that
-wipe fails, the tombstone is still there and the buffer is undrainable — a
-failed wipe fails closed. Every later run re-asserts the tombstone for as long
-as the setting stands, so it survives; turning telemetry back on means writing
-`telemetry = true` in the same place, and that is also what clears it. Nothing
-buffered before that point is ever sent.
+deletes the random install id, truncates every buffered event and every dry-run
+record, and writes a tombstone. Appends, identity/state writes, and delivery all
+share the wipe's ordering lock, so once opt-out returns no pre-opt-out write or
+POST remains in flight. If any part of that wipe fails, the tombstone is still
+there and the buffer is undrainable — a failed wipe fails closed. Every later
+run re-asserts the same tombstone for as long as the setting stands, so it
+survives; turning telemetry back on means writing `telemetry = true` in the same
+place, and that is also what clears it. Nothing buffered before that point is
+ever sent.
 
 **The environment variable and the flag are kill switches, not opt-outs.**
 Telemetry is off for the run, nothing is written, nothing is sent — and
@@ -80,7 +83,7 @@ Everything is under `$CODEWHALE_HOME/telemetry/` (`0700`), every file `0600`:
 | file | role |
 |---|---|
 | `buffer.jsonl` | pending events, one JSON object per line |
-| `buffer.jsonl.lock` | a sibling lock file; only compaction takes it |
+| `buffer.jsonl.lock` | the sibling ordering lock shared by writes, delivery, arming, and wipe |
 | `dryrun.jsonl` | where batches go when the endpoint is configured empty |
 | `state.json` | the last app version seen and the last flush attempt |
 | `install_id.json` | the random install id and when it was minted |
@@ -175,8 +178,8 @@ most once per flush point and never grows a queue.
 A surface emits by default unless the machine has a persistent opt-out or the
 run has a kill switch. The notice is only rendered on a TTY. So:
 
-- **`tui`** — shows the disclosure before raw mode on first interactive launch,
-  then follows the answer.
+- **`tui`** — enters the native TUI first, shows the disclosure as a startup
+  modal, stays unarmed until the first interactive choice, then follows it.
 - **`exec`, `cli`, `app-server`, `mcp-server`, `serve`** — follow the documented
   default on a fresh home and every persistent/run-scoped opt-out on any home.
 - **Fleet workers never emit**, on any surface, by construction (`crates/tui/src/fleet/host.rs:1362`).

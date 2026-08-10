@@ -40,10 +40,11 @@ pub const SETUP_STATE_FILE_NAME: &str = "setup_state.json";
 ///
 /// The notice is owed whenever
 /// [`SetupState::telemetry_notice_decided_for`] does not match this string.
-/// Bumping it re-asks everyone, so it is bumped only when the collection policy,
-/// schema, or disclosure materially changes. Keying it to the app version would
-/// re-prompt every release, which is nagging with extra steps.
-pub const TELEMETRY_NOTICE_VERSION: &str = "2";
+/// Bumping it re-asks prior acceptors and unanswered users, so it is bumped only
+/// when the collection policy, schema, or disclosure materially changes. Prior
+/// declines remain off. Keying it to the app version would re-prompt every
+/// release, which is nagging with extra steps.
+pub const TELEMETRY_NOTICE_VERSION: &str = "3";
 
 /// Canonical setup step ids. The ordering matches the first-run spine so a
 /// `BTreeMap<SetupStep, _>` renders in wizard order.
