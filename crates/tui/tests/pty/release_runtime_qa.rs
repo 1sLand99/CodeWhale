@@ -2097,3 +2097,376 @@ base_url = "{base_url}"
     let _ = tui.shutdown();
     Ok(())
 }
+
+/// Named custom provider used by `release_resume_restores_route_identity` as
+/// the restored ("route B") identity. Deliberately a `[providers.<name>]`
+/// custom table so the restored identity differs from the startup route in
+/// provider kind, exact identity, endpoint, and model at once.
+const RESTORED_PROVIDER_KEY: &str = "qa-remote";
+const RESTORED_TEST_MODEL: &str = "qa-remote-model-x";
+
+/// Sealed-home config: keep the harness's silent-notifications block and add
+/// one named custom OpenAI-compatible provider pointing at the restored-route
+/// mock server. The startup route stays env-configured DeepSeek.
+fn write_restored_route_provider_config(ws: &SealedWorkspace, base_url: &str) -> Result<()> {
+    std::fs::write(
+        ws.home().join(".codewhale").join("config.toml"),
+        format!(
+            "[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n\n\
+             [providers.{RESTORED_PROVIDER_KEY}]\n\
+             kind = \"openai-compatible\"\n\
+             base_url = \"{base_url}\"\n\
+             api_key = \"qa-remote-local-test-key\"\n\
+             model = \"{RESTORED_TEST_MODEL}\"\n"
+        ),
+    )?;
+    Ok(())
+}
+
+/// A persisted session whose metadata declares the restored route B:
+/// `model_provider = "custom"` + `model_provider_id = "qa-remote"` is exactly
+/// what the live save path writes for a named custom route (see
+/// `SessionMetadata::set_model_provider_route`).
+fn write_restored_route_session(
+    ws: &SealedWorkspace,
+    id: &str,
+    message_count: usize,
+) -> Result<std::path::PathBuf> {
+    let messages = (0..message_count)
+        .map(|index| {
+            json!({
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": [{
+                    "type": "text",
+                    "text": format!("restored route dialogue item {index:02}"),
+                    "cache_control": null
+                }]
+            })
+        })
+        .collect::<Vec<_>>();
+    let session_path = ws.workspace().join(format!("{id}.json"));
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": id,
+                "title": format!("Route identity PTY {id}"),
+                "created_at": "2026-08-08T00:00:00Z",
+                "updated_at": "2026-08-08T00:00:00Z",
+                "message_count": messages.len(),
+                "total_tokens": 64,
+                "model": RESTORED_TEST_MODEL,
+                "model_provider": "custom",
+                "model_provider_id": RESTORED_PROVIDER_KEY,
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": messages,
+            "system_prompt": null,
+            "work_state": null
+        }))?,
+    )?;
+    Ok(session_path)
+}
+
+/// Regression for the v0.9.6 known issue: "A resumed session can still display
+/// the startup provider/model instead of the restored route identity."
+///
+/// Three identities are recorded separately and must agree after `/load`:
+/// 1. persisted — what the session JSON metadata declares (route B:
+///    custom `qa-remote`, model `qa-remote-model-x`),
+/// 2. displayed — the header route label after the load,
+/// 3. outbound — which mock server (and which request-body model) receives
+///    the next submitted turn.
+///
+/// The startup route A (env-configured DeepSeek against its own loopback
+/// server) first completes a real turn, so any stale "effective route" state a
+/// drifting restore would leave behind genuinely exists before the load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_resume_restores_route_identity() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let startup_server = MockServer::start().await;
+    let restored_server = MockServer::start().await;
+    mount_text_model(&startup_server, DEEPSEEK_TEST_MODEL, "startup-route-ok").await;
+    mount_text_model(&restored_server, RESTORED_TEST_MODEL, "restored-route-ok").await;
+
+    let ws = make_sealed_workspace()?;
+    write_restored_route_provider_config(&ws, &restored_server.uri())?;
+    let session_path = write_restored_route_session(&ws, "route-identity-pty", 4)?;
+
+    let mut tui = compaction_tui_builder(&ws, &startup_server).spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    // Startup identity: route A on the header before anything else happens.
+    let startup_route_label = format!("DeepSeek · {DEEPSEEK_TEST_MODEL}");
+    let startup_needle = startup_route_label.clone();
+    tui.wait_for(
+        move |frame| frame.row(0).contains(&startup_needle),
+        INTERACTION_TIMEOUT,
+    )?;
+
+    // A completed startup turn against route A. This both proves the startup
+    // route works and materializes the per-turn route state (`pending_turn_route`
+    // and friends) whose staleness a broken restore could later display.
+    type_and_submit(&mut tui, "startup route probe")?;
+    tui.wait_for_text("startup-route-ok", INTERACTION_TIMEOUT)?;
+
+    // Identity 1 (persisted): declared by the session file written above.
+    let persisted_provider = RESTORED_PROVIDER_KEY;
+    let persisted_model = RESTORED_TEST_MODEL;
+
+    load_session(&mut tui, &session_path, 4)?;
+
+    // Identity 2 (displayed): the header must show the restored route, not the
+    // startup route. This is the exact drift named in the v0.9.6 known issue.
+    let restored_route_label = format!("{persisted_provider} · {persisted_model}");
+    let displayed_needle = restored_route_label.clone();
+    if let Err(err) = tui.wait_for(
+        move |frame| frame.row(0).contains(&displayed_needle),
+        INTERACTION_TIMEOUT,
+    ) {
+        let header = tui.frame().row(0);
+        return Err(anyhow!(
+            "displayed route identity diverged from the persisted session route: \
+             persisted `{restored_route_label}`, header shows `{header}` \
+             (startup route was `{startup_route_label}`): {err}"
+        ));
+    }
+    let displayed_header = tui.frame().row(0);
+    assert!(
+        !displayed_header.contains(&startup_route_label),
+        "header still displays the startup route alongside the restored one: {displayed_header}"
+    );
+
+    // Identity 3 (outbound): the next submitted turn must reach the restored
+    // provider's endpoint with the restored model in the request body.
+    type_and_submit(&mut tui, "restored route outbound probe")?;
+    tui.wait_for_text("restored-route-ok", INTERACTION_TIMEOUT)?;
+
+    let startup_chat = chat_requests(&startup_server.received_requests().await.unwrap_or_default());
+    let restored_chat = chat_requests(
+        &restored_server
+            .received_requests()
+            .await
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        startup_chat.len(),
+        1,
+        "outbound identity diverged: the startup provider received {} chat request(s) \
+         after the load instead of only its pre-load probe: {startup_chat:#?}",
+        startup_chat.len().saturating_sub(1)
+    );
+    assert_eq!(
+        restored_chat.len(),
+        1,
+        "restored provider endpoint did not receive exactly the post-load turn: {restored_chat:#?}"
+    );
+    assert_eq!(
+        restored_chat[0]["model"], persisted_model,
+        "outbound request-body model diverged from the persisted session model"
+    );
+    assert!(
+        restored_chat[0]
+            .to_string()
+            .contains("restored route outbound probe"),
+        "restored-route request does not carry the post-load turn: {:#?}",
+        restored_chat[0]
+    );
+    assert!(
+        startup_chat[0].to_string().contains("startup route probe"),
+        "startup-route request should be the pre-load probe only: {:#?}",
+        startup_chat[0]
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// Write the restored-route session into the sealed home's canonical sessions
+/// directory so id-based resume surfaces (startup `--resume`, the `/resume`
+/// picker) can find it.
+fn install_restored_route_session_in_sessions_dir(
+    ws: &SealedWorkspace,
+    id: &str,
+    message_count: usize,
+) -> Result<()> {
+    let session_path = write_restored_route_session(ws, id, message_count)?;
+    let sessions_dir = ws.home().join(".codewhale").join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    std::fs::rename(&session_path, sessions_dir.join(format!("{id}.json")))?;
+    Ok(())
+}
+
+/// Same three-identity contract as `release_resume_restores_route_identity`,
+/// on the startup resume surface: `codewhale --resume <id>` must boot straight
+/// into the restored route identity, not the env-configured startup route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_startup_resume_restores_route_identity() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let startup_server = MockServer::start().await;
+    let restored_server = MockServer::start().await;
+    mount_text_model(&startup_server, DEEPSEEK_TEST_MODEL, "startup-route-ok").await;
+    mount_text_model(&restored_server, RESTORED_TEST_MODEL, "restored-route-ok").await;
+
+    let ws = make_sealed_workspace()?;
+    write_restored_route_provider_config(&ws, &restored_server.uri())?;
+    install_restored_route_session_in_sessions_dir(&ws, "route-identity-startup", 4)?;
+
+    let mut tui = compaction_tui_builder(&ws, &startup_server)
+        .args(["--resume", "route-identity-startup"])
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    // Displayed identity: the restored route must be on the header at boot.
+    let restored_route_label = format!("{RESTORED_PROVIDER_KEY} · {RESTORED_TEST_MODEL}");
+    let displayed_needle = restored_route_label.clone();
+    if let Err(err) = tui.wait_for(
+        move |frame| frame.row(0).contains(&displayed_needle),
+        INTERACTION_TIMEOUT,
+    ) {
+        let header = tui.frame().row(0);
+        return Err(anyhow!(
+            "startup --resume displayed route identity diverged: persisted \
+             `{restored_route_label}`, header shows `{header}`: {err}"
+        ));
+    }
+
+    // Outbound identity: the first submitted turn must reach the restored
+    // provider with the restored model; the startup provider gets nothing.
+    type_and_submit(&mut tui, "restored route outbound probe")?;
+    tui.wait_for_text("restored-route-ok", INTERACTION_TIMEOUT)?;
+
+    let startup_chat = chat_requests(&startup_server.received_requests().await.unwrap_or_default());
+    let restored_chat = chat_requests(
+        &restored_server
+            .received_requests()
+            .await
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        startup_chat.len(),
+        0,
+        "outbound identity diverged: the startup provider received chat request(s) \
+         in a session resumed onto another route: {startup_chat:#?}"
+    );
+    assert_eq!(
+        restored_chat.len(),
+        1,
+        "restored provider endpoint did not receive exactly the resumed turn: {restored_chat:#?}"
+    );
+    assert_eq!(
+        restored_chat[0]["model"], RESTORED_TEST_MODEL,
+        "outbound request-body model diverged from the persisted session model"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// Same three-identity contract on the interactive picker surface: `/resume`
+/// with no argument opens the session picker; selecting the persisted session
+/// must swap the header and the outbound route to the restored identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_session_picker_restores_route_identity() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let startup_server = MockServer::start().await;
+    let restored_server = MockServer::start().await;
+    mount_text_model(&startup_server, DEEPSEEK_TEST_MODEL, "startup-route-ok").await;
+    mount_text_model(&restored_server, RESTORED_TEST_MODEL, "restored-route-ok").await;
+
+    let ws = make_sealed_workspace()?;
+    write_restored_route_provider_config(&ws, &restored_server.uri())?;
+    install_restored_route_session_in_sessions_dir(&ws, "route-identity-picker", 4)?;
+
+    let mut tui = compaction_tui_builder(&ws, &startup_server)
+        .env("RUST_LOG", crate::qa_harness::view_log::VIEW_STACK_RUST_LOG)
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    // Startup route A completes a real turn first, exactly like the /load
+    // scenario, so stale per-turn route state exists before the picker swap.
+    let startup_route_label = format!("DeepSeek · {DEEPSEEK_TEST_MODEL}");
+    let startup_needle = startup_route_label.clone();
+    tui.wait_for(
+        move |frame| frame.row(0).contains(&startup_needle),
+        INTERACTION_TIMEOUT,
+    )?;
+    type_and_submit(&mut tui, "startup route probe")?;
+    tui.wait_for_text("startup-route-ok", INTERACTION_TIMEOUT)?;
+
+    // Open the picker. The action rail paints with the modal, so it is the
+    // robust "picker is open" signal.
+    type_and_submit(&mut tui, "/resume")?;
+    if let Err(err) = tui.wait_for_text("Enter resume", INTERACTION_TIMEOUT) {
+        let events = crate::qa_harness::view_log::read_events(ws.home())
+            .map(|events| format!("{events:#?}"))
+            .unwrap_or_else(|log_err| format!("<no view log: {log_err}>"));
+        return Err(anyhow!(
+            "session picker never opened after /resume: {err}\nview-stack events: {events}"
+        ));
+    }
+    // The picker also lists the autosaved live session, which sorts first.
+    // Search-filter to the persisted session id so Enter cannot resume the
+    // wrong row.
+    tui.send(keys::key::text("/route-identity-picker"))?;
+    tui.wait_for_text("1. route-id", INTERACTION_TIMEOUT)?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
+    tui.send(keys::key::enter())?; // leave search mode, keep the filtered row
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
+    tui.send(keys::key::enter())?; // resume the selected session
+    // The restored transcript is the durable receipt that the swap happened
+    // (the "Session loaded" status message is transient footer state).
+    tui.wait_for_text("restored route dialogue item 00", INTERACTION_TIMEOUT)?;
+
+    // Displayed identity after the picker swap.
+    let restored_route_label = format!("{RESTORED_PROVIDER_KEY} · {RESTORED_TEST_MODEL}");
+    let displayed_needle = restored_route_label.clone();
+    if let Err(err) = tui.wait_for(
+        move |frame| frame.row(0).contains(&displayed_needle),
+        INTERACTION_TIMEOUT,
+    ) {
+        let header = tui.frame().row(0);
+        return Err(anyhow!(
+            "session-picker displayed route identity diverged: persisted \
+             `{restored_route_label}`, header shows `{header}` \
+             (startup route was `{startup_route_label}`): {err}"
+        ));
+    }
+
+    // Outbound identity after the picker swap.
+    type_and_submit(&mut tui, "restored route outbound probe")?;
+    tui.wait_for_text("restored-route-ok", INTERACTION_TIMEOUT)?;
+
+    let startup_chat = chat_requests(&startup_server.received_requests().await.unwrap_or_default());
+    let restored_chat = chat_requests(
+        &restored_server
+            .received_requests()
+            .await
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        startup_chat.len(),
+        1,
+        "outbound identity diverged: the startup provider received {} chat request(s) \
+         after the picker swap instead of only its pre-swap probe: {startup_chat:#?}",
+        startup_chat.len().saturating_sub(1)
+    );
+    assert_eq!(
+        restored_chat.len(),
+        1,
+        "restored provider endpoint did not receive exactly the post-swap turn: {restored_chat:#?}"
+    );
+    assert_eq!(
+        restored_chat[0]["model"], RESTORED_TEST_MODEL,
+        "outbound request-body model diverged from the persisted session model"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
