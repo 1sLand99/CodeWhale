@@ -25,6 +25,8 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(15);
 const KEY_TIMEOUT: Duration = Duration::from_secs(5);
 const SKILL_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPOSER_READY_TEXT: &str = "Write a task";
+const SESSION_SHELL_MAX_WIDTH: u16 = 112;
+
 /// Operate-mode composer placeholder, pinned as shipped copy since the
 /// goal-first placeholder rewording (bf0478395): the mode ramp legs below
 /// assert the exact user-visible text, not a substring of it.
@@ -286,7 +288,7 @@ fn foreground_at_text(
 fn composer_edge_rows(frame: &crate::qa_harness::Frame, placeholder: &str) -> (u16, u16) {
     let input_row = visible_row_with_text(frame, placeholder)
         .unwrap_or_else(|| panic!("composer placeholder {placeholder:?} missing"));
-    let minimum_rule_cells = usize::from(frame.cols() / 2);
+    let minimum_rule_cells = usize::from(frame.cols().min(SESSION_SHELL_MAX_WIDTH) / 2);
     let is_rule = |row: u16| {
         frame
             .row(row)
@@ -310,6 +312,25 @@ fn composer_edge_rows(frame: &crate::qa_harness::Frame, placeholder: &str) -> (u
     (top, bottom)
 }
 
+fn first_horizontal_rule_col(frame: &crate::qa_harness::Frame, row: u16) -> u16 {
+    frame
+        .row(row)
+        .chars()
+        .position(|ch| {
+            matches!(
+                ch,
+                '-' | '─' | '━' | '╌' | '╍' | '┄' | '┅' | '┈' | '┉' | '═'
+            )
+        })
+        .and_then(|col| u16::try_from(col).ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "horizontal rule missing from row {row}: {:?}",
+                frame.row(row)
+            )
+        })
+}
+
 /// Assert the user-visible labels and the split composer edges tell the same
 /// agency/permission story in the ANSI cells emitted through the real PTY.
 fn assert_control_grammar(
@@ -331,16 +352,21 @@ fn assert_control_grammar(
     let mode_color = foreground_at_text(frame, 0, mode);
     let permission_color = foreground_at_text(frame, 0, permission);
     let (permission_edge, mode_edge) = composer_edge_rows(frame, placeholder);
+    let permission_edge_col = first_horizontal_rule_col(frame, permission_edge);
+    let mode_edge_col = first_horizontal_rule_col(frame, mode_edge);
     assert_eq!(
         frame
-            .colors_at(permission_edge, 1)
+            .colors_at(permission_edge, permission_edge_col)
             .expect("permission edge cell")
             .0,
         permission_color,
         "header permission and composer top edge diverged:\n{dump}"
     );
     assert_eq!(
-        frame.colors_at(mode_edge, 1).expect("mode edge cell").0,
+        frame
+            .colors_at(mode_edge, mode_edge_col)
+            .expect("mode edge cell")
+            .0,
         mode_color,
         "header mode and composer bottom edge diverged:\n{dump}"
     );
@@ -593,7 +619,13 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
                 );
             }
 
-            let signature = format!("{:?}", frame.colors_at(0, 0).expect("header mark cell"));
+            let header_mark_col = frame.find_text_in_row(0, "cw").expect("header mark cell");
+            let signature = format!(
+                "{:?}",
+                frame
+                    .colors_at(0, header_mark_col)
+                    .expect("header mark cell")
+            );
             if let Some((_, previous)) = theme_signatures
                 .iter()
                 .find(|(previous_theme, _)| *previous_theme == theme)
@@ -3726,15 +3758,37 @@ fn wait_for_transcript_marker_before_icon(
     })
 }
 
-fn horizontal_rule_fills(frame: &crate::qa_harness::Frame, row: u16, cols: u16) -> bool {
+fn horizontal_rule_fills_session_shell(
+    frame: &crate::qa_harness::Frame,
+    row: u16,
+    cols: u16,
+) -> bool {
     let text = frame.row(row);
-    UnicodeWidthStr::width(text.as_str()) == usize::from(cols)
-        && (text.chars().all(|ch| ch == '─') || text.chars().all(|ch| ch == '-'))
+    let shell_width = cols.min(SESSION_SHELL_MAX_WIDTH);
+    let shell_start = (cols.saturating_sub(shell_width)) / 2;
+    let shell_end = shell_start.saturating_add(shell_width);
+    let chars = text.chars().collect::<Vec<_>>();
+    // Frame rows omit trailing blank cells. A centered rail therefore ends at
+    // `shell_end`, while a fluid rail still reaches the terminal edge.
+    UnicodeWidthStr::width(text.as_str()) == usize::from(shell_end)
+        && chars
+            .iter()
+            .take(usize::from(shell_start))
+            .all(|ch| ch.is_whitespace())
+        && chars
+            .iter()
+            .skip(usize::from(shell_start))
+            .take(usize::from(shell_width))
+            .all(|ch| *ch == '─' || *ch == '-')
+        && chars
+            .iter()
+            .skip(usize::from(shell_end))
+            .all(|ch| ch.is_whitespace())
 }
 
 /// `Harness::resize` updates the parser dimensions immediately, before the
-/// child has emitted its resized composition. Require the product's full-width
-/// header and composer rules before accepting the frame so a preserved old
+/// child has emitted its resized composition. Require the product's responsive
+/// header and session-shell rules before accepting the frame so a preserved old
 /// frame (or the clear between frames) cannot masquerade as a settled resize.
 fn resize_and_wait_for_composition<F>(
     h: &mut Harness,
@@ -3755,8 +3809,8 @@ where
     }
     h.wait_for(
         |frame| {
-            let full_width_rules = (0..rows)
-                .filter(|&row| horizontal_rule_fills(frame, row, cols))
+            let shell_width_rules = (0..rows)
+                .filter(|&row| horizontal_rule_fills_session_shell(frame, row, cols))
                 .count();
             // Brand-aware header: `cw 🐳` (emoji chip) or legacy `cw  ` spacing.
             let header = frame.row(0);
@@ -3765,8 +3819,8 @@ where
             frame.rows() == rows
                 && frame.cols() == cols
                 && brand_header
-                && horizontal_rule_fills(frame, 1, cols)
-                && full_width_rules >= 2
+                && horizontal_rule_fills_session_shell(frame, 1, cols)
+                && shell_width_rules >= 2
                 && frame.contains(COMPOSER_READY_TEXT)
                 && predicate(frame)
         },
