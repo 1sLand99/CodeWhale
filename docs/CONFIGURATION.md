@@ -755,10 +755,11 @@ window it cannot justify — it falls back to a conservative value and labels it
 ### Adjacent knobs
 
 - `auto_compact_threshold_percent` (settings.toml; also accepted as
-  `auto_compact_threshold`; `10`–`100`, default `80`): the share of the usable
-  input budget — the window minus reserved output headroom — at which
-  auto-compaction fires. Editable from `/config`. Raising the window without
-  touching this raises the absolute compaction point along with it.
+  `auto_compact_threshold`; `10`–`100`, default `80`): the share of the full
+  route context window at which auto-compaction fires, clamped so it can never
+  cross the spendable input ceiling after output reservation and headroom.
+  Editable from `/config`. Raising the window without touching this raises the
+  absolute compaction point along with it.
 - `auto_compact` (settings.toml, on/off): turns automatic compaction off
   entirely; `/compact` and Ctrl+L stay available.
 - `CODEWHALE_MAX_OUTPUT_TOKENS` (environment variable; legacy alias

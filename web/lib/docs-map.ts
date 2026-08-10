@@ -178,6 +178,30 @@ export const DOC_TOPICS: DocTopic[] = [
     category: "extending",
   },
   {
+    id: "skills",
+    slug: "skills",
+    label: { en: "Skills", zh: "技能" },
+    description: {
+      en: "Install, discover, trust, and load reusable instruction packages.",
+      zh: "安装、发现、信任并加载可复用的指令包。",
+    },
+    repoSource: "docs/SKILLS.md",
+    hasPage: false,
+    category: "extending",
+  },
+  {
+    id: "plugins",
+    slug: "plugins",
+    label: { en: "Plugins", zh: "插件" },
+    description: {
+      en: "Plugin discovery, installation, bundles, trust boundaries, and runtime lifecycle.",
+      zh: "插件发现、安装、Bundle、信任边界与运行时生命周期。",
+    },
+    repoSource: ["docs/PLUGINS.md", "docs/PLUGIN_BUNDLES.md"],
+    hasPage: false,
+    category: "extending",
+  },
+  {
     id: "sandbox",
     slug: "sandbox",
     label: { en: "Sandbox & Approval", zh: "沙箱与审批" },

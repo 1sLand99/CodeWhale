@@ -9,7 +9,8 @@
 //!   * **output token cap** — the output reservation actually used to compute
 //!     that budget (clamped so it never starves the window);
 //!   * **compaction trigger** — the input-token level at which compaction
-//!     should be suggested (default: ~75% of the spendable input ceiling);
+//!     should be suggested (default: ~75% of the full window, clamped to the
+//!     spendable input ceiling);
 //!   * **[`PressureLevel`]** — a coarse Low/Medium/High/Critical signal the UI
 //!     can render without re-deriving thresholds.
 //!
@@ -49,9 +50,9 @@ pub const DEFAULT_COMPACTION_TRIGGER_PERCENT: f64 = 75.0;
 pub const CRITICAL_PRESSURE_PERCENT: f64 = 90.0;
 
 /// Percentage of the window at or above which pressure is [`PressureLevel::High`].
-/// Pressure remains a window-relative UI signal. The actual compaction trigger
-/// is relative to the spendable input ceiling, so these thresholds can diverge
-/// when output reservation consumes a substantial part of the window.
+/// Pressure and the requested compaction trigger are window-relative. The
+/// trigger is clamped to the spendable input ceiling, so it can fire before
+/// this UI boundary when output reservation consumes substantial window space.
 pub const HIGH_PRESSURE_PERCENT: f64 = DEFAULT_COMPACTION_TRIGGER_PERCENT;
 
 /// Percentage of the window at or above which pressure is [`PressureLevel::Medium`].
@@ -147,8 +148,8 @@ pub struct ContextBudget {
     /// at least [`MIN_INPUT_BUDGET_TOKENS`] of input room.
     pub output_cap_tokens: u64,
     /// Spendable input ceiling for the turn (`window - output_cap - headroom`,
-    /// saturating at 0). Compaction percentages use this denominator rather
-    /// than the raw input-plus-output context window.
+    /// saturating at 0). Compaction percentages use the full window and clamp
+    /// their resulting token threshold to this ceiling.
     pub input_budget_ceiling: u64,
     /// Input tokens still available before hitting the reserved boundary
     /// (`input_budget_ceiling - input`, saturating at 0).
