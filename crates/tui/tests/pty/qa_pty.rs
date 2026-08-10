@@ -134,9 +134,9 @@ fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
 }
 
 fn wait_for_native_telemetry_notice(h: &mut Harness, home: &Path) -> anyhow::Result<()> {
-    h.wait_for_text("Anonymous usage counting", BOOT_TIMEOUT)?;
-    h.wait_for_text("Keep anonymous usage on", KEY_TIMEOUT)?;
-    h.wait_for_text("Disable anonymous usage", KEY_TIMEOUT)?;
+    h.wait_for_text("Help improve Codewhale?", BOOT_TIMEOUT)?;
+    h.wait_for_text("Yes, keep anonymous counts", KEY_TIMEOUT)?;
+    h.wait_for_text("No, turn off tracking", KEY_TIMEOUT)?;
     assert_eq!(
         h.terminal_modes().state(mode::ALT_SCREEN),
         Some(true),

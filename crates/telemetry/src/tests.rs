@@ -1797,18 +1797,20 @@ fn the_notice_summarizes_what_the_schema_collects_and_states_every_red_line() {
 
     // The modal names the useful product categories and links the exact
     // field-by-field schema. `install_id` is "a random ID stored on this
-    // machine"; transport metadata remains in the linked document.
+    // machine"; transport metadata remains in the linked document. The body
+    // wraps at 72 columns, so multi-word claims are matched across the
+    // reflowed whitespace.
+    let flat: String = body.split_whitespace().collect();
     for claim in [
         "version",
         "OS and CPU family",
         "session duration and outcome",
-        "aggregate",
-        "feature and error counters",
+        "aggregate feature and error counters",
         "random ID stored on this machine",
         "every 90 days",
     ] {
         assert!(
-            body.contains(claim),
+            flat.contains(&claim.split_whitespace().collect::<String>()),
             "the notice does not describe: {claim}"
         );
     }
@@ -1817,16 +1819,16 @@ fn the_notice_summarizes_what_the_schema_collects_and_states_every_red_line() {
     // anonymized or sampled — two promises this client does not make.
     for red_line in [
         "conversations",
-        "prompts",
         "code",
+        "prompts",
         "files",
-        "file, repo, or branch names",
+        "repo or branch names",
         "model content",
         "credentials",
         "per-turn or per-tool timeline",
     ] {
         assert!(
-            body.contains(red_line),
+            flat.contains(&red_line.split_whitespace().collect::<String>()),
             "the notice does not disclaim: {red_line}"
         );
     }

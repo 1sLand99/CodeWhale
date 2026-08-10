@@ -394,12 +394,12 @@ mod tests {
     fn disclosure_and_both_choices_survive_responsive_sizes() {
         for (width, height) in [(40, 12), (56, 18), (60, 18), (70, 20), (80, 24), (100, 32)] {
             let text = rendered_text(Locale::En, width, height);
+            assert!(text.contains("Help improve Codewhale?"), "{width}x{height}");
             assert!(
-                text.contains("Anonymous usage counting"),
+                text.contains("Yes, keep anonymous counts"),
                 "{width}x{height}"
             );
-            assert!(text.contains("Keep anonymous usage on"), "{width}x{height}");
-            assert!(text.contains("Disable anonymous usage"), "{width}x{height}");
+            assert!(text.contains("No, turn off tracking"), "{width}x{height}");
             assert!(text.contains("Enter"), "{width}x{height}");
             if width < 80 {
                 for required in [
@@ -541,7 +541,11 @@ mod tests {
     }
 
     #[test]
-    fn english_full_body_is_the_schema_owned_notice_verbatim() {
+    fn english_notice_is_the_schema_owned_copy_verbatim() {
+        assert_eq!(
+            tr(Locale::En, MessageId::TelemetryNoticeHeadline).as_ref(),
+            codewhale_telemetry::notice::NOTICE_HEADLINE
+        );
         assert_eq!(
             tr(Locale::En, MessageId::TelemetryNoticeBody).as_ref(),
             codewhale_telemetry::notice::NOTICE_BODY
