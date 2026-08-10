@@ -27,6 +27,11 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   launch checks.
 - Maintainers can report observed daily active installs from the same anonymous,
   aggregate telemetry dataset; no additional client data is collected.
+- Fleet-dispatched members under a read-only/recon (no-network) ceiling now
+  keep the `Web` tool's read-only `search` and `fetch` actions — parity with an
+  ordinary scout — while every reaching surface (`web.run`, `fetch_url`,
+  `github`, MCP) stays denied and the sentinel-backed capability envelope
+  remains the fail-closed backstop.
 
 ### Changed
 
@@ -88,6 +93,23 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   persistent service. Cancellation after terminal usage still charges the turn.
 - Website setup, provider, diagnostics, Fleet, and single-runtime claims now
   match the source candidate.
+- Opening the sub-agent register no longer hides the to-do list: the Agents
+  panel shows the full register and the durable checklist together, and the
+  register header is a two-way door that returns to Tasks on a second click.
+- The ⌥V / Alt+V details chord opens the selected work-surface row's own
+  inspector instead of the transcript's nearest tool cell, so a selected
+  to-do row shows its own content rather than the latest reasoning.
+- The first-run usage disclosure now asks a clear question — "Help improve
+  Codewhale?" — with unambiguous "Yes, keep anonymous counts" / "No, turn off
+  tracking" choices in every shipped locale, and states the persistent opt-out
+  command. Consent semantics are unchanged: telemetry stays unarmed until a
+  choice is made.
+- macOS screencapture screenshots referenced in a message are copied to a
+  stable attachments directory the moment the message is received, and the
+  reference is rewritten to the stable path, so the image still exists when
+  the agent reads it. Only files under a screencapture "Temporary Items"
+  directory are touched; copies are idempotent and a failed copy keeps the
+  original reference.
 
 ### Removed
 
@@ -100,6 +122,11 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - A resumed session can still display the startup provider/model instead of the
   restored route identity. This drift is explicitly unresolved and is separate
   from the fixed, provider-neutral compaction path.
+- Manual `/compact` during an active turn is refused with "engine is busy"
+  instead of queueing behind the turn; idle and between-turn compaction work
+  correctly. Deferred to v0.9.7 by owner decision, and the three
+  release-runtime QA scenarios that pin the required lifecycle are marked
+  ignored with a tracking reason until the fix lands.
 
 ### Contributors
 
