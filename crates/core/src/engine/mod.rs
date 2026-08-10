@@ -1,9 +1,12 @@
 //! Core engine (issue #5261).
 //!
 //! Move, don't rewrite: the turn loop, session, thread manager, the TUI's
-//! `run_event_loop`, and the chat client's request-building have been moved
-//! here from `crates/tui/src/core/engine` into `crates/core`. This file is
-//! the new owner. The TUI crate depends on `core`, not the reverse.
+//! `run_event_loop`, and the chat client's request-building are all destined
+//! for this crate. **Only request-building and fragments have moved so far.**
+//! The turn loop still lives in `crates/tui/src/core/engine/turn_loop.rs` and
+//! is what every interactive and headless turn runs today; this module is the
+//! boundary that move lands against, not the current owner of turn execution.
+//! The TUI crate depends on `core`, not the reverse.
 //!
 //! Approved crates that the engine needs are already in `crates/core`'s
 //! Cargo.toml: `config`, `execpolicy`, `protocol`, `state`, `tools`, `mcp`,
