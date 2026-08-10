@@ -791,6 +791,273 @@ fn extract_media_attachment_references(input: &str) -> Vec<MediaAttachmentRefere
     media_attachment_references(input)
 }
 
+// ---------------------------------------------------------------------------
+//  macOS screencapture-temp stabilization
+// ---------------------------------------------------------------------------
+//
+// macOS parks dragged-out screenshots under a per-capture temp directory like
+// `/var/folders/…/T/Temporary Items/NSIRD_screencaptureui_XXXX/` and deletes
+// it minutes later. Inbound references to such files are copied to a stable
+// directory the moment the message is received, so the agent later reads a
+// path that still exists.
+
+/// Marker fragments of the macOS screencapture temp directory layout.
+const SCREENCAPTURE_TEMP_DIR_MARKERS: [&str; 2] = ["Temporary Items", "screencaptureui"];
+
+/// Stable per-session directory for stabilized screencapture files. Follows
+/// the same home-first convention as `clipboard.rs`'s clipboard-images dir.
+pub(crate) fn screenshot_stabilization_dir(workspace: &Path) -> PathBuf {
+    match crate::config::effective_home_dir() {
+        Some(home) => home.join(".codewhale").join("attachments"),
+        None => workspace.join("attachments"),
+    }
+}
+
+/// Whether a path lives under a macOS screencapture "Temporary Items" dir:
+/// it must have a `Temporary Items` component and a `screencaptureui`-named
+/// component (e.g. `NSIRD_screencaptureui_XXXX`), so ordinary user paths are
+/// never touched even when their names contain either fragment.
+fn is_screencapture_temp_path(path: &Path) -> bool {
+    let components: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    components
+        .iter()
+        .any(|c| c == SCREENCAPTURE_TEMP_DIR_MARKERS[0])
+        && components
+            .iter()
+            .any(|c| c.contains(SCREENCAPTURE_TEMP_DIR_MARKERS[1]))
+}
+
+/// The `[Attached …]` parser splits at " at ", so a stable copy must not
+/// reintroduce that separator in its name.
+fn stable_attachment_name(file_name: &std::ffi::OsStr) -> String {
+    file_name.to_string_lossy().replace(" at ", "-")
+}
+
+/// Copy a screencapture temp file to `artifact_dir` and return the stable
+/// destination. Returns `None` when the path is not a screencapture temp
+/// file, not a regular file, or the copy fails — callers keep the original
+/// reference then. Idempotent: an existing destination is reused without a
+/// second copy.
+fn stabilize_screencapture_file(path: &Path, artifact_dir: &Path) -> Option<PathBuf> {
+    if !is_screencapture_temp_path(path) || !path.is_file() {
+        return None;
+    }
+    let dest = artifact_dir.join(stable_attachment_name(path.file_name()?));
+    if !dest.exists()
+        && (std::fs::create_dir_all(artifact_dir).is_err() || std::fs::copy(path, &dest).is_err())
+    {
+        return None;
+    }
+    Some(dest)
+}
+
+/// A path reference found in inbound text: its byte span, the path text, and
+/// how it was carried (`@`-mention prefix and/or surrounding quotes).
+struct ScreencaptureCandidate {
+    byte_start: usize,
+    byte_end: usize,
+    path: String,
+    quote: Option<char>,
+    mention: bool,
+}
+
+/// Reconstruct a path that an unquoted paste split across whitespace tokens
+/// (the "Temporary Items" component contains a space). Returns the char span
+/// and joined path of the window that names an existing screencapture temp
+/// file, bounded to a handful of tokens either side of `seed`.
+fn screencapture_window(
+    chars: &[char],
+    tokens: &[(usize, usize)],
+    seed: usize,
+) -> Option<(usize, usize, String)> {
+    let max_span = tokens.len().min(12);
+    for left in 0..=seed.min(max_span) {
+        for right in 0..=max_span {
+            let end = (seed + right).min(tokens.len() - 1);
+            let (mut ws, mut we) = (tokens[seed - left].0, tokens[end].1);
+            let raw: String = chars[ws..we].iter().collect();
+            // Trim leading delimiters and trailing punctuation against the
+            // raw span (advancing both ends), then collapse interior
+            // whitespace runs so the probe path matches the file.
+            let lead = raw
+                .chars()
+                .take_while(|&ch| matches!(ch, '(' | '[' | '{' | '<' | '"' | '\'' | '@'))
+                .count();
+            let trimmed = trim_unquoted_mention(&raw);
+            ws += lead;
+            we -= raw.chars().count() - trimmed.chars().count();
+            let joined = trimmed
+                .chars()
+                .skip(lead)
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let path = Path::new(&joined);
+            if is_screencapture_temp_path(path) && path.is_file() {
+                return Some((ws, we, joined));
+            }
+        }
+    }
+    None
+}
+
+/// Rewrite every inbound reference to a macOS screencapture temp file to a
+/// stable copy under `artifact_dir`. Non-matching references — not a
+/// screencapture path, missing, or an unresolvable copy — are left untouched;
+/// the function never fails and never changes the message otherwise.
+pub(crate) fn stabilize_screenshot_references(input: &str, artifact_dir: &Path) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let offsets: Vec<usize> = input.char_indices().map(|(i, _)| i).collect();
+    let mut candidates: Vec<ScreencaptureCandidate> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            // `@"quoted path"` / `@bare/path` mentions (mirror `extract_file_mentions`).
+            '@' if is_file_mention_start(&chars, i) => {
+                let byte_start = offsets[i];
+                if let Some(quote @ ('"' | '\'')) = chars.get(i + 1).copied()
+                    && let Some(rel) = chars[i + 2..].iter().position(|&ch| ch == quote)
+                {
+                    let end = i + 2 + rel;
+                    let path: String = chars[i + 2..end].iter().collect();
+                    if !path.trim().is_empty() {
+                        candidates.push(ScreencaptureCandidate {
+                            byte_start,
+                            byte_end: offsets.get(end + 1).copied().unwrap_or(input.len()),
+                            path: path.trim().to_string(),
+                            quote: Some(quote),
+                            mention: true,
+                        });
+                    }
+                    i = end + 1;
+                } else {
+                    let mut end = i + 1;
+                    while end < chars.len() && !chars[end].is_whitespace() {
+                        end += 1;
+                    }
+                    let raw: String = chars[i + 1..end].iter().collect();
+                    let trimmed = trim_unquoted_mention(&raw);
+                    if !trimmed.is_empty() {
+                        candidates.push(ScreencaptureCandidate {
+                            byte_start,
+                            byte_end: offsets.get(end).copied().unwrap_or(input.len()),
+                            path: trimmed.to_string(),
+                            quote: None,
+                            mention: true,
+                        });
+                    }
+                    i = end;
+                }
+            }
+            // Quoted strings: terminals quote drag-dropped paths with spaces.
+            // A closing quote is only sought on the same line, so a lone
+            // apostrophe in prose never swallows the rest of the message.
+            quote @ ('"' | '\'') => {
+                if let Some(rel) = chars[i + 1..]
+                    .iter()
+                    .take_while(|&&ch| ch != '\n')
+                    .position(|&ch| ch == quote)
+                {
+                    let end = i + 1 + rel;
+                    let path: String = chars[i + 1..end].iter().collect();
+                    if !path.trim().is_empty() {
+                        candidates.push(ScreencaptureCandidate {
+                            byte_start: offsets[i],
+                            byte_end: offsets.get(end + 1).copied().unwrap_or(input.len()),
+                            path: path.trim().to_string(),
+                            quote: Some(quote),
+                            mention: false,
+                        });
+                    }
+                    i = end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Bare unquoted pastes: rebuild the path across whitespace tokens.
+    let tokens: Vec<(usize, usize)> = {
+        let mut tokens = Vec::new();
+        let mut start = None;
+        for (idx, ch) in chars.iter().enumerate() {
+            match (ch.is_whitespace(), start) {
+                (true, Some(s)) => {
+                    tokens.push((s, idx));
+                    start = None;
+                }
+                (false, None) => start = Some(idx),
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            tokens.push((s, chars.len()));
+        }
+        tokens
+    };
+    for (seed, &(token_start, token_end)) in tokens.iter().enumerate() {
+        let token: String = chars[token_start..token_end].iter().collect();
+        if !(token.contains("screencaptureui")
+            || token.contains("Temporary")
+            || token.contains("Items"))
+        {
+            continue;
+        }
+        let Some((ws, we, path)) = screencapture_window(&chars, &tokens, seed) else {
+            continue;
+        };
+        let byte_end = offsets.get(we).copied().unwrap_or(input.len());
+        // Only suppress the window when it overlaps a candidate that is
+        // itself a confirmed screencapture temp file (that candidate will
+        // rewrite it); prose quoted with `'` never blocks a real reference.
+        let confirmed = |c: &ScreencaptureCandidate| {
+            is_screencapture_temp_path(Path::new(&c.path)) && Path::new(&c.path).is_file()
+        };
+        let blocked = candidates
+            .iter()
+            .any(|c| c.byte_start < byte_end && offsets[ws] < c.byte_end && confirmed(c));
+        if !blocked {
+            candidates.push(ScreencaptureCandidate {
+                byte_start: offsets[ws],
+                byte_end,
+                path,
+                quote: None,
+                mention: false,
+            });
+        }
+    }
+
+    // Apply last-to-first so byte spans stay valid.
+    candidates.sort_by_key(|c| c.byte_start);
+    let mut output = input.to_string();
+    for candidate in candidates.iter().rev() {
+        let Some(dest) = stabilize_screencapture_file(Path::new(&candidate.path), artifact_dir)
+        else {
+            continue;
+        };
+        let stable = dest.to_string_lossy();
+        let mut replacement = String::new();
+        if candidate.mention {
+            replacement.push('@');
+        }
+        if let Some(quote) = candidate.quote {
+            replacement.push(quote);
+        }
+        replacement.push_str(stable.as_ref());
+        if let Some(quote) = candidate.quote {
+            replacement.push(quote);
+        }
+        output.replace_range(candidate.byte_start..candidate.byte_end, &replacement);
+    }
+    output
+}
+
 fn local_context_from_file_mentions(
     input: &str,
     workspace: &Path,
@@ -1845,5 +2112,158 @@ mod tests {
 
         // A partial that matches no token leaves path completion untouched.
         assert_eq!(with_git_mention_entries(paths.clone(), "src", 8), paths);
+    }
+
+    // ------------------------------------------------------------------
+    // macOS screencapture-temp stabilization
+    // ------------------------------------------------------------------
+
+    /// A fake macOS screencapture temp tree. Returns the tempdir (alive for
+    /// the test's duration), the screenshot source path, and the artifact dir
+    /// stabilization should copy into.
+    fn screencapture_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().expect("tempdir");
+        let source_dir = tmp
+            .path()
+            .join("Temporary Items")
+            .join("NSIRD_screencaptureui_7F3A");
+        std::fs::create_dir_all(&source_dir).expect("mkdir");
+        let source = source_dir.join("Screenshot 2026-08-10 at 01.09.39 截图.png");
+        std::fs::write(&source, b"fake screenshot bytes").expect("write");
+        let artifact_dir = tmp.path().join("attachments");
+        (tmp, source, artifact_dir)
+    }
+
+    #[test]
+    fn detects_screencapture_temp_paths() {
+        assert!(is_screencapture_temp_path(Path::new(
+            "/var/folders/x/T/Temporary Items/NSIRD_screencaptureui_ABC/Shot.png"
+        )));
+        let (tmp, source, _) = screencapture_fixture();
+        assert!(is_screencapture_temp_path(&source));
+        // Only one marker is not a screencapture temp location.
+        assert!(!is_screencapture_temp_path(Path::new(
+            "/tmp/Temporary Items/Shot.png"
+        )));
+        assert!(!is_screencapture_temp_path(Path::new("/tmp/Shot.png")));
+        assert!(!is_screencapture_temp_path(tmp.path()));
+    }
+
+    #[test]
+    fn stabilizes_a_quoted_paste_with_spaces_and_unicode() {
+        let (tmp, source, artifact_dir) = screencapture_fixture();
+        let input = format!("take a look at \"{}\" please", source.display());
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+
+        let stable = artifact_dir.join("Screenshot 2026-08-10-01.09.39 截图.png");
+        assert_eq!(
+            std::fs::read(&stable).expect("stable copy"),
+            b"fake screenshot bytes"
+        );
+        assert!(out.contains(&stable.display().to_string()), "got: {out}");
+        assert!(!out.contains(&source.display().to_string()), "got: {out}");
+        assert!(source.is_file(), "source must be left in place");
+        // Idempotent: the stable path is not a screencapture reference, and a
+        // second pass over the rewritten text changes nothing.
+        assert_eq!(stabilize_screenshot_references(&out, &artifact_dir), out);
+        let _ = tmp;
+    }
+
+    #[test]
+    fn stabilizes_mention_attached_and_unquoted_references() {
+        let (tmp, source, artifact_dir) = screencapture_fixture();
+        let disp = source.display().to_string();
+        let input = format!("see @\"{disp}\", also [Attached image: {disp}] and bare {disp} here");
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+
+        let stable = artifact_dir.join("Screenshot 2026-08-10-01.09.39 截图.png");
+        let stable_disp = stable.display().to_string();
+        // Three different carriers, one stable destination each time, and
+        // exactly one physical copy despite the duplicates.
+        assert_eq!(out.matches(&stable_disp).count(), 3, "got: {out}");
+        assert!(!out.contains(&disp), "got: {out}");
+        assert_eq!(
+            std::fs::read_dir(&artifact_dir).expect("artifacts").count(),
+            1
+        );
+        let _ = tmp;
+    }
+
+    #[test]
+    fn leaves_missing_and_non_screencapture_paths_alone() {
+        let (tmp, source, artifact_dir) = screencapture_fixture();
+        let ghost = source.with_file_name("Screenshot 1999-01-01 at 00.00.00.png");
+        let input = format!(
+            "missing {} regular /tmp/notes.txt mention @README.md quote \"no file\"",
+            ghost.display()
+        );
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+        assert_eq!(out, input);
+        assert!(std::fs::read_dir(&artifact_dir).is_err());
+        let _ = tmp;
+    }
+
+    #[test]
+    fn single_quoted_prose_does_not_block_a_real_reference() {
+        let (tmp, source, artifact_dir) = screencapture_fixture();
+        let disp = source.display().to_string();
+        // The `'` pair encloses the path but is prose, not a quoted path.
+        let input = format!("'check {disp} is here' please");
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+        let stable = artifact_dir.join("Screenshot 2026-08-10-01.09.39 截图.png");
+        assert!(out.contains(&stable.display().to_string()), "got: {out}");
+        assert!(!out.contains(&disp), "got: {out}");
+        let _ = tmp;
+    }
+
+    #[test]
+    fn handles_leading_delimiters_on_unquoted_pastes() {
+        let (tmp, source, artifact_dir) = screencapture_fixture();
+        let disp = source.display().to_string();
+        // Paren-wrapped paste: the `(` rides on the first path token, and an
+        // unquoted `@`-prefixed paste keeps its `@` in the rewritten text.
+        let input = format!("see ({disp}) and also @{disp} thanks");
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+        let stable = artifact_dir.join("Screenshot 2026-08-10-01.09.39 截图.png");
+        let stable_disp = stable.display().to_string();
+        assert_eq!(out.matches(&stable_disp).count(), 2, "got: {out}");
+        assert!(out.contains(&format!("({stable_disp})")), "got: {out}");
+        assert!(out.contains(&format!("@{stable_disp}")), "got: {out}");
+        assert!(!out.contains(&disp), "got: {out}");
+        let _ = tmp;
+    }
+
+    #[test]
+    fn handles_a_multibyte_final_filename_char() {
+        let tmp = TempDir::new().expect("tempdir");
+        let source_dir = tmp
+            .path()
+            .join("Temporary Items")
+            .join("NSIRD_screencaptureui_9B2C");
+        std::fs::create_dir_all(&source_dir).expect("mkdir");
+        // No ASCII extension: the reference span ends on a CJK code point.
+        let source = source_dir.join("截图");
+        std::fs::write(&source, b"screenshot").expect("write");
+        let artifact_dir = tmp.path().join("attachments");
+        let input = format!("here {} it is", source.display());
+        let out = stabilize_screenshot_references(&input, &artifact_dir);
+        let stable = artifact_dir.join("截图");
+        assert!(out.contains(&stable.display().to_string()), "got: {out}");
+        assert!(!out.contains(&source.display().to_string()), "got: {out}");
+        let _ = tmp;
+    }
+
+    #[test]
+    fn keeps_the_original_reference_when_the_copy_fails() {
+        let (tmp, source, _) = screencapture_fixture();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("write");
+        // create_dir_all under a regular file must fail.
+        let bad_artifact_dir = blocker.join("attachments");
+        let input = format!("see \"{}\"", source.display());
+        let out = stabilize_screenshot_references(&input, &bad_artifact_dir);
+        assert_eq!(out, input);
+        assert!(source.is_file());
+        let _ = tmp;
     }
 }

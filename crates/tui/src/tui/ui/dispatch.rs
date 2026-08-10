@@ -323,8 +323,15 @@ pub(crate) fn queued_message_content_for_app(
         app.mention_walk_depth,
         app.workspace_follow_symlinks,
     );
-    let user_request = crate::tui::file_mention::user_request_with_file_mentions_cached(
+    // Stabilize macOS screencapture temp references before anything else sees
+    // the text: macOS deletes those Temporary Items dirs minutes after capture.
+    let stabilization_dir = crate::tui::file_mention::screenshot_stabilization_dir(&app.workspace);
+    let display = crate::tui::file_mention::stabilize_screenshot_references(
         &message.display,
+        &stabilization_dir,
+    );
+    let user_request = crate::tui::file_mention::user_request_with_file_mentions_cached(
+        &display,
         &app.workspace,
         cwd,
         git_cache,
