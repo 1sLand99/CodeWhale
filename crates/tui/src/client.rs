@@ -3082,6 +3082,25 @@ pub(super) fn system_to_instructions(system: Option<SystemPrompt>) -> Option<Str
     }
 }
 
+/// Write DeepSeek's Chat Completions thinking controls from the shared tier
+/// table.
+///
+/// The table (`client::deepseek_effort`) is the only place the tier ladder is
+/// written down; this function is just the Chat wire's spelling of it. An
+/// effort string the table does not name is not a DeepSeek tier request, so
+/// nothing is written rather than guessing a field the user did not ask for.
+fn apply_deepseek_chat_reasoning_effort(body: &mut Value, normalized: &str) {
+    let Some(tier) = deepseek_effort::deepseek_effort_tier(normalized) else {
+        return;
+    };
+    if let Some(value) = tier.chat_reasoning_effort() {
+        body["reasoning_effort"] = json!(value);
+    }
+    body["thinking"] = json!({
+        "type": if tier.chat_thinking_enabled() { "enabled" } else { "disabled" },
+    });
+}
+
 pub(super) fn apply_reasoning_effort(
     body: &mut Value,
     effort: Option<&str>,
@@ -3091,11 +3110,19 @@ pub(super) fn apply_reasoning_effort(
         return;
     };
     let normalized = effort.trim().to_ascii_lowercase();
+    // DeepSeek's first-party routes read their tier ladder from the one
+    // annotated table (`client::deepseek_effort`), shared with the Responses
+    // wire, so a documented mapping change is a single edit. Every other
+    // provider keeps its own dialect below.
+    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+        apply_deepseek_chat_reasoning_effort(body, &normalized);
+        return;
+    }
     match normalized.as_str() {
         "off" | "disabled" | "none" | "false" => match provider {
-            ApiProvider::Deepseek
-            | ApiProvider::DeepseekCN
-            | ApiProvider::Openrouter
+            // Handled by the shared DeepSeek table above, before this match.
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {}
+            ApiProvider::Openrouter
             | ApiProvider::XiaomiMimo
             | ApiProvider::Novita
             | ApiProvider::Siliconflow
@@ -3184,26 +3211,8 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Mistral => {}
         },
         "low" | "minimal" | "medium" | "mid" | "high" | "" => match provider {
-            // DeepSeek first-party Chat Completions: the wire documents
-            // exactly three `reasoning_effort` values — `low`, `high`, `max`
-            // (https://api-docs.deepseek.com/api/create-chat-completion) —
-            // plus the `thinking` on/off toggle. There is no `medium` on the
-            // wire, so the honest ladder is:
-            //   low/minimal → "low"  (a real cheaper tier; it used to be
-            //                         collapsed onto high, so no tier below
-            //                         high existed — FINISH-0.9.4 #52)
-            //   medium/mid  → "high" (nearest documented tier; the wire has
-            //                         no medium and the server default in
-            //                         thinking mode is also high)
-            //   high/""     → "high"
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                let value = match normalized.as_str() {
-                    "low" | "minimal" => "low",
-                    _ => "high",
-                };
-                body["reasoning_effort"] = json!(value);
-                body["thinking"] = json!({ "type": "enabled" });
-            }
+            // Handled by the shared DeepSeek table above, before this match.
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {}
             // DeepSeek-compatible hosted routes: low/medium both map to high.
             // Their own wire contracts are not verified here, so the historic
             // collapse stays rather than inventing unsupported wire values.
@@ -3307,9 +3316,9 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Mistral => {}
         },
         "xhigh" | "max" | "highest" | "ultracode" => match provider {
-            ApiProvider::Deepseek
-            | ApiProvider::DeepseekCN
-            | ApiProvider::Siliconflow
+            // Handled by the shared DeepSeek table above, before this match.
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {}
+            ApiProvider::Siliconflow
             | ApiProvider::SiliconflowCn
             | ApiProvider::Sglang
             | ApiProvider::Volcengine
@@ -3528,6 +3537,7 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
+mod deepseek_effort;
 mod prepared;
 mod provider_native_search;
 mod responses;
@@ -7446,6 +7456,53 @@ mod tests {
                 "hosted route {provider:?} keeps the collapse"
             );
         }
+    }
+
+    /// #5055: the Chat and Responses DeepSeek mappings are two spellings of
+    /// one table. If they ever disagree, one of them was edited alone.
+    #[test]
+    fn deepseek_chat_and_responses_wires_agree_with_the_shared_effort_table() {
+        use super::deepseek_effort::{
+            DEEPSEEK_DEFAULT_EFFORT_TIER, DEEPSEEK_EFFORT_ALIASES, deepseek_effort_tier,
+        };
+
+        for &(alias, tier) in DEEPSEEK_EFFORT_ALIASES {
+            for provider in [ApiProvider::Deepseek, ApiProvider::DeepseekCN] {
+                let mut body = json!({});
+                apply_reasoning_effort(&mut body, Some(alias), provider);
+                assert_eq!(
+                    body.get("reasoning_effort").and_then(Value::as_str),
+                    tier.chat_reasoning_effort(),
+                    "chat wire disagrees with the table for {alias:?} on {provider:?}"
+                );
+                assert_eq!(
+                    body.pointer("/thinking/type").and_then(Value::as_str),
+                    Some(if tier.chat_thinking_enabled() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }),
+                    "chat thinking toggle disagrees with the table for {alias:?}"
+                );
+            }
+
+            assert_eq!(
+                super::responses::responses_reasoning_effort(alias, true),
+                Some(tier.responses_effort()),
+                "responses wire disagrees with the table for {alias:?}"
+            );
+        }
+
+        // A spelling the table does not name: the Chat wire writes nothing,
+        // the Responses wire must still send a documented label.
+        assert_eq!(deepseek_effort_tier("auto"), None);
+        let mut body = json!({});
+        apply_reasoning_effort(&mut body, Some("auto"), ApiProvider::Deepseek);
+        assert_eq!(body, json!({}));
+        assert_eq!(
+            super::responses::responses_reasoning_effort("auto", true),
+            Some(DEEPSEEK_DEFAULT_EFFORT_TIER.responses_effort())
+        );
     }
 
     async fn capture_deepseek_chat_body_for_effort(effort: Option<&str>) -> Value {

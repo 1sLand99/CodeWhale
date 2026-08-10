@@ -766,22 +766,19 @@ fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static str> {
+/// DeepSeek's Responses wire spelling of the shared tier table
+/// (`client::deepseek_effort`), which is the single annotated source for the
+/// tier ladder — including the documented `"none"` off tier, so the picker's
+/// Off entry stays off instead of collapsing into a still-thinking low.
+///
+/// Unlike the Chat wire, this endpoint must send *some* documented label once
+/// an effort is requested at all, so unknown/automatic tiers normalize to the
+/// table's default tier rather than writing nothing.
+pub(super) fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static str> {
     if !is_deepseek {
         return codex_responses_reasoning_effort(raw);
     }
-    match raw.trim().to_ascii_lowercase().as_str() {
-        // DeepSeek's Responses API documents `reasoning.effort: "none"` as the
-        // thinking-off tier; the picker offers Off for flash, so it must stay
-        // "none" on the wire instead of collapsing into low (still thinking).
-        "off" | "disabled" | "none" | "false" => Some("none"),
-        "minimal" | "low" => Some("low"),
-        "xhigh" | "max" | "maximum" | "ultracode" => Some("max"),
-        // DeepSeek maps both low and medium to its normal high tier in
-        // thinking mode. Preserve explicit low for Codex compatibility, and
-        // normalize every remaining/automatic tier to a documented value.
-        _ => Some("high"),
-    }
+    Some(super::deepseek_effort::deepseek_effort_tier_or_default(raw).responses_effort())
 }
 
 fn responses_event_error_details(event: &Value) -> (String, String) {
