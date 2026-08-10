@@ -10,10 +10,8 @@ use std::path::Path;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
-use codewhale_config::route::RouteLimits;
-
 use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens_conservative};
-use crate::config::{ApiProvider, Config};
+use crate::config::Config;
 use crate::context_budget::PressureLevel;
 use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
 use crate::prompts::{CORE_EXECUTION_PROFILE_PROMPT, Personality};
@@ -212,12 +210,12 @@ impl ReportBuilder {
         self.entries.push(entry);
     }
 
+    /// The window arrives as one resolution rather than a number plus a
+    /// separately chosen label, so the report can never attribute one rung's
+    /// tokens to another rung.
     fn finish(
         self,
-        provider: ApiProvider,
-        model: &str,
-        route_limits: Option<RouteLimits>,
-        context_window_source: Option<crate::route_runtime::ContextWindowSource>,
+        context_window: crate::route_runtime::ContextWindowResolution,
         active_context_estimated_tokens: usize,
         note: impl Into<String>,
     ) -> PromptSourceMap {
@@ -226,23 +224,16 @@ impl ReportBuilder {
             .iter()
             .map(|entry| entry.estimated_tokens)
             .sum();
-        // Overlay the resolved route's context window when known, falling back
-        // to the provider+model capability matrix (route_context_window_tokens
-        // always yields a concrete value, so this is never None at runtime).
-        let context_window_tokens =
-            Some(route_context_window_tokens(provider, model, route_limits));
-        let budget_used_percent = context_window_tokens.map(|window| {
-            ((active_context_estimated_tokens as f64 / f64::from(window)) * 100.0).clamp(0.0, 100.0)
-        });
+        let budget_used_percent =
+            ((active_context_estimated_tokens as f64 / f64::from(context_window.tokens)) * 100.0)
+                .clamp(0.0, 100.0);
         PromptSourceMap {
             entries: self.entries,
             total_estimated_tokens,
             active_context_estimated_tokens,
-            context_window_tokens,
-            context_window_source: context_window_source
-                .map(crate::route_runtime::ContextWindowSource::label)
-                .map(str::to_string),
-            budget_used_percent,
+            context_window_tokens: Some(context_window.tokens),
+            context_window_source: Some(context_window.source.label().to_string()),
+            budget_used_percent: Some(budget_used_percent),
             generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             note: note.into(),
         }
@@ -263,11 +254,14 @@ pub fn build_context_report(app: &App) -> PromptSourceMap {
     add_app_runtime_entries(&mut builder, app);
     let active_context_estimated_tokens =
         estimate_input_tokens_conservative(&app.api_messages, app.system_prompt.as_ref());
+    // The host still stores the rung apart from the number; pair them against
+    // the same route limits the pressure meter reads.
+    let context_window = crate::route_runtime::ContextWindowResolution {
+        tokens: route_context_window_tokens(app.api_provider, &app.model, app.active_route_limits),
+        source: app.active_context_window_source,
+    };
     builder.finish(
-        app.api_provider,
-        &app.model,
-        app.active_route_limits,
-        Some(app.active_context_window_source),
+        context_window,
         active_context_estimated_tokens,
         "Diagnostic source map. Token counts are conservative estimates and may differ from provider billing.",
     )
@@ -318,12 +312,19 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
     let provider = config.api_provider();
     let provider_identity = config.provider_identity_for(provider);
     let route = crate::route_runtime::resolve_runtime_route(config, provider, Some(&model)).ok();
-    let route_limits = route.as_ref().map(|route| route.candidate.limits());
-    let context_window_source = route
-        .as_ref()
-        .map(|route| route.context_window.source)
-        .unwrap_or(crate::route_runtime::ContextWindowSource::Fallback);
-    let context_window = route_context_window_tokens(provider, &model, route_limits);
+    // A route we could not resolve does not erase an operator-configured
+    // window: doctor must report the same number the session would use.
+    let context_window = route.as_ref().map_or_else(
+        || {
+            crate::route_runtime::resolve_context_window(
+                provider,
+                &model,
+                None,
+                config.context_window_for_provider_config(provider),
+            )
+        },
+        |route| route.context_window,
+    );
     let global_skills_dir = config.skills_dir();
     let selected_skills_dir =
         crate::tui::app::resolve_skills_dir(workspace, &global_skills_dir, config);
@@ -371,8 +372,8 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
             "provider: {}\nmodel: {}\ncontext_window: {}\ncontext_window_source: {}",
             provider_identity,
             model,
-            context_window,
-            context_window_source.label()
+            context_window.tokens,
+            context_window.source.label()
         ),
         CountingConfidence::Approximate,
         None,
@@ -384,10 +385,7 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         .map(|entry| entry.estimated_tokens)
         .sum();
     builder.finish(
-        provider,
-        &model,
-        route_limits,
-        Some(context_window_source),
+        context_window,
         active_context_estimated_tokens,
         "Headless diagnostic source map. Conversation, tool results, and live TUI state are unavailable in doctor mode.",
     )
@@ -829,11 +827,19 @@ pub fn format_context_report(report: &PromptSourceMap) -> String {
             let source = report
                 .context_window_source
                 .as_deref()
-                .unwrap_or("fallback");
-            let source_label = if source == "fallback" {
-                "fallback (unknown model — using 128K default; set `providers.<name>.context_window` if this model serves a larger window)"
+                .unwrap_or_else(|| crate::route_runtime::ContextWindowSource::Fallback.label());
+            // An unverified rung is a guess about the window printed on this
+            // same line; it must not claim a fixed 128K default the capability
+            // matrix may not hold. A label from no known rung is no evidence
+            // either, so it reads the same way.
+            let source_label = if crate::route_runtime::ContextWindowSource::from_label(source)
+                .is_some_and(crate::route_runtime::ContextWindowSource::is_verified)
+            {
+                source.to_string()
             } else {
-                source
+                format!(
+                    "{source} (unverified — nothing describes this model, so this window is a guess)"
+                )
             };
             let _ = writeln!(
                 out,
@@ -941,8 +947,10 @@ pub fn prompt_context_json(context: &PromptContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::models::Tool;
+    use crate::route_runtime::{ContextWindowResolution, ContextWindowSource};
+    use codewhale_config::route::RouteLimits;
     use std::fs;
     use tempfile::tempdir;
 
@@ -978,10 +986,10 @@ mod tests {
         ));
         add_message_entries(&mut builder, &messages);
         let report = builder.finish(
-            ApiProvider::Deepseek,
-            "deepseek-v4-pro",
-            None,
-            Some(crate::route_runtime::ContextWindowSource::Fallback),
+            ContextWindowResolution {
+                tokens: 128_000,
+                source: ContextWindowSource::Fallback,
+            },
             123,
             "test",
         );
@@ -1090,6 +1098,57 @@ mod tests {
 
         assert_eq!(report.context_window_tokens, Some(1_048_576));
         assert_eq!(report.context_window_source.as_deref(), Some("configured"));
+    }
+
+    fn private_deployment_config(context_window: Option<u32>) -> Config {
+        Config {
+            provider: Some("custom".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "custom".to_string(),
+                    crate::config::ProviderConfig {
+                        api_key: Some("test-private-key".to_string()),
+                        base_url: Some("https://private.test/v1".to_string()),
+                        model: Some("private-1m-deployment-v9".to_string()),
+                        context_window,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// #5239: a privately deployed id nobody catalogs, with an operator
+    /// override, is a 1M route in the report — no route-resolution outcome may
+    /// silently substitute the legacy window.
+    #[test]
+    fn headless_context_report_honors_a_private_model_context_override() {
+        let tmp = tempdir().expect("workspace");
+
+        let report =
+            build_headless_context_report(&private_deployment_config(Some(1_048_576)), tmp.path());
+
+        assert_eq!(report.context_window_tokens, Some(1_048_576));
+        assert_eq!(report.context_window_source.as_deref(), Some("configured"));
+    }
+
+    /// The same id without an override is a guess, and the report must say so
+    /// against the window it actually used.
+    #[test]
+    fn headless_context_report_marks_an_unknown_private_model_unverified() {
+        let tmp = tempdir().expect("workspace");
+
+        let report = build_headless_context_report(&private_deployment_config(None), tmp.path());
+
+        assert_eq!(report.context_window_source.as_deref(), Some("fallback"));
+        let formatted = format_context_report(&report);
+        assert!(formatted.contains("this window is a guess"), "{formatted}");
+        assert!(
+            !formatted.contains("128K"),
+            "the fallback rung must not assert a window it did not read: {formatted}"
+        );
     }
 
     #[test]
@@ -1292,10 +1351,10 @@ mod tests {
             Some(7),
         ));
         let report = builder.finish(
-            ApiProvider::Deepseek,
-            "deepseek-v4-pro",
-            None,
-            Some(crate::route_runtime::ContextWindowSource::Fallback),
+            ContextWindowResolution {
+                tokens: 128_000,
+                source: ContextWindowSource::Fallback,
+            },
             525,
             "test",
         );
@@ -1323,17 +1382,19 @@ mod tests {
             input_tokens: None,
             output_tokens: None,
         };
-        let builder = ReportBuilder::new();
-        let report = builder.finish(
+        let resolved = crate::route_runtime::resolve_context_window(
             ApiProvider::Deepseek,
             "deepseek-v4-pro",
             Some(limits),
-            Some(crate::route_runtime::ContextWindowSource::Catalog),
-            10_000,
-            "test",
+            None,
         );
+        assert_eq!(resolved.source, ContextWindowSource::Catalog);
+
+        let builder = ReportBuilder::new();
+        let report = builder.finish(resolved, 10_000, "test");
 
         assert_eq!(report.context_window_tokens, Some(route_window as u32));
+        assert_eq!(report.context_window_source.as_deref(), Some("catalog"));
         // Budget percent is computed against the route window, not the default.
         let expected = (10_000.0 / route_window as f64) * 100.0;
         let actual = report.budget_used_percent.expect("window known");

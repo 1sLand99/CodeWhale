@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use codewhale_config::route::{
-    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteRequest, RouteResolver,
-    SourcedLimitOverride, WireModelId,
+    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteLimits, RouteRequest,
+    RouteResolver, SourcedLimitOverride, WireModelId,
 };
 use serde::Serialize;
 
@@ -29,6 +29,15 @@ pub(crate) enum ContextWindowSource {
 }
 
 impl ContextWindowSource {
+    /// Every rung, in precedence order.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Configured,
+        Self::ProviderReported,
+        Self::StaticKimiCodeSafeFloor,
+        Self::Catalog,
+        Self::Fallback,
+    ];
+
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -39,6 +48,22 @@ impl ContextWindowSource {
             Self::Fallback => "fallback",
         }
     }
+
+    /// Recover the rung a serialized report wrote, so a surface holding only
+    /// the label still reads verification off the enum instead of matching
+    /// strings.  An unrecognized label is nobody's rung.
+    #[must_use]
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rung| rung.label() == label)
+    }
+
+    /// Whether the window rests on evidence about this exact route.  The
+    /// fallback rung is a guess made because nothing described the model, so
+    /// no surface may present it as a capability we checked.
+    #[must_use]
+    pub(crate) const fn is_verified(self) -> bool {
+        !matches!(self, Self::Fallback)
+    }
 }
 
 /// Context window carried alongside an exact runtime route.
@@ -46,6 +71,48 @@ impl ContextWindowSource {
 pub(crate) struct ContextWindowResolution {
     pub(crate) tokens: u32,
     pub(crate) source: ContextWindowSource,
+}
+
+/// Resolve the effective context window for a host holding no fully resolved
+/// route candidate: an `auto` selection, a model switch that keeps the current
+/// endpoint, or a route resolution that failed.
+///
+/// Only the rungs derivable without an endpoint-scoped candidate are reachable
+/// here — operator config, then offering/catalog limits, then the conservative
+/// capability fallback.  The provider-reported and Kimi Code safe-floor rungs
+/// need a resolved candidate and stay in [`plan_limit_overrides`].
+///
+/// The catalog predicate must stay identical to the one in
+/// [`crate::route_budget::route_context_window_tokens`]: the pressure meter and
+/// compaction trigger read their number from there, so any divergence would
+/// print one rung's number under another rung's label.
+#[must_use]
+pub(crate) fn resolve_context_window(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<RouteLimits>,
+    context_window_override: Option<u32>,
+) -> ContextWindowResolution {
+    if let Some(tokens) = context_window_override.filter(|tokens| *tokens > 0) {
+        return ContextWindowResolution {
+            tokens,
+            source: ContextWindowSource::Configured,
+        };
+    }
+    if let Some(tokens) = route_limits
+        .and_then(|limits| limits.context_tokens)
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+    {
+        return ContextWindowResolution {
+            tokens,
+            source: ContextWindowSource::Catalog,
+        };
+    }
+    ContextWindowResolution {
+        tokens: crate::route_budget::route_context_window_tokens(provider, model, None),
+        source: ContextWindowSource::Fallback,
+    }
 }
 
 /// Authenticated Kimi Code `/models` metadata that a caller has already
@@ -640,6 +707,107 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
+
+    /// Every rung keeps its own label and round-trips through it, and only the
+    /// fallback reads as unverified.  Two rungs sharing a label would let a
+    /// guess be displayed as evidence.
+    #[test]
+    fn every_context_window_rung_round_trips_its_own_label() {
+        let mut seen = Vec::new();
+        for source in ContextWindowSource::ALL {
+            let label = source.label();
+            assert!(!label.is_empty(), "{source:?} must carry a label");
+            assert!(
+                !seen.contains(&label),
+                "{source:?} reuses the label {label}"
+            );
+            seen.push(label);
+            assert_eq!(ContextWindowSource::from_label(label), Some(source));
+            assert_eq!(
+                source.is_verified(),
+                source != ContextWindowSource::Fallback,
+                "{source:?} misreports whether its window rests on route evidence"
+            );
+        }
+        assert_eq!(ContextWindowSource::from_label("configured "), None);
+    }
+
+    /// #5239: an id nothing describes must land on the fallback rung and say
+    /// so, rather than borrowing the configured rung's authority for a guess.
+    #[test]
+    fn unknown_model_resolves_to_the_honest_fallback_rung() {
+        let resolved =
+            resolve_context_window(ApiProvider::Custom, "private-1m-deployment-v9", None, None);
+
+        assert_eq!(resolved.source, ContextWindowSource::Fallback);
+        assert_eq!(resolved.source.label(), "fallback");
+        assert!(!resolved.source.is_verified());
+        assert_eq!(
+            resolved.tokens,
+            crate::route_budget::route_context_window_tokens(
+                ApiProvider::Custom,
+                "private-1m-deployment-v9",
+                None,
+            )
+        );
+    }
+
+    /// The same unknown id with an operator override is a configured 1M route,
+    /// not a 128K one — and the rung must say which of the two it is.
+    #[test]
+    fn configured_override_outranks_offering_limits_and_the_fallback() {
+        let offering = Some(RouteLimits {
+            context_tokens: Some(131_072),
+            ..RouteLimits::default()
+        });
+
+        for limits in [None, offering] {
+            let resolved = resolve_context_window(
+                ApiProvider::Custom,
+                "private-1m-deployment-v9",
+                limits,
+                Some(1_048_576),
+            );
+            assert_eq!(resolved.tokens, 1_048_576);
+            assert_eq!(resolved.source, ContextWindowSource::Configured);
+        }
+
+        let catalog = resolve_context_window(
+            ApiProvider::Custom,
+            "private-1m-deployment-v9",
+            offering,
+            None,
+        );
+        assert_eq!(catalog.tokens, 131_072);
+        assert_eq!(catalog.source, ContextWindowSource::Catalog);
+    }
+
+    /// A zero or absent override is not a configuration decision; it must not
+    /// promote a guess to the configured rung.
+    #[test]
+    fn empty_override_and_empty_offering_stay_on_the_fallback_rung() {
+        for (limits, over) in [
+            (None, Some(0)),
+            (
+                Some(RouteLimits {
+                    context_tokens: Some(0),
+                    ..RouteLimits::default()
+                }),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                resolve_context_window(
+                    ApiProvider::Custom,
+                    "private-1m-deployment-v9",
+                    limits,
+                    over
+                )
+                .source,
+                ContextWindowSource::Fallback
+            );
+        }
+    }
 
     #[test]
     fn resolved_runtime_route_keeps_large_config_off_async_stacks() {
