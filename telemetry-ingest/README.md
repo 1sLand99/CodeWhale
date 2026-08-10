@@ -152,7 +152,7 @@ the ones that will produce the next one.
 ```sh
 cd telemetry-ingest
 npm install
-npm test                    # 87 tests, including the doc weld and the IP guard
+npm test                    # 109 tests, including the doc weld and the IP guard
 npx wrangler deploy --dry-run --outdir=.wrangler/dry-run   # no account touched
 npx wrangler deploy         # <- the only command that publishes anything
 ```
@@ -218,25 +218,47 @@ the moment it goes over.
 
 ## Owner reports and queries
 
-The routine daily-active report is a checked-in command rather than SQL copied
+The routine activity report is a checked-in command rather than SQL copied
 from a chat:
 
 ```sh
-CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:dau -- --days 14
-CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:dau -- --days 14 --json
+CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:active-installs
+CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:active-installs -- --days 30 --json
 ```
 
-It reports **observed active installs by UTC day**, defined as distinct random
-`install_id` values that produced a `session_start` event that day, plus the
-weighted number of sessions started. This is not a person count: the id is per
-installation, rotates every 90 days, and is deleted on opt-out. Before v0.9.6
-the metric is an opt-in lower bound; v0.9.6 makes it default-on but it remains a
-lower bound because opt-outs, offline shutdowns, dropped flushes, old binaries,
-and Analytics Engine sampling can all remove observations.
+The metric is **observed active installs by UTC day**: distinct rotating
+anonymous `install_id` values that produced a `session_start` event that day,
+plus the weighted number of sessions started. It is never a count of people,
+accounts, or total installs, and the report says so next to the numbers.
+`npm run report:dau` still works — `scripts/report-dau.mjs` is a pure
+re-export of the canonical `scripts/report-active-installs.mjs`, kept only so
+the old name keeps working — but the canonical name matches what the number
+actually is.
 
-The token needs **Account → Account Analytics → Read**. The report performs one
-read-only SQL request, does not print credentials, and rejects windows beyond
-Analytics Engine's fixed 90-day retention.
+One command produces all four things the ledger asks for:
+
+- the **daily series** (default `--days 15` — 14 complete UTC days plus the
+  partial current day, marked `*`);
+- a **7-day trend** over complete UTC days only: the last 7 days' sum of
+  daily observed active installs against the previous 7, with the percentage
+  change. When the window cannot cover both sides it says so instead of
+  printing zeros;
+- **event freshness**: the timestamp of the newest ingested event of any kind
+  and how stale it is, or a plain statement that nothing has been ingested;
+- the **coverage caveats, printed with the numbers** in both text and
+  `--json` modes: clients older than the telemetry feature, opted-out
+  installs, and non-emitting environments (kill switches, fleet workers,
+  offline shutdowns, dropped flushes) are invisible, so every count is a
+  lower bound; and the 90-day id rotation means week-over-week comparisons
+  are not a retention metric.
+
+The token needs **Account → Account Analytics → Read**. The report performs
+two read-only SQL requests (the series and the freshness probe), does not
+print credentials, and rejects windows beyond Analytics Engine's fixed 90-day
+retention. Its read path is pinned by `test/report-active-installs.test.ts`:
+the install id appears only inside `count(DISTINCT …)`, no payload column
+(`blob2`+, `double*`) is ever selected, and the output wording can never label
+the result as users, people, or accounts.
 
 The underlying ad-hoc queries are one query each, which is what the column
 layout was chosen for. Run them against the SQL API:
@@ -351,7 +373,7 @@ per-request entries at all.
 
 ```sh
 npm install
-npm test          # vitest, 87 tests
+npm test          # vitest, 109 tests
 npm run typecheck # tsc --noEmit
 npm run check     # wrangler deploy --dry-run — touches no account
 npm run dev       # wrangler dev --local

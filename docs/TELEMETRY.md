@@ -305,6 +305,19 @@ Batches are **IP-stripped at ingest**. No IP is stored, logged, or joined to `in
 
 **Turning it off deletes what was kept locally, not what was already sent.** `codewhale config set telemetry false` erases the install id, the buffer, and the dry-run records on your machine, and stops anything further. Rows already accepted by the endpoint are keyed only by a rotating random id that is now gone; they age out with the three-month window. There is no deletion API, and this document does not claim one.
 
+### What the owner reads back — observed active installs
+
+The one product metric derived from this data is **observed active installs**: the number of distinct rotating anonymous install ids that produced a `session_start` event on a UTC day. That is the whole definition. It is not a count of people, not a count of accounts, and not a count of total installs — the id is per installation, rotates every 90 days, and is deleted on opt-out, so no number derived from it can be any of those things.
+
+The exact owner command is checked into the repository, so the routine query is reviewable code rather than SQL pasted from a chat:
+
+```sh
+cd telemetry-ingest
+CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:active-installs
+```
+
+It prints the daily series, a 7-day trend over complete UTC days, the freshness of the newest ingested event, and — with the numbers, in both text and `--json` output — the coverage caveats: clients older than the telemetry feature, opted-out installs, and non-emitting environments (kill switches, fleet workers, offline shutdowns, dropped flushes) are invisible, so every count is a lower bound; and because ids rotate, week-over-week comparisons are not a retention metric. The report's read path is itself tested: the install id appears only inside an aggregate, no payload column is selected, and the wording can never drift into calling the result users. (`npm run report:dau` remains as a compatibility alias for the same report.)
+
 ### What is never collected — the public red-line list
 
 Prompts; completions; tool arguments; diffs; patches; file contents; filenames; absolute or relative paths; git remotes; repo names; branch names; workspace commit SHAs; memory entries; chat history; API keys, tokens, cookies, or `Authorization` headers (including any boolean asserting a key exists); model ids of any kind; custom provider table names; MCP server names, commands, or URLs; approval rule text; error message bodies; panic message text; per-event timestamps; keystrokes; clipboard; screenshots; microphone; camera; location; and any third-party ad or analytics SDK — there are none in the runtime binary and none may be added.
