@@ -1669,7 +1669,7 @@ fn parse_inline_spans(line: &str, base_style: Style, link_style: Style) -> Vec<I
                 out.push(InlineToken::new(
                     text.to_string(),
                     link_style,
-                    normalized_http_link_target(url),
+                    normalized_link_target(url),
                 ));
                 rest = &after_bracket[paren_end + 1..];
                 continue;
@@ -1705,11 +1705,35 @@ fn parse_inline_spans(line: &str, base_style: Style, link_style: Style) -> Vec<I
     out
 }
 
+/// Normalize an explicit markdown link destination, the only construct the
+/// renderer treats as a structured reference. Prose is never scanned for
+/// path-shaped text: that linkifies identifiers and version strings, and points
+/// at files that do not exist.
+fn normalized_link_target(target: &str) -> Option<String> {
+    normalized_http_link_target(target).or_else(|| normalized_file_link_target(target))
+}
+
+/// A destination that is already an absolute path, with or without the `file:`
+/// scheme. Relative destinations stay inert because this layer has no workspace
+/// root to resolve them against, and a `file://host/...` form is rejected rather
+/// than reinterpreted as local. Windows paths must therefore arrive pre-formed
+/// as `file:///C:/…`.
+fn normalized_file_link_target(target: &str) -> Option<String> {
+    let path = match target.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("file://") => &target[7..],
+        _ => target,
+    };
+    if !path.starts_with('/') || path.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return None;
+    }
+    Some(format!("file://{path}"))
+}
+
 /// OSC 8 targets produced by markdown are deliberately limited to ordinary
 /// web URLs. The browser-opening gesture is user-initiated, but accepting
 /// arbitrary schemes here would still turn untrusted model output into a
-/// `file:`, `javascript:`, or application-protocol link. Normalize the scheme
-/// and reject whitespace/control characters before metadata reaches a frame.
+/// `javascript:` or application-protocol link. Normalize the scheme and reject
+/// whitespace/control characters before metadata reaches a frame.
 fn normalized_http_link_target(target: &str) -> Option<String> {
     let (scheme, rest) = if target
         .get(..8)
@@ -2965,6 +2989,62 @@ mod tests {
             render_markdown_tagged("[docs](HTTPS://example.com/guide)", 80, Style::default());
         assert_eq!(tagged_visible(&web_link), vec!["docs"]);
         assert_eq!(web_link[0].links[0].target, "https://example.com/guide");
+    }
+
+    #[test]
+    fn named_links_target_absolute_paths_with_the_file_scheme() {
+        let rendered = render_markdown_tagged(
+            "edit [main.rs](/repo/src/main.rs) now",
+            80,
+            Style::default(),
+        );
+        assert_eq!(tagged_visible(&rendered), vec!["edit main.rs now"]);
+        assert_eq!(
+            rendered[0].links,
+            vec![osc8::LineLink {
+                col_start: 5,
+                col_end: 11,
+                target: "file:///repo/src/main.rs".to_string(),
+            }]
+        );
+
+        let explicit =
+            render_markdown_tagged("[main.rs](FILE:///repo/src/main.rs)", 80, Style::default());
+        assert_eq!(explicit[0].links[0].target, "file:///repo/src/main.rs");
+    }
+
+    #[test]
+    fn named_links_reject_relative_paths_and_smuggled_control_bytes() {
+        // Nothing here resolves a relative path against a workspace root, so a
+        // relative destination would link to whatever the terminal's cwd is.
+        let relative = render_markdown_tagged("[main.rs](src/main.rs)", 80, Style::default());
+        assert_eq!(tagged_visible(&relative), vec!["main.rs"]);
+        assert!(relative.iter().all(|line| line.links.is_empty()));
+
+        let hostile = render_markdown_tagged(
+            "[log](/tmp/a\x07b\x1b]8;;https://evil.test\x1b\\c)",
+            80,
+            Style::default(),
+        );
+        assert!(
+            hostile.iter().all(|line| line.links.is_empty()),
+            "control bytes must not reach a link target: {hostile:?}"
+        );
+
+        // A `file://host/share` destination is a remote reference, not a local
+        // path, and must not be rewritten into one.
+        let host = render_markdown_tagged("[share](file://evil.test/etc)", 80, Style::default());
+        assert!(host.iter().all(|line| line.links.is_empty()));
+    }
+
+    #[test]
+    fn bare_paths_in_prose_are_never_linkified() {
+        let rendered = render_markdown_tagged(
+            "the fix landed in /repo/src/main.rs today",
+            80,
+            Style::default(),
+        );
+        assert!(rendered.iter().all(|line| line.links.is_empty()));
     }
 
     #[test]

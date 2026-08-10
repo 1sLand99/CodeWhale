@@ -21,8 +21,9 @@
 //! emits OSC 8 escapes around the corresponding cell runs. This keeps text
 //! layout, selection, and clipboard extraction byte-for-byte identical with
 //! links enabled or disabled, including long links wrapped across rows.
-//! Markdown contributes only normalized HTTP(S) targets, and emission
-//! percent-encodes terminal control characters as defense in depth.
+//! Markdown contributes only normalized HTTP(S) and absolute `file://`
+//! targets, and emission percent-encodes terminal control characters as
+//! defense in depth.
 //!
 //! Opening is terminal-owned: supporting terminals conventionally use
 //! Cmd-click on macOS or Ctrl-click on Linux/Windows. CodeWhale does not
