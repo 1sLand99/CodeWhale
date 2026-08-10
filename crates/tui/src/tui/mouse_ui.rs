@@ -631,9 +631,23 @@ pub(crate) fn apply_sidebar_row_action(app: &mut App, action: SidebarRowAction) 
             Vec::new()
         }
         SidebarRowAction::ShowSubagentsPanel => {
-            app.work_surface.panel = crate::tui::work_surface::RailPanel::Agents;
+            use crate::tui::work_surface::RailPanel;
+            // The register header is a two-way door: opening the Agents panel
+            // from anywhere, and returning to Tasks when it is already open,
+            // so the to-do list is never one click away with no way back.
+            let target = match app.work_surface.panel {
+                RailPanel::Agents => RailPanel::Tasks,
+                _ => RailPanel::Agents,
+            };
+            app.work_surface.panel = target;
             app.work_surface.focused = true;
-            app.status_message = Some("Showing subagents".to_string());
+            app.status_message = Some(
+                match target {
+                    RailPanel::Agents => "Showing subagents",
+                    _ => "Showing tasks",
+                }
+                .to_string(),
+            );
             app.needs_redraw = true;
             Vec::new()
         }
