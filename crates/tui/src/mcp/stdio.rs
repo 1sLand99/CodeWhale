@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex as TokioMutex;
 
+use super::wire::MAX_MCP_RESPONSE_BYTES;
 use super::{McpServerConfig, McpTransport};
 use crate::child_env;
 
@@ -310,7 +311,7 @@ impl McpTransport for StdioTransport {
             let bytes = match read_line_capped(
                 &mut self.reader,
                 &mut line_bytes,
-                super::MAX_MCP_RESPONSE_BYTES,
+                MAX_MCP_RESPONSE_BYTES,
             )
             .await
             {

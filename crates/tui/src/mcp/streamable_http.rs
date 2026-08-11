@@ -5,10 +5,8 @@ use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
-use super::{
-    ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, bounded_body_excerpt, mask_url_secrets,
-    parse_sse_message_data,
-};
+use super::wire::{MAX_MCP_RESPONSE_BYTES, parse_sse_message_data};
+use super::{ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, bounded_body_excerpt, mask_url_secrets};
 
 pub(super) struct StreamableHttpTransport {
     pub(super) client: reqwest::Client,
@@ -121,14 +119,14 @@ impl StreamableHttpTransport {
         // responses cannot OOM us either — Content-Length alone does not
         // protect against a server that streams without declaring a length.
         if let Some(len) = response.content_length()
-            && len > super::MAX_MCP_RESPONSE_BYTES as u64
+            && len > MAX_MCP_RESPONSE_BYTES as u64
         {
             return Err(StreamableSendError::Other(anyhow::anyhow!(
                 "MCP response Content-Length {len} exceeds {} bytes — aborting",
-                super::MAX_MCP_RESPONSE_BYTES
+                MAX_MCP_RESPONSE_BYTES
             )));
         }
-        let body = read_body_capped(response, super::MAX_MCP_RESPONSE_BYTES)
+        let body = read_body_capped(response, MAX_MCP_RESPONSE_BYTES)
             .await
             .map_err(StreamableSendError::Other)?;
         self.store_response_body(content_type.as_deref(), &body)

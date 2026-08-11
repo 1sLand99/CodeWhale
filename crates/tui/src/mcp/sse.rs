@@ -3,10 +3,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
-use super::{
-    ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, McpTransport, bounded_body_excerpt,
-    find_sse_event_separator_bytes, is_mcp_stale_session_body, mask_url_secrets, sse_field_value,
+use super::wire::{
+    MAX_SSE_FRAME_BYTES, find_sse_event_separator_bytes, is_mcp_stale_session_body, sse_field_value,
 };
+use super::{ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, McpTransport, bounded_body_excerpt, mask_url_secrets};
 
 const SSE_INBOUND_CHANNEL_CAPACITY: usize = 4;
 
@@ -152,10 +152,10 @@ impl SseTransport {
             };
             let chunk = item?;
             buffer.extend_from_slice(&chunk);
-            if buffer.len() > super::MAX_SSE_FRAME_BYTES {
+            if buffer.len() > MAX_SSE_FRAME_BYTES {
                 anyhow::bail!(
                     "MCP SSE frame exceeded {} bytes without a separator — aborting",
-                    super::MAX_SSE_FRAME_BYTES
+                    MAX_SSE_FRAME_BYTES
                 );
             }
 
