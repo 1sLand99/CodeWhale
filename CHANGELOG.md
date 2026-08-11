@@ -16,8 +16,8 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 ### Added
 
-- `web_search` can use Firecrawl Cloud without an API key; keyless requests are
-  headerless and quota-bounded, while an optional user key raises the limits.
+- `web_search` defaults to Firecrawl Cloud without an API key; keyless requests
+  are headerless and quota-bounded, while an optional user key raises limits.
 - Mistral AI is a first-class provider route, including Codestral models,
   first-party reasoning support, authentication, picker entries, and aliases.
 - Headless `Bash` can transfer explicitly requested persistent Unix services

@@ -366,7 +366,7 @@ pub struct EngineConfig {
     pub strict_tool_mode: bool,
     /// Workshop / large-tool-output routing (#548). `None` disables routing.
     pub workshop: Option<crate::tools::large_output_router::WorkshopConfig>,
-    /// Which search backend `web_search` should use. Default: DuckDuckGo.
+    /// Which search backend `web_search` should use. Default: Firecrawl.
     pub search_provider: crate::config::SearchProvider,
     /// Optional Firecrawl key, or required key for other API search providers.
     /// Metaso also falls back to the `METASO_API_KEY` env var.

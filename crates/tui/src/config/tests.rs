@@ -943,8 +943,8 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
 }
 
 #[test]
-fn search_provider_defaults_to_duckduckgo() {
-    assert_eq!(SearchProvider::default(), SearchProvider::DuckDuckGo);
+fn search_provider_defaults_to_firecrawl() {
+    assert_eq!(SearchProvider::default(), SearchProvider::Firecrawl);
     assert_eq!(
         SearchProvider::parse("fire-crawl"),
         Some(SearchProvider::Firecrawl)
@@ -1130,7 +1130,7 @@ fn search_provider_resolution_reports_default_source() {
     let resolution = Config::default().search_provider_resolution();
 
     unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
-    assert_eq!(resolution.provider, SearchProvider::DuckDuckGo);
+    assert_eq!(resolution.provider, SearchProvider::Firecrawl);
     assert_eq!(resolution.source, SearchProviderSource::Default);
 }
 

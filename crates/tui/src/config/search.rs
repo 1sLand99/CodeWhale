@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Search provider enumeration — selects the first backend `web_search` uses.
-/// API-backed providers may visibly degrade through the default DuckDuckGo →
-/// Bing chain after runtime failure or an empty result. Configuration and
+/// API-backed providers may visibly degrade through DuckDuckGo → Bing after
+/// runtime failure or an empty result. Configuration and
 /// network-policy errors fail closed without crossing providers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,11 +17,11 @@ pub enum SearchProvider {
     /// Bing HTML scraping. No API key needed.
     Bing,
     /// DuckDuckGo HTML scraping with Bing fallback. No API key needed.
-    #[default]
     #[serde(alias = "duckduckgo")]
     DuckDuckGo,
     /// Firecrawl Search API. Works keyless on Firecrawl Cloud with a bounded
     /// per-IP quota; `[search] api_key` or `FIRECRAWL_API_KEY` raises limits.
+    #[default]
     Firecrawl,
     /// Tavily AI Search API (<https://tavily.com>). Requires api_key.
     Tavily,
@@ -126,7 +126,7 @@ pub struct SearchProviderResolution {
 /// Web search provider configuration (`[search]` table in config.toml).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SearchConfig {
-    /// Search provider. Default: `duckduckgo`; `firecrawl` works without a key.
+    /// Search provider. Default: keyless `firecrawl`.
     #[serde(default)]
     pub provider: Option<SearchProvider>,
     /// Optional search endpoint. With `duckduckgo`, this is a

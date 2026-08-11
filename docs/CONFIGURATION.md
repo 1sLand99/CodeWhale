@@ -2272,11 +2272,10 @@ graduate behind real gated flags.
 
 ## Web Search Provider
 
-`web_search` uses DuckDuckGo by default and does not require an API key. The
-DuckDuckGo path keeps a Bing fallback when DDG returns a bot challenge or no
-parseable results. Bing remains selectable for users who explicitly want it,
-and Firecrawl, Tavily, Bocha, Metaso, SearXNG, Baidu, Volcengine, or Sofya can
-be selected when an API-backed provider is preferred.
+`web_search` uses keyless Firecrawl by default. Runtime failure or an exhausted
+keyless quota degrades visibly through DuckDuckGo and Bing. China deployments
+can explicitly select Baidu, Metaso, Volcengine, or a trusted SearXNG endpoint;
+Codewhale does not guess geography from locale or model provider.
 
 Configured API providers are attempted first. Runtime failure or an empty
 result visibly degrades through DuckDuckGo and then Bing; the structured search

@@ -674,7 +674,7 @@ pub struct ToolExecutionState {
     /// routing (e.g. in sub-agents and test contexts to avoid recursion).
     pub large_output_router: Option<crate::tools::large_output_router::LargeOutputRouter>,
 
-    /// Which search backend `web_search` should use. Default: DuckDuckGo. Set via
+    /// Which search backend `web_search` should use. Default: Firecrawl. Set via
     /// `[search] provider` in config.toml.
     pub search_provider: crate::config::SearchProvider,
     /// Optional Firecrawl key, or required key for other API search providers.
