@@ -3,8 +3,7 @@ use super::*;
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    merge_new_runtime_mcp_tools, registered_tool_approval_required,
-    registered_tool_blocked_in_full_access, registered_tool_forces_prompt,
+    merge_new_runtime_mcp_tools, registered_tool_approval_required, registered_tool_forces_prompt,
     workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
@@ -5503,22 +5502,11 @@ fn rlm_eval_required_approval_ignores_generic_auto_approve() {
 }
 
 #[test]
-fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
-    // Security invariant (#3866): the LLM can request a runtime MCP server
-    // start, which spawns a child process / opens a network connection. That
-    // must never run without explicit user approval. Ask emits that approval;
-    // Full Access cannot show an approval modal, so planning fails closed
-    // before execute (and therefore before process/network side effects). A
-    // generic `Required` tool remains auto-approved in Full Access.
-    assert!(
-        registered_tool_approval_required("start_mcp_server", ApprovalRequirement::Required, true),
-        "start_mcp_server must require approval even when auto_approve is enabled"
-    );
-    assert!(registered_tool_approval_required(
-        "start_mcp_server",
-        ApprovalRequirement::Required,
-        true
-    ));
+fn non_bypassable_registered_tools_auto_approve_in_full_access() {
+    // #3866 reversed (owner decision, 2026-08-10): Full Access already grants
+    // everything these calls can do — shell included — so a hold that cannot
+    // open its own approval modal auto-approves instead of stranding the
+    // call. Ask, which can open the modal, still gates every one of these.
     // Registry launcher is host-constructed and cache-bound (no free-form
     // command), so Full Access auto-approves it: `--auto` automation must
     // be able to complete the discovery flow end to end. Ask still gates it.
@@ -5532,20 +5520,15 @@ fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
         ApprovalRequirement::Required,
         false
     ));
-    assert!(registered_tool_blocked_in_full_access(
+    assert!(!registered_tool_approval_required(
         "start_mcp_server",
         ApprovalRequirement::Required,
-        true,
+        true
     ));
-    assert!(registered_tool_blocked_in_full_access(
+    assert!(!registered_tool_approval_required(
         "rlm_eval",
         ApprovalRequirement::Required,
-        true,
-    ));
-    assert!(!registered_tool_blocked_in_full_access(
-        "start_registry_mcp_server",
-        ApprovalRequirement::Required,
-        true,
+        true
     ));
     assert!(registered_tool_forces_prompt(
         "start_mcp_server",
@@ -5559,10 +5542,10 @@ fn non_bypassable_registered_tools_block_without_prompt_in_full_access() {
         "rlm_eval",
         ApprovalRequirement::Required,
     ));
-    assert!(!registered_tool_blocked_in_full_access(
+    assert!(!registered_tool_approval_required(
         "exec_shell",
         ApprovalRequirement::Required,
-        true,
+        true
     ));
     assert!(
         registered_tool_approval_required("start_mcp_server", ApprovalRequirement::Required, false),
@@ -9020,12 +9003,162 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     assert!(saw_turn_complete);
 }
 
+async fn assert_full_access_model_tool_batch_runs(
+    engine_config: EngineConfig,
+    tool_calls: Vec<(&'static str, serde_json::Value)>,
+    expected_names: &[&str],
+) {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let model_tool_calls = tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            json!({
+                "index": index,
+                "id": format!("call_full_access_{index}"),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments.to_string(),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let tool_delta = json!({
+        "id": "chatcmpl-full-access-blocked",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": model_tool_calls},
+            "finish_reason": serde_json::Value::Null,
+        }],
+    });
+    let tool_finish = json!({
+        "id": "chatcmpl-full-access-blocked",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    });
+    let tool_call_sse = format!("data: {tool_delta}\n\ndata: {tool_finish}\n\ndata: [DONE]\n\n");
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &api_config);
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "exercise the Full Access auto-approval boundary".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send Full Access model turn");
+
+    let expected = expected_names
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut saw_turn_complete = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for Full Access auto-approval event")
+    {
+        match event {
+            Event::ApprovalRequired { tool_name, .. } => {
+                panic!(
+                    "Full Access must not open an approval modal for auto-approved tool {tool_name}"
+                )
+            }
+            Event::ToolCallComplete { name, result, .. } if expected.contains(name.as_str()) => {
+                if let Err(error) = &result {
+                    let message = error.to_string();
+                    assert!(
+                        !message.contains("blocked in Full Access"),
+                        "Full Access auto-approves non-bypassable tools: {message}"
+                    );
+                }
+                seen.insert(name);
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                saw_turn_complete = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "every tool must reach execution, seen: {seen:?}"
+    );
+    assert!(saw_turn_complete);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn full_access_blocks_non_bypassable_registered_tools_at_engine_boundary() {
+async fn full_access_auto_approves_non_bypassable_registered_tools() {
     let _lock = lock_test_env();
     let workspace = tempdir().expect("tempdir");
-    let marker = workspace.path().join("runtime-tool-must-not-run");
+    let marker = workspace.path().join("runtime-tool-must-run");
     let marker_literal = marker
         .to_string_lossy()
         .replace('\\', "\\\\")
@@ -9041,28 +9174,25 @@ async fn full_access_blocks_non_bypassable_registered_tools_at_engine_boundary()
         subagents_enabled: false,
         ..EngineConfig::default()
     };
-    let denial = "requires explicit approval and is blocked in Full Access";
-
-    assert_full_access_model_tool_batch_is_blocked(
+    assert_full_access_model_tool_batch_runs(
         engine_config,
         vec![
             (
                 "start_mcp_server",
-                json!({"server": start_probe, "name": "must-not-start"}),
+                json!({"server": start_probe, "name": "auto-approved"}),
             ),
             (
                 "rlm",
                 json!({"action": "eval", "name": "missing-context", "code": rlm_probe}),
             ),
         ],
-        &[("start_mcp_server", denial), ("rlm", denial)],
-        denial,
+        &["start_mcp_server", "rlm"],
     )
     .await;
 
     assert!(
-        !marker.exists(),
-        "blocked runtime tools must not start a process or evaluate code"
+        marker.exists(),
+        "Full Access auto-approves start_mcp_server, so its server command must actually run"
     );
 }
 

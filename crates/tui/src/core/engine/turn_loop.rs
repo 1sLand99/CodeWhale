@@ -52,17 +52,6 @@ pub(super) fn registered_tool_approval_required(
     )
 }
 
-pub(super) fn registered_tool_blocked_in_full_access(
-    tool_name: &str,
-    requirement: ApprovalRequirement,
-    auto_approve: bool,
-) -> bool {
-    // Full Access does not open tool-approval modals. Non-bypassable holds
-    // that would still Prompt under Full Access are blocked at the engine
-    // instead of opening a contradictory modal (#3866).
-    auto_approve && registered_tool_forces_prompt(tool_name, requirement)
-}
-
 /// The engine-side half of the in-workspace write carve-out (#5185): true
 /// when a `Suggest`-tier call is a canonical file-write tool whose targets
 /// all qualify under the default Ask posture. Callers still honor
@@ -2397,27 +2386,17 @@ impl Engine {
                 if let Some(prepared) = prepared_policy {
                     let registered_non_bypassable =
                         registered_tool_forces_prompt(&tool_name, prepared.call.approval);
-                    if registered_tool_blocked_in_full_access(
+                    approval_required = registered_tool_approval_required(
                         &tool_name,
                         prepared.call.approval,
                         prepared.auto_approve,
-                    ) {
-                        approval_required = false;
-                        blocked_error = Some(ToolError::permission_denied(format!(
-                            "Tool '{tool_name}' requires explicit approval and is blocked in Full Access because this posture does not open tool-approval prompts. Switch to Ask to review this call."
-                        )));
-                    } else {
-                        approval_required = registered_tool_approval_required(
-                            &tool_name,
-                            prepared.call.approval,
-                            prepared.auto_approve,
-                        );
-                        // Preserve the typed non-bypassable hold through UI
-                        // posture races: an Ask-planned request received after
-                        // switching to Full Access must fail closed, never take
-                        // the ordinary Full Access auto-approval path.
-                        approval_force_prompt = registered_non_bypassable;
-                    }
+                    );
+                    // Non-bypassable holds force a prompt in every posture
+                    // that can open one. Full Access auto-approves instead:
+                    // it already grants everything these calls can do, and a
+                    // gate that cannot open its own approval UI used to
+                    // strand the call entirely (#3866, reversed 2026-08-10).
+                    approval_force_prompt = registered_non_bypassable && !prepared.auto_approve;
                     approval_description = prepared.call.description;
                     supports_parallel = prepared.call.supports_parallel;
                     read_only = prepared.call.read_only;

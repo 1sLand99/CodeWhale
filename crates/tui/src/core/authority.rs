@@ -431,7 +431,15 @@ pub(crate) fn resolve_tool_permission(
         ApprovalRequirement::Auto => ToolPermission::Allow,
         ApprovalRequirement::Suggest | ApprovalRequirement::Required => {
             if is_non_bypassable {
-                return ToolPermission::Prompt;
+                // Full Access already grants everything these calls can do —
+                // shell included — so a hold that cannot open its own
+                // approval modal auto-approves instead of stranding the call.
+                // #3866 blocked here through v0.9.6; reversed 2026-08-10.
+                return if authority.auto_approve || authority.mode == AppMode::Yolo {
+                    ToolPermission::Allow
+                } else {
+                    ToolPermission::Prompt
+                };
             }
             if authority.auto_approve
                 || authority.approval_mode == ApprovalMode::Bypass
@@ -890,10 +898,21 @@ mod tests {
                 );
                 assert_eq!(
                     resolve_tool_permission(&auth, requirement, true),
-                    ToolPermission::Prompt,
-                    "non-bypassable {requirement:?} tool forces a prompt in Full Access"
+                    ToolPermission::Allow,
+                    "non-bypassable {requirement:?} tool auto-approves in Full Access (#3866 reversed)"
                 );
             }
+        }
+
+        // Ask (the default suggest posture without auto-approve) can open the
+        // modal, so the hold still prompts there.
+        let ask = authority(AppMode::Agent, false, ApprovalMode::Suggest);
+        for requirement in [ApprovalRequirement::Suggest, ApprovalRequirement::Required] {
+            assert_eq!(
+                resolve_tool_permission(&ask, requirement, true),
+                ToolPermission::Prompt,
+                "non-bypassable {requirement:?} tool still prompts in Ask"
+            );
         }
     }
 
