@@ -33,10 +33,10 @@
 //! ## The seam
 //!
 //! Runtime **must not** call anything in this module, and nothing here reads a
-//! [`crate::FleetSnapshot`] or mutates a saved Fleet. If a future lane wires
-//! composition into a UI, the wiring belongs on the UI side of this boundary:
-//! parse → propose → *show the human* → human saves a Fleet file → the ordinary
-//! exact-Fleet path takes over from there.
+//! [`crate::FleetSnapshot`] or mutates a saved Fleet. The TUI setup wizard wires
+//! this on the UI side of the boundary: parse → propose → *show the human* →
+//! human saves a Fleet profile through the ordinary setup save path. This
+//! module remains unable to save, launch, or snapshot anything itself.
 
 use std::collections::BTreeSet;
 

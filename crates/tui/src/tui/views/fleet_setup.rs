@@ -1,7 +1,10 @@
 //! `/fleet setup` — a progressive "set up your agent team" flow.
 //!
 //! Replaces the old six-column config matrix (#3791). Fleet is presented as an
-//! agent team: the shortest valid path is role → provider/model → save/apply.
+//! agent team: the shortest valid path remains role → provider/model →
+//! save/apply. From the Model step, `c` opens an optional, pure composition
+//! advisory built only from configured routes; accept/edit/reject all return to
+//! this same human-reviewed save path.
 //! The review step shows resolved provider, model, auth/readiness, profile
 //! availability, and overwrite consequences once before anything is written. Thinking defaults to
 //! inherit and can be adjusted on the review step without an extra wizard
@@ -14,8 +17,13 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use codewhale_workflow::fleet_composition::{
+    CompositionError, CompositionRole, ConfiguredModel, FleetCompositionProposal,
+    FleetCompositionRequest, RatificationState, RoleSuggestion,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
@@ -400,10 +408,44 @@ pub(super) fn provider_display_label(provider_id: &str) -> String {
 enum Step {
     /// Pick the team role.
     Role,
+    /// Review an inert role-to-model suggestion built from configured routes.
+    Composition,
     /// Pick the model-routing class.
     Model,
     /// Review the full posture and save.
     Review,
+}
+
+/// The workflow-owned request and its validated, deliberately unratified
+/// proposal. Keeping the request beside the proposal lets the UI re-run the
+/// workflow validator at the exact point where a human accepts a suggestion.
+#[derive(Debug, Clone)]
+struct CompositionAdvisory {
+    request: FleetCompositionRequest,
+    proposal: FleetCompositionProposal,
+}
+
+impl CompositionAdvisory {
+    fn validated_route_for_role(
+        &self,
+        role: &str,
+    ) -> Result<Option<(String, String)>, CompositionError> {
+        let proposal =
+            FleetCompositionProposal::validate(&self.request, self.proposal.suggestions.clone())?;
+        Ok(proposal
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.role.eq_ignore_ascii_case(role))
+            .map(|suggestion| (suggestion.provider.clone(), suggestion.model.clone())))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositionDecision {
+    Pending,
+    Accepted,
+    Edited,
+    Rejected,
 }
 
 /// Per-row Fleet Model step interaction state.
@@ -438,6 +480,67 @@ impl FleetModelRowState {
                 .unwrap_or_else(|| readiness.label().into_owned()),
         }
     }
+}
+
+/// Build the setup-time advisory from routes the wizard already resolved from
+/// the operator's configured providers. The adapter is intentionally pure: it
+/// sorts and de-duplicates the redacted provider/model pairs, assigns them to
+/// the built-in roles in stable round-robin order, then asks the workflow
+/// schema to validate every assignment against that exact pool.
+fn deterministic_composition_advisory(
+    available_models: &[(
+        String,
+        String,
+        crate::provider_readiness::ResolvedProviderReadiness,
+    )],
+) -> Option<CompositionAdvisory> {
+    let mut seen = BTreeSet::new();
+    let mut pool: Vec<ConfiguredModel> = available_models
+        .iter()
+        // Do not recommend a route the Model step would refuse or require the
+        // operator to activate first. Such rows remain available for explicit
+        // human selection in the existing picker.
+        .filter(|(_, _, readiness)| {
+            FleetModelRowState::from_readiness(readiness) == FleetModelRowState::Ready
+        })
+        .filter_map(|(provider, model, _)| {
+            let key = (provider.clone(), model.clone());
+            seen.insert(key.clone())
+                .then(|| ConfiguredModel::new(key.0, key.1, None))
+        })
+        .collect();
+    pool.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+
+    let roles: Vec<CompositionRole> = ROLES
+        .iter()
+        // `custom` is an invitation to author a posture, not a semantic Fleet
+        // role, so it stays on the manual Model path.
+        .filter(|role| role.label != "custom")
+        .map(|role| CompositionRole::new(role.label.to_string(), Some(&role.summary)))
+        .collect();
+    let request = FleetCompositionRequest::new(pool, roles).ok()?;
+    let suggestions = request
+        .roles
+        .iter()
+        .enumerate()
+        .map(|(idx, role)| {
+            let configured = &request.pool[idx % request.pool.len()];
+            RoleSuggestion {
+                role: role.role.clone(),
+                provider: configured.provider.clone(),
+                model: configured.model.clone(),
+                reason: Some(
+                    "Stable round-robin assignment from the configured model pool.".to_string(),
+                ),
+            }
+        })
+        .collect();
+    let proposal = FleetCompositionProposal::validate(&request, suggestions).ok()?;
+    Some(CompositionAdvisory { request, proposal })
 }
 
 pub struct FleetSetupView {
@@ -485,6 +588,10 @@ pub struct FleetSetupView {
     /// Whether the Model step's filter input is capturing keystrokes (`/`
     /// toggles it; Enter keeps the filter, Esc clears it).
     model_filter_active: bool,
+    /// Pure workflow-schema proposal shown before the Model picker. It has no
+    /// save, spawn, launch, or snapshot capability.
+    composition: Option<CompositionAdvisory>,
+    composition_decision: CompositionDecision,
     /// Selectable rows registered by the latest render. Keeping mouse geometry
     /// in the view gives the Fleet walkthrough the same row ownership as its
     /// keyboard path without coupling the host to this modal's layout.
@@ -522,6 +629,9 @@ impl FleetSetupView {
         self.profile_status = old_profile_status;
         self.model_draft = old_model_draft;
         self.model_draft_preview = old_model_draft_preview;
+        if self.step == Step::Composition && !self.has_composition_for_selected_role() {
+            self.step = Step::Model;
+        }
     }
 
     #[must_use]
@@ -583,6 +693,7 @@ impl FleetSetupView {
             model_routes.push((provider.clone(), model.clone()));
             model_row_states.push(FleetModelRowState::from_readiness(readiness));
         }
+        let composition = deterministic_composition_advisory(&snapshot.available_models);
         Self {
             snapshot,
             step: Step::Role,
@@ -602,6 +713,8 @@ impl FleetSetupView {
             model_row_states,
             model_query: String::new(),
             model_filter_active: false,
+            composition,
+            composition_decision: CompositionDecision::Pending,
             row_hitboxes: RefCell::new(Vec::new()),
         }
     }
@@ -653,6 +766,73 @@ impl FleetSetupView {
     /// The planner role chosen (drives the profile file name and `role_hint`).
     fn selected_role(&self) -> String {
         ROLES[self.role_idx.min(ROLES.len() - 1)].label.to_string()
+    }
+
+    fn has_composition_for_selected_role(&self) -> bool {
+        let role = self.selected_role();
+        self.composition.as_ref().is_some_and(|advisory| {
+            advisory
+                .proposal
+                .suggestions
+                .iter()
+                .any(|suggestion| suggestion.role.eq_ignore_ascii_case(&role))
+        })
+    }
+
+    /// Re-validate the entire proposal against its original explicit pool,
+    /// then return the selected role's route. An out-of-pool proposal never
+    /// reaches `model_idx`, even if the in-memory advisory were corrupted.
+    fn validated_composition_route(&self) -> Option<(String, String)> {
+        self.composition
+            .as_ref()?
+            .validated_route_for_role(&self.selected_role())
+            .ok()?
+    }
+
+    fn select_model_route(&mut self, route: &(String, String)) -> bool {
+        let Some(idx) = self
+            .model_routes
+            .iter()
+            .position(|candidate| candidate == route)
+        else {
+            return false;
+        };
+        self.model_query.clear();
+        self.model_filter_active = false;
+        self.model_idx = idx;
+        true
+    }
+
+    fn accept_composition(&mut self) -> ViewAction {
+        let Some(route) = self.validated_composition_route() else {
+            return ViewAction::None;
+        };
+        if !self.select_model_route(&route) {
+            return ViewAction::None;
+        }
+        self.composition_decision = CompositionDecision::Accepted;
+        self.step = Step::Review;
+        self.review_scroll = 0;
+        self.refresh_profile_status();
+        ViewAction::None
+    }
+
+    fn edit_composition(&mut self) -> ViewAction {
+        let Some(route) = self.validated_composition_route() else {
+            return ViewAction::None;
+        };
+        if !self.select_model_route(&route) {
+            return ViewAction::None;
+        }
+        self.composition_decision = CompositionDecision::Edited;
+        self.step = Step::Model;
+        ViewAction::None
+    }
+
+    fn reject_composition(&mut self) -> ViewAction {
+        self.composition_decision = CompositionDecision::Rejected;
+        self.step = Step::Model;
+        ViewAction::None
     }
 
     /// Copy note when the chosen role would override an existing roster
@@ -747,6 +927,7 @@ impl FleetSetupView {
     fn step_len(&self) -> usize {
         match self.step {
             Step::Role => ROLES.len(),
+            Step::Composition => 0,
             Step::Model => self.filtered_model_indices().len(),
             Step::Review => 0,
         }
@@ -758,11 +939,16 @@ impl FleetSetupView {
                 self.role_idx =
                     crate::tui::list_nav::wrap_index(self.role_idx, self.step_len(), -1);
                 self.discard_model_draft();
+                self.composition_decision = CompositionDecision::Pending;
             }
+            Step::Composition => {}
             Step::Model => {
                 self.model_idx =
                     crate::tui::list_nav::wrap_index(self.model_idx, self.step_len(), -1);
                 self.discard_model_draft();
+                if self.composition_decision != CompositionDecision::Pending {
+                    self.composition_decision = CompositionDecision::Edited;
+                }
             }
             Step::Review => self.review_scroll = self.review_scroll.saturating_sub(1),
         }
@@ -779,11 +965,16 @@ impl FleetSetupView {
             Step::Role => {
                 self.role_idx = crate::tui::list_nav::wrap_index(self.role_idx, self.step_len(), 1);
                 self.discard_model_draft();
+                self.composition_decision = CompositionDecision::Pending;
             }
+            Step::Composition => {}
             Step::Model => {
                 self.model_idx =
                     crate::tui::list_nav::wrap_index(self.model_idx, self.step_len(), 1);
                 self.discard_model_draft();
+                if self.composition_decision != CompositionDecision::Pending {
+                    self.composition_decision = CompositionDecision::Edited;
+                }
             }
             Step::Review => self.review_scroll = self.review_scroll.saturating_add(1),
         }
@@ -806,6 +997,7 @@ impl FleetSetupView {
                 self.step = Step::Model;
                 ViewAction::None
             }
+            Step::Composition => self.accept_composition(),
             Step::Model => {
                 let idx = self.real_model_idx();
                 match self.model_row_states.get(idx) {
@@ -853,6 +1045,10 @@ impl FleetSetupView {
     fn back(&mut self) -> ViewAction {
         match self.step {
             Step::Role => ViewAction::None,
+            Step::Composition => {
+                self.step = Step::Model;
+                ViewAction::None
+            }
             Step::Model => {
                 self.step = Step::Role;
                 ViewAction::None
@@ -912,9 +1108,18 @@ impl FleetSetupView {
                 hints.push(ActionHint::new("↑/↓", "choose"));
                 hints.push(ActionHint::new("Enter", "next"));
             }
+            Step::Composition => {
+                hints.push(ActionHint::new("a/Enter", "accept"));
+                hints.push(ActionHint::new("e", "edit"));
+                hints.push(ActionHint::new("r", "reject"));
+                hints.push(ActionHint::new("←", "back"));
+            }
             Step::Model => {
                 hints.push(ActionHint::new("↑/↓", "choose"));
                 hints.push(ActionHint::new("/", "filter"));
+                if self.has_composition_for_selected_role() {
+                    hints.push(ActionHint::new("c", "suggest"));
+                }
                 hints.push(ActionHint::new("Enter", "next"));
                 hints.push(ActionHint::new("←", "back"));
             }
@@ -960,9 +1165,16 @@ impl ModalView for FleetSetupView {
                 });
                 if let Some(row) = row {
                     match self.step {
-                        Step::Role => self.role_idx = row.min(ROLES.len().saturating_sub(1)),
+                        Step::Role => {
+                            self.role_idx = row.min(ROLES.len().saturating_sub(1));
+                            self.composition_decision = CompositionDecision::Pending;
+                        }
+                        Step::Composition => {}
                         Step::Model => {
                             self.model_idx = row.min(self.step_len().saturating_sub(1));
+                            if self.composition_decision != CompositionDecision::Pending {
+                                self.composition_decision = CompositionDecision::Edited;
+                            }
                         }
                         Step::Review => {}
                     }
@@ -989,6 +1201,9 @@ impl ModalView for FleetSetupView {
                 KeyCode::Backspace => {
                     self.model_query.pop();
                     self.model_idx = 0;
+                    if self.composition_decision != CompositionDecision::Pending {
+                        self.composition_decision = CompositionDecision::Edited;
+                    }
                 }
                 KeyCode::Up => {
                     self.move_up();
@@ -1003,6 +1218,9 @@ impl ModalView for FleetSetupView {
                 {
                     self.model_query.push(ch);
                     self.model_idx = 0;
+                    if self.composition_decision != CompositionDecision::Pending {
+                        self.composition_decision = CompositionDecision::Edited;
+                    }
                 }
                 _ => {}
             }
@@ -1011,6 +1229,17 @@ impl ModalView for FleetSetupView {
         match key.code {
             KeyCode::Esc if self.step != Step::Role => self.back(),
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
+            KeyCode::Char('a') if self.step == Step::Composition => self.accept_composition(),
+            KeyCode::Char('e') if self.step == Step::Composition => self.edit_composition(),
+            KeyCode::Char('r') if self.step == Step::Composition => self.reject_composition(),
+            KeyCode::Char('c')
+                if self.step == Step::Model && self.has_composition_for_selected_role() =>
+            {
+                self.composition_decision = CompositionDecision::Pending;
+                self.discard_model_draft();
+                self.step = Step::Composition;
+                ViewAction::None
+            }
             KeyCode::Char('/') if self.step == Step::Model => {
                 self.model_filter_active = true;
                 ViewAction::None
@@ -1104,6 +1333,7 @@ impl ModalView for FleetSetupView {
         // scrollable, so it keeps the extra row budgeted for the footer gutter.
         let preferred_height = match self.step {
             Step::Role => 21,
+            Step::Composition => 25,
             Step::Model => 22,
             Step::Review => 31,
         };
@@ -1112,6 +1342,7 @@ impl ModalView for FleetSetupView {
 
         let step_no = match self.step {
             Step::Role => 1,
+            Step::Composition => 2,
             Step::Model => 2,
             Step::Review => 3,
         };
@@ -1159,6 +1390,7 @@ impl ModalView for FleetSetupView {
                 render_choice_step(chunks[1], buf, &ROLES, self.role_idx, &context);
                 register_choice_hitboxes(chunks[1], ROLES.len(), self.role_idx, &self.row_hitboxes);
             }
+            Step::Composition => self.render_composition(chunks[1], buf),
             Step::Model => {
                 let filtered = self.filtered_model_indices();
                 let filtered_choices: Vec<Choice> = filtered
@@ -1217,6 +1449,10 @@ impl FleetSetupView {
                 "Choose a team role",
                 "Each Fleet member plays one role in the delegation.",
             ),
+            Step::Composition => (
+                "Unratified composition suggestion",
+                "Review the configured-pool assignments; nothing is saved or running.",
+            ),
             Step::Model => (
                 "Choose a model",
                 "Pick this worker's model, or inherit your current route.",
@@ -1240,6 +1476,68 @@ impl FleetSetupView {
                 Style::default().fg(palette::TEXT_MUTED),
             )),
         ];
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .render(area, buf);
+    }
+
+    fn render_composition(&self, area: Rect, buf: &mut Buffer) {
+        let Some(advisory) = self.composition.as_ref() else {
+            Paragraph::new("No configured model pool is available. Press e to choose manually.")
+                .wrap(Wrap { trim: true })
+                .render(area, buf);
+            return;
+        };
+        let selected_role = self.selected_role();
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!(
+                    "{} · {}",
+                    advisory.proposal.ratification.as_str().to_ascii_uppercase(),
+                    advisory.proposal.advisory
+                ),
+                Style::default().fg(palette::STATUS_WARNING).bold(),
+            )),
+            Line::from(""),
+        ];
+        for suggestion in &advisory.proposal.suggestions {
+            let selected = suggestion.role.eq_ignore_ascii_case(&selected_role);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{} {}",
+                        crate::tui::glyphs::selection_marker(selected),
+                        suggestion.role
+                    ),
+                    if selected {
+                        menu_style::selected_row_style()
+                    } else {
+                        Style::default().fg(palette::TEXT_PRIMARY)
+                    },
+                ),
+                Span::styled(
+                    format!(
+                        "  →  {}/{}",
+                        provider_display_label(&suggestion.provider),
+                        suggestion.model
+                    ),
+                    Style::default().fg(palette::TEXT_MUTED),
+                ),
+            ]));
+        }
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "Accept applies only the {selected_role} suggestion to this unsaved profile. Edit highlights it in the configured model picker; reject keeps your current selection."
+                ),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]);
+        debug_assert_eq!(
+            advisory.proposal.ratification,
+            RatificationState::Unratified
+        );
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .render(area, buf);
@@ -1324,6 +1622,24 @@ impl FleetSetupView {
                 ),
             },
         );
+        match self.composition_decision {
+            CompositionDecision::Accepted => section(
+                &mut lines,
+                "Composition",
+                "Accepted the configured-pool suggestion for this role. It remains unsaved until you save this profile; no Fleet was launched or changed.".to_string(),
+            ),
+            CompositionDecision::Edited => section(
+                &mut lines,
+                "Composition",
+                "Edited the suggestion in the configured model picker. This review is the only save boundary.".to_string(),
+            ),
+            CompositionDecision::Rejected => section(
+                &mut lines,
+                "Composition",
+                "Rejected the suggestion and kept the manually selected route. Nothing was saved or launched by the advisory.".to_string(),
+            ),
+            CompositionDecision::Pending => {}
+        }
         section(&mut lines, "Thinking", self.selected_thinking_label());
         section(
             &mut lines,
@@ -1736,6 +2052,155 @@ mod tests {
         view.handle_key(key(KeyCode::Enter)); // Role -> Model
         view.handle_key(key(KeyCode::Enter)); // Model -> Review
         assert_eq!(view.step, Step::Review);
+    }
+
+    fn open_composition(view: &mut FleetSetupView) {
+        view.handle_key(key(KeyCode::Enter)); // Role -> Model
+        assert_eq!(view.step, Step::Model);
+        view.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(view.step, Step::Composition);
+    }
+
+    #[test]
+    fn composition_is_deterministic_unratified_and_pool_bounded() {
+        let first = FleetSetupView::from_snapshot(snapshot());
+        let second = FleetSetupView::from_snapshot(snapshot());
+        let first = first.composition.expect("configured pool advisory");
+        let second = second.composition.expect("configured pool advisory");
+
+        assert_eq!(first.proposal, second.proposal);
+        assert_eq!(first.proposal.ratification, RatificationState::Unratified);
+        assert!(!first.proposal.is_actionable());
+        assert_eq!(
+            first.request.pool_keys(),
+            vec![
+                "deepseek/deepseek-v4-flash".to_string(),
+                "deepseek/deepseek-v4-pro".to_string(),
+            ]
+        );
+        for suggestion in &first.proposal.suggestions {
+            assert!(
+                first
+                    .request
+                    .pool_contains(&suggestion.provider, &suggestion.model),
+                "{suggestion:?} escaped the configured pool"
+            );
+        }
+
+        let rendered = render_through_stack(
+            || {
+                let mut view = FleetSetupView::from_snapshot(snapshot());
+                open_composition(&mut view);
+                view
+            },
+            120,
+            40,
+        )
+        .join("\n");
+        assert!(rendered.contains("UNRATIFIED"), "{rendered}");
+        assert!(rendered.contains("Suggestion only"), "{rendered}");
+        assert!(rendered.contains("a/Enter accept"), "{rendered}");
+        assert!(rendered.contains("e edit"), "{rendered}");
+        assert!(rendered.contains("r reject"), "{rendered}");
+    }
+
+    #[test]
+    fn composition_accept_edit_and_reject_keep_the_existing_save_boundary() {
+        let mut accepted = FleetSetupView::from_snapshot(snapshot());
+        open_composition(&mut accepted);
+        let expected = accepted
+            .validated_composition_route()
+            .expect("selected role suggestion");
+        assert!(matches!(
+            accepted.handle_key(key(KeyCode::Char('a'))),
+            ViewAction::None
+        ));
+        assert_eq!(accepted.step, Step::Review);
+        assert_eq!(accepted.composition_decision, CompositionDecision::Accepted);
+        assert_eq!(accepted.selected_route().as_ref(), Some(&expected));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, .. }) =
+            accepted.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("only the existing review save path may persist an accepted suggestion");
+        };
+        assert_eq!(
+            (draft.provider.as_deref(), draft.model.as_deref()),
+            (Some(expected.0.as_str()), Some(expected.1.as_str()))
+        );
+
+        let mut edited = FleetSetupView::from_snapshot(snapshot());
+        open_composition(&mut edited);
+        let suggested = edited
+            .validated_composition_route()
+            .expect("selected role suggestion");
+        assert!(matches!(
+            edited.handle_key(key(KeyCode::Char('e'))),
+            ViewAction::None
+        ));
+        assert_eq!(edited.step, Step::Model);
+        assert_eq!(edited.composition_decision, CompositionDecision::Edited);
+        assert_eq!(edited.selected_route().as_ref(), Some(&suggested));
+
+        let mut rejected = FleetSetupView::from_snapshot(snapshot());
+        open_composition(&mut rejected);
+        assert!(rejected.selected_route().is_none());
+        assert!(matches!(
+            rejected.handle_key(key(KeyCode::Char('r'))),
+            ViewAction::None
+        ));
+        assert_eq!(rejected.step, Step::Model);
+        assert_eq!(rejected.composition_decision, CompositionDecision::Rejected);
+        assert!(rejected.selected_route().is_none());
+    }
+
+    #[test]
+    fn composition_acceptance_revalidates_and_rejects_an_out_of_pool_route() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        open_composition(&mut view);
+        let advisory = view.composition.as_mut().expect("advisory");
+        let manager = advisory
+            .proposal
+            .suggestions
+            .iter_mut()
+            .find(|suggestion| suggestion.role == "manager")
+            .expect("manager suggestion");
+        manager.provider = "unconfigured".to_string();
+        manager.model = "outside-pool".to_string();
+        assert!(matches!(
+            advisory.validated_route_for_role("manager"),
+            Err(CompositionError::ModelOutsidePool { .. })
+        ));
+
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('a'))),
+            ViewAction::None
+        ));
+        assert_eq!(view.step, Step::Composition);
+        assert_eq!(view.composition_decision, CompositionDecision::Pending);
+        assert!(view.selected_route().is_none());
+    }
+
+    #[test]
+    fn composition_does_not_suggest_a_blocked_configured_route() {
+        let mut snap = snapshot();
+        snap.available_models.push((
+            "anthropic".to_string(),
+            "blocked-model".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed {
+                category: crate::error_taxonomy::ErrorCategory::Authentication,
+                message: "auth failed".to_string(),
+            },
+        ));
+        let view = FleetSetupView::from_snapshot(snap);
+        let advisory = view.composition.expect("ready pool still composes");
+        assert!(!advisory.request.pool_contains("anthropic", "blocked-model"));
+        assert!(
+            advisory
+                .proposal
+                .suggestions
+                .iter()
+                .all(|suggestion| suggestion.model != "blocked-model")
+        );
     }
 
     #[test]
