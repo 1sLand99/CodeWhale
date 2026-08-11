@@ -34,6 +34,7 @@ const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
+const releaseDockerfile = read("packaging/docker/Dockerfile.release");
 const cnb = read(".cnb.yml");
 const bundles = read("scripts/release/create-release-bundles.sh");
 const archiveInstaller = read("scripts/release/install.sh");
@@ -251,6 +252,59 @@ assert.equal(
 );
 assert.match(release, /overwrite_files:\s*false/);
 assert.match(release, /fail_on_unmatched_files:\s*true/);
+
+assert.match(release, /^  docker-build:\n/m);
+assert.match(release, /^  docker:\n/m);
+assert.match(release, /runner: ubuntu-latest\n\s+platform: linux\/amd64/);
+assert.match(release, /runner: ubuntu-24\.04-arm\n\s+platform: linux\/arm64/);
+assert.match(release, /cli_artifact: codewhale-linux-x64/);
+assert.match(release, /cli_artifact: codewhale-linux-arm64/);
+assert.match(release, /shim_artifact: codew-linux-x64/);
+assert.match(release, /shim_artifact: codew-linux-arm64/);
+assert.doesNotMatch(
+  release,
+  /docker\/setup-qemu-action/,
+  "public container publication must not funnel both architectures through QEMU",
+);
+const releaseDockerBytes = namedStep(release, "Verify native release bytes");
+assert.match(releaseDockerBytes, /CLI_ARTIFACT: \$\{\{ matrix\.cli_artifact \}\}/);
+assert.match(releaseDockerBytes, /SHIM_ARTIFACT: \$\{\{ matrix\.shim_artifact \}\}/);
+assert.match(
+  releaseDockerBytes,
+  /mv -- "docker-context\/bin\/\$\{CLI_ARTIFACT\}" docker-context\/bin\/codewhale/,
+);
+assert.match(
+  releaseDockerBytes,
+  /mv -- "docker-context\/bin\/\$\{SHIM_ARTIFACT\}" docker-context\/bin\/codew/,
+);
+assert.match(releaseDockerBytes, /cmp docker-context\/bin\/codewhale docker-context\/bin\/codew/);
+const releaseDockerBuild = namedStep(release, "Assemble and push native image by digest");
+assert.match(releaseDockerBuild, /context: docker-context/);
+assert.match(releaseDockerBuild, /file: infra\/packaging\/docker\/Dockerfile\.release/);
+assert.match(releaseDockerBuild, /platforms: \$\{\{ matrix\.platform \}\}/);
+assert.match(releaseDockerBuild, /provenance: mode=max/);
+assert.match(releaseDockerBuild, /sbom: true/);
+assert.match(releaseDockerBuild, /push-by-digest=true/);
+const releaseDockerManifest = namedStep(release, "Publish multi-architecture manifest");
+assert.match(releaseDockerManifest, /Expected exactly two native image digests/);
+assert.match(releaseDockerManifest, /docker buildx imagetools create/);
+const releaseDockerSmoke = namedStep(release, "Verify and smoke published container");
+assert.match(releaseDockerSmoke, /linux\/amd64/);
+assert.match(releaseDockerSmoke, /linux\/arm64/);
+assert.match(releaseDockerSmoke, /--entrypoint codewhale/);
+assert.match(releaseDockerSmoke, /--entrypoint codew/);
+
+assert.match(releaseDockerfile, /^FROM debian:bookworm-slim$/m);
+assert.match(releaseDockerfile, /ca-certificates/);
+assert.match(releaseDockerfile, /libdbus-1-3/);
+assert.match(releaseDockerfile, /COPY .*bin\/codewhale \/usr\/local\/bin\/codewhale/);
+assert.match(releaseDockerfile, /COPY .*bin\/codew \/usr\/local\/bin\/codew/);
+assert.match(releaseDockerfile, /^USER codewhale$/m);
+assert.doesNotMatch(
+  releaseDockerfile,
+  /\bcargo\s+build\b|^FROM\s+rust:/m,
+  "release container assembly must reuse the already-verified release binaries",
+);
 
 assert.match(runbook, /release[- ]candidate/i);
 assert.match(runbook, /expected_sha/);

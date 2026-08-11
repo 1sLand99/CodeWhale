@@ -185,26 +185,149 @@ jobs:
       version: ${{ needs.resolve.outputs.version }}
       retention_days: 14
 
-  docker:
+  docker-build:
     needs: [artifacts, resolve]
     if: ${{ !cancelled() && needs.artifacts.result == 'success' }}
-    runs-on: ubuntu-latest
+    name: Docker ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            architecture: amd64
+            cli_artifact: codewhale-linux-x64
+            shim_artifact: codew-linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            architecture: arm64
+            cli_artifact: codewhale-linux-arm64
+            shim_artifact: codew-linux-arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Checkout release source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          path: source
       - name: Checkout release infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           path: infra
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - name: Download Codewhale release binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ matrix.cli_artifact }}
+          path: docker-context/bin
+      - name: Download codew release alias
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ matrix.shim_artifact }}
+          path: docker-context/bin
+      - name: Verify native release bytes
+        shell: bash
+        env:
+          CLI_ARTIFACT: ${{ matrix.cli_artifact }}
+          SHIM_ARTIFACT: ${{ matrix.shim_artifact }}
+        run: |
+          set -euo pipefail
+          mv -- "docker-context/bin/${CLI_ARTIFACT}" docker-context/bin/codewhale
+          mv -- "docker-context/bin/${SHIM_ARTIFACT}" docker-context/bin/codew
+          chmod 0755 docker-context/bin/codewhale docker-context/bin/codew
+          cmp docker-context/bin/codewhale docker-context/bin/codew
+          docker-context/bin/codewhale --version
+          docker-context/bin/codew --version
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Extract image labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: |
+            ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=${{ needs.resolve.outputs.version }}
+      - name: Revalidate release tag before container upload
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          ./infra/scripts/release/verify-remote-tag.sh \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "${TAG}" \
+            "${EXPECTED_SHA}"
+      - name: Assemble and push native image by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: docker-context
+          file: infra/packaging/docker/Dockerfile.release
+          platforms: ${{ matrix.platform }}
+          provenance: mode=max
+          sbom: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+      - name: Smoke native image digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}"
+          docker run --rm --entrypoint codewhale "${IMAGE}" --version
+          docker run --rm --entrypoint codew "${IMAGE}" --version
+      - name: Export image digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unexpected image digest: ${DIGEST}" >&2
+            exit 1
+          fi
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+      - name: Upload image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: docker-digest-${{ matrix.architecture }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  docker:
+    needs: [docker-build, resolve]
+    if: ${{ !cancelled() && needs.docker-build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout release infrastructure
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: infra
+      - name: Download native image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: digests
+          pattern: docker-digest-*
+          merge-multiple: true
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Log in to GitHub Container Registry
@@ -243,30 +366,49 @@ jobs:
             "https://github.com/${GITHUB_REPOSITORY}.git" \
             "${TAG}" \
             "${EXPECTED_SHA}"
-      - name: Build and push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+      - name: Publish multi-architecture manifest
+        shell: bash
         env:
-          DOCKER_BUILD_RECORD_UPLOAD: false
-          DOCKER_BUILD_SUMMARY: false
-        with:
-          context: source
-          file: infra/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: mode=max
-          sbom: true
-          build-args: |
-            DEEPSEEK_BUILD_SHA=${{ needs.resolve.outputs.sha }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Smoke published container entrypoints
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t digest_files < <(find digests -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "${#digest_files[@]}" -ne 2 ]]; then
+            echo "Expected exactly two native image digests; found ${#digest_files[@]}." >&2
+            exit 1
+          fi
+
+          sources=()
+          for digest in "${digest_files[@]}"; do
+            if ! [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Unexpected image digest file: ${digest}" >&2
+              exit 1
+            fi
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+
+          tag_args=()
+          while IFS= read -r tag; do
+            [[ -n "${tag}" ]] && tag_args+=(--tag "${tag}")
+          done <<< "${TAGS}"
+          if [[ "${#tag_args[@]}" -eq 0 ]]; then
+            echo "No container tags were generated." >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+      - name: Verify and smoke published container
         shell: bash
         env:
           IMAGE: ${{ steps.image.outputs.name }}:${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}"
+          raw_manifest="$(docker buildx imagetools inspect --raw "${IMAGE}")"
+          jq -e \
+            '[.manifests[] | select(.platform.os == "linux") | "linux/\(.platform.architecture)"] | unique | sort == ["linux/amd64", "linux/arm64"]' \
+            <<< "${raw_manifest}"
           docker pull "${IMAGE}"
           docker run --rm --entrypoint codewhale "${IMAGE}" --version
           docker run --rm --entrypoint codew "${IMAGE}" --version
