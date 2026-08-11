@@ -48,11 +48,6 @@ pub fn render_diff_bounded(diff: &str, width: u16, max_body_rows: usize) -> Boun
 /// Render only the diff body. Callers that already own a semantic summary use
 /// this form so the bounded preview budget is spent on the actual red/green
 /// evidence instead of a second, generic summary.
-#[must_use]
-pub fn render_diff_body(diff: &str, width: u16) -> Vec<Line<'static>> {
-    render_diff_body_bounded(diff, width, usize::MAX).lines
-}
-
 /// Render at most `max_rows` body rows while counting every omitted wrapped
 /// row. Allocation is bounded by the retained preview plus one source line's
 /// wrapped representation, rather than by the size of the complete diff.
@@ -623,7 +618,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             .expect("append generated diff");
         }
 
-        let full_row_count = render_diff_body(&diff, 32).len();
+        let full_row_count = render_diff_body_bounded(&diff, 32, usize::MAX).lines.len();
         let rendered = render_diff_body_bounded(&diff, 32, 14);
 
         assert_eq!(rendered.lines.len(), 14);
