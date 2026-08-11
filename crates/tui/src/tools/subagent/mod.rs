@@ -7212,7 +7212,7 @@ impl ToolSpec for AgentTool {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 3,
-                    "description": "Optional remaining nested-agent depth budget for this child. Defaults to the configured runtime budget."
+                    "description": "Optional absolute nested-agent depth cap for this child. It may only narrow the inherited runtime budget, never widen it. Defaults to the inherited budget."
                 },
                 "max_steps": {
                     "type": "integer",
