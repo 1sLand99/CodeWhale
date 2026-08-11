@@ -535,6 +535,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
             content: vec![ContentBlock::Thinking {
                 thinking: "preserve this tool-loop reasoning".to_string(),
                 signature: None,
+                state: None,
             }],
         },
     );
@@ -561,6 +562,113 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         body.pointer("/input/0/content/0/text"),
         Some(&json!("preserve this tool-loop reasoning"))
     );
+}
+
+#[test]
+fn codex_replays_only_exact_model_opaque_reasoning_state() {
+    const SENTINEL: &str = "readable private reasoning must not be replayed";
+    let state = OpaqueReasoningState {
+        provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+        api: "openai-responses".to_string(),
+        model: "gpt-5.5".to_string(),
+        id: Some("rs_opaque".to_string()),
+        encrypted_content: "enc_opaque_payload".to_string(),
+    };
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Thinking {
+                thinking: SENTINEL.to_string(),
+                signature: None,
+                state: Some(state),
+            }],
+        },
+    );
+
+    let exact = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    let exact_wire = exact.to_string();
+    assert!(!exact_wire.contains(SENTINEL), "{exact}");
+    assert_eq!(exact.pointer("/input/0/type"), Some(&json!("reasoning")));
+    assert_eq!(exact.pointer("/input/0/id"), Some(&json!("rs_opaque")));
+    assert_eq!(exact.pointer("/input/0/summary"), Some(&json!([])));
+    assert_eq!(
+        exact.pointer("/input/0/encrypted_content"),
+        Some(&json!("enc_opaque_payload"))
+    );
+
+    request.model = "gpt-5.6".to_string();
+    let switched_model = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    assert!(!switched_model.to_string().contains(SENTINEL));
+    assert!(
+        switched_model
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{switched_model}"
+    );
+
+    let switched_provider = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+    let switched_wire = switched_provider.to_string();
+    assert!(!switched_wire.contains(SENTINEL), "{switched_provider}");
+    assert!(
+        !switched_wire.contains("enc_opaque_payload"),
+        "{switched_provider}"
+    );
+}
+
+#[tokio::test]
+async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"visible summary\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"encrypted_content\":\"enc_state\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path(CODEX_RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _codex_token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::ContentBlockDelta {
+            delta: Delta::ReasoningStateDelta { state },
+            ..
+        } = event.unwrap()
+        {
+            captured = Some(state);
+        }
+    }
+
+    let state = captured.expect("encrypted reasoning state delta");
+    assert_eq!(state.provider, ApiProvider::OpenaiCodex.as_str());
+    assert_eq!(state.api, "openai-responses");
+    assert_eq!(state.model, "gpt-5.5");
+    assert_eq!(state.id.as_deref(), Some("rs_1"));
+    assert_eq!(state.encrypted_content, "enc_state");
 }
 
 #[test]
@@ -854,7 +962,7 @@ fn responses_input_includes_user_role_tool_results() {
         top_p: None,
     };
 
-    let input = convert_messages_to_responses_input(&request, false);
+    let input = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
 
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["call_id"], "call_abc");
@@ -889,7 +997,7 @@ fn responses_input_encodes_tool_call_names() {
         top_p: None,
     };
 
-    let input = convert_messages_to_responses_input(&request, false);
+    let input = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
 
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["name"], to_api_tool_name("web.run"));
@@ -1016,7 +1124,7 @@ fn user_image_becomes_an_input_image_item() {
         },
     });
 
-    let items = convert_messages_to_responses_input(&request, false);
+    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
 
     let user = items
         .iter()
@@ -1067,7 +1175,7 @@ fn tool_result_image_becomes_native_function_output_content() {
         },
     ];
 
-    let items = convert_messages_to_responses_input(&request, false);
+    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
     let output = items
         .iter()
         .find(|item| item["type"] == "function_call_output")

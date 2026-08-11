@@ -819,6 +819,7 @@ impl Engine {
             // #3014: Anthropic signed-thinking signature for the current
             // thinking block; must be replayed verbatim in tool loops.
             let mut current_thinking_signature: Option<String> = None;
+            let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
             let mut tool_uses: Vec<ToolUseState> = Vec::new();
             let mut usage = Usage {
                 input_tokens: 0,
@@ -1157,6 +1158,8 @@ impl Engine {
                         }
                         ContentBlockStart::Thinking { thinking } => {
                             current_thinking = thinking;
+                            current_thinking_signature = None;
+                            current_thinking_state = None;
                             current_block_kind = Some(ContentBlockKind::Thinking);
                             let _ = self
                                 .tx_event
@@ -1251,6 +1254,9 @@ impl Engine {
                                 Some(existing) => existing.push_str(&signature),
                                 None => current_thinking_signature = Some(signature),
                             }
+                        }
+                        Delta::ReasoningStateDelta { state } => {
+                            current_thinking_state = Some(state);
                         }
                         Delta::InputJsonDelta { partial_json } => {
                             if let Some(&tool_idx) = current_tool_indices.get(&index)
@@ -1510,10 +1516,11 @@ impl Engine {
                         // outer `content_blocks` variable is still empty at
                         // this point and will be rebuilt on the next round.
                         let mut resume_blocks: Vec<ContentBlock> = Vec::new();
-                        if !current_thinking.is_empty() {
+                        if !current_thinking.is_empty() || current_thinking_state.is_some() {
                             resume_blocks.push(ContentBlock::Thinking {
                                 thinking: current_thinking.clone(),
                                 signature: current_thinking_signature.clone(),
+                                state: current_thinking_state.clone(),
                             });
                         }
                         if !current_text_visible.is_empty() {
@@ -1580,10 +1587,11 @@ impl Engine {
             // that compatibility value to the outgoing JSON only. Persisting
             // it here leaked an invented "(reasoning omitted)" block into the
             // transcript and every provider-neutral session replay.
-            if !current_thinking.is_empty() {
+            if !current_thinking.is_empty() || current_thinking_state.is_some() {
                 content_blocks.push(ContentBlock::Thinking {
                     thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
+                    state: current_thinking_state.clone(),
                 });
             }
             let mut final_text = current_text_visible.clone();

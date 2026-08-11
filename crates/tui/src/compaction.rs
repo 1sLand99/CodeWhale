@@ -742,6 +742,7 @@ fn sanitize_retained_messages(mut messages: Vec<Message>) -> Vec<Message> {
                 ContentBlock::Thinking {
                     thinking,
                     signature,
+                    ..
                 } if signature.is_none() => {
                     truncate_retained_block(
                         "thinking block",
@@ -1832,6 +1833,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: thinking.clone(),
                     },
                     ContentBlock::ToolUse {

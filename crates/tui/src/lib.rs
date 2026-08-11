@@ -15699,10 +15699,7 @@ mod terminal_mode_tests {
             Message {
                 role: "assistant".to_string(),
                 content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "checking context".to_string(),
-                        signature: None,
-                    },
+                    ContentBlock::thinking("checking context"),
                     ContentBlock::Text {
                         text: "working".to_string(),
                         cache_control: None,

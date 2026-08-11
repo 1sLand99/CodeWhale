@@ -15,7 +15,7 @@ use crate::llm_client::StreamEventBox;
 use crate::logging;
 use crate::models::{
     ContentBlock, ContentBlockStart, Delta, MessageDelta, MessageRequest, MessageResponse,
-    StreamEvent, Tool, Usage,
+    OpaqueReasoningState, StreamEvent, Tool, Usage,
 };
 use crate::tools::schema_sanitize;
 
@@ -73,7 +73,7 @@ pub(super) fn build_responses_body_for_provider(
     body["instructions"] = json!(instructions);
 
     // Convert messages to Responses input items.
-    let input = convert_messages_to_responses_input(request, is_deepseek);
+    let input = convert_messages_to_responses_input(request, provider);
     body["input"] = json!(input);
 
     // Convert tools to Responses function tools.
@@ -132,6 +132,8 @@ impl DeepSeekClient {
         // remapping — rather than borrowing the request that no longer exists
         // at this layer.
         let wire_model = prepared.wire_model.clone();
+        let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex)
+            .then(|| (self.api_provider.as_str().to_string(), wire_model.clone()));
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -437,6 +439,31 @@ impl DeepSeekClient {
                             }
                             "response.output_item.done" => {
                                 if let Some(idx) = current_block_index {
+                                    if let (Some((provider, model)), Some(item)) =
+                                        (reasoning_origin.as_ref(), event.get("item"))
+                                        && item.get("type").and_then(Value::as_str)
+                                            == Some("reasoning")
+                                        && let Some(encrypted_content) = item
+                                            .get("encrypted_content")
+                                            .and_then(Value::as_str)
+                                            .filter(|value| !value.is_empty())
+                                    {
+                                        yield Ok(StreamEvent::ContentBlockDelta {
+                                            index: idx,
+                                            delta: Delta::ReasoningStateDelta {
+                                                state: OpaqueReasoningState {
+                                                    provider: provider.clone(),
+                                                    api: "openai-responses".to_string(),
+                                                    model: model.clone(),
+                                                    id: item
+                                                        .get("id")
+                                                        .and_then(Value::as_str)
+                                                        .map(str::to_string),
+                                                    encrypted_content: encrypted_content.to_string(),
+                                                },
+                                            },
+                                        });
+                                    }
                                     yield Ok(StreamEvent::ContentBlockStop { index: idx });
                                     current_block_index = None;
                                 }
@@ -528,6 +555,7 @@ impl DeepSeekClient {
                         ContentBlockStart::Thinking { thinking } => ContentBlock::Thinking {
                             thinking,
                             signature: None,
+                            state: None,
                         },
                         ContentBlockStart::ToolUse {
                             id,
@@ -573,6 +601,14 @@ impl DeepSeekClient {
                         Delta::SignatureDelta { .. } => {
                             // Anthropic-native signature deltas never occur on
                             // the Responses bridge (#3014).
+                        }
+                        Delta::ReasoningStateDelta { state } => {
+                            if let Some(ContentBlock::Thinking {
+                                state: existing, ..
+                            }) = response.content.get_mut(i)
+                            {
+                                *existing = Some(state);
+                            }
                         }
                     }
                 }
@@ -623,7 +659,11 @@ fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Val
 }
 
 /// Convert Codewhale messages to Responses API input items.
-fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bool) -> Vec<Value> {
+fn convert_messages_to_responses_input(
+    request: &MessageRequest,
+    provider: ApiProvider,
+) -> Vec<Value> {
+    let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     let mut items = Vec::new();
 
     for msg in &request.messages {
@@ -709,24 +749,33 @@ fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bo
                                 "arguments": serde_json::to_string(input).unwrap_or_default(),
                             }));
                         }
-                        ContentBlock::Thinking { thinking, .. } => {
-                            items.push(if is_deepseek {
-                                json!({
+                        ContentBlock::Thinking {
+                            thinking, state, ..
+                        } => {
+                            if let Some(state) = state {
+                                if state.provider == provider.as_str()
+                                    && state.api == "openai-responses"
+                                    && state.model == request.model
+                                {
+                                    let mut item = json!({
+                                        "type": "reasoning",
+                                        "summary": [],
+                                        "encrypted_content": state.encrypted_content,
+                                    });
+                                    if let Some(id) = state.id.as_ref() {
+                                        item["id"] = json!(id);
+                                    }
+                                    items.push(item);
+                                }
+                            } else if is_deepseek {
+                                items.push(json!({
                                     "type": "reasoning",
                                     "content": [{
                                         "type": "reasoning_text",
                                         "text": thinking,
                                     }],
-                                })
-                            } else {
-                                json!({
-                                    "type": "reasoning",
-                                    "summary": [{
-                                        "type": "summary_text",
-                                        "text": thinking,
-                                    }],
-                                })
-                            });
+                                }));
+                            }
                         }
                         _ => {}
                     }

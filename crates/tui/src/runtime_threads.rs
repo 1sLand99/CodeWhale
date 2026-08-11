@@ -6054,6 +6054,7 @@ impl RuntimeThreadManager {
                             assistant_blocks.push(ContentBlock::Thinking {
                                 thinking,
                                 signature: None,
+                                state: None,
                             });
                         }
                     }

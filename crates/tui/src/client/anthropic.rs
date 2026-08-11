@@ -633,6 +633,7 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<Value> {
         ContentBlock::Thinking {
             thinking,
             signature,
+            ..
         } => {
             // Anthropic rejects unsigned thinking blocks on replay (and the
             // DeepSeek-era "(reasoning omitted)" placeholders mean nothing to
@@ -1488,10 +1489,12 @@ mod tests {
                     ContentBlock::Thinking {
                         thinking: "signed reasoning".to_string(),
                         signature: Some("sig-abc".to_string()),
+                        state: None,
                     },
                     ContentBlock::Thinking {
                         thinking: "(reasoning omitted)".to_string(),
                         signature: None,
+                        state: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),

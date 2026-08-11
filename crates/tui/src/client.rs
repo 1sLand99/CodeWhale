@@ -4738,6 +4738,7 @@ mod tests {
                     ContentBlock::Thinking {
                         thinking: "Inspect the saved tool state".to_string(),
                         signature: None,
+                        state: None,
                     },
                     ContentBlock::ToolUse {
                         id: "call-k3-replay".to_string(),
@@ -6739,6 +6740,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     signature: None,
+                    state: None,
                     thinking: "plan".to_string(),
                 },
                 ContentBlock::Text {
@@ -6778,6 +6780,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "plan".to_string(),
                     },
                     ContentBlock::Text {
@@ -6828,6 +6831,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Need to call a tool".to_string(),
                     },
                     ContentBlock::ToolUse {
@@ -6880,6 +6884,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Need to call a tool".to_string(),
                     },
                     ContentBlock::ToolUse {
@@ -6951,6 +6956,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Internal explanation plan".to_string(),
                     },
                     ContentBlock::Text {
@@ -6995,6 +7001,7 @@ mod tests {
             content: vec![
                 ContentBlock::Thinking {
                     signature: None,
+                    state: None,
                     thinking: "I should explain step by step.".to_string(),
                 },
                 ContentBlock::Text {
@@ -8122,6 +8129,7 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![ContentBlock::Thinking {
                 signature: None,
+                state: None,
                 thinking: "plan".to_string(),
             }],
         };
@@ -8270,6 +8278,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Need to inspect the directory".to_string(),
                     },
                     ContentBlock::ToolUse {
@@ -8311,6 +8320,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Need to search".to_string(),
                     },
                     ContentBlock::ToolUse {
@@ -8401,6 +8411,7 @@ mod tests {
                 content: vec![
                     ContentBlock::Thinking {
                         signature: None,
+                        state: None,
                         thinking: "Need to list files".to_string(),
                     },
                     ContentBlock::ToolUse {

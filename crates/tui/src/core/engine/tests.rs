@@ -10818,6 +10818,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
         content: vec![
             ContentBlock::Thinking {
                 signature: None,
+                state: None,
                 thinking: "Need a tool before answering.".to_string(),
             },
             ContentBlock::ToolUse {

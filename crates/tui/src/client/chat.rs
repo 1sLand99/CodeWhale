@@ -2855,10 +2855,6 @@ fn requires_reasoning_content(model: &str) -> bool {
         // `reasoning_content` on subsequent turns or the API returns 400.
         || lower.starts_with("deepseek-chat")
         || lower.starts_with("deepseek-reasoner")
-        // Generic reasoning markers used by custom/proxied deployments.
-        || lower.contains("reasoner")
-        || lower.contains("-reasoning")
-        || lower.contains("-thinking")
         || has_deepseek_r_series_marker(&lower)
 }
 
@@ -3215,6 +3211,7 @@ fn parse_chat_message_for_route(
     {
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
+            state: None,
             thinking: reasoning.to_string(),
         });
     }
@@ -3226,6 +3223,7 @@ fn parse_chat_message_for_route(
     if let Some(thinking) = mistral_thinking.filter(|s| !s.trim().is_empty()) {
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
+            state: None,
             thinking,
         });
     }
@@ -4047,6 +4045,7 @@ mod minimax_reasoning_replay_tests {
                     ContentBlock::Thinking {
                         thinking: "Inspect tool state".to_string(),
                         signature: None,
+                        state: None,
                     },
                     ContentBlock::Text {
                         text: "Done.".to_string(),
@@ -4145,6 +4144,7 @@ mod minimax_reasoning_replay_tests {
                     ContentBlock::Thinking {
                         thinking: "stale thinking from the prior turn".to_string(),
                         signature: None,
+                        state: None,
                     },
                     ContentBlock::Text {
                         text: "I'll read the widget first.".to_string(),
@@ -4731,11 +4731,9 @@ mod alias_thinking_detection_tests {
             assert!(body.get("enable_thinking").is_none(), "{model}: {body}");
             assert!(body.get("preserve_thinking").is_none(), "{model}: {body}");
         }
-        // The generic heuristic itself is unchanged: away from the exact
-        // Model Studio route these names still classify as reasoning-capable.
-        // Only the route gate must take precedence.
-        assert!(requires_reasoning_content("foo-thinking"));
-        assert!(requires_reasoning_content("foo-reasoner"));
+        // A suggestive name is not a replay contract on any route.
+        assert!(!requires_reasoning_content("foo-thinking"));
+        assert!(!requires_reasoning_content("foo-reasoner"));
     }
 
     #[test]
@@ -5405,6 +5403,33 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn suggestive_unknown_model_names_never_authorize_reasoning_replay() {
+        for provider in [
+            ApiProvider::Openai,
+            ApiProvider::Deepseek,
+            ApiProvider::Openrouter,
+            ApiProvider::Moonshot,
+            ApiProvider::Zai,
+        ] {
+            for model in [
+                "foo-thinking",
+                "foo-reasoner",
+                "acme-reasoning",
+                "future-reasoner-v9",
+            ] {
+                assert!(
+                    !should_replay_reasoning_content_for_provider(provider, model, None),
+                    "{provider:?} {model}"
+                );
+                assert!(
+                    !is_reasoning_model_for_stream(provider, model),
+                    "stream classification must fail closed too: {provider:?} {model}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn stream_classifies_deepseek_model_on_openai_provider_as_reasoning() {
         // #1739: the SSE parser must treat a DeepSeek thinking model on the
         // generic `openai` provider (DeepSeek-compatible endpoint) as a
@@ -5728,6 +5753,7 @@ mod mistral_reasoning_tests {
                             thinking: "Inspect the current state before calling the tool."
                                 .to_string(),
                             signature: None,
+                            state: None,
                         },
                         ContentBlock::Text {
                             text: "I will inspect it now.".to_string(),

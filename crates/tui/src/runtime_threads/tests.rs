@@ -3228,6 +3228,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
                 ContentBlock::Thinking {
                     thinking: "need a tool".to_string(),
                     signature: Some("sig-1".to_string()),
+                    state: None,
                 },
                 ContentBlock::ToolUse {
                     id: "tool-1".to_string(),

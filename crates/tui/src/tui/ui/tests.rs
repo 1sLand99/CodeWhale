@@ -4020,6 +4020,7 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
                     .collect::<Vec<_>>()
                     .join("\n"),
                 signature: None,
+                state: None,
             },
             crate::models::ContentBlock::Text {
                 text: "restored final answer".to_string(),
