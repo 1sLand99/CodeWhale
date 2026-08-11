@@ -308,21 +308,18 @@ impl McpTransport for StdioTransport {
         loop {
             // Bounded read: a server emitting a newline-free multi-GB "line"
             // must not OOM us (read_line is unbounded).
-            let bytes = match read_line_capped(
-                &mut self.reader,
-                &mut line_bytes,
-                MAX_MCP_RESPONSE_BYTES,
-            )
-            .await
-            {
-                Ok(b) => b,
-                Err(err) => {
-                    if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
-                        anyhow::bail!("Stdio transport read error: {err}\n{stderr}");
+            let bytes =
+                match read_line_capped(&mut self.reader, &mut line_bytes, MAX_MCP_RESPONSE_BYTES)
+                    .await
+                {
+                    Ok(b) => b,
+                    Err(err) => {
+                        if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
+                            anyhow::bail!("Stdio transport read error: {err}\n{stderr}");
+                        }
+                        return Err(err.into());
                     }
-                    return Err(err.into());
-                }
-            };
+                };
             if bytes == 0 {
                 if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
                     anyhow::bail!("Stdio transport closed\n{stderr}");

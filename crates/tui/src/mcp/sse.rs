@@ -6,7 +6,9 @@ use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
 use super::wire::{
     MAX_SSE_FRAME_BYTES, find_sse_event_separator_bytes, is_mcp_stale_session_body, sse_field_value,
 };
-use super::{ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, McpTransport, bounded_body_excerpt, mask_url_secrets};
+use super::{
+    ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, McpTransport, bounded_body_excerpt, mask_url_secrets,
+};
 
 const SSE_INBOUND_CHANNEL_CAPACITY: usize = 4;
 

@@ -22,8 +22,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use self::constitution::{load_repo_constitution_block, repo_constitution_candidate_paths};
 pub(crate) use self::constitution::{RepoLawAction, RepoLawRule, load_repo_law_rules};
+use self::constitution::{load_repo_constitution_block, repo_constitution_candidate_paths};
 use self::pack::generate_bounded_project_overview;
 pub use self::pack::generate_project_context_pack;
 pub use self::types::ProjectContext;
