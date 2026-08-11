@@ -7,17 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Manual `/compact` during an active turn now queues even when the engine's
-  bounded op mailbox is saturated. The request defers client-side, the event
-  loop retries it as mailbox slots free, and a compaction that starts or
-  settles first supersedes it — a full mailbox no longer refuses with "engine
-  is busy". The three deferred release-runtime QA compaction scenarios are
-  re-enabled, and the full-mailbox liveness regression now proves the
-  queue-behind-pressure contract.
-
-## [0.9.6] - 2026-08-09
+## [0.9.6] - 2026-08-10
 
 Codewhale v0.9.6 is a subtractive release: fewer runtime guards, one stable
 prompt, truthful provider endings, and a smaller compaction path that preserves
@@ -42,6 +32,14 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   ordinary scout — while every reaching surface (`web.run`, `fetch_url`,
   `github`, MCP) stays denied and the sentinel-backed capability envelope
   remains the fail-closed backstop.
+- `/fleet setup` can show an optional, deterministic, unratified role-to-model
+  advisory built only from configured ready routes. Accept, edit, and reject
+  all remain inside the existing human-reviewed profile save boundary; the
+  advisory never launches a Fleet or writes a second configuration.
+- `/update` checks for a newer Codewhale release and installs it from inside
+  the TUI, while `tui_help` gives agents the same command and key map users see.
+- Markdown file paths render as OSC 8 links where the terminal supports them,
+  and every agent row can open that agent's transcript directly.
 
 ### Changed
 
@@ -62,8 +60,14 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - Compaction is one cache-stable summary request followed by one committed
   replacement summary and a bounded recent-message tail. Older saved sessions
   still restore.
-- Plan, Act, and Operate share one stable base prompt. Modes continue to differ
-  through permissions and the live tool catalog.
+- Ask, Work, Auto-Review, and Full Access share one stable base prompt. Modes
+  continue to differ through permissions and the live tool catalog; the former
+  Act label is now Work throughout the product and shipped locales.
+- Full Access now auto-approves non-bypassable tools consistently, and the
+  default choice shown on ordinary approval cards is configurable.
+- Model, context-window, dispatch-name, and nested-agent spawn receipts report
+  the route and limits actually used rather than silently substituting a
+  guessed identity.
 - Goal runs no longer stop because of internal continuation, repeated-gap, or
   unanswered-question guards. Explicit user limits and terminal goal states
   remain authoritative.
@@ -120,27 +124,39 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   the agent reads it. Only files under a screencapture "Temporary Items"
   directory are touched; copies are idempotent and a failed copy keeps the
   original reference.
+- Manual `/compact` during an active turn now queues even when the engine's
+  bounded op mailbox is saturated. The request defers client-side, retries as
+  mailbox slots free, and cannot latch as already running after it settles.
+- Interactive `/load`, startup `--resume`, and `/resume` picker paths preserve
+  the persisted provider, endpoint, and model identity; picker resume also
+  leaves a durable transcript receipt.
+- Relative `mcp_config_path` values no longer depend on the launch directory or
+  silently load an empty server pool: Codewhale warns and falls back to the
+  user-global MCP configuration. Explicit absolute paths remain authoritative.
+- Write, edit, and patch tools use content-hash guards so a file changed after
+  inspection cannot be overwritten as though it were unchanged.
+- Shell previews hold back incomplete UTF-8 sequences instead of emitting
+  replacement characters, and compaction receipts report token deltas.
+- Nested agents may narrow but can never widen their inherited depth budget
+  (#5317 by @ousamabenyounes).
+- Container publication now assembles AMD64 and ARM64 images in parallel on
+  native runners from the already-verified static release binaries, then
+  publishes and checks one multi-architecture manifest. It no longer rebuilds
+  both targets through the single long-running QEMU job that lost its runner.
 
 ### Removed
 
 - The no-progress guard, repeated-read guard, and injected tool-error strategy
   coaching. Productive polling, repeated inspection, and model-owned recovery
   are no longer interrupted by runtime heuristics.
-
-### Known issues
-
-- A resumed session can still display the startup provider/model instead of the
-  restored route identity. This drift is explicitly unresolved and is separate
-  from the fixed, provider-neutral compaction path.
-- Manual `/compact` during an active turn is refused with "engine is busy"
-  instead of queueing behind the turn; idle and between-turn compaction work
-  correctly. Deferred to v0.9.7 by owner decision, and the three
-  release-runtime QA scenarios that pin the required lifecycle are marked
-  ignored with a tracking reason until the fix lands.
+- Never-wired decision-card, keybinding, hover, shell-execution, engine-op, and
+  release-script paths were deleted so the supported runtime has one route for
+  each behavior.
 
 ### Contributors
 
 - Xavier Pestel (@xavierpestel-ai) — Mistral AI provider route (#5295).
+- Ben Younes (@ousamabenyounes) — inherited nested-agent depth cap (#5317).
 
 ## [0.9.5] - 2026-08-08
 
