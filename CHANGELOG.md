@@ -82,6 +82,9 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - Model, context-window, dispatch-name, and nested-agent spawn receipts report
   the route and limits actually used rather than silently substituting a
   guessed identity.
+- Child-agent launches mint one immutable route receipt before admission and
+  preserve it through status, interruption, completion, resume, Work Graph,
+  and ledger projections, so provider/model attribution cannot drift (#5305).
 - Goal runs no longer stop because of internal continuation, repeated-gap, or
   unanswered-question guards. Explicit user limits and terminal goal states
   remain authoritative.

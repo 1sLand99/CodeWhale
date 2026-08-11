@@ -16,6 +16,11 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 ### Added
 
+- `web_search` defaults to Firecrawl Cloud without an API key; keyless requests
+  are headerless and quota-bounded, while an optional user key raises limits.
+- Green web builds on `main` now emit an actionable manual-deploy reminder, so
+  site changes cannot quietly appear shipped while Cloudflare still serves an
+  older revision.
 - Mistral AI is a first-class provider route, including Codestral models,
   first-party reasoning support, authentication, picker entries, and aliases.
 - Headless `Bash` can transfer explicitly requested persistent Unix services
@@ -77,6 +82,9 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - Model, context-window, dispatch-name, and nested-agent spawn receipts report
   the route and limits actually used rather than silently substituting a
   guessed identity.
+- Child-agent launches mint one immutable route receipt before admission and
+  preserve it through status, interruption, completion, resume, Work Graph,
+  and ledger projections, so provider/model attribution cannot drift (#5305).
 - Goal runs no longer stop because of internal continuation, repeated-gap, or
   unanswered-question guards. Explicit user limits and terminal goal states
   remain authoritative.
