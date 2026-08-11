@@ -288,6 +288,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         max_steps,
         spawn_depth: 0,
         max_spawn_depth: runtime_profile.max_spawn_depth,
+        child_route: None,
         launch_manifest: Some(launch_manifest),
     })
 }
@@ -3521,6 +3522,7 @@ mod tests {
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            child_route: None,
             launch_manifest: None,
         };
         let exec = codewhale_config::FleetExecConfig {
@@ -3551,6 +3553,7 @@ mod tests {
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            child_route: None,
             launch_manifest: None,
         };
 
@@ -3657,6 +3660,7 @@ mod tests {
             max_steps: 100,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            child_route: None,
             launch_manifest: None,
         };
         let exec = codewhale_config::FleetExecConfig {

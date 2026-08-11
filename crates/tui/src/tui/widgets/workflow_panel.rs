@@ -223,6 +223,7 @@ impl WorkflowTokenSource {
 /// that admitted the task.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowRowRoute {
+    pub child_route: Option<crate::tools::subagent::ChildRouteReceipt>,
     /// Fleet role resolved for the worker (`resolved_role`, else `role`).
     pub role: Option<String>,
     /// Provider identity the child client was installed on.
@@ -405,7 +406,7 @@ pub enum WorkflowPanelEvent {
         worktree: bool,
         workspace: Option<PathBuf>,
         /// Launch receipt carried by this event (#4039).
-        route: WorkflowRowRoute,
+        route: Box<WorkflowRowRoute>,
         at_ms: u64,
     },
     TaskCompleted {
@@ -478,36 +479,69 @@ impl WorkflowPanelEvent {
                 title: opt_str(value, "title").unwrap_or_else(|| "Phase".to_string()),
                 at_ms,
             }),
-            "task_started" => Some(Self::TaskStarted {
-                task_id: opt_str(value, "task_id")?,
-                // Prefer typed workflow metadata over generic label so rows
-                // never fall back to prompt parsing (#4119).
-                label: opt_str(value, "workflow_task_label").or_else(|| opt_str(value, "label")),
-                profile: opt_str(value, "profile"),
-                model: opt_str(value, "model").or_else(|| opt_str(value, "resolved_model")),
-                strength: opt_str(value, "strength"),
-                resolved_model: opt_str(value, "resolved_model"),
-                worktree: value
-                    .get("worktree")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                workspace: opt_str(value, "workspace").map(PathBuf::from),
-                // #4039: the receipt is read only out of this event.
-                route: WorkflowRowRoute {
-                    role: opt_str(value, "resolved_role").or_else(|| opt_str(value, "role")),
-                    provider: opt_str(value, "resolved_provider"),
-                    // Requested `model` is useful for the compact status row,
-                    // but is not proof of the effective launch model.
-                    model: opt_str(value, "resolved_model"),
-                    requested_reasoning: opt_str(value, "requested_reasoning")
-                        .or_else(|| opt_str(value, "thinking")),
-                    effective_reasoning: opt_str(value, "effective_reasoning"),
-                    route_source: opt_str(value, "route_source")
-                        .as_deref()
-                        .and_then(WorkflowRouteSource::parse),
-                },
-                at_ms,
-            }),
+            "task_started" => {
+                let child_route = value
+                    .get("child_route")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                Some(Self::TaskStarted {
+                    task_id: opt_str(value, "task_id")?,
+                    // Prefer typed workflow metadata over generic label so rows
+                    // never fall back to prompt parsing (#4119).
+                    label: opt_str(value, "workflow_task_label")
+                        .or_else(|| opt_str(value, "label")),
+                    profile: opt_str(value, "profile"),
+                    model: opt_str(value, "model").or_else(|| opt_str(value, "resolved_model")),
+                    strength: opt_str(value, "strength"),
+                    resolved_model: opt_str(value, "resolved_model"),
+                    worktree: value
+                        .get("worktree")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    workspace: opt_str(value, "workspace").map(PathBuf::from),
+                    route: Box::new(WorkflowRowRoute {
+                        role: child_route
+                            .as_ref()
+                            .map(|receipt: &crate::tools::subagent::ChildRouteReceipt| {
+                                receipt.canonical_role.clone()
+                            })
+                            .or_else(|| {
+                                opt_str(value, "resolved_role").or_else(|| opt_str(value, "role"))
+                            }),
+                        provider: child_route
+                            .as_ref()
+                            .map(|receipt| receipt.provider_id.clone())
+                            .or_else(|| opt_str(value, "resolved_provider")),
+                        // Requested `model` is useful for the compact status row,
+                        // but is not proof of the effective launch model.
+                        model: child_route
+                            .as_ref()
+                            .map(|receipt| receipt.model_id.clone())
+                            .or_else(|| opt_str(value, "resolved_model")),
+                        requested_reasoning: child_route
+                            .as_ref()
+                            .map(|receipt| receipt.requested_reasoning.clone())
+                            .or_else(|| {
+                                opt_str(value, "requested_reasoning")
+                                    .or_else(|| opt_str(value, "thinking"))
+                            }),
+                        effective_reasoning: child_route
+                            .as_ref()
+                            .and_then(|receipt| receipt.effective_reasoning.clone())
+                            .or_else(|| opt_str(value, "effective_reasoning")),
+                        route_source: child_route
+                            .as_ref()
+                            .and_then(|receipt| WorkflowRouteSource::parse(&receipt.route_source))
+                            .or_else(|| {
+                                opt_str(value, "route_source")
+                                    .as_deref()
+                                    .and_then(WorkflowRouteSource::parse)
+                            }),
+                        child_route,
+                    }),
+                    at_ms,
+                })
+            }
             "task_completed" => {
                 let status = value
                     .get("status")
@@ -705,6 +739,10 @@ impl WorkflowPanel {
                                 route_source: opt_str(row, "route_source")
                                     .as_deref()
                                     .and_then(WorkflowRouteSource::parse),
+                                child_route: row
+                                    .get("child_route")
+                                    .cloned()
+                                    .and_then(|value| serde_json::from_value(value).ok()),
                             },
                             usage: row.get("usage").and_then(usage_from_json),
                         });
@@ -1327,7 +1365,7 @@ impl WorkflowPanel {
                     completed_at_ms: None,
                     error: None,
                     schema_error: None,
-                    route,
+                    route: *route,
                     usage: None,
                 };
                 if let Some(existing) = self.find_row_mut(&task_id) {
@@ -1828,6 +1866,7 @@ fn workflow_row_run_json(row: &WorkflowPanelRow) -> Value {
         "requested_reasoning": row.route.requested_reasoning,
         "effective_reasoning": row.route.effective_reasoning,
         "route_source": row.route.route_source.map(WorkflowRouteSource::as_str),
+        "child_route": row.route.child_route,
         "usage": usage,
     })
 }
@@ -2515,7 +2554,7 @@ mod tests {
             resolved_model: Some("deepseek-v4-flash".to_string()),
             worktree: true,
             workspace: Some(PathBuf::from("/tmp/wt-1")),
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_200,
         });
         panel
@@ -2556,7 +2595,7 @@ mod tests {
                     resolved_model: None,
                     worktree: false,
                     workspace: None,
-                    route: WorkflowRowRoute::default(),
+                    route: Box::default(),
                     at_ms: 1_400,
                 });
             }
@@ -2654,7 +2693,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 2_100,
         });
         // selected phase is Verify (latest)
@@ -2721,7 +2760,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_400,
         });
         assert!(panel.expanded);
@@ -2777,7 +2816,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_300,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -2930,7 +2969,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_300,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3211,7 +3250,7 @@ mod tests {
                 resolved_model: Some("deepseek-v4-flash".to_string()),
                 worktree: false,
                 workspace: None,
-                route: WorkflowRowRoute::default(),
+                route: Box::default(),
                 at_ms: 1_200,
             });
             panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3234,7 +3273,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_700,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3321,7 +3360,7 @@ mod tests {
             resolved_model: Some("deepseek-v4-pro".to_string()),
             worktree: true,
             workspace: Some(PathBuf::from("/tmp/wt-impl")),
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3343,7 +3382,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 2_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3418,7 +3457,7 @@ mod tests {
                 resolved_model: None,
                 worktree: false,
                 workspace: None,
-                route: WorkflowRowRoute::default(),
+                route: Box::default(),
                 at_ms: 1_200,
             });
             panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3444,7 +3483,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_700,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
@@ -3503,7 +3542,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskStarted {
@@ -3515,7 +3554,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
-            route: WorkflowRowRoute::default(),
+            route: Box::default(),
             at_ms: 1_210,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {

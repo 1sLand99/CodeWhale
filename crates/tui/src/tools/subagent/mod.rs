@@ -630,6 +630,8 @@ pub struct SubAgentResult {
     pub parent_run_id: Option<String>,
     #[serde(default)]
     pub spawn_depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_route: Option<ChildRouteReceipt>,
     pub result: Option<String>,
     pub steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -652,6 +654,27 @@ pub struct SubAgentResult {
     pub from_prior_session: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildRouteReceipt {
+    pub requested_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_profile: Option<String>,
+    pub resolved_profile_id: Option<String>,
+    pub profile_origin: Option<String>,
+    pub canonical_role: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub route_source: String,
+    pub requested_reasoning: String,
+    pub effective_reasoning: Option<String>,
+    pub runtime_version: String,
+    pub runtime_build_sha: String,
+}
+struct RequestedChildRoute {
+    requested_type: String,
+    requested_profile: Option<String>,
+    requested_reasoning: String,
+}
 /// Headless worker lifecycle states for sub-agent execution.
 ///
 /// This is the TUI-independent state machine that future CLI/API/workflow
@@ -719,6 +742,8 @@ pub struct AgentWorkerSpec {
     pub max_steps: u32,
     pub spawn_depth: u32,
     pub max_spawn_depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_route: Option<ChildRouteReceipt>,
     /// #414 launch authority and #4647 write contract, persisted as one record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_manifest: Option<ChildLaunchManifest>,
@@ -769,6 +794,8 @@ pub struct AgentCoordSummary {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_route: Option<ChildRouteReceipt>,
     pub status: String,
     pub steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1526,6 +1553,7 @@ pub(crate) struct SubAgentSpawnOptions {
     pub name: Option<String>,
     pub model: Option<String>,
     pub model_route: Option<ModelRoute>,
+    pub child_route: Option<ChildRouteReceipt>,
     pub nickname: Option<String>,
     pub fork_context: bool,
     pub token_budget: Option<u64>,
@@ -1574,27 +1602,13 @@ pub(crate) struct WorkflowTaskSpawnIdentity {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowTaskSpawnMetadata {
+    pub child_route: ChildRouteReceipt,
     pub resolved_provider: String,
     pub resolved_model: String,
     pub route_source: String,
-    /// Provider the spawn asked for: the id a resolved Fleet profile pins.
-    /// `None` means nothing was pinned and the child inherited the session
-    /// provider — `route_source` names the rule that chose it (#5305).
-    pub requested_provider: Option<String>,
-    /// Model the caller pinned on the spawn request, verbatim (before
-    /// normalization to the provider's wire id). `None` when the caller pinned
-    /// no model (#5305).
-    pub requested_model: Option<String>,
-    /// Reasoning the caller asked for, verbatim (`inherit`/`auto`/effort).
-    /// `None` only when the spawn request carried no reasoning at all (#4039).
     pub requested_reasoning: Option<String>,
-    /// Reasoning the installed child runtime was actually launched with, after
-    /// route resolution. `None` means the provider route carries no reasoning
-    /// control — it is never rendered as an effort value (#4039).
     pub effective_reasoning: Option<String>,
-    /// Fleet role resolved for this spawn, if any (#4177).
     pub resolved_role: Option<String>,
-    /// AgentProfile id resolved for this spawn, if any (#4177).
     pub resolved_profile: Option<String>,
     pub parent_task_id: Option<String>,
     pub depth: u32,
@@ -2799,6 +2813,7 @@ impl SubAgent {
             runtime_permissions: None,
             parent_run_id: None,
             spawn_depth: 0,
+            child_route: None,
             result: self.result.clone(),
             steps_taken: self.steps_taken,
             checkpoint: self.checkpoint.clone(),
@@ -4863,6 +4878,7 @@ impl SubAgentManager {
             workspace,
             claim,
             preserved_profile,
+            child_route,
         ) = {
             let agent = self
                 .agents
@@ -4907,6 +4923,10 @@ impl SubAgentManager {
                 .worker_records
                 .get(&agent_id)
                 .map(|record| record.spec.runtime_profile.clone());
+            let child_route = self
+                .worker_records
+                .get(&agent_id)
+                .and_then(|record| record.spec.child_route.clone());
             (
                 agent.agent_type.clone(),
                 build_resume_prompt(&agent.prompt, checkpoint, followup_text),
@@ -4917,6 +4937,7 @@ impl SubAgentManager {
                 agent.workspace.clone(),
                 claim,
                 preserved_profile,
+                child_route,
             )
         };
         // Resume runs at child depth with a detached cancellation token, the
@@ -4939,6 +4960,7 @@ impl SubAgentManager {
             name: None, // the old session name stays owned by the terminal record
             model: Some(model),
             model_route: None,
+            child_route,
             nickname: None,
             fork_context,
             write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
@@ -5077,6 +5099,7 @@ impl SubAgentManager {
             agent_id: snap.agent_id.clone(),
             name: snap.name.clone(),
             parent_run_id: record.and_then(|r| r.parent_run_id.clone()),
+            child_route: record.and_then(|r| r.spec.child_route.clone()),
             status: subagent_status_name(&snap.status).to_string(),
             steps_taken: snap.steps_taken,
             token_budget: record.and_then(|r| r.usage.token_budget),
@@ -5192,6 +5215,7 @@ impl SubAgentManager {
             max_steps: WorkerRuntimeProfile::default().max_steps,
             spawn_depth: 1,
             max_spawn_depth: 3,
+            child_route: None,
             launch_manifest: None,
         };
         self.register_worker(spec);
@@ -5544,6 +5568,7 @@ impl SubAgentManager {
             max_steps,
             spawn_depth: runtime.spawn_depth,
             max_spawn_depth: runtime.max_spawn_depth,
+            child_route: options.child_route.clone(),
             launch_manifest: Some(ChildLaunchManifest {
                 owner_session: runtime
                     .parent_agent_id
@@ -5671,11 +5696,11 @@ impl SubAgentManager {
         );
         self.persist_state_best_effort();
 
-        Ok(self
+        let agent = self
             .agents
             .get(&agent_id)
-            .expect("agent should exist after spawn")
-            .snapshot())
+            .expect("agent should exist after spawn");
+        Ok(self.snapshot_for_listing(agent))
     }
 
     /// Get the current snapshot for an agent.
@@ -5684,7 +5709,7 @@ impl SubAgentManager {
             .agents
             .get(agent_id)
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
-        Ok(agent.snapshot())
+        Ok(self.snapshot_for_listing(agent))
     }
 
     pub fn get_result_by_ref(&self, agent_ref: &str) -> Result<SubAgentResult> {
@@ -5707,7 +5732,7 @@ impl SubAgentManager {
                     .is_none_or(|record| record.spec.parent_run_id.is_none())
             })
             .filter(|agent| !delivered_ids.contains(&agent.id))
-            .map(SubAgent::snapshot)
+            .map(|agent| self.snapshot_for_listing(agent))
             .collect::<Vec<_>>();
         results.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         results
@@ -5836,6 +5861,7 @@ impl SubAgentManager {
                 .clone()
                 .or_else(|| record.spec.parent_run_id.clone());
             snap.spawn_depth = record.spec.spawn_depth;
+            snap.child_route = record.spec.child_route.clone();
         }
         snap
     }
@@ -6064,7 +6090,7 @@ impl SubAgentManager {
     fn finish_terminal_result(
         &mut self,
         agent_id: &str,
-        result: SubAgentResult,
+        mut result: SubAgentResult,
         abort_task: bool,
         persist_after_commit: bool,
     ) -> bool {
@@ -6074,6 +6100,10 @@ impl SubAgentManager {
         if !self.claim_terminal_delivery(agent_id) {
             return false;
         }
+        result.child_route = self
+            .worker_records
+            .get(agent_id)
+            .and_then(|record| record.spec.child_route.clone());
 
         if abort_task
             && let Some(handle) = self
@@ -6209,37 +6239,10 @@ pub struct SubAgentSessionProjection {
     pub timed_out_with_checkpoint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_record: Option<AgentWorkerRecord>,
-    /// Fleet roster profile that was resolved for this dispatch, if any.
-    /// Populated on `action=start` receipts; absent for status/peek projections.
-    /// Lets the dispatching model confirm which configured profile each worker
-    /// resolved to before launch (#5046).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet_profile: Option<String>,
-    /// Route the child was actually launched on. Populated on `action=start`
-    /// receipts; absent for status/peek projections. Without it a receipt that
-    /// names only the profile invites false model attribution — the reader
-    /// cannot tell whether the child kept the session route or took the
-    /// profile's (#5305).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_route: Option<SubAgentChildRouteProjection>,
-}
-
-/// Requested-vs-effective route receipt for a launched child.
-///
-/// Origin labels only: provider ids, model ids, and the precedence rule that
-/// chose them. Never endpoints, credentials, or filesystem paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentChildRouteProjection {
-    /// Absent when the spawn pinned no provider (the child inherited the
-    /// session's); `route_source` still says where the route came from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_provider: Option<String>,
-    /// Absent when the caller pinned no model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_model: Option<String>,
-    pub effective_provider: String,
-    pub effective_model: String,
-    pub route_source: String,
+    pub child_route: Option<ChildRouteReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6393,9 +6396,14 @@ async fn subagent_session_projection(
         snapshot,
         timed_out,
         timed_out_with_checkpoint: timed_out && continuable,
+        fleet_profile: worker_record
+            .as_ref()
+            .and_then(|record| record.spec.child_route.as_ref())
+            .and_then(|receipt| receipt.resolved_profile_id.clone()),
+        child_route: worker_record
+            .as_ref()
+            .and_then(|record| record.spec.child_route.clone()),
         worker_record,
-        fleet_profile: None,
-        child_route: None,
     }
 }
 
@@ -7339,19 +7347,13 @@ impl ToolSpec for AgentTool {
             .get("verbose")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let (snapshot, spawn_metadata) =
+        let (snapshot, _spawn_metadata) =
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
             let manager = self.manager.read().await;
             manager.get_worker_record(&snapshot.agent_id)
         };
-        let mut projection =
-            subagent_session_projection(snapshot, false, context, worker_record).await;
-        // The receipt names the configured profile that was used (#5046) and
-        // the route that profile actually produced (#5305) — a profile id
-        // alone does not say which provider/model the child got.
-        projection.child_route = Some(spawn_child_route_projection(&spawn_metadata));
-        projection.fleet_profile = spawn_metadata.resolved_profile;
+        let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let mut value = serde_json::to_value(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         compact_spawn_receipt(&mut value, verbose);
@@ -7371,21 +7373,6 @@ impl ToolSpec for AgentTool {
     }
 }
 
-/// Read the child's route off the spawn metadata, which was captured at the
-/// spawn seam: a later session-level model switch cannot rewrite a launched
-/// child's receipt.
-fn spawn_child_route_projection(
-    metadata: &WorkflowTaskSpawnMetadata,
-) -> SubAgentChildRouteProjection {
-    SubAgentChildRouteProjection {
-        requested_provider: metadata.requested_provider.clone(),
-        requested_model: metadata.requested_model.clone(),
-        effective_provider: metadata.resolved_provider.clone(),
-        effective_model: metadata.resolved_model.clone(),
-        route_source: metadata.route_source.clone(),
-    }
-}
-
 /// A spawn receipt is an acknowledgement, not an archive: the full projection
 /// carried the complete child prompt (launch_manifest inside `worker_record`)
 /// plus a duplicated `snapshot` — ~12KB per spawn (morning-report issue #4).
@@ -7398,29 +7385,17 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    // Archive weight: the child prompt and its duplicate.
     object.remove("snapshot");
     object.remove("worker_record");
     object.remove("checkpoint");
-    // Supervision detail that is meaningless seconds after spawn and fully
-    // retrievable via `agent status`: nothing has been written (artifacts),
-    // verified (verification), or worth taking over (takeover), and the
-    // transcript handle re-materializes on every status/peek. Unscoped
-    // status compaction keeps these because there they describe a child
-    // with history; a spawn ack has none yet.
     object.remove("artifacts");
     object.remove("takeover");
     object.remove("transcript_handle");
     object.remove("verification");
-    // `child_route` is kept inside the 1KB budget rather than exempted from
-    // it: five short identifiers cost ~150B, and a receipt that omits the
-    // route the child actually took is the misattribution #5305 is about.
     object.insert("compact".to_string(), json!(true));
     object.insert(
         "compact_note".to_string(),
-        json!(
-            "Spawn receipt compacted; transcript, takeover, artifacts, and the full projection are available via agent status with this agent_id, or pass verbose: true on start."
-        ),
+        json!("Spawn receipt compacted; inspect with agent_id or start verbose: true."),
     );
 }
 
@@ -7497,12 +7472,16 @@ async fn inspect_agent_from_input(
                 unchanged
             };
             if unchanged {
+                let child_route = worker_record
+                    .as_ref()
+                    .and_then(|record| record.spec.child_route.clone());
                 let payload = json!({
                     "action": if peek { "peek" } else { "status" },
                     "agent_id": snapshot.agent_id,
                     "name": snapshot.name,
                     "status": "running",
                     "unchanged": true,
+                    "child_route": child_route,
                     "hint": "No change since your last check. Checking again in a loop is the anti-pattern; one blocking wait is not. Make one agent(action=\"wait\") call — until=\"all\" to join every running child in a single block — or continue independent work, or end your turn. Results arrive automatically as <codewhale:subagent.done> sentinels.",
                 });
                 let mut tool_result = ToolResult::json(&payload)
@@ -7513,6 +7492,7 @@ async fn inspect_agent_from_input(
                     "terminal": false,
                     "agent_id": payload["agent_id"],
                     "unchanged": true,
+                    "child_route": child_route,
                 }));
                 return Ok(tool_result);
             }
@@ -7527,6 +7507,7 @@ async fn inspect_agent_from_input(
             "status": projection.status,
             "terminal": projection.terminal,
             "agent_id": projection.agent_id,
+            "child_route": projection.child_route,
         }));
         return Ok(tool_result);
     }
@@ -7912,7 +7893,6 @@ fn child_client_for_member(
 ) -> Result<DeepSeekClient, ToolError> {
     child_provider_binding(runtime, member).map(|binding| binding.client)
 }
-
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
@@ -7921,6 +7901,11 @@ async fn spawn_subagent_from_input(
     apply_session_spawn_defaults(&mut runtime);
     refresh_spawn_route_sources(&mut runtime);
     let mut spawn_request = parse_spawn_request(&input)?;
+    let requested_route = RequestedChildRoute {
+        requested_type: spawn_request.agent_type.as_str().to_string(),
+        requested_profile: spawn_request.profile.clone(),
+        requested_reasoning: subagent_thinking_label(spawn_request.thinking).to_string(),
+    };
     let profile_member = apply_spawn_profile(&mut spawn_request, &runtime.fleet_roster)?;
     // Profile-backed requests cannot be classified safely until the roster
     // resolves their effective role. Enforce the same bounded-write contract
@@ -7945,9 +7930,6 @@ async fn spawn_subagent_from_input(
         )));
     }
 
-    // Bind and validate the exact child route before admission can create a
-    // git worktree. Provider credentials, explicit profile ids, and fixed
-    // model selectors therefore fail without leaving filesystem artifacts.
     let mut child_runtime = runtime.background_runtime();
     let provider_binding = child_provider_binding(&runtime, profile_member.as_ref())?;
     child_runtime.client = provider_binding.client;
@@ -7957,6 +7939,46 @@ async fn spawn_subagent_from_input(
     let providerless =
         crate::fleet::worker_runtime::explicit_fleet_provider_id(profile_member.as_ref()).is_none();
     resolve_fixed_spawn_model_route(&child_runtime, &mut model_selection, providerless)?;
+    let resident_context = spawn_request
+        .resident_file
+        .as_deref()
+        .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
+        .transpose()?;
+    let effective_prompt = assemble_spawn_prompt(&spawn_request, resident_context.as_ref());
+    let route = resolve_subagent_assignment_route(
+        &child_runtime,
+        None,
+        &effective_prompt,
+        &spawn_request.agent_type,
+        model_selection.model_route,
+        spawn_request.thinking,
+    )
+    .await;
+    let effective_model =
+        ensure_subagent_model_for_provider(&child_runtime, &route.model_route, route.model)?;
+    child_runtime.model = effective_model.clone();
+    if let Some(rebound) = child_runtime
+        .client
+        .rebound_for_model_protocol(child_runtime.api_config.as_deref(), &effective_model)
+        .map_err(|err| {
+            ToolError::execution_failed(format!(
+                "fleet dispatch could not bind the wire protocol for model {effective_model:?}: {err:#}"
+            ))
+        })?
+    {
+        child_runtime.client = rebound;
+    }
+    child_runtime.reasoning_effort = route.reasoning_effort.clone();
+    child_runtime.reasoning_effort_auto = false;
+    let model_route = route.model_route;
+    let child_route = mint_child_route_receipt(
+        &requested_route,
+        &spawn_request,
+        profile_member.as_ref(),
+        &child_runtime,
+        effective_model.clone(),
+        model_selection.source.as_str(),
+    )?;
 
     if spawn_request.worktree.is_some() {
         let manager_guard = manager.read().await;
@@ -8022,124 +8044,21 @@ async fn spawn_subagent_from_input(
     }
     apply_spawn_write_authority(&mut child_runtime, &spawn_request);
     let write_capable = spawn_request_is_write_capable(&spawn_request);
-    let resident_context = spawn_request
-        .resident_file
-        .as_deref()
-        .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
-        .transpose()?;
-    let effective_prompt = if let Some(resident) = resident_context.as_ref() {
-        let prefixed = format!(
-            "<!-- resident_file: {} -->\n```\n{}\n```\n\n{}",
-            resident.display_path, resident.contents, spawn_request.prompt
-        );
-        prefixed
-    } else {
-        spawn_request.prompt
-    };
-    // Surface the declared expected artifact to the child so the deliberate
-    // contract is visible to the agent doing the work, not just validated at
-    // the parse boundary (TUI-DOG-017).
-    let effective_prompt = match spawn_request.expected_artifact.as_deref() {
-        Some(artifact) => {
-            format!("{effective_prompt}\n\nExpected artifact (declared by the spawner): {artifact}")
-        }
-        None => effective_prompt,
-    };
-    let effective_prompt = if spawn_request.dependencies.is_empty()
-        && spawn_request.acceptance.is_empty()
-    {
-        effective_prompt
-    } else {
-        let dependencies = spawn_request
-            .dependencies
-            .iter()
-            .map(|item| format!("- {}", item.chars().take(256).collect::<String>()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let acceptance = spawn_request
-            .acceptance
-            .iter()
-            .map(|item| format!("- {}", item.chars().take(256).collect::<String>()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "{effective_prompt}\n\nDelegation contract (bounded):\nDependencies:\n{dependencies}\nAcceptance:\n{acceptance}"
-        )
-    };
     let write_claim = write_capable.then(|| WriteScopeClaim {
         owner: String::new(),
         roots: spawn_request.write_roots.clone(),
         exact_files: spawn_request.exact_files.clone(),
         contracts: spawn_request.coordination_contracts.clone(),
     });
-    // #4193 seam 2 (cont.): strength/inherit/faster routing and the final
-    // provider-namespace guard both read the provider from the runtime's client,
-    // so route them through `child_runtime` (pinned provider) instead of the
-    // session `runtime`. Router candidates, reasoning-effort defaults, and the
-    // fixed-model validation then all resolve against provider B.
-    let route = resolve_subagent_assignment_route(
-        &child_runtime,
-        None,
-        &effective_prompt,
-        &spawn_request.agent_type,
-        model_selection.model_route,
-        spawn_request.thinking,
-    )
-    .await;
-    let effective_model =
-        ensure_subagent_model_for_provider(&child_runtime, &route.model_route, route.model)?;
-    child_runtime.model = effective_model.clone();
-    // #5042: the child client was bound before the final model was known. A
-    // ModelAware provider (e.g. DeepSeek: pro=chat, flash=responses) can map
-    // the resolved model to a different wire protocol, so delegate to the
-    // same central resolver the main session uses and rebuild the client now
-    // instead of failing deterministically on the child's first send.
-    if let Some(rebound) = child_runtime
-        .client
-        .rebound_for_model_protocol(child_runtime.api_config.as_deref(), &effective_model)
-        .map_err(|err| {
-            ToolError::execution_failed(format!(
-                "fleet dispatch could not bind the wire protocol for model \
-                 {effective_model:?}: {err:#}"
-            ))
-        })?
-    {
-        child_runtime.client = rebound;
-    }
-    child_runtime.reasoning_effort = route.reasoning_effort.clone();
-    child_runtime.reasoning_effort_auto = false;
-    let model_route = route.model_route;
-    let resolved_role = profile_member
-        .as_ref()
-        .map(|member| member.profile.role.name.clone())
-        .filter(|name| !name.trim().is_empty())
-        .or_else(|| spawn_request.assignment.role.clone());
-    let resolved_profile = profile_member
-        .as_ref()
-        .map(|member| member.id.clone())
-        .or_else(|| spawn_request.profile.clone());
     let mut spawn_metadata = WorkflowTaskSpawnMetadata {
-        resolved_provider: child_runtime
-            .api_config
-            .as_ref()
-            .map(|config| config.provider_identity_for(child_runtime.client.api_provider()))
-            .unwrap_or_else(|| child_runtime.client.api_provider().as_str().to_string()),
-        resolved_model: effective_model.clone(),
-        route_source: model_selection.source.as_str().to_string(),
-        // #5305: same explicit-only source the launch route used above, so the
-        // receipt cannot claim a pin the child was never bound to.
-        requested_provider: crate::fleet::worker_runtime::explicit_fleet_provider_id(
-            profile_member.as_ref(),
-        ),
-        requested_model: spawn_request.model.clone(),
-        // #4039: requested is what the caller asked for; effective is what the
-        // child runtime was installed with a line above. Both are read here,
-        // at the spawn seam, so a later session-level model/reasoning switch
-        // can never rewrite a launched row's receipt.
-        requested_reasoning: Some(subagent_thinking_label(spawn_request.thinking).to_string()),
-        effective_reasoning: child_runtime.reasoning_effort.clone(),
-        resolved_role,
-        resolved_profile,
+        resolved_provider: child_route.provider_id.clone(),
+        resolved_model: child_route.model_id.clone(),
+        route_source: child_route.route_source.clone(),
+        requested_reasoning: Some(child_route.requested_reasoning.clone()),
+        effective_reasoning: child_route.effective_reasoning.clone(),
+        resolved_role: Some(child_route.canonical_role.clone()),
+        resolved_profile: child_route.resolved_profile_id.clone(),
+        child_route: child_route.clone(),
         parent_task_id: child_runtime.parent_agent_id.clone(),
         depth: child_runtime.spawn_depth,
         workflow_run_id: None,
@@ -8253,6 +8172,7 @@ async fn spawn_subagent_from_input(
             name: spawn_request.session_name.clone(),
             model: Some(effective_model),
             model_route: Some(model_route),
+            child_route: Some(child_route),
             nickname: None,
             fork_context,
             token_budget: spawn_request.token_budget,
@@ -8283,6 +8203,84 @@ async fn spawn_subagent_from_input(
     }
 
     Ok((result, spawn_metadata))
+}
+const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 384;
+
+fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentContext>) -> String {
+    let prompt = match resident {
+        Some(resident) => format!(
+            "<!-- resident_file: {} -->\n```\n{}\n```\n\n{}",
+            resident.display_path, resident.contents, request.prompt
+        ),
+        None => request.prompt.clone(),
+    };
+    let prompt = match request.expected_artifact.as_deref() {
+        Some(artifact) => {
+            format!("{prompt}\n\nExpected artifact (declared by the spawner): {artifact}")
+        }
+        None => prompt,
+    };
+    if request.dependencies.is_empty() && request.acceptance.is_empty() {
+        return prompt;
+    }
+    let lines = |items: &[String]| {
+        items
+            .iter()
+            .map(|item| format!("- {}", item.chars().take(256).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "{prompt}\n\nDelegation contract (bounded):\nDependencies:\n{}\nAcceptance:\n{}",
+        lines(&request.dependencies),
+        lines(&request.acceptance),
+    )
+}
+
+fn mint_child_route_receipt(
+    requested_route: &RequestedChildRoute,
+    request: &SpawnRequest,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+    runtime: &SubAgentRuntime,
+    model_id: String,
+    route_source: &str,
+) -> Result<ChildRouteReceipt, ToolError> {
+    let canonical_role = member
+        .map(|member| member.profile.role.name.trim())
+        .filter(|role| !role.is_empty())
+        .map(str::to_string)
+        .or_else(|| request.assignment.role.clone())
+        .unwrap_or_else(|| request.agent_type.as_str().to_string());
+    let provider_id = runtime
+        .api_config
+        .as_ref()
+        .map(|config| config.provider_identity_for(runtime.client.api_provider()))
+        .unwrap_or_else(|| runtime.client.api_provider().as_str().to_string());
+    let receipt = ChildRouteReceipt {
+        requested_type: requested_route.requested_type.clone(),
+        requested_profile: requested_route.requested_profile.clone(),
+        resolved_profile_id: member.map(|member| member.id.clone()),
+        profile_origin: member.map(|member| member.origin.to_string()),
+        canonical_role,
+        provider_id,
+        model_id,
+        route_source: route_source.to_string(),
+        requested_reasoning: requested_route.requested_reasoning.clone(),
+        effective_reasoning: runtime.reasoning_effort.clone(),
+        runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+        runtime_build_sha: option_env!("CODEWHALE_BUILD_COMMIT")
+            .unwrap_or("unknown")
+            .to_string(),
+    };
+    let length = serde_json::to_vec(&receipt)
+        .map_err(|error| ToolError::execution_failed(error.to_string()))?
+        .len();
+    if length > CHILD_ROUTE_RECEIPT_MAX_BYTES {
+        return Err(ToolError::invalid_input(format!(
+            "resolved child route receipt is {length} bytes; the {CHILD_ROUTE_RECEIPT_MAX_BYTES}-byte limit prevents an oversized admission record"
+        )));
+    }
+    Ok(receipt)
 }
 
 fn apply_spawn_write_authority(runtime: &mut SubAgentRuntime, request: &SpawnRequest) {
@@ -9116,6 +9114,9 @@ fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult, truncated: bool)
     if let Some(needs_input) = res.needs_input.clone() {
         payload["needs_input"] = json!(needs_input);
     }
+    if let Some(child_route) = res.child_route.clone() {
+        payload["child_route"] = json!(child_route);
+    }
     format!("<codewhale:subagent.done>{payload}</codewhale:subagent.done>")
 }
 
@@ -9159,6 +9160,7 @@ fn subagent_failed_sentinel(res: &SubAgentResult, error: &str) -> String {
         "elapsed_ms": res.duration_ms,
         "transcript_handle": transcript_handle,
         "error_location": "previous_line",
+        "child_route": res.child_route,
     });
     format!("<codewhale:subagent.done>{payload}</codewhale:subagent.done>")
 }
@@ -9977,6 +9979,7 @@ async fn run_subagent(
                 runtime_permissions: None,
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
+                child_route: None,
                 result: None,
                 steps_taken: steps,
                 checkpoint: latest_checkpoint.clone(),
@@ -10148,6 +10151,7 @@ async fn run_subagent(
                     runtime_permissions: None,
                     parent_run_id: runtime.parent_agent_id.clone(),
                     spawn_depth: runtime.spawn_depth,
+                    child_route: None,
                     result: None,
                     steps_taken: steps,
                     checkpoint: latest_checkpoint.clone(),
@@ -10266,6 +10270,7 @@ async fn run_subagent(
                             runtime_permissions: None,
                             parent_run_id: runtime.parent_agent_id.clone(),
                             spawn_depth: runtime.spawn_depth,
+                            child_route: None,
                             result: Some(reason),
                             steps_taken: steps,
                             checkpoint: Some(checkpoint),
@@ -10469,6 +10474,7 @@ async fn run_subagent(
                 runtime_permissions: None,
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
+                child_route: None,
                 result: final_result.clone(),
                 steps_taken: steps,
                 checkpoint: latest_checkpoint.clone(),
@@ -10754,6 +10760,7 @@ async fn run_subagent(
         runtime_permissions: None,
         parent_run_id: runtime.parent_agent_id.clone(),
         spawn_depth: runtime.spawn_depth,
+        child_route: None,
         result: final_result,
         steps_taken: steps,
         checkpoint: latest_checkpoint,
