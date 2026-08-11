@@ -34,7 +34,7 @@ use self::sse::SseTransport;
 use self::stdio::StdioTransport;
 #[cfg(all(test, unix))]
 use self::stdio::{STDIO_SHUTDOWN_GRACE, StderrTail};
-use self::wire::is_mcp_stale_session_error;
+use self::wire::{is_mcp_stale_session_body, is_mcp_stale_session_error};
 use crate::network_policy::{Decision, NetworkPolicyDecider, host_from_url};
 use crate::utils::write_atomic;
 
@@ -1202,7 +1202,6 @@ pub trait McpTransport: Send + Sync {
     async fn shutdown(&mut self) {}
 }
 
-
 const MAX_MCP_CATALOG_PAGES: usize = 64;
 const MAX_MCP_CATALOG_ITEMS: usize = 4_096;
 const MAX_MCP_CATALOG_BYTES: usize = 32 * 1024 * 1024;
@@ -1267,7 +1266,6 @@ impl McpCatalogBudget {
         Ok(cursor)
     }
 }
-
 
 fn is_legacy_sse_transport(config: &McpServerConfig) -> bool {
     config
