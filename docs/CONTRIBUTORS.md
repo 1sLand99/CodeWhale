@@ -36,6 +36,12 @@ notes, and relevant issue/PR comments.
   Mistral AI (la Plateforme) as a first-class provider route, including the
   adjustable-reasoning wire contract and its multi-turn thinking replay
   (PR #5295)
+- **[Ben Younes / ousamabenyounes](https://github.com/ousamabenyounes)** —
+  inherited nested-agent depth cap, keeping child agents from widening the
+  budget provided by their parent (PR #5317)
+- **[Rafael Cavalheri / rafaelcavalheri](https://github.com/rafaelcavalheri)** —
+  multi-round ACP file, search, Git, patch, and explicitly enabled shell tool
+  execution with cancellation and fail-closed shell safety (PR #5225)
 
 </details>
 

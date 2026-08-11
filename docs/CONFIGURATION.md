@@ -1620,8 +1620,9 @@ separate:
 For known context-window models, including 1M-class V4 models, replacement
 compaction is enabled by default unless the user explicitly configures
 `auto_compact = false`. It fires at the active model's compaction threshold and
-replays the generated summary through the stable system prompt on the next
-request. Unknown model ids remain opt-in.
+replaces old history with recent user context followed by one ordinary
+checkpoint message. The standing system prompt remains unchanged. Unknown model
+ids remain opt-in.
 
 ### Command Migration Notes
 

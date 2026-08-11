@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.6] - 2026-08-10
+## [0.9.6] - 2026-08-11
 
 Codewhale v0.9.6 is a subtractive release: fewer runtime guards, one stable
 prompt, truthful provider endings, and a smaller compaction path that preserves
@@ -27,7 +27,7 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   launch checks.
 - Maintainers can report observed daily active installs from the same anonymous,
   aggregate telemetry dataset; no additional client data is collected.
-- Fleet-dispatched members under a read-only/recon (no-network) ceiling now
+- Fleet-dispatched members under a read-only evidence (no-network) ceiling now
   keep the `Web` tool's read-only `search` and `fetch` actions — parity with an
   ordinary scout — while every reaching surface (`web.run`, `fetch_url`,
   `github`, MCP) stays denied and the sentinel-backed capability envelope
@@ -45,6 +45,10 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   Shell access requires both the client's terminal capability and Codewhale's
   headless shell opt-in, and cancellation stops an in-flight tool before the
   turn returns (#5225 by @rafaelcavalheri).
+- Lowercase `read` returns bounded typed PNG, JPEG, GIF, and WebP results to
+  image-capable Chat, Responses, Anthropic, and ACP routes. Text-only routes
+  receive an explicit omission receipt; image bytes never spill into ordinary
+  transcript, export, compaction, or relay text.
 
 ### Changed
 
@@ -81,6 +85,32 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   approval, failure, and snapshot state.
 - `todo_write` is an optional progress surface rather than required model
   ceremony.
+- New turns use one small, stable toolbox: `read`, `write`, `edit`, `bash`,
+  `agent`, and `tool_search`. Specialized native, Web, MCP, plugin, memory,
+  task, and verification tools are policy-filtered and searchable; activated
+  schemas stay in a bounded per-conversation cache. Every sub-agent keeps its
+  own search and cache, including policy-allowed Web research, while forked
+  context and parent activations remain warm starts rather than allowlists.
+- The direct file and shell schemas follow Pi's deliberately small contract:
+  bounded complete-line reads, hash-free writes, unambiguous multi-edit with
+  BOM/CRLF preservation and conservative fuzzy matching, and one foreground
+  `bash` command with a bounded chronological output tail. Modes change
+  execution authority, not those primitive names.
+- Codewhale no longer re-states the To-do list to the model. The model learns
+  what is on the list from the tool result its own `todo_write` call returned,
+  which is ordinary conversation history — the same way Pi's To-do works. The
+  transient `<codewhale:work_state>` block that used to ride the tail of every
+  parent turn-loop and sub-agent step request is gone, along with the stable
+  system prefix being disturbed by list changes. A snapshot is still shown once,
+  where a person asked for it: the `<codewhale:fork_state>` block a newly forked
+  sub-agent is handed, `/relay` handoff instructions, and the agent card. The
+  complete To-do stays visible in the UI. A structural test asserts real
+  outbound provider request bodies do not carry the list.
+- Scout and Reviewer name the read-only investigator roles. Both expose exactly
+  one shell entry point — canonical lowercase `bash`, bounded by the strict
+  read-only classifier — and the legacy `Bash` alias stays denied in the catalog
+  and at dispatch. Previously a case-insensitive name match let a call spelled
+  `Bash` execute through that carve-out, returning raw shell to a read-only role.
 
 ### Fixed
 
@@ -91,9 +121,10 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - `/compact` completion, failure, queued, duplicate, and mailbox outcomes are
   durable transcript receipts instead of short-lived toasts. A stray terminal
   event can no longer leave every later compaction stuck as already running.
-- Repeat compactions replace the previous committed summary rather than stack
-  summaries. The prior summary is coalesced only in the final instruction, so
-  the original conversation prefix remains cacheable.
+- Compaction now follows Codex's simple transcript shape: recent user context
+  followed by one ordinary history checkpoint. It never appends the summary,
+  the To-do list, or volatile shell/worker state to the standing system prompt;
+  reloads migrate the persisted carrier back into exactly one history item.
 - Automatic compaction uses a percentage of the real context window, clamped to
   the route's spendable ceiling. Pressure comes from the current parent-route
   prompt, not cumulative billing or child-model usage.
@@ -138,8 +169,15 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - Relative `mcp_config_path` values no longer depend on the launch directory or
   silently load an empty server pool: Codewhale warns and falls back to the
   user-global MCP configuration. Explicit absolute paths remain authoritative.
-- Write, edit, and patch tools use content-hash guards so a file changed after
-  inspection cannot be overwritten as though it were unchanged.
+- Alibaba Model Studio `qwen3.8-max` and `qwen3.8-max-preview` still stream
+  their current reasoning, but no longer replay historical `reasoning_content`
+  that those routes do not accept. Historical reasoning replay is now gated by
+  the exact provider/API/model contract, so unknown `*-thinking` lookalikes
+  fail closed while documented Qwen, Kimi, DeepSeek, Mistral, Anthropic, and
+  Responses continuity rules remain intact.
+- Compatibility File/patch calls retain optional content-hash guards when a
+  caller supplies them. The new direct `write` and `edit` schemas do not expose
+  hash or prior-read ceremony.
 - Shell previews hold back incomplete UTF-8 sequences instead of emitting
   replacement characters, and compaction receipts report token deltas.
 - Nested agents may narrow but can never widen their inherited depth budget
@@ -482,7 +520,7 @@ File edits, terminal width, and Windows installation.
 
 - An explicit `type=builder` (or its `implementer` alias) plus
   `write_authority=read_only` now fails closed at spawn instead of launching a
-  labeled write role that silently had only recon tools and then self-BLOCKED
+  labeled write role that silently had only read-only tools and then self-BLOCKED
   after burning a turn (#5123). The check is deliberately narrow, because two
   neighbouring combinations are legitimate and stay legal:
   - `type=worker` + `read_only` — worker is the unnamed default (it renders as
@@ -502,7 +540,7 @@ File edits, terminal width, and Windows installation.
   total the worker budget uses) instead of completion tokens alone; elapsed
   time still freezes when the child settles.
 - Live work-bar rows for sub-agents show how many to-dos they still have
-  left (`N left`) when the child's own ledger has unsettled items — never a
+  left (`N left`) when the child's own list has unsettled items — never a
   fabricated zero when no list exists.
 
 - Surfaces no longer claim an OS sandbox on platforms that cannot enforce one.
