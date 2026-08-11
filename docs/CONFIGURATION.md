@@ -1951,6 +1951,8 @@ If you are upgrading from older releases:
   unknown values are rejected so future policies can be added deliberately.
 - `mcp_config_path` (string, optional): defaults to `~/.codewhale/mcp.json`, with
   legacy `~/.deepseek/mcp.json` fallback when the Codewhale path is absent.
+  Custom paths must be absolute; a relative value falls back to the user-global
+  path so changing the launch directory cannot silently change the MCP pool.
   It is visible in `/config` and can be changed from the TUI. The new path is
   used immediately by `/mcp`, but rebuilding the model-visible MCP tool pool
   requires restarting the TUI.

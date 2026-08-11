@@ -6154,11 +6154,18 @@ impl Config {
     /// Resolve the MCP config path.
     #[must_use]
     pub fn mcp_config_path(&self) -> PathBuf {
-        self.mcp_config_path
-            .as_deref()
-            .map(expand_path)
-            .or_else(default_mcp_config_path)
-            .unwrap_or_else(|| PathBuf::from("./mcp.json"))
+        let configured = self.mcp_config_path.as_deref().map(expand_path);
+        match configured {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => {
+                tracing::warn!(
+                    configured_path = %path.display(),
+                    "relative mcp_config_path is not stable across launch directories; using the user-global MCP config"
+                );
+                default_mcp_config_path().unwrap_or_else(|| PathBuf::from("./mcp.json"))
+            }
+            None => default_mcp_config_path().unwrap_or_else(|| PathBuf::from("./mcp.json")),
+        }
     }
 
     /// Resolve the notes file path.
