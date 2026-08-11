@@ -141,6 +141,9 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   restore, filtering, and resize (#5291).
 - Step-budget exhaustion is a typed failure and cannot release a pending
   persistent service. Cancellation after terminal usage still charges the turn.
+- Deferred tools now preserve a completed result when a provider reuses its
+  tool-call ID on the retry turn, preventing successful plugin calls from
+  entering a repeated execution loop.
 - Website setup, provider, diagnostics, Fleet, and single-runtime claims now
   match the source candidate.
 - Opening the sub-agent register no longer hides the to-do list: the Agents
