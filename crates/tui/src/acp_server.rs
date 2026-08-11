@@ -499,6 +499,7 @@ async fn execute_tool_calls_with_cancellation<R, W>(
     registry: &ToolRegistry,
     tool_calls: Vec<PendingToolCall>,
     session_id: &str,
+    response_id_policy: JsonRpcResponseIdPolicy,
     reader: &mut Lines<R>,
     writer: &mut W,
 ) -> Result<ToolBatchOutcome>
@@ -554,6 +555,7 @@ where
                             let target = message.pointer("/params/sessionId").and_then(Value::as_str);
                             if target.is_none() || target == Some(session_id) {
                                 if let Some(msg_id) = msg_id {
+                                    let msg_id = response_id_policy.response_id(msg_id);
                                     write_jsonrpc_result(writer, msg_id, json!(null)).await?;
                                 }
                                 cancel_token.cancel();
@@ -564,11 +566,13 @@ where
                                 break None;
                             }
                             if let Some(msg_id) = msg_id {
+                                let msg_id = response_id_policy.response_id(msg_id);
                                 write_jsonrpc_result(writer, msg_id, json!(null)).await?;
                             }
                         }
                         _ => {
                             if let Some(msg_id) = msg_id {
+                                let msg_id = response_id_policy.response_id(msg_id);
                                 write_jsonrpc_error(
                                     writer,
                                     Some(msg_id),
@@ -705,6 +709,7 @@ where
             tool_registry,
             tool_calls,
             session_id,
+            response_id_policy,
             reader,
             writer,
         )
@@ -835,7 +840,11 @@ impl AcpServer {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.default_cwd.clone());
         let session_id = format!("codewhale-{}", uuid::Uuid::new_v4());
-        let tool_registry = Arc::new(build_acp_tool_registry(&cwd, self.client_supports_terminal));
+        let tool_registry = Arc::new(build_acp_tool_registry(
+            &self.config,
+            &cwd,
+            self.client_supports_terminal,
+        ));
 
         // Evict oldest session when at capacity.
         if self.sessions.len() >= MAX_ACP_SESSIONS {
@@ -1052,6 +1061,15 @@ impl AcpServer {
             .map(str::to_string);
 
         let tools = tool_registry.to_api_tools();
+        let route_limits =
+            resolve_acp_route_limits(&execution_config, request_route.provider, &model);
+        let system = build_acp_system_prompt(
+            &execution_config,
+            cwd,
+            request_route.provider,
+            &request_route.model,
+            route_limits,
+        );
 
         let request = MessageRequest {
             model,
@@ -1059,11 +1077,9 @@ impl AcpServer {
             max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
                 request_route.provider,
                 &request_route.model,
-                None,
+                route_limits,
             ),
-            system: Some(SystemPrompt::Text(
-                "You are a coding assistant inside an ACP-compatible editor. Give concise, actionable responses.".to_string(),
-            )),
+            system: Some(system),
             tools: Some(tools.clone()),
             tool_choice: if tools.is_empty() {
                 None
@@ -1082,31 +1098,114 @@ impl AcpServer {
     }
 }
 
+fn resolve_acp_route_limits(
+    config: &Config,
+    provider: ApiProvider,
+    model: &str,
+) -> Option<codewhale_config::route::RouteLimits> {
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .ok()
+        .and_then(|route| crate::route_budget::known_route_limits(route.candidate.limits()))
+}
+
+/// Compose ACP's stable prompt through the same headless host seam as
+/// `codewhale exec`. Tool availability remains owned by the request catalog;
+/// this function supplies the shared constitution, project instructions,
+/// configured instruction files, memory, locale, and route context.
+fn build_acp_system_prompt(
+    config: &Config,
+    workspace: &std::path::Path,
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+) -> SystemPrompt {
+    let settings = crate::settings::Settings::load().unwrap_or_default();
+    let locale_tag = crate::localization::resolve_locale(&settings.locale)
+        .tag()
+        .to_string();
+    let instructions = config
+        .instructions_paths()
+        .into_iter()
+        .map(crate::prompts::InstructionSource::from)
+        .collect::<Vec<_>>();
+    let skills_dir = config.skills_dir();
+    let user_memory_block = crate::native_memory::native_prompt_block(
+        config.memory_enabled(),
+        &config.memory_path(),
+        workspace,
+    );
+
+    crate::prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
+        workspace,
+        None,
+        Some(&skills_dir),
+        Some(&instructions),
+        crate::prompts::PromptSessionContext {
+            user_memory_block: user_memory_block.as_deref(),
+            goal_objective: None,
+            project_context_pack_enabled: config.project_context_pack_enabled(),
+            locale_tag: &locale_tag,
+            translation_enabled: false,
+            model_id: model,
+            context_window_override: Some(crate::route_budget::route_context_window_tokens(
+                provider,
+                model,
+                route_limits,
+            )),
+            verbosity: config.verbosity.as_deref(),
+            skills_scan_codewhale_only: config.skills_config().scan_codewhale_only(),
+            plugin_registry: None,
+            mode: crate::tui::app::AppMode::Agent,
+        },
+        crate::prompts::PromptHost::Headless,
+    )
+}
+
 /// Build the tool registry for one ACP session, rooted at the session's
-/// `cwd`. Reuses the same builder methods the CLI `exec` agent
-/// (`crate::main::run_exec_agent`) and the MCP server adapter
-/// (`crate::mcp_server`) use — no ACP-specific tool implementations.
+/// `cwd`. Reuses the shared registry builders used by headless `exec` and the
+/// MCP adapter — no ACP-specific tool implementations.
 ///
-/// `allow_shell` gates `Bash`/terminal tools on the client's declared
-/// `clientCapabilities.terminal` support (see [`AcpServer::client_supports_terminal`]).
+/// `Bash` is registered only when all three independent gates allow it: the
+/// client declares `clientCapabilities.terminal`, headless shell access is
+/// explicitly enabled in config, and the stable shell feature is enabled.
+/// Omitting any gate fails closed. The context also inherits the current
+/// mode-derived/configured sandbox boundary.
 /// `ToolContext::new` leaves `auto_approve` at its default (`false`), so the
 /// `SafetyLevel::Dangerous` heuristic still runs — matching `mcp_server`'s
 /// trust posture. ACP has no `session/request_permission` round-trip yet, so
 /// a blocked command surfaces as a normal `success: false` tool result
 /// (`BLOCKED: ...`) fed back to the model, rather than a silent failure.
-fn build_acp_tool_registry(workspace: &std::path::Path, allow_shell: bool) -> ToolRegistry {
-    let mut context = ToolContext::new(workspace);
-    context.shell_policy = if allow_shell {
+fn build_acp_tool_registry(
+    config: &Config,
+    workspace: &std::path::Path,
+    client_supports_terminal: bool,
+) -> ToolRegistry {
+    let features = config.features();
+    let allow_shell = client_supports_terminal
+        && config.allow_shell()
+        && features.enabled(crate::features::Feature::ShellTool);
+    let shell_policy = if allow_shell {
         ShellPolicy::Full
     } else {
         ShellPolicy::None
     };
+    let sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
+        crate::tui::app::AppMode::Agent,
+        crate::tui::approval::ApprovalMode::Suggest,
+        config.sandbox_mode.as_deref(),
+        workspace,
+    );
+    let context = ToolContext::new(workspace)
+        .with_shell_policy(shell_policy)
+        .with_elevated_sandbox_policy(sandbox_policy);
 
     let mut builder = ToolRegistryBuilder::new()
         .with_file_tools()
         .with_search_tools()
-        .with_git_tools()
-        .with_patch_tools();
+        .with_git_tools();
+    if features.enabled(crate::features::Feature::ApplyPatch) {
+        builder = builder.with_patch_tools();
+    }
     if allow_shell {
         builder = builder.with_shell_tools();
     }
@@ -2049,12 +2148,14 @@ mod tests {
     #[test]
     fn concurrent_sessions_each_get_their_own_tool_registry() {
         let mut server = AcpServer::new(
-            Config::default(),
+            Config {
+                allow_shell: Some(true),
+                ..Config::default()
+            },
             "test-model".to_string(),
             PathBuf::from("/tmp"),
         );
-        // Shell access is gated on the client declaring terminal support at
-        // `initialize` time; sessions created without it omit `Bash`.
+        // Both config opt-in and the client terminal capability are present.
         server.client_supports_terminal = true;
         let s1 = server.new_session(json!({ "cwd": "/tmp" })).unwrap();
         let s2 = server.new_session(json!({ "cwd": "/tmp" })).unwrap();
@@ -2077,14 +2178,62 @@ mod tests {
     #[test]
     fn shell_tool_omitted_when_client_declares_no_terminal_support() {
         let workspace = std::env::temp_dir();
-        let registry = build_acp_tool_registry(&workspace, false);
+        let config = Config {
+            allow_shell: Some(true),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&config, &workspace, false);
         assert!(!registry.contains("Bash"));
         assert!(registry.contains("File"));
     }
 
+    #[test]
+    fn shell_tool_omitted_without_headless_config_opt_in() {
+        let workspace = std::env::temp_dir();
+        let registry = build_acp_tool_registry(&Config::default(), &workspace, true);
+        assert!(!registry.contains("Bash"));
+        assert_eq!(registry.context().shell_policy, ShellPolicy::None);
+        assert!(!registry.context().auto_approve);
+    }
+
+    #[test]
+    fn acp_prompt_uses_the_stable_headless_composer() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            "# ACP project law\n\nKeep the acp-project-marker visible.",
+        )
+        .expect("write project instructions");
+        let extra = workspace.path().join("maintainer-instructions.md");
+        std::fs::write(&extra, "Keep the acp-config-marker visible.")
+            .expect("write configured instructions");
+        let config = Config {
+            instructions: Some(vec![extra.to_string_lossy().into_owned()]),
+            ..Config::default()
+        };
+
+        let prompt = build_acp_system_prompt(
+            &config,
+            workspace.path(),
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            None,
+        );
+        let text = crate::prompts::system_prompt_flat_text(&prompt);
+
+        assert!(text.contains(crate::prompts::text::HEADLESS_BASE_PROMPT.trim()));
+        assert!(text.contains("acp-project-marker"));
+        assert!(text.contains("acp-config-marker"));
+        assert!(!text.contains("You are a coding assistant inside an ACP-compatible editor."));
+    }
+
     fn workspace_registry() -> (tempfile::TempDir, ToolRegistry) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = build_acp_tool_registry(dir.path(), true);
+        let config = Config {
+            allow_shell: Some(true),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&config, dir.path(), true);
         (dir, registry)
     }
 
@@ -2391,45 +2540,52 @@ mod tests {
     const SLOW_SHELL_COMMAND: &str = "sleep 5";
 
     #[tokio::test]
-    async fn agentic_turn_cancels_while_a_tool_is_running() {
+    async fn tool_batch_cancels_a_running_bash_and_applies_response_id_policy() {
         let (_dir, registry) = workspace_registry();
-
-        // Bash runs long enough for the cancel line to win the race.
-        let round1 = ready_stream({
-            let mut events = tool_use_events(
-                0,
-                "call_1",
-                "Bash",
-                &json!({ "command": SLOW_SHELL_COMMAND }).to_string(),
-            );
-            events.push(StreamEvent::MessageStop);
-            events
+        let (mut input_writer, input_reader) = tokio::io::duplex(512);
+        let cancel_writer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            input_writer
+                .write_all(
+                    br#"{"jsonrpc":"2.0","id":7,"method":"session/cancel","params":{"sessionId":"sess_1"}}
+"#,
+                )
+                .await
+                .expect("write delayed cancel");
         });
-        let scripted = ScriptedStreams::new(vec![round1]);
-        let mut reader = lines_from(
-            r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_1"}}"#,
-        );
+        let mut reader = BufReader::new(input_reader).lines();
         let mut out = Vec::new();
+        let started = std::time::Instant::now();
 
-        let (outcome, _messages) = run_agentic_prompt_turn(
-            "sess_1",
-            vec![Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: "Run a slow command".to_string(),
-                    cache_control: None,
-                }],
-            }],
+        let outcome = execute_tool_calls_with_cancellation(
             &registry,
-            JsonRpcResponseIdPolicy::Preserve,
+            vec![PendingToolCall {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: json!({ "command": SLOW_SHELL_COMMAND }),
+                parse_error: None,
+            }],
+            "sess_1",
+            JsonRpcResponseIdPolicy::StringifyNumeric,
             &mut reader,
             &mut out,
-            |_msgs| scripted.next(),
         )
         .await
-        .expect("turn resolves even when cancelled mid-tool");
+        .expect("tool batch resolves when cancelled");
+        cancel_writer.await.expect("cancel writer joins");
 
-        assert_eq!(outcome, PromptOutcome::Cancelled);
+        assert!(matches!(outcome, ToolBatchOutcome::Cancelled));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "Bash cancellation must preempt the five-second command"
+        );
+        let lines = parse_lines(out);
+        assert!(
+            lines
+                .iter()
+                .any(|value| value["id"] == "7" && value["result"].is_null()),
+            "Zed-compatible cancellation response id was not stringified: {lines:?}"
+        );
     }
 
     #[tokio::test]
