@@ -1027,6 +1027,7 @@ mod tests {
             let ui = theme_id.ui_theme();
             let badges = [
                 ("act", ui.mode_agent),
+                ("work", ui.mode_agent),
                 ("plan", ui.mode_plan),
                 ("operate", ui.mode_operate),
                 ("full access", ui.mode_yolo),

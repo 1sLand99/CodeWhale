@@ -1368,7 +1368,7 @@ impl Settings {
                 // Act (wire: agent), Plan, and Operate are valid startup modes.
                 // yolo remains a permission-migration alias, not a mode write.
                 self.default_mode = match value.trim().to_ascii_lowercase().as_str() {
-                    "agent" | "normal" | "act" | "edit" => "agent".to_string(),
+                    "agent" | "normal" | "act" | "work" | "edit" => "agent".to_string(),
                     "plan" => "plan".to_string(),
                     "operate" | "operation" | "ops" => "operate".to_string(),
                     _ => anyhow::bail!(
@@ -2533,7 +2533,7 @@ fn normalize_mode(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "edit" => "agent",
         "normal" => "agent",
-        "agent" | "act" => "agent",
+        "agent" | "act" | "work" => "agent",
         "plan" => "plan",
         // Operate is a first-class startup mode (Hunter 2026-07-24).
         "operate" | "operation" | "ops" => "operate",

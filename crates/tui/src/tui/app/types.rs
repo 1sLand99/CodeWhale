@@ -517,7 +517,7 @@ impl AppMode {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "agent" | "act" | "auto" | "1" => Some(Self::Agent),
+            "agent" | "act" | "work" | "auto" | "1" => Some(Self::Agent),
             "plan" | "2" => Some(Self::Plan),
             "operate" | "operation" | "ops" | "3" => Some(Self::Operate),
             // Invisible one-way permission shorthand only — never a visible mode.

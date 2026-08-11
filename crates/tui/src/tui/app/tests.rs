@@ -2881,6 +2881,7 @@ fn entering_operate_preserves_user_rail_panel() {
 fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::parse("agent"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("act"), Some(AppMode::Agent));
+    assert_eq!(AppMode::parse("work"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("2"), Some(AppMode::Plan));
     assert_eq!(AppMode::parse("auto"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("3"), Some(AppMode::Operate));
