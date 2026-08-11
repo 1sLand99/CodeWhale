@@ -386,6 +386,7 @@ function startBrowserClient() {
     newThread: document.querySelector("#new-thread"),
     connectionDot: document.querySelector("#connection-dot"),
     connectionLabel: document.querySelector("#connection-label"),
+    runtimeProvenance: document.querySelector("#runtime-provenance"),
     kicker: document.querySelector("#session-kicker"),
     title: document.querySelector("#session-title"),
     facts: document.querySelector("#session-facts"),
@@ -1214,6 +1215,7 @@ function startBrowserClient() {
         api("/v1/runtime/info"),
         api("/v1/workspace/status"),
       ]);
+      renderRuntimeProvenance(dom.runtimeProvenance, app.runtimeInfo);
       setConnection("ready", "Local runtime connected");
       await loadThreads();
       await loadSessions();
@@ -1242,11 +1244,26 @@ function humanize(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function modeLabel(mode) {
-  if (mode === "agent") return "Act";
+export function modeLabel(mode) {
+  if (mode === "agent") return "Work";
   if (mode === "plan") return "Plan";
   if (mode === "operate") return "Operate";
   return humanize(mode || "Runtime default");
+}
+
+export function formatRuntimeProvenance(runtimeInfo) {
+  const version = String(
+    runtimeInfo?.codewhale_version || runtimeInfo?.version || "",
+  ).trim() || "version unknown";
+  const commit = String(runtimeInfo?.codewhale_commit || "").trim();
+  const source = /^[0-9a-f]{40}$/i.test(commit)
+    ? commit.slice(0, 12)
+    : "source unknown";
+  return `${version} · ${source}`;
+}
+
+export function renderRuntimeProvenance(element, runtimeInfo) {
+  return setSafeText(element, formatRuntimeProvenance(runtimeInfo));
 }
 
 function permissionLabel(thread) {

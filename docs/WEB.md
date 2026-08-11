@@ -27,7 +27,7 @@ ends with it.
 
 ## What the browser can do
 
-The v0.9.1 client provides a responsive thread and search rail, Runtime-owned
+The embedded client provides a responsive thread and search rail, Runtime-owned
 session facts, transcript and tool receipts, and a composer. It can create,
 select, rename, and archive threads; start or steer turns; interrupt work;
 resolve approvals; and answer Runtime user-input requests.

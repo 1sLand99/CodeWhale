@@ -404,6 +404,7 @@ textarea::placeholder {
 
 .rail-footer {
   min-width: 0;
+  align-items: flex-start;
   gap: 8px;
   padding: 9px 4px 0;
   border-top: 1px solid var(--line);
@@ -415,8 +416,24 @@ textarea::placeholder {
   flex: 0 0 7px;
   width: 7px;
   height: 7px;
+  margin-top: 3px;
   border-radius: 50%;
   background: var(--action);
+}
+
+.connection-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.runtime-provenance {
+  overflow: hidden;
+  color: rgba(147, 160, 184, 0.72);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connection-dot.ready {
