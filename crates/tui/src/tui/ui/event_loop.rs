@@ -3428,52 +3428,6 @@ pub(crate) async fn run_event_loop(
                 continue;
             }
 
-            // Decision card keyboard routing (v0.8.43 truth-surface).
-            // When a card is active, number keys 1-9 select options,
-            // j/k or Up/Down navigate, and Enter confirms.
-            // Only route keys to the decision card when no other modal
-            // (Help, Config, Pager, etc.) is on top of the view stack (#2005).
-            if app.view_stack.is_empty()
-                && let Some(card) = app.decision_card.as_mut()
-            {
-                if let Some(n) = decision_card_number_from_key(&key) {
-                    card.select_number(n);
-                    card.confirm();
-                    app.status_message = card
-                        .confirmed_label()
-                        .map(|label| format!("Selected: {label}"));
-                    app.decision_card = None;
-                    app.needs_redraw = true;
-                } else {
-                    match key.code {
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            card.select_next();
-                            app.needs_redraw = true;
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            card.select_prev();
-                            app.needs_redraw = true;
-                        }
-                        KeyCode::Enter => {
-                            card.confirm();
-                            app.status_message = card
-                                .confirmed_label()
-                                .map(|label| format!("Selected: {label}"));
-                            app.decision_card = None;
-                            app.needs_redraw = true;
-                        }
-                        KeyCode::Esc => {
-                            app.decision_card = None;
-                            app.status_message = Some("Decision cancelled".to_string());
-                            app.needs_redraw = true;
-                        }
-                        _ => {}
-                    }
-                }
-                submit_initial_input_if_ready(app, config, &engine_handle).await?;
-                continue;
-            }
-
             // Clicking the WorkflowPanel gives its non-text controls focus,
             // but ordinary characters always return directly to the composer.
             // This keeps the panel keyboard-accessible without stealing the

@@ -158,7 +158,6 @@ pub(crate) fn hotbar_slot_from_key(app: &App, key: &event::KeyEvent) -> Option<u
         if app.onboarding != OnboardingState::None
             || !app.view_stack.is_empty()
             || app.is_history_search_active()
-            || app.decision_card.is_some()
             || !visible_slash_menu_entries(app, SLASH_MENU_LIMIT).is_empty()
         {
             return None;
@@ -168,17 +167,6 @@ pub(crate) fn hotbar_slot_from_key(app: &App, key: &event::KeyEvent) -> Option<u
     }
 
     None
-}
-
-pub(crate) fn decision_card_number_from_key(key: &event::KeyEvent) -> Option<usize> {
-    let KeyCode::Char(c @ '1'..='9') = key.code else {
-        return None;
-    };
-    if !key.modifiers.is_empty() {
-        return None;
-    }
-
-    Some((c as u8 - b'1' + 1) as usize)
 }
 
 pub(crate) fn is_permission_cycle_shortcut(key: &KeyEvent) -> bool {

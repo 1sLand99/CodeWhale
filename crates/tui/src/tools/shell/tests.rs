@@ -21,14 +21,32 @@ fn env_lock() -> &'static Mutex<()> {
 
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
 
+fn execute_shell(
+    manager: &mut ShellManager,
+    command: &str,
+    working_dir: Option<&str>,
+    timeout_ms: u64,
+    background: bool,
+) -> Result<ShellResult> {
+    manager.execute_with_options_env(
+        command,
+        working_dir,
+        timeout_ms,
+        background,
+        None,
+        false,
+        None,
+        HashMap::new(),
+    )
+}
+
 #[test]
 fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let workspace = tempdir().expect("workspace");
     let stale = workspace.path().join("deleted-session-workspace");
     let mut manager = ShellManager::new(stale.clone());
 
-    let error = manager
-        .execute("echo should-not-run", None, 1_000, false)
+    let error = execute_shell(&mut manager, "echo should-not-run", None, 1_000, false)
         .expect_err("missing saved workspace must fail before shell spawn");
     let message = error.to_string();
     assert!(message.contains("saved session workspace is unavailable"));
@@ -43,9 +61,14 @@ fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
     let missing = workspace.path().join("explicit-missing");
     let mut manager = ShellManager::new(workspace.path().to_path_buf());
 
-    let error = manager
-        .execute("echo should-not-run", missing.to_str(), 1_000, false)
-        .expect_err("missing explicit cwd must fail before shell spawn");
+    let error = execute_shell(
+        &mut manager,
+        "echo should-not-run",
+        missing.to_str(),
+        1_000,
+        false,
+    )
+    .expect_err("missing explicit cwd must fail before shell spawn");
     let message = error.to_string();
     assert!(message.contains("requested working directory is unavailable"));
     assert!(message.contains(&missing.display().to_string()));
@@ -1152,9 +1175,7 @@ fn shell_execution_preserves_custom_windows_sdk_root_env() {
             .to_string()
     };
 
-    let result = manager
-        .execute(&command, None, 5000, false)
-        .expect("execute");
+    let result = execute_shell(&mut manager, &command, None, 5000, false).expect("execute");
 
     unsafe {
         match previous_sdk {
@@ -1185,9 +1206,8 @@ fn test_sync_execution() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(&echo_command("hello"), None, 5000, false)
-        .expect("execute");
+    let result =
+        execute_shell(&mut manager, &echo_command("hello"), None, 5000, false).expect("execute");
 
     assert_eq!(result.status, ShellStatus::Completed);
     assert!(result.stdout.contains("hello"));
@@ -1199,9 +1219,14 @@ fn test_background_execution() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(&sleep_then_echo_command(1, "done"), None, 5000, true)
-        .expect("execute");
+    let result = execute_shell(
+        &mut manager,
+        &sleep_then_echo_command(1, "done"),
+        None,
+        5000,
+        true,
+    )
+    .expect("execute");
 
     assert_eq!(result.status, ShellStatus::Running);
     assert!(result.task_id.is_some());
@@ -1221,9 +1246,8 @@ fn test_timeout() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(&sleep_command(10), None, 1000, false)
-        .expect("execute");
+    let result =
+        execute_shell(&mut manager, &sleep_command(10), None, 1000, false).expect("execute");
 
     assert_eq!(result.status, ShellStatus::TimedOut);
 }
@@ -1233,9 +1257,8 @@ fn test_kill() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(&sleep_command(60), None, 5000, true)
-        .expect("execute");
+    let result =
+        execute_shell(&mut manager, &sleep_command(60), None, 5000, true).expect("execute");
 
     let task_id = result
         .task_id
@@ -1252,7 +1275,16 @@ fn test_write_stdin_streams_output() {
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
     let result = manager
-        .execute_with_options(&echo_stdin_command(), None, 5000, true, None, false, None)
+        .execute_with_options_env(
+            &echo_stdin_command(),
+            None,
+            5000,
+            true,
+            None,
+            false,
+            None,
+            HashMap::new(),
+        )
         .expect("execute");
 
     let task_id = result
@@ -1282,7 +1314,7 @@ fn background_tty_command_has_controlling_terminal() {
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
     let result = manager
-        .execute_with_options(
+        .execute_with_options_env(
             "sh -c 'exec 3<>/dev/tty && printf tty-ok && exec 3>&-'",
             None,
             5000,
@@ -1290,6 +1322,7 @@ fn background_tty_command_has_controlling_terminal() {
             None,
             true,
             Some(ExecutionSandboxPolicy::DangerFullAccess),
+            HashMap::new(),
         )
         .expect("execute tty command");
 
@@ -1314,9 +1347,14 @@ fn test_job_list_poll_cancel_and_stale_snapshot() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let started = manager
-        .execute(&sleep_then_echo_command(1, "done"), None, 5000, true)
-        .expect("execute");
+    let started = execute_shell(
+        &mut manager,
+        &sleep_then_echo_command(1, "done"),
+        None,
+        5000,
+        true,
+    )
+    .expect("execute");
     let task_id = started.task_id.expect("task id");
     manager
         .tag_linked_task(&task_id, Some("task_123".to_string()))
@@ -1362,9 +1400,8 @@ fn running_job_snapshot_marks_no_output_stale_after_threshold() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let started = manager
-        .execute(&sleep_command(5), None, 5000, true)
-        .expect("execute");
+    let started =
+        execute_shell(&mut manager, &sleep_command(5), None, 5000, true).expect("execute");
     let task_id = started.task_id.expect("task id");
 
     {
@@ -1392,9 +1429,8 @@ fn running_job_snapshot_keeps_recent_no_output_fresh() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let started = manager
-        .execute(&sleep_command(5), None, 5000, true)
-        .expect("execute");
+    let started =
+        execute_shell(&mut manager, &sleep_command(5), None, 5000, true).expect("execute");
     let task_id = started.task_id.expect("task id");
 
     let job = manager
@@ -1413,9 +1449,8 @@ fn test_job_cancel_updates_completion_state() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let started = manager
-        .execute(&sleep_command(60), None, 5000, true)
-        .expect("execute");
+    let started =
+        execute_shell(&mut manager, &sleep_command(60), None, 5000, true).expect("execute");
     let task_id = started.task_id.expect("task id");
 
     let killed = manager.kill(&task_id).expect("kill");
@@ -2093,11 +2128,14 @@ async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let ctx = ToolContext::new(tmp.path()).with_cancel_token(cancel_token.clone());
     let shell_manager = ctx.shell_manager.clone();
-    let started = shell_manager
-        .lock()
-        .expect("shell manager lock")
-        .execute(&sleep_command(30), None, 600_000, true)
-        .expect("execute");
+    let started = execute_shell(
+        &mut shell_manager.lock().expect("shell manager lock"),
+        &sleep_command(30),
+        None,
+        600_000,
+        true,
+    )
+    .expect("execute");
     let task_id = started.task_id.expect("task id");
     let wait_task_id = task_id.clone();
     let task_ctx = ctx.clone();
@@ -2145,11 +2183,14 @@ async fn test_completed_background_shell_releases_process_handles() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
     let shell_manager = ctx.shell_manager.clone();
-    let started = shell_manager
-        .lock()
-        .expect("shell manager lock")
-        .execute(&echo_command("done"), None, 600_000, true)
-        .expect("execute");
+    let started = execute_shell(
+        &mut shell_manager.lock().expect("shell manager lock"),
+        &echo_command("done"),
+        None,
+        600_000,
+        true,
+    )
+    .expect("execute");
     let task_id = started.task_id.expect("task id");
 
     let result = BashTool::alias("exec_shell_wait", "wait")
@@ -2220,11 +2261,14 @@ async fn test_exec_shell_cancel_tool_kills_background_process() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
     let shell_manager = ctx.shell_manager.clone();
-    let started = shell_manager
-        .lock()
-        .expect("shell manager lock")
-        .execute(&sleep_command(30), None, 600_000, true)
-        .expect("execute");
+    let started = execute_shell(
+        &mut shell_manager.lock().expect("shell manager lock"),
+        &sleep_command(30),
+        None,
+        600_000,
+        true,
+    )
+    .expect("execute");
     let task_id = started.task_id.expect("task id");
 
     let result = BashTool::alias("exec_shell_cancel", "cancel")
@@ -2251,20 +2295,26 @@ async fn test_exec_shell_cancel_tool_can_kill_all_running_processes() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
     let shell_manager = ctx.shell_manager.clone();
-    let first = shell_manager
-        .lock()
-        .expect("shell manager lock")
-        .execute(&sleep_command(30), None, 600_000, true)
-        .expect("execute first")
-        .task_id
-        .expect("first task id");
-    let second = shell_manager
-        .lock()
-        .expect("shell manager lock")
-        .execute(&sleep_command(30), None, 600_000, true)
-        .expect("execute second")
-        .task_id
-        .expect("second task id");
+    let first = execute_shell(
+        &mut shell_manager.lock().expect("shell manager lock"),
+        &sleep_command(30),
+        None,
+        600_000,
+        true,
+    )
+    .expect("execute first")
+    .task_id
+    .expect("first task id");
+    let second = execute_shell(
+        &mut shell_manager.lock().expect("shell manager lock"),
+        &sleep_command(30),
+        None,
+        600_000,
+        true,
+    )
+    .expect("execute second")
+    .task_id
+    .expect("second task id");
 
     let result = BashTool::alias("exec_shell_cancel", "cancel")
         .execute(json!({ "all": true }), &ctx)
@@ -2349,9 +2399,8 @@ fn test_orphaned_subprocess_does_not_block_collect_output() {
 
     // sh spawns `sleep 100 &` and exits; the sleep subprocess inherits the
     // pipe write-ends and would keep reader threads blocked without the fix.
-    let result = manager
-        .execute("sh -c 'sleep 100 &'", None, 5000, true)
-        .expect("execute");
+    let result =
+        execute_shell(&mut manager, "sh -c 'sleep 100 &'", None, 5000, true).expect("execute");
     let task_id = result.task_id.expect("task id");
 
     // Drive to completion with a tight timeout — must not hang.
@@ -2368,8 +2417,7 @@ fn foreground_shell_does_not_block_on_orphaned_subprocess_pipe() {
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
     let started = std::time::Instant::now();
-    let result = manager
-        .execute("sh -c 'sleep 100 &'", None, 5000, false)
+    let result = execute_shell(&mut manager, "sh -c 'sleep 100 &'", None, 5000, false)
         .expect("foreground execute must complete, not hang");
 
     assert!(
@@ -2389,14 +2437,14 @@ fn background_collection_does_not_block_on_detached_descendant_pipe() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(
-            r#"cmd /c start "" /b ping 127.0.0.1 -n 4"#,
-            None,
-            5000,
-            true,
-        )
-        .expect("execute");
+    let result = execute_shell(
+        &mut manager,
+        r#"cmd /c start "" /b ping 127.0.0.1 -n 4"#,
+        None,
+        5000,
+        true,
+    )
+    .expect("execute");
     let task_id = result.task_id.expect("task id");
 
     let started = std::time::Instant::now();
@@ -2496,14 +2544,14 @@ fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let result = manager
-        .execute(
-            r#"cmd /c start "" /b ping 127.0.0.1 -n 8"#,
-            None,
-            5000,
-            true,
-        )
-        .expect("execute");
+    let result = execute_shell(
+        &mut manager,
+        r#"cmd /c start "" /b ping 127.0.0.1 -n 8"#,
+        None,
+        5000,
+        true,
+    )
+    .expect("execute");
     let task_id = result.task_id.expect("task id");
 
     {
@@ -2585,9 +2633,8 @@ fn test_list_jobs_cleans_up_completed_old_processes() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
 
-    let bg = manager
-        .execute(&echo_command("bg"), None, 5000, true)
-        .expect("execute bg");
+    let bg =
+        execute_shell(&mut manager, &echo_command("bg"), None, 5000, true).expect("execute bg");
     let bg_id = bg.task_id.expect("bg task id");
     manager.get_output(&bg_id, true, 3000).expect("bg done");
 
@@ -2828,9 +2875,8 @@ async fn kill_returns_promptly_when_escaped_descendant_holds_pipe_open() {
         shell_words::quote("tools::shell::tests::shell_group_escape_helper_process"),
     );
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
-    let started_bg = manager
-        .execute(&command, None, 600_000, true)
-        .expect("start wrapper");
+    let started_bg =
+        execute_shell(&mut manager, &command, None, 600_000, true).expect("start wrapper");
     let task_id = started_bg.task_id.expect("task id");
     let grandchild = wait_for_shell_pid_file(&pid_file);
 

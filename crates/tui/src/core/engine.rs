@@ -60,15 +60,14 @@ use crate::tools::spec::{
 use crate::tools::subagent::{
     FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion,
     SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus,
-    SubAgentThinking, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
-    new_shared_subagent_manager_with_state_root_and_timeout, resolve_subagent_assignment_route,
+    agent_worker_owner_snapshot, new_shared_subagent_manager_with_state_root_and_timeout,
 };
 use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::{ModelRoute, WorkerRuntimeProfile};
+use crate::worker_profile::WorkerRuntimeProfile;
 use crate::working_set::WorkingSet;
 
 #[cfg(test)]
@@ -897,30 +896,6 @@ async fn forward_subagent_mailbox_message(
 }
 
 impl Engine {
-    /// Per-posture question discipline. Lives with the approval overlays in the
-    /// stable prefix / gate errors — not re-asserted every turn (#4780).
-    #[allow(dead_code)] // surface via approval-gate errors when those are tightened
-    fn permission_question_discipline(
-        approval_mode: crate::tui::approval::ApprovalMode,
-    ) -> &'static str {
-        use crate::tui::approval::ApprovalMode;
-
-        match approval_mode {
-            ApprovalMode::Suggest => {
-                "Tool approvals and user decisions are separate. Ask a concise question when an unresolved choice materially affects authority, cost, requested scope, or outcome; otherwise continue under the active approval policy."
-            }
-            ApprovalMode::Auto => {
-                "Auto-Review is fully autonomous. Do not ask the user questions or pause for a user decision. Resolve ambiguity from the available context, choose the safest reversible interpretation that still advances the request, and continue; if no safe in-scope action exists, report the constraint without opening a question prompt."
-            }
-            ApprovalMode::Bypass => {
-                "Tool calls do not need approval, but Full Access does not authorize invented intent. Ask one concise, deliberate question when a consequential choice cannot be recovered safely from context; otherwise proceed autonomously within the current sandbox, repository, and managed-policy boundaries."
-            }
-            ApprovalMode::Never => {
-                "Remain read-only. Ask when a missing user decision blocks a truthful plan or investigation; do not imply that this permission boundary can be bypassed."
-            }
-        }
-    }
-
     pub(super) async fn emit_compaction_started(
         &mut self,
         id: String,
@@ -2167,142 +2142,6 @@ impl Engine {
                     }
                     Op::SetGoalStatus { status, clear } => {
                         self.handle_set_goal_status(status, clear).await;
-                    }
-                    Op::CancelRequest => {
-                        self.cancel_token.cancel();
-                        self.reset_cancel_token();
-                    }
-                    Op::ApproveToolCall { id } => {
-                        // Tool approval handling will be implemented in tools module
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!("Approved tool call: {id}")))
-                            .await;
-                    }
-                    Op::DenyToolCall { id } => {
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!("Denied tool call: {id}")))
-                            .await;
-                    }
-                    Op::SpawnSubAgent { prompt } => {
-                        let Some(client) = self.deepseek_client.clone() else {
-                            let message = self
-                                .deepseek_client_error
-                                .as_deref()
-                                .map(|err| format!("Failed to spawn sub-agent: {err}"))
-                                .unwrap_or_else(|| {
-                                    "Failed to spawn sub-agent: API client not configured"
-                                        .to_string()
-                                });
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal(message)))
-                                .await;
-                            continue;
-                        };
-
-                        let mcp_pool = if self.config.features.enabled(Feature::Mcp) {
-                            self.ensure_mcp_pool().await.ok()
-                        } else {
-                            None
-                        };
-
-                        let mut runtime = SubAgentRuntime::new(
-                            client,
-                            self.session.model.clone(),
-                            // Sub-agents don't inherit YOLO mode - use Agent mode defaults
-                            self.build_tool_context(AppMode::Agent, self.session.auto_approve),
-                            self.session.allow_shell,
-                            Some(self.tx_event.clone()),
-                            Arc::clone(&self.subagent_manager),
-                        )
-                        .with_locale_tag(self.config.locale_tag.clone())
-                        .with_role_models(self.subagent_role_models())
-                        .with_api_config(self.api_config.clone())
-                        .with_fleet_roster(self.config.fleet_roster.clone())
-                        .with_auto_model(self.session.auto_model)
-                        .with_reasoning_effort(
-                            self.session.reasoning_effort.clone(),
-                            self.session.reasoning_effort_auto,
-                        )
-                        .with_agent_tool_surface_options(self.agent_tool_surface_options(
-                            shell_policy_for_mode(AppMode::Agent, self.session.allow_shell),
-                        ))
-                        .with_max_spawn_depth(self.config.max_spawn_depth)
-                        .with_step_api_timeout(self.config.subagent_api_timeout)
-                        .with_speech_output_dir(self.config.speech_output_dir.clone())
-                        .with_mcp_pool(mcp_pool)
-                        .with_parent_mode(self.current_mode)
-                        // #4810: no `with_todos` here — this runtime *is* the
-                        // spawned background agent, and `background_runtime()`
-                        // gives it its own list. Binding the session list would
-                        // be discarded anyway, and reading as if the background
-                        // agent writes the user's Work checklist.
-                        .background_runtime();
-                        // #4042: thread the session's --disallowed-tools into
-                        // the child so tool restrictions flow down to sub-agents.
-                        runtime.worker_profile.denied_tools =
-                            self.config.disallowed_tools.clone().unwrap_or_default();
-                        let route = resolve_subagent_assignment_route(
-                            &runtime,
-                            None,
-                            &prompt,
-                            &FleetRole::Worker,
-                            ModelRoute::Inherit,
-                            SubAgentThinking::Inherit,
-                        )
-                        .await;
-                        let effective_model = match ensure_subagent_model_for_provider(
-                            &runtime,
-                            &route.model_route,
-                            route.model,
-                        ) {
-                            Ok(model) => model,
-                            Err(err) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::error(ErrorEnvelope::fatal(format!(
-                                        "Failed to spawn sub-agent: {err}"
-                                    ))))
-                                    .await;
-                                continue;
-                            }
-                        };
-                        runtime.model = effective_model;
-                        runtime.reasoning_effort = route.reasoning_effort;
-                        runtime.reasoning_effort_auto = false;
-
-                        let result = {
-                            let mut manager = self.subagent_manager.write().await;
-                            manager.spawn_background(
-                                Arc::clone(&self.subagent_manager),
-                                runtime,
-                                FleetRole::Worker,
-                                prompt.clone(),
-                                None,
-                            )
-                        };
-
-                        match result {
-                            Ok(snapshot) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::status(format!(
-                                        "Spawned sub-agent {}",
-                                        snapshot.agent_id
-                                    )))
-                                    .await;
-                            }
-                            Err(err) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::error(ErrorEnvelope::fatal(format!(
-                                        "Failed to spawn sub-agent: {err}"
-                                    ))))
-                                    .await;
-                            }
-                        }
                     }
                     Op::PreviewOutboundRequest {
                         inputs,

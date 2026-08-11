@@ -112,7 +112,16 @@ async fn pending_shell_completion_makes_the_body_unavailable_without_draining_it
             "sleep 30"
         };
         manager
-            .execute(command, None, 30_000, true)
+            .execute_with_options_env(
+                command,
+                None,
+                30_000,
+                true,
+                None,
+                false,
+                None,
+                std::collections::HashMap::new(),
+            )
             .expect("background shell starts");
         assert!(manager.may_have_undelivered_completion());
     }

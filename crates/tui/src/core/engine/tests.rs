@@ -13121,11 +13121,15 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
     let task_id = {
         let mut manager = shell_manager.lock().expect("shell manager");
         let result = manager
-            .execute(
+            .execute_with_options_env(
                 &format!("sleep 5 && touch '{}'", marker.display()),
                 None,
                 60_000,
                 true,
+                None,
+                false,
+                None,
+                HashMap::new(),
             )
             .expect("spawn background job");
         result.task_id.expect("background task id")

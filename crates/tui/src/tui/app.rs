@@ -1842,9 +1842,6 @@ pub struct App {
     pub task_panel: Vec<TaskPanelEntry>,
     /// Session-local quieting and command detectors for event-driven tips.
     pub behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState,
-    /// Active decision card (v0.8.43 truth-surface). When set, keyboard input
-    /// is routed through the card navigation instead of the composer.
-    pub decision_card: Option<crate::tui::widgets::decision_card::DecisionCard>,
     /// Unified Workflow activity surface (#4121). Lives above the composer so
     /// phase/row progress does not flood the chat transcript. Preserved after
     /// completion until the next `RunStarted` replaces it.

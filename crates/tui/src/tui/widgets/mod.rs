@@ -1,10 +1,5 @@
-mod header;
-// Some helpers (`shift`, `ctrl_alt`, `is_press`, etc.) are part of the
-// public surface for issue #93's help overlay and future call sites; allow
-// dead code rather than scattering `#[allow]` across every constructor.
 pub mod agent_card;
-pub mod decision_card;
-#[allow(dead_code)]
+mod header;
 pub mod key_hint;
 pub mod pending_input_preview;
 mod renderable;

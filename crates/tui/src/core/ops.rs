@@ -162,22 +162,6 @@ pub enum Op {
         clear: bool,
     },
 
-    /// Cancel the current request
-    #[allow(dead_code)]
-    CancelRequest,
-
-    /// Approve a tool call that requires permission
-    #[allow(dead_code)]
-    ApproveToolCall { id: String },
-
-    /// Deny a tool call that requires permission
-    #[allow(dead_code)]
-    DenyToolCall { id: String },
-
-    /// Spawn a sub-agent
-    #[allow(dead_code)]
-    SpawnSubAgent { prompt: String },
-
     /// Describe the exact request the next turn would send, without
     /// sending it (`/preview-request`, #1004).
     ///

@@ -5315,46 +5315,6 @@ impl SubAgentManager {
         true
     }
 
-    /// Spawn a new background sub-agent.
-    pub fn spawn_background(
-        &mut self,
-        manager_handle: SharedSubAgentManager,
-        runtime: SubAgentRuntime,
-        agent_type: FleetRole,
-        prompt: String,
-        allowed_tools: Option<Vec<String>>,
-    ) -> Result<SubAgentResult> {
-        self.spawn_background_with_assignment(
-            manager_handle,
-            runtime,
-            agent_type,
-            prompt.clone(),
-            SubAgentAssignment::new(prompt, None),
-            allowed_tools,
-        )
-    }
-
-    /// Spawn a new background sub-agent with explicit assignment metadata.
-    pub fn spawn_background_with_assignment(
-        &mut self,
-        manager_handle: SharedSubAgentManager,
-        runtime: SubAgentRuntime,
-        agent_type: FleetRole,
-        prompt: String,
-        assignment: SubAgentAssignment,
-        allowed_tools: Option<Vec<String>>,
-    ) -> Result<SubAgentResult> {
-        self.spawn_background_with_assignment_options(
-            manager_handle,
-            runtime,
-            agent_type,
-            prompt,
-            assignment,
-            allowed_tools,
-            SubAgentSpawnOptions::default(),
-        )
-    }
-
     /// Spawn a new background sub-agent with explicit assignment and display
     /// metadata.
     #[allow(clippy::too_many_arguments)]

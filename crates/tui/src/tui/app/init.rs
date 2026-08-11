@@ -929,7 +929,6 @@ impl App {
             memory_size_hint: None,
             task_panel: Vec::new(),
             behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::default(),
-            decision_card: None,
             workflow_panel: None,
             session_started_at: chrono::Utc::now(),
             needs_redraw: true,
