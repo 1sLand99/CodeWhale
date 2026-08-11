@@ -238,6 +238,13 @@ assert.match(artifacts, /codew-windows-arm64\.exe/);
 assert.match(artifacts, /CodeWhaleSetup\.exe/);
 assert.match(artifacts, /assemble-release-assets\.js --verify release-assets/);
 assert.match(artifacts, /CODEWHALE_SMOKE_ASSETS_DIR/);
+const bundleStep = namedStep(artifacts, "Create and checksum platform archives");
+assert.match(bundleStep, /git show -s --format=%ct "\$\{\{ inputs\.source_sha \}\}"/);
+assert.match(
+  bundleStep,
+  /SOURCE_DATE_EPOCH="\$\{source_date_epoch\}"[\s\\]+bash scripts\/release\/create-release-bundles\.sh artifacts bundles/,
+);
+assert.doesNotMatch(bundleStep, /\bdate\b/, "bundle timestamps must come from the pinned source commit, not wall-clock time");
 
 assert.equal(allReleaseAssetNames().length, 34);
 assert.match(release, /^  artifacts:\n/m);
