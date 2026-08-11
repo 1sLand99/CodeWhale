@@ -5119,8 +5119,10 @@ fn relative_mcp_config_path_falls_back_to_user_global_config() -> Result<()> {
     let temp_root = tempfile::tempdir()?;
     let explicit_home = temp_root.path().join("codewhale-home");
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
-    let mut config = Config::default();
-    config.mcp_config_path = Some("relative/mcp.json".to_string());
+    let config = Config {
+        mcp_config_path: Some("relative/mcp.json".to_string()),
+        ..Config::default()
+    };
 
     assert_eq!(config.mcp_config_path(), explicit_home.join("mcp.json"));
     Ok(())
@@ -5130,8 +5132,10 @@ fn relative_mcp_config_path_falls_back_to_user_global_config() -> Result<()> {
 fn absolute_mcp_config_path_remains_an_explicit_override() -> Result<()> {
     let temp_root = tempfile::tempdir()?;
     let explicit = temp_root.path().join("custom-mcp.json");
-    let mut config = Config::default();
-    config.mcp_config_path = Some(explicit.display().to_string());
+    let config = Config {
+        mcp_config_path: Some(explicit.display().to_string()),
+        ..Config::default()
+    };
 
     assert_eq!(config.mcp_config_path(), explicit);
     Ok(())

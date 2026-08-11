@@ -211,7 +211,7 @@ pub(crate) fn work_panel_lines_with_opts(
 
     if summary.state_updating && lines.len() < max_rows {
         lines.push(Line::from(Span::styled(
-            "Work state updating...",
+            "To-do updating...",
             Style::default().fg(ui_theme.text_muted),
         )));
     }

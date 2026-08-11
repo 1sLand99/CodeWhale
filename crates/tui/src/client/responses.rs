@@ -604,7 +604,25 @@ impl DeepSeekClient {
     }
 }
 
-/// Convert CodeWhale messages to Responses API input items.
+fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Value {
+    let (image, omitted) = crate::image_attach::provider_tool_result_image_refs(content_blocks);
+    let content = crate::image_attach::tool_result_text_with_omission(content, omitted);
+    let Some((mime_type, data)) = image else {
+        return json!(content);
+    };
+    let mut output = Vec::with_capacity(2);
+    if !content.is_empty() {
+        output.push(json!({ "type": "input_text", "text": content }));
+    }
+    output.push(json!({
+        "type": "input_image",
+        "image_url": format!("data:{mime_type};base64,{data}"),
+        "detail": "auto",
+    }));
+    json!(output)
+}
+
+/// Convert Codewhale messages to Responses API input items.
 fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bool) -> Vec<Value> {
     let mut items = Vec::new();
 
@@ -629,6 +647,7 @@ fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bo
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            content_blocks,
                             ..
                         } => {
                             if !content_items.is_empty() {
@@ -643,7 +662,7 @@ fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bo
                             items.push(json!({
                                 "type": "function_call_output",
                                 "call_id": call_id,
-                                "output": content,
+                                "output": responses_tool_output(content, content_blocks.as_deref()),
                             }));
                         }
                         _ => {}
@@ -718,6 +737,7 @@ fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bo
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        content_blocks,
                         ..
                     } = block
                     {
@@ -725,7 +745,7 @@ fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bo
                         items.push(json!({
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": content,
+                            "output": responses_tool_output(content, content_blocks.as_deref()),
                         }));
                     }
                 }

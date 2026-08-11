@@ -310,7 +310,7 @@ fn assert_viewport_starts_at_top(frame: &crate::qa_harness::Frame) {
     let header = frame.row(0).to_ascii_lowercase();
     assert!(
         header.contains("plan")
-            || header.contains("act")
+            || header.contains("work")
             || header.contains("agent")
             || header.contains("operate")
             || header.contains("yolo")
@@ -663,7 +663,7 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             let dump = frame.debug_dump();
             assert_real_pty_frame_geometry(frame, cols, rows);
             assert_empty_state_hierarchy(frame, ascii_safe);
-            assert_control_grammar(frame, "act", "ask", COMPOSER_READY_TEXT);
+            assert_control_grammar(frame, "work", "ask", COMPOSER_READY_TEXT);
             if ascii_safe {
                 assert!(
                     frame.text().is_ascii(),
@@ -701,7 +701,7 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
                     if ascii_safe { "-ascii" } else { "" }
                 ),
                 &format!(
-                    "size={cols}x{rows}\ntheme={theme}\nmode=act\npermission=ask\nreduced_motion=true\nascii_safe={ascii_safe}"
+                    "size={cols}x{rows}\ntheme={theme}\nmode=work\npermission=ask\nreduced_motion=true\nascii_safe={ascii_safe}"
                 ),
                 frame,
             )?;
@@ -711,7 +711,7 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
         // both dark and light themes. Header labels and split composer edges
         // must change together, and each state must retain its own ANSI color.
         if cols == 140 || theme == "light" {
-            let (act, ask) = assert_control_grammar(h.frame(), "act", "ask", COMPOSER_READY_TEXT);
+            let (work, ask) = assert_control_grammar(h.frame(), "work", "ask", COMPOSER_READY_TEXT);
 
             h.send(b"\t")?;
             h.wait_for(
@@ -746,49 +746,52 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
                 ),
                 h.frame(),
             )?;
-            assert_ne!(plan, act, "Plan and Act collapsed to one ANSI color");
+            assert_ne!(plan, work, "Plan and Work collapsed to one ANSI color");
             assert_ne!(
                 plan, operate,
                 "Plan and Operate collapsed to one ANSI color"
             );
-            assert_ne!(act, operate, "Act and Operate collapsed to one ANSI color");
+            assert_ne!(
+                work, operate,
+                "Work and Operate collapsed to one ANSI color"
+            );
 
             h.send(b"\t")?;
             h.wait_for(
                 |frame| {
-                    frame.row(0).contains("act")
+                    frame.row(0).contains("work")
                         && frame.row(0).contains("ask")
                         && frame.contains(COMPOSER_READY_TEXT)
                 },
                 KEY_TIMEOUT,
             )?;
-            assert_control_grammar(h.frame(), "act", "ask", COMPOSER_READY_TEXT);
+            assert_control_grammar(h.frame(), "work", "ask", COMPOSER_READY_TEXT);
 
             h.send(keys::key::backtab())?;
             h.wait_for(
-                |frame| frame.row(0).contains("act") && frame.row(0).contains("auto"),
+                |frame| frame.row(0).contains("work") && frame.row(0).contains("auto"),
                 KEY_TIMEOUT,
             )?;
-            let (_, auto) = assert_control_grammar(h.frame(), "act", "auto", COMPOSER_READY_TEXT);
+            let (_, auto) = assert_control_grammar(h.frame(), "work", "auto", COMPOSER_READY_TEXT);
             write_real_pty_evidence(
                 &format!("permission-auto-{theme}-{cols}x{rows}"),
                 &format!(
-                    "size={cols}x{rows}\ntheme={theme}\nmode=act\npermission=auto\nreduced_motion=true\nascii_safe=false"
+                    "size={cols}x{rows}\ntheme={theme}\nmode=work\npermission=auto\nreduced_motion=true\nascii_safe=false"
                 ),
                 h.frame(),
             )?;
 
             h.send(keys::key::backtab())?;
             h.wait_for(
-                |frame| frame.row(0).contains("act") && frame.row(0).contains("Full Access"),
+                |frame| frame.row(0).contains("work") && frame.row(0).contains("Full Access"),
                 KEY_TIMEOUT,
             )?;
             let (_, full_access) =
-                assert_control_grammar(h.frame(), "act", "Full Access", COMPOSER_READY_TEXT);
+                assert_control_grammar(h.frame(), "work", "Full Access", COMPOSER_READY_TEXT);
             write_real_pty_evidence(
                 &format!("permission-full-access-{theme}-{cols}x{rows}"),
                 &format!(
-                    "size={cols}x{rows}\ntheme={theme}\nmode=act\npermission=full-access\nreduced_motion=true\nascii_safe=false"
+                    "size={cols}x{rows}\ntheme={theme}\nmode=work\npermission=full-access\nreduced_motion=true\nascii_safe=false"
                 ),
                 h.frame(),
             )?;
@@ -3187,7 +3190,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
         let mut h = spawn_file_mutation_harness(&ws, &base_url, rows, cols, ascii_safe)?;
         enter_launch_session(&mut h)?;
         assert_real_pty_frame_geometry(h.frame(), cols, rows);
-        assert_control_grammar(h.frame(), "act", permission_label, COMPOSER_READY_TEXT);
+        assert_control_grammar(h.frame(), "work", permission_label, COMPOSER_READY_TEXT);
 
         let prompt = "exercise the canonical File mutation receipt";
         h.paste(prompt)?;
@@ -3997,8 +4000,8 @@ fn assert_running_tool_lifecycle_frame(
     assert_real_pty_frame_geometry(frame, cols, rows);
     let dump = frame.debug_dump();
     assert!(
-        frame.row(0).contains("act"),
-        "Act missing from header:\n{dump}"
+        frame.row(0).contains("work"),
+        "Work missing from header:\n{dump}"
     );
     assert!(
         frame.row(0).contains("Full Access"),

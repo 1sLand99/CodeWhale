@@ -30,10 +30,51 @@ use crate::worker_profile::ShellPolicy;
 #[allow(unused_imports)]
 pub use codewhale_tools::{
     ApprovalRequirement, PreparedToolCall, ResourceClaim, ToolCapability, ToolError,
-    ToolExecutionOutcome, ToolResult, ToolTerminalStatus, optional_bool, optional_bool_opt,
-    optional_str, optional_u64, required_str, required_u64, schedule_non_conflicting,
-    type_mismatch,
+    ToolExecutionOutcome, ToolResult, ToolResultContentBlock, ToolTerminalStatus, optional_bool,
+    optional_bool_opt, optional_str, optional_u64, required_str, required_u64,
+    schedule_non_conflicting, type_mismatch,
 };
+
+/// Text plus provider-neutral rich blocks at the conversation boundary.
+#[derive(Debug, Clone)]
+pub(crate) struct RichToolResult {
+    pub result: ToolResult,
+    pub content_blocks: Vec<ToolResultContentBlock>,
+}
+
+impl RichToolResult {
+    #[must_use]
+    pub fn plain(result: ToolResult) -> Self {
+        Self {
+            result,
+            content_blocks: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_content_blocks(
+        result: ToolResult,
+        content_blocks: Vec<ToolResultContentBlock>,
+    ) -> Self {
+        Self {
+            result,
+            content_blocks,
+        }
+    }
+
+    #[must_use]
+    pub fn into_result(self) -> ToolResult {
+        self.result
+    }
+}
+
+impl std::ops::Deref for RichToolResult {
+    type Target = ToolResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
 
 #[async_trait]
 pub trait DynamicToolExecutor: Send + Sync {
@@ -192,7 +233,7 @@ pub struct ToolAuthorityEnvelope {
 /// Shell authority carried across the Fleet subprocess boundary.
 ///
 /// Full/arbitrary shell is intentionally not representable here. Fleet can
-/// opt a recon worker into the classifier-proven read subset, while every
+/// opt a Scout/Reviewer worker into the classifier-proven read subset, while every
 /// other headless role keeps the historical shell-less posture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1383,6 +1424,19 @@ pub trait ToolSpec: Send + Sync {
 
     /// Execute the tool with the given input and context.
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError>;
+
+    /// Execute with rich result blocks. Existing tools inherit text-only
+    /// behavior; tools such as lowercase `read` can opt in without changing
+    /// the published `ToolResult` struct.
+    async fn execute_rich(
+        &self,
+        input: Value,
+        context: &ToolContext,
+    ) -> Result<RichToolResult, ToolError> {
+        self.execute(input, context)
+            .await
+            .map(RichToolResult::plain)
+    }
 }
 
 #[cfg(test)]

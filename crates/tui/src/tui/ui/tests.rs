@@ -19610,10 +19610,10 @@ fn displayed_session_cost_is_monotonic_under_negative_reconciliation() {
     // cache discount applied after the fact). The underlying value drops,
     // but the displayed cost must not.
     app.session.subagent_cost = 0.20;
-    let after_recon = app.displayed_session_cost();
+    let after_second = app.displayed_session_cost();
     assert!(
-        after_recon >= after_first,
-        "displayed cost regressed: {after_recon} < {after_first}"
+        after_second >= after_first,
+        "displayed cost regressed: {after_second} < {after_first}"
     );
 
     // Adding more cost should still bump above the high-water.

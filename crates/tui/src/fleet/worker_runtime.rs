@@ -1924,12 +1924,12 @@ mod tests {
         );
         let mut reviewer = reviewer;
         reviewer.instructions = "Use gh to check the PR and report CI evidence.".to_string();
-        // Scout/reviewer lanes now ship the recon posture (network reach,
+        // Scout/reviewer lanes now ship the read-only inspection posture (network reach,
         // bounded verification surface; see worker_profile::for_role), so a
         // network-dependent reviewer brief no longer warns by default.
         assert!(
             network_posture_warning_for_task(&reviewer, &[], None).is_none(),
-            "reviewer recon posture must not warn for a gh brief"
+            "reviewer read-only inspection posture must not warn for a gh brief"
         );
 
         // A genuinely network-less role (planner: analysis only, no shell)
@@ -3196,7 +3196,7 @@ mod tests {
         assert!(!spec.runtime_profile.permissions.write);
         assert!(
             spec.runtime_profile.permissions.network,
-            "recon lanes keep network reach"
+            "read-only inspection lanes keep network reach"
         );
         assert_eq!(
             spec.runtime_profile.shell,
@@ -3211,7 +3211,10 @@ mod tests {
 
         let permissions = fleet_effective_permissions_from_worker_spec(&spec);
         assert!(!permissions.write);
-        assert!(permissions.network, "recon lanes keep network reach");
+        assert!(
+            permissions.network,
+            "read-only inspection lanes keep network reach"
+        );
         assert_eq!(permissions.shell, "full");
         assert_eq!(permissions.tool_scope, "explicit");
         assert_eq!(permissions.tools, vec!["read_file".to_string()]);

@@ -9246,9 +9246,8 @@ fn summary_merge_appends_section_to_base_prompt() {
     assert!(merged.contains(COMPACTION_SUMMARY_BEGIN));
     assert!(merged.contains("User prefers lists."));
     assert!(merged.ends_with(COMPACTION_SUMMARY_END));
-    // Reload restore keys on the marker: SyncSession maps the record to
-    // SystemPrompt::Text and extract_compaction_summary_prompt checks
-    // `contains("Conversation Summary (Auto-Generated)")`.
+    // Reload restore keys on the marker: SyncSession migrates this carrier
+    // into one ordinary history checkpoint before provider dispatch.
     assert!(merged.contains("Conversation Summary (Auto-Generated)"));
 }
 

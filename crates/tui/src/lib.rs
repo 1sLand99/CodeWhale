@@ -135,6 +135,7 @@ mod telemetry_notice;
 #[cfg(test)]
 mod test_support;
 mod tls;
+mod todo_snapshot;
 mod tool_history_repair;
 mod tool_inspection;
 mod tool_output_receipts;
@@ -144,7 +145,6 @@ mod turn_route_plan;
 mod utils;
 mod vision;
 mod work_graph;
-mod work_grounding;
 mod worker_profile;
 mod working_set;
 mod workspace_discovery;

@@ -21,6 +21,126 @@ fn env_lock() -> &'static Mutex<()> {
 
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
 
+#[test]
+fn lowercase_bash_schema_is_pi_small() {
+    let schema = PiBashTool.input_schema();
+    assert_eq!(schema["required"], json!(["command"]));
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(
+        schema["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["command", "timeout"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+    assert!(!BashTool::new("Bash").model_visible());
+}
+
+#[test]
+fn pi_bash_nonzero_is_an_error_with_status_after_output() {
+    let error = finish_pi_bash_result(
+        ShellResult {
+            task_id: None,
+            status: ShellStatus::Failed,
+            exit_code: Some(7),
+            stdout: "before".to_string(),
+            stderr: String::new(),
+            duration_ms: 1,
+            stdout_len: 6,
+            stderr_len: 0,
+            stdout_omitted: 0,
+            stderr_omitted: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            sandboxed: false,
+            sandbox_type: None,
+            sandbox_denied: false,
+        },
+        None,
+    )
+    .expect_err("nonzero must be a failed tool call");
+    assert!(
+        error
+            .to_string()
+            .ends_with("before\n\nCommand exited with code 7")
+    );
+}
+
+#[tokio::test]
+async fn lowercase_bash_returns_one_ordered_stream() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path());
+    let result = PiBashTool
+        .execute(
+            json!({"command": "printf out-1; printf err-2 >&2; printf out-3"}),
+            &context,
+        )
+        .await
+        .expect("bash");
+    assert_eq!(result.content, "out-1err-2out-3");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let result = PiBashTool
+        .execute(json!({"command": "pwd"}), &context)
+        .await
+        .expect("read-only bash");
+    assert_eq!(
+        result.content.trim(),
+        workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace")
+            .display()
+            .to_string()
+    );
+}
+
+#[tokio::test]
+async fn lowercase_bash_readonly_refusal_names_work_mode() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let result = PiBashTool
+        .execute(json!({"command": "touch blocked-by-plan"}), &context)
+        .await
+        .expect("policy refusal is a normal tool result");
+
+    assert!(!result.success);
+    assert!(result.content.contains("Work mode (`/mode work`)"));
+    assert!(!result.content.contains("Act mode"));
+    assert!(!workspace.path().join("blocked-by-plan").exists());
+}
+
+#[tokio::test]
+async fn lowercase_bash_timeout_uses_seconds_and_fails() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path());
+    let error = PiBashTool
+        .execute(
+            json!({"command": sleep_command(2), "timeout": 0.01}),
+            &context,
+        )
+        .await
+        .expect_err("timeout must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("Command timed out after 0.01 seconds"),
+        "{error}"
+    );
+}
+
 fn execute_shell(
     manager: &mut ShellManager,
     command: &str,
@@ -472,6 +592,33 @@ async fn readonly_shell_refuses_raw_string_external_backend() {
         .expect_err("raw-string backend must not receive a classifier-approved argv")
         .to_string();
     assert!(error.contains("raw command string"), "{error}");
+    assert!(!backend.0.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn lowercase_bash_refuses_non_streaming_external_backend() {
+    struct Backend(std::sync::atomic::AtomicBool);
+    #[async_trait::async_trait]
+    impl crate::sandbox::backend::SandboxBackend for Backend {
+        async fn exec(
+            &self,
+            _cmd: &str,
+            _env: &std::collections::HashMap<String, String>,
+        ) -> anyhow::Result<crate::sandbox::backend::SandboxOutput> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            unreachable!("lowercase bash must fail before external dispatch")
+        }
+    }
+
+    let workspace = tempdir().expect("workspace");
+    let backend = std::sync::Arc::new(Backend(std::sync::atomic::AtomicBool::new(false)));
+    let mut context = ToolContext::new(workspace.path());
+    context.sandbox_backend = Some(backend.clone());
+    let error = PiBashTool
+        .execute(json!({"command": "pwd", "timeout": 1}), &context)
+        .await
+        .expect_err("non-streaming backend must be rejected");
+    assert!(error.to_string().contains("combined streaming output"));
     assert!(!backend.0.load(std::sync::atomic::Ordering::SeqCst));
 }
 

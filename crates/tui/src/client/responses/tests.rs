@@ -369,9 +369,11 @@ async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
 }
 
 #[test]
-fn responses_body_serializes_exactly_one_load_skill_definition() {
+fn responses_body_serializes_the_child_catalog_without_duplication() {
     // Mirror of the Anthropic contract: the real child catalog fixture
-    // maps 1:1 into Responses function tools with one load_skill entry.
+    // maps 1:1 into Responses function tools with one canonical `read` entry.
+    // Skills are discoverable through tool_search, so the child wire catalog
+    // carries no load_skill at all.
     let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
     let mut request = minimal_responses_request();
     request.tools = Some(tools);
@@ -379,19 +381,23 @@ fn responses_body_serializes_exactly_one_load_skill_definition() {
     let serialized = body["tools"]
         .as_array()
         .expect("tools serialize as an array");
-    let load_skills: Vec<_> = serialized
+    let reads: Vec<_> = serialized
         .iter()
-        .filter(|tool| tool["name"] == "load_skill")
+        .filter(|tool| tool["name"] == "read")
         .collect();
     assert_eq!(
-        load_skills.len(),
+        reads.len(),
         1,
-        "exactly one load_skill definition reaches the Responses wire"
+        "exactly one canonical read definition reaches the Responses wire"
     );
     assert!(
-        load_skills[0]["parameters"]["properties"].is_object(),
-        "load_skill keeps a valid parameters schema: {}",
-        load_skills[0]
+        reads[0]["parameters"]["properties"].is_object(),
+        "read keeps a valid parameters schema: {}",
+        reads[0]
+    );
+    assert!(
+        serialized.iter().all(|tool| tool["name"] != "load_skill"),
+        "load_skill must not appear on the child Responses wire"
     );
 }
 
@@ -1031,4 +1037,50 @@ fn user_image_becomes_an_input_image_item() {
         content.iter().any(|part| part["type"] == "input_text"),
         "the accompanying question must survive: {user}"
     );
+}
+
+#[test]
+fn tool_result_image_becomes_native_function_output_content() {
+    let mut request = minimal_responses_request();
+    request.messages = vec![
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::ToolUse {
+                id: "call_image_1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"path": "shot.png"}),
+                caller: None,
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_image_1".to_string(),
+                content: "screenshot captured".to_string(),
+                is_error: Some(false),
+                content_blocks: Some(vec![serde_json::json!({
+                    "type": "image",
+                    "mime_type": "image/png",
+                    "data": "QUJD",
+                })]),
+            }],
+        },
+    ];
+
+    let items = convert_messages_to_responses_input(&request, false);
+    let output = items
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("function output");
+    let content = output["output"].as_array().expect("rich output array");
+
+    assert_eq!(
+        content[0],
+        serde_json::json!({
+            "type": "input_text",
+            "text": "screenshot captured",
+        })
+    );
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["image_url"], "data:image/png;base64,QUJD");
 }

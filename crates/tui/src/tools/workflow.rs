@@ -2051,7 +2051,7 @@ fn bounded_run_record_value(
         obj.insert(
             "dispatch_failures_note".to_string(),
             json!(format!(
-                "showing {} of {} dispatch failures with bounded fields; full ledger: {journal}",
+                "showing {} of {} dispatch failures with bounded fields; full record: {journal}",
                 bounds.dispatch_failures_returned,
                 bounds.dispatch_failures_returned + bounds.dispatch_failures_omitted,
             )),

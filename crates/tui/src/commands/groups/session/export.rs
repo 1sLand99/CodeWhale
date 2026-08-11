@@ -502,7 +502,13 @@ fn render_content_block(out: &mut String, index: usize, block: &ContentBlock) {
             push_sanitized_text(out, content);
             if let Some(blocks) = content_blocks {
                 out.push_str("Structured result blocks:\n\n");
-                push_json(out, &Value::Array(blocks.clone()));
+                push_json(
+                    out,
+                    &Value::Array(
+                        crate::image_attach::safe_tool_result_content_blocks(Some(blocks))
+                            .unwrap_or_default(),
+                    ),
+                );
             }
         }
         ContentBlock::ServerToolUse { id, name, input } => {

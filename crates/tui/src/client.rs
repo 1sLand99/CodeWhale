@@ -4960,7 +4960,24 @@ mod tests {
     async fn assert_kimi_code_captures_exact_general_child_catalog() {
         let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
         let source_len = tools.len();
-        assert!(source_len > 20, "expected a real General child catalog");
+        // The deliberate lowercase contract: the child wire catalog is the
+        // fixed six-tool surface, with specialized tools discoverable through
+        // tool_search rather than eager.
+        assert_eq!(
+            source_len, 6,
+            "expected the six-tool General child catalog: {tools:?}"
+        );
+        let source_names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            source_names,
+            ["agent", "bash", "edit", "read", "tool_search", "write"]
+                .into_iter()
+                .collect(),
+            "the child wire catalog must be exactly the six-tool surface"
+        );
 
         // Name the offending first-party tool in test-only diagnostics while
         // production errors remain fixed and non-secret.
@@ -4981,7 +4998,12 @@ mod tests {
 
         let captured = body["tools"].as_array().expect("captured tool catalog");
         assert_eq!(captured.len(), source_len);
-        assert!(captured_function(&body, "get_goal").is_object());
+        for required in ["read", "write", "edit", "bash", "agent", "tool_search"] {
+            assert!(
+                captured_function(&body, required).is_object(),
+                "{required} must reach the Kimi Code wire"
+            );
+        }
         assert!(
             captured
                 .iter()
@@ -5004,13 +5026,6 @@ mod tests {
             }
             crate::tools::schema_sanitize::validate_mfjs_parameters(parameters).unwrap();
         }
-
-        let handle_read = &captured_function(&body, "handle_read")["parameters"];
-        assert!(
-            handle_read.to_string().contains("var_handle"),
-            "real nested const fixture must survive as an enum: {handle_read}"
-        );
-        assert!(value_contains_key(handle_read, "enum"), "{handle_read}");
     }
 
     #[tokio::test]
