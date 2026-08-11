@@ -735,9 +735,17 @@ impl ToolRegistryBuilder {
     /// `exec_shell*` spellings were removed in v0.9.3.
     #[must_use]
     pub fn with_shell_tools(self) -> Self {
+        self.with_foreground_shell_tools().with_terminal_tools()
+    }
+
+    /// Include only the cancellable foreground shell tool.
+    ///
+    /// Protocol hosts that cannot safely own a persistent PTY session use
+    /// this surface instead of [`Self::with_shell_tools`].
+    #[must_use]
+    pub fn with_foreground_shell_tools(self) -> Self {
         use super::shell::BashTool;
         self.with_tool(Arc::new(BashTool::new("Bash")))
-            .with_terminal_tools()
     }
 
     /// Include only the foreground, direct-argv read-only shell surface.

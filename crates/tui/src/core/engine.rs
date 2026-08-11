@@ -5309,14 +5309,14 @@ fn goal_objective_for_prompt(
 // outside messages[0].
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ToolAskRuleDecision {
+pub(crate) enum ToolAskRuleDecision {
     Allow,
     Prompt(String),
     Block(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum AutoReviewPlanDecision {
+pub(crate) enum AutoReviewPlanDecision {
     NoChange,
     Allow,
     ForcePrompt(String),
@@ -5337,7 +5337,7 @@ pub(super) fn auto_review_run_origin_for_plan(
 // which this thin wrapper builds; the 8 call sites (1 prod + tests) read clearer
 // passing the fields than constructing a context first.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn auto_review_plan_decision(
+pub(crate) fn auto_review_plan_decision(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
     tool_name: &str,
     tool_input: &Value,
@@ -5423,6 +5423,25 @@ pub(super) fn exec_shell_ask_rule_decision(
     workspace: &Path,
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
+    exec_shell_ask_rule_decision_for_policy(
+        &config.exec_policy_engine,
+        tool_name,
+        tool_input,
+        workspace,
+        approval_mode,
+    )
+}
+
+/// Evaluate the persisted shell ask/allow/deny rules without requiring a full
+/// [`EngineConfig`]. Headless protocol adapters use this seam so they enforce
+/// the same sibling `permissions.toml` policy as the interactive engine.
+pub(crate) fn exec_shell_ask_rule_decision_for_policy(
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
+    tool_name: &str,
+    tool_input: &Value,
+    workspace: &Path,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     if policy_tool_name != "exec_shell" {
@@ -5430,7 +5449,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
     tool_ask_rule_decision_for_context(
-        config,
+        exec_policy_engine,
         policy_tool_name,
         command,
         None,
@@ -5446,12 +5465,31 @@ pub(super) fn file_tool_ask_rule_decision(
     workspace: &Path,
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
+    file_tool_ask_rule_decision_for_policy(
+        &config.exec_policy_engine,
+        tool_name,
+        tool_input,
+        workspace,
+        approval_mode,
+    )
+}
+
+/// Evaluate the persisted file ask/allow/deny rules without requiring a full
+/// [`EngineConfig`]. This keeps protocol adapters on the canonical path and
+/// preserves the all-targets-must-match rule for multi-file patches.
+pub(crate) fn file_tool_ask_rule_decision_for_policy(
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
+    tool_name: &str,
+    tool_input: &Value,
+    workspace: &Path,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     let paths = file_tool_permission_paths(policy_tool_name, tool_input)?;
     if paths.is_empty() {
         return tool_ask_rule_decision_for_context(
-            config,
+            exec_policy_engine,
             policy_tool_name,
             "",
             None,
@@ -5464,7 +5502,7 @@ pub(super) fn file_tool_ask_rule_decision(
     let mut all_allowed = true;
     for path in paths {
         match tool_ask_rule_decision_for_context(
-            config,
+            exec_policy_engine,
             policy_tool_name,
             "",
             Some(&path),
@@ -5492,7 +5530,7 @@ pub(super) fn file_tool_ask_rule_decision(
 }
 
 fn tool_ask_rule_decision_for_context(
-    config: &EngineConfig,
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,
     command: &str,
     path: Option<&str>,
@@ -5506,8 +5544,7 @@ fn tool_ask_rule_decision_for_context(
         | crate::tui::approval::ApprovalMode::Bypass
         | crate::tui::approval::ApprovalMode::Suggest => AskForApproval::OnFailure,
     };
-    let decision = config
-        .exec_policy_engine
+    let decision = exec_policy_engine
         .check(ExecPolicyContext {
             command,
             cwd: cwd.as_ref(),
@@ -5974,7 +6011,7 @@ pub(crate) mod tool_catalog;
 mod tool_execution;
 mod tool_preparation;
 mod tool_setup;
-mod turn_loop;
+pub(crate) mod turn_loop;
 pub(crate) use token_estimate_cache::TokenEstimateCache;
 
 pub(super) const MAX_PARALLEL_SHELL_EXEC: usize = 4;

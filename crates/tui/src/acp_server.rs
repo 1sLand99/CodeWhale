@@ -26,6 +26,8 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
@@ -35,10 +37,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::DeepSeekClient;
 use crate::config::{ApiProvider, Config};
+use crate::core::engine::turn_loop::run_tool_call_before_hooks;
+use crate::core::engine::{
+    AutoReviewPlanDecision, ToolAskRuleDecision, auto_review_plan_decision,
+    exec_shell_ask_rule_decision_for_policy, file_tool_ask_rule_decision_for_policy,
+};
 use crate::llm_client::{LlmClient, StreamEventBox};
 use crate::models::{
     ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
 };
+use crate::tools::spec::{ApprovalRequirement, PreparedToolCall, ToolError, ToolResult};
 use crate::tools::{ToolContext, ToolRegistry, ToolRegistryBuilder};
 use crate::worker_profile::ShellPolicy;
 
@@ -52,6 +60,16 @@ const MAX_ACP_TOOL_ROUNDS: usize = 50;
 /// Maximum number of concurrent sessions kept in memory. When this limit is
 /// exceeded, the oldest session with no in-flight prompt is evicted.
 const MAX_ACP_SESSIONS: usize = 64;
+
+/// A conforming ACP client answers every pending permission request with a
+/// `cancelled` outcome when the prompt is cancelled. Bound that hand-off so a
+/// broken client cannot strand the stdio server forever after cancellation.
+const ACP_PERMISSION_CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// Agent-originated JSON-RPC request ids have their own namespace. Strings
+/// avoid the client-specific numeric response-id compatibility shim used for
+/// replies to client-originated requests.
+static NEXT_ACP_PERMISSION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Content is streamed to the model in full (no truncation); this cap only
 /// bounds how much of a tool's output is echoed into the `tool_call_update`
@@ -97,6 +115,12 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
         let id = message.get("id").cloned();
         let method = match message.get("method").and_then(Value::as_str) {
             Some(method) => method,
+            None if is_jsonrpc_response(&message) => {
+                // A late response to an agent-originated request (most notably
+                // permission after cancellation) has no request semantics and
+                // must not be answered with another JSON-RPC error.
+                continue;
+            }
             None => {
                 write_jsonrpc_error(
                     &mut writer,
@@ -128,6 +152,13 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                         write_jsonrpc_error(&mut writer, id, -32603, "unknown sessionId").await?;
                         continue;
                     };
+                    // Freeze the first round's fully composed system prompt
+                    // for this entire `session/prompt`. Tool calls may edit
+                    // AGENTS.md, memory, or configured instruction files, but
+                    // self-authored content cannot become same-turn system
+                    // authority on a later provider round.
+                    let frozen_system_prompt =
+                        Arc::new(std::sync::Mutex::new(None::<SystemPrompt>));
                     // The stream-opening closure borrows `&server` only
                     // briefly per round; each returned `StreamEventBox` is
                     // `'static`, so it can be raced against the reader
@@ -135,6 +166,8 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                     // await, and the main task keeps exclusive ownership of
                     // stdout.
                     let outcome = run_agentic_prompt_turn(
+                        &server.config,
+                        &server.model,
                         &session_id,
                         messages,
                         &tool_registry,
@@ -153,7 +186,17 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                             let server = &server;
                             let cwd = &cwd;
                             let tool_registry = &tool_registry;
-                            async move { server.open_prompt_stream(&msgs, cwd, tool_registry).await }
+                            let frozen_system_prompt = Arc::clone(&frozen_system_prompt);
+                            async move {
+                                server
+                                    .open_prompt_stream(
+                                        &msgs,
+                                        cwd,
+                                        tool_registry,
+                                        &frozen_system_prompt,
+                                    )
+                                    .await
+                            }
                         },
                     )
                     .await;
@@ -173,17 +216,11 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                                 .await?;
                             }
                         }
-                        Ok((PromptOutcome::Cancelled, mut partial_messages)) => {
-                            // Strip the trailing assistant message if it
-                            // carried tool_use blocks whose execution was
-                            // interrupted — dangling tool_use blocks without
-                            // tool_result blocks confuse the model on the
-                            // next prompt. All earlier completed tool rounds
-                            // stay in history.
-                            if partial_messages.last().map(|m| m.role.as_str()) == Some("assistant")
-                            {
-                                partial_messages.pop();
-                            }
+                        Ok((PromptOutcome::Cancelled, partial_messages)) => {
+                            // The turn driver keeps complete receipts for every
+                            // proposed tool call, including calls cancelled
+                            // before execution, so partial side effects remain
+                            // visible and no dangling tool_use block is stored.
                             server.commit_turn_messages(&session_id, partial_messages);
                             if let Some(id) = id {
                                 let id = response_id_policy.response_id(id);
@@ -210,13 +247,20 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                             }
                         }
                         Err(err) => {
-                            // The user message was already pushed into
-                            // session history by `begin_prompt`; roll it
-                            // back so the next prompt doesn't start with two
-                            // consecutive `user` messages.
-                            server.rollback_user_message(&session_id);
+                            if let Some(partial_messages) = err.partial_messages {
+                                // A later provider round failed after one or
+                                // more tools completed. Preserve those
+                                // side-effect receipts in session history.
+                                server.commit_turn_messages(&session_id, partial_messages);
+                            } else {
+                                // The user message was already pushed into
+                                // session history by `begin_prompt`; roll it
+                                // back when no tool receipt exists yet.
+                                server.rollback_user_message(&session_id);
+                            }
                             let id = id.map(|id| response_id_policy.response_id(id));
-                            write_jsonrpc_error(&mut writer, id, -32603, err.to_string()).await?;
+                            write_jsonrpc_error(&mut writer, id, -32603, err.source.to_string())
+                                .await?;
                         }
                     }
                 }
@@ -252,6 +296,11 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
     Ok(())
 }
 
+fn is_jsonrpc_response(message: &Value) -> bool {
+    message.get("id").is_some()
+        && (message.get("result").is_some() || message.get("error").is_some())
+}
+
 /// Outcome of a `session/prompt` turn driven against the input stream.
 #[derive(Debug, PartialEq, Eq)]
 enum PromptOutcome {
@@ -262,6 +311,30 @@ enum PromptOutcome {
     /// The turn reached the maximum number of tool-call round-trips.
     /// Carries whatever text the model produced in the final round.
     MaxRounds(String),
+}
+
+#[derive(Debug)]
+struct AgenticPromptError {
+    source: anyhow::Error,
+    /// Present once at least one complete tool-result batch has been appended.
+    /// Those receipts may describe real side effects and must survive a later
+    /// provider failure.
+    partial_messages: Option<Vec<Message>>,
+}
+
+impl std::fmt::Display for AgenticPromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl AgenticPromptError {
+    fn new(source: anyhow::Error, messages: &[Message], has_tool_receipts: bool) -> Self {
+        Self {
+            source,
+            partial_messages: has_tool_receipts.then(|| messages.to_vec()),
+        }
+    }
 }
 
 /// A tool call the model requested, assembled from streamed
@@ -484,8 +557,455 @@ enum ToolBatchOutcome {
     /// Every tool call ran to completion; carries the `tool_result` messages
     /// to append to the conversation, in call order.
     Completed(Vec<Message>),
-    /// A matching `session/cancel` arrived while a tool was running.
+    /// A matching `session/cancel` arrived while a tool was awaiting approval
+    /// or running. Carries receipts for every proposed call so completed or
+    /// partially completed side effects never disappear from history.
+    Cancelled(Vec<Message>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AcpToolAdmission {
+    Auto,
+    RequestPermission(String),
+    Block(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AcpPermissionDecision {
+    Allow,
+    Reject(String),
     Cancelled,
+}
+
+fn acp_shell_command_requests_detach(command: &str) -> bool {
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    let mut escaped = false;
+    let chars = command.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single_quoted {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double_quoted {
+            single_quoted = !single_quoted;
+            continue;
+        }
+        if ch == '"' && !single_quoted {
+            double_quoted = !double_quoted;
+            continue;
+        }
+        if ch != '&' || single_quoted || double_quoted {
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(index + 1).copied();
+        // `&&`, `&>`/`&>>`, and `>&` are chaining/redirection rather than a
+        // detached child. Any other unquoted ampersand is a background
+        // control operator and is unavailable in ACP.
+        if previous != Some('&') && next != Some('&') && next != Some('>') && previous != Some('>')
+        {
+            return true;
+        }
+    }
+
+    shell_words::split(command).is_ok_and(|words| {
+        words.iter().any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "nohup" | "disown" | "setsid" | "daemonize"
+            )
+        })
+    })
+}
+
+#[derive(Debug)]
+struct PreparedAcpTool {
+    call: PreparedToolCall,
+    admission: AcpToolAdmission,
+    additional_context: Option<String>,
+}
+
+/// Prepare one registered call and fold every policy layer that can tighten
+/// its admission. ACP deliberately does not use the TUI's workspace-write
+/// carve-out: a remembered exact allow rule may clear the ordinary tool hold,
+/// but the built-in safety floor and repository law can always re-add a prompt
+/// or hard block afterwards.
+fn prepare_acp_tool_admission(
+    config: &Config,
+    registry: &ToolRegistry,
+    call: &PendingToolCall,
+) -> std::result::Result<(PreparedToolCall, AcpToolAdmission), ToolError> {
+    let spec = registry.get(&call.name).ok_or_else(|| {
+        ToolError::not_available(format!("tool '{}' is not registered", call.name))
+    })?;
+    let prepared = spec.prepare(call.input.clone(), registry.context())?;
+    let canonical_name =
+        crate::tools::canonical_action::canonical_action_alias(&call.name, &prepared.input);
+    if matches!(call.name.as_str(), "bash" | "Bash" | "exec_shell")
+        || canonical_name.starts_with("exec_shell")
+    {
+        let action = prepared
+            .input
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("run");
+        let requests_stateful_shell = action != "run"
+            || prepared.starts_detached
+            || prepared.input.get("interactive").and_then(Value::as_bool) == Some(true)
+            || prepared.input.get("persist").and_then(Value::as_bool) == Some(true)
+            || prepared
+                .input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(acp_shell_command_requests_detach);
+        if requests_stateful_shell {
+            return Ok((
+                prepared,
+                AcpToolAdmission::Block(
+                    "ACP v0.9.6 exposes foreground Bash runs only; background, TTY, interactive, persistent, and background-task control actions are unavailable."
+                        .to_string(),
+                ),
+            ));
+        }
+    }
+    let mut permission_reason =
+        (prepared.approval != ApprovalRequirement::Auto).then(|| prepared.description.clone());
+    let approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+    let workspace = registry.context().workspace.as_path();
+
+    let typed_rule = exec_shell_ask_rule_decision_for_policy(
+        &config.exec_policy_engine,
+        &call.name,
+        &prepared.input,
+        workspace,
+        approval_mode,
+    )
+    .or_else(|| {
+        file_tool_ask_rule_decision_for_policy(
+            &config.exec_policy_engine,
+            &call.name,
+            &prepared.input,
+            workspace,
+            approval_mode,
+        )
+    });
+    match typed_rule {
+        Some(ToolAskRuleDecision::Allow) => permission_reason = None,
+        Some(ToolAskRuleDecision::Prompt(reason)) => permission_reason = Some(reason),
+        Some(ToolAskRuleDecision::Block(reason)) => {
+            return Ok((prepared, AcpToolAdmission::Block(reason)));
+        }
+        None => {}
+    }
+
+    let run_origin = if prepared.starts_detached {
+        crate::tui::auto_review::RunOrigin::Background
+    } else {
+        crate::tui::auto_review::RunOrigin::Headless
+    };
+    let (auto_review, _audit) = auto_review_plan_decision(
+        &config.auto_review_policy(),
+        &call.name,
+        &prepared.input,
+        run_origin,
+        approval_mode,
+        None,
+        crate::config::is_workspace_trusted(workspace),
+        false,
+    );
+    match auto_review {
+        AutoReviewPlanDecision::NoChange | AutoReviewPlanDecision::Allow => {}
+        AutoReviewPlanDecision::ForcePrompt(reason) => permission_reason = Some(reason),
+        AutoReviewPlanDecision::Block(reason) => {
+            return Ok((prepared, AcpToolAdmission::Block(reason)));
+        }
+    }
+
+    if let Some(repo_law) =
+        crate::repo_law::repo_law_plan_decision(workspace, &call.name, &prepared.input)
+    {
+        match repo_law {
+            crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
+                permission_reason = Some(reason);
+            }
+            crate::repo_law::RepoLawPlanDecision::Block(reason) => {
+                return Ok((prepared, AcpToolAdmission::Block(reason)));
+            }
+        }
+    }
+
+    let admission = permission_reason
+        .map(AcpToolAdmission::RequestPermission)
+        .unwrap_or(AcpToolAdmission::Auto);
+    Ok((prepared, admission))
+}
+
+/// Run the same strict pre-tool hook gate as the native turn loop, then
+/// prepare and evaluate policy from the hook's final input. The initial
+/// preparation is deliberately side-effect free and catches malformed input
+/// before an operator hook is asked to reason about it; any rewrite is fully
+/// re-prepared and all policy layers run again from that rewritten value.
+async fn prepare_acp_tool_with_hooks(
+    config: &Config,
+    model: &str,
+    registry: &ToolRegistry,
+    call: &PendingToolCall,
+) -> std::result::Result<PreparedAcpTool, ToolError> {
+    let spec = registry.get(&call.name).ok_or_else(|| {
+        ToolError::not_available(format!("tool '{}' is not registered", call.name))
+    })?;
+    // Initial validation mirrors the native prepare-before-hooks contract.
+    spec.prepare(call.input.clone(), registry.context())?;
+
+    let hook_outcome = run_tool_call_before_hooks(
+        registry.context().runtime.hook_executor.as_ref(),
+        &call.name,
+        &call.id,
+        &call.input,
+        crate::tui::app::AppMode::Agent,
+        registry.context().workspace.as_path(),
+        model,
+    )
+    .await?;
+
+    let mut final_call = call.clone();
+    if let Some(updated_input) = hook_outcome.updated_input {
+        final_call.input = updated_input;
+    }
+    let (prepared, mut admission) = prepare_acp_tool_admission(config, registry, &final_call)?;
+    if hook_outcome.requires_approval && matches!(admission, AcpToolAdmission::Auto) {
+        admission = AcpToolAdmission::RequestPermission(
+            "A ToolCallBefore hook requires explicit approval for this call.".to_string(),
+        );
+    }
+
+    Ok(PreparedAcpTool {
+        call: prepared,
+        admission,
+        additional_context: hook_outcome.additional_context,
+    })
+}
+
+fn next_acp_permission_request_id() -> Value {
+    Value::String(format!(
+        "codewhale-permission-{}",
+        NEXT_ACP_PERMISSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+async fn write_tool_permission_request<W>(
+    writer: &mut W,
+    request_id: &Value,
+    session_id: &str,
+    call: &PendingToolCall,
+    reason: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_json_line(
+        writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": call.id,
+                    "title": tool_call_title(call),
+                    "kind": tool_call_kind(call),
+                    "status": "pending",
+                    "rawInput": call.input,
+                    "content": [{
+                        "type": "content",
+                        "content": { "type": "text", "text": reason }
+                    }]
+                },
+                "options": [
+                    {
+                        "optionId": "allow-once",
+                        "name": "Allow once",
+                        "kind": "allow_once"
+                    },
+                    {
+                        "optionId": "reject-once",
+                        "name": "Reject",
+                        "kind": "reject_once"
+                    }
+                ]
+            }
+        }),
+    )
+    .await
+}
+
+/// Ask the ACP client to approve one sensitive call. The client owns the UI
+/// and ACP v1 requires it to answer a pending request with `cancelled` when the
+/// prompt turn is cancelled. Unknown, malformed, or errored responses all fail
+/// closed as rejection; only the exact offered `allow-once` id authorizes work.
+async fn request_tool_permission<R, W>(
+    reader: &mut Lines<R>,
+    writer: &mut W,
+    response_id_policy: JsonRpcResponseIdPolicy,
+    session_id: &str,
+    call: &PendingToolCall,
+    reason: &str,
+) -> Result<AcpPermissionDecision>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let request_id = next_acp_permission_request_id();
+    write_tool_permission_request(writer, &request_id, session_id, call, reason).await?;
+    let mut cancel_deadline = None;
+
+    loop {
+        let line = if let Some(deadline) = cancel_deadline {
+            match tokio::time::timeout_at(deadline, reader.next_line()).await {
+                Ok(line) => line?,
+                Err(_) => return Ok(AcpPermissionDecision::Cancelled),
+            }
+        } else {
+            reader.next_line().await?
+        };
+        let Some(line) = line else {
+            return Ok(AcpPermissionDecision::Reject(
+                "Permission denied: ACP client disconnected before answering.".to_string(),
+            ));
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                write_jsonrpc_error(writer, None, -32700, format!("invalid json: {err}")).await?;
+                continue;
+            }
+        };
+
+        if let Some(method) = message.get("method").and_then(Value::as_str) {
+            let message_id = message.get("id").cloned();
+            if method == "session/cancel" {
+                let target = message.pointer("/params/sessionId").and_then(Value::as_str);
+                if target.is_none() || target == Some(session_id) {
+                    if let Some(message_id) = message_id {
+                        let message_id = response_id_policy.response_id(message_id);
+                        write_jsonrpc_result(writer, message_id, json!(null)).await?;
+                    }
+                    cancel_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + ACP_PERMISSION_CANCEL_GRACE
+                    });
+                    continue;
+                }
+                if let Some(message_id) = message_id {
+                    let message_id = response_id_policy.response_id(message_id);
+                    write_jsonrpc_result(writer, message_id, json!(null)).await?;
+                }
+                continue;
+            }
+
+            if let Some(message_id) = message_id {
+                let message_id = response_id_policy.response_id(message_id);
+                write_jsonrpc_error(
+                    writer,
+                    Some(message_id),
+                    -32603,
+                    "a session/prompt turn is already in progress",
+                )
+                .await?;
+            }
+            continue;
+        }
+
+        if message.get("id") != Some(&request_id) {
+            // This is a response, not a request; there is nothing valid to send
+            // back. Ignore stale/unrelated agent-response traffic without
+            // allowing it to satisfy the permission gate.
+            continue;
+        }
+        if cancel_deadline.is_some() {
+            return Ok(AcpPermissionDecision::Cancelled);
+        }
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Ok(AcpPermissionDecision::Reject(
+                "Permission denied: malformed ACP response.".to_string(),
+            ));
+        }
+        if message.get("error").is_some() {
+            return Ok(AcpPermissionDecision::Reject(
+                "Permission denied: ACP client returned an error.".to_string(),
+            ));
+        }
+        match message
+            .pointer("/result/outcome/outcome")
+            .and_then(Value::as_str)
+        {
+            Some("cancelled") => return Ok(AcpPermissionDecision::Cancelled),
+            Some("selected") => {
+                let option_id = message
+                    .pointer("/result/outcome/optionId")
+                    .and_then(Value::as_str);
+                return Ok(match option_id {
+                    Some("allow-once") => AcpPermissionDecision::Allow,
+                    Some("reject-once") => AcpPermissionDecision::Reject(
+                        "Permission denied by the user; the tool was not executed.".to_string(),
+                    ),
+                    _ => AcpPermissionDecision::Reject(
+                        "Permission denied: ACP client selected an unknown option.".to_string(),
+                    ),
+                });
+            }
+            _ => {
+                return Ok(AcpPermissionDecision::Reject(
+                    "Permission denied: malformed ACP response.".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+async fn record_tool_execution_result<W>(
+    writer: &mut W,
+    session_id: &str,
+    call: &PendingToolCall,
+    result: std::result::Result<ToolResult, ToolError>,
+) -> Result<Message>
+where
+    W: AsyncWrite + Unpin,
+{
+    let (content, is_error) = match result {
+        Ok(tool_result) => (tool_result.content, !tool_result.success),
+        Err(err) => (format!("Error: {err}"), true),
+    };
+    let status = if is_error { "failed" } else { "completed" };
+    write_tool_call_update(writer, session_id, call, status, Some(&content)).await?;
+    Ok(tool_result_message(&call.id, content, is_error))
+}
+
+async fn record_unstarted_cancelled_calls<W, I>(
+    writer: &mut W,
+    session_id: &str,
+    calls: I,
+) -> Result<Vec<Message>>
+where
+    W: AsyncWrite + Unpin,
+    I: IntoIterator<Item = PendingToolCall>,
+{
+    let mut messages = Vec::new();
+    for call in calls {
+        write_tool_call_start(writer, session_id, &call).await?;
+        let content = "Cancelled before execution; the tool was not run.";
+        write_tool_call_update(writer, session_id, &call, "failed", Some(content)).await?;
+        messages.push(tool_result_message(&call.id, content.to_string(), true));
+    }
+    Ok(messages)
 }
 
 /// Execute `tool_calls` in order against `registry`, reporting each one to
@@ -496,6 +1016,8 @@ enum ToolBatchOutcome {
 /// cancel-aware tool like `Bash` gets a chance to kill its child
 /// process) before returning [`ToolBatchOutcome::Cancelled`].
 async fn execute_tool_calls_with_cancellation<R, W>(
+    config: &Config,
+    model: &str,
     registry: &ToolRegistry,
     tool_calls: Vec<PendingToolCall>,
     session_id: &str,
@@ -509,8 +1031,9 @@ where
 {
     let mut result_messages = Vec::with_capacity(tool_calls.len());
     let mut reader_open = true;
+    let mut calls = tool_calls.into_iter();
 
-    for call in tool_calls {
+    while let Some(mut call) = calls.next() {
         write_tool_call_start(writer, session_id, &call).await?;
 
         if let Some(parse_error) = call.parse_error.clone() {
@@ -520,6 +1043,63 @@ where
             continue;
         }
 
+        let prepared = match prepare_acp_tool_with_hooks(config, model, registry, &call).await {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                let content = format!("Error: {err}");
+                write_tool_call_update(writer, session_id, &call, "failed", Some(&content)).await?;
+                result_messages.push(tool_result_message(&call.id, content, true));
+                continue;
+            }
+        };
+        call.input = prepared.call.input;
+
+        match prepared.admission {
+            AcpToolAdmission::Auto => {}
+            AcpToolAdmission::Block(reason) => {
+                let content = format!("Blocked by Codewhale policy: {reason}");
+                write_tool_call_update(writer, session_id, &call, "failed", Some(&content)).await?;
+                result_messages.push(tool_result_message(&call.id, content, true));
+                continue;
+            }
+            AcpToolAdmission::RequestPermission(reason) => {
+                match request_tool_permission(
+                    reader,
+                    writer,
+                    response_id_policy,
+                    session_id,
+                    &call,
+                    &reason,
+                )
+                .await?
+                {
+                    AcpPermissionDecision::Allow => {}
+                    AcpPermissionDecision::Reject(content) => {
+                        write_tool_call_update(writer, session_id, &call, "failed", Some(&content))
+                            .await?;
+                        result_messages.push(tool_result_message(&call.id, content, true));
+                        continue;
+                    }
+                    AcpPermissionDecision::Cancelled => {
+                        let content = "Cancelled while awaiting permission; the tool was not run.";
+                        write_tool_call_update(writer, session_id, &call, "failed", Some(content))
+                            .await?;
+                        result_messages.push(tool_result_message(
+                            &call.id,
+                            content.to_string(),
+                            true,
+                        ));
+                        result_messages.extend(
+                            record_unstarted_cancelled_calls(writer, session_id, calls).await?,
+                        );
+                        return Ok(ToolBatchOutcome::Cancelled(result_messages));
+                    }
+                }
+            }
+        }
+
+        write_tool_call_update(writer, session_id, &call, "in_progress", None).await?;
+
         let cancel_token = CancellationToken::new();
         let mut turn_context = registry.context().clone();
         turn_context.cancel_token = Some(cancel_token.clone());
@@ -527,9 +1107,10 @@ where
             registry.execute_full_with_context(&call.name, call.input.clone(), Some(&turn_context));
         tokio::pin!(exec_fut);
 
+        let mut cancelled = false;
         let exec_result = loop {
             tokio::select! {
-                result = &mut exec_fut => break Some(result),
+                result = &mut exec_fut => break result,
                 line = reader.next_line(), if reader_open => {
                     let line = match line? {
                         Some(line) => line,
@@ -562,8 +1143,8 @@ where
                                 // Give the tool a chance to observe the token and
                                 // wind down (e.g. kill a running child process)
                                 // before we drop it.
-                                let _ = (&mut exec_fut).await;
-                                break None;
+                                cancelled = true;
+                                break (&mut exec_fut).await;
                             }
                             if let Some(msg_id) = msg_id {
                                 let msg_id = response_id_policy.response_id(msg_id);
@@ -587,36 +1168,18 @@ where
             }
         };
 
-        let Some(exec_result) = exec_result else {
-            return Ok(ToolBatchOutcome::Cancelled);
-        };
-
-        match exec_result {
-            Ok(tool_result) => {
-                let status = if tool_result.success {
-                    "completed"
-                } else {
-                    "failed"
-                };
-                write_tool_call_update(
-                    writer,
-                    session_id,
-                    &call,
-                    status,
-                    Some(&tool_result.content),
-                )
-                .await?;
-                result_messages.push(tool_result_message(
-                    &call.id,
-                    tool_result.content,
-                    !tool_result.success,
-                ));
+        let exec_result = exec_result.map(|mut result| {
+            if let Some(context) = prepared.additional_context.as_deref() {
+                result.content = format!("{}\n\n[hook context] {context}", result.content);
             }
-            Err(err) => {
-                let content = format!("Error: {err}");
-                write_tool_call_update(writer, session_id, &call, "failed", Some(&content)).await?;
-                result_messages.push(tool_result_message(&call.id, content, true));
-            }
+            result
+        });
+        result_messages
+            .push(record_tool_execution_result(writer, session_id, &call, exec_result).await?);
+        if cancelled {
+            result_messages
+                .extend(record_unstarted_cancelled_calls(writer, session_id, calls).await?);
+            return Ok(ToolBatchOutcome::Cancelled(result_messages));
         }
     }
 
@@ -654,6 +1217,8 @@ fn tool_result_message(tool_use_id: &str, content: String, is_error: bool) -> Me
 /// single associated `Fut` type cannot express. Taking ownership sidesteps
 /// that; production callers move the clone into an `async move` block.
 async fn run_agentic_prompt_turn<R, W, F, Fut>(
+    config: &Config,
+    model: &str,
     session_id: &str,
     mut messages: Vec<Message>,
     tool_registry: &ToolRegistry,
@@ -661,17 +1226,22 @@ async fn run_agentic_prompt_turn<R, W, F, Fut>(
     reader: &mut Lines<R>,
     writer: &mut W,
     mut open_stream: F,
-) -> Result<(PromptOutcome, Vec<Message>)>
+) -> std::result::Result<(PromptOutcome, Vec<Message>), AgenticPromptError>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     F: FnMut(Vec<Message>) -> Fut,
     Fut: Future<Output = Result<StreamEventBox>>,
 {
+    let mut has_tool_receipts = false;
     for _round in 0..MAX_ACP_TOOL_ROUNDS {
-        let stream = open_stream(messages.clone()).await?;
+        let stream = open_stream(messages.clone())
+            .await
+            .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
         let (outcome, tool_calls) =
-            drive_prompt_stream(stream, session_id, response_id_policy, reader, writer).await?;
+            drive_prompt_stream(stream, session_id, response_id_policy, reader, writer)
+                .await
+                .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
 
         let text = match outcome {
             PromptOutcome::Cancelled => return Ok((PromptOutcome::Cancelled, messages)),
@@ -705,7 +1275,9 @@ where
             return Ok((PromptOutcome::Completed(text), messages));
         }
 
-        match execute_tool_calls_with_cancellation(
+        let batch = execute_tool_calls_with_cancellation(
+            config,
+            model,
             tool_registry,
             tool_calls,
             session_id,
@@ -713,11 +1285,16 @@ where
             reader,
             writer,
         )
-        .await?
-        {
-            ToolBatchOutcome::Cancelled => return Ok((PromptOutcome::Cancelled, messages)),
+        .await
+        .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
+        match batch {
+            ToolBatchOutcome::Cancelled(tool_result_messages) => {
+                messages.extend(tool_result_messages);
+                return Ok((PromptOutcome::Cancelled, messages));
+            }
             ToolBatchOutcome::Completed(tool_result_messages) => {
                 messages.extend(tool_result_messages);
+                has_tool_receipts = true;
             }
         }
     }
@@ -752,8 +1329,8 @@ struct AcpServer {
     /// `initialize` params `clientCapabilities.terminal`. Defaults to `false`
     /// (restrictive): clients that omit the field get no shell access. Older
     /// ACP clients predating the `terminal` capability get a working agent
-    /// without shell, which is safe; the client can re-declare support on
-    /// reconnect or via `session/request_permission`.
+    /// without shell, which is safe; the client can re-declare support when it
+    /// reconnects.
     client_supports_terminal: bool,
     response_id_policy: JsonRpcResponseIdPolicy,
 }
@@ -1027,6 +1604,7 @@ impl AcpServer {
         messages: &[Message],
         cwd: &PathBuf,
         tool_registry: &ToolRegistry,
+        frozen_system_prompt: &std::sync::Mutex<Option<SystemPrompt>>,
     ) -> Result<StreamEventBox> {
         let _cwd_guard = ScopedCurrentDir::new(cwd)?;
         let last_user_text = messages
@@ -1063,7 +1641,8 @@ impl AcpServer {
         let tools = tool_registry.to_api_tools();
         let route_limits =
             resolve_acp_route_limits(&execution_config, request_route.provider, &model);
-        let system = build_acp_system_prompt(
+        let system = frozen_acp_system_prompt(
+            frozen_system_prompt,
             &execution_config,
             cwd,
             request_route.provider,
@@ -1106,6 +1685,29 @@ fn resolve_acp_route_limits(
     crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
         .ok()
         .and_then(|route| crate::route_budget::known_route_limits(route.candidate.limits()))
+}
+
+/// Return the first fully composed ACP system prompt for this user turn.
+/// Later tool rounds clone that exact value instead of re-reading mutable
+/// instruction sources from disk.
+fn frozen_acp_system_prompt(
+    slot: &std::sync::Mutex<Option<SystemPrompt>>,
+    config: &Config,
+    workspace: &std::path::Path,
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+) -> SystemPrompt {
+    let mut slot = match slot.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(system) = slot.as_ref() {
+        return system.clone();
+    }
+    let system = build_acp_system_prompt(config, workspace, provider, model, route_limits);
+    *slot = Some(system.clone());
+    system
 }
 
 /// Compose ACP's stable prompt through the same headless host seam as
@@ -1171,19 +1773,34 @@ fn build_acp_system_prompt(
 /// Omitting any gate fails closed. The context also inherits the current
 /// mode-derived/configured sandbox boundary.
 /// `ToolContext::new` leaves `auto_approve` at its default (`false`), so the
-/// `SafetyLevel::Dangerous` heuristic still runs — matching `mcp_server`'s
-/// trust posture. ACP has no `session/request_permission` round-trip yet, so
-/// a blocked command surfaces as a normal `success: false` tool result
-/// (`BLOCKED: ...`) fed back to the model, rather than a silent failure.
+/// shell's own last-line safety check remains active after ACP's shared
+/// prepared-call, typed-policy, auto-review, repository-law, and explicit
+/// `session/request_permission` gates have admitted the call.
 fn build_acp_tool_registry(
     config: &Config,
     workspace: &std::path::Path,
     client_supports_terminal: bool,
 ) -> ToolRegistry {
     let features = config.features();
+    let external_sandbox_requested = config.sandbox_backend.as_deref().is_some_and(|kind| {
+        let kind = kind.trim();
+        !kind.is_empty() && !kind.eq_ignore_ascii_case("none")
+    });
+    let sandbox_backend = match crate::sandbox::backend::create_backend(config) {
+        Ok(backend) => backend.map(std::sync::Arc::from),
+        Err(error) => {
+            tracing::warn!("Failed to create ACP sandbox backend: {error}");
+            None
+        }
+    };
+    // A requested external sandbox is an execution boundary, not a hint. If
+    // it cannot be constructed, omit Bash instead of silently running the
+    // command on the local host.
+    let sandbox_backend_ready = !external_sandbox_requested || sandbox_backend.is_some();
     let allow_shell = client_supports_terminal
         && config.allow_shell()
-        && features.enabled(crate::features::Feature::ShellTool);
+        && features.enabled(crate::features::Feature::ShellTool)
+        && sandbox_backend_ready;
     let shell_policy = if allow_shell {
         ShellPolicy::Full
     } else {
@@ -1195,9 +1812,24 @@ fn build_acp_tool_registry(
         config.sandbox_mode.as_deref(),
         workspace,
     );
-    let context = ToolContext::new(workspace)
+    let mut context = ToolContext::new(workspace)
         .with_shell_policy(shell_policy)
         .with_elevated_sandbox_policy(sandbox_policy);
+    match context.shell_manager.lock() {
+        Ok(mut manager) => manager.set_prefer_bwrap(config.prefer_bwrap.unwrap_or(false)),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .set_prefer_bwrap(config.prefer_bwrap.unwrap_or(false)),
+    }
+    if let Some(backend) = sandbox_backend {
+        context = context.with_sandbox_backend(backend);
+    }
+    let hooks_config =
+        crate::hooks::HooksConfig::load_with_project(config.hooks_config(), workspace);
+    context.runtime.hook_executor = Some(Arc::new(crate::hooks::HookExecutor::new(
+        hooks_config,
+        workspace.to_path_buf(),
+    )));
 
     let mut builder = ToolRegistryBuilder::new()
         .with_file_tools()
@@ -1207,10 +1839,46 @@ fn build_acp_tool_registry(
         builder = builder.with_patch_tools();
     }
     if allow_shell {
-        builder = builder.with_shell_tools();
+        builder = builder.with_foreground_shell_tools();
     }
 
-    builder.build(context)
+    let mut registry = builder.build(context);
+    // ACP does not load arbitrary plugin replacements in v0.9.6, but it must
+    // never fall through to a built-in the operator disabled or replaced.
+    if let Some(overrides) = config
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.overrides.as_ref())
+    {
+        for tool_name in overrides.keys() {
+            remove_acp_overridden_builtin(&mut registry, tool_name);
+        }
+    }
+    registry
+}
+
+/// ACP does not load executable tool replacements in v0.9.6. Remove the
+/// built-in compatibility family for every configured override so neither a
+/// hidden legacy alias nor a newly canonical lowercase name can fall through
+/// to the original implementation.
+fn remove_acp_overridden_builtin(registry: &mut ToolRegistry, tool_name: &str) {
+    let aliases: &[&str] = match tool_name {
+        "bash" | "Bash" | "exec_shell" => &["bash", "Bash", "exec_shell"],
+        "read" | "write" | "edit" | "File" | "read_file" | "write_file" | "edit_file" => &[
+            "read",
+            "write",
+            "edit",
+            "File",
+            "read_file",
+            "write_file",
+            "edit_file",
+        ],
+        "apply_patch" => &["apply_patch"],
+        _ => std::slice::from_ref(&tool_name),
+    };
+    for alias in aliases {
+        registry.remove_tool(alias);
+    }
 }
 
 /// ACP `kind` hint for a tool call, used by the client to pick an icon/label.
@@ -1227,8 +1895,8 @@ fn tool_call_kind(call: &PendingToolCall) -> &'static str {
         },
         "apply_patch" => "edit",
         "Git" => "read",
-        "Bash" | "terminal/run" | "terminal/send" | "terminal/wait" | "terminal/cancel"
-        | "terminal/reset" => "execute",
+        "bash" | "Bash" | "terminal/run" | "terminal/send" | "terminal/wait"
+        | "terminal/cancel" | "terminal/reset" => "execute",
         _ => "other",
     }
 }
@@ -1279,7 +1947,7 @@ where
                 "toolCallId": call.id,
                 "title": tool_call_title(call),
                 "kind": tool_call_kind(call),
-                "status": "in_progress",
+                "status": "pending",
                 "rawInput": call.input,
             }
         }
@@ -1890,6 +2558,10 @@ mod tests {
         ))
     }
 
+    fn error_stream(message: &'static str) -> StreamEventBox {
+        Box::pin(futures_util::stream::iter(vec![Err(anyhow!(message))]))
+    }
+
     /// A stream that never yields, so a concurrent cancel always wins.
     fn pending_stream() -> StreamEventBox {
         Box::pin(futures_util::stream::pending::<Result<StreamEvent>>())
@@ -1914,6 +2586,178 @@ mod tests {
             .filter(|line| !line.trim().is_empty())
             .map(|line| serde_json::from_str(line).expect("json"))
             .collect()
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PermissionClientScript {
+        Allow,
+        Reject,
+        WrongIdThenReject,
+        CancelThenLateAllow,
+        AllowThenCancelRunning,
+    }
+
+    async fn write_client_message(writer: &mut tokio::io::DuplexStream, message: Value) {
+        writer
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .expect("write simulated ACP client message");
+    }
+
+    async fn drive_permission_client(
+        output: tokio::io::DuplexStream,
+        mut input: tokio::io::DuplexStream,
+        script: PermissionClientScript,
+        must_not_exist_before_response: Option<PathBuf>,
+    ) -> Vec<Value> {
+        let mut output = BufReader::new(output).lines();
+        let mut seen = Vec::new();
+        let mut sent_running_cancel = false;
+        while let Some(line) = output.next_line().await.expect("read agent output") {
+            let message: Value = serde_json::from_str(&line).expect("agent output json");
+            seen.push(message.clone());
+
+            if message.get("method").and_then(Value::as_str) == Some("session/request_permission") {
+                if let Some(path) = must_not_exist_before_response.as_ref() {
+                    assert!(
+                        !path.exists(),
+                        "sensitive tool ran before the permission response: {}",
+                        path.display()
+                    );
+                }
+                let request_id = message["id"].clone();
+                let selected = |option_id: &str| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id.clone(),
+                        "result": {
+                            "outcome": {
+                                "outcome": "selected",
+                                "optionId": option_id
+                            }
+                        }
+                    })
+                };
+                match script {
+                    PermissionClientScript::Allow
+                    | PermissionClientScript::AllowThenCancelRunning => {
+                        write_client_message(&mut input, selected("allow-once")).await;
+                    }
+                    PermissionClientScript::Reject => {
+                        write_client_message(&mut input, selected("reject-once")).await;
+                    }
+                    PermissionClientScript::WrongIdThenReject => {
+                        write_client_message(
+                            &mut input,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": "wrong-agent-request-id",
+                                "result": {
+                                    "outcome": {
+                                        "outcome": "selected",
+                                        "optionId": "allow-once"
+                                    }
+                                }
+                            }),
+                        )
+                        .await;
+                        write_client_message(&mut input, selected("reject-once")).await;
+                    }
+                    PermissionClientScript::CancelThenLateAllow => {
+                        write_client_message(
+                            &mut input,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/cancel",
+                                "params": { "sessionId": "sess_1" }
+                            }),
+                        )
+                        .await;
+                        write_client_message(
+                            &mut input,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": request_id.clone(),
+                                "result": { "outcome": { "outcome": "cancelled" } }
+                            }),
+                        )
+                        .await;
+                        write_client_message(&mut input, selected("allow-once")).await;
+                    }
+                }
+            }
+
+            let update_status = message
+                .pointer("/params/update/status")
+                .and_then(Value::as_str);
+            if script == PermissionClientScript::AllowThenCancelRunning
+                && update_status == Some("in_progress")
+                && !sent_running_cancel
+            {
+                sent_running_cancel = true;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                write_client_message(
+                    &mut input,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "session/cancel",
+                        "params": { "sessionId": "sess_1" }
+                    }),
+                )
+                .await;
+            }
+            if matches!(update_status, Some("completed" | "failed")) {
+                break;
+            }
+        }
+        seen
+    }
+
+    async fn execute_one_with_permission_client(
+        config: &Config,
+        registry: &ToolRegistry,
+        call: PendingToolCall,
+        script: PermissionClientScript,
+        response_id_policy: JsonRpcResponseIdPolicy,
+        must_not_exist_before_response: Option<PathBuf>,
+    ) -> (ToolBatchOutcome, Vec<Value>, Option<Value>) {
+        let (client_input, agent_input) = tokio::io::duplex(64 * 1024);
+        let (agent_output, client_output) = tokio::io::duplex(64 * 1024);
+        let client = tokio::spawn(drive_permission_client(
+            client_output,
+            client_input,
+            script,
+            must_not_exist_before_response,
+        ));
+        let mut reader = BufReader::new(agent_input).lines();
+        let mut writer = agent_output;
+
+        let outcome = execute_tool_calls_with_cancellation(
+            config,
+            "test-model",
+            registry,
+            vec![call],
+            "sess_1",
+            response_id_policy,
+            &mut reader,
+            &mut writer,
+        )
+        .await
+        .expect("execute ACP tool batch");
+        let late_response = if script == PermissionClientScript::CancelThenLateAllow {
+            let line = tokio::time::timeout(Duration::from_secs(1), reader.next_line())
+                .await
+                .expect("late permission response arrived")
+                .expect("read late permission response")
+                .expect("late permission response line");
+            Some(serde_json::from_str(&line).expect("late response json"))
+        } else {
+            None
+        };
+        drop(writer);
+        let seen = client.await.expect("simulated ACP client joins");
+        (outcome, seen, late_response)
     }
 
     #[tokio::test]
@@ -2173,6 +3017,13 @@ mod tests {
         assert!(reg1.contains("Git"));
         assert!(reg1.contains("apply_patch"));
         assert!(reg1.contains("Bash"));
+        assert!(
+            reg1.names()
+                .into_iter()
+                .all(|name| !name.starts_with("terminal/")),
+            "ACP must not expose stateful terminal tools"
+        );
+        assert!(reg1.context().runtime.hook_executor.is_some());
     }
 
     #[test]
@@ -2194,6 +3045,53 @@ mod tests {
         assert!(!registry.contains("Bash"));
         assert_eq!(registry.context().shell_policy, ShellPolicy::None);
         assert!(!registry.context().auto_approve);
+    }
+
+    #[test]
+    fn acp_shell_uses_configured_external_sandbox_or_fails_closed() {
+        let workspace = std::env::temp_dir();
+        let configured = Config {
+            allow_shell: Some(true),
+            sandbox_backend: Some("opensandbox".to_string()),
+            sandbox_url: Some("http://127.0.0.1:8080".to_string()),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&configured, &workspace, true);
+        assert!(registry.contains("Bash"));
+        assert!(registry.context().sandbox_backend.is_some());
+
+        let unsupported = Config {
+            allow_shell: Some(true),
+            sandbox_backend: Some("unsupported-backend".to_string()),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&unsupported, &workspace, true);
+        assert!(!registry.contains("bash"));
+        assert!(!registry.contains("Bash"));
+        assert!(registry.context().sandbox_backend.is_none());
+    }
+
+    #[test]
+    fn acp_tool_override_removes_every_builtin_compatibility_alias() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("Bash".to_string(), crate::config::ToolOverride::Disabled);
+        let config = Config {
+            allow_shell: Some(true),
+            tools: Some(crate::config::ToolsConfig {
+                overrides: Some(overrides),
+                ..crate::config::ToolsConfig::default()
+            }),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&config, &std::env::temp_dir(), true);
+        assert!(!registry.contains("bash"));
+        assert!(!registry.contains("Bash"));
+        assert!(
+            registry
+                .names()
+                .into_iter()
+                .all(|name| !name.starts_with("terminal/"))
+        );
     }
 
     #[test]
@@ -2227,6 +3125,57 @@ mod tests {
         assert!(!text.contains("You are a coding assistant inside an ACP-compatible editor."));
     }
 
+    #[test]
+    fn acp_system_prompt_is_byte_stable_after_round_one_agents_write() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let agents = workspace.path().join("AGENTS.md");
+        std::fs::write(&agents, "round-one-authority").expect("write initial AGENTS");
+        let config = Config::default();
+        let slot = std::sync::Mutex::new(None);
+
+        let round_one = frozen_acp_system_prompt(
+            &slot,
+            &config,
+            workspace.path(),
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            None,
+        );
+        // Simulate a model tool changing project instructions during round 1.
+        std::fs::write(&agents, "round-two-self-authored-authority")
+            .expect("mutate AGENTS between rounds");
+        let round_two = frozen_acp_system_prompt(
+            &slot,
+            &config,
+            workspace.path(),
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            None,
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&round_one).unwrap(),
+            serde_json::to_vec(&round_two).unwrap(),
+            "later rounds must receive the byte-identical first-round system prompt"
+        );
+        let freshly_composed = build_acp_system_prompt(
+            &config,
+            workspace.path(),
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            None,
+        );
+        assert!(
+            crate::prompts::system_prompt_flat_text(&freshly_composed)
+                .contains("round-two-self-authored-authority"),
+            "fixture must prove the mutable source really changed"
+        );
+        assert!(
+            !crate::prompts::system_prompt_flat_text(&round_two)
+                .contains("round-two-self-authored-authority")
+        );
+    }
+
     fn workspace_registry() -> (tempfile::TempDir, ToolRegistry) {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = Config {
@@ -2235,6 +3184,409 @@ mod tests {
         };
         let registry = build_acp_tool_registry(&config, dir.path(), true);
         (dir, registry)
+    }
+
+    fn pending_call(name: &str, input: Value) -> PendingToolCall {
+        PendingToolCall {
+            id: "call_1".to_string(),
+            name: name.to_string(),
+            input,
+            parse_error: None,
+        }
+    }
+
+    fn config_with_policy_rule(rule: codewhale_execpolicy::ToolAskRule) -> Config {
+        Config {
+            exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+                codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+            ]),
+            ..Config::default()
+        }
+    }
+
+    fn tool_call_hook_command(payload: &Value) -> String {
+        let payload = payload.to_string();
+        if cfg!(windows) {
+            format!("echo {payload}")
+        } else {
+            format!("printf '%s\\n' '{payload}'")
+        }
+    }
+
+    fn config_with_tool_call_hook(mut config: Config, payload: Value, strict: bool) -> Config {
+        let mut hook = crate::hooks::Hook::new(
+            crate::hooks::HookEvent::ToolCallBefore,
+            &tool_call_hook_command(&payload),
+        );
+        hook.continue_on_error = !strict;
+        config.hooks = Some(crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![hook],
+            ..crate::hooks::HooksConfig::default()
+        });
+        config
+    }
+
+    #[tokio::test]
+    async fn acp_strict_tool_call_before_deny_blocks_before_execution() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config_with_tool_call_hook(
+            Config::default(),
+            json!({"decision": "deny", "reason": "release gate"}),
+            true,
+        );
+        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let error = prepare_acp_tool_with_hooks(
+            &config,
+            "test-model",
+            &registry,
+            &pending_call("File", json!({"action": "read", "path": "safe.txt"})),
+        )
+        .await
+        .expect_err("strict hook must deny");
+
+        assert!(error.to_string().contains("release gate"));
+    }
+
+    #[tokio::test]
+    async fn acp_hook_rewrite_is_reprepared_and_policy_is_re_evaluated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deny_rewritten_write = codewhale_execpolicy::ToolAskRule {
+            action: codewhale_execpolicy::PermissionAction::Deny,
+            ..codewhale_execpolicy::ToolAskRule::file_path("write_file", "rewritten.txt")
+        };
+        let config = config_with_tool_call_hook(
+            config_with_policy_rule(deny_rewritten_write),
+            json!({
+                "updatedInput": {
+                    "action": "write",
+                    "path": "rewritten.txt",
+                    "content": "rewritten by hook"
+                }
+            }),
+            true,
+        );
+        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let raw = pending_call("File", json!({"action": "read", "path": "safe.txt"}));
+        let (_, raw_admission) = prepare_acp_tool_admission(&config, &registry, &raw).unwrap();
+        assert_eq!(raw_admission, AcpToolAdmission::Auto);
+
+        let prepared = prepare_acp_tool_with_hooks(&config, "test-model", &registry, &raw)
+            .await
+            .expect("hook rewrite prepares");
+        assert_eq!(
+            prepared.call.input.get("action").and_then(Value::as_str),
+            Some("write")
+        );
+        assert!(matches!(prepared.admission, AcpToolAdmission::Block(_)));
+        assert!(!dir.path().join("rewritten.txt").exists());
+    }
+
+    #[test]
+    fn acp_admission_is_input_specific_and_has_no_workspace_write_carve_out() {
+        let (dir, registry) = workspace_registry();
+        let config = Config::default();
+        let read = pending_call("File", json!({"action": "read", "path": "src/lib.rs"}));
+        let write = pending_call(
+            "File",
+            json!({"action": "write", "path": "src/lib.rs", "content": "new"}),
+        );
+
+        let (_, read_admission) = prepare_acp_tool_admission(&config, &registry, &read).unwrap();
+        let (_, write_admission) = prepare_acp_tool_admission(&config, &registry, &write).unwrap();
+
+        assert_eq!(read_admission, AcpToolAdmission::Auto);
+        assert!(matches!(
+            write_admission,
+            AcpToolAdmission::RequestPermission(_)
+        ));
+        assert_eq!(registry.context().workspace, dir.path());
+    }
+
+    #[test]
+    fn acp_admission_folds_typed_rules_then_headless_safety_floor() {
+        let (dir, registry) = workspace_registry();
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let input = json!({"action": "write", "path": "allowed.txt", "content": "new"});
+        let call = pending_call("File", input.clone());
+
+        let allow = codewhale_execpolicy::ToolAskRule::file_path("write_file", "allowed.txt")
+            .into_exact_workspace_allow(workspace.clone());
+        let (_, admission) =
+            prepare_acp_tool_admission(&config_with_policy_rule(allow), &registry, &call).unwrap();
+        assert_eq!(admission, AcpToolAdmission::Auto);
+
+        let ask = codewhale_execpolicy::ToolAskRule::file_path("write_file", "allowed.txt");
+        let (_, admission) =
+            prepare_acp_tool_admission(&config_with_policy_rule(ask), &registry, &call).unwrap();
+        assert!(matches!(
+            admission,
+            AcpToolAdmission::RequestPermission(reason) if reason.contains("requires approval")
+        ));
+
+        let deny = codewhale_execpolicy::ToolAskRule {
+            action: codewhale_execpolicy::PermissionAction::Deny,
+            ..codewhale_execpolicy::ToolAskRule::file_path("write_file", "allowed.txt")
+        };
+        let (_, admission) =
+            prepare_acp_tool_admission(&config_with_policy_rule(deny), &registry, &call).unwrap();
+        assert!(matches!(admission, AcpToolAdmission::Block(_)));
+
+        let command = "rm -rf ~/";
+        let shell_allow = codewhale_execpolicy::ToolAskRule::exec_shell(command)
+            .into_exact_workspace_allow(workspace);
+        let shell_call = pending_call("Bash", json!({"command": command}));
+        let (_, admission) = prepare_acp_tool_admission(
+            &config_with_policy_rule(shell_allow),
+            &registry,
+            &shell_call,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission,
+            AcpToolAdmission::RequestPermission(reason)
+                if reason.contains("Built-in safety gate")
+        ));
+    }
+
+    #[test]
+    fn acp_admission_blocks_detached_and_stateful_bash_inputs() {
+        let (_dir, registry) = workspace_registry();
+        for input in [
+            json!({"command": "sleep 30", "background": true}),
+            json!({"command": "sleep 30", "tty": true}),
+            json!({"command": "echo hi", "interactive": true}),
+            json!({"command": "serve", "background": true, "persist": true}),
+            json!({"command": "sleep 30 &"}),
+            json!({"command": "nohup sleep 30"}),
+            json!({"action": "wait", "task_id": "shell-1"}),
+            json!({"action": "cancel", "task_id": "shell-1"}),
+        ] {
+            let call = pending_call("Bash", input);
+            let (_, admission) =
+                prepare_acp_tool_admission(&Config::default(), &registry, &call).unwrap();
+            assert!(matches!(
+                admission,
+                AcpToolAdmission::Block(reason)
+                    if reason.contains("foreground Bash runs only")
+            ));
+        }
+        assert!(!acp_shell_command_requests_detach("echo '&' && echo done"));
+    }
+
+    #[test]
+    fn acp_admission_auto_review_and_repo_law_override_typed_allow() {
+        let (dir, registry) = workspace_registry();
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let command = "cargo test";
+        let shell_allow = codewhale_execpolicy::ToolAskRule::exec_shell(command)
+            .into_exact_workspace_allow(workspace.clone());
+        let mut auto_review_block = config_with_policy_rule(shell_allow);
+        auto_review_block.auto_review = Some(crate::config::AutoReviewConfig {
+            block: vec![crate::config::AutoReviewRuleConfig {
+                id: Some("acp-shell-block".to_string()),
+                action_kind: Some("shell".to_string()),
+                reason: Some("ACP shell is disabled by policy".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let (_, admission) = prepare_acp_tool_admission(
+            &auto_review_block,
+            &registry,
+            &pending_call("Bash", json!({"command": command})),
+        )
+        .unwrap();
+        assert!(matches!(
+            admission,
+            AcpToolAdmission::Block(reason) if reason.contains("ACP shell is disabled by policy")
+        ));
+
+        let law_dir = dir.path().join(".codewhale");
+        std::fs::create_dir_all(&law_dir).unwrap();
+        std::fs::write(
+            law_dir.join("constitution.json"),
+            r#"{
+                "protected_invariants": [
+                    { "text": "Never rewrite the wire", "paths": ["wire.rs"], "action": "block" },
+                    { "text": "Review release notes", "paths": ["CHANGELOG.md"] }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        for (path, expected_block) in [("wire.rs", true), ("CHANGELOG.md", false)] {
+            let allow = codewhale_execpolicy::ToolAskRule::file_path("write_file", path)
+                .into_exact_workspace_allow(workspace.clone());
+            let config = config_with_policy_rule(allow);
+            let call = pending_call(
+                "File",
+                json!({"action": "write", "path": path, "content": "new"}),
+            );
+            let (_, admission) = prepare_acp_tool_admission(&config, &registry, &call).unwrap();
+            if expected_block {
+                assert!(matches!(
+                    admission,
+                    AcpToolAdmission::Block(reason) if reason.contains("Never rewrite the wire")
+                ));
+            } else {
+                assert!(matches!(
+                    admission,
+                    AcpToolAdmission::RequestPermission(reason)
+                        if reason.contains("Review release notes")
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_read_runs_without_permission_but_reports_pending_before_in_progress() {
+        let (dir, registry) = workspace_registry();
+        std::fs::write(dir.path().join("read.txt"), "safe").unwrap();
+        let mut reader = lines_from("");
+        let mut out = Vec::new();
+
+        let outcome = execute_tool_calls_with_cancellation(
+            &Config::default(),
+            "test-model",
+            &registry,
+            vec![pending_call(
+                "File",
+                json!({"action": "read", "path": "read.txt"}),
+            )],
+            "sess_1",
+            JsonRpcResponseIdPolicy::Preserve,
+            &mut reader,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, ToolBatchOutcome::Completed(_)));
+        let messages = parse_lines(out);
+        assert!(!messages.iter().any(|message| {
+            message.get("method").and_then(Value::as_str) == Some("session/request_permission")
+        }));
+        let statuses = messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .pointer("/params/update/status")
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec!["pending", "in_progress", "completed"]);
+    }
+
+    #[tokio::test]
+    async fn acp_permission_allow_executes_write_once_after_response() {
+        let (dir, registry) = workspace_registry();
+        let target = dir.path().join("allowed.txt");
+        let (outcome, messages, late) = execute_one_with_permission_client(
+            &Config::default(),
+            &registry,
+            pending_call(
+                "File",
+                json!({"action": "write", "path": "allowed.txt", "content": "written once"}),
+            ),
+            PermissionClientScript::Allow,
+            JsonRpcResponseIdPolicy::Preserve,
+            Some(target.clone()),
+        )
+        .await;
+
+        assert!(late.is_none());
+        assert!(matches!(outcome, ToolBatchOutcome::Completed(_)));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "written once");
+        let request = messages
+            .iter()
+            .find(|message| message["method"] == "session/request_permission")
+            .expect("permission request");
+        assert_eq!(request["params"]["toolCall"]["status"], "pending");
+        assert_eq!(request["params"]["options"][0]["kind"], "allow_once");
+        assert_eq!(request["params"]["options"][1]["kind"], "reject_once");
+        let statuses = messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .pointer("/params/update/status")
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec!["pending", "in_progress", "completed"]);
+    }
+
+    #[tokio::test]
+    async fn acp_permission_reject_and_wrong_id_fail_closed_without_write() {
+        for script in [
+            PermissionClientScript::Reject,
+            PermissionClientScript::WrongIdThenReject,
+        ] {
+            let (dir, registry) = workspace_registry();
+            let target = dir.path().join("denied.txt");
+            let (outcome, messages, _) = execute_one_with_permission_client(
+                &Config::default(),
+                &registry,
+                pending_call(
+                    "File",
+                    json!({"action": "write", "path": "denied.txt", "content": "forbidden"}),
+                ),
+                script,
+                JsonRpcResponseIdPolicy::Preserve,
+                Some(target.clone()),
+            )
+            .await;
+
+            assert!(!target.exists(), "{script:?} must not authorize the write");
+            let ToolBatchOutcome::Completed(results) = outcome else {
+                panic!("rejection should complete with a failed tool result");
+            };
+            assert_eq!(results.len(), 1);
+            let ContentBlock::ToolResult { is_error, .. } = &results[0].content[0] else {
+                panic!("expected tool result");
+            };
+            assert_eq!(*is_error, Some(true));
+            assert!(!messages.iter().any(|message| {
+                message
+                    .pointer("/params/update/status")
+                    .and_then(Value::as_str)
+                    == Some("in_progress")
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_permission_cancel_ignores_late_allow_and_never_runs_tool() {
+        let (dir, registry) = workspace_registry();
+        let target = dir.path().join("cancelled.txt");
+        let (outcome, messages, late) = execute_one_with_permission_client(
+            &Config::default(),
+            &registry,
+            pending_call(
+                "File",
+                json!({"action": "write", "path": "cancelled.txt", "content": "forbidden"}),
+            ),
+            PermissionClientScript::CancelThenLateAllow,
+            JsonRpcResponseIdPolicy::Preserve,
+            Some(target.clone()),
+        )
+        .await;
+
+        assert!(!target.exists());
+        assert!(matches!(outcome, ToolBatchOutcome::Cancelled(_)));
+        assert!(messages.iter().any(|message| {
+            message
+                .pointer("/params/update/status")
+                .and_then(Value::as_str)
+                == Some("failed")
+        }));
+        let late = late.expect("late allow remains queued for the outer dispatcher");
+        assert!(is_jsonrpc_response(&late));
+        assert_eq!(
+            late.pointer("/result/outcome/optionId")
+                .and_then(Value::as_str),
+            Some("allow-once")
+        );
     }
 
     #[tokio::test]
@@ -2355,6 +3707,8 @@ mod tests {
         let mut out = Vec::new();
 
         let (outcome, messages) = run_agentic_prompt_turn(
+            &Config::default(),
+            "test-model",
             "sess_1",
             vec![Message {
                 role: "user".to_string(),
@@ -2409,6 +3763,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agentic_turn_preserves_tool_receipts_when_later_provider_round_fails() {
+        let (dir, registry) = workspace_registry();
+        std::fs::write(dir.path().join("receipt.txt"), "observed").unwrap();
+        let round1 = ready_stream({
+            let mut events = tool_use_events(
+                0,
+                "call_receipt",
+                "File",
+                r#"{"action":"read","path":"receipt.txt"}"#,
+            );
+            events.push(StreamEvent::MessageStop);
+            events
+        });
+        let scripted = ScriptedStreams::new(vec![round1, error_stream("provider unavailable")]);
+        let mut reader = lines_from("");
+        let mut out = Vec::new();
+
+        let error = run_agentic_prompt_turn(
+            &Config::default(),
+            "test-model",
+            "sess_1",
+            vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "Read receipt.txt".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &registry,
+            JsonRpcResponseIdPolicy::Preserve,
+            &mut reader,
+            &mut out,
+            |_msgs| scripted.next(),
+        )
+        .await
+        .expect_err("second provider round fails");
+
+        assert!(error.source.to_string().contains("provider unavailable"));
+        let messages = error
+            .partial_messages
+            .expect("completed tool receipt must be returned for commit");
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(
+            &messages[2].content[0],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_receipt"
+        ));
+    }
+
+    #[tokio::test]
     async fn agentic_turn_chains_nested_tool_calls_across_rounds() {
         let (dir, registry) = workspace_registry();
         std::fs::write(dir.path().join("a.txt"), "contents-of-a").unwrap();
@@ -2437,6 +3840,8 @@ mod tests {
         let mut out = Vec::new();
 
         let (outcome, messages) = run_agentic_prompt_turn(
+            &Config::default(),
+            "test-model",
             "sess_1",
             vec![Message {
                 role: "user".to_string(),
@@ -2501,6 +3906,8 @@ mod tests {
         let mut out = Vec::new();
 
         let (outcome, messages) = run_agentic_prompt_turn(
+            &Config::default(),
+            "test-model",
             "sess_1",
             vec![Message {
                 role: "user".to_string(),
@@ -2542,49 +3949,28 @@ mod tests {
     #[tokio::test]
     async fn tool_batch_cancels_a_running_bash_and_applies_response_id_policy() {
         let (_dir, registry) = workspace_registry();
-        let (mut input_writer, input_reader) = tokio::io::duplex(512);
-        let cancel_writer = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            input_writer
-                .write_all(
-                    br#"{"jsonrpc":"2.0","id":7,"method":"session/cancel","params":{"sessionId":"sess_1"}}
-"#,
-                )
-                .await
-                .expect("write delayed cancel");
-        });
-        let mut reader = BufReader::new(input_reader).lines();
-        let mut out = Vec::new();
         let started = std::time::Instant::now();
 
-        let outcome = execute_tool_calls_with_cancellation(
+        let (outcome, messages, _) = execute_one_with_permission_client(
+            &Config::default(),
             &registry,
-            vec![PendingToolCall {
-                id: "call_1".to_string(),
-                name: "Bash".to_string(),
-                input: json!({ "command": SLOW_SHELL_COMMAND }),
-                parse_error: None,
-            }],
-            "sess_1",
+            pending_call("Bash", json!({ "command": SLOW_SHELL_COMMAND })),
+            PermissionClientScript::AllowThenCancelRunning,
             JsonRpcResponseIdPolicy::StringifyNumeric,
-            &mut reader,
-            &mut out,
+            None,
         )
-        .await
-        .expect("tool batch resolves when cancelled");
-        cancel_writer.await.expect("cancel writer joins");
+        .await;
 
-        assert!(matches!(outcome, ToolBatchOutcome::Cancelled));
+        assert!(matches!(outcome, ToolBatchOutcome::Cancelled(_)));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(4),
             "Bash cancellation must preempt the five-second command"
         );
-        let lines = parse_lines(out);
         assert!(
-            lines
+            messages
                 .iter()
                 .any(|value| value["id"] == "7" && value["result"].is_null()),
-            "Zed-compatible cancellation response id was not stringified: {lines:?}"
+            "Zed-compatible cancellation response id was not stringified: {messages:?}"
         );
     }
 

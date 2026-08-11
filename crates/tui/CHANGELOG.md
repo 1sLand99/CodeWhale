@@ -40,6 +40,11 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   the TUI, while `tui_help` gives agents the same command and key map users see.
 - Markdown file paths render as OSC 8 links where the terminal supports them,
   and every agent row can open that agent's transcript directly.
+- ACP editor sessions can execute multi-round file, search, Git, patch, and
+  explicitly enabled shell tool calls through the shared Runtime registry.
+  Shell access requires both the client's terminal capability and Codewhale's
+  headless shell opt-in, and cancellation stops an in-flight tool before the
+  turn returns (#5225 by @rafaelcavalheri).
 
 ### Changed
 
@@ -157,6 +162,7 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 
 - Xavier Pestel (@xavierpestel-ai) — Mistral AI provider route (#5295).
 - Ben Younes (@ousamabenyounes) — inherited nested-agent depth cap (#5317).
+- Rafael Cavalheri (@rafaelcavalheri) — ACP agentic tool turns (#5225).
 
 ## [0.9.5] - 2026-08-08
 

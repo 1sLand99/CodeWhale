@@ -2259,127 +2259,43 @@ impl Engine {
                 };
                 let mut reprepared_after_hook = false;
 
-                if blocked_error.is_none()
-                    && let Some(hook_executor) = self.config.hook_executor.as_ref()
-                    && hook_executor.has_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore)
-                {
-                    // Warn if any ToolCallBefore hook is configured as background
-                    // — background hooks return exit_code: None immediately, so
-                    // the denial check (exit_code == Some(2)) can never match.
-                    if hook_executor
-                        .has_background_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore)
-                    {
-                        tracing::warn!(
-                            "ToolCallBefore hook(s) configured with background=true — \
-                             background hooks cannot deny tool calls because they exit \
-                             immediately with no result"
-                        );
-                    }
-
-                    // `hook_executor.session_id()`, not `self.session.id`:
-                    // the hook session identity is minted once per TUI launch
-                    // and every other event reports it. Using the engine's own
-                    // session id here made `tool_call_before` the one event
-                    // whose `DEEPSEEK_SESSION_ID` did not match the rest.
-                    let hook_context = crate::hooks::HookContext::new()
-                        .with_tool_name(&tool_name)
-                        .with_tool_call_id(&tool_id)
-                        .with_tool_args(&tool_input)
-                        .with_mode(&format!("{mode:?}"))
-                        .with_workspace(self.session.workspace.clone())
-                        .with_model(&self.config.model)
-                        .with_session_id(hook_executor.session_id());
-                    // Run hooks off the Tokio worker thread: `execute()` calls
-                    // `child.wait_timeout()` which is a blocking syscall that
-                    // would stall all other async tasks on this thread.
-                    let executor = hook_executor.clone();
-                    // Collected *before* the spawn, and deliberately not
-                    // derived from the results: if the blocking task dies, the
-                    // results are gone and there is no way to ask afterwards
-                    // which gates were supposed to run. This names exactly the
-                    // strict foreground hooks whose conditions match this call
-                    // — never a hook that would not have run anyway.
-                    let strict_gates = hook_executor.matched_strict_gate_labels(
-                        crate::hooks::HookEvent::ToolCallBefore,
-                        &hook_context,
-                    );
-                    let hook_results = match tokio::task::spawn_blocking(move || {
-                        executor.execute(crate::hooks::HookEvent::ToolCallBefore, &hook_context)
-                    })
+                if blocked_error.is_none() {
+                    match run_tool_call_before_hooks(
+                        self.config.hook_executor.as_ref(),
+                        &tool_name,
+                        &tool_id,
+                        &tool_input,
+                        mode,
+                        &self.session.workspace,
+                        &self.config.model,
+                    )
                     .await
                     {
-                        Ok(results) => Some(results),
-                        Err(join_err) => {
-                            tracing::error!(
-                                target: "hooks",
-                                tool = %tool_name,
-                                strict_gates = strict_gates.len(),
-                                "hook executor task panicked or was cancelled: {join_err}"
-                            );
-                            // `None`, not `Vec::new()`. An empty result set is
-                            // what "every hook matched and allowed" looks
-                            // like, so returning one here let a lost executor
-                            // silently open every strict gate configured for
-                            // this call.
-                            None
+                        Ok(hook_outcome) => {
+                            if hook_outcome.requires_approval {
+                                hook_requires_approval = true;
+                            }
+                            if let Some(updated) = hook_outcome.updated_input {
+                                tool_input = updated;
+                                reprepared_after_hook = true;
+                                prepared_policy = match reprepare_tool_call_after_hook(
+                                    &tool_name,
+                                    tool_input.clone(),
+                                    tool_registry,
+                                    self.session.auto_approve,
+                                ) {
+                                    Ok(policy) => Some(policy),
+                                    Err(error) => {
+                                        blocked_error = Some(error);
+                                        None
+                                    }
+                                };
+                            }
+                            if let Some(context) = hook_outcome.additional_context {
+                                hook_contexts.insert(tool_id.clone(), context);
+                            }
                         }
-                    };
-                    // #3026: fold all foreground hook results into one
-                    // decision: deny (exit code 2 or JSON) > ask > allow;
-                    // last `updatedInput` writer wins; `additionalContext`
-                    // strings are concatenated.
-                    let fold = match &hook_results {
-                        Some(results) => fold_tool_call_before_results(results),
-                        None => lost_executor_fold(&strict_gates),
-                    };
-                    if !fold.unavailable.is_empty() {
-                        tracing::warn!(
-                            target: "hooks",
-                            tool = %tool_name,
-                            gates = %fold.unavailable.join("; "),
-                            blocking = fold.blocking_unavailable.len(),
-                            "tool_call_before hook(s) returned no verdict"
-                        );
-                    }
-                    // A gate that timed out or could not start returned no
-                    // verdict. Fail closed only for the gates that *matched
-                    // this call* and declared `continue_on_error = false`:
-                    // silently allowing those is the one outcome the operator
-                    // ruled out, while a lenient hook's timeout — or an
-                    // unrelated strict hook that never matched — must not deny.
-                    if !fold.blocking_unavailable.is_empty() {
-                        blocked_error = Some(ToolError::permission_denied(format!(
-                            "ToolCallBefore hook returned no verdict for tool '{tool_name}' \
-                             and `continue_on_error = false` is configured: {}",
-                            fold.blocking_unavailable.join("; ")
-                        )));
-                    } else if let Some(reason) = fold.deny_reason {
-                        blocked_error = Some(ToolError::permission_denied(format!(
-                            "ToolCallBefore hook denied tool '{tool_name}': {reason}"
-                        )));
-                    } else {
-                        if fold.requires_approval {
-                            hook_requires_approval = true;
-                        }
-                        if let Some(updated) = fold.updated_input {
-                            tool_input = updated;
-                            reprepared_after_hook = true;
-                            prepared_policy = match reprepare_tool_call_after_hook(
-                                &tool_name,
-                                tool_input.clone(),
-                                tool_registry,
-                                self.session.auto_approve,
-                            ) {
-                                Ok(policy) => Some(policy),
-                                Err(error) => {
-                                    blocked_error = Some(error);
-                                    None
-                                }
-                            };
-                        }
-                        if let Some(context) = fold.additional_context {
-                            hook_contexts.insert(tool_id.clone(), context);
-                        }
+                        Err(error) => blocked_error = Some(error),
                     }
                 }
 
@@ -4202,6 +4118,111 @@ fn fold_tool_call_before_results(results: &[crate::hooks::HookResult]) -> ToolCa
         ));
     }
     fold
+}
+
+/// Shared admission result for the synchronous `tool_call_before` hook gate.
+/// Protocol hosts reuse this path so a hook cannot be bypassed merely by
+/// choosing a non-TUI frontend.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ToolCallBeforeHookOutcome {
+    pub(crate) requires_approval: bool,
+    pub(crate) updated_input: Option<serde_json::Value>,
+    pub(crate) additional_context: Option<String>,
+}
+
+/// Run and fold the native pre-tool hook gate without blocking a Tokio worker.
+///
+/// Strict hooks fail closed when their executor is lost or returns no verdict;
+/// explicit deny beats ask/allow, and the last input rewrite is returned to the
+/// caller for mandatory re-preparation and policy evaluation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_tool_call_before_hooks(
+    hook_executor: Option<&std::sync::Arc<crate::hooks::HookExecutor>>,
+    tool_name: &str,
+    tool_call_id: &str,
+    tool_input: &serde_json::Value,
+    mode: AppMode,
+    workspace: &std::path::Path,
+    model: &str,
+) -> Result<ToolCallBeforeHookOutcome, ToolError> {
+    let Some(hook_executor) = hook_executor else {
+        return Ok(ToolCallBeforeHookOutcome::default());
+    };
+    if !hook_executor.has_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore) {
+        return Ok(ToolCallBeforeHookOutcome::default());
+    }
+
+    // Background hooks are observers: they return immediately and cannot
+    // provide an admission verdict.
+    if hook_executor.has_background_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore) {
+        tracing::warn!(
+            "ToolCallBefore hook(s) configured with background=true — \
+             background hooks cannot deny tool calls because they exit \
+             immediately with no result"
+        );
+    }
+
+    // The executor owns the stable hook-session identity across every event.
+    let hook_context = crate::hooks::HookContext::new()
+        .with_tool_name(tool_name)
+        .with_tool_call_id(tool_call_id)
+        .with_tool_args(tool_input)
+        .with_mode(&format!("{mode:?}"))
+        .with_workspace(workspace.to_path_buf())
+        .with_model(model)
+        .with_session_id(hook_executor.session_id());
+    let executor = hook_executor.clone();
+    // Capture strict gates before dispatch so a lost blocking task cannot turn
+    // an operator-declared fail-closed hook into an implicit allow.
+    let strict_gates = hook_executor
+        .matched_strict_gate_labels(crate::hooks::HookEvent::ToolCallBefore, &hook_context);
+    let hook_results = match tokio::task::spawn_blocking(move || {
+        executor.execute(crate::hooks::HookEvent::ToolCallBefore, &hook_context)
+    })
+    .await
+    {
+        Ok(results) => Some(results),
+        Err(join_err) => {
+            tracing::error!(
+                target: "hooks",
+                tool = %tool_name,
+                strict_gates = strict_gates.len(),
+                "hook executor task panicked or was cancelled: {join_err}"
+            );
+            None
+        }
+    };
+    let fold = match &hook_results {
+        Some(results) => fold_tool_call_before_results(results),
+        None => lost_executor_fold(&strict_gates),
+    };
+    if !fold.unavailable.is_empty() {
+        tracing::warn!(
+            target: "hooks",
+            tool = %tool_name,
+            gates = %fold.unavailable.join("; "),
+            blocking = fold.blocking_unavailable.len(),
+            "tool_call_before hook(s) returned no verdict"
+        );
+    }
+    if !fold.blocking_unavailable.is_empty() {
+        return Err(ToolError::permission_denied(format!(
+            "ToolCallBefore hook returned no verdict for tool '{tool_name}' \
+             and `continue_on_error = false` is configured: {}",
+            fold.blocking_unavailable.join("; ")
+        )));
+    }
+    if let Some(reason) = fold.deny_reason {
+        return Err(ToolError::permission_denied(format!(
+            "ToolCallBefore hook denied tool '{tool_name}': {reason}"
+        )));
+    }
+
+    Ok(ToolCallBeforeHookOutcome {
+        requires_approval: fold.requires_approval,
+        updated_input: fold.updated_input,
+        additional_context: fold.additional_context,
+    })
 }
 
 #[cfg(test)]
