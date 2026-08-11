@@ -5493,8 +5493,8 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
 }
 
 #[test]
-fn rlm_eval_required_approval_ignores_generic_auto_approve() {
-    assert!(registered_tool_approval_required(
+fn rlm_eval_required_approval_is_auto_approved_in_full_access() {
+    assert!(!registered_tool_approval_required(
         "rlm_eval",
         ApprovalRequirement::Required,
         true
@@ -9163,8 +9163,13 @@ async fn full_access_auto_approves_non_bypassable_registered_tools() {
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('\'', "\\'");
+    // GitHub's Windows image exposes the interpreter as `python`; Unix
+    // images expose `python3`. Keep the runtime-tool execution receipt
+    // platform-neutral so this test measures the Full Access boundary rather
+    // than an executable-name convention.
+    let python = if cfg!(windows) { "python" } else { "python3" };
     let start_probe =
-        format!("python3 -c \"__import__('pathlib').Path('{marker_literal}').write_text('ran')\"");
+        format!("{python} -c \"__import__('pathlib').Path('{marker_literal}').write_text('ran')\"");
     let rlm_probe = format!("__import__('pathlib').Path('{marker_literal}').write_text('ran')");
     let engine_config = EngineConfig {
         model: crate::config::DEFAULT_TEXT_MODEL.to_string(),

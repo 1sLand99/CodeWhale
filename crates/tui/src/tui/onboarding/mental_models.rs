@@ -145,7 +145,7 @@ mod tests {
 
         assert!(body.contains("How Codewhale works"));
         assert!(body.contains("Plan"));
-        assert!(body.contains("Act"));
+        assert!(body.contains("Work"));
         assert!(body.contains("Operate"));
         assert!(body.contains("Ask"));
         assert!(body.contains("Auto-Review"));

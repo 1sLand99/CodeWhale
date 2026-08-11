@@ -1187,7 +1187,7 @@ mod tests {
             "命令",
             "就緒",
             "槽位",
-            "Act模式",
+            "Work模式",
             "命令面板",
             "切換側邊欄",
         ] {
@@ -1210,7 +1210,7 @@ mod tests {
             "ready",
             "modified",
             "empty",
-            "Agent mode",
+            "Work mode",
             "Command palette",
             "Toggle sidebar",
             "Switch the conversation",

@@ -11342,8 +11342,8 @@ fn update_notice_block_is_persistent_and_actionable() {
         "includes the update command: {block:?}"
     );
     assert!(
-        block.contains("codewhale update --check"),
-        "prefers the check-first command: {block:?}"
+        block.contains("`/update install`") && block.contains("bare `/update`"),
+        "names the in-app install command and its check-first preview: {block:?}"
     );
     assert!(
         block.to_lowercase().contains("restart"),

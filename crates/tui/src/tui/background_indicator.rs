@@ -469,7 +469,7 @@ mod tests {
             from_prior_session: false,
         };
         app.subagent_cache
-            .push(running("agent_named_lane", "branch-triage"));
+            .push(running("agent_named_lane", "triage"));
         // An unnamed dispatch: `name` is still the agent id, so the whale
         // nickname stays the honest label (#5287).
         app.subagent_cache
@@ -477,6 +477,6 @@ mod tests {
 
         let work = pending_work_from_app(&app);
         let labels: Vec<&str> = work.items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, ["branch-triage·builder", "Blue Whale·builder"]);
+        assert_eq!(labels, ["triage·builder", "Blue Whale·builder"]);
     }
 }

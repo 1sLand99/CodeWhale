@@ -1752,7 +1752,8 @@ mod tests {
             (40, false, false),
             (60, false, true),
             (80, false, true),
-            (93, true, true),
+            (93, false, true),
+            (94, true, true),
             (100, true, true),
             (110, false, true),
             (130, true, true),
@@ -1769,7 +1770,7 @@ mod tests {
                 "unexpected context visibility at width {width}: {header:?}",
             );
             assert!(
-                header.to_ascii_lowercase().contains("act"),
+                header.to_ascii_lowercase().contains("work"),
                 "mode must survive at width {width}: {header:?}",
             );
             assert!(
