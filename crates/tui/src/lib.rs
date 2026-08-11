@@ -11132,6 +11132,9 @@ async fn run_exec_agent(
         outer_network_access,
         outer_shell_authority,
     );
+    if crate::core::allowlist_is_native_file_and_shell_only(allowed_tools.as_deref()) {
+        engine_features.disable(crate::features::Feature::Mcp);
+    }
     let engine_plugin_registry = if fleet_authority_active {
         std::sync::Arc::new(crate::plugins::PluginRegistry::empty(&workspace))
     } else {

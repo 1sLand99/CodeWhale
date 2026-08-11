@@ -1,10 +1,10 @@
 use super::{
-    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS, apply_mcp_tool_deferral,
-    apply_native_tool_deferral, apply_registry_first_shell_guidance,
-    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
-    ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
-    is_synthetic_catalog_tool, remove_evicted_cache_activations, tool_matches_any_rule,
-    touch_cached_tool_after_execution,
+    CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS,
+    allowlist_is_native_file_and_shell_only, apply_mcp_tool_deferral, apply_native_tool_deferral,
+    apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
+    default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
+    initial_active_tools, is_synthetic_catalog_tool, remove_evicted_cache_activations,
+    tool_matches_any_rule, touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -222,6 +222,23 @@ fn allow_and_deny_rules_cover_visible_and_hidden_compat_aliases_symmetrically() 
         assert!(tool_matches_any_rule(&["File".to_string()], primitive));
     }
     assert!(!tool_matches_any_rule(&["read".to_string()], "write"));
+}
+
+#[test]
+fn native_file_and_shell_allowlist_can_skip_mcp_startup() {
+    let native = ["bash", "read", "write", "edit"].map(str::to_string);
+    assert!(allowlist_is_native_file_and_shell_only(Some(&native)));
+    assert!(!allowlist_is_native_file_and_shell_only(None));
+}
+
+#[test]
+fn unknown_and_wildcard_allowlists_keep_mcp_startup() {
+    for rule in ["mcp_github_list_prs", "mcp_*", "m*", "*", "other_tool"] {
+        assert!(
+            !allowlist_is_native_file_and_shell_only(Some(&[rule.to_string()])),
+            "{rule} may admit an MCP-backed tool"
+        );
+    }
 }
 
 #[test]

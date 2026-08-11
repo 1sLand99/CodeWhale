@@ -588,6 +588,32 @@ pub(crate) fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {
     })
 }
 
+/// Whether an explicit tool allowlist is provably limited to the native file
+/// and shell primitives. Unknown names and wildcards remain conservative
+/// because a configured MCP server may own them.
+pub(crate) fn allowlist_is_native_file_and_shell_only(allowed_tools: Option<&[String]>) -> bool {
+    let Some(rules) = allowed_tools else {
+        return false;
+    };
+    const NATIVE_NAMES: &[&str] = &[
+        "bash",
+        "exec_shell",
+        "read",
+        "read_file",
+        "write",
+        "write_file",
+        "edit",
+        "edit_file",
+        "file",
+    ];
+    rules.iter().all(|rule| {
+        let rule = rule.trim();
+        !rule.is_empty()
+            && !rule.ends_with('*')
+            && NATIVE_NAMES.contains(&rule.to_ascii_lowercase().as_str())
+    })
+}
+
 fn policy_tool_aliases(name: &str) -> &'static [&'static str] {
     match name {
         "read" | "read_file" => &["read", "read_file", "file"],
