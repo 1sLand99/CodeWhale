@@ -945,6 +945,11 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
 #[test]
 fn search_provider_defaults_to_duckduckgo() {
     assert_eq!(SearchProvider::default(), SearchProvider::DuckDuckGo);
+    assert_eq!(
+        SearchProvider::parse("fire-crawl"),
+        Some(SearchProvider::Firecrawl)
+    );
+    assert_eq!(SearchProvider::Firecrawl.as_str(), "firecrawl");
 }
 
 #[test]

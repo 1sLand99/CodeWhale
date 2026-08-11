@@ -677,8 +677,7 @@ pub struct ToolExecutionState {
     /// Which search backend `web_search` should use. Default: DuckDuckGo. Set via
     /// `[search] provider` in config.toml.
     pub search_provider: crate::config::SearchProvider,
-    /// API key for Tavily, Bocha, Metaso, Baidu, Volcengine, or Sofya.
-    /// `None` for Bing, DuckDuckGo, or SearXNG.
+    /// Optional Firecrawl key, or required key for other API search providers.
     /// Metaso also falls back to the `METASO_API_KEY` env var.
     /// Baidu also falls back to `BAIDU_SEARCH_API_KEY`.
     pub search_api_key: Option<String>,

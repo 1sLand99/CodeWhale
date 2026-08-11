@@ -20,6 +20,9 @@ pub enum SearchProvider {
     #[default]
     #[serde(alias = "duckduckgo")]
     DuckDuckGo,
+    /// Firecrawl Search API. Works keyless on Firecrawl Cloud with a bounded
+    /// per-IP quota; `[search] api_key` or `FIRECRAWL_API_KEY` raises limits.
+    Firecrawl,
     /// Tavily AI Search API (<https://tavily.com>). Requires api_key.
     Tavily,
     /// Bocha AI Search API (<https://bochaai.com>). Requires api_key.
@@ -65,6 +68,7 @@ impl SearchProvider {
         match value.trim().to_ascii_lowercase().as_str() {
             "bing" => Some(Self::Bing),
             "duckduckgo" | "duck-duck-go" | "duck_duck_go" | "ddg" => Some(Self::DuckDuckGo),
+            "firecrawl" | "fire-crawl" | "fire_crawl" => Some(Self::Firecrawl),
             "tavily" => Some(Self::Tavily),
             "bocha" => Some(Self::Bocha),
             "metaso" => Some(Self::Metaso),
@@ -83,6 +87,7 @@ impl SearchProvider {
         match self {
             Self::Bing => "bing",
             Self::DuckDuckGo => "duckduckgo",
+            Self::Firecrawl => "firecrawl",
             Self::Tavily => "tavily",
             Self::Bocha => "bocha",
             Self::Metaso => "metaso",
@@ -121,7 +126,7 @@ pub struct SearchProviderResolution {
 /// Web search provider configuration (`[search]` table in config.toml).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SearchConfig {
-    /// Search provider: `bing` | `duckduckgo` | `tavily` | `bocha` | `metaso` | `searxng` | `baidu` | `volcengine`. Default: `duckduckgo`.
+    /// Search provider. Default: `duckduckgo`; `firecrawl` works without a key.
     #[serde(default)]
     pub provider: Option<SearchProvider>,
     /// Optional search endpoint. With `duckduckgo`, this is a
@@ -129,7 +134,7 @@ pub struct SearchConfig {
     /// SearXNG instance root or `/search` endpoint.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// API key for Tavily, Bocha, Metaso, Baidu, or Volcengine. Not required for Bing, DuckDuckGo, or SearXNG.
+    /// Optional for Firecrawl; required for Tavily, Bocha, Metaso, Baidu, Volcengine, or Sofya.
     /// Metaso also falls back to the `METASO_API_KEY` env var.
     /// Baidu also falls back to `BAIDU_SEARCH_API_KEY` env var.
     /// Volcengine also falls back to `VOLCENGINE_API_KEY` / `VOLCENGINE_ARK_API_KEY` / `ARK_API_KEY` env vars.

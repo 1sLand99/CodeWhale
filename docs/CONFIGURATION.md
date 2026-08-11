@@ -2275,8 +2275,8 @@ graduate behind real gated flags.
 `web_search` uses DuckDuckGo by default and does not require an API key. The
 DuckDuckGo path keeps a Bing fallback when DDG returns a bot challenge or no
 parseable results. Bing remains selectable for users who explicitly want it,
-and Tavily, Bocha, Metaso, SearXNG, Baidu, Volcengine, or Sofya can be selected
-when an API-backed provider is preferred.
+and Firecrawl, Tavily, Bocha, Metaso, SearXNG, Baidu, Volcengine, or Sofya can
+be selected when an API-backed provider is preferred.
 
 Configured API providers are attempted first. Runtime failure or an empty
 result visibly degrades through DuckDuckGo and then Bing; the structured search
@@ -2300,6 +2300,11 @@ traffic.
 **Metaso** ([metaso.cn](https://metaso.cn)) requires a user-supplied key. Set
 `METASO_API_KEY` or `[search] api_key`; Codewhale does not ship a shared key.
 
+**Firecrawl** ([docs](https://docs.firecrawl.dev/sdks/cli)) searches Firecrawl
+Cloud without a key using its bounded per-IP daily quota. Set
+`FIRECRAWL_API_KEY` or `[search] api_key` for authenticated limits. Codewhale
+sends no `Authorization` header in keyless mode.
+
 **Baidu** uses Baidu AI Search at
 `https://qianfan.baidubce.com/v2/ai_search/web_search`. Set
 `BAIDU_SEARCH_API_KEY` or `[search] api_key`. This is a search-tool backend
@@ -2312,9 +2317,9 @@ Sofya model provider.
 
 ```toml
 [search]
-provider = "searxng" # duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya
+provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya
 # base_url = "https://search.example/" # optional with provider = "duckduckgo"; required with "searxng"
-# api_key = "YOUR_KEY" # required for tavily, bocha, metaso, baidu, volcengine, and sofya; unused by searxng
+# api_key = "YOUR_KEY" # optional for firecrawl; required by the other API providers
 ```
 
 ## Local Media Attachments
