@@ -8204,7 +8204,7 @@ async fn spawn_subagent_from_input(
 
     Ok((result, spawn_metadata))
 }
-const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 384;
+const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 448;
 
 fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentContext>) -> String {
     let prompt = match resident {
@@ -8268,9 +8268,13 @@ fn mint_child_route_receipt(
         requested_reasoning: requested_route.requested_reasoning.clone(),
         effective_reasoning: runtime.reasoning_effort.clone(),
         runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+        // CI builds embed the full 40-hex GITHUB_SHA; a full-length field
+        // pushed real receipts past 384 bytes (394 with the sha, 386 on some
+        // legitimate routes without it), breaking admission. Twelve hex chars
+        // plus the version identify the build without bloating every receipt.
         runtime_build_sha: option_env!("CODEWHALE_BUILD_COMMIT")
-            .unwrap_or("unknown")
-            .to_string(),
+            .map(|sha| sha.get(..12).unwrap_or(sha).to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
     };
     let length = serde_json::to_vec(&receipt)
         .map_err(|error| ToolError::execution_failed(error.to_string()))?
