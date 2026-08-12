@@ -2798,6 +2798,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         stdout_cursor: 0,
         stderr_cursor: 0,
         completion_reported: false,
+        pi_output: None,
         stdin: None,
         child: None,
         windows_job: None,
