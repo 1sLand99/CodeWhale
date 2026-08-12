@@ -292,10 +292,10 @@ second catalog snapshot.
 
 The default diet removes `exec_wait` and `exec_interact` from the active head
 (they become hidden-compat; their canonical twins `exec_shell_wait` /
-`exec_shell_interact` stay). `tts` and `todo_*` are *already not* in the active
-set, so they do not change the active budget in this diet. The net effect of
-this specific diet is to remove two duplicate active aliases from whatever
-default active head is current after the surrounding v0.8.53 PR batch.
+`exec_shell_interact` stay). `tts` and the legacy `todo_*` aliases remain out
+of the active set. The canonical `todo_write` tool became eager in v0.9.6 as an
+explicit budget decision so ordinary progress tracking never requires a
+discovery turn.
 
 ### Per mode (Plan / Agent / YOLO)
 

@@ -2270,6 +2270,50 @@ async fn test_exec_shell_foreground_can_move_to_background() {
 }
 
 #[tokio::test]
+async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let shell_manager = ctx.shell_manager.clone();
+    let command = sleep_command(30);
+    let task_ctx = ctx.clone();
+
+    let task = tokio::spawn(async move {
+        PiBashTool
+            .execute(json!({"command": command}), &task_ctx)
+            .await
+            .expect("execute")
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shell_manager
+        .lock()
+        .expect("shell manager lock")
+        .request_foreground_background();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("foreground shell should detach")
+        .expect("task should not panic");
+
+    assert!(result.success, "{}", result.content);
+    assert!(
+        result.content.contains("moved to /jobs"),
+        "{}",
+        result.content
+    );
+    assert!(!result.content.contains("code -1"), "{}", result.content);
+    let metadata = result.metadata.expect("metadata");
+    assert_eq!(metadata["status"], "Running");
+    assert_eq!(metadata["backgrounded"], true);
+    let task_id = metadata["task_id"].as_str().expect("task id");
+
+    let mut manager = shell_manager.lock().expect("shell manager lock");
+    let job = manager.inspect_job(task_id).expect("inspect job");
+    assert_eq!(job.snapshot.status, ShellStatus::Running);
+    manager.kill(task_id).expect("kill test job");
+}
+
+#[tokio::test]
 async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let tmp = tempdir().expect("tempdir");
     let cancel_token = tokio_util::sync::CancellationToken::new();

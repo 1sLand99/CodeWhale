@@ -145,7 +145,7 @@ fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) ->
     Ok(())
 }
 
-/// Status of a shell process
+/// Status of a shell process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ShellStatus {
     Running,
@@ -155,9 +155,8 @@ pub enum ShellStatus {
     TimedOut,
 }
 
-/// Result from a shell command execution
+/// Result from a shell command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-
 pub struct ShellResult {
     pub task_id: Option<String>,
     pub status: ShellStatus,
@@ -3517,6 +3516,20 @@ fn finish_pi_bash_result(
 ) -> Result<ToolResult, ToolError> {
     let mut output = result.stdout.clone();
     output.push_str(&result.stderr);
+    let metadata = json!({
+        "evidence_routing": "inline", "exit_code": result.exit_code,
+        "status": format!("{:?}", result.status), "duration_ms": result.duration_ms,
+        "sandboxed": result.sandboxed, "sandbox_type": result.sandbox_type,
+        "task_id": result.task_id, "backgrounded": result.status == ShellStatus::Running,
+    });
+    if result.status == ShellStatus::Running {
+        let task_id = result.task_id.as_deref().unwrap_or("unknown");
+        let partial = (!output.is_empty()).then(|| format!("\n\nOutput so far:\n{output}"));
+        return Ok(ToolResult::success(format!(
+            "Foreground shell wait moved to /jobs: {task_id}{}\n\nThe command is still running; completion will appear as a runtime event.",
+            partial.as_deref().unwrap_or_default()
+        )).with_metadata(metadata));
+    }
     if result.status != ShellStatus::Completed {
         let status = pi_bash_error_status(&result, timeout_ms);
         return Err(ToolError::execution_failed(if output.is_empty() {
@@ -3531,14 +3544,7 @@ fn finish_pi_bash_result(
     } else {
         output
     })
-    .with_metadata(json!({
-        "evidence_routing": "inline",
-        "exit_code": result.exit_code,
-        "status": "Completed",
-        "duration_ms": result.duration_ms,
-        "sandboxed": result.sandboxed,
-        "sandbox_type": result.sandbox_type,
-    })))
+    .with_metadata(metadata))
 }
 
 /// Small foreground-only shell surface shown to new model turns.

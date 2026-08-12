@@ -43,14 +43,11 @@ pub(crate) fn is_tool_search_tool(name: &str) -> bool {
     )
 }
 
-// Crate-visible rather than `pub(super)` so the hook gate's classifier test can
-// assert it still recognises every default-active name. Without that anchor the
-// test pins hardcoded strings and stays green through a tool rename, while the
-// gate silently reclassifies the renamed tool as unknown.
+// Crate-visible so the hook gate tests the real eager names instead of a copy.
+#[rustfmt::skip]
 pub(crate) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
-    // A deliberately small, stable router surface. Specialized native, MCP,
-    // plugin, and durable-work tools remain discoverable through tool_search.
-    "read", "write", "edit", "bash", "agent",
+    // Specialized native, MCP, plugin, and durable-work tools stay searchable.
+    "read", "write", "edit", "bash", "agent", "todo_write",
 ];
 
 const CORE_ACTION_TOOL_FALLBACKS: &[CoreActionToolFallback] = &[

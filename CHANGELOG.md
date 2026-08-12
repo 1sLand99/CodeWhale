@@ -94,11 +94,12 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
 - `todo_write` is an optional progress surface rather than required model
   ceremony.
 - New turns use one small, stable toolbox: `read`, `write`, `edit`, `bash`,
-  `agent`, and `tool_search`. Specialized native, Web, MCP, plugin, memory,
-  task, and verification tools are policy-filtered and searchable; activated
-  schemas stay in a bounded per-conversation cache. Every sub-agent keeps its
-  own search and cache, including policy-allowed Web research, while forked
-  context and parent activations remain warm starts rather than allowlists.
+  `agent`, `todo_write`, and `tool_search`. The optional progress tool stays
+  visible as familiar working memory; specialized native, Web, MCP, plugin,
+  memory, task, and verification tools are policy-filtered and searchable;
+  activated schemas stay in a bounded per-conversation cache. Every sub-agent
+  keeps its own search and cache, including policy-allowed Web research, while
+  forked context and parent activations remain warm starts rather than allowlists.
 - The direct file and shell schemas follow Pi's deliberately small contract:
   bounded complete-line reads, hash-free writes, unambiguous multi-edit with
   BOM/CRLF preservation and conservative fuzzy matching, and one foreground
@@ -121,6 +122,11 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   `Bash` execute through that carve-out, returning raw shell to a read-only role.
 
 ### Fixed
+
+- Sending more context while a lowercase `bash` command is running now moves
+  the command to `/jobs` and returns a successful running receipt instead of
+  falsely reporting `Command exited with code -1`; the process keeps running
+  and its completion still arrives through the normal runtime event.
 
 - First-run usage disclosure now opens as a native Codewhale modal instead of a
   shell questionnaire before application startup. Telemetry remains unarmed

@@ -72,12 +72,20 @@ fn published_synthetic_names_agree_with_the_synthetic_predicate() {
 fn first_turn_surface_is_stable_across_plan_work_and_full_access() {
     assert_eq!(
         DEFAULT_ACTIVE_NATIVE_TOOLS,
-        &["read", "write", "edit", "bash", "agent"]
+        &["read", "write", "edit", "bash", "agent", "todo_write"]
     );
-    let expected = ["agent", "bash", "edit", "read", "tool_search", "write"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
+    let expected = [
+        "agent",
+        "bash",
+        "edit",
+        "read",
+        "todo_write",
+        "tool_search",
+        "write",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
     for mode in [AppMode::Plan, AppMode::Agent, AppMode::Yolo] {
         let mut catalog = [
             "read",
@@ -85,6 +93,7 @@ fn first_turn_surface_is_stable_across_plan_work_and_full_access() {
             "edit",
             "bash",
             "agent",
+            "todo_write",
             "Git",
             "Run",
             "tasks",
@@ -244,7 +253,7 @@ fn unknown_and_wildcard_allowlists_keep_mcp_startup() {
 #[test]
 fn compact_surface_keeps_the_exact_eager_agent_head() {
     let catalog = build_model_tool_catalog_with_surface(
-        ["read", "write", "edit", "bash", "agent"]
+        ["read", "write", "edit", "bash", "agent", "todo_write"]
             .into_iter()
             .map(tool)
             .collect(),

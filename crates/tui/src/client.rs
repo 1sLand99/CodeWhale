@@ -4961,24 +4961,23 @@ mod tests {
     async fn assert_kimi_code_captures_exact_general_child_catalog() {
         let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
         let source_len = tools.len();
-        // The deliberate lowercase contract: the child wire catalog is the
-        // fixed six-tool surface, with specialized tools discoverable through
-        // tool_search rather than eager.
+        // Specialized tools remain discoverable beyond the fixed eager head.
         assert_eq!(
-            source_len, 6,
-            "expected the six-tool General child catalog: {tools:?}"
+            source_len,
+            crate::core::engine::default_active_native_tool_names().len() + 1,
+            "expected the seven-tool General child catalog: {tools:?}"
         );
         let source_names = tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            source_names,
-            ["agent", "bash", "edit", "read", "tool_search", "write"]
-                .into_iter()
-                .collect(),
-            "the child wire catalog must be exactly the six-tool surface"
-        );
+        let expected_names = crate::core::engine::default_active_native_tool_names()
+            .iter()
+            .copied()
+            .chain([crate::core::engine::tool_catalog::TOOL_SEARCH_NAME])
+            .map(str::to_string)
+            .collect();
+        assert_eq!(source_names, expected_names);
 
         // Name the offending first-party tool in test-only diagnostics while
         // production errors remain fixed and non-secret.
@@ -4999,7 +4998,7 @@ mod tests {
 
         let captured = body["tools"].as_array().expect("captured tool catalog");
         assert_eq!(captured.len(), source_len);
-        for required in ["read", "write", "edit", "bash", "agent", "tool_search"] {
+        for required in &source_names {
             assert!(
                 captured_function(&body, required).is_object(),
                 "{required} must reach the Kimi Code wire"

@@ -6669,9 +6669,9 @@ fn approval_stamp_preserves_existing_metadata() {
 }
 
 #[test]
-fn only_pi_core_native_tools_default_to_eager() {
+fn core_primitives_and_todo_write_default_to_eager() {
     let always_load = HashSet::new();
-    for core in ["read", "write", "edit", "bash", "agent"] {
+    for core in ["read", "write", "edit", "bash", "agent", "todo_write"] {
         assert!(!should_default_defer_tool(core, &always_load));
     }
     for searchable in ["File", "Bash", "Git", "Run", "tasks", "git_blame"] {
@@ -6681,7 +6681,7 @@ fn only_pi_core_native_tools_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 5] = ["read", "write", "edit", "bash", "agent"];
+    const EXPECTED_NATIVE: [&str; 6] = ["read", "write", "edit", "bash", "agent", "todo_write"];
     assert_eq!(
         default_active_native_tool_names(),
         EXPECTED_NATIVE.as_slice()
@@ -6715,7 +6715,7 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
 #[test]
 fn non_yolo_mode_retains_default_defer_policy() {
     let always_load = HashSet::new();
-    for core in ["read", "write", "edit", "bash", "agent"] {
+    for core in ["read", "write", "edit", "bash", "agent", "todo_write"] {
         assert!(!should_default_defer_tool(core, &always_load));
     }
     for searchable in [
@@ -7191,7 +7191,15 @@ fn metric_tool_names<'a>(
 #[allow(clippy::await_holding_lock)]
 async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
     let payload = measure_production_mode_tool_catalogs().await;
-    let expected_active = HashSet::from(["agent", "bash", "edit", "read", "tool_search", "write"]);
+    let expected_active = HashSet::from([
+        "agent",
+        "bash",
+        "edit",
+        "read",
+        "todo_write",
+        "tool_search",
+        "write",
+    ]);
 
     for mode in ["plan", "act", "operate"] {
         let full = metric_tool_names(&payload, mode, "full");
@@ -8020,8 +8028,8 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         "todo_write must be model-visible"
     );
     assert!(
-        !active.contains("todo_write"),
-        "todo_write is searchable/lazy"
+        active.contains("todo_write"),
+        "todo_write must be available without a discovery turn"
     );
     assert!(
         !catalog_names.contains("update_plan"),

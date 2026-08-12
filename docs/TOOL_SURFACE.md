@@ -17,16 +17,17 @@ Implementation sources:
 
 ## Default-active contract
 
-New turns start with exactly six model-facing names:
+New turns start with exactly seven model-facing names:
 
 1. `read`
 2. `write`
 3. `edit`
 4. `bash`
 5. `agent`
-6. `tool_search`
+6. `todo_write`
+7. `tool_search`
 
-The first five are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
+The first six are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
 `crates/tui/src/core/engine/tool_catalog.rs`. `tool_search` is synthetic and is
 always active. An authority boundary may remove `agent` at the maximum child
 depth, but route size alone must not change this core vocabulary.
@@ -40,6 +41,7 @@ The direct schemas deliberately stay small:
 | `edit` | `path`, `edits` | Apply one or more unambiguous text replacements against one original snapshot. |
 | `bash` | `command`, optional `timeout` | Run one cancellable foreground shell command and return a bounded tail. |
 | `agent` | delegated task and optional scope/context controls | Start or inspect focused child work. |
+| `todo_write` | complete replacement list of `{content, status}` items | Keep optional, agent-owned progress notes for genuinely multi-step work. |
 | `tool_search` | `query`, optional matching controls | Discover policy-allowed deferred tools and add selected schemas to this conversation's toolbox. |
 
 Mode is an authority decision, not a synonym system. Plan, Work, and Operate
@@ -49,8 +51,8 @@ trusted-path, repository-law, and managed-policy gates. Full Access changes
 ordinary approval behavior but does not bypass hard safety or repository law.
 
 `update_plan` remains registered only for saved-artifact compatibility and is
-not model-visible. `todo_write`, `tasks`, `Git`, `Run`, `Web`, `remember`, and
-other specialized capabilities are searchable rather than first-turn ceremony.
+not model-visible. `tasks`, `Git`, `Run`, `Web`, `remember`, and other
+specialized capabilities are searchable rather than first-turn ceremony.
 
 ## Deferred and dynamic tools
 
@@ -253,7 +255,7 @@ exits 0 with "0 passed; N filtered out" when a filter matches nothing, so a
 misspelled filter is indistinguishable from a pass. (Three filters printed here
 before v0.9.4 named tests that did not exist.)
 
-The provider-free receipt must report the six default-active names listed
+The provider-free receipt must report the seven default-active names listed
 above. A separate repository-wide tool count may include deferred, dynamic,
 feature-gated, and compatibility-only registrations; it is not the number of
 tools placed in the first-turn model catalog.

@@ -6225,10 +6225,18 @@ fn small_surface_starts_with_only_pi_head_and_search() {
 
     assert_eq!(
         model_tool_names(model_request_tools(&mut surface)),
-        ["agent", "bash", "edit", "read", "tool_search", "write"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "agent",
+            "bash",
+            "edit",
+            "read",
+            "todo_write",
+            "tool_search",
+            "write",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     );
     let strict = surface.request_tools(surface.catalog.clone(), true);
     assert_eq!(
@@ -6474,7 +6482,7 @@ fn small_surface_depth_cap_removes_only_agent() {
     );
     assert_eq!(
         model_tool_names(model_request_tools(&mut surface)),
-        ["bash", "edit", "read", "tool_search", "write"]
+        ["bash", "edit", "read", "todo_write", "tool_search", "write"]
             .into_iter()
             .map(str::to_string)
             .collect()

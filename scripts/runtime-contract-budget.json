@@ -85,23 +85,24 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 12786,
-          "identity_sha256": "34a00b1aa3688c88b5b3b57b292b0fbc01ced97e7d5ae00ecbeefee4cfb62671",
-          "tokens_est": 3197,
+          "bytes": 13435,
+          "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
+          "tokens_est": 3359,
           "tool_names": [
             "agent",
             "bash",
             "edit",
             "read",
+            "todo_write",
             "tool_search",
             "write"
           ],
-          "tools": 6
+          "tools": 7
         },
         "full": {
-          "bytes": 68409,
+          "bytes": 68377,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17103,
+          "tokens_est": 17095,
           "tool_names": [
             "Git",
             "Run",
@@ -164,23 +165,24 @@
       },
       "operate": {
         "active": {
-          "bytes": 12786,
-          "identity_sha256": "34a00b1aa3688c88b5b3b57b292b0fbc01ced97e7d5ae00ecbeefee4cfb62671",
-          "tokens_est": 3197,
+          "bytes": 13435,
+          "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
+          "tokens_est": 3359,
           "tool_names": [
             "agent",
             "bash",
             "edit",
             "read",
+            "todo_write",
             "tool_search",
             "write"
           ],
-          "tools": 6
+          "tools": 7
         },
         "full": {
-          "bytes": 68409,
+          "bytes": 68377,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17103,
+          "tokens_est": 17095,
           "tool_names": [
             "Git",
             "Run",
@@ -243,23 +245,24 @@
       },
       "plan": {
         "active": {
-          "bytes": 12786,
-          "identity_sha256": "34a00b1aa3688c88b5b3b57b292b0fbc01ced97e7d5ae00ecbeefee4cfb62671",
-          "tokens_est": 3197,
+          "bytes": 13435,
+          "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
+          "tokens_est": 3359,
           "tool_names": [
             "agent",
             "bash",
             "edit",
             "read",
+            "todo_write",
             "tool_search",
             "write"
           ],
-          "tools": 6
+          "tools": 7
         },
         "full": {
-          "bytes": 41403,
+          "bytes": 41371,
           "identity_sha256": "2cf3e5b6810e7840ee2d2df2b6dd81a24058e3e916acdb1199aff3abae916a41",
-          "tokens_est": 10351,
+          "tokens_est": 10343,
           "tool_names": [
             "Git",
             "Web",
