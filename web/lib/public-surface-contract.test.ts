@@ -461,6 +461,12 @@ done
       roadmap.indexOf('title: "Underway"'),
     );
     expect(roadmap).toContain("Implemented in the v0.9.1 source candidate");
+    // docs/TOOL_SURFACE.md moved from six to seven model-facing names when
+    // the TUI promoted todo_write into DEFAULT_ACTIVE_NATIVE_TOOLS
+    // (bf6def00d). The committed facts files (docs/public-surface-facts.json
+    // and web/lib/facts.generated.ts) are owned by the release pipeline and
+    // still list the six-name matrix, so this quote check tracks the doc
+    // while the name loop below keeps the matrix↔doc↔site alignment honest.
     expect(toolDoc).toContain("exactly seven model-facing names");
     for (const name of matrix.toolSurface.defaultActive) {
       expect(toolDoc, name).toContain(`\`${name}\``);

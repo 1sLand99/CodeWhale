@@ -86,7 +86,7 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
             href="https://github.com/Hmbown/CodeWhale/blob/main/docs/CONFIGURATION.md#constitution-project-instructions-and-repo-authority"
             className="body-link"
           >
-            {isZh ? "configuration docs" : "configuration docs"}
+            {isZh ? "配置文档" : "configuration docs"}
           </Link>
           {isZh ? "。" : "."}
         </p>
