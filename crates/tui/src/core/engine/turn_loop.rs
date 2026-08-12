@@ -189,6 +189,9 @@ impl Engine {
             .unwrap_or_default();
         completions
             .into_iter()
+            // Child runtimes consume their own shell completions. Only
+            // unowned jobs belong in the parent model stream.
+            .filter(|completion| completion.event.owner_agent_id.is_none())
             .map(|mut completion| {
                 let tool_call_id =
                     format!("background-shell-completion-{}", completion.event.task_id);
