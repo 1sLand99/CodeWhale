@@ -365,7 +365,7 @@ pub struct Settings {
     pub inline_diffs: String,
     /// UI locale: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko,
     /// ca, de, fr, id, hi, ru, uk.
-    /// zh-Hant is a partial pack; missing strings fall back to English.
+    /// Every shipped pack holds full `en.json` parity; nothing falls back.
     pub locale: String,
     /// Named UI theme. Accepts `"system"` (follow terminal background),
     /// `"dark"`, `"light"`, `"grayscale"`, or one of the community
@@ -1682,7 +1682,7 @@ impl Settings {
             ),
             (
                 "locale",
-                "UI locale and default model language: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko, ca, de, fr, id, hi, ru, uk; zh-Hant is partial and missing strings fall back to English",
+                "UI locale and default model language: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko, ca, de, fr, id, hi, ru, uk; every shipped pack holds full English parity",
             ),
             (
                 "theme",

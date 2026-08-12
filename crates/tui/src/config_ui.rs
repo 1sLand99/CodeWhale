@@ -77,7 +77,7 @@ pub struct SettingsSection {
     pub inline_diffs: InlineDiffValue,
     #[schemars(
         title = "UI locale",
-        description = "Locale used by the TUI. zh-Hant is a partial pack; missing strings fall back to English."
+        description = "Locale used by the TUI. Every shipped locale pack holds full English parity; nothing falls back."
     )]
     pub locale: UiLocale,
     pub theme: UiThemeValue,
