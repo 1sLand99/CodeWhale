@@ -21,7 +21,7 @@
   },
   "sourceCandidate": {
     "version": "0.9.6",
-    "providerCount": 41,
+    "providerCount": 42,
     "toolCount": 74,
     "sandboxBackends": [
       "seatbelt (macOS, when available)",
