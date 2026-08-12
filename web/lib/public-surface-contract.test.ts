@@ -461,7 +461,7 @@ done
       roadmap.indexOf('title: "Underway"'),
     );
     expect(roadmap).toContain("Implemented in the v0.9.1 source candidate");
-    expect(toolDoc).toContain("exactly six model-facing names");
+    expect(toolDoc).toContain("exactly seven model-facing names");
     for (const name of matrix.toolSurface.defaultActive) {
       expect(toolDoc, name).toContain(`\`${name}\``);
       expect(toolsPage, name).toContain(name);
