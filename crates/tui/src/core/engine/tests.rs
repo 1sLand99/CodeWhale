@@ -9045,7 +9045,7 @@ async fn full_access_auto_approves_non_bypassable_registered_tools() {
     let marker = workspace.path().join("runtime-tool-must-run");
     let marker_literal = marker
         .to_string_lossy()
-        .replace('\\', "\\\\")
+        .replace('\\', "/")
         .replace('\'', "\\'");
     // GitHub's Windows image exposes the interpreter as `python`; Unix
     // images expose `python3`. Keep the runtime-tool execution receipt
