@@ -233,7 +233,10 @@ impl McpServer {
                 }
             }
         }
-        json!({ "tools": tools, "nextCursor": Value::Null })
+        // MCP spec: `nextCursor` must be omitted (or be a string) when there
+        // are no more results. Emitting `null` violates the spec and breaks
+        // strict clients (e.g. Claude Code) that validate the response shape.
+        json!({ "tools": tools })
     }
 
     fn list_resources_response(&self) -> Value {
@@ -258,7 +261,9 @@ impl McpServer {
             }
         }
 
-        json!({ "resources": resources, "nextCursor": Value::Null })
+        // Same spec point as `list_tools_response`: omit `nextCursor` when
+        // there are no further pages rather than emitting `null`.
+        json!({ "resources": resources })
     }
 
     fn call_tool(
@@ -649,5 +654,37 @@ mod tests {
             Some("apply_patch")
         );
         assert_eq!(map.get("shell").map(String::as_str), Some("exec_shell"));
+    }
+
+    #[test]
+    fn list_responses_omit_null_next_cursor() {
+        // MCP spec: `nextCursor` must be omitted (or be a string) when there
+        // are no further pages. Emitting `null` breaks strict clients such as
+        // Claude Code, which validate the response shape.
+        let settings = McpServerSettings {
+            expose_tools: vec!["deepseek".to_string(), "apply_patch".to_string()],
+            require_approval: false,
+        };
+        let server = McpServer::new(PathBuf::from("."), settings).expect("build server");
+
+        let tools_value = server.list_tools_response();
+        let tools = tools_value
+            .as_object()
+            .expect("tools/list response is an object");
+        assert!(tools.contains_key("tools"));
+        assert!(
+            tools.get("nextCursor").is_none(),
+            "tools/list must omit nextCursor when there are no more pages"
+        );
+
+        let resources_value = server.list_resources_response();
+        let resources = resources_value
+            .as_object()
+            .expect("resources/list response is an object");
+        assert!(resources.contains_key("resources"));
+        assert!(
+            resources.get("nextCursor").is_none(),
+            "resources/list must omit nextCursor when there are no more pages"
+        );
     }
 }
