@@ -15,7 +15,7 @@ Checks:
   - local tag vVERSION exists
   - remote tag vVERSION resolves to the same commit SHA
   - GitHub Release vVERSION exists
-  - a successful Release workflow run used that SHA
+  - a successful asset-publishing job in a Release workflow run used that SHA
   - npm/codewhale release:check sees the fresh binary/archive/installer matrix
     and both required checksum manifests
 
@@ -100,20 +100,40 @@ if [[ -z "${release_url}" ]]; then
 fi
 echo "GitHub Release OK: ${release_url}"
 
-run_summary="$(
+run_candidates="$(
   TAG_SHA="${local_sha}" "${gh_bin}" run list \
     --repo "${repo}" \
     --workflow "Release" \
     --limit 100 \
     --json databaseId,headSha,headBranch,event,conclusion,status,createdAt,updatedAt,url \
-    --jq 'map(select(.headSha == env.TAG_SHA and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))) | sort_by(.updatedAt) | last | if . == null then empty else "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.url)" end'
+    --jq 'map(select(.headSha == env.TAG_SHA and (.event == "push" or .event == "workflow_dispatch"))) | sort_by(.updatedAt) | reverse | .[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.url)"'
 )"
+
+run_summary=""
+while IFS=$'\t' read -r run_id head_branch run_event run_url; do
+  if [[ -z "${run_id}" ]]; then
+    continue
+  fi
+
+  release_job_id="$(
+    "${gh_bin}" run view "${run_id}" \
+      --repo "${repo}" \
+      --json jobs \
+      --jq '.jobs[] | select(.name == "release" and .conclusion == "success") | .databaseId' \
+      | head -n 1
+  )"
+  if [[ -n "${release_job_id}" ]]; then
+    run_summary="${run_id}\t${head_branch}\t${run_event}\t${run_url}\trelease job ${release_job_id}"
+    break
+  fi
+done <<<"${run_candidates}"
+
 if [[ -z "${run_summary}" ]]; then
-  echo "No successful Release workflow run found in the last 100 Release runs for ${tag} at ${local_sha}." >&2
+  echo "No successful asset-publishing job found in the last 100 Release workflow runs for ${tag} at ${local_sha}." >&2
   echo "Rerun the Release workflow before publishing Cargo/npm." >&2
   exit 1
 fi
-printf 'Release workflow OK: %s\n' "${run_summary}"
+printf 'Release asset job OK: %b\n' "${run_summary}"
 
 npm_package_version="$(node -p "require('./npm/codewhale/package.json').version")"
 npm_binary_version="$(

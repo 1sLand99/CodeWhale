@@ -19,6 +19,7 @@ const {
   assertChecksumManifestIncludes,
   assertPackageVersionMatchesBinaryVersion,
   assertReleaseAssetsFresh,
+  findReleaseWorkflowRun,
   parseChecksumManifest,
 } = require("../scripts/verify-release-assets");
 
@@ -116,6 +117,56 @@ test("assertReleaseAssetsFresh accepts assets updated by the release workflow ru
       ["codewhale-linux-x64"],
       { database_id: 123, created_at: "2026-06-26T00:00:00Z" },
     ),
+  );
+});
+
+test("findReleaseWorkflowRun accepts a successful release job when a downstream job failed", async () => {
+  const run = {
+    id: 123,
+    head_sha: "abc123",
+    head_branch: "v0.9.6",
+    event: "push",
+    conclusion: "failure",
+    updated_at: "2026-08-12T08:48:00Z",
+  };
+  const api = async (_repo, endpoint) => {
+    if (endpoint.includes("/workflows/release.yml/runs")) {
+      return { workflow_runs: [run] };
+    }
+    assert.equal(endpoint, "/actions/runs/123/jobs?per_page=100");
+    return {
+      jobs: [
+        { name: "release", conclusion: "success" },
+        { name: "npm", conclusion: "failure" },
+      ],
+    };
+  };
+
+  assert.equal(await findReleaseWorkflowRun("owner/repo", "v0.9.6", "abc123", api), run);
+});
+
+test("findReleaseWorkflowRun rejects runs without a successful release job", async () => {
+  const api = async (_repo, endpoint) => {
+    if (endpoint.includes("/workflows/release.yml/runs")) {
+      return {
+        workflow_runs: [
+          {
+            id: 123,
+            head_sha: "abc123",
+            head_branch: "v0.9.6",
+            event: "push",
+            conclusion: "failure",
+            updated_at: "2026-08-12T08:48:00Z",
+          },
+        ],
+      };
+    }
+    return { jobs: [{ name: "release", conclusion: "failure" }] };
+  };
+
+  await assert.rejects(
+    findReleaseWorkflowRun("owner/repo", "v0.9.6", "abc123", api),
+    /No successful asset-publishing job found/,
   );
 });
 

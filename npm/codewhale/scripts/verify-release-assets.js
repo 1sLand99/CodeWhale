@@ -208,22 +208,41 @@ async function resolveTagCommitSha(repo, tag) {
   return tagObject.object.sha;
 }
 
-async function findReleaseWorkflowRun(repo, tag, tagSha) {
-  const runs = await githubApi(repo, "/actions/workflows/release.yml/runs?per_page=100");
-  const matches = (runs.workflow_runs || [])
+async function findReleaseWorkflowRun(repo, tag, tagSha, api = githubApi) {
+  const runs = await api(repo, "/actions/workflows/release.yml/runs?per_page=100");
+  const candidates = (runs.workflow_runs || [])
     .filter((run) => run.head_sha === tagSha)
-    .filter((run) => run.conclusion === "success")
     .filter((run) => run.event === "push" || run.event === "workflow_dispatch")
     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
-  const tagBranchMatch = matches.find((run) => run.head_branch === tag);
-  const match = tagBranchMatch || matches[0];
-  if (!match) {
+
+  const orderedCandidates = [
+    ...candidates.filter((run) => run.head_branch === tag),
+    ...candidates.filter((run) => run.head_branch !== tag),
+  ];
+  for (const candidate of orderedCandidates) {
+    const runId = candidate.database_id || candidate.id;
+    if (!runId) {
+      continue;
+    }
+    const jobs = await api(repo, `/actions/runs/${runId}/jobs?per_page=100`);
+    const releaseJob = (jobs.jobs || []).find(
+      (job) => job.name === "release" && job.conclusion === "success",
+    );
+    if (releaseJob) {
+      return candidate;
+    }
+  }
+
+  if (orderedCandidates.length === 0) {
     throw new Error(
-      `No successful release.yml workflow run found for ${tag} at ${tagSha}. ` +
+      `No release.yml workflow run found for ${tag} at ${tagSha}. ` +
         "Rerun the Release workflow before publishing npm, or increase the verifier's last-100-runs search window.",
     );
   }
-  return match;
+  throw new Error(
+    `No successful asset-publishing job found in release.yml workflow runs for ${tag} at ${tagSha}. ` +
+      "Repair the Release workflow before publishing npm.",
+  );
 }
 
 function parseGitHubTime(value, label) {
@@ -347,6 +366,7 @@ module.exports = {
   assertChecksumManifestIncludes,
   assertPackageVersionMatchesBinaryVersion,
   assertReleaseAssetsFresh,
+  findReleaseWorkflowRun,
   hasReleaseBaseOverride,
   parseChecksumManifest,
 };
