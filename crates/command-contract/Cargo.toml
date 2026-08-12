@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
 description = "Prototype command capability and dispatch shapes for the staged TUI command extraction"
 
 [dependencies]
