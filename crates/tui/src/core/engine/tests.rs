@@ -12334,7 +12334,7 @@ fn evidence_bounded_preview_is_not_recompacted() {
 }
 
 #[test]
-fn codex_tool_retention_uses_oauth_route_window_not_api_model_window() {
+fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window() {
     let content = "route-effective context\n".repeat(900);
     let output = ToolResult::success(content.clone());
     let limits = codewhale_config::route::RouteLimits {

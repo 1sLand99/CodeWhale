@@ -537,7 +537,7 @@ fn advertised_actions_match_the_actions_that_dispatch() {
 }
 
 #[test]
-fn primitive_schemas_are_separate_and_pi_shaped() {
+fn primitive_schemas_are_separate_and_small_contract_shaped() {
     assert_eq!(ReadTool.name(), "read");
     assert_eq!(WriteTool.name(), "write");
     assert_eq!(EditTool.name(), "edit");

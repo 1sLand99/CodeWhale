@@ -52,24 +52,24 @@ async fn read_file_missing_pdftotext_is_a_failed_typed_outcome() {
 }
 
 #[test]
-fn pi_read_exact_line_limit_with_terminal_newline_is_not_truncated() {
-    let content = (0..PI_READ_MAX_LINES)
+fn contract_read_exact_line_limit_with_terminal_newline_is_not_truncated() {
+    let content = (0..READ_MAX_LINES)
         .map(|index| format!("line-{index}"))
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    let window = pi_read_window(&content);
+    let window = contract_read_window(&content);
     assert!(!window.truncated_by_lines);
     assert!(!window.truncated_by_bytes);
-    assert_eq!(window.shown_lines, PI_READ_MAX_LINES);
+    assert_eq!(window.shown_lines, READ_MAX_LINES);
     assert_eq!(window.content, content);
 }
 
 #[test]
-fn pi_read_byte_limit_keeps_only_complete_utf8_lines() {
+fn contract_read_byte_limit_keeps_only_complete_utf8_lines() {
     let first = "é".repeat(20_000);
     let second = "z".repeat(20_000);
-    let window = pi_read_window(&format!("{first}\n{second}\n"));
+    let window = contract_read_window(&format!("{first}\n{second}\n"));
     assert!(window.truncated_by_bytes);
     assert_eq!(window.shown_lines, 1);
     assert_eq!(window.content, first);
@@ -77,15 +77,15 @@ fn pi_read_byte_limit_keeps_only_complete_utf8_lines() {
 }
 
 #[tokio::test]
-async fn pi_read_reports_huge_first_line_with_exact_bash_fallback() {
+async fn contract_read_reports_huge_first_line_with_exact_bash_fallback() {
     let temporary = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         temporary.path().join("huge.txt"),
-        "x".repeat(PI_READ_MAX_BYTES + 1),
+        "x".repeat(READ_MAX_BYTES + 1),
     )
     .expect("fixture");
     let context = ToolContext::new(temporary.path());
-    let result = ReadFileTool::execute_pi_read(json!({"path": "huge.txt"}), &context)
+    let result = ReadFileTool::execute_contract_read(json!({"path": "huge.txt"}), &context)
         .await
         .expect("read result");
     assert_eq!(
@@ -100,7 +100,7 @@ async fn pi_read_offset_oob_and_limit_continuation_match_contract() {
     std::fs::write(temporary.path().join("lines.txt"), "one\ntwo\nthree").expect("fixture");
     let context = ToolContext::new(temporary.path());
 
-    let limited = ReadFileTool::execute_pi_read(
+    let limited = ReadFileTool::execute_contract_read(
         json!({"path": "lines.txt", "offset": 2, "limit": 1}),
         &context,
     )
@@ -111,9 +111,10 @@ async fn pi_read_offset_oob_and_limit_continuation_match_contract() {
         "two\n\n[1 more lines in file. Use offset=3 to continue.]"
     );
 
-    let error = ReadFileTool::execute_pi_read(json!({"path": "lines.txt", "offset": 4}), &context)
-        .await
-        .expect_err("offset beyond EOF");
+    let error =
+        ReadFileTool::execute_contract_read(json!({"path": "lines.txt", "offset": 4}), &context)
+            .await
+            .expect_err("offset beyond EOF");
     assert_eq!(
         error.to_string(),
         "Failed to execute tool: Offset 4 is beyond end of file (3 lines total)"
@@ -131,11 +132,11 @@ async fn pi_read_uses_magic_not_extension_for_images() {
     .expect("image fixture");
     let context = ToolContext::new(temporary.path());
 
-    let text = ReadFileTool::execute_pi_read(json!({"path": "plain.png"}), &context)
+    let text = ReadFileTool::execute_contract_read(json!({"path": "plain.png"}), &context)
         .await
         .expect("fake extension remains text");
     assert_eq!(text.content, "ordinary text");
-    let image = ReadFileTool::execute_pi_read(json!({"path": "renamed.data"}), &context)
+    let image = ReadFileTool::execute_contract_read(json!({"path": "renamed.data"}), &context)
         .await
         .expect("real image uses typed transport");
     assert_eq!(image.content_blocks.len(), 1);
@@ -175,7 +176,7 @@ fn pi_edit_fuzzy_normalization_preserves_untouched_lines() {
     let original = "untouched line  \nShe said “hello”—today.   \ntail  \n";
     let updated = apply_pi_edits(
         original,
-        &[PiEdit {
+        &[ContractEdit {
             index: 0,
             old_text: "She said \"hello\"-today.".to_string(),
             new_text: "She said hello.".to_string(),
@@ -251,7 +252,7 @@ async fn cancelled_queued_pi_write_never_starts() {
     let cancellation = CancellationToken::new();
     let queued_context = context.clone().with_cancel_token(cancellation.clone());
     let queued = tokio::spawn(async move {
-        WriteFileTool::execute_pi_write(
+        WriteFileTool::execute_contract_write(
             json!({"path": "queued.txt", "content": "must-not-land"}),
             &queued_context,
         )

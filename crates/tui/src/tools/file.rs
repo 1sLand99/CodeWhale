@@ -453,10 +453,10 @@ fn is_codewhale_credential_path(path: &Path) -> bool {
     false
 }
 
-// === Pi-compatible primitive implementation helpers ===
+// === small-contract-compatible primitive implementation helpers ===
 
-const PI_READ_MAX_LINES: usize = 2_000;
-const PI_READ_MAX_BYTES: usize = 50 * 1024;
+const READ_MAX_LINES: usize = 2_000;
+const READ_MAX_BYTES: usize = 50 * 1024;
 
 type FileMutationMutex = AsyncMutex<()>;
 
@@ -507,7 +507,7 @@ fn check_file_operation_cancelled(context: &ToolContext) -> Result<(), ToolError
     Ok(())
 }
 
-async fn pi_mutation_result(
+async fn contract_mutation_result(
     context: &ToolContext,
     file_path: &Path,
     requested_path: &str,
@@ -547,7 +547,7 @@ fn reject_primitive_unknown(input: &Value, tool: &str, allowed: &[&str]) -> Resu
     )))
 }
 
-fn optional_pi_line_number(input: &Value, key: &str) -> Result<Option<usize>, ToolError> {
+fn contract_line_number(input: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     let Some(value) = input.get(key) else {
         return Ok(None);
     };
@@ -564,7 +564,7 @@ fn primitive_image_mime(bytes: &[u8]) -> Option<&'static str> {
         .or_else(|| bytes.starts_with(b"BM").then_some("image/bmp"))
 }
 
-fn pi_format_size(bytes: usize) -> String {
+fn contract_format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")
     } else if bytes < 1024 * 1024 {
@@ -575,7 +575,7 @@ fn pi_format_size(bytes: usize) -> String {
 }
 
 #[derive(Debug)]
-struct PiReadWindow {
+struct ContractReadWindow {
     content: String,
     shown_lines: usize,
     truncated_by_bytes: bool,
@@ -583,10 +583,10 @@ struct PiReadWindow {
     first_line_too_large: bool,
 }
 
-/// Retain only complete lines from the head, stopping at Pi's independent
+/// Retain only complete lines from the head, stopping at its own independent
 /// line and UTF-8 byte budgets. A terminal newline is content but does not add
 /// a phantom line to the truncation counter.
-fn pi_read_window(content: &str) -> PiReadWindow {
+fn contract_read_window(content: &str) -> ContractReadWindow {
     let mut lines = if content.is_empty() {
         Vec::new()
     } else {
@@ -597,9 +597,9 @@ fn pi_read_window(content: &str) -> PiReadWindow {
     }
     if lines
         .first()
-        .is_some_and(|line| line.len() > PI_READ_MAX_BYTES)
+        .is_some_and(|line| line.len() > READ_MAX_BYTES)
     {
-        return PiReadWindow {
+        return ContractReadWindow {
             content: String::new(),
             shown_lines: 0,
             truncated_by_bytes: true,
@@ -608,8 +608,8 @@ fn pi_read_window(content: &str) -> PiReadWindow {
         };
     }
 
-    if lines.len() <= PI_READ_MAX_LINES && content.len() <= PI_READ_MAX_BYTES {
-        return PiReadWindow {
+    if lines.len() <= READ_MAX_LINES && content.len() <= READ_MAX_BYTES {
+        return ContractReadWindow {
             content: content.to_string(),
             shown_lines: lines.len(),
             truncated_by_bytes: false,
@@ -621,9 +621,9 @@ fn pi_read_window(content: &str) -> PiReadWindow {
     let mut kept = Vec::new();
     let mut bytes = 0usize;
     let mut truncated_by_bytes = false;
-    for line in lines.iter().take(PI_READ_MAX_LINES) {
+    for line in lines.iter().take(READ_MAX_LINES) {
         let next = line.len() + usize::from(!kept.is_empty());
-        if bytes.saturating_add(next) > PI_READ_MAX_BYTES {
+        if bytes.saturating_add(next) > READ_MAX_BYTES {
             truncated_by_bytes = true;
             break;
         }
@@ -631,7 +631,7 @@ fn pi_read_window(content: &str) -> PiReadWindow {
         bytes += next;
     }
     let shown_lines = kept.len();
-    PiReadWindow {
+    ContractReadWindow {
         content: kept.join("\n"),
         shown_lines,
         truncated_by_bytes,
@@ -645,15 +645,15 @@ pub struct ReadFileTool;
 
 impl ReadFileTool {
     /// Execute the lowercase `read` primitive without leaking the hidden
-    /// Codewhale hash/snapshot protocol into its Pi-shaped model contract.
-    pub(super) async fn execute_pi_read(
+    /// Codewhale hash/snapshot protocol into its small-contract-shaped model contract.
+    pub(super) async fn execute_contract_read(
         input: Value,
         context: &ToolContext,
     ) -> Result<RichToolResult, ToolError> {
         reject_primitive_unknown(&input, "read", &["path", "offset", "limit"])?;
         let path_str = required_str(&input, "path")?;
-        let offset = optional_pi_line_number(&input, "offset")?;
-        let limit = optional_pi_line_number(&input, "limit")?;
+        let offset = contract_line_number(&input, "offset")?;
+        let limit = contract_line_number(&input, "limit")?;
         let file_path = context.resolve_path(path_str)?;
         if is_codewhale_credential_path(&file_path) {
             return Err(ToolError::permission_denied(
@@ -676,7 +676,7 @@ impl ReadFileTool {
             ));
         }
 
-        // Pi decodes non-image buffers as UTF-8 text with replacement
+        // The small-contract reader decodes non-image buffers as UTF-8 text with replacement
         // characters instead of refusing the whole read on one invalid byte.
         let text = String::from_utf8_lossy(&bytes);
         let all_lines = text.split('\n').collect::<Vec<_>>();
@@ -695,14 +695,14 @@ impl ReadFileTool {
             None => available,
         };
         let selected_content = selected.join("\n");
-        let window = pi_read_window(&selected_content);
+        let window = contract_read_window(&selected_content);
         let first_display = start + 1;
         let mut output = if window.first_line_too_large {
             let size = selected.first().map_or(0, |line| line.len());
             format!(
-                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {PI_READ_MAX_BYTES}]",
-                pi_format_size(size),
-                pi_format_size(PI_READ_MAX_BYTES)
+                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {READ_MAX_BYTES}]",
+                contract_format_size(size),
+                contract_format_size(READ_MAX_BYTES)
             )
         } else {
             window.content
@@ -1297,9 +1297,9 @@ async fn read_pdf_with_command(
 pub struct WriteFileTool;
 
 impl WriteFileTool {
-    /// Execute the Pi-shaped lowercase writer. Compatibility-only hash
+    /// Execute the small-contract-shaped lowercase writer. Compatibility-only hash
     /// arguments remain on the hidden `write_file`/`File` paths.
-    pub(super) async fn execute_pi_write(
+    pub(super) async fn execute_contract_write(
         input: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
@@ -1341,7 +1341,7 @@ impl WriteFileTool {
 
         let outcome = if existed_before { "updated" } else { "created" };
         let utf16_units = file_content.encode_utf16().count();
-        Ok(pi_mutation_result(
+        Ok(contract_mutation_result(
             context,
             &file_path,
             path_str,
@@ -1493,32 +1493,32 @@ impl ToolSpec for WriteFileTool {
 pub struct EditFileTool;
 
 #[derive(Clone, Debug)]
-struct PiEdit {
+struct ContractEdit {
     index: usize,
     old_text: String,
     new_text: String,
 }
 
 #[derive(Clone, Debug)]
-struct ResolvedPiEdit {
+struct ResolvedContractEdit {
     index: usize,
     start: usize,
     end: usize,
     replacement: String,
 }
 
-fn normalize_pi_line_endings(text: &str) -> String {
+fn normalize_contract_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn pi_line_ending(text: &str) -> &'static str {
+fn contract_line_ending(text: &str) -> &'static str {
     match text.find('\n') {
         Some(index) if index > 0 && text.as_bytes()[index - 1] == b'\r' => "\r\n",
         _ => "\n",
     }
 }
 
-fn restore_pi_line_endings(text: &str, ending: &str) -> String {
+fn restore_contract_line_endings(text: &str, ending: &str) -> String {
     if ending == "\r\n" {
         text.replace('\n', "\r\n")
     } else {
@@ -1527,9 +1527,9 @@ fn restore_pi_line_endings(text: &str, ending: &str) -> String {
 }
 
 /// Fallback matching view used only after a literal match fails. It follows
-/// Pi's current normalization categories while leaving the public schema as
+/// The small-contract normalization categories while leaving the public schema as
 /// exact-text replacement rather than teaching a second edit mode.
-fn normalize_pi_fuzzy(text: &str) -> String {
+fn normalize_contract_fuzzy(text: &str) -> String {
     let compatible = text.nfkc().collect::<String>();
     compatible
         .split('\n')
@@ -1616,7 +1616,7 @@ fn prepare_pi_edit_input(mut input: Value) -> Result<Value, ToolError> {
     Ok(input)
 }
 
-fn parse_pi_edits(input: &Value) -> Result<Vec<PiEdit>, ToolError> {
+fn parse_pi_edits(input: &Value) -> Result<Vec<ContractEdit>, ToolError> {
     let raw = input
         .get("edits")
         .and_then(Value::as_array)
@@ -1637,16 +1637,16 @@ fn parse_pi_edits(input: &Value) -> Result<Vec<PiEdit>, ToolError> {
                     "edits[{index}].oldText must not be empty"
                 )));
             }
-            Ok(PiEdit {
+            Ok(ContractEdit {
                 index,
-                old_text: normalize_pi_line_endings(old_text),
-                new_text: normalize_pi_line_endings(new_text),
+                old_text: normalize_contract_line_endings(old_text),
+                new_text: normalize_contract_line_endings(new_text),
             })
         })
         .collect()
 }
 
-fn apply_resolved_edits(base: &str, edits: &[ResolvedPiEdit], offset: usize) -> String {
+fn apply_resolved_edits(base: &str, edits: &[ResolvedContractEdit], offset: usize) -> String {
     let mut updated = base.to_string();
     for edit in edits.iter().rev() {
         updated.replace_range(
@@ -1679,7 +1679,7 @@ fn line_spans(text: &str) -> Vec<(usize, usize)> {
 
 fn touched_line_range(
     spans: &[(usize, usize)],
-    edit: &ResolvedPiEdit,
+    edit: &ResolvedContractEdit,
 ) -> Result<(usize, usize), ToolError> {
     let start = spans
         .iter()
@@ -1700,7 +1700,7 @@ fn touched_line_range(
 fn apply_fuzzy_edits_preserving_other_lines(
     original: &str,
     normalized: &str,
-    edits: &[ResolvedPiEdit],
+    edits: &[ResolvedContractEdit],
 ) -> Result<String, ToolError> {
     let original_lines = lines_with_endings(original);
     let spans = line_spans(normalized);
@@ -1714,7 +1714,7 @@ fn apply_fuzzy_edits_preserving_other_lines(
     struct Group {
         start_line: usize,
         end_line: usize,
-        edits: Vec<ResolvedPiEdit>,
+        edits: Vec<ResolvedContractEdit>,
     }
 
     let mut groups: Vec<Group> = Vec::new();
@@ -1755,14 +1755,14 @@ fn apply_fuzzy_edits_preserving_other_lines(
     Ok(result)
 }
 
-fn apply_pi_edits(base: &str, edits: &[PiEdit], path: &str) -> Result<String, ToolError> {
-    let fuzzy_base = normalize_pi_fuzzy(base);
+fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<String, ToolError> {
+    let fuzzy_base = normalize_contract_fuzzy(base);
     let initial = edits
         .iter()
         .map(|edit| {
             if base.contains(&edit.old_text) {
                 Ok(false)
-            } else if fuzzy_base.contains(&normalize_pi_fuzzy(&edit.old_text)) {
+            } else if fuzzy_base.contains(&normalize_contract_fuzzy(&edit.old_text)) {
                 Ok(true)
             } else {
                 Err(pi_edit_not_found(path, edit.index, edits.len()))
@@ -1775,7 +1775,7 @@ fn apply_pi_edits(base: &str, edits: &[PiEdit], path: &str) -> Result<String, To
     let mut resolved = Vec::with_capacity(edits.len());
     for edit in edits {
         let exact = text_matches(replacement_base, &edit.old_text);
-        let fuzzy_old = normalize_pi_fuzzy(&edit.old_text);
+        let fuzzy_old = normalize_contract_fuzzy(&edit.old_text);
         let fuzzy_occurrences = text_matches(&fuzzy_base, &fuzzy_old).len();
         if fuzzy_occurrences > 1 {
             return Err(pi_edit_duplicate(
@@ -1801,7 +1801,7 @@ fn apply_pi_edits(base: &str, edits: &[PiEdit], path: &str) -> Result<String, To
                 matches.len(),
             ));
         }
-        resolved.push(ResolvedPiEdit {
+        resolved.push(ResolvedContractEdit {
             index: edit.index,
             start,
             end,
@@ -1863,11 +1863,11 @@ impl EditFileTool {
         let (bom, without_bom) = raw
             .strip_prefix('\u{FEFF}')
             .map_or(("", raw.as_str()), |text| ("\u{FEFF}", text));
-        let ending = pi_line_ending(without_bom);
-        let normalized = normalize_pi_line_endings(without_bom);
+        let ending = contract_line_ending(without_bom);
+        let normalized = normalize_contract_line_endings(without_bom);
         let updated = apply_pi_edits(&normalized, &edits, path_str)?;
         check_file_operation_cancelled(context)?;
-        let final_content = format!("{bom}{}", restore_pi_line_endings(&updated, ending));
+        let final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
 
         crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
             |error| {
@@ -1881,7 +1881,7 @@ impl EditFileTool {
         context.note_file_read(&file_path);
         drop(mutation_guard);
 
-        Ok(pi_mutation_result(
+        Ok(contract_mutation_result(
             context,
             &file_path,
             path_str,

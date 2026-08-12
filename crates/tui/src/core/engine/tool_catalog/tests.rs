@@ -273,7 +273,7 @@ fn compact_surface_keeps_the_exact_eager_agent_head() {
 }
 
 #[test]
-fn registry_first_guidance_does_not_expand_pi_bash_schema_text() {
+fn registry_first_guidance_does_not_expand_contract_bash_schema_text() {
     let mut catalog = vec![tool("bash")];
     let description = catalog[0].description.clone();
 

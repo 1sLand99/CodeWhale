@@ -1,6 +1,6 @@
 //! Model-facing file tools and the legacy action-family compatibility wrapper.
 //!
-//! New turns see the small Pi-style `read`, `write`, and `edit` primitives.
+//! New turns see the small small-contract-style `read`, `write`, and `edit` primitives.
 //! `File` remains registered but hidden so saved v0.9.x transcripts can replay
 //! without teaching new sessions the older action-family schema.
 
@@ -48,7 +48,7 @@ pub struct FileTool {
     allow_patch: bool,
 }
 
-/// Small model-facing reader with the same public contract as Pi's built-in
+/// Small model-facing reader with the same public contract as the small-contract built-in
 /// `read` tool. The legacy [`ReadFileTool`] remains separately registered for
 /// saved Codewhale transcripts.
 pub struct ReadTool;
@@ -94,7 +94,7 @@ impl ToolSpec for ReadTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        ReadFileTool::execute_pi_read(input, context)
+        ReadFileTool::execute_contract_read(input, context)
             .await
             .map(RichToolResult::into_result)
     }
@@ -104,7 +104,7 @@ impl ToolSpec for ReadTool {
         input: Value,
         context: &ToolContext,
     ) -> Result<RichToolResult, ToolError> {
-        ReadFileTool::execute_pi_read(input, context).await
+        ReadFileTool::execute_contract_read(input, context).await
     }
 }
 
@@ -145,11 +145,11 @@ impl ToolSpec for WriteTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        WriteFileTool::execute_pi_write(input, context).await
+        WriteFileTool::execute_contract_write(input, context).await
     }
 }
 
-/// Pi-style multi-edit surface. Every `oldText` is resolved against the same
+/// small-contract-style multi-edit surface. Every `oldText` is resolved against the same
 /// original file and ranges must be unique and non-overlapping.
 pub struct EditTool;
 

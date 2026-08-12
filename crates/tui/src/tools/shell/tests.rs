@@ -22,8 +22,8 @@ fn env_lock() -> &'static Mutex<()> {
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
 
 #[test]
-fn lowercase_bash_schema_is_pi_small() {
-    let schema = PiBashTool.input_schema();
+fn lowercase_bash_schema_is_small_contract() {
+    let schema = LowercaseBashTool.input_schema();
     assert_eq!(schema["required"], json!(["command"]));
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
@@ -42,8 +42,8 @@ fn lowercase_bash_schema_is_pi_small() {
 }
 
 #[test]
-fn pi_bash_nonzero_is_an_error_with_status_after_output() {
-    let error = finish_pi_bash_result(
+fn contract_bash_nonzero_is_an_error_with_status_after_output() {
+    let error = finish_contract_bash_result(
         ShellResult {
             task_id: None,
             status: ShellStatus::Failed,
@@ -75,7 +75,7 @@ fn pi_bash_nonzero_is_an_error_with_status_after_output() {
 async fn lowercase_bash_returns_one_ordered_stream() {
     let workspace = tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path());
-    let result = PiBashTool
+    let result = LowercaseBashTool
         .execute(
             json!({"command": "printf out-1; printf err-2 >&2; printf out-3"}),
             &context,
@@ -91,7 +91,7 @@ async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {
     let workspace = tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
-    let result = PiBashTool
+    let result = LowercaseBashTool
         .execute(json!({"command": "pwd"}), &context)
         .await
         .expect("read-only bash");
@@ -111,7 +111,7 @@ async fn lowercase_bash_readonly_refusal_names_work_mode() {
     let workspace = tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path())
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
-    let result = PiBashTool
+    let result = LowercaseBashTool
         .execute(json!({"command": "touch blocked-by-plan"}), &context)
         .await
         .expect("policy refusal is a normal tool result");
@@ -126,7 +126,7 @@ async fn lowercase_bash_readonly_refusal_names_work_mode() {
 async fn lowercase_bash_timeout_uses_seconds_and_fails() {
     let workspace = tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path());
-    let error = PiBashTool
+    let error = LowercaseBashTool
         .execute(
             json!({"command": sleep_command(2), "timeout": 0.01}),
             &context,
@@ -614,7 +614,7 @@ async fn lowercase_bash_refuses_non_streaming_external_backend() {
     let backend = std::sync::Arc::new(Backend(std::sync::atomic::AtomicBool::new(false)));
     let mut context = ToolContext::new(workspace.path());
     context.sandbox_backend = Some(backend.clone());
-    let error = PiBashTool
+    let error = LowercaseBashTool
         .execute(json!({"command": "pwd", "timeout": 1}), &context)
         .await
         .expect_err("non-streaming backend must be rejected");
@@ -2278,7 +2278,7 @@ async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let task_ctx = ctx.clone();
 
     let task = tokio::spawn(async move {
-        PiBashTool
+        LowercaseBashTool
             .execute(json!({"command": command}), &task_ctx)
             .await
             .expect("execute")
@@ -2798,7 +2798,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         stdout_cursor: 0,
         stderr_cursor: 0,
         completion_reported: false,
-        pi_output: None,
+        bounded_output: None,
         stdin: None,
         child: None,
         windows_job: None,

@@ -802,16 +802,16 @@ impl ToolRegistryBuilder {
     /// this surface instead of [`Self::with_shell_tools`].
     #[must_use]
     pub fn with_foreground_shell_tools(self) -> Self {
-        use super::shell::{BashTool, PiBashTool};
-        self.with_tool(Arc::new(PiBashTool))
+        use super::shell::{BashTool, LowercaseBashTool};
+        self.with_tool(Arc::new(LowercaseBashTool))
             .with_tool(Arc::new(BashTool::new("Bash")))
     }
 
     /// Include only the foreground, direct-argv read-only shell surface.
     #[must_use]
     pub fn with_read_only_shell_tool(self) -> Self {
-        use super::shell::{BashTool, PiBashTool};
-        self.with_tool(Arc::new(PiBashTool))
+        use super::shell::{BashTool, LowercaseBashTool};
+        self.with_tool(Arc::new(LowercaseBashTool))
             .with_tool(Arc::new(BashTool::read_only("Bash")))
     }
 

@@ -472,7 +472,7 @@ done
     expect(registry).toContain("Arc::new(ReadTool)");
     expect(registry).toContain("Arc::new(WriteTool)");
     expect(registry).toContain("Arc::new(EditTool)");
-    expect(registry).toContain("Arc::new(PiBashTool)");
+    expect(registry).toContain("Arc::new(LowercaseBashTool)");
     expect(registry).toContain('FileTool::new("File")');
     expect(registry).toContain('BashTool::new("Bash")');
     expect(toolsPage).toContain("8 names / 16 KiB");

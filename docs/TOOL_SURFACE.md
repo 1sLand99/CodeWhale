@@ -245,8 +245,8 @@ catalog and alias visibility at the exact candidate SHA:
 ```bash
 python3 scripts/measure-runtime-contract.py
 cargo test -p codewhale-tui --lib --locked core::engine::tests::default_active_contract_keeps_discovery_and_core_tools_eager -- --exact
-cargo test -p codewhale-tui --lib --locked tools::file_tool::tests::primitive_schemas_are_separate_and_pi_shaped -- --exact
-cargo test -p codewhale-tui --lib --locked tools::shell::tests::lowercase_bash_schema_is_pi_small -- --exact
+cargo test -p codewhale-tui --lib --locked tools::file_tool::tests::primitive_schemas_are_separate_and_small_contract_shaped -- --exact
+cargo test -p codewhale-tui --lib --locked tools::shell::tests::lowercase_bash_schema_is_small_contract -- --exact
 cargo test --locked -p codewhale-tui --lib core::engine::tests::print_mode_tool_catalog_metrics -- --ignored --exact --nocapture
 ```
 

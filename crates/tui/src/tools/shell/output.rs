@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use encoding_rs::{CoderResult, Decoder, UTF_8};
 
-const PI_MAX_LINES: usize = 2_000;
-const PI_MAX_BYTES: usize = 50 * 1024;
-const PI_RETAIN_BYTES: usize = PI_MAX_BYTES + 4;
+const BOUNDED_OUTPUT_MAX_LINES: usize = 2_000;
+const BOUNDED_OUTPUT_MAX_BYTES: usize = 50 * 1024;
+const BOUNDED_OUTPUT_RETAIN_BYTES: usize = BOUNDED_OUTPUT_MAX_BYTES + 4;
 
 #[derive(Debug)]
-pub(super) struct PiOutputSnapshot {
+pub(super) struct BoundedOutputSnapshot {
     pub(super) content: String,
     pub(super) total_bytes: usize,
     pub(super) retained_bytes: usize,
@@ -18,8 +18,8 @@ pub(super) struct PiOutputSnapshot {
 }
 
 /// One decoded, arrival-ordered stream: complete output goes to disk while
-/// memory retains only enough tail bytes for Pi's 2,000-line/50KiB result.
-pub(super) struct PiOutputAccumulator {
+/// memory retains only enough tail bytes for the 2,000-line/50KiB result bound.
+pub(super) struct BoundedOutputAccumulator {
     tail: VecDeque<u8>,
     tail_newlines: usize,
     total_bytes: usize,
@@ -35,10 +35,10 @@ pub(super) struct PiOutputAccumulator {
     full_output_path: Option<PathBuf>,
 }
 
-impl PiOutputAccumulator {
+impl BoundedOutputAccumulator {
     pub(super) fn new() -> io::Result<Self> {
         Ok(Self {
-            tail: VecDeque::with_capacity(PI_RETAIN_BYTES),
+            tail: VecDeque::with_capacity(BOUNDED_OUTPUT_RETAIN_BYTES),
             tail_newlines: 0,
             total_bytes: 0,
             total_newlines: 0,
@@ -121,11 +121,11 @@ impl PiOutputAccumulator {
             }
             self.last_byte = Some(byte);
         }
-        while self.tail.len() > PI_RETAIN_BYTES {
+        while self.tail.len() > BOUNDED_OUTPUT_RETAIN_BYTES {
             self.pop_front();
             self.front_clipped = true;
         }
-        while self.tail_lines() > PI_MAX_LINES {
+        while self.tail_lines() > BOUNDED_OUTPUT_MAX_LINES {
             while let Some(byte) = self.tail.pop_front() {
                 if byte == b'\n' {
                     self.tail_newlines -= 1;
@@ -157,12 +157,12 @@ impl PiOutputAccumulator {
         } else {
             self.current_line_bytes
         };
-        let partial_line = recent_line_bytes > PI_MAX_BYTES;
+        let partial_line = recent_line_bytes > BOUNDED_OUTPUT_MAX_BYTES;
         if partial_line {
             if bytes.last() == Some(&b'\n') {
                 bytes.pop();
             }
-            let floor = bytes.len().saturating_sub(PI_MAX_BYTES);
+            let floor = bytes.len().saturating_sub(BOUNDED_OUTPUT_MAX_BYTES);
             let start = (floor..bytes.len())
                 .find(|index| std::str::from_utf8(&bytes[*index..]).is_ok())
                 .unwrap_or(bytes.len());
@@ -189,7 +189,7 @@ impl PiOutputAccumulator {
         self.total_bytes
     }
 
-    pub(super) fn snapshot(&mut self, finalize: bool) -> io::Result<PiOutputSnapshot> {
+    pub(super) fn snapshot(&mut self, finalize: bool) -> io::Result<BoundedOutputSnapshot> {
         if let Some(error) = self.stream_error.as_ref() {
             return Err(io::Error::other(error.clone()));
         }
@@ -227,7 +227,7 @@ impl PiOutputAccumulator {
             } else {
                 let start = total_lines.saturating_sub(kept_lines) + 1;
                 let limit = if self.front_clipped {
-                    format!(" ({} limit)", Self::format_size(PI_MAX_BYTES))
+                    format!(" ({} limit)", Self::format_size(BOUNDED_OUTPUT_MAX_BYTES))
                 } else {
                     String::new()
                 };
@@ -237,7 +237,7 @@ impl PiOutputAccumulator {
                 ));
             }
         }
-        Ok(PiOutputSnapshot {
+        Ok(BoundedOutputSnapshot {
             content,
             total_bytes: self.total_bytes,
             retained_bytes,
@@ -325,7 +325,10 @@ pub(super) fn tail_text(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PI_MAX_BYTES, PI_MAX_LINES, PiOutputAccumulator, take_delta_from_buffer};
+    use super::{
+        BOUNDED_OUTPUT_MAX_BYTES, BOUNDED_OUTPUT_MAX_LINES, BoundedOutputAccumulator,
+        take_delta_from_buffer,
+    };
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -364,12 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn pi_output_keeps_last_two_thousand_complete_lines() {
-        let source = (0..=PI_MAX_LINES)
+    fn bounded_output_keeps_last_two_thousand_complete_lines() {
+        let source = (0..=BOUNDED_OUTPUT_MAX_LINES)
             .map(|index| format!("line-{index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut output = PiOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
         output.append(source.as_bytes()).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
@@ -379,17 +382,17 @@ mod tests {
     }
 
     #[test]
-    fn pi_output_streams_raw_full_output_and_bounds_decoded_tail() {
+    fn bounded_output_streams_raw_full_output_and_bounds_decoded_tail() {
         let raw = vec![0xFF; 2 * 1024 * 1024];
-        let mut output = PiOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
         for chunk in raw.chunks(4_096) {
             output.append(chunk).expect("append");
-            assert!(output.retained_memory_bytes() <= PI_MAX_BYTES + 4);
+            assert!(output.retained_memory_bytes() <= BOUNDED_OUTPUT_MAX_BYTES + 4);
         }
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
         assert!(snapshot.truncated);
-        assert!(snapshot.retained_bytes <= PI_MAX_BYTES);
+        assert!(snapshot.retained_bytes <= BOUNDED_OUTPUT_MAX_BYTES);
         assert!(snapshot.content.contains('\u{FFFD}'));
         let path = output
             .full_output_path()
@@ -401,10 +404,10 @@ mod tests {
     }
 
     #[test]
-    fn pi_output_huge_terminal_line_matches_upstream_notice() {
-        let mut source = vec![b'x'; PI_MAX_BYTES + 1_024];
+    fn bounded_output_huge_terminal_line_matches_upstream_notice() {
+        let mut source = vec![b'x'; BOUNDED_OUTPUT_MAX_BYTES + 1_024];
         source.push(b'\n');
-        let mut output = PiOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
         output.append(&source).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");

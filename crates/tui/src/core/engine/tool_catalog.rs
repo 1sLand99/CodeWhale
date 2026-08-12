@@ -215,7 +215,7 @@ const REGISTRY_FIRST_SHELL_GUIDANCE: &str = "Before using this tool for a task w
 /// performs no task matching in the host; the model still compares the user's
 /// context against the Registry catalog itself.
 pub(super) fn apply_registry_first_shell_guidance(catalog: &mut [Tool]) {
-    // The Pi-shaped lowercase bash schema stays small and direct. This legacy
+    // The small-contract-shaped lowercase bash schema stays small and direct. This legacy
     // compatibility hook is intentionally inert unless an old model-visible
     // exec_shell definition is present.
     let Some(shell) = catalog.iter_mut().find(|tool| tool.name == "exec_shell") else {

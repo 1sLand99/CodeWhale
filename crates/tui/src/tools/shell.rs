@@ -65,7 +65,8 @@ use crate::work_graph::{
 };
 use crate::worker_profile::ShellPolicy;
 use output::{
-    PiOutputAccumulator, PiOutputSnapshot, tail_from_buffer, tail_text, take_delta_from_buffer,
+    BoundedOutputAccumulator, BoundedOutputSnapshot, tail_from_buffer, tail_text,
+    take_delta_from_buffer,
 };
 
 const READONLY_ENV_MARKER: &str = "CODEWHALE_INTERNAL_READONLY_ARGV";
@@ -749,9 +750,9 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
     })
 }
 
-fn spawn_pi_reader_thread<R: Read + Send + 'static>(
+fn spawn_bounded_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
-    output: Arc<Mutex<PiOutputAccumulator>>,
+    output: Arc<Mutex<BoundedOutputAccumulator>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -873,8 +874,8 @@ pub struct BackgroundShell {
     stdout_buffer: Arc<Mutex<Vec<u8>>>,
     stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
     /// Lowercase `bash` streams one combined process pipe through a bounded
-    /// Pi-compatible accumulator while persisting the complete output.
-    pi_output: Option<Arc<Mutex<PiOutputAccumulator>>>,
+    /// small-contract-compatible accumulator while persisting the complete output.
+    bounded_output: Option<Arc<Mutex<BoundedOutputAccumulator>>>,
     heavy_permit: Option<HeavyCommandPermit>,
     stdout_cursor: usize,
     stderr_cursor: usize,
@@ -1063,7 +1064,7 @@ impl BackgroundShell {
     }
 
     fn observed_output_len(&self) -> usize {
-        if let Some(output) = self.pi_output.as_ref() {
+        if let Some(output) = self.bounded_output.as_ref() {
             return output
                 .lock()
                 .map(|output| output.total_bytes())
@@ -1136,7 +1137,7 @@ impl BackgroundShell {
     }
 
     fn full_output(&self) -> (String, String, usize, usize) {
-        if let Some(snapshot) = self.pi_output_snapshot(false).ok().flatten() {
+        if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
             return (snapshot.content, String::new(), snapshot.total_bytes, 0);
         }
         let (stdout_bytes, stderr_bytes) = self.full_output_bytes();
@@ -1152,7 +1153,7 @@ impl BackgroundShell {
     }
 
     fn full_output_bytes(&self) -> (Vec<u8>, Vec<u8>) {
-        if let Some(snapshot) = self.pi_output_snapshot(false).ok().flatten() {
+        if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
             return (snapshot.content.into_bytes(), Vec::new());
         }
         let stdout_bytes = self
@@ -1169,7 +1170,7 @@ impl BackgroundShell {
     }
 
     fn take_delta(&mut self) -> (String, String, usize, usize, usize, usize) {
-        if let Some(snapshot) = self.pi_output_snapshot(false).ok().flatten() {
+        if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
             let changed = snapshot.total_bytes != self.stdout_cursor;
             self.stdout_cursor = snapshot.total_bytes;
             if changed {
@@ -1275,7 +1276,7 @@ impl BackgroundShell {
     #[allow(dead_code)]
     pub fn snapshot(&self) -> Result<ShellResult> {
         let sandboxed = !matches!(self.sandbox_type, SandboxType::None);
-        if let Some(snapshot) = self.pi_output_snapshot(self.status != ShellStatus::Running)? {
+        if let Some(snapshot) = self.bounded_output_snapshot(self.status != ShellStatus::Running)? {
             return Ok(ShellResult {
                 task_id: Some(self.id.clone()),
                 status: self.status.clone(),
@@ -1321,8 +1322,8 @@ impl BackgroundShell {
         })
     }
 
-    fn pi_output_snapshot(&self, finalize: bool) -> Result<Option<PiOutputSnapshot>> {
-        self.pi_output
+    fn bounded_output_snapshot(&self, finalize: bool) -> Result<Option<BoundedOutputSnapshot>> {
+        self.bounded_output
             .as_ref()
             .map(|output| {
                 output
@@ -1341,7 +1342,7 @@ impl BackgroundShell {
         // held for an arbitrarily long time during list_jobs() calls from the
         // TUI event loop — freezing input handling on long automation runs.
         let (stdout_len, stdout_tail) =
-            if let Some(snapshot) = self.pi_output_snapshot(false).ok().flatten() {
+            if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
                 (snapshot.total_bytes, tail_text(&snapshot.content, 1_200))
             } else {
                 tail_from_buffer(&self.stdout_buffer, 1200)
@@ -1386,7 +1387,7 @@ impl BackgroundShell {
     fn completion_event(&self) -> ShellCompletionEvent {
         let snapshot = self.job_snapshot();
         let (stdout_len, stdout_tail) =
-            if let Some(output) = self.pi_output_snapshot(false).ok().flatten() {
+            if let Some(output) = self.bounded_output_snapshot(false).ok().flatten() {
                 (
                     output.total_bytes,
                     tail_text(&output.content, SHELL_COMPLETION_TAIL_BYTES),
@@ -1697,7 +1698,7 @@ impl ShellManager {
         let exec_env = self.sandbox_manager.prepare(&spec);
 
         if background {
-            let pi_output = timeout_bounds_ms == (1, PI_BASH_MAX_TIMEOUT_MS);
+            let bounded_output = timeout_bounds_ms == (1, BASH_MAX_TIMEOUT_MS);
             self.spawn_background_sandboxed(
                 command,
                 &work_dir,
@@ -1710,7 +1711,7 @@ impl ShellManager {
                     work_lifecycle,
                 },
                 persist_pending,
-                pi_output,
+                bounded_output,
             )
         } else {
             if tty {
@@ -2047,7 +2048,7 @@ impl ShellManager {
         tty: bool,
         spawn_context: ShellSpawnContext,
         persist_pending: bool,
-        pi_mode: bool,
+        small_contract_mode: bool,
     ) -> Result<ShellResult> {
         let ShellSpawnContext {
             owner_agent,
@@ -2072,13 +2073,13 @@ impl ShellManager {
         }
 
         let stdout_buffer = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buffer = if tty || persist_pending || pi_mode {
+        let stderr_buffer = if tty || persist_pending || small_contract_mode {
             None
         } else {
             Some(Arc::new(Mutex::new(Vec::new())))
         };
-        let pi_output = pi_mode
-            .then(PiOutputAccumulator::new)
+        let bounded_output = small_contract_mode
+            .then(BoundedOutputAccumulator::new)
             .transpose()
             .context("Failed to create streaming shell output")?
             .map(|output| Arc::new(Mutex::new(output)));
@@ -2165,7 +2166,7 @@ impl ShellManager {
             crate::utils::suppress_console_window(&mut cmd);
             push_shell_args(&mut cmd, program, args);
             cmd.current_dir(working_dir).stdin(Stdio::piped());
-            let combined_reader = if pi_mode {
+            let combined_reader = if small_contract_mode {
                 let (reader, stdout, stderr) =
                     shared_output_pipe().context("Failed to create combined shell output pipe")?;
                 cmd.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
@@ -2193,9 +2194,9 @@ impl ShellManager {
             let stdin_handle = child.stdin.take().map(StdinWriter::Pipe);
 
             let (stdout_thread, stderr_thread) =
-                if let (Some(reader), Some(output)) = (combined_reader, pi_output.as_ref()) {
+                if let (Some(reader), Some(output)) = (combined_reader, bounded_output.as_ref()) {
                     (
-                        Some(spawn_pi_reader_thread(reader, Arc::clone(output))),
+                        Some(spawn_bounded_reader_thread(reader, Arc::clone(output))),
                         None,
                     )
                 } else {
@@ -2251,7 +2252,7 @@ impl ShellManager {
             },
             stdout_buffer,
             stderr_buffer,
-            pi_output,
+            bounded_output,
             heavy_permit,
             stdout_cursor: 0,
             stderr_cursor: 0,
@@ -3489,12 +3490,12 @@ async fn execute_foreground_via_background(
     }
 }
 
-const PI_BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
+const BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
 
-fn pi_bash_error_status(result: &ShellResult, timeout_ms: Option<u64>) -> String {
+fn contract_bash_error_status(result: &ShellResult, timeout_ms: Option<u64>) -> String {
     match result.status {
         ShellStatus::TimedOut => {
-            let millis = timeout_ms.unwrap_or(PI_BASH_MAX_TIMEOUT_MS);
+            let millis = timeout_ms.unwrap_or(BASH_MAX_TIMEOUT_MS);
             let seconds = if millis.is_multiple_of(1_000) {
                 (millis / 1_000).to_string()
             } else {
@@ -3510,7 +3511,7 @@ fn pi_bash_error_status(result: &ShellResult, timeout_ms: Option<u64>) -> String
     }
 }
 
-fn finish_pi_bash_result(
+fn finish_contract_bash_result(
     result: ShellResult,
     timeout_ms: Option<u64>,
 ) -> Result<ToolResult, ToolError> {
@@ -3531,7 +3532,7 @@ fn finish_pi_bash_result(
         )).with_metadata(metadata));
     }
     if result.status != ShellStatus::Completed {
-        let status = pi_bash_error_status(&result, timeout_ms);
+        let status = contract_bash_error_status(&result, timeout_ms);
         return Err(ToolError::execution_failed(if output.is_empty() {
             status
         } else {
@@ -3548,10 +3549,10 @@ fn finish_pi_bash_result(
 }
 
 /// Small foreground-only shell surface shown to new model turns.
-pub struct PiBashTool;
+pub struct LowercaseBashTool;
 
 #[async_trait]
-impl ToolSpec for PiBashTool {
+impl ToolSpec for LowercaseBashTool {
     fn name(&self) -> &'static str {
         "bash"
     }
@@ -3581,12 +3582,12 @@ impl ToolSpec for PiBashTool {
     }
 
     fn approval_requirement_for(&self, input: &serde_json::Value) -> ApprovalRequirement {
-        let translated = pi_bash_legacy_input(input).unwrap_or_else(|_| input.clone());
+        let translated = contract_bash_legacy_input(input).unwrap_or_else(|_| input.clone());
         BashTool::pi_delegate().approval_requirement_for(&translated)
     }
 
     fn is_read_only_for(&self, input: &serde_json::Value) -> bool {
-        pi_bash_legacy_input(input)
+        contract_bash_legacy_input(input)
             .is_ok_and(|translated| BashTool::pi_delegate().is_read_only_for(&translated))
     }
 
@@ -3599,12 +3600,12 @@ impl ToolSpec for PiBashTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let translated = pi_bash_legacy_input(&input)?;
+        let translated = contract_bash_legacy_input(&input)?;
         BashTool::pi_delegate().execute(translated, context).await
     }
 }
 
-fn pi_bash_legacy_input(input: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
+fn contract_bash_legacy_input(input: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
     let object = input
         .as_object()
         .ok_or_else(|| ToolError::invalid_input("bash input must be an object"))?;
@@ -3631,10 +3632,10 @@ fn pi_bash_legacy_input(input: &serde_json::Value) -> Result<serde_json::Value, 
             ));
         }
         let millis = seconds * 1000.0;
-        if millis > PI_BASH_MAX_TIMEOUT_MS as f64 {
+        if millis > BASH_MAX_TIMEOUT_MS as f64 {
             return Err(ToolError::invalid_input(format!(
                 "Invalid timeout: maximum is {} seconds",
-                PI_BASH_MAX_TIMEOUT_MS as f64 / 1000.0
+                BASH_MAX_TIMEOUT_MS as f64 / 1000.0
             )));
         }
         translated["timeout_ms"] = json!((millis as u64).max(1));
@@ -3915,7 +3916,7 @@ impl ToolSpec for BashTool {
         } else {
             Some(optional_u64(&input, "timeout_ms", 120_000)?.min(600_000))
         };
-        let timeout_value_ms = timeout_ms.unwrap_or(PI_BASH_MAX_TIMEOUT_MS);
+        let timeout_value_ms = timeout_ms.unwrap_or(BASH_MAX_TIMEOUT_MS);
         let background = optional_bool(&input, "background", false)?;
         let interactive = optional_bool(&input, "interactive", false)?;
         let combined_output = optional_bool(&input, "combined_output", false)?;
@@ -4343,7 +4344,7 @@ impl ToolSpec for BashTool {
                 extra_env,
                 matches!(context.shell_policy, ShellPolicy::ReadOnly),
                 if self.pi_timeout {
-                    (1, PI_BASH_MAX_TIMEOUT_MS)
+                    (1, BASH_MAX_TIMEOUT_MS)
                 } else {
                     (1_000, 600_000)
                 },
@@ -4370,7 +4371,7 @@ impl ToolSpec for BashTool {
                     .as_ref()
                     .is_some_and(|token| token.is_cancelled());
                 if self.pi_timeout {
-                    return finish_pi_bash_result(result, timeout_ms);
+                    return finish_contract_bash_result(result, timeout_ms);
                 }
                 let task_id_str = result.task_id.clone().unwrap_or_default();
                 let stdout_summary = summarize_output(&result.stdout);
