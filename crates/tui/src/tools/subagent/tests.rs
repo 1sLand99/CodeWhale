@@ -5806,7 +5806,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "get_goal",
         "grep_files",
         "handle_read",
-        "image_ocr",
         "list_dir",
         "load_skill",
         "lsp",
@@ -5835,7 +5834,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "get_goal",
         "grep_files",
         "handle_read",
-        "image_ocr",
         "list_dir",
         "load_skill",
         "lsp",
@@ -5869,7 +5867,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "grep_files",
         "handle_read",
         "harness",
-        "image_ocr",
         "list_dir",
         "load_skill",
         "lsp",
@@ -5912,7 +5909,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "grep_files",
         "handle_read",
         "harness",
-        "image_ocr",
         "list_dir",
         "load_skill",
         "lsp",
@@ -5920,7 +5916,6 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "memory_search",
         "note",
         "notify",
-        "pandoc_convert",
         "project_map",
         "read",
         "remember",
@@ -5984,7 +5979,7 @@ fn every_named_role_has_one_complete_capability_based_surface() {
             crate::tools::plan::new_shared_plan_state(),
         );
         let names = tool_names(registry.tools_for_model(&role));
-        let expected = match role {
+        let mut expected = match role {
             FleetRole::Scout | FleetRole::Reviewer => INSPECTION,
             FleetRole::Planner | FleetRole::Consultant => COUNSEL,
             FleetRole::Verifier => VERIFICATION,
@@ -5994,6 +5989,17 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         .iter()
         .map(|name| (*name).to_string())
         .collect::<HashSet<_>>();
+        // The OCR tool registers only when a local backend exists, so the
+        // pinned surface follows the host instead of hardcoding it.
+        if crate::tools::image_ocr::ocr_available() && !matches!(role, FleetRole::Custom) {
+            expected.insert("image_ocr".to_string());
+        }
+        // The converter registers only when the `pandoc` binary exists.
+        if matches!(role, FleetRole::Builder | FleetRole::Worker)
+            && crate::dependencies::resolve_pandoc().is_some()
+        {
+            expected.insert("pandoc_convert".to_string());
+        }
 
         assert_eq!(names, expected, "{role:?} visible surface drifted");
     }
@@ -6685,7 +6691,7 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
 
         let tools = registry.tools_for_model(&role);
         let names = tool_names(tools.clone());
-        let expected = [
+        let mut expected = [
             "Web",
             "agent",
             "agents/list",
@@ -6697,7 +6703,6 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             "get_goal",
             "grep_files",
             "handle_read",
-            "image_ocr",
             "list_dir",
             "load_skill",
             "lsp",
@@ -6717,6 +6722,9 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
         .into_iter()
         .map(str::to_string)
         .collect::<std::collections::HashSet<_>>();
+        if crate::tools::image_ocr::ocr_available() {
+            expected.insert("image_ocr".to_string());
+        }
         assert_eq!(names, expected, "{role:?} complete visible surface drifted");
 
         let bash = tools.iter().find(|tool| tool.name == "bash").unwrap();
@@ -6820,7 +6828,6 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             "diagnostics",
             "file_search",
             "grep_files",
-            "image_ocr",
             "list_dir",
             "lsp",
             "memory_get",
@@ -6833,6 +6840,16 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             assert!(
                 !registry.role_blocks_unhardened_process_tool(name),
                 "{role:?} must not hide proven read-only tool {name}"
+            );
+        }
+        if crate::tools::image_ocr::ocr_available() {
+            assert!(
+                registry.is_tool_allowed("image_ocr"),
+                "{role:?} must allow image_ocr"
+            );
+            assert!(
+                !registry.role_blocks_unhardened_process_tool("image_ocr"),
+                "{role:?} must not hide proven read-only tool image_ocr"
             );
         }
 

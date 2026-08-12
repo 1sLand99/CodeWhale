@@ -591,9 +591,8 @@ fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
+    assert_eq!(names, {
+        let mut expected = vec![
             "Run",
             "Web",
             "diagnostics",
@@ -601,7 +600,6 @@ fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
             "finance",
             "grep_files",
             "handle_read",
-            "image_ocr",
             "list_dir",
             "load_skill",
             "lsp",
@@ -613,8 +611,12 @@ fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
             "tui_help",
             "validate_data",
             "web.run",
-        ]
-    );
+        ];
+        if crate::tools::image_ocr::ocr_available() {
+            expected.insert(7, "image_ocr");
+        }
+        expected
+    });
     let run = registry.get("Run").expect("bounded Run registered");
     assert!(
         tools
@@ -1261,9 +1263,8 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
+    assert_eq!(names, {
+        let mut expected = vec![
             "Web",
             "bash",
             "diagnostics",
@@ -1271,7 +1272,6 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
             "finance",
             "grep_files",
             "handle_read",
-            "image_ocr",
             "list_dir",
             "load_skill",
             "lsp",
@@ -1283,8 +1283,12 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
             "tui_help",
             "validate_data",
             "web.run",
-        ]
-    );
+        ];
+        if crate::tools::image_ocr::ocr_available() {
+            expected.insert(7, "image_ocr");
+        }
+        expected
+    });
     assert!(registry.contains("File"));
     assert!(registry.contains("Bash"));
     assert!(tools.iter().all(|tool| tool.name != "File"));
