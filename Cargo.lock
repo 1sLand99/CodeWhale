@@ -836,6 +836,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewhale-command-contract"
+version = "0.9.6"
+dependencies = [
+ "codewhale-core",
+]
+
+[[package]]
 name = "codewhale-config"
 version = "0.9.6"
 dependencies = [
