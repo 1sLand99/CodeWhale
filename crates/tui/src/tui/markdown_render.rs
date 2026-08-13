@@ -1041,8 +1041,9 @@ fn parse_list_item(line: &str) -> Option<(String, &str)> {
 }
 
 /// Upper bound on the nesting depth rendered for a `>` quote. Deeper quotes
-/// keep their remaining markers as text; capping stops a pathological input
-/// like `>>>>>>>>>>>> text` from consuming the whole line width in rails.
+/// are clamped and the extra markers dropped from the rendered text; capping
+/// stops a pathological input like `>>>>>>>>>>>> text` from consuming the
+/// whole line width in rails.
 const MAX_QUOTE_DEPTH: usize = 4;
 
 /// Parse a `>` blockquote line, returning `(depth, text)`.
@@ -1390,9 +1391,12 @@ fn render_list_line_tagged(
 /// Render a `>` quote line: a vertical-rule rail per nesting depth plus the
 /// quote text with inline formatting (bold, code, links).
 ///
-/// The rail is display chrome, not source markup, so selection copy skips it:
-/// every rendered row reports `copy_prefix_width` equal to the rail width.
-/// Wrapped continuation rows keep the same indentation as the first row.
+/// The rail is display chrome, not source markup. On the first row the
+/// transcript rail-scan (`compute_rail_prefix_width`) already strips it along
+/// with the assistant glyph, so `copy_prefix_width` must be `0` there — like
+/// list items — or selection copy would strip the rail twice and lose quote
+/// text. Wrapped continuation rows have no rail scan (plain spaces), so they
+/// report the rail width so selection copy skips their alignment.
 fn render_quote_line_tagged(
     text: &str,
     depth: usize,
@@ -1423,7 +1427,10 @@ fn render_quote_line_tagged(
             line: Line::from(spans),
             links,
             is_code: false,
-            copy_prefix_width: rail_width,
+            // First row: the transcript rail-scan strips the visible rail
+            // (mirror `render_list_line_tagged`); continuation rows: report
+            // the alignment width so selection copy skips it.
+            copy_prefix_width: if idx == 0 { 0 } else { rail_width },
             copy_separator_after: rendered.copy_separator_after,
         });
     }
@@ -2975,7 +2982,8 @@ mod tests {
 
     #[test]
     fn blockquote_lines_parse_with_depth() {
-        let parsed = parse("> hello\n>\n>> nested\n> > spaced\n>no-space\nlone > arrow\n");
+        let parsed =
+            parse("> hello\n>\n>> nested\n> > spaced\n>no-space\n>\t tabbed\nlone > arrow\n");
         let quotes: Vec<_> = parsed
             .blocks
             .iter()
@@ -2992,10 +3000,34 @@ mod tests {
                 (2, "nested"),
                 (2, "spaced"),
                 (1, "no-space"),
+                (1, "tabbed"),
             ]
         );
         // `lone > arrow` starts with prose, so it stays a paragraph.
-        assert_eq!(parsed.blocks.len(), 6);
+        assert_eq!(parsed.blocks.len(), 7);
+    }
+
+    #[test]
+    fn code_fence_contains_quote_lines_untouched() {
+        // Fenced-code lines are collected before blockquote classification, so
+        // `>` inside a fence must stay literal code content.
+        let parsed = parse("```\n> not a quote\n\n> but this is\n```\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["> not a quote", "", "> but this is"]);
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .all(|b| !matches!(b, Block::Quote { .. })),
+            "lines inside a fence must stay code, never quotes"
+        );
     }
 
     #[test]
@@ -3025,8 +3057,10 @@ mod tests {
                     && span.style.bg == Some(palette::SURFACE_ELEVATED)),
             "inline code is styled distinctly from plain text"
         );
-        // The rail is display chrome: selection copy skips it, links shift by it.
-        assert_eq!(rendered[0].copy_prefix_width, 2);
+        // First-row rail is stripped by the transcript rail-scan along with
+        // the assistant glyph, so copy must report 0 here (mirror list items)
+        // — reporting the rail width would strip it twice and lose text.
+        assert_eq!(rendered[0].copy_prefix_width, 0);
         assert_eq!(
             rendered[0].links,
             vec![osc8::LineLink {
@@ -3054,6 +3088,13 @@ mod tests {
         let visible = tagged_visible(&rendered);
         assert!(visible.len() > 1, "fixture must wrap: {visible:?}");
         assert!(visible[0].starts_with("│ "), "first row starts with rail");
+        // Copy-prefix accounting: first row reports 0 (rail-scan strips it),
+        // continuation rows report the rail width (plain spaces are not
+        // stripped by the rail-scan).
+        assert_eq!(rendered[0].copy_prefix_width, 0);
+        for row in rendered.iter().skip(1) {
+            assert_eq!(row.copy_prefix_width, 2);
+        }
         for row in &visible[1..] {
             assert!(
                 row.starts_with("  "),
