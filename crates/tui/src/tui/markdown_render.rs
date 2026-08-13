@@ -508,7 +508,7 @@ fn push_parsed_line(
             // Inside a code block: a fence at least as long as the opener
             // closes it; a shorter backtick line is code content per
             // CommonMark and must not flip the state or escape the block.
-            Some(open) if fence_len >= open => {
+            Some(open) if fence_len >= open && trimmed[fence_len..].trim().is_empty() => {
                 *open_fence_len = None;
                 *code_language = None;
             }
@@ -1435,7 +1435,7 @@ fn render_quote_line_tagged(
             .map(|link| link.shifted(rail_width))
             .collect();
         let mut spans = if idx == 0 {
-            vec![Span::styled(rail.clone(), rail_style)]
+            (0..depth).map(|_| Span::styled("│ ", rail_style)).collect()
         } else {
             vec![Span::raw(" ".repeat(rail_width))]
         };
@@ -3099,6 +3099,27 @@ mod tests {
     }
 
     #[test]
+    fn backticks_with_info_do_not_close_an_open_fence() {
+        let parsed = parse("```\n```rust\n> still code\n```\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(code, vec!["```rust", "> still code"]);
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .all(|block| !matches!(block, Block::Quote { .. }))
+        );
+    }
+
+    #[test]
     fn blockquote_renders_rail_and_inline_formatting() {
         let rendered = render_markdown_tagged(
             "> **bold** `code` and see https://example.com",
@@ -3146,6 +3167,17 @@ mod tests {
         assert_eq!(
             tagged_visible(&rendered),
             vec!["│ │ │ deep", "│ │ │ │ too deep"]
+        );
+        assert_eq!(
+            rendered[0]
+                .line
+                .spans
+                .iter()
+                .take(3)
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["│ ", "│ ", "│ "],
+            "each rail must remain independently discoverable by selection copy"
         );
     }
 
