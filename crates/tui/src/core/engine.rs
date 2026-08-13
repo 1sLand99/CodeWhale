@@ -5262,6 +5262,65 @@ pub(super) fn auto_review_run_origin_for_plan(
     }
 }
 
+pub(crate) fn auto_review_plan_decision_for_context(
+    policy: &crate::tui::auto_review::AutoReviewPolicy,
+    context: &crate::tui::auto_review::AutoReviewContext<'_>,
+) -> (AutoReviewPlanDecision, Value) {
+    let decision = policy.evaluate(context);
+    let audit_event = policy.audit_event(context, &decision);
+    let plan_decision = if context.approval_mode == crate::tui::approval::ApprovalMode::Auto
+        && context.tool_name == REQUEST_USER_INPUT_NAME
+    {
+        // This synthetic tool does not execute user work. Let the turn loop
+        // return its ordinary autonomous guidance result instead of treating
+        // a hallucinated question as an unknown external action.
+        AutoReviewPlanDecision::Allow
+    } else {
+        match decision.action {
+            crate::tui::auto_review::AutoReviewAction::Allow
+                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+            {
+                AutoReviewPlanDecision::Allow
+            }
+            crate::tui::auto_review::AutoReviewAction::Allow => AutoReviewPlanDecision::NoChange,
+            crate::tui::auto_review::AutoReviewAction::AskUser if decision.built_in_safety_gate => {
+                // Name the built-in gate honestly.
+                let reason = format!(
+                    "Built-in safety gate requires approval: {}",
+                    decision.reason
+                );
+                if matches!(
+                    context.approval_mode,
+                    crate::tui::approval::ApprovalMode::Auto
+                        | crate::tui::approval::ApprovalMode::Never
+                        | crate::tui::approval::ApprovalMode::Bypass
+                ) {
+                    // Auto-Review, Never, and Full Access are non-interactive for
+                    // approval holds. Full Access auto-runs ordinary calls, but a
+                    // non-bypassable safety floor always fails closed.
+                    AutoReviewPlanDecision::Block(reason)
+                } else {
+                    AutoReviewPlanDecision::ForcePrompt(reason)
+                }
+            }
+            crate::tui::auto_review::AutoReviewAction::AskUser
+                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+            {
+                AutoReviewPlanDecision::ConsultReviewer(decision.reason.clone())
+            }
+            crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
+            crate::tui::auto_review::AutoReviewAction::Block => {
+                AutoReviewPlanDecision::Block(format!(
+                    "Auto-review policy blocked tool '{}': {}",
+                    context.tool_name, decision.reason
+                ))
+            }
+        }
+    };
+    (plan_decision, audit_event)
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn auto_review_plan_decision(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
@@ -5280,83 +5339,9 @@ pub(crate) fn auto_review_plan_decision(
         approval_mode,
         workspace_trusted,
         dirty_worktree,
+        workspace,
     );
-    let mut decision = policy.evaluate(&context);
-    if approval_mode == crate::tui::approval::ApprovalMode::Auto
-        && context.action_kind == crate::tui::auto_review::ToolActionKind::Write
-        && decision.action == crate::tui::auto_review::AutoReviewAction::Allow
-    {
-        let write_is_bounded = workspace
-            .and_then(|workspace| {
-                file_write_tool_target_paths(tool_name, tool_input).map(|paths| {
-                    crate::core::authority::paths_within_workspace_write_carve_out(
-                        workspace, &paths,
-                    )
-                })
-            })
-            .unwrap_or(false);
-        if !write_is_bounded {
-            decision = crate::tui::auto_review::AutoReviewDecision {
-                action: crate::tui::auto_review::AutoReviewAction::AskUser,
-                reason: "Auto-Review requires every write target to stay inside the workspace and outside sensitive paths".to_string(),
-                rule_id: None,
-            };
-        }
-    }
-    let audit_event = policy.audit_event(&context, &decision);
-    let plan_decision = if approval_mode == crate::tui::approval::ApprovalMode::Auto
-        && tool_name == REQUEST_USER_INPUT_NAME
-    {
-        // This synthetic tool does not execute user work. Let the turn loop
-        // return its ordinary autonomous guidance result instead of treating
-        // a hallucinated question as an unknown external action.
-        AutoReviewPlanDecision::Allow
-    } else {
-        match decision.action {
-            crate::tui::auto_review::AutoReviewAction::Allow
-                if approval_mode == crate::tui::approval::ApprovalMode::Auto =>
-            {
-                AutoReviewPlanDecision::Allow
-            }
-            crate::tui::auto_review::AutoReviewAction::Allow => AutoReviewPlanDecision::NoChange,
-            crate::tui::auto_review::AutoReviewAction::AskUser
-                if approval_mode == crate::tui::approval::ApprovalMode::Auto =>
-            {
-                AutoReviewPlanDecision::ConsultReviewer(decision.reason.clone())
-            }
-            crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
-            crate::tui::auto_review::AutoReviewAction::HoldForReview => {
-                // HoldForReview only originates from the built-in safety floor
-                // (configured rules produce Allow/Block), so name the gate
-                // honestly instead of blaming an "auto-review policy" the user
-                // may never have configured (#3883).
-                let reason = format!(
-                    "Built-in safety gate requires approval: {}",
-                    decision.reason
-                );
-                if matches!(
-                    approval_mode,
-                    crate::tui::approval::ApprovalMode::Auto
-                        | crate::tui::approval::ApprovalMode::Never
-                        | crate::tui::approval::ApprovalMode::Bypass
-                ) {
-                    // Auto-Review, Never, and Full Access are non-interactive for
-                    // approval holds. Full Access auto-runs ordinary calls, but a
-                    // non-bypassable safety floor always fails closed.
-                    AutoReviewPlanDecision::Block(reason)
-                } else {
-                    AutoReviewPlanDecision::ForcePrompt(reason)
-                }
-            }
-            crate::tui::auto_review::AutoReviewAction::Block => {
-                AutoReviewPlanDecision::Block(format!(
-                    "Auto-review policy blocked tool '{tool_name}': {}",
-                    decision.reason
-                ))
-            }
-        }
-    };
-    (plan_decision, audit_event)
+    auto_review_plan_decision_for_context(policy, &context)
 }
 
 pub(super) fn exec_shell_ask_rule_decision(

@@ -39,7 +39,7 @@ use crate::client::DeepSeekClient;
 use crate::config::{ApiProvider, Config};
 use crate::core::engine::turn_loop::run_tool_call_before_hooks;
 use crate::core::engine::{
-    AutoReviewPlanDecision, ToolAskRuleDecision, auto_review_plan_decision,
+    AutoReviewPlanDecision, ToolAskRuleDecision, auto_review_plan_decision_for_context,
     exec_shell_ask_rule_decision_for_policy, file_tool_ask_rule_decision_for_policy,
 };
 use crate::llm_client::{LlmClient, StreamEventBox};
@@ -710,16 +710,17 @@ fn prepare_acp_tool_admission(
     } else {
         crate::tui::auto_review::RunOrigin::Headless
     };
-    let (auto_review, _audit) = auto_review_plan_decision(
-        &config.auto_review_policy(),
+    let review_context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
         &call.name,
         &prepared.input,
         run_origin,
         approval_mode,
         crate::config::is_workspace_trusted(workspace),
         false,
-        None,
+        Some(workspace),
     );
+    let (auto_review, _audit) =
+        auto_review_plan_decision_for_context(&config.auto_review_policy(), &review_context);
     match auto_review {
         AutoReviewPlanDecision::NoChange | AutoReviewPlanDecision::Allow => {}
         AutoReviewPlanDecision::ForcePrompt(reason) => permission_reason = Some(reason),

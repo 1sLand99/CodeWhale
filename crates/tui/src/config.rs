@@ -2910,7 +2910,6 @@ impl AutoReviewRuleConfig {
             crate::tui::auto_review::AutoReviewAction::Allow => "allow",
             crate::tui::auto_review::AutoReviewAction::Block => "block",
             crate::tui::auto_review::AutoReviewAction::AskUser => "ask",
-            crate::tui::auto_review::AutoReviewAction::HoldForReview => "hold",
         };
         let id = self
             .id
@@ -2933,8 +2932,7 @@ impl AutoReviewRuleConfig {
             crate::tui::auto_review::AutoReviewAction::Block => {
                 crate::tui::auto_review::AutoReviewRule::block(id, reason)
             }
-            crate::tui::auto_review::AutoReviewAction::AskUser
-            | crate::tui::auto_review::AutoReviewAction::HoldForReview => {
+            crate::tui::auto_review::AutoReviewAction::AskUser => {
                 crate::tui::auto_review::AutoReviewRule::block(id, reason)
             }
         };

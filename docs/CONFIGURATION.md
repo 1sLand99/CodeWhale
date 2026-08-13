@@ -1852,9 +1852,11 @@ If you are upgrading from older releases:
   Timeout, cancellation, provider failure, incomplete output, malformed JSON,
   or an empty rationale all fail closed. The deterministic floor is never
   model-reviewed, and headless adapters use the deterministic-only tier.
-  Reviewer outcomes emit `tool.auto_review_reviewer` audit events.
+  Reviewer outcomes emit `tool.auto_review` audit events with
+  `gate = "guardian"`.
 
-  Auto-review decisions emit `tool.auto_review_decision` audit events when tool
+  Auto-review decisions emit `tool.auto_review` audit events with
+  `gate = "deterministic"` when tool
   audit logging is enabled. Future PreToolUse/PostToolUse hooks can add
   observer input around this layer, but the configured auto-review policy is
   evaluated before a tool call is allowed to proceed.

@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 pub enum AutoReviewAction {
     Allow,
     AskUser,
-    HoldForReview,
     Block,
 }
 
@@ -25,7 +24,6 @@ impl AutoReviewAction {
         match self {
             Self::Allow => "allow",
             Self::AskUser => "ask_user",
-            Self::HoldForReview => "hold_for_review",
             Self::Block => "block",
         }
     }
@@ -36,6 +34,8 @@ pub struct AutoReviewDecision {
     pub action: AutoReviewAction,
     pub reason: String,
     pub rule_id: Option<String>,
+    /// Lets the UI name the non-bypassable built-in gate honestly.
+    pub built_in_safety_gate: bool,
 }
 
 impl AutoReviewDecision {
@@ -44,6 +44,16 @@ impl AutoReviewDecision {
             action,
             reason: reason.into(),
             rule_id: None,
+            built_in_safety_gate: false,
+        }
+    }
+
+    fn safety_gate(reason: impl Into<String>) -> Self {
+        Self {
+            action: AutoReviewAction::AskUser,
+            reason: reason.into(),
+            rule_id: None,
+            built_in_safety_gate: true,
         }
     }
 
@@ -173,6 +183,7 @@ pub struct AutoReviewContext<'a> {
     pub approval_mode: ApprovalMode,
     pub workspace_trusted: bool,
     pub dirty_worktree: bool,
+    pub write_targets_bounded: bool,
 }
 
 impl<'a> AutoReviewContext<'a> {
@@ -184,6 +195,7 @@ impl<'a> AutoReviewContext<'a> {
         approval_mode: ApprovalMode,
         workspace_trusted: bool,
         dirty_worktree: bool,
+        workspace: Option<&std::path::Path>,
     ) -> Self {
         let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
@@ -199,6 +211,13 @@ impl<'a> AutoReviewContext<'a> {
             approval_mode,
             workspace_trusted,
             dirty_worktree,
+            write_targets_bounded: workspace
+                .zip(file_write_target_paths(tool_name, params))
+                .is_some_and(|(workspace, paths)| {
+                    crate::core::authority::paths_within_workspace_write_carve_out(
+                        workspace, &paths,
+                    )
+                }),
         }
     }
 }
@@ -261,21 +280,11 @@ impl AutoReviewRule {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoReviewPolicy {
     pub allow_rules: Vec<AutoReviewRule>,
     pub block_rules: Vec<AutoReviewRule>,
     pub natural_language_guidance: Option<String>,
-}
-
-impl Default for AutoReviewPolicy {
-    fn default() -> Self {
-        Self {
-            allow_rules: Vec::new(),
-            block_rules: Vec::new(),
-            natural_language_guidance: None,
-        }
-    }
 }
 
 impl AutoReviewPolicy {
@@ -286,16 +295,7 @@ impl AutoReviewPolicy {
                 .with_rule(rule.id.clone());
         }
 
-        if let Some(decision) = safety_floor(ctx) {
-            return decision;
-        }
-
-        if let Some(rule) = self.allow_rules.iter().find(|rule| rule.matches(ctx)) {
-            return AutoReviewDecision::new(AutoReviewAction::Allow, rule.reason.clone())
-                .with_rule(rule.id.clone());
-        }
-
-        deterministic_fallback(ctx)
+        deterministic_fallback(ctx, self.allow_rules.iter().find(|rule| rule.matches(ctx)))
     }
 
     #[must_use]
@@ -309,47 +309,50 @@ impl AutoReviewPolicy {
             "approval_mode": ctx.approval_mode.label(),
             "workspace_trusted": ctx.workspace_trusted,
             "dirty_worktree": ctx.dirty_worktree,
+            "write_targets_bounded": ctx.write_targets_bounded,
             "policy_has_guidance": self.natural_language_guidance.is_some(),
-            "decision": decision.action.as_str(),
+            "decision": if decision.built_in_safety_gate { "hold_for_review" } else { decision.action.as_str() },
             "reason": decision.reason,
             "rule_id": decision.rule_id.as_deref(),
         })
     }
 }
 
-/// The safety floor beneath configured rules. Ask and Auto-Review surface an
-/// applicable hold for approval; non-interactive approval postures convert the
-/// same hold into a hard block. Full Access deliberately skips the interactive
-/// publish hold, but the catastrophic destructive background/headless floor
-/// still applies. The floor keys on `ToolActionKind` — what the call actually
-/// does — not on `RiskLevel`, whose `Destructive` bucket means "not provably
-/// read-only" and exists for modal styling. Keying the floor on that bucket
-/// held ordinary background test runs and read-only sub-agent fanout for
-/// durable review even in YOLO (#3883).
-fn safety_floor(ctx: &AutoReviewContext<'_>) -> Option<AutoReviewDecision> {
+/// Built-in gates, configured allow, then conservative fallback.
+fn deterministic_fallback(
+    ctx: &AutoReviewContext<'_>,
+    allow_rule: Option<&AutoReviewRule>,
+) -> AutoReviewDecision {
+    // Gate on the action, not the broad modal-styling risk bucket.
     match (ctx.action_kind, ctx.run_origin) {
-        // Full Access (Bypass) means exactly that: the user granted publish
-        // authority to this session, so the publish floor prompts only in
-        // the Ask/Auto-Review postures (#4595). The catastrophic-destroyer
-        // floor below still applies in every posture — it guards against
-        // model error, not user intent.
+        // Full Access skips publish holds; catastrophic detached work still
+        // holds in every posture because it guards against model error.
         (ToolActionKind::Publish, _) if ctx.approval_mode != ApprovalMode::Bypass => {
-            Some(AutoReviewDecision::new(
-                AutoReviewAction::HoldForReview,
-                "publish-like action requires durable review",
-            ))
+            return AutoReviewDecision::safety_gate("publish-like action requires durable review");
         }
         (ToolActionKind::Destructive, RunOrigin::Background | RunOrigin::Headless) => {
-            Some(AutoReviewDecision::new(
-                AutoReviewAction::HoldForReview,
+            return AutoReviewDecision::safety_gate(
                 "destructive background/headless action requires durable review",
-            ))
+            );
         }
-        _ => None,
+        _ => {}
     }
-}
 
-fn deterministic_fallback(ctx: &AutoReviewContext<'_>) -> AutoReviewDecision {
+    if ctx.approval_mode == ApprovalMode::Auto
+        && ctx.action_kind == ToolActionKind::Write
+        && !ctx.write_targets_bounded
+    {
+        return AutoReviewDecision::new(
+            AutoReviewAction::AskUser,
+            "Auto-Review requires every write target to stay inside the workspace and outside sensitive paths",
+        );
+    }
+
+    if let Some(rule) = allow_rule {
+        return AutoReviewDecision::new(AutoReviewAction::Allow, rule.reason.clone())
+            .with_rule(rule.id.clone());
+    }
+
     match (ctx.category, ctx.risk, ctx.action_kind) {
         (ToolCategory::Unknown, _, _) => AutoReviewDecision::new(
             AutoReviewAction::AskUser,
@@ -383,6 +386,26 @@ fn deterministic_fallback(ctx: &AutoReviewContext<'_>) -> AutoReviewDecision {
             "destructive action requires explicit review",
         ),
     }
+}
+
+fn file_write_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+    let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
+    Some(match canonical {
+        "write_file" | "edit_file" => vec![
+            input
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)?,
+        ],
+        "apply_patch" => {
+            crate::tools::apply_patch::preflight_apply_patch(input)
+                .ok()?
+                .touched_files
+        }
+        _ => return None,
+    })
 }
 
 fn shell_params_are_auto_review_routine(params: &Value) -> bool {
@@ -974,7 +997,13 @@ mod tests {
             approval_mode,
             true,
             false,
+            None,
         )
+    }
+
+    fn assert_safety_gate(decision: &AutoReviewDecision) {
+        assert_eq!(decision.action, AutoReviewAction::AskUser);
+        assert!(decision.built_in_safety_gate);
     }
 
     #[test]
@@ -1026,6 +1055,7 @@ mod tests {
             ApprovalMode::Auto,
             true,
             false,
+            None,
         );
 
         let decision = policy.evaluate(&ctx);
@@ -1052,7 +1082,7 @@ mod tests {
 
         let decision = policy.evaluate(&ctx);
 
-        assert_eq!(decision.action, AutoReviewAction::HoldForReview);
+        assert_safety_gate(&decision);
         assert_eq!(decision.rule_id.as_deref(), None);
         assert!(decision.reason.contains("publish-like"));
     }
@@ -1072,7 +1102,7 @@ mod tests {
 
         let decision = policy.evaluate(&ctx);
 
-        assert_ne!(decision.action, AutoReviewAction::HoldForReview);
+        assert!(!decision.built_in_safety_gate);
         assert_ne!(decision.action, AutoReviewAction::Block);
     }
 
@@ -1091,9 +1121,8 @@ mod tests {
             RunOrigin::Background,
             ApprovalMode::Bypass,
         );
-        assert_ne!(
-            policy.evaluate(&ordinary).action,
-            AutoReviewAction::HoldForReview,
+        assert!(
+            !policy.evaluate(&ordinary).built_in_safety_gate,
             "ordinary background task_shell_start must not prompt in YOLO"
         );
 
@@ -1103,11 +1132,7 @@ mod tests {
             RunOrigin::Background,
             ApprovalMode::Bypass,
         );
-        assert_eq!(
-            policy.evaluate(&dangerous).action,
-            AutoReviewAction::HoldForReview,
-            "dangerous background task_shell_start must still hold"
-        );
+        assert_safety_gate(&policy.evaluate(&dangerous));
 
         let verifiers = ctx_for(
             "run_verifiers",
@@ -1115,9 +1140,8 @@ mod tests {
             RunOrigin::Background,
             ApprovalMode::Bypass,
         );
-        assert_ne!(
-            policy.evaluate(&verifiers).action,
-            AutoReviewAction::HoldForReview,
+        assert!(
+            !policy.evaluate(&verifiers).built_in_safety_gate,
             "run_verifiers is not a destructive action kind and must not hold"
         );
     }
@@ -1142,11 +1166,7 @@ mod tests {
                 ApprovalMode::Bypass,
             );
             let decision = policy.evaluate(&ctx);
-            assert_eq!(
-                decision.action,
-                AutoReviewAction::HoldForReview,
-                "{command} must hold"
-            );
+            assert_safety_gate(&decision);
         }
     }
 
@@ -1170,11 +1190,7 @@ mod tests {
                 RunOrigin::Background,
                 ApprovalMode::Bypass,
             );
-            assert_eq!(
-                policy.evaluate(&ctx).action,
-                AutoReviewAction::HoldForReview,
-                "evasion not held: {command}"
-            );
+            assert_safety_gate(&policy.evaluate(&ctx));
         }
     }
 
@@ -1191,11 +1207,7 @@ mod tests {
                 ApprovalMode::Bypass,
             );
             let decision = policy.evaluate(&ctx);
-            assert_ne!(
-                decision.action,
-                AutoReviewAction::HoldForReview,
-                "{command} must not hold"
-            );
+            assert!(!decision.built_in_safety_gate, "{command} must not hold");
         }
     }
 
@@ -1214,11 +1226,7 @@ mod tests {
 
             let decision = policy.evaluate(&ctx);
 
-            assert_eq!(
-                decision.action,
-                AutoReviewAction::HoldForReview,
-                "{command} must hold"
-            );
+            assert_safety_gate(&decision);
             assert!(decision.reason.contains("destructive background/headless"));
         }
     }
@@ -1238,7 +1246,7 @@ mod tests {
 
         let decision = policy.evaluate(&ctx);
 
-        assert_ne!(decision.action, AutoReviewAction::HoldForReview);
+        assert!(!decision.built_in_safety_gate);
         assert_ne!(decision.action, AutoReviewAction::Block);
     }
 
@@ -1261,9 +1269,8 @@ mod tests {
         );
 
         assert_eq!(policy.evaluate(&read_ctx).action, AutoReviewAction::Allow);
-        assert_ne!(
-            policy.evaluate(&action_ctx).action,
-            AutoReviewAction::HoldForReview,
+        assert!(
+            !policy.evaluate(&action_ctx).built_in_safety_gate,
             "MCP actions are no longer held by the policy; the mode governs prompting"
         );
     }
@@ -1279,10 +1286,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_eq!(
-            policy.evaluate(&ctx).action,
-            AutoReviewAction::HoldForReview
-        );
+        assert_safety_gate(&policy.evaluate(&ctx));
     }
 
     #[test]
@@ -1296,10 +1300,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_eq!(
-            policy.evaluate(&ctx).action,
-            AutoReviewAction::HoldForReview
-        );
+        assert_safety_gate(&policy.evaluate(&ctx));
     }
 
     #[test]
@@ -1321,9 +1322,8 @@ mod tests {
                 RunOrigin::Interactive,
                 ApprovalMode::Bypass,
             );
-            assert_ne!(
-                policy.evaluate(&ctx).action,
-                AutoReviewAction::HoldForReview,
+            assert!(
+                !policy.evaluate(&ctx).built_in_safety_gate,
                 "expected no publish hold under Full Access for {command}"
             );
         }
@@ -1353,9 +1353,10 @@ mod tests {
                 ToolActionKind::Shell,
                 "expected routine shell classification for {command}"
             );
-            assert_ne!(
-                AutoReviewPolicy::default().evaluate(&ctx).action,
-                AutoReviewAction::HoldForReview,
+            assert!(
+                !AutoReviewPolicy::default()
+                    .evaluate(&ctx)
+                    .built_in_safety_gate,
                 "expected no publish hold for {command}"
             );
         }
@@ -1402,11 +1403,7 @@ mod tests {
                 ToolActionKind::Publish,
                 "expected publish hold classification for {command}"
             );
-            assert_eq!(
-                AutoReviewPolicy::default().evaluate(&ctx).action,
-                AutoReviewAction::HoldForReview,
-                "expected publish hold for {command}"
-            );
+            assert_safety_gate(&AutoReviewPolicy::default().evaluate(&ctx));
         }
     }
 
@@ -1421,10 +1418,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_eq!(
-            policy.evaluate(&ctx).action,
-            AutoReviewAction::HoldForReview
-        );
+        assert_safety_gate(&policy.evaluate(&ctx));
     }
 
     #[test]
@@ -1462,10 +1456,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_eq!(
-            policy.evaluate(&ctx).action,
-            AutoReviewAction::HoldForReview
-        );
+        assert_safety_gate(&policy.evaluate(&ctx));
     }
 
     #[test]
@@ -1479,10 +1470,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_eq!(
-            policy.evaluate(&ctx).action,
-            AutoReviewAction::HoldForReview
-        );
+        assert_safety_gate(&policy.evaluate(&ctx));
     }
 
     #[test]
@@ -1517,6 +1505,7 @@ mod tests {
             ApprovalMode::Suggest,
             true,
             true,
+            None,
         );
         let decision = policy.evaluate(&ctx);
 
@@ -1574,6 +1563,7 @@ mod tests {
                 ApprovalMode::Auto,
                 true,
                 false,
+                None,
             );
             assert_eq!(context.tool_name, tool_name);
             assert_eq!(context.category, category, "{tool_name}");
@@ -1625,6 +1615,7 @@ mod tests {
             ApprovalMode::Auto,
             true,
             false,
+            None,
         );
         let exact_request = format!("run the test suite {} never publish", "x".repeat(2_100));
         let text = build_reviewer_context(

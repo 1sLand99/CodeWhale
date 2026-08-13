@@ -435,6 +435,7 @@ reason = "read_file is allowed"
         crate::tui::approval::ApprovalMode::Auto,
         true,
         false,
+        None,
     );
     let shell_decision = policy.evaluate(&shell_context);
     assert_eq!(
@@ -450,6 +451,7 @@ reason = "read_file is allowed"
         crate::tui::approval::ApprovalMode::Auto,
         true,
         false,
+        None,
     );
     let read_decision = policy.evaluate(&read_context);
     assert_eq!(

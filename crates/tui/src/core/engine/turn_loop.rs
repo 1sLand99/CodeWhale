@@ -323,6 +323,65 @@ impl Engine {
         }
     }
 
+    async fn consult_auto_review_guardian(
+        &self,
+        client: &dyn crate::core::model_client::ModelClient,
+        context: &crate::tui::auto_review::AutoReviewContext<'_>,
+        tool_input: &Value,
+        held_reason: &str,
+        tool_id: &str,
+        turn: &mut TurnContext,
+    ) -> Result<(), ToolError> {
+        let context_text = crate::tui::auto_review::build_reviewer_context(
+            context,
+            held_reason,
+            &self.session.trusted_user_requests,
+            tool_input,
+        );
+        let _ = self
+            .tx_event
+            .send(Event::status(format!(
+                "Auto-Review checking '{}'",
+                context.tool_name
+            )))
+            .await;
+        let started = Instant::now();
+        let review = super::reviewer::consult_reviewer(
+            client,
+            &context_text,
+            !self.session.trusted_user_requests.is_empty(),
+            self.config
+                .auto_review_policy
+                .natural_language_guidance
+                .as_deref(),
+            &self.cancel_token,
+        )
+        .await;
+        if let Some(usage) = review.usage.as_ref() {
+            turn.add_usage(usage);
+            if usage_has_reported_data(usage) {
+                let _ = self
+                    .tx_event
+                    .send(Event::TurnUsage {
+                        usage: usage.clone(),
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    })
+                    .await;
+            }
+        }
+        let decision = review.outcome.audit_decision();
+        let result = review.outcome.into_tool_result(context.tool_name);
+        emit_tool_audit(json!({
+            "event": "tool.auto_review",
+            "gate": "guardian",
+            "tool_id": tool_id,
+            "decision": decision,
+            "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
+        }));
+        result.map(|_| ())
+    }
+
     pub(super) async fn handle_deepseek_turn(
         &mut self,
         turn: &mut TurnContext,
@@ -2462,8 +2521,7 @@ impl Engine {
                 }
 
                 if blocked_error.is_none() {
-                    let (decision, audit_event) = auto_review_plan_decision(
-                        &self.config.auto_review_policy,
+                    let review_context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
                         &tool_name,
                         &tool_input,
                         auto_review_run_origin_for_plan(detached_start),
@@ -2472,8 +2530,13 @@ impl Engine {
                         false,
                         Some(&self.session.workspace),
                     );
+                    let (decision, audit_event) = auto_review_plan_decision_for_context(
+                        &self.config.auto_review_policy,
+                        &review_context,
+                    );
                     emit_tool_audit(json!({
-                        "event": "tool.auto_review_decision",
+                        "event": "tool.auto_review",
+                        "gate": "deterministic",
                         "tool_id": tool_id.clone(),
                         "auto_review": audit_event,
                     }));
@@ -2499,65 +2562,17 @@ impl Engine {
                             blocked_error = Some(auto_review_block_tool_error(&reason));
                         }
                         AutoReviewPlanDecision::ConsultReviewer(held_reason) => {
-                            let review_context =
-                                crate::tui::auto_review::AutoReviewContext::from_tool_call(
-                                    &tool_name,
+                            if let Err(error) = self
+                                .consult_auto_review_guardian(
+                                    client.as_ref(),
+                                    &review_context,
                                     &tool_input,
-                                    auto_review_run_origin_for_plan(detached_start),
-                                    self.session.approval_mode,
-                                    crate::config::is_workspace_trusted(&self.session.workspace),
-                                    false,
-                                );
-                            let context_text = crate::tui::auto_review::build_reviewer_context(
-                                &review_context,
-                                &held_reason,
-                                &self.session.trusted_user_requests,
-                                &tool_input,
-                            );
-                            let _ = self
-                                .tx_event
-                                .send(Event::status(format!("Auto-Review checking '{tool_name}'")))
-                                .await;
-                            let reviewer_started = Instant::now();
-                            let review = super::reviewer::consult_reviewer(
-                                client.as_ref(),
-                                &context_text,
-                                !self.session.trusted_user_requests.is_empty(),
-                                self.config
-                                    .auto_review_policy
-                                    .natural_language_guidance
-                                    .as_deref(),
-                                &self.cancel_token,
-                            )
-                            .await;
-                            if let Some(usage) = review.usage.as_ref() {
-                                turn.add_usage(usage);
-                                if usage_has_reported_data(usage) {
-                                    let _ = self
-                                        .tx_event
-                                        .send(Event::TurnUsage {
-                                            usage: usage.clone(),
-                                            duration_ms: u64::try_from(
-                                                reviewer_started.elapsed().as_millis(),
-                                            )
-                                            .unwrap_or(u64::MAX),
-                                        })
-                                        .await;
-                                }
-                            }
-                            let audit_decision = review.outcome.audit_decision();
-                            let tool_result = review.outcome.into_tool_result(&tool_name);
-                            let audit_reason = match &tool_result {
-                                Ok(reason) => reason.clone(),
-                                Err(error) => error.to_string(),
-                            };
-                            emit_tool_audit(json!({
-                                "event": "tool.auto_review_reviewer",
-                                "tool_id": tool_id.clone(),
-                                "decision": audit_decision,
-                                "reason": audit_reason,
-                            }));
-                            if let Err(error) = tool_result {
+                                    &held_reason,
+                                    &tool_id,
+                                    turn,
+                                )
+                                .await
+                            {
                                 blocked_error = Some(error);
                             } else if !hook_requires_approval && !approval_force_prompt {
                                 approval_required = false;
