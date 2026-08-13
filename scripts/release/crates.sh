@@ -20,6 +20,9 @@ release_crates=(
   codewhale-lane
   codewhale-agent
   codewhale-core
+  # Prototype command boundary depends on core; future TUI/commands adapters
+  # consume it without changing current production dispatch in FEAT-014.
+  codewhale-command-contract
   codewhale-tui
   codewhale-app-server
   codewhale-cli
