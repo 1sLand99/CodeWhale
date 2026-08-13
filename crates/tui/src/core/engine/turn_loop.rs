@@ -96,6 +96,15 @@ pub(super) fn registered_tool_forces_prompt(
         && registered_tool_requires_non_bypassable_approval(tool_name)
 }
 
+/// Repo-law `ask` rules require a human decision. Only Ask posture can open
+/// that decision; every autonomous or no-prompt posture must fail closed.
+pub(super) fn repo_law_must_block_without_prompt(
+    approval_mode: crate::tui::approval::ApprovalMode,
+    auto_approve: bool,
+) -> bool {
+    auto_approve || approval_mode != crate::tui::approval::ApprovalMode::Suggest
+}
+
 /// Whether a [`Usage`] carries any provider-reported data. The
 /// chat-completions streaming adapter emits a synthetic `MessageStart` with a
 /// zeroed [`Usage`]; treating that as reported would fabricate zero-valued
@@ -357,7 +366,7 @@ impl Engine {
             &self.cancel_token,
         )
         .await;
-        if let Some(usage) = review.usage.as_ref() {
+        for usage in &review.usages {
             turn.add_usage(usage);
             if usage_has_reported_data(usage) {
                 let _ = self
@@ -371,12 +380,16 @@ impl Engine {
             }
         }
         let decision = review.outcome.audit_decision();
+        let risk = review.outcome.audit_risk();
+        let attempts = review.attempts;
         let result = review.outcome.into_tool_result(context.tool_name);
         emit_tool_audit(json!({
             "event": "tool.auto_review",
             "gate": "guardian",
             "tool_id": tool_id,
             "decision": decision,
+            "risk": risk,
+            "attempts": attempts,
             "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
         }));
         result.map(|_| ())
@@ -2606,11 +2619,15 @@ impl Engine {
                     }));
                     match decision {
                         crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
-                            if self.session.auto_approve {
+                            if repo_law_must_block_without_prompt(
+                                self.session.approval_mode,
+                                self.session.auto_approve,
+                            ) {
                                 approval_required = false;
                                 approval_force_prompt = false;
                                 blocked_error = Some(ToolError::permission_denied(format!(
-                                    "Repository law blocked tool '{tool_name}' in Full Access: {reason}. Switch to Ask to review this protected change."
+                                    "Repository law blocked tool '{tool_name}' in {}: {reason}. Switch to Ask to review this protected change.",
+                                    self.session.approval_mode.permission_chip_label(),
                                 )));
                             } else {
                                 approval_required = true;

@@ -1812,7 +1812,7 @@ If you are upgrading from older releases:
   This layer sits on top of the existing permission posture; it can hold or block a
   tool call, but it is not an auto-push, auto-merge, or hosted review service.
   Block rules are checked first, then the built-in safety floor, then allow
-  rules. In Ask and Auto-Review, a safety hold opens approval; in Full Access
+  rules. In Ask, a safety hold opens approval; in Auto-Review, Full Access,
   or a non-interactive `never` posture it fails closed as a hard block. The
   safety floor still covers publish-like actions and destructive
   background/headless actions even if an allow rule matches.
@@ -1844,13 +1844,17 @@ If you are upgrading from older releases:
   Fallback holds in interactive Auto-Review escalate to one stateless guardian
   request. The request contains bounded text accepted at the external input
   boundary and the exact held call as separate JSON fields. Skill instructions,
-  attached file contents, and other expanded model context are never treated as
-  authorization. Synthetic continuations inherit the current request, while a
+  attached file contents, and other expanded model context are excluded. The
+  guardian does not compute a generic intent or authorization score: exact
+  user-authored text is evidence only when the action needs explicit authority.
+  Synthetic continuations inherit the current request, while a
   restored session starts with none until new external input arrives. The
-  guardian exposes no tools and returns allow/deny
-  with a rationale. An oversized exact call is denied rather than truncated.
-  Timeout, cancellation, provider failure, incomplete output, malformed JSON,
-  or an empty rationale all fail closed. The deterministic floor is never
+  guardian exposes no tools and returns a risk level, allow/deny, and a
+  rationale. High or critical risk cannot auto-run even if the model says
+  allow. An oversized exact call is denied rather than truncated. Incomplete
+  or malformed output is retried at most three times within the same 90-second
+  deadline; exhaustion, timeout, cancellation, provider failure, or an empty
+  rationale all fail closed. The deterministic floor is never
   model-reviewed, and headless adapters use the deterministic-only tier.
   Reviewer outcomes emit `tool.auto_review` audit events with
   `gate = "guardian"`.

@@ -4,7 +4,8 @@ use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     auto_review_block_tool_error, merge_new_runtime_mcp_tools, registered_tool_approval_required,
-    registered_tool_forces_prompt, workspace_write_carve_out_applies,
+    registered_tool_forces_prompt, repo_law_must_block_without_prompt,
+    workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
@@ -5516,6 +5517,31 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
     );
     assert_eq!(audit["approval_mode"], "NEVER");
     assert_eq!(audit["decision"], "hold_for_review");
+}
+
+#[test]
+fn repo_law_asks_only_in_ask_posture() {
+    use crate::tui::approval::ApprovalMode;
+
+    assert!(!repo_law_must_block_without_prompt(
+        ApprovalMode::Suggest,
+        false
+    ));
+    for mode in [
+        ApprovalMode::Auto,
+        ApprovalMode::Never,
+        ApprovalMode::Bypass,
+    ] {
+        assert!(
+            repo_law_must_block_without_prompt(mode, false),
+            "{} must not open a human repo-law approval",
+            mode.permission_chip_label()
+        );
+    }
+    assert!(repo_law_must_block_without_prompt(
+        ApprovalMode::Suggest,
+        true
+    ));
 }
 
 #[test]

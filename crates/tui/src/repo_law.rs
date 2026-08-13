@@ -10,9 +10,9 @@
 //!
 //! - Law can only ADD holds. There is no allow/widen shape in the schema, so
 //!   a crafted constitution cannot grant authority.
-//! - `ask` force-prompts in approval-gated postures. Full Access never opens
-//!   tool-approval prompts, so the same law fails closed there. `block` denies
-//!   outright in every posture.
+//! - `ask` force-prompts only in Ask posture. Auto-Review, Full Access, and
+//!   Never never open tool-approval prompts, so the same law fails closed
+//!   there. `block` denies outright in every posture.
 //! - Any failure (missing file, parse error, bad glob) degrades to fewer or
 //!   zero rules — never a poisoned gate, never a hold on unprotected paths.
 //! - Only the repo-local constitution participates. The user-global

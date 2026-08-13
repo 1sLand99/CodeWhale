@@ -182,13 +182,17 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
   floor) allows proven-safe calls and hard-blocks publish-like actions and
   destructive background/headless work; it is never model-reviewed. Fallback
   holds — calls the deterministic engine could not prove safe — escalate to a
-  one-shot **model guardian** (v0.9.8) that returns allow/deny with a
+  one-shot **model guardian** (v0.9.8) that returns risk, allow/deny, and a
   rationale. The guardian sees bounded external-input text and the exact held
   call in separate JSON fields; skill instructions, attachments, and expanded
-  model context are not authorization. It has no tools, remembers no rules, and
-  denies rather than truncates an oversized exact call. It fails closed on
-  timeout, cancellation, provider failure, incomplete output, or malformed
-  JSON. Headless adapters use the deterministic-only tier.
+  model context are excluded. It does not compute a generic user-intent score.
+  High or critical risk cannot auto-run even if the model says allow. It has no
+  tools, remembers no rules, and denies rather than truncates an oversized
+  exact call. Incomplete or malformed output is retried at most three times
+  within one deadline; exhaustion, timeout, cancellation, or provider failure
+  fails closed. Headless adapters use the deterministic-only tier. Repo-law
+  holds that explicitly require a person block in Auto-Review rather than
+  opening a hidden approval modal.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
   while deliberate user questions remain available. Non-bypassable safety,
   repository-law, and managed-policy holds fail closed as hard blocks instead
