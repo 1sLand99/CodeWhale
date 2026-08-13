@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fb18fffb0fe -->
+<!-- source: README.md sha256:3a759de92f8b -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -68,7 +68,7 @@ shell qua đường phê duyệt bình thường.
 
 - **Model nào cũng được, provider nào cũng được.** DeepSeek, Claude, GPT, Kimi,
   GLM, hơn 30 provider, và vLLM, SGLang hay Ollama của riêng bạn — không cần
-  key — đều chạy qua một runtime và một bộ công cụ. Ngân sách ngữ cảnh và giá
+  key — đều chạy qua một runtime và một bộ công cụ. Danh mục theo dõi đội hình trực tiếp của từng provider — backend V4 Pro của DeepSeek (nhãn `DeepSeek-V4-Pro-0813`) vẫn gọi được bằng `deepseek-v4-pro`, Grok 4.6 là mặc định trực tiếp của xAI, còn OrcaRouter định tuyến qua `orcarouter/auto`. Ngân sách ngữ cảnh và giá
   lấy từ route thật; giá chưa rõ hiển thị là chưa rõ, chứ không phải $0.
 - **Một harness do bạn viết.** Vai trò là những tệp bạn có thể đọc và sửa — mỗi
   vai trò một model, một tư thế công cụ và các chỉ dẫn thường trực — đặt trong dự

@@ -1231,6 +1231,117 @@ fn reasoning_effort_normalizes_each_exact_k3_route_without_neighbor_leakage() {
 }
 
 #[test]
+fn picker_uses_catalog_reasoning_efforts_for_grok_46() {
+    let labels: Vec<&str> = crate::tui::model_picker::picker_efforts_for_route(
+        ApiProvider::Xai,
+        ApiProvider::Xai.default_base_url(),
+        crate::config::XAI_GROK_4_6_MODEL,
+        false,
+    )
+    .iter()
+    .map(|effort| effort.as_setting())
+    .collect();
+    assert_eq!(labels, vec!["auto", "low", "medium", "high", "xhigh"]);
+}
+
+#[test]
+fn reasoning_effort_preserves_grok_46_ladder_only_on_exact_xai_route() {
+    let xai = crate::config::DEFAULT_XAI_BASE_URL;
+    let model = crate::config::XAI_GROK_4_6_MODEL;
+    for (requested, expected) in [
+        (ReasoningEffort::Off, ReasoningEffort::High),
+        (ReasoningEffort::Low, ReasoningEffort::Low),
+        (ReasoningEffort::Medium, ReasoningEffort::Medium),
+        (ReasoningEffort::High, ReasoningEffort::High),
+        (ReasoningEffort::XHigh, ReasoningEffort::XHigh),
+        (ReasoningEffort::Max, ReasoningEffort::XHigh),
+        (ReasoningEffort::Ultra, ReasoningEffort::XHigh),
+        (ReasoningEffort::Auto, ReasoningEffort::Auto),
+    ] {
+        assert_eq!(
+            requested.normalize_for_route(ApiProvider::Xai, xai, model),
+            expected,
+            "{requested:?}"
+        );
+    }
+    assert_eq!(
+        ReasoningEffort::Medium.normalize_for_route(
+            ApiProvider::Xai,
+            "https://gateway.example/v1",
+            model,
+        ),
+        ReasoningEffort::Medium,
+        "catalog effort lists are model metadata; the Chat wire still omits them on a custom endpoint"
+    );
+}
+
+fn xai_grok_46_startup_config() -> Config {
+    Config {
+        provider: Some("xai".to_string()),
+        providers: Some(ProvidersConfig {
+            xai: ProviderConfig {
+                api_key: Some("xai-startup-test-key".to_string()),
+                base_url: Some(crate::config::DEFAULT_XAI_BASE_URL.to_string()),
+                model: Some(crate::config::XAI_GROK_4_6_MODEL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    }
+}
+
+fn xai_grok_46_startup_app(config: &Config) -> App {
+    let mut options = test_options(false);
+    options.model = crate::config::XAI_GROK_4_6_MODEL.to_string();
+    App::new(options, config)
+}
+
+#[test]
+fn app_new_uses_grok_46_official_high_when_effort_is_unset() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let config = xai_grok_46_startup_config();
+    let app = xai_grok_46_startup_app(&config);
+
+    assert_eq!(app.api_provider, ApiProvider::Xai);
+    assert_eq!(app.model, crate::config::XAI_GROK_4_6_MODEL);
+    assert_eq!(
+        app.active_route_base_url,
+        crate::config::DEFAULT_XAI_BASE_URL
+    );
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(app.reasoning_effort_display_label(), "high");
+}
+
+#[test]
+fn app_new_maps_persisted_grok_46_off_to_high_and_max_to_xhigh() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let config = xai_grok_46_startup_config();
+
+    for (raw, expected, display) in [
+        ("off", ReasoningEffort::High, "high"),
+        ("max", ReasoningEffort::XHigh, "xhigh"),
+        ("auto", ReasoningEffort::Auto, "auto"),
+    ] {
+        std::fs::write(
+            tmp.path().join("settings.toml"),
+            format!("reasoning_effort = \"{raw}\"\n"),
+        )
+        .expect("settings");
+
+        let app = xai_grok_46_startup_app(&config);
+        assert_eq!(app.reasoning_effort, expected, "raw setting {raw}");
+        assert_eq!(app.reasoning_effort_display_label(), display);
+    }
+}
+
+#[test]
 fn set_model_selection_normalizes_codex_fixed_model_effort() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::OpenaiCodex;

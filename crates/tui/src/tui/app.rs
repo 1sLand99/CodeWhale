@@ -4923,6 +4923,8 @@ impl App {
         } else if let Some(effort) = inferred {
             ReasoningEffort::from_setting(effort)
                 .normalize_for_route(provider, base_url, wire_model)
+        } else if let Some(default) = ReasoningEffort::catalog_default(provider, wire_model) {
+            default
         } else {
             self.reasoning_effort
                 .normalize_for_route(provider, base_url, wire_model)

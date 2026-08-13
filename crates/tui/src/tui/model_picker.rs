@@ -4829,6 +4829,23 @@ mod tests {
     }
 
     #[test]
+    fn picker_lists_grok_46_first_and_keeps_grok_45_selectable() {
+        let (mut app, config, _lock) = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Xai;
+        app.model = crate::config::XAI_GROK_4_6_MODEL.to_string();
+        app.auto_model = false;
+        let view = ModelPickerView::new(&app, &config);
+        let ids: Vec<_> = view
+            .model_rows
+            .iter()
+            .filter(|row| row.provider == Some(crate::config::ApiProvider::Xai))
+            .map(|row| row.id.as_str())
+            .collect();
+        assert_eq!(ids.first().copied(), Some("grok-4.6"));
+        assert!(ids.contains(&"grok-4.5"));
+    }
+
+    #[test]
     fn picker_for_ollama_preserves_current_local_tag_without_hosted_static_rows() {
         let (mut app, config, _lock) = create_test_app();
         app.api_provider = crate::config::ApiProvider::Ollama;

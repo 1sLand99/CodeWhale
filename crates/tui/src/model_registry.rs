@@ -192,6 +192,7 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("muse-spark-1.2", ModelProvider::Meta),
     ("muse-spark-1.2-contributor", ModelProvider::Meta),
     // --- xAI / Grok (config DEFAULT_XAI_MODEL) ---
+    ("grok-4.6", ModelProvider::Xai),
     ("grok-4.5", ModelProvider::Xai),
     ("grok-4.3", ModelProvider::Xai),
     ("grok-build", ModelProvider::Xai),
@@ -306,6 +307,7 @@ mod tests {
             ("muse-spark-1.1", Some(1_000_000)),
             ("muse-spark-1.2", Some(1_000_000)),
             ("muse-spark-1.2-contributor", Some(1_000_000)),
+            ("grok-4.6", Some(500_000)),
             ("grok-4.5", Some(500_000)),
             ("grok-4.3", Some(1_000_000)),
             ("grok-4.20-0309-reasoning", Some(2_000_000)),
@@ -366,7 +368,7 @@ mod tests {
 
     #[test]
     fn xai_models_are_classified_as_xai() {
-        let meta = lookup("grok-4.5").expect("xAI default should be seeded");
+        let meta = lookup("grok-4.6").expect("xAI default should be seeded");
         assert_eq!(meta.provider, ModelProvider::Xai);
         assert_eq!(meta.context_window, Some(500_000));
         assert!(meta.supports_reasoning);

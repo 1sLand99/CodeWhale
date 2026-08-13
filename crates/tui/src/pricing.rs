@@ -584,6 +584,10 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "meta/muse-spark-1.2-contributor" | "muse-spark-1.2-contributor" => {
             Some(usd_only_pricing(0.002, 0.10, 0.20))
         }
+        // Grok 4.6 doubles all token rates when the prompt reaches 200K.
+        // Metadata-only lookups use the standard tier; turn auditing below
+        // selects the exact usage-aware tier for the direct xAI route.
+        "grok-4.6" => Some(grok_4_6_pricing(false)),
         // Anthropic first-party rates including the published cache-read
         // discounts and 5-minute cache-write rates (2026-07-09 audit,
         // https://platform.claude.com/docs/en/about-claude/pricing). These sit
@@ -710,6 +714,7 @@ fn usd_pricing(
 }
 
 const MINIMAX_M3_LONG_CONTEXT_THRESHOLD: u32 = 512_000;
+const GROK_4_6_LONG_CONTEXT_THRESHOLD: u32 = 200_000;
 const OPENAI_LONG_CONTEXT_SURCHARGE_THRESHOLD: u32 = 272_000;
 
 /// OpenAI applies a higher price to the full request once these models exceed
@@ -756,10 +761,27 @@ fn is_minimax_m3(model: &str) -> bool {
     )
 }
 
+fn grok_4_6_pricing(long_context: bool) -> ModelPricing {
+    if long_context {
+        usd_only_pricing(1.00, 4.00, 12.00)
+    } else {
+        usd_only_pricing(0.50, 2.00, 6.00)
+    }
+}
+
+fn is_grok_4_6(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("grok-4.6")
+}
+
 fn pricing_for_model_and_usage(model: &str, usage: &Usage) -> Option<ModelPricing> {
     if is_minimax_m3(model) {
         return Some(minimax_m3_standard_pricing(
             usage.input_tokens > MINIMAX_M3_LONG_CONTEXT_THRESHOLD,
+        ));
+    }
+    if is_grok_4_6(model) {
+        return Some(grok_4_6_pricing(
+            usage.input_tokens >= GROK_4_6_LONG_CONTEXT_THRESHOLD,
         ));
     }
     pricing_for_model(model)
@@ -1227,6 +1249,13 @@ pub(crate) fn audit_turn_cost_for_provider_on_endpoint_at(
         return hand_priced_audit(pricing_for_model_and_usage(&catalog_model, usage), usage);
     }
 
+    // xAI doubles Grok 4.6 input, cached-input, and output rates once the
+    // prompt reaches 200K tokens. Keep this provider-owned and usage-aware so
+    // a third-party route reusing the model slug never inherits xAI billing.
+    if provider == ApiProvider::Xai && catalog_model.eq_ignore_ascii_case("grok-4.6") {
+        return hand_priced_audit(pricing_for_model_and_usage(&catalog_model, usage), usage);
+    }
+
     // Direct DeepSeek pricing carries an authoritative CNY row, and Sonnet 5
     // has a recorded-time introductory window that a static catalog row cannot
     // represent. These exact first-party routes intentionally override the
@@ -1623,6 +1652,7 @@ fn provider_owned_hand_pricing_at(
                 | "claude-fable-5"
                 | "claude-sonnet-5"
         ),
+        ApiProvider::Xai => model_lower == "grok-4.6",
         // GLM-5.3 is deliberately absent: this allowlist declares that Z.ai
         // owns a *hand-written price row* for the model, and no GLM-5.3 rate
         // has been published. An absent price is honest; an owned-but-empty
@@ -2636,6 +2666,47 @@ mod tests {
             }
             assert!(calculate_cache_savings(model, 1).is_none());
         }
+    }
+
+    #[test]
+    fn grok_46_pricing_tracks_the_200k_prompt_boundary() {
+        for (input_tokens, cache_read, input, output) in
+            [(199_999, 0.50, 2.00, 6.00), (200_000, 1.00, 4.00, 12.00)]
+        {
+            let usage = Usage {
+                input_tokens,
+                ..Usage::default()
+            };
+            let pricing =
+                pricing_for_model_and_usage("grok-4.6", &usage).expect("Grok 4.6 pricing");
+            assert_eq!(pricing.usd.input_cache_hit_per_million, cache_read);
+            assert_eq!(pricing.usd.input_cache_miss_per_million, input);
+            assert_eq!(pricing.usd.output_per_million, output);
+        }
+    }
+
+    #[test]
+    fn direct_xai_grok_46_owns_usage_tier_without_leaking_to_other_providers() {
+        for (input_tokens, input_rate) in [(199_999, 2.00), (200_000, 4.00)] {
+            let usage = Usage {
+                input_tokens,
+                ..Usage::default()
+            };
+            let estimate = calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Xai,
+                "grok-4.6",
+                &usage,
+                Utc::now(),
+            )
+            .expect("direct xAI route has authoritative tiered pricing");
+            let expected = f64::from(input_tokens) / 1_000_000.0 * input_rate;
+            assert!((estimate.usd - expected).abs() < 1e-12);
+        }
+
+        assert!(
+            provider_owned_hand_pricing_at(ApiProvider::Openrouter, "grok-4.6", Utc::now(),)
+                .is_none()
+        );
     }
 
     #[test]

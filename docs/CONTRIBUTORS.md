@@ -28,6 +28,25 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.7 — the catalog stays ordinary</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[XhesicaFrost](https://github.com/XhesicaFrost)** — copy from the message
+  context menu now takes canonical content, keeping authored Unicode,
+  Markdown, and hard line breaks in the clipboard while role glyphs,
+  continuation rails, and visual wrapping stay out of it (PR #5319)
+- **[h3c-hexin](https://github.com/h3c-hexin)** — split durable-session
+  snapshot reads from crash recovery so an embedding host inspecting a
+  session while a tool is still running no longer gets a spurious crash
+  repair (PR #5320)
+- **[XiaoHuo888-hue](https://github.com/XiaoHuo888-hue)** — OrcaRouter as a
+  first-class named provider with `ORCAROUTER_API_KEY`, auto-routing,
+  CLI `--provider` selection, and TUI picker entries (PR #5321)
+
+</details>
+
+<details>
 <summary><strong>v0.9.6 — fewer bumpers, truthful endings</strong></summary>
 
 **Merged or adapted contributions**

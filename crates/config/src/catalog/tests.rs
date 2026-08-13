@@ -682,6 +682,30 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
         Some("disabled")
     );
 
+    let grok_46 = find(&rows, "xai", "grok-4.6");
+    assert!(grok_46.default_for_provider);
+    assert_eq!(
+        grok_46.limit.as_ref().and_then(|limit| limit.context),
+        Some(500_000)
+    );
+    assert_eq!(grok_46.attachment, Some(true));
+    assert_eq!(grok_46.structured_output, Some(true));
+    let grok_input_modalities = grok_46
+        .modalities
+        .as_ref()
+        .expect("Grok 4.6 modalities")
+        .input
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(grok_input_modalities, ["text", "image"]);
+    assert_eq!(
+        grok_46.reasoning_options[0]
+            .get("default")
+            .and_then(serde_json::Value::as_str),
+        Some("high")
+    );
+
     let minimax_m2_7 = find(&rows, "minimax-anthropic", "MiniMax-M2.7");
     assert_eq!(
         minimax_m2_7.limit.as_ref().and_then(|limit| limit.context),
@@ -755,6 +779,11 @@ fn bundled_asset_pricing_is_honest() {
     // cannot represent, so the bundled route row stays honestly unpriced.
     let minimax_m3 = find(&rows, "minimax-anthropic", "MiniMax-M3");
     assert!(minimax_m3.cost.is_none());
+
+    // Grok 4.6 also has a prompt-length tier, starting at 200K input tokens.
+    // The usage-aware TUI table prices it; a flat catalog row would underbill.
+    let grok_46 = find(&rows, "xai", "grok-4.6");
+    assert!(grok_46.cost.is_none());
 
     let minimax_m2_7 = find(&rows, "minimax-anthropic", "MiniMax-M2.7");
     let cost = minimax_m2_7.cost.as_ref().expect("M2.7 is priced");

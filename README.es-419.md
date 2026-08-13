@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fb18fffb0fe -->
+<!-- source: README.md sha256:3a759de92f8b -->
 # Codewhale
 
 Un agente de programación de código abierto para tu terminal — trae tu propio modelo.
@@ -69,8 +69,11 @@ aprobación.
 
 - **Cualquier modelo, cualquier proveedor.** DeepSeek, Claude, GPT, Kimi, GLM y
   más de 30 proveedores, además de tu propio vLLM, SGLang u Ollama sin key —
-  todo a través de un solo runtime y un solo conjunto de herramientas. Los
-  presupuestos de contexto y los precios vienen de la ruta real, y un precio
+  todo a través de un solo runtime y un solo conjunto de herramientas. El
+  catálogo sigue la alineación en vivo de cada proveedor: el backend V4 Pro de
+  DeepSeek (etiquetado `DeepSeek-V4-Pro-0813`) sigue siendo invocable como
+  `deepseek-v4-pro`, Grok 4.6 es el modelo predeterminado directo de xAI y
+  OrcaRouter enruta a través de `orcarouter/auto`. Los presupuestos de contexto y los precios vienen de la ruta real, y un precio
   desconocido se muestra como desconocido en lugar de $0.
 - **Un harness que tú escribes.** Los roles son archivos que puedes leer y
   editar — un modelo, una postura de herramientas e instrucciones permanentes por

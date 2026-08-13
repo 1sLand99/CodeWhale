@@ -20,9 +20,9 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
-  "@xavierpestel-ai",
-  "@ousamabenyounes",
-  "@rafaelcavalheri",
+  "@XhesicaFrost",
+  "@h3c-hexin",
+  "@XiaoHuo888-hue",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */

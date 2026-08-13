@@ -73,7 +73,7 @@ pub(crate) fn documented_server_side_web_search(
                 | "claude-sonnet-5"
                 | "claude-sonnet-4-6"
         ),
-        "xai" => wire_model_id == "grok-4.5",
+        "xai" => matches!(wire_model_id.as_str(), "grok-4.6" | "grok-4.5"),
         _ => false,
     };
     if supported {
@@ -144,6 +144,10 @@ mod tests {
     #[test]
     fn documented_web_search_is_exact_and_provider_owned() {
         assert_eq!(
+            documented_server_side_web_search("xai", "grok-4.6"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
             documented_server_side_web_search("xai", "grok-4.5"),
             CapabilityState::Supported
         );
@@ -160,6 +164,8 @@ mod tests {
             ("openrouter", "openai/gpt-5.6"),
             ("custom", "gpt-5.6"),
             ("openai", "gpt-5.6-sol"),
+            ("xai", "grok-4.6-fast"),
+            ("xai", "grok-4.6-latest"),
             ("xai", "grok-4.5-fast"),
             ("anthropic", "claude-haiku-4-5"),
         ] {
