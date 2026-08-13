@@ -18,7 +18,8 @@ pub(crate) use crate::shell_dispatcher::test_env_lock::{
 /// and unsafe in a parallel test binary: an unguarded save can otherwise read
 /// or overwrite the developer's config. Tests that exercise path precedence
 /// still hold [`lock_test_env`] and provide explicit temporary environment
-/// values; every other test is confined here.
+/// values; every other test is confined here — enforced by
+/// [`guarded_environment_provides_state_paths`], not assumed.
 pub(crate) fn isolated_test_state_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
@@ -38,6 +39,33 @@ pub(crate) fn isolated_test_state_root() -> &'static Path {
         });
         root
     })
+}
+
+/// Where the calling test's state should live when it has not sealed the
+/// environment itself.
+///
+/// Two different callers land here. A test that never took [`lock_test_env`]
+/// gets the shared root, exactly as before — those tests already coexist there
+/// under [`with_test_state_io_lock`]. A test that *holds* the lock but sealed
+/// nothing gets a private directory instead: before #5359 it resolved the
+/// developer's real home, so it has never shared the process root, and several
+/// such tests run full settings transactions. Adding that traffic to the shared
+/// root pushed the transaction lock past its deadline and hung unrelated
+/// `config_command_*` tests. Keep them isolated from the developer *and* from
+/// each other.
+pub(crate) fn unsealed_test_state_root() -> PathBuf {
+    let shared = isolated_test_state_root();
+    if !current_thread_holds_test_env_lock() {
+        return shared.to_path_buf();
+    }
+    let root = shared.join(format!("env-holder-{:?}", std::thread::current().id()));
+    std::fs::create_dir_all(&root).unwrap_or_else(|error| {
+        panic!(
+            "failed to create per-holder test state root {}: {error}",
+            root.display()
+        )
+    });
+    root
 }
 
 /// Build a syntactically valid, non-secret JWT fixture without embedding a
@@ -73,9 +101,78 @@ pub(crate) fn with_test_state_io_lock<T>(operation: impl FnOnce() -> T) -> T {
 ///
 /// Callers that mutate process-global environment variables must hold
 /// [`lock_test_env`] until after this guard is dropped.
+///
+/// Every live guard is also recorded in [`guarded_env_keys`], so path
+/// resolution can distinguish a test that deliberately redirected `HOME`
+/// from one that merely holds the lock to serialize unrelated env access —
+/// see [`guarded_environment_provides_state_paths`].
 pub(crate) struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
+}
+
+fn guarded_env_keys() -> &'static Mutex<std::collections::HashMap<&'static str, usize>> {
+    static KEYS: OnceLock<Mutex<std::collections::HashMap<&'static str, usize>>> = OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn register_guarded_env_key(key: &'static str) {
+    let mut keys = match guarded_env_keys().lock() {
+        Ok(keys) => keys,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *keys.entry(key).or_insert(0) += 1;
+}
+
+fn unregister_guarded_env_key(key: &'static str) {
+    let mut keys = match guarded_env_keys().lock() {
+        Ok(keys) => keys,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(count) = keys.get_mut(key) {
+        *count -= 1;
+        if *count == 0 {
+            keys.remove(key);
+        }
+    }
+}
+
+/// Whether some live [`EnvVarGuard`] currently covers `key`.
+pub(crate) fn env_var_currently_guarded(key: &str) -> bool {
+    match guarded_env_keys().lock() {
+        Ok(keys) => keys.contains_key(key),
+        Err(poisoned) => poisoned.into_inner().contains_key(key),
+    }
+}
+
+/// Whether the calling test actually provided the state-path environment it
+/// is about to resolve.
+///
+/// Holding [`lock_test_env`] alone is not that: many tests hold the lock only
+/// to serialize access to unrelated variables (`TERM_PROGRAM`, API keys) and
+/// have provided no temporary paths at all. Trusting the lock routed those
+/// tests to the developer's real `~/.codewhale` state, which is exactly the
+/// leak the isolated root exists to prevent (#5359). A test earns environment
+/// resolution by holding the lock *and* either setting one of the explicit
+/// override variables or redirecting `HOME`/`USERPROFILE` through
+/// [`EnvVarGuard`].
+pub(crate) fn guarded_environment_provides_state_paths() -> bool {
+    if !current_thread_holds_test_env_lock() {
+        return false;
+    }
+    // Explicit overrides may arrive from a parent process (the cross-process
+    // settings children), so presence in the environment counts even without
+    // a live guard in this process.
+    let explicit_override_present = [
+        "CODEWHALE_HOME",
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+    ]
+    .iter()
+    .any(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()));
+    explicit_override_present
+        || env_var_currently_guarded("HOME")
+        || env_var_currently_guarded("USERPROFILE")
 }
 
 impl EnvVarGuard {
@@ -87,6 +184,7 @@ impl EnvVarGuard {
         let previous = std::env::var_os(key);
         // SAFETY: callers hold the process-wide test env mutex.
         unsafe { std::env::set_var(key, value) };
+        register_guarded_env_key(key);
         Self { key, previous }
     }
 
@@ -98,6 +196,7 @@ impl EnvVarGuard {
         let previous = std::env::var_os(key);
         // SAFETY: callers hold the process-wide test env mutex.
         unsafe { std::env::remove_var(key) };
+        register_guarded_env_key(key);
         Self { key, previous }
     }
 
@@ -117,6 +216,7 @@ impl Drop for EnvVarGuard {
                 std::env::remove_var(self.key);
             }
         }
+        unregister_guarded_env_key(self.key);
     }
 }
 
