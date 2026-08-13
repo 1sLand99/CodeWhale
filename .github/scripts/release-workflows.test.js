@@ -320,6 +320,7 @@ assert.match(npmTagGate, /verify-remote-tag\.sh/);
 assert.match(npmAssetGate, /verify-release-assets\.sh/);
 assert.match(npmAssetGate, /GH_TOKEN: \$\{\{ github\.token \}\}/);
 assert.match(npmPublish, /working-directory: npm\/codewhale/);
+assert.match(npmPublish, /GH_TOKEN: \$\{\{ github\.token \}\}/);
 assert.match(npmPublish, /npm publish --access public/);
 assert.doesNotMatch(npmJob[1], /NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./);
 assert.ok(
