@@ -5306,30 +5306,6 @@ pub(crate) fn auto_review_plan_decision_for_context(
     (plan_decision, audit_event)
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn auto_review_plan_decision(
-    policy: &crate::tui::auto_review::AutoReviewPolicy,
-    tool_name: &str,
-    tool_input: &Value,
-    run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    workspace_trusted: bool,
-    dirty_worktree: bool,
-    workspace: Option<&std::path::Path>,
-) -> (AutoReviewPlanDecision, Value) {
-    let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
-        tool_name,
-        tool_input,
-        run_origin,
-        approval_mode,
-        workspace_trusted,
-        dirty_worktree,
-        workspace,
-    );
-    auto_review_plan_decision_for_context(policy, &context)
-}
-
 pub(super) fn exec_shell_ask_rule_decision(
     config: &EngineConfig,
     tool_name: &str,

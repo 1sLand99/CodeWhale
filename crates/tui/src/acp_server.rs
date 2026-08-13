@@ -716,7 +716,6 @@ fn prepare_acp_tool_admission(
         run_origin,
         approval_mode,
         crate::config::is_workspace_trusted(workspace),
-        false,
         Some(workspace),
     );
     let (auto_review, _audit) =

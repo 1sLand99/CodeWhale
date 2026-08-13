@@ -14,7 +14,7 @@ use crate::prompts::{
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -5835,6 +5835,26 @@ async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
     operate_task.await.expect("Operate engine task");
 }
 
+fn auto_review_plan_decision(
+    policy: &crate::tui::auto_review::AutoReviewPolicy,
+    tool_name: &str,
+    tool_input: &Value,
+    run_origin: crate::tui::auto_review::RunOrigin,
+    approval_mode: crate::tui::approval::ApprovalMode,
+    workspace_trusted: bool,
+    workspace: Option<&Path>,
+) -> (AutoReviewPlanDecision, Value) {
+    let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
+        tool_name,
+        tool_input,
+        run_origin,
+        approval_mode,
+        workspace_trusted,
+        workspace,
+    );
+    auto_review_plan_decision_for_context(policy, &context)
+}
+
 #[test]
 fn auto_review_classifies_publish_and_holds_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
@@ -5844,7 +5864,6 @@ fn auto_review_classifies_publish_and_holds_without_prompting() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -5868,7 +5887,6 @@ fn auto_review_classifier_allow_executes_without_prompting() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -5885,7 +5903,6 @@ fn auto_review_allows_ordinary_shell_probe_without_prompting() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -5903,7 +5920,6 @@ fn auto_review_routes_unknown_tool_to_reviewer_in_auto() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -5925,7 +5941,6 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Never,
         true,
-        false,
         None,
     );
 
@@ -6173,7 +6188,6 @@ fn auto_review_allows_ordinary_test_command_without_prompting() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -6194,7 +6208,6 @@ fn auto_review_allows_ordinary_workspace_write_without_prompting() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         Some(tmp.path()),
     );
 
@@ -6215,7 +6228,6 @@ fn auto_review_routes_unbounded_or_sensitive_workspace_writes_to_reviewer() {
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
             true,
-            false,
             Some(tmp.path()),
         );
         assert!(
@@ -6235,7 +6247,6 @@ fn auto_review_routes_interactive_destructive_shell_to_reviewer() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 
@@ -6268,7 +6279,6 @@ fn auto_review_routes_shell_commands_requiring_approval_to_reviewer() {
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
             true,
-            false,
             None,
         );
 
@@ -6293,7 +6303,6 @@ fn auto_review_routes_mcp_mutations_or_secret_tools_to_reviewer() {
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
             true,
-            false,
             None,
         );
 
@@ -6329,7 +6338,6 @@ fn auto_review_policy_holds_background_destructive_under_suggest() {
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Suggest,
         true,
-        false,
         None,
     );
 
@@ -6357,7 +6365,6 @@ fn full_access_blocks_detached_catastrophic_tools_without_prompting() {
             run_origin,
             crate::tui::approval::ApprovalMode::Bypass,
             true,
-            false,
             None,
         );
 
@@ -6383,7 +6390,6 @@ fn auto_review_policy_blocks_background_destructive_under_never() {
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Never,
         true,
-        false,
         None,
     );
 
@@ -6419,7 +6425,6 @@ fn auto_review_plan_decision_uses_configured_policy() {
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
         true,
-        false,
         None,
     );
 

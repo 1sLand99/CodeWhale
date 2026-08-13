@@ -2521,7 +2521,6 @@ impl Engine {
                         auto_review_run_origin_for_plan(detached_start),
                         self.session.approval_mode,
                         crate::config::is_workspace_trusted(&self.session.workspace),
-                        false,
                         Some(&self.session.workspace),
                     );
                     let (decision, audit_event) = auto_review_plan_decision_for_context(

@@ -182,7 +182,6 @@ pub struct AutoReviewContext<'a> {
     pub run_origin: RunOrigin,
     pub approval_mode: ApprovalMode,
     pub workspace_trusted: bool,
-    pub dirty_worktree: bool,
     pub write_targets_bounded: bool,
 }
 
@@ -194,7 +193,6 @@ impl<'a> AutoReviewContext<'a> {
         run_origin: RunOrigin,
         approval_mode: ApprovalMode,
         workspace_trusted: bool,
-        dirty_worktree: bool,
         workspace: Option<&std::path::Path>,
     ) -> Self {
         let category = get_tool_category_for_call(tool_name, params);
@@ -210,7 +208,6 @@ impl<'a> AutoReviewContext<'a> {
             run_origin,
             approval_mode,
             workspace_trusted,
-            dirty_worktree,
             write_targets_bounded: workspace
                 .zip(file_write_target_paths(tool_name, params))
                 .is_some_and(|(workspace, paths)| {
@@ -307,7 +304,6 @@ impl AutoReviewPolicy {
             "run_origin": ctx.run_origin.as_str(),
             "approval_mode": ctx.approval_mode.label(),
             "workspace_trusted": ctx.workspace_trusted,
-            "dirty_worktree": ctx.dirty_worktree,
             "write_targets_bounded": ctx.write_targets_bounded,
             "decision": if decision.built_in_safety_gate { "hold_for_review" } else { decision.action.as_str() },
             "reason": decision.reason,
@@ -538,7 +534,6 @@ pub(crate) fn build_reviewer_context(
             "risk": risk_label(ctx.risk),
             "run_origin": ctx.run_origin.as_str(),
             "workspace_trusted": ctx.workspace_trusted,
-            "dirty_worktree": ctx.dirty_worktree,
             "hold_reason": held_reason,
         }
     }))
@@ -1029,15 +1024,7 @@ mod tests {
         run_origin: RunOrigin,
         approval_mode: ApprovalMode,
     ) -> AutoReviewContext<'_> {
-        AutoReviewContext::from_tool_call(
-            tool_name,
-            &params,
-            run_origin,
-            approval_mode,
-            true,
-            false,
-            None,
-        )
+        AutoReviewContext::from_tool_call(tool_name, &params, run_origin, approval_mode, true, None)
     }
 
     fn assert_safety_gate(decision: &AutoReviewDecision) {
@@ -1093,7 +1080,6 @@ mod tests {
             RunOrigin::Interactive,
             ApprovalMode::Auto,
             true,
-            false,
             None,
         );
 
@@ -1521,7 +1507,6 @@ mod tests {
             RunOrigin::Background,
             ApprovalMode::Suggest,
             true,
-            true,
             None,
         );
         let decision = policy.evaluate(&ctx);
@@ -1533,7 +1518,6 @@ mod tests {
         assert_eq!(event["run_origin"], "background");
         assert_eq!(event["decision"], "allow");
         assert_eq!(event["reason"], "read-only action is allowed");
-        assert_eq!(event["dirty_worktree"], true);
     }
 
     #[test]
@@ -1578,7 +1562,6 @@ mod tests {
                 RunOrigin::Interactive,
                 ApprovalMode::Auto,
                 true,
-                false,
                 None,
             );
             assert_eq!(context.tool_name, tool_name);
@@ -1646,7 +1629,6 @@ mod tests {
             RunOrigin::Interactive,
             ApprovalMode::Auto,
             true,
-            false,
             None,
         );
         let text = build_reviewer_context(
