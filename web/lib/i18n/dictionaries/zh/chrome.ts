@@ -79,6 +79,6 @@ export const chrome: ChromeDict = {
   footerSecurity: "安全",
 
   switcherLabel: "语言",
-  switcherSwitchTo: "切换到{label}",
+  switcherSwitchTo: "切换到 {label}",
   partialBadge: "(部分)",
 };
