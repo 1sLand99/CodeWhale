@@ -52,10 +52,13 @@ Coverage today exercises the trait surface end-to-end:
 - sub-agent style independent parent/child mocks
 - capacity-gate observation of a captured request before stream drain
 
-Full-engine mock coverage remains blocked until `core::engine::Engine` is
-refactored to take `Arc<dyn LlmClient>` instead of a concrete
-`Option<DeepSeekClient>`. The obsolete ignored `engine_full_*` placeholders were
-removed; add real end-to-end tests once that constructor seam exists.
+Full-engine journeys use `Engine::new_with_model_client` and the same mock.
+When a model-visible behavior crosses prompt assembly, a provider call, a tool
+gate or execution, and the follow-up prompt, add a keyless assembled journey to
+the existing engine harness. Assert the externally meaningful events, exact
+side effects, accounting, and next request. Do not add a new snapshot framework,
+network call, provider key, timing sleep, or platform shell merely to cover the
+journey.
 
 ## `--record` mode for `deepseek eval`
 
