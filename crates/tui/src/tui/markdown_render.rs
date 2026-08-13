@@ -194,7 +194,7 @@ thread_local! {
 /// Resumable parser state.
 ///
 /// The parser is strictly line-oriented: each source line maps to blocks using
-/// only a three-field carry (`in_code_block`, `code_language`,
+/// only a three-field carry (`open_fence_len`, `code_language`,
 /// `code_block_id`). That is what makes resuming *exact* rather than
 /// approximate — appending text can never change how an earlier complete line
 /// parsed, so committed blocks never need revisiting.
@@ -212,7 +212,10 @@ pub struct ParseState {
     /// Length of `prefix`. Always ends just past a newline, so only whole
     /// lines are ever committed.
     consumed: usize,
-    in_code_block: bool,
+    /// Length of the opening code fence in backticks while inside a fenced
+    /// code block (`None` outside). A closing fence must be at least this
+    /// long per CommonMark; shorter backtick lines are code content.
+    open_fence_len: Option<usize>,
     code_language: Option<String>,
     code_block_id: usize,
 }
@@ -235,7 +238,7 @@ impl ParseState {
             push_parsed_line(
                 raw_line,
                 &mut self.blocks,
-                &mut self.in_code_block,
+                &mut self.open_fence_len,
                 &mut self.code_language,
                 &mut self.code_block_id,
             );
@@ -254,14 +257,14 @@ impl ParseState {
             };
         }
         let mut blocks = self.blocks.clone();
-        let mut in_code_block = self.in_code_block;
+        let mut open_fence_len = self.open_fence_len;
         let mut code_language = self.code_language.clone();
         let mut code_block_id = self.code_block_id;
         for raw_line in tail.lines() {
             push_parsed_line(
                 raw_line,
                 &mut blocks,
-                &mut in_code_block,
+                &mut open_fence_len,
                 &mut code_language,
                 &mut code_block_id,
             );
@@ -457,14 +460,14 @@ impl ParseState {
     fn snapshot_tail(&self, content: &str) -> Vec<Block> {
         let tail = content.get(self.consumed..).unwrap_or_default();
         let mut blocks = Vec::new();
-        let mut in_code_block = self.in_code_block;
+        let mut open_fence_len = self.open_fence_len;
         let mut code_language = self.code_language.clone();
         let mut code_block_id = self.code_block_id;
         for raw_line in tail.lines() {
             push_parsed_line(
                 raw_line,
                 &mut blocks,
-                &mut in_code_block,
+                &mut open_fence_len,
                 &mut code_language,
                 &mut code_block_id,
             );
@@ -494,24 +497,38 @@ fn stable_block_prefix_len(blocks: &[Block]) -> usize {
 fn push_parsed_line(
     raw_line: &str,
     blocks: &mut Vec<Block>,
-    in_code_block: &mut bool,
+    open_fence_len: &mut Option<usize>,
     code_language: &mut Option<String>,
     code_block_id: &mut usize,
 ) {
     let trimmed = raw_line.trim_start();
-    if trimmed.starts_with("```") {
-        if *in_code_block {
-            *in_code_block = false;
-            *code_language = None;
-        } else {
-            *in_code_block = true;
-            *code_block_id = code_block_id.saturating_add(1);
-            *code_language = normalized_fence_language(trimmed.trim_start_matches('`'));
+    let fence_len = trimmed.chars().take_while(|c| *c == '`').count();
+    if fence_len >= 3 {
+        match *open_fence_len {
+            // Inside a code block: a fence at least as long as the opener
+            // closes it; a shorter backtick line is code content per
+            // CommonMark and must not flip the state or escape the block.
+            Some(open) if fence_len >= open => {
+                *open_fence_len = None;
+                *code_language = None;
+            }
+            Some(_) => {
+                blocks.push(Block::Code {
+                    line: raw_line.to_string(),
+                    language: code_language.clone(),
+                    block_id: *code_block_id,
+                });
+            }
+            None => {
+                *open_fence_len = Some(fence_len);
+                *code_block_id = code_block_id.saturating_add(1);
+                *code_language = normalized_fence_language(&trimmed[fence_len..]);
+            }
         }
         return;
     }
 
-    if *in_code_block {
+    if open_fence_len.is_some() {
         blocks.push(Block::Code {
             line: raw_line.to_string(),
             language: code_language.clone(),
@@ -3028,6 +3045,57 @@ mod tests {
                 .all(|b| !matches!(b, Block::Quote { .. })),
             "lines inside a fence must stay code, never quotes"
         );
+    }
+
+    #[test]
+    fn four_backtick_fence_keeps_shorter_fence_and_quotes_as_code() {
+        // A ```` opener must not be closed by a shorter ``` line: the shorter
+        // fence and any `>` lines after it stay code content (CommonMark
+        // fence-length rule), and the block only closes on a fence >= opener.
+        let parsed = parse("````\n```\n> still code\n`````\n> now a quote\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["```", "> still code"]);
+        let quotes: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Quote { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(quotes, vec!["now a quote"]);
+    }
+
+    #[test]
+    fn longer_fence_closes_shorter_opener() {
+        // CommonMark: a closing fence may be longer than the opener; only the
+        // opener's length is the minimum.
+        let parsed = parse("```\ncode\n````\nplain\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["code"]);
+        let paragraphs: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs, vec!["plain"]);
     }
 
     #[test]
