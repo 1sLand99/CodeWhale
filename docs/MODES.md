@@ -183,16 +183,32 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
   destructive background/headless work; it is never model-reviewed. Fallback
   holds — calls the deterministic engine could not prove safe — escalate to a
   one-shot **model guardian** (v0.9.8) that returns risk, allow/deny, and a
-  rationale. The guardian sees bounded external-input text and the exact held
-  call in separate JSON fields; skill instructions, attachments, and expanded
-  model context are excluded. It does not compute a generic user-intent score.
+  rationale. The guardian sees the exact held call and deterministic
+  observations in separate JSON fields; conversation history, skill
+  instructions, attachments, and expanded model context are excluded. It does
+  not infer user intent or compute a generic user-intent score.
   High or critical risk cannot auto-run even if the model says allow. It has no
   tools, remembers no rules, and denies rather than truncates an oversized
-  exact call. Incomplete or malformed output is retried at most three times
-  within one deadline; exhaustion, timeout, cancellation, or provider failure
-  fails closed. Headless adapters use the deterministic-only tier. Repo-law
+  exact call. Exactly one reviewer request is made; incomplete or malformed
+  output, timeout, cancellation, or provider failure fails closed. Headless
+  adapters use the deterministic-only tier. Repo-law
   holds that explicitly require a person block in Auto-Review rather than
   opening a hidden approval modal.
+
+The safety baseline above is grounded in DeepSeek Harness `0.1.0-rc.5` at
+commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/deepseek-harness/tree/47f943859bef60e4160492346772ded9b24f765a):
+its [sandbox contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/sandbox.md)
+defines per-call `read-only`, `workspace-write`, and `danger-full-access`
+boundaries and forbids silent unconfined fallback; its
+[approval contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/approval.md)
+grants only `allowed-once` and fails closed on rejection, cancellation, or an
+unavailable answerer; and its
+[sandbox result contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/shell/bash-sandbox/README.md)
+tells the model to retry a denied command exactly once with the narrowest wider
+mode plus a justification. DeepSeek Harness does not add an LLM reviewer to
+that path. Codewhale's autonomous posture adds only the single stateless
+guardian request described above; deterministic hard blocks remain
+non-bypassable.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
   while deliberate user questions remain available. Non-bypassable safety,
   repository-law, and managed-policy holds fail closed as hard blocks instead

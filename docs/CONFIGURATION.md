@@ -1842,20 +1842,18 @@ If you are upgrading from older releases:
   `agent`, and `unknown` to `external`; `secret` to `destructive`; and
   `mcp_read` to `read`.
   Fallback holds in interactive Auto-Review escalate to one stateless guardian
-  request. The request contains bounded text accepted at the external input
-  boundary and the exact held call as separate JSON fields. Skill instructions,
-  attached file contents, and other expanded model context are excluded. The
-  guardian does not compute a generic intent or authorization score: exact
-  user-authored text is evidence only when the action needs explicit authority.
-  Synthetic continuations inherit the current request, while a
-  restored session starts with none until new external input arrives. The
-  guardian exposes no tools and returns a risk level, allow/deny, and a
+  request. The request contains the exact held call and deterministic
+  observations as separate JSON fields. Conversation history, skill
+  instructions, attached file contents, and other expanded model context are
+  excluded. The guardian does not infer user intent or compute an authorization
+  score. It exposes no tools and returns a risk level, allow/deny, and a
   rationale. High or critical risk cannot auto-run even if the model says
-  allow. An oversized exact call is denied rather than truncated. Incomplete
-  or malformed output is retried at most three times within the same 90-second
-  deadline; exhaustion, timeout, cancellation, provider failure, or an empty
-  rationale all fail closed. The deterministic floor is never
-  model-reviewed, and headless adapters use the deterministic-only tier.
+  allow. An oversized exact call is denied rather than truncated. Exactly one
+  reviewer request is made; incomplete or malformed output, timeout,
+  cancellation, provider failure, or an empty rationale all fail closed. The
+  deterministic floor is never model-reviewed, and headless adapters use the
+  deterministic-only tier. The pinned DeepSeek Harness source contracts behind
+  this fail-closed baseline are linked from [Permission Posture](MODES.md#permission-posture).
   Reviewer outcomes emit `tool.auto_review` audit events with
   `gate = "guardian"`.
 

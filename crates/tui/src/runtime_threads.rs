@@ -5231,7 +5231,6 @@ impl RuntimeThreadManager {
         let trust_mode = req.trust_mode.unwrap_or(thread.trust_mode);
         let auto_approve = policy.auto_approve();
         let op = Op::SendMessage {
-            authorization_text: Some(prompt.clone()),
             content: prompt,
             mode,
             route: Box::new(route),

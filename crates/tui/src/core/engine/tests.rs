@@ -350,7 +350,6 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     handle
         .send(Op::SendMessage {
             content: "verify exact route".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: Box::new(
                 resolve_runtime_route(&config, ApiProvider::Custom, Some("local-model"))
@@ -724,7 +723,6 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
     handle
         .send(Op::SendMessage {
             content: "first turn".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -1003,7 +1001,6 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
     handle
         .send(Op::SendMessage {
             content: "start the saturated goal turn".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -1131,7 +1128,6 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
     let run_task = tokio::spawn(engine.run());
     let send_message = |content: &str| Op::SendMessage {
         content: content.to_string(),
-        authorization_text: None,
         mode: AppMode::Agent,
         route: resolved_route_for_test(&config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
@@ -1728,7 +1724,6 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
     handle
         .send(Op::SendMessage {
             content: "start budgeted goal".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -2756,7 +2751,6 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     handle
         .send(Op::SendMessage {
             content: "one host-owned turn".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -2864,7 +2858,6 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     handle
         .send(Op::SendMessage {
             content: "claim the next turn".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -3900,7 +3893,6 @@ fn active_goal_message_op(
 ) -> Op {
     Op::SendMessage {
         content: content.to_string(),
-        authorization_text: None,
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
@@ -3937,7 +3929,6 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
     Op::SendMessage {
         content: content.to_string(),
-        authorization_text: None,
         mode,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
@@ -8665,7 +8656,6 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     handle
         .send(Op::SendMessage {
             content: "write the requested local fixture".to_string(),
-            authorization_text: None,
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -8807,7 +8797,6 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
     handle
         .send(Op::SendMessage {
             content: "continue from the completed child".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -8944,7 +8933,6 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     handle
         .send(Op::SendMessage {
             content: "exercise the Full Access execution boundary".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9150,7 +9138,6 @@ async fn assert_full_access_model_tool_batch_runs(
     handle
         .send(Op::SendMessage {
             content: "exercise the Full Access auto-approval boundary".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9427,7 +9414,6 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
     handle
         .send(Op::SendMessage {
             content: "continue autonomously".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9614,7 +9600,6 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9755,7 +9740,6 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
-            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9892,7 +9876,6 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
     handle
         .send(Op::SendMessage {
             content: "please publish this crate".to_string(),
-            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -10033,7 +10016,6 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     handle
         .send(Op::SendMessage {
             content: "please open the PR".to_string(),
-            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15295,7 +15277,6 @@ async fn run_headless_turn_with_flaky_network(
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15421,7 +15402,6 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15663,7 +15643,6 @@ async fn run_interactive_turn_with_flaky_network(
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
-            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),

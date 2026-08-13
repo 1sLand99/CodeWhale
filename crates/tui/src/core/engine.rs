@@ -1949,7 +1949,6 @@ impl Engine {
             .handle_send_message(
                 "[runtime] A background shell task finished; its completion evidence follows."
                     .to_string(),
-                None,
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
@@ -2007,7 +2006,6 @@ impl Engine {
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
                         content,
-                        authorization_text,
                         mode,
                         route,
                         compaction,
@@ -2030,7 +2028,6 @@ impl Engine {
                     } => {
                         self.handle_send_message(
                             content,
-                            authorization_text,
                             mode,
                             *route,
                             *compaction,
@@ -2100,7 +2097,6 @@ impl Engine {
                         let _ = self
                             .handle_send_message(
                                 content,
-                                None,
                                 self.current_mode,
                                 route,
                                 self.config.compaction.clone(),
@@ -2348,7 +2344,6 @@ impl Engine {
                         // generated-ID new-session path), so never carry the
                         // previous conversation's toolbox across this edge.
                         self.session.tool_activation_cache.clear();
-                        self.session.trusted_user_requests.clear();
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         if let Some(session_id) = session_id {
@@ -2502,7 +2497,6 @@ impl Engine {
                         let mode = self.current_mode;
                         self.handle_send_message(
                             new_message.clone(),
-                            Some(new_message),
                             mode,
                             route,
                             self.config.compaction.clone(),
@@ -3077,7 +3071,6 @@ impl Engine {
         let outcome = self
             .handle_send_message(
                 content,
-                None,
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
@@ -3720,7 +3713,6 @@ impl Engine {
     async fn handle_send_message(
         &mut self,
         content: String,
-        authorization_text: Option<String>,
         mode: AppMode,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
@@ -3831,12 +3823,6 @@ impl Engine {
 
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
-        if provenance.can_authorize_work() {
-            match authorization_text {
-                Some(text) => self.session.reset_trusted_user_request(text),
-                None => self.session.trusted_user_requests.clear(),
-            }
-        }
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`

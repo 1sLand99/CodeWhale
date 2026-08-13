@@ -341,12 +341,8 @@ impl Engine {
         tool_id: &str,
         turn: &mut TurnContext,
     ) -> Result<(), ToolError> {
-        let context_text = crate::tui::auto_review::build_reviewer_context(
-            context,
-            held_reason,
-            &self.session.trusted_user_requests,
-            tool_input,
-        );
+        let context_text =
+            crate::tui::auto_review::build_reviewer_context(context, held_reason, tool_input);
         let _ = self
             .tx_event
             .send(Event::status(format!(
@@ -358,7 +354,6 @@ impl Engine {
         let review = super::reviewer::consult_reviewer(
             client,
             &context_text,
-            !self.session.trusted_user_requests.is_empty(),
             self.config
                 .auto_review_policy
                 .natural_language_guidance
@@ -366,7 +361,7 @@ impl Engine {
             &self.cancel_token,
         )
         .await;
-        for usage in &review.usages {
+        if let Some(usage) = &review.usage {
             turn.add_usage(usage);
             if usage_has_reported_data(usage) {
                 let _ = self
@@ -381,7 +376,6 @@ impl Engine {
         }
         let decision = review.outcome.audit_decision();
         let risk = review.outcome.audit_risk();
-        let attempts = review.attempts;
         let result = review.outcome.into_tool_result(context.tool_name);
         emit_tool_audit(json!({
             "event": "tool.auto_review",
@@ -389,7 +383,6 @@ impl Engine {
             "tool_id": tool_id,
             "decision": decision,
             "risk": risk,
-            "attempts": attempts,
             "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
         }));
         result.map(|_| ())
@@ -479,10 +472,6 @@ impl Engine {
                 if steer.is_empty() {
                     continue;
                 }
-                // Steer input arrives through the live user boundary. Retain
-                // its exact text as additional authorization evidence; never
-                // replace it with an assistant-written intent summary.
-                self.session.push_trusted_user_steer(steer.clone());
                 self.session
                     .working_set
                     .observe_user_message(&steer, &self.session.workspace);

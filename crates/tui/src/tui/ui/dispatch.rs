@@ -730,7 +730,6 @@ pub(crate) async fn spawned_dispatch_inner(
     if let Err(err) = engine_handle
         .send(Op::SendMessage {
             content: prepare.content.clone(),
-            authorization_text: Some(prepare.message.display.clone()),
             mode: prepare.mode,
             route: Box::new(turn_route),
             compaction: Box::new(turn_compaction.clone()),

@@ -11316,7 +11316,6 @@ async fn run_exec_agent(
     engine_handle
         .send(Op::SendMessage {
             content: prompt.to_string(),
-            authorization_text: Some(prompt.to_string()),
             mode,
             route: Box::new(validated_route.into_resolved()),
             compaction: Box::new(compaction.clone()),

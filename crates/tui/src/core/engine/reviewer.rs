@@ -27,9 +27,6 @@ use tokio_util::sync::CancellationToken;
 /// One-shot reviewer deadline. Slow reviewers are denials, surfaced
 /// separately from explicit denials (a timeout proves nothing about safety).
 const REVIEWER_TIMEOUT: Duration = Duration::from_secs(90);
-/// Retry only malformed or incomplete reviewer answers. Provider transport
-/// retries already belong to the model client, so this does not multiply them.
-const REVIEWER_MAX_ATTEMPTS: u8 = 3;
 /// Keep one exact held call comfortably inside every supported model context.
 /// Truncating tool input could hide the unsafe part, so oversized reviews deny.
 const MAX_REVIEW_CONTEXT_BYTES: usize = 64 * 1024;
@@ -85,30 +82,24 @@ impl ReviewerOutcome {
     }
 }
 
-/// One guardian review and the provider usage from all bounded attempts.
+/// One guardian review and its provider usage, when a request was dispatched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewerResult {
     pub(crate) outcome: ReviewerOutcome,
-    pub(crate) usages: Vec<Usage>,
-    pub(crate) attempts: u8,
+    pub(crate) usage: Option<Usage>,
 }
 
 impl ReviewerResult {
-    fn finish(outcome: ReviewerOutcome, usages: Vec<Usage>, attempts: u8) -> Self {
-        Self {
-            outcome,
-            usages,
-            attempts,
-        }
+    fn finish(outcome: ReviewerOutcome, usage: Option<Usage>) -> Self {
+        Self { outcome, usage }
     }
 
-    fn unavailable(reason: impl Into<String>, usages: Vec<Usage>, attempts: u8) -> Self {
+    fn unavailable(reason: impl Into<String>, usage: Option<Usage>) -> Self {
         Self::finish(
             ReviewerOutcome::Unavailable {
                 reason: reason.into(),
             },
-            usages,
-            attempts,
+            usage,
         )
     }
 }
@@ -119,22 +110,13 @@ impl ReviewerResult {
 pub(crate) async fn consult_reviewer(
     client: &dyn ModelClient,
     context_text: &str,
-    has_external_user_text: bool,
     natural_language_guidance: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> ReviewerResult {
-    if !has_external_user_text {
-        return ReviewerResult::unavailable(
-            "no current external request authorizes this call",
-            Vec::new(),
-            0,
-        );
-    }
     if context_text.len() > MAX_REVIEW_CONTEXT_BYTES {
         return ReviewerResult::unavailable(
             "the exact review context exceeded the guardian limit",
-            Vec::new(),
-            0,
+            None,
         );
     }
     let mut policy = DEFAULT_GUARDIAN_POLICY.to_string();
@@ -164,46 +146,28 @@ pub(crate) async fn consult_reviewer(
         temperature: Some(0.0),
         top_p: None,
     };
-    let deadline = tokio::time::Instant::now() + REVIEWER_TIMEOUT;
-    let mut usages = Vec::new();
-    let mut attempts = 0;
-    loop {
-        if cancel_token.is_cancelled() {
-            return ReviewerResult::finish(ReviewerOutcome::Cancelled, usages, attempts);
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return ReviewerResult::unavailable("the reviewer timed out", usages, attempts);
-        }
-        attempts += 1;
-        let response = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                return ReviewerResult::finish(ReviewerOutcome::Cancelled, usages, attempts);
-            }
-            response = tokio::time::timeout(remaining, client.create_message(request.clone())) => response,
-        };
-        let response = match response {
-            Err(_) => {
-                return ReviewerResult::unavailable("the reviewer timed out", usages, attempts);
-            }
-            Ok(Err(error)) => {
-                return ReviewerResult::unavailable(
-                    format!("the reviewer request failed ({error})"),
-                    usages,
-                    attempts,
-                );
-            }
-            Ok(Ok(response)) => response,
-        };
-        let outcome = verdict_from_response(&response);
-        usages.push(response.usage);
-        if !matches!(outcome, ReviewerOutcome::Unavailable { .. })
-            || attempts >= REVIEWER_MAX_ATTEMPTS
-        {
-            return ReviewerResult::finish(outcome, usages, attempts);
-        }
+    if cancel_token.is_cancelled() {
+        return ReviewerResult::finish(ReviewerOutcome::Cancelled, None);
     }
+    let response = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return ReviewerResult::finish(ReviewerOutcome::Cancelled, None);
+        }
+        response = tokio::time::timeout(REVIEWER_TIMEOUT, client.create_message(request)) => response,
+    };
+    let response = match response {
+        Err(_) => return ReviewerResult::unavailable("the reviewer timed out", None),
+        Ok(Err(error)) => {
+            return ReviewerResult::unavailable(
+                format!("the reviewer request failed ({error})"),
+                None,
+            );
+        }
+        Ok(Ok(response)) => response,
+    };
+    let outcome = verdict_from_response(&response);
+    ReviewerResult::finish(outcome, Some(response.usage))
 }
 
 fn verdict_from_response(response: &MessageResponse) -> ReviewerOutcome {
@@ -286,8 +250,7 @@ mod tests {
 
         let result = consult_reviewer(
             &mock,
-            r#"{"external_user_text":[{"text":"run tests"}]}"#,
-            true,
+            r#"{"proposed_tool_call":{"tool":"exec_shell"}}"#,
             Some("Prefer reversible work."),
             &CancellationToken::new(),
         )
@@ -300,14 +263,13 @@ mod tests {
                 reason: "bounded and authorized".to_string()
             }
         );
-        assert_eq!(result.usages, vec![usage]);
-        assert_eq!(result.attempts, 1);
+        assert_eq!(result.usage, Some(usage));
         let request = mock.last_request().expect("reviewer request");
         assert_eq!(request.tools, None, "guardian requests never expose tools");
         let SystemPrompt::Text(system) = request.system.expect("guardian policy") else {
             panic!("guardian system prompt must be text");
         };
-        assert!(system.contains("external_user_text[].text"));
+        assert!(system.contains("Never infer user intent"));
         assert!(system.contains("Prefer reversible work."));
     }
 
@@ -319,7 +281,7 @@ mod tests {
             Usage::default(),
         ));
         assert_eq!(
-            consult_reviewer(&deny, "context", true, None, &CancellationToken::new())
+            consult_reviewer(&deny, "context", None, &CancellationToken::new())
                 .await
                 .outcome,
             ReviewerOutcome::Deny {
@@ -340,20 +302,13 @@ mod tests {
 
         let malformed = MockLlmClient::new(Vec::new());
         malformed.push_message_response(response("allow it", Usage::default()));
-        malformed.push_message_response(response(
-            r#"{"risk_level":"medium","decision":"allow","reason":"bounded workspace mutation"}"#,
-            Usage::default(),
-        ));
-        let retried =
-            consult_reviewer(&malformed, "context", true, None, &CancellationToken::new()).await;
+        let malformed_result =
+            consult_reviewer(&malformed, "context", None, &CancellationToken::new()).await;
         assert!(matches!(
-            retried.outcome,
-            ReviewerOutcome::Allow {
-                risk: ReviewerRiskLevel::Medium,
-                ..
-            }
+            malformed_result.outcome,
+            ReviewerOutcome::Unavailable { .. }
         ));
-        assert_eq!((retried.attempts, retried.usages.len()), (2, 2));
+        assert!(malformed_result.usage.is_some());
 
         let incomplete = MockLlmClient::new(Vec::new());
         let mut incomplete_response = response(
@@ -361,19 +316,11 @@ mod tests {
             Usage::default(),
         );
         incomplete_response.stop_reason = Some("max_tokens".to_string());
-        for _ in 0..REVIEWER_MAX_ATTEMPTS {
-            incomplete.push_message_response(incomplete_response.clone());
-        }
+        incomplete.push_message_response(incomplete_response);
         assert_eq!(
-            consult_reviewer(
-                &incomplete,
-                "context",
-                true,
-                None,
-                &CancellationToken::new(),
-            )
-            .await
-            .outcome,
+            consult_reviewer(&incomplete, "context", None, &CancellationToken::new(),)
+                .await
+                .outcome,
             ReviewerOutcome::Unavailable {
                 reason: "the reviewer answer was incomplete".to_string()
             }
@@ -386,11 +333,10 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = consult_reviewer(&mock, "context", true, None, &cancel).await;
+        let result = consult_reviewer(&mock, "context", None, &cancel).await;
 
         assert_eq!(result.outcome, ReviewerOutcome::Cancelled);
-        assert!(result.usages.is_empty());
-        assert_eq!(result.attempts, 0);
+        assert!(result.usage.is_none());
         assert_eq!(mock.call_count(), 0);
     }
 
@@ -399,7 +345,7 @@ mod tests {
         let mock = MockLlmClient::new(Vec::new());
         let context = "x".repeat(MAX_REVIEW_CONTEXT_BYTES + 1);
 
-        let result = consult_reviewer(&mock, &context, true, None, &CancellationToken::new()).await;
+        let result = consult_reviewer(&mock, &context, None, &CancellationToken::new()).await;
 
         assert_eq!(
             result.outcome,
@@ -407,24 +353,7 @@ mod tests {
                 reason: "the exact review context exceeded the guardian limit".to_string()
             }
         );
-        assert!(result.usages.is_empty());
-        assert_eq!(result.attempts, 0);
-        assert_eq!(mock.call_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn reviewer_denies_without_current_external_authorization() {
-        let mock = MockLlmClient::new(Vec::new());
-
-        let result =
-            consult_reviewer(&mock, "context", false, None, &CancellationToken::new()).await;
-
-        assert!(matches!(
-            result.outcome,
-            ReviewerOutcome::Unavailable { .. }
-        ));
-        assert!(result.usages.is_empty());
-        assert_eq!(result.attempts, 0);
+        assert!(result.usage.is_none());
         assert_eq!(mock.call_count(), 0);
     }
 }
