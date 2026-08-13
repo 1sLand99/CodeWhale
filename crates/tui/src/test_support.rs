@@ -58,14 +58,28 @@ pub(crate) fn unsealed_test_state_root() -> PathBuf {
     if !current_thread_holds_test_env_lock() {
         return shared.to_path_buf();
     }
-    let root = shared.join(format!("env-holder-{:?}", std::thread::current().id()));
-    std::fs::create_dir_all(&root).unwrap_or_else(|error| {
-        panic!(
-            "failed to create per-holder test state root {}: {error}",
-            root.display()
-        )
-    });
-    root
+    // Create the directory once per thread. Path resolution runs on every
+    // settings read, and an unconditional `create_dir_all` there is a syscall
+    // per read — cheap on Linux, not free on Windows, and pure waste after the
+    // first call since a thread keeps its own directory for its whole life.
+    HOLDER_ROOT.with(|cached| {
+        cached
+            .get_or_init(|| {
+                let root = shared.join(format!("env-holder-{:?}", std::thread::current().id()));
+                std::fs::create_dir_all(&root).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to create per-holder test state root {}: {error}",
+                        root.display()
+                    )
+                });
+                root
+            })
+            .clone()
+    })
+}
+
+thread_local! {
+    static HOLDER_ROOT: OnceLock<PathBuf> = const { OnceLock::new() };
 }
 
 /// Build a syntactically valid, non-secret JWT fixture without embedding a
