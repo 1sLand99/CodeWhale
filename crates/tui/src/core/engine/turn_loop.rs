@@ -5,6 +5,7 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
+use super::dispatch::normalize_schema_json_containers;
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
@@ -1616,6 +1617,17 @@ impl Engine {
                         input_parse_error: None,
                     });
                 }
+            }
+
+            for tool in &mut tool_uses {
+                let Some(schema) = tool_catalog
+                    .iter()
+                    .find(|candidate| candidate.name == tool.name)
+                    .map(|candidate| &candidate.input_schema)
+                else {
+                    continue;
+                };
+                normalize_schema_json_containers(&mut tool.input, schema);
             }
 
             if !final_text.is_empty() {
