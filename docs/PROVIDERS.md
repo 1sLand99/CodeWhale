@@ -356,12 +356,13 @@ The pinned DS4 [agent-client contract](https://github.com/antirez/ds4/blob/84cc8
 documents Chat Completions at `/v1`, DeepSeek thinking replay, streamed usage,
 `max_tokens`, and no strict-tool mode; Codewhale follows those exact route
 facts instead of inheriting unsupported capabilities from a generic gateway.
-The model-facing behavior follows DeepSeek's official
+The primary sources for model-facing behavior are DeepSeek's official
 [thinking-mode](https://api-docs.deepseek.com/guides/thinking_mode),
 [tool-call](https://api-docs.deepseek.com/guides/tool_calls), and
 [Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)
-contracts, also used as the source of truth by the pinned
-[DeepSeek Harness adapter](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm-deepseek/README.md).
+contracts. The pinned
+[DeepSeek Harness adapter](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm-deepseek/README.md)
+is only a secondary implementation cross-check; it is not the API contract.
 
 ### Ollama
 
