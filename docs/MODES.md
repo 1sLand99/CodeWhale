@@ -196,8 +196,8 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
   opening a hidden approval modal.
 
 The LLM reviewer is closest to OpenAI Codex's experimental Auto-Review at
-commit [`95c7265e849e6e360a7fa53ffeac70b25d6051a3`](https://github.com/openai/codex/tree/95c7265e849e6e360a7fa53ffeac70b25d6051a3).
-Codex's [guardian entry point](https://github.com/openai/codex/blob/95c7265e849e6e360a7fa53ffeac70b25d6051a3/codex-rs/core/src/guardian/mod.rs)
+commit [`6fc6b9d6d2580d62622fc9884b5f5707f6505a5e`](https://github.com/openai/codex/tree/6fc6b9d6d2580d62622fc9884b5f5707f6505a5e).
+Codex's [guardian entry point](https://github.com/openai/codex/blob/6fc6b9d6d2580d62622fc9884b5f5707f6505a5e/codex-rs/core/src/guardian/mod.rs)
 reconstructs conversation context and runs a dedicated review session.
 Codewhale deliberately adopts only the exact-action structured decision,
 90-second deadline, and fail-closed result. It does not copy Codex's transcript

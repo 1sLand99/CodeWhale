@@ -407,7 +407,7 @@ fn auto_review_config_builds_runtime_policy() -> Result<()> {
     let config: Config = toml::from_str(
         r#"
 [auto_review]
-guidance = "Prefer review before remote side effects."
+natural_language_guidance = "retired compatibility key"
 
 [[auto_review.block]]
 id = "block-shell"
@@ -423,11 +423,6 @@ reason = "read_file is allowed"
     config.validate()?;
 
     let policy = config.auto_review_policy();
-    assert_eq!(
-        policy.natural_language_guidance.as_deref(),
-        Some("Prefer review before remote side effects.")
-    );
-
     let shell_context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
         "exec_shell",
         &serde_json::json!({"command": "cargo test"}),
@@ -467,14 +462,8 @@ reason = "read_file is allowed"
 fn auto_review_profile_overrides_base_policy() -> Result<()> {
     let parsed: ConfigFile = toml::from_str(
         r#"
-[auto_review]
-guidance = "base"
-
 [[auto_review.block]]
 action_kind = "shell"
-
-[profiles.strict.auto_review]
-guidance = "strict"
 
 [[profiles.strict.auto_review.block]]
 action_kind = "external"
@@ -484,7 +473,6 @@ action_kind = "external"
     let merged = apply_profile(parsed, Some("strict"))?;
     let policy = merged.auto_review_policy();
 
-    assert_eq!(policy.natural_language_guidance.as_deref(), Some("strict"));
     assert_eq!(policy.block_rules.len(), 1);
     assert_eq!(
         policy.block_rules[0].action_kind,

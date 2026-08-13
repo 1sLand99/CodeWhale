@@ -2848,8 +2848,6 @@ impl BaseUrlEnvReceipt {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AutoReviewConfig {
-    #[serde(default, alias = "guidance", alias = "naturalLanguageGuidance")]
-    pub natural_language_guidance: Option<String>,
     #[serde(default)]
     pub allow: Vec<AutoReviewRuleConfig>,
     #[serde(default)]
@@ -2885,11 +2883,6 @@ impl AutoReviewConfig {
                     rule.to_runtime_rule(index, crate::tui::auto_review::AutoReviewAction::Block)
                 })
                 .collect(),
-            natural_language_guidance: self
-                .natural_language_guidance
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
         }
     }
 

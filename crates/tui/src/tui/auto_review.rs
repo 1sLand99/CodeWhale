@@ -284,7 +284,6 @@ impl AutoReviewRule {
 pub struct AutoReviewPolicy {
     pub allow_rules: Vec<AutoReviewRule>,
     pub block_rules: Vec<AutoReviewRule>,
-    pub natural_language_guidance: Option<String>,
 }
 
 impl AutoReviewPolicy {
@@ -310,7 +309,6 @@ impl AutoReviewPolicy {
             "workspace_trusted": ctx.workspace_trusted,
             "dirty_worktree": ctx.dirty_worktree,
             "write_targets_bounded": ctx.write_targets_bounded,
-            "policy_has_guidance": self.natural_language_guidance.is_some(),
             "decision": if decision.built_in_safety_gate { "hold_for_review" } else { decision.action.as_str() },
             "reason": decision.reason,
             "rule_id": decision.rule_id.as_deref(),
@@ -1515,30 +1513,8 @@ mod tests {
     }
 
     #[test]
-    fn guidance_does_not_override_deterministic_fallback() {
-        let policy = AutoReviewPolicy {
-            natural_language_guidance: Some("Prefer fast background fixes.".to_string()),
-            ..AutoReviewPolicy::default()
-        };
-        let ctx = ctx_for(
-            "mystery_tool",
-            json!({ "value": true }),
-            RunOrigin::Interactive,
-            ApprovalMode::Suggest,
-        );
-
-        let decision = policy.evaluate(&ctx);
-
-        assert_eq!(decision.action, AutoReviewAction::AskUser);
-        assert!(decision.reason.contains("unknown"));
-    }
-
-    #[test]
     fn audit_event_includes_context_and_reason() {
-        let policy = AutoReviewPolicy {
-            natural_language_guidance: Some("Hold risky tools.".to_string()),
-            ..AutoReviewPolicy::default()
-        };
+        let policy = AutoReviewPolicy::default();
         let ctx = AutoReviewContext::from_tool_call(
             "read_file",
             &json!({ "path": "Cargo.toml" }),
@@ -1557,7 +1533,6 @@ mod tests {
         assert_eq!(event["run_origin"], "background");
         assert_eq!(event["decision"], "allow");
         assert_eq!(event["reason"], "read-only action is allowed");
-        assert_eq!(event["policy_has_guidance"], true);
         assert_eq!(event["dirty_worktree"], true);
     }
 

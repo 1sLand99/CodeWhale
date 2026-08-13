@@ -1818,9 +1818,6 @@ If you are upgrading from older releases:
   background/headless actions even if an allow rule matches.
 
   ```toml
-  [auto_review]
-  natural_language_guidance = "Prefer read-only inspection until the user asks for writes."
-
   [[auto_review.allow]]
   id = "read-only-inspection"
   action_kind = "read"
@@ -1836,9 +1833,7 @@ If you are upgrading from older releases:
   required. `action_kind` accepts the six decision-relevant kinds `read`,
   `write`, `shell`, `external`, `publish`, and `destructive`. Invalid names
   fail config validation instead of silently broadening into another policy
-  class. `natural_language_guidance` is retained on the deterministic runtime
-  policy and audit event for compatibility; it is not fed to the guardian.
-  Existing rules should map `network`, `git`, `mcp_action`, `browser`,
+  class. Existing rules should map `network`, `git`, `mcp_action`, `browser`,
   `agent`, and `unknown` to `external`; `secret` to `destructive`; and
   `mcp_read` to `read`.
   Fallback holds in interactive Auto-Review escalate to one stateless guardian
