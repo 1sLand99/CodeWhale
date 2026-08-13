@@ -21,6 +21,11 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DICT_DIR = join(ROOT, "lib", "i18n", "dictionaries");
 const REFERENCE = "en";
 const FILES = ["chrome.ts", "home.ts"];
+// Per-page dictionaries (#5337): optional per locale. English is the
+// required reference; a locale that ships the file is held to the same
+// key/token parity, and a locale without it falls back to English at
+// lookup time — so absence is a valid state, never a failure.
+const OPTIONAL_FILES = ["docs-guide.ts"];
 
 /** Top-level keys of the exported object literal (two-space indented `key:`). */
 function extractKeys(source) {
@@ -59,36 +64,50 @@ const locales = readdirSync(DICT_DIR, { withFileTypes: true })
 console.log(`[check-locales] reference ${REFERENCE}: ${FILES.join(", ")}`);
 console.log(`[check-locales] locale dirs: ${locales.join(", ")}`);
 
-for (const file of FILES) {
+/** Compare one locale file against the English reference (parity + tokens). */
+function checkLocaleFile(locale, file, refKeys, refTokens) {
+  const path = join(DICT_DIR, locale, file);
+  const source = readFileSync(path, "utf8");
+  const keys = extractKeys(source);
+  const missing = [...refKeys].filter((k) => !keys.has(k));
+  const extra = [...keys].filter((k) => !refKeys.has(k));
+  if (missing.length) fail(`${locale}/${file}: missing keys: ${missing.join(", ")}`);
+  if (extra.length) fail(`${locale}/${file}: keys the reference lacks: ${extra.join(", ")}`);
+
+  const tokens = extractTokens(source);
+  for (const [key, refSet] of refTokens) {
+    const got = tokens.get(key) ?? new Set();
+    const dropped = [...refSet].filter((t) => !got.has(t));
+    if (dropped.length) {
+      fail(`${locale}/${file}: ${key} dropped template token(s): ${dropped.join(", ")}`);
+    }
+  }
+  if (!missing.length && !extra.length) {
+    console.log(`[check-locales] ${locale}/${file}: ${keys.size}/${refKeys.size} keys — complete`);
+  }
+}
+
+for (const file of [...FILES, ...OPTIONAL_FILES]) {
+  const required = FILES.includes(file);
   const refPath = join(DICT_DIR, REFERENCE, file);
+  if (!existsSync(refPath)) {
+    fail(`${REFERENCE}/${file}: reference file missing`);
+    continue;
+  }
   const refSource = readFileSync(refPath, "utf8");
   const refKeys = extractKeys(refSource);
   const refTokens = extractTokens(refSource);
 
   for (const locale of locales) {
-    const path = join(DICT_DIR, locale, file);
-    if (!existsSync(path)) {
-      fail(`${locale}/${file}: missing (reference has ${refKeys.size} keys)`);
+    if (!existsSync(join(DICT_DIR, locale, file))) {
+      if (required) {
+        fail(`${locale}/${file}: missing (reference has ${refKeys.size} keys)`);
+      } else {
+        console.log(`[check-locales] ${locale}/${file}: absent — falls back to English`);
+      }
       continue;
     }
-    const source = readFileSync(path, "utf8");
-    const keys = extractKeys(source);
-    const missing = [...refKeys].filter((k) => !keys.has(k));
-    const extra = [...keys].filter((k) => !refKeys.has(k));
-    if (missing.length) fail(`${locale}/${file}: missing keys: ${missing.join(", ")}`);
-    if (extra.length) fail(`${locale}/${file}: keys the reference lacks: ${extra.join(", ")}`);
-
-    const tokens = extractTokens(source);
-    for (const [key, refSet] of refTokens) {
-      const got = tokens.get(key) ?? new Set();
-      const dropped = [...refSet].filter((t) => !got.has(t));
-      if (dropped.length) {
-        fail(`${locale}/${file}: ${key} dropped template token(s): ${dropped.join(", ")}`);
-      }
-    }
-    if (!missing.length && !extra.length) {
-      console.log(`[check-locales] ${locale}/${file}: ${keys.size}/${refKeys.size} keys — complete`);
-    }
+    checkLocaleFile(locale, file, refKeys, refTokens);
   }
 }
 

@@ -279,3 +279,26 @@ export interface HomeDict {
   communityLinksAria: string;
   contribute: string;
 }
+
+/**
+ * Docs "Getting started" page (`app/[locale]/docs/guide/page.tsx`).
+ *
+ * First of the per-page dictionaries that retire the page-body `isZh`
+ * branches left after #4934. Page dictionaries are optional per locale:
+ * English is the required reference, any other locale that ships the file
+ * is held to exact key parity (`check-locales.mjs` OPTIONAL_FILES), and a
+ * locale without it falls back to English at lookup time — matching how
+ * page bodies already behave for partial locales.
+ */
+export interface DocsGuideDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  sessionTitle: string;
+  sessionLead: string;
+  nextTitle: string;
+  sourceNote: string;
+}

@@ -12,9 +12,11 @@
  * than a map entry, which keeps `DICTIONARY_LOCALES` equal to the set of
  * non-reference locale directories that `check-locales.mjs` walks.
  */
-import type { ChromeDict, HomeDict } from "./types";
+import type { ChromeDict, DocsGuideDict, HomeDict } from "./types";
 import { chrome as enChrome } from "./en/chrome";
 import { home as enHome } from "./en/home";
+import { docsGuide as enDocsGuide } from "./en/docs-guide";
+import { docsGuide as zhDocsGuide } from "./zh/docs-guide";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -61,6 +63,17 @@ const HOME: Record<string, HomeDict> = {
 /** Locales with their own dictionary directory (English is the reference). */
 export const DICTIONARY_LOCALES = Object.keys(CHROME) as readonly string[];
 
+/**
+ * Per-page dictionaries (#5337). Unlike chrome/home, a page dictionary is
+ * optional per locale: English is the required reference, any locale that
+ * ships the file is held to exact key parity, and everyone else falls back
+ * to English here — the same behavior page bodies already had for partial
+ * locales, now expressed through one lookup instead of an `isZh` ternary.
+ */
+const DOCS_GUIDE: Record<string, DocsGuideDict> = {
+  zh: zhDocsGuide,
+};
+
 export function getChrome(locale: string): ChromeDict {
   return CHROME[locale] ?? enChrome;
 }
@@ -69,9 +82,25 @@ export function getHome(locale: string): HomeDict {
   return HOME[locale] ?? enHome;
 }
 
+export function getDocsGuide(locale: string): DocsGuideDict {
+  return DOCS_GUIDE[locale] ?? enDocsGuide;
+}
+
+/**
+ * Select one side of a legacy `{ en, zh }` content pair by locale. This is
+ * the transitional bridge for `web/lib/content/` modules that still carry
+ * two-language pairs (#5337 Phase 3 dissolves them into dictionaries): it
+ * moves the branch out of page TSX and into the i18n layer, so call sites
+ * stay locale-agnostic.
+ */
+export function pickText(pair: { en: string; zh: string }, locale: string): string {
+  return locale === "zh" ? pair.zh : pair.en;
+}
+
 /** Reference dictionaries (parity baseline for the locale checks). */
 export const EN_CHROME = enChrome;
 export const EN_HOME = enHome;
+export const EN_DOCS_GUIDE = enDocsGuide;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */
