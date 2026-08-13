@@ -501,6 +501,21 @@ text_contains = "run tests"
 }
 
 #[test]
+fn auto_review_legacy_allow_kind_fails_closed_instead_of_widening() {
+    let error = toml::from_str::<Config>(
+        r#"
+[[auto_review.allow]]
+action_kind = "git"
+"#,
+    )
+    .expect("shape parses")
+    .validate()
+    .expect_err("narrow legacy allow kind must not widen to external");
+
+    assert!(error.to_string().contains("cannot safely widen"));
+}
+
+#[test]
 fn auto_review_config_rejects_invalid_rule_shapes() {
     let invalid_kind: Config = toml::from_str(
         r#"

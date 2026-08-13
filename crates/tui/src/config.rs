@@ -2979,12 +2979,23 @@ fn validate_auto_review_rules(kind: &str, rules: &[AutoReviewRuleConfig]) -> Res
                 "Invalid auto_review.{kind}[{index}]: set at least one of tool or action_kind."
             );
         }
-        if let Some(action_kind) = rule.action_kind.as_deref()
-            && parse_auto_review_action_kind(action_kind.trim()).is_none()
-        {
-            anyhow::bail!(
-                "Invalid auto_review.{kind}[{index}].action_kind '{action_kind}': expected read, write, shell, external, publish, or destructive."
-            );
+        if let Some(action_kind) = rule.action_kind.as_deref() {
+            let normalized = action_kind.trim().to_ascii_lowercase().replace('-', "_");
+            if parse_auto_review_action_kind(&normalized).is_none() {
+                anyhow::bail!(
+                    "Invalid auto_review.{kind}[{index}].action_kind '{action_kind}': expected read, write, shell, external, publish, or destructive."
+                );
+            }
+            if kind == "allow"
+                && !matches!(
+                    normalized.as_str(),
+                    "read" | "write" | "shell" | "external" | "publish" | "destructive"
+                )
+            {
+                anyhow::bail!(
+                    "Invalid auto_review.allow[{index}].action_kind '{action_kind}': this retired narrow kind cannot safely widen to a v0.9.8 decision class; replace it with an exact tool rule or a current action_kind."
+                );
+            }
         }
     }
     Ok(())
@@ -2995,7 +3006,7 @@ fn parse_auto_review_action_kind(raw: &str) -> Option<crate::tui::auto_review::T
         "read" | "mcp_read" => Some(crate::tui::auto_review::ToolActionKind::Read),
         "write" => Some(crate::tui::auto_review::ToolActionKind::Write),
         "shell" => Some(crate::tui::auto_review::ToolActionKind::Shell),
-        "external" | "network" | "git" | "mcp_action" | "browser" | "agent" | "unknown" => {
+        "external" | "network" | "git" | "mcp_action" | "browser" | "unknown" => {
             Some(crate::tui::auto_review::ToolActionKind::External)
         }
         "publish" => Some(crate::tui::auto_review::ToolActionKind::Publish),
