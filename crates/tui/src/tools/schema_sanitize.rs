@@ -117,6 +117,10 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     obj.remove("allOf");
     obj.remove("enum");
     obj.remove("not");
+    // The Responses/Anthropic tool-schema subset does not accept Draft 2020
+    // dependency keywords. Runtime validation remains authoritative, while
+    // the tool description retains the same action contract for the model.
+    obj.remove("dependentSchemas");
     ensure_properties_object(obj);
     prune_dangling_required(schema);
     constraint_note
@@ -130,7 +134,10 @@ fn strict_schema_supported(schema: &Value) -> bool {
 
 fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
     if let Some(obj) = schema.as_object() {
-        if obj.contains_key("oneOf") || obj.contains_key("allOf") {
+        if obj.contains_key("oneOf")
+            || obj.contains_key("allOf")
+            || obj.contains_key("dependentSchemas")
+        {
             return true;
         }
         if is_root && obj.contains_key("anyOf") {
@@ -898,6 +905,28 @@ mod tests {
 
         assert!(!prepare_tools_for_strict_mode(&mut tools));
         assert_eq!(tools[0].strict, None);
+    }
+
+    #[test]
+    fn strict_mode_leaves_dependent_schema_tools_non_strict() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "message": {"type": "string"}
+            },
+            "dependentSchemas": {
+                "action": {
+                    "properties": {"message": {}},
+                    "required": ["message"]
+                }
+            }
+        });
+        let mut tools = vec![test_tool("agent", schema.clone())];
+
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, schema);
     }
 
     #[test]
