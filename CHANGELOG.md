@@ -7,13 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-12
+
+Codewhale v0.9.7 keeps the catalog ordinary. Grok 4.6 lands as a normal catalog
+row instead of a provider-shaped pile of special cases, OrcaRouter joins as a
+named provider, and a panic-safety advisory in `lru` is cleared by lifting the
+pin that caused it rather than living around it.
+
 ### Added
 
-- Add Grok 4.6 as the direct xAI default with its official 500K context,
-  text/image input, tool and structured-output support, four reasoning efforts,
-  native web search, and usage-aware 200K-token pricing boundary. Reconcile the
-  existing `deepseek-v4-pro` registration with DeepSeek's live
-  `DeepSeek-V4-Pro-0813` backend label without changing the callable API ID.
+- Grok 4.6 is the direct xAI default, with the `grok` alias moving onto it and
+  `grok-4.5` still explicitly selectable. Its 500K context, text/image input,
+  tool and structured-output support, `low`/`medium`/`high`/`xhigh` reasoning
+  efforts (default `high`), and server-side web search all come from the
+  Models.dev-shaped catalog rather than model-specific code. `reasoning_effort`
+  reaches the wire only on the exact first-party `https://api.x.ai/v1` route,
+  and the usage-aware 200K-token pricing boundary is scoped to direct xAI so
+  aggregator routes reusing the model slug cannot inherit xAI billing.
+- OrcaRouter is a first-class named provider: `ORCAROUTER_API_KEY`, default base
+  URL `https://api.orcarouter.ai/v1`, `deepseek/deepseek-v4-pro` default,
+  `orcarouter/auto` routing, CLI `--provider` selector, and TUI picker entries
+  (#5321).
+
+### Changed
+
+- Reasoning-effort normalization and the model picker read a model's published
+  `reasoning_options` list from the catalog instead of collapsing every route to
+  the historic Low/Medium ladder. Any catalog row that publishes an effort list
+  keeps its own vocabulary.
+- Docs record DeepSeek's live `DeepSeek-V4-Pro-0813` backend label while the
+  callable API ID stays `deepseek-v4-pro`. No aliases are remapped and no
+  `deepseek-v4-pro[1m]` selector is sent.
+
+### Fixed
+
+- Copying a user or assistant message takes its canonical content instead of
+  reserialized transcript lines, keeping role glyphs, continuation rails, and
+  visual wrapping out of the clipboard while preserving authored Unicode,
+  Markdown, and hard line breaks. Tool and Thinking cells stay on the existing
+  full-transcript path (#5319).
+- `load_session` no longer runs crash recovery on every read. Snapshot reads go
+  through a side-effect-free `load_session_snapshot` and recovery is explicit
+  via `recover_session_for_resume`, so an embedding host inspecting a durable
+  session while a tool is still running no longer gets a spurious crash repair
+  (#5320).
+
+### Security
+
+- `lru` moves to 0.18 to clear RUSTSEC-2026-0253, where `LruCache::pop()` was
+  not panic-safe and could leave dangling list pointers. The `ratatui-core`
+  `=0.1.0` pin that transitively forced `lru` ^0.16 is lifted, so
+  `ColorCompatBackend` now answers `get_cursor_position()` from tracked cursor
+  state — the upstream-recommended workaround for the startup CPR race
+  (ratatui/ratatui#2483, ratatui/ratatui#2640) that the pin originally worked
+  around. `ratatui` itself stays pinned at `=0.30.0`, so the API surface is
+  unchanged.
+
+### Known issues
+
+- The integration test
+  `exec_persistent_service::failed_exec_kills_pending_service_and_exits_nonzero`
+  is a confirmed flake under parallel load ("service pid file never appeared").
+  It passes in isolation and is unrelated to any v0.9.7 change.
+
+### Contributors
+
+- XhesicaFrost (@XhesicaFrost) — canonical message copy (#5319).
+- h3c-hexin (@h3c-hexin) — session snapshot and crash-recovery split (#5320).
+- XiaoHuo888-hue (@XiaoHuo888-hue) — OrcaRouter provider registration (#5321).
 
 ## [0.9.6] - 2026-08-11
 
@@ -5453,7 +5514,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/Hmbown/CodeWhale/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/Hmbown/CodeWhale/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4

@@ -7,12 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-12
+
+Codewhale v0.9.7 keeps the catalog ordinary. Grok 4.6 lands as a normal catalog
+row instead of a provider-shaped pile of special cases, OrcaRouter joins as a
+named provider, and a panic-safety advisory in `lru` is cleared by lifting the
+pin that caused it rather than living around it.
+
 ### Added
 
-- Add Grok 4.6 to the direct xAI picker as the default, including its official
-  reasoning efforts, image-input capability, 500K context, native web search,
-  and long-context pricing tier; retain `deepseek-v4-pro` as the API ID for
-  DeepSeek's live V4-Pro-0813 backend.
+- Grok 4.6 is the direct xAI default, with the `grok` alias moving onto it and
+  `grok-4.5` still explicitly selectable. Its 500K context, text/image input,
+  tool and structured-output support, `low`/`medium`/`high`/`xhigh` reasoning
+  efforts (default `high`), and server-side web search all come from the
+  Models.dev-shaped catalog rather than model-specific code. `reasoning_effort`
+  reaches the wire only on the exact first-party `https://api.x.ai/v1` route,
+  and the usage-aware 200K-token pricing boundary is scoped to direct xAI so
+  aggregator routes reusing the model slug cannot inherit xAI billing.
+- OrcaRouter is a first-class named provider: `ORCAROUTER_API_KEY`, default base
+  URL `https://api.orcarouter.ai/v1`, `deepseek/deepseek-v4-pro` default,
+  `orcarouter/auto` routing, CLI `--provider` selector, and TUI picker entries
+  (#5321).
+
+### Changed
+
+- Reasoning-effort normalization and the model picker read a model's published
+  `reasoning_options` list from the catalog instead of collapsing every route to
+  the historic Low/Medium ladder. Any catalog row that publishes an effort list
+  keeps its own vocabulary.
+- Docs record DeepSeek's live `DeepSeek-V4-Pro-0813` backend label while the
+  callable API ID stays `deepseek-v4-pro`. No aliases are remapped and no
+  `deepseek-v4-pro[1m]` selector is sent.
+
+### Fixed
+
+- Copying a user or assistant message takes its canonical content instead of
+  reserialized transcript lines, keeping role glyphs, continuation rails, and
+  visual wrapping out of the clipboard while preserving authored Unicode,
+  Markdown, and hard line breaks. Tool and Thinking cells stay on the existing
+  full-transcript path (#5319).
+- `load_session` no longer runs crash recovery on every read. Snapshot reads go
+  through a side-effect-free `load_session_snapshot` and recovery is explicit
+  via `recover_session_for_resume`, so an embedding host inspecting a durable
+  session while a tool is still running no longer gets a spurious crash repair
+  (#5320).
+
+### Security
+
+- `lru` moves to 0.18 to clear RUSTSEC-2026-0253, where `LruCache::pop()` was
+  not panic-safe and could leave dangling list pointers. The `ratatui-core`
+  `=0.1.0` pin that transitively forced `lru` ^0.16 is lifted, so
+  `ColorCompatBackend` now answers `get_cursor_position()` from tracked cursor
+  state — the upstream-recommended workaround for the startup CPR race
+  (ratatui/ratatui#2483, ratatui/ratatui#2640) that the pin originally worked
+  around. `ratatui` itself stays pinned at `=0.30.0`, so the API surface is
+  unchanged.
+
+### Known issues
+
+- The integration test
+  `exec_persistent_service::failed_exec_kills_pending_service_and_exits_nonzero`
+  is a confirmed flake under parallel load ("service pid file never appeared").
+  It passes in isolation and is unrelated to any v0.9.7 change.
+
+### Contributors
+
+- XhesicaFrost (@XhesicaFrost) — canonical message copy (#5319).
+- h3c-hexin (@h3c-hexin) — session snapshot and crash-recovery split (#5320).
+- XiaoHuo888-hue (@XiaoHuo888-hue) — OrcaRouter provider registration (#5321).
 
 ## [0.9.6] - 2026-08-11
 
@@ -3404,97 +3466,6 @@ recorded in this changelog. Crediting them now, with the version they shipped in
 - Hidden `reasoning_content` kept in English regardless of locale — thanks @cmyyy (report) (#1842, v0.8.47)
 - `ExternalTool` abstraction layer — thanks @aboimpinto (#1794, #2294, v0.8.48)
 - Ephemeral generated project context — thanks @Final527 (report) (#3058, v0.8.59)
-
-## [0.8.61] - 2026-06-15
-
-This release lands the **runtime control plane** for multi-agent work: the TUI stays
-responsive while sub-agents run, sub-agents converge toward fleet-style durable workers
-with per-role model routing, and provider/model routes are isolated per session. It also
-folds in several community contributions.
-
-### Added
-
-- **WhaleFlow runtime foundations** — worker runtime profiles (role / permissions / shell /
-  tools / model-route, with non-escalating child derivation), a cross-provider model registry
-  with offline catalog hydration, and provider-readiness / context-budget / provider-adapter /
-  resource-telemetry services. (#3217, #3071, #3072, #3073)
-- **Per-role, heterogeneous-model sub-agent routing** — sub-agents can be assigned a model and
-  provider per role (e.g. scout vs. synthesis; verifiers route to a fast model). (#2027, #1768)
-- **Durable goal mode** — cross-turn goal progress with token/time accounting and a
-  verifier-as-judge gate before a goal may complete. (#3215, #891, #1976, #2058, #2029)
-- Parent-visible worker interaction contract — a recommended action per worker. (#3226)
-- Maintainer GitHub workflow skills; ACP registry submission prepared. (#3192)
-- OpenAI-compatible `/v1/chat/completions` endpoint on the legacy app-server HTTP transport,
-  provider-neutral, with model registry resolution and configured-credential forwarding.
-
-### Changed
-
-- **Sub-agents converge toward fleet-style durable workers** — real worker lifecycle states are
-  projected to the sidebar instead of a hardcoded "running", and a sub-agent returns a structured
-  needs-input checkpoint instead of parking. (#3226, #3096, #3154)
-- The per-turn runtime tag exposes capability posture instead of human-facing mode labels. (#3213)
-- Independent shell and verifier work defaults to background jobs with nonblocking waits and a
-  completion notification; blocking now requires an explicit wait. (#3212)
-- Sub-agent launches now expose explicit `model_strength` and `thinking` controls to the model
-  instead of hidden child-model auto-routing; `explore` work is documented as a good fit for
-  faster models and `thinking: "off"`.
-- Plan mode is strictly read-only (no shell tools), consistent with its runtime posture.
-- `/swarm` is gated behind the durable worker substrate. (#3218)
-- Legacy `deepseek` install/update path resolves to `codewhale`. (#2960, #2924, #2917)
-
-### Fixed
-
-- **TUI freeze when multiple sub-agents spawn (launch blocker)** — the terminal input pump runs
-  off the render thread, AgentProgress events are coalesced, and sub-agents no longer park on
-  input with no orchestrator to answer; a six-worker stress test guards input/render/cancel
-  liveness. (#3216, #3096)
-- Idle sub-agent completion notifications now resume the parent turn instead of waiting for a
-  later user message; thanks @giovanni-paolilla for the deadlock report (#3266).
-- **Provider/model route isolation** — provider and model state is session-local, and a
-  mismatched provider+model tuple is rejected at the route boundary. (#3227)
-- Route-effective context-window metadata, over-limit preflight, and bounded recovery from
-  `context_length_exceeded` instead of re-looping. (#3204)
-- Synchronous tools (`file_search`, `grep_files`, `list_dir`) are cancellable and no longer hold
-  a turn open against cancellation. (#1791)
-- MCP stdio proxy startup prompts no longer strand YOLO / non-interactive runs. (#2475)
-- Stalled / failed background-shell recovery; configurable sub-agent API timeout. (#1737, #1786, #1806)
-- Composer: reliable queued steering + Ctrl+S send (#3203, #3224); footer busy/idle indicator
-  (#2982); CJK word-wrap (#963); clickable sidebar stop targets (#3028); live token throughput
-  (#3190); auto-expiring terminal sub-agent cards (#3078).
-- Linux glibc preflight in the installer/update path with a clear error. (#3207, #1067)
-- Self-update retries transient GitHub metadata/asset failures and falls back from the GitHub
-  REST API to the public `releases/latest` redirect before constructing release asset URLs. (#3232)
-- Provider picker lists providers in neutral alphabetical order instead of hard-coding DeepSeek first; the active provider stays pre-selected. (#3076)
-- Work sidebar no longer shows stale `phase now:` / `phase next:` strategy rows once the checklist
-  is 100% complete.
-- Plan mode no longer shortcuts investigation for requests that name a repository, URL, version,
-  release, build state, bug, PR, issue, API surface, or local code path.
-- Oversized pasted text stays editable in the composer, with a file backup appended at submit
-  time for model access; thanks @idling11 (#3267, closes #3263).
-- Bare digit keys `1`-`8` now insert text instead of firing hotbar slots; use `Alt+digit` for
-  hotbar actions. Thanks @wjq2026 for the report and @DieMoe233 for the paste-path note (#3243).
-- Kimi/Moonshot tool schemas normalize empty function parameters to a root object schema; thanks
-  @jghwwnq for the provider repro (#3265).
-- Novita defaults to its OpenAI-compatible `/openai/v1` endpoint so chat completions no longer
-  404 out of the box; thanks @buko for the report and endpoint verification (#3255).
-- Dependency security: `ws` pinned to 8.21.0 across npm packages to close remote memory-exhaustion
-  DoS (dependabot).
-
-### Community contributions
-
-- Non-DeepSeek model pricing — thanks @mvanhorn (#3201)
-- Telegram polling transport — thanks @cyq1017 (#3195)
-- Mobile event history — thanks @RobertEmprechtinger (#3220)
-- Runtime-API session save — thanks @gaord (#3199)
-- Whale-accent rename — thanks @nightt5879 (#3197)
-- `DEEPSEEK_BASE_URL` / `MODEL` honored in `exec` — thanks @hongchen1993 (#3221)
-- VS Code read-only API documentation — thanks @cyq1017 (#3013)
-- Atomic ask-only permission rule persistence — thanks @greyfreedom (#3233)
-- DeepInfra provider support and release-surface follow-through — thanks @idling11 (#3235, closes #3231) and @nightt5879 (#3236)
-- Editable oversized paste composer flow — thanks @idling11 (#3267, closes #3263)
-- WeChat bridge (`integrations/weixin-bridge` via Feishu + Tencent OpenClaw) — thanks @VincentCorleone (#3206)
-- Config robustness: atomic permission-rule save, one-time config `.bak` backup before the first changed write, `CODEWHALE_HOME` as primary config home, and accepting the dispatcher-written config shape (camelCase aliases + `[features.enabled]` table) so legacy/dual-written configs parse cleanly
-- Dependency/CI bumps: docker login/qemu actions, softprops gh-release, download-artifact, vitest, @opennextjs/cloudflare, form-data, js-yaml, dompurify, ws
 
 ---
 
