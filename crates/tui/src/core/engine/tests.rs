@@ -3,8 +3,8 @@ use super::*;
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    merge_new_runtime_mcp_tools, registered_tool_approval_required, registered_tool_forces_prompt,
-    workspace_write_carve_out_applies,
+    auto_review_block_tool_error, merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    registered_tool_forces_prompt, workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
@@ -349,6 +349,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     handle
         .send(Op::SendMessage {
             content: "verify exact route".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: Box::new(
                 resolve_runtime_route(&config, ApiProvider::Custom, Some("local-model"))
@@ -722,6 +723,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
     handle
         .send(Op::SendMessage {
             content: "first turn".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -1000,6 +1002,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
     handle
         .send(Op::SendMessage {
             content: "start the saturated goal turn".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -1127,6 +1130,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
     let run_task = tokio::spawn(engine.run());
     let send_message = |content: &str| Op::SendMessage {
         content: content.to_string(),
+        authorization_text: None,
         mode: AppMode::Agent,
         route: resolved_route_for_test(&config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
@@ -1723,6 +1727,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
     handle
         .send(Op::SendMessage {
             content: "start budgeted goal".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -2750,6 +2755,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     handle
         .send(Op::SendMessage {
             content: "one host-owned turn".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -2857,6 +2863,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     handle
         .send(Op::SendMessage {
             content: "claim the next turn".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -3892,6 +3899,7 @@ fn active_goal_message_op(
 ) -> Op {
     Op::SendMessage {
         content: content.to_string(),
+        authorization_text: None,
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
@@ -3928,6 +3936,7 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
     Op::SendMessage {
         content: content.to_string(),
+        authorization_text: None,
         mode,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
@@ -5412,9 +5421,9 @@ fn auto_review_classifies_publish_and_holds_without_prompting() {
         &json!({"command": "git push origin main"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("push the release branch"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
@@ -5436,9 +5445,9 @@ fn auto_review_classifier_allow_executes_without_prompting() {
         &json!({"path": "Cargo.toml"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("inspect the manifest"),
         true,
         false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
@@ -5453,14 +5462,36 @@ fn auto_review_allows_ordinary_shell_probe_without_prompting() {
         &json!({"command": "git remote -v && git rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git tag --list 'v0.8.65'"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("inspect release status"),
         true,
         false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
     assert_eq!(audit["decision"], "allow");
     assert_eq!(audit["action_kind"], "shell");
+}
+
+#[test]
+fn auto_review_routes_unknown_tool_to_reviewer_in_auto() {
+    let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
+        "mystery_tool",
+        &json!({"value": true}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        true,
+        false,
+        None,
+    );
+
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::ConsultReviewer(
+            "unknown tool category requires explicit review".to_string()
+        )
+    );
+    assert_eq!(audit["decision"], "ask_user");
 }
 
 #[test]
@@ -5471,9 +5502,9 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
         &json!({"tag": "v0.8.64"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Never,
-        Some("publish release"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
@@ -5694,9 +5725,9 @@ fn auto_review_allows_ordinary_test_command_without_prompting() {
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
         false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
@@ -5709,13 +5740,12 @@ fn auto_review_allows_ordinary_workspace_write_without_prompting() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     std::fs::create_dir(tmp.path().join("src")).expect("source directory");
-    let (decision, audit) = auto_review_plan_decision_in_workspace(
+    let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "write_file",
         &json!({"path": "src/lib.rs", "content": "pub fn ready() {}\n"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("update the implementation"),
         true,
         false,
         Some(tmp.path()),
@@ -5727,55 +5757,53 @@ fn auto_review_allows_ordinary_workspace_write_without_prompting() {
 }
 
 #[test]
-fn auto_review_rejects_unbounded_or_sensitive_workspace_writes() {
+fn auto_review_routes_unbounded_or_sensitive_workspace_writes_to_reviewer() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     for path in ["../outside.rs", "/etc/hostname", ".env", ".git/config"] {
-        let (decision, audit) = auto_review_plan_decision_in_workspace(
+        let (decision, audit) = auto_review_plan_decision(
             &crate::tui::auto_review::AutoReviewPolicy::default(),
             "write_file",
             &json!({"path": path, "content": "blocked"}),
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the write boundary"),
             true,
             false,
             Some(tmp.path()),
         );
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {path}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {path} without reviewer judgment"
         );
         assert_eq!(audit["decision"], "ask_user", "unexpected audit for {path}");
     }
 }
 
 #[test]
-fn auto_review_still_blocks_interactive_destructive_shell() {
+fn auto_review_routes_interactive_destructive_shell_to_reviewer() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
         &json!({"command": "rm -rf /"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("destroy the system tree"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
         decision,
-        AutoReviewPlanDecision::Block(
-            "Auto-Review held tool 'exec_shell': sensitive or destructive action requires explicit review"
-                .to_string()
+        AutoReviewPlanDecision::ConsultReviewer(
+            "sensitive or destructive action requires explicit review".to_string()
         )
     );
     assert_eq!(audit["decision"], "ask_user");
-    assert_eq!(audit["action_kind"], "destructive");
+    assert_eq!(audit["risk"], "destructive");
 }
 
 #[test]
-fn auto_review_does_not_bypass_shell_commands_requiring_approval() {
+fn auto_review_routes_shell_commands_requiring_approval_to_reviewer() {
     for command in [
         "git reset --hard",
         "sudo cargo test",
@@ -5792,21 +5820,21 @@ fn auto_review_does_not_bypass_shell_commands_requiring_approval() {
             &json!({"command": command}),
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the approval boundary"),
             true,
             false,
+            None,
         );
 
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {command}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {command} without reviewer judgment"
         );
         assert_ne!(audit["decision"], "allow", "unexpected allow for {command}");
     }
 }
 
 #[test]
-fn auto_review_does_not_bypass_mcp_mutations_or_secret_tools() {
+fn auto_review_routes_mcp_mutations_or_secret_tools_to_reviewer() {
     for (tool_name, input) in [
         ("mcp_github_merge_pull_request", json!({"number": 5341})),
         ("read_secret", json!({"name": "provider-token"})),
@@ -5817,14 +5845,14 @@ fn auto_review_does_not_bypass_mcp_mutations_or_secret_tools() {
             &input,
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the approval boundary"),
             true,
             false,
+            None,
         );
 
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {tool_name}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {tool_name} without reviewer judgment"
         );
         assert_ne!(
             audit["decision"], "allow",
@@ -5853,9 +5881,9 @@ fn auto_review_policy_holds_background_destructive_under_suggest() {
         &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Suggest,
-        Some("wipe the home directory in the background"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
@@ -5881,9 +5909,9 @@ fn full_access_blocks_detached_catastrophic_tools_without_prompting() {
             &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
             crate::tui::approval::ApprovalMode::Bypass,
-            Some("wipe the home directory in the background"),
             true,
             false,
+            None,
         );
 
         assert_eq!(
@@ -5907,9 +5935,9 @@ fn auto_review_policy_blocks_background_destructive_under_never() {
         &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Never,
-        Some("wipe the home directory in the background"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
@@ -5943,9 +5971,9 @@ fn auto_review_plan_decision_uses_configured_policy() {
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
         false,
+        None,
     );
 
     assert_eq!(
@@ -5957,6 +5985,16 @@ fn auto_review_plan_decision_uses_configured_policy() {
     );
     assert_eq!(audit["decision"], "block");
     assert_eq!(audit["rule_id"], "configured-shell-block");
+}
+
+#[test]
+fn auto_review_block_error_preserves_reason_and_names_the_safe_next_step() {
+    let error = auto_review_block_tool_error("policy reason");
+    let message = error.to_string();
+
+    assert!(message.contains("policy reason."), "{message}");
+    assert!(message.contains("do not work around it"), "{message}");
+    assert!(message.contains("take a safer approach"), "{message}");
 }
 
 #[test]
@@ -8601,6 +8639,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     handle
         .send(Op::SendMessage {
             content: "write the requested local fixture".to_string(),
+            authorization_text: None,
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -8742,6 +8781,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
     handle
         .send(Op::SendMessage {
             content: "continue from the completed child".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -8878,6 +8918,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     handle
         .send(Op::SendMessage {
             content: "exercise the Full Access execution boundary".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9083,6 +9124,7 @@ async fn assert_full_access_model_tool_batch_runs(
     handle
         .send(Op::SendMessage {
             content: "exercise the Full Access auto-approval boundary".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9359,6 +9401,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
     handle
         .send(Op::SendMessage {
             content: "continue autonomously".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9545,6 +9588,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9685,6 +9729,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
+            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9821,6 +9866,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
     handle
         .send(Op::SendMessage {
             content: "please publish this crate".to_string(),
+            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -9961,6 +10007,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     handle
         .send(Op::SendMessage {
             content: "please open the PR".to_string(),
+            authorization_text: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15222,6 +15269,7 @@ async fn run_headless_turn_with_flaky_network(
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15347,6 +15395,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -15588,6 +15637,7 @@ async fn run_interactive_turn_with_flaky_network(
     handle
         .send(Op::SendMessage {
             content: "solve the task".to_string(),
+            authorization_text: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),

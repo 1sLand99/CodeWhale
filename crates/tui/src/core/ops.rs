@@ -88,6 +88,10 @@ pub enum Op {
     /// Send a message to the AI
     SendMessage {
         content: String,
+        /// Exact text accepted at the external input boundary, before skill
+        /// instructions, file contents, or other model context are attached.
+        /// `None` means this turn supplies no guardian authorization evidence.
+        authorization_text: Option<String>,
         mode: AppMode,
         /// Exact, structurally resolved route authority for this turn. The
         /// engine activates its client before mutating turn state; injected

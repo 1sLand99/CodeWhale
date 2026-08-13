@@ -1949,6 +1949,7 @@ impl Engine {
             .handle_send_message(
                 "[runtime] A background shell task finished; its completion evidence follows."
                     .to_string(),
+                None,
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
@@ -2006,6 +2007,7 @@ impl Engine {
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
                         content,
+                        authorization_text,
                         mode,
                         route,
                         compaction,
@@ -2028,6 +2030,7 @@ impl Engine {
                     } => {
                         self.handle_send_message(
                             content,
+                            authorization_text,
                             mode,
                             *route,
                             *compaction,
@@ -2097,6 +2100,7 @@ impl Engine {
                         let _ = self
                             .handle_send_message(
                                 content,
+                                None,
                                 self.current_mode,
                                 route,
                                 self.config.compaction.clone(),
@@ -2344,6 +2348,7 @@ impl Engine {
                         // generated-ID new-session path), so never carry the
                         // previous conversation's toolbox across this edge.
                         self.session.tool_activation_cache.clear();
+                        self.session.trusted_user_requests.clear();
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         if let Some(session_id) = session_id {
@@ -2496,7 +2501,8 @@ impl Engine {
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
                         self.handle_send_message(
-                            new_message,
+                            new_message.clone(),
+                            Some(new_message),
                             mode,
                             route,
                             self.config.compaction.clone(),
@@ -3071,6 +3077,7 @@ impl Engine {
         let outcome = self
             .handle_send_message(
                 content,
+                None,
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
@@ -3713,6 +3720,7 @@ impl Engine {
     async fn handle_send_message(
         &mut self,
         content: String,
+        authorization_text: Option<String>,
         mode: AppMode,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
@@ -3823,6 +3831,12 @@ impl Engine {
 
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
+        if provenance.can_authorize_work() {
+            match authorization_text {
+                Some(text) => self.session.reset_trusted_user_request(text),
+                None => self.session.trusted_user_requests.clear(),
+            }
+        }
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
@@ -5233,6 +5247,9 @@ pub(crate) enum AutoReviewPlanDecision {
     Allow,
     ForcePrompt(String),
     Block(String),
+    /// Fallback hold routed to the model guardian in interactive Auto posture
+    /// instead of a hard block.
+    ConsultReviewer(String),
 }
 
 pub(super) fn auto_review_run_origin_for_plan(
@@ -5245,9 +5262,6 @@ pub(super) fn auto_review_run_origin_for_plan(
     }
 }
 
-// The parameter list intentionally mirrors `AutoReviewContext::from_tool_call`,
-// which this thin wrapper builds; the 8 call sites (1 prod + tests) read clearer
-// passing the fields than constructing a context first.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn auto_review_plan_decision(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
@@ -5255,31 +5269,6 @@ pub(crate) fn auto_review_plan_decision(
     tool_input: &Value,
     run_origin: crate::tui::auto_review::RunOrigin,
     approval_mode: crate::tui::approval::ApprovalMode,
-    user_intent: Option<&str>,
-    workspace_trusted: bool,
-    dirty_worktree: bool,
-) -> (AutoReviewPlanDecision, Value) {
-    auto_review_plan_decision_in_workspace(
-        policy,
-        tool_name,
-        tool_input,
-        run_origin,
-        approval_mode,
-        user_intent,
-        workspace_trusted,
-        dirty_worktree,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn auto_review_plan_decision_in_workspace(
-    policy: &crate::tui::auto_review::AutoReviewPolicy,
-    tool_name: &str,
-    tool_input: &Value,
-    run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    user_intent: Option<&str>,
     workspace_trusted: bool,
     dirty_worktree: bool,
     workspace: Option<&std::path::Path>,
@@ -5289,7 +5278,6 @@ pub(crate) fn auto_review_plan_decision_in_workspace(
         tool_input,
         run_origin,
         approval_mode,
-        user_intent,
         workspace_trusted,
         dirty_worktree,
     );
@@ -5334,10 +5322,7 @@ pub(crate) fn auto_review_plan_decision_in_workspace(
             crate::tui::auto_review::AutoReviewAction::AskUser
                 if approval_mode == crate::tui::approval::ApprovalMode::Auto =>
             {
-                AutoReviewPlanDecision::Block(format!(
-                    "Auto-Review held tool '{tool_name}': {}",
-                    decision.reason
-                ))
+                AutoReviewPlanDecision::ConsultReviewer(decision.reason.clone())
             }
             crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
             crate::tui::auto_review::AutoReviewAction::HoldForReview => {
@@ -5963,6 +5948,7 @@ use context::{
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
 mod dispatch;
 mod lsp_hooks;
+mod reviewer;
 mod streaming;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;

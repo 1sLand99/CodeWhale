@@ -37,6 +37,14 @@ fn approval_intent_summary(text: &str) -> Option<String> {
     Some(summary)
 }
 
+/// Tell the model how to proceed after a deterministic Auto-Review denial.
+/// Keeping the original reason first preserves the audit trail.
+pub(super) fn auto_review_block_tool_error(reason: &str) -> ToolError {
+    ToolError::permission_denied(format!(
+        "{reason}. This block is automatic - do not work around it; take a safer approach inside the current permissions, or stop and tell the user."
+    ))
+}
+
 pub(super) fn registered_tool_approval_required(
     tool_name: &str,
     requirement: ApprovalRequirement,
@@ -399,6 +407,10 @@ impl Engine {
                 if steer.is_empty() {
                     continue;
                 }
+                // Steer input arrives through the live user boundary. Retain
+                // its exact text as additional authorization evidence; never
+                // replace it with an assistant-written intent summary.
+                self.session.push_trusted_user_steer(steer.clone());
                 self.session
                     .working_set
                     .observe_user_message(&steer, &self.session.workspace);
@@ -2450,13 +2462,12 @@ impl Engine {
                 }
 
                 if blocked_error.is_none() {
-                    let (decision, audit_event) = auto_review_plan_decision_in_workspace(
+                    let (decision, audit_event) = auto_review_plan_decision(
                         &self.config.auto_review_policy,
                         &tool_name,
                         &tool_input,
                         auto_review_run_origin_for_plan(detached_start),
                         self.session.approval_mode,
-                        None,
                         crate::config::is_workspace_trusted(&self.session.workspace),
                         false,
                         Some(&self.session.workspace),
@@ -2485,7 +2496,72 @@ impl Engine {
                         AutoReviewPlanDecision::Block(reason) => {
                             approval_required = false;
                             approval_force_prompt = false;
-                            blocked_error = Some(ToolError::permission_denied(reason));
+                            blocked_error = Some(auto_review_block_tool_error(&reason));
+                        }
+                        AutoReviewPlanDecision::ConsultReviewer(held_reason) => {
+                            let review_context =
+                                crate::tui::auto_review::AutoReviewContext::from_tool_call(
+                                    &tool_name,
+                                    &tool_input,
+                                    auto_review_run_origin_for_plan(detached_start),
+                                    self.session.approval_mode,
+                                    crate::config::is_workspace_trusted(&self.session.workspace),
+                                    false,
+                                );
+                            let context_text = crate::tui::auto_review::build_reviewer_context(
+                                &review_context,
+                                &held_reason,
+                                &self.session.trusted_user_requests,
+                                &tool_input,
+                            );
+                            let _ = self
+                                .tx_event
+                                .send(Event::status(format!("Auto-Review checking '{tool_name}'")))
+                                .await;
+                            let reviewer_started = Instant::now();
+                            let review = super::reviewer::consult_reviewer(
+                                client.as_ref(),
+                                &context_text,
+                                !self.session.trusted_user_requests.is_empty(),
+                                self.config
+                                    .auto_review_policy
+                                    .natural_language_guidance
+                                    .as_deref(),
+                                &self.cancel_token,
+                            )
+                            .await;
+                            if let Some(usage) = review.usage.as_ref() {
+                                turn.add_usage(usage);
+                                if usage_has_reported_data(usage) {
+                                    let _ = self
+                                        .tx_event
+                                        .send(Event::TurnUsage {
+                                            usage: usage.clone(),
+                                            duration_ms: u64::try_from(
+                                                reviewer_started.elapsed().as_millis(),
+                                            )
+                                            .unwrap_or(u64::MAX),
+                                        })
+                                        .await;
+                                }
+                            }
+                            let audit_decision = review.outcome.audit_decision();
+                            let tool_result = review.outcome.into_tool_result(&tool_name);
+                            let audit_reason = match &tool_result {
+                                Ok(reason) => reason.clone(),
+                                Err(error) => error.to_string(),
+                            };
+                            emit_tool_audit(json!({
+                                "event": "tool.auto_review_reviewer",
+                                "tool_id": tool_id.clone(),
+                                "decision": audit_decision,
+                                "reason": audit_reason,
+                            }));
+                            if let Err(error) = tool_result {
+                                blocked_error = Some(error);
+                            } else if !hook_requires_approval && !approval_force_prompt {
+                                approval_required = false;
+                            }
                         }
                     }
                 }

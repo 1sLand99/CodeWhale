@@ -234,6 +234,10 @@ pub struct Session {
     /// [`Session::replace_messages`], and at other mutation sites in
     /// `core/engine.rs`.
     pub messages_revision: u64,
+
+    /// Current external request plus same-turn steers. Synthetic continuations
+    /// inherit this exact evidence; a fresh external request replaces it.
+    pub(crate) trusted_user_requests: Vec<String>,
 }
 
 /// Cumulative usage statistics for a session.
@@ -309,7 +313,23 @@ impl Session {
             frozen_prefix: None,
             tool_activation_cache: ToolActivationCache::default(),
             messages_revision: 0,
+            trusted_user_requests: Vec::new(),
         }
+    }
+
+    pub(crate) fn reset_trusted_user_request(&mut self, request: String) {
+        self.trusted_user_requests.clear();
+        self.push_trusted_user_steer(request);
+    }
+
+    pub(crate) fn push_trusted_user_steer(&mut self, request: String) {
+        if request.trim().is_empty() {
+            return;
+        }
+        if self.trusted_user_requests.len() >= 3 {
+            self.trusted_user_requests.remove(0);
+        }
+        self.trusted_user_requests.push(request);
     }
 
     /// Add a message to the conversation
@@ -361,6 +381,26 @@ mod tests {
             strict: None,
             cache_control: None,
         }
+    }
+
+    #[test]
+    fn trusted_request_window_resets_between_tasks_and_keeps_same_turn_steers() {
+        let mut session = Session::new(
+            "model".to_string(),
+            PathBuf::from("."),
+            false,
+            false,
+            PathBuf::new(),
+            PathBuf::new(),
+        );
+        session.reset_trusted_user_request("first task".to_string());
+        for steer in [" one ", "two", "three"] {
+            session.push_trusted_user_steer(steer.to_string());
+        }
+        assert_eq!(session.trusted_user_requests, [" one ", "two", "three"]);
+
+        session.reset_trusted_user_request("next task".to_string());
+        assert_eq!(session.trusted_user_requests, ["next task"]);
     }
 
     #[test]

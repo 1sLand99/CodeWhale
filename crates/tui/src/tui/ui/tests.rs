@@ -8978,10 +8978,12 @@ async fn dispatch_non_resume_message_preserves_paused_command_state() {
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage {
             content,
+            authorization_text,
             goal_objective,
             ..
         } => {
             assert!(goal_objective.is_none());
+            assert_eq!(authorization_text.as_deref(), Some("how are you?"));
             assert!(content.contains("Paused custom slash command: Scan nested git repositories"));
             assert!(content.contains("do not continue the paused command"));
         }

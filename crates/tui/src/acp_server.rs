@@ -716,14 +716,17 @@ fn prepare_acp_tool_admission(
         &prepared.input,
         run_origin,
         approval_mode,
-        None,
         crate::config::is_workspace_trusted(workspace),
         false,
+        None,
     );
     match auto_review {
         AutoReviewPlanDecision::NoChange | AutoReviewPlanDecision::Allow => {}
         AutoReviewPlanDecision::ForcePrompt(reason) => permission_reason = Some(reason),
-        AutoReviewPlanDecision::Block(reason) => {
+        // Headless adapters keep the deterministic-only tier: a fallback hold
+        // that interactive Auto posture would send to the model guardian is
+        // a hard block here (the reviewer is an interactive-session feature).
+        AutoReviewPlanDecision::ConsultReviewer(reason) | AutoReviewPlanDecision::Block(reason) => {
             return Ok((prepared, AcpToolAdmission::Block(reason)));
         }
     }

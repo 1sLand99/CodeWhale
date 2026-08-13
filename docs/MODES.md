@@ -177,10 +177,18 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
 - `auto` (**Auto-Review**): the fully autonomous posture. It never opens a user
   question; the model resolves ambiguity from context, chooses a safe reversible
   interpretation, or reports that it cannot proceed safely. Tool safety holds
-  remain separate from user questions. Approval decisions here are
-  **deterministic**: rules and the built-in safety floor allow proven-safe
-  calls, and any call that would otherwise need a human decision is denied
-  rather than executed. No AI reviewer approves actions on your behalf.
+  remain separate from user questions. Two layers decide approvals. The
+  **deterministic floor** (configured block rules plus the built-in safety
+  floor) allows proven-safe calls and hard-blocks publish-like actions and
+  destructive background/headless work; it is never model-reviewed. Fallback
+  holds — calls the deterministic engine could not prove safe — escalate to a
+  one-shot **model guardian** (v0.9.8) that returns allow/deny with a
+  rationale. The guardian sees bounded external-input text and the exact held
+  call in separate JSON fields; skill instructions, attachments, and expanded
+  model context are not authorization. It has no tools, remembers no rules, and
+  denies rather than truncates an oversized exact call. It fails closed on
+  timeout, cancellation, provider failure, incomplete output, or malformed
+  JSON. Headless adapters use the deterministic-only tier.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
   while deliberate user questions remain available. Non-bypassable safety,
   repository-law, and managed-policy holds fail closed as hard blocks instead

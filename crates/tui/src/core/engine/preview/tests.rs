@@ -736,6 +736,7 @@ async fn assert_preview_matches_first_wire_body(
     let _ = engine
         .handle_send_message(
             prompt.to_string(),
+            Some(prompt.to_string()),
             AppMode::Agent,
             production_route,
             compaction,
@@ -1698,6 +1699,7 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
     let _ = engine
         .handle_send_message(
             prompt.to_string(),
+            Some(prompt.to_string()),
             AppMode::Agent,
             production_route,
             compaction,

@@ -433,7 +433,6 @@ reason = "read_file is allowed"
         &serde_json::json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
         false,
     );
@@ -449,7 +448,6 @@ reason = "read_file is allowed"
         &serde_json::json!({"path": "README.md"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("read the docs"),
         true,
         false,
     );
@@ -477,7 +475,7 @@ action_kind = "shell"
 guidance = "strict"
 
 [[profiles.strict.auto_review.block]]
-action_kind = "network"
+action_kind = "external"
 "#,
     )?;
 
@@ -488,7 +486,7 @@ action_kind = "network"
     assert_eq!(policy.block_rules.len(), 1);
     assert_eq!(
         policy.block_rules[0].action_kind,
-        Some(crate::tui::auto_review::ToolActionKind::Network)
+        Some(crate::tui::auto_review::ToolActionKind::External)
     );
 
     Ok(())

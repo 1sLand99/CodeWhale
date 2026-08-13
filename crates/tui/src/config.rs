@@ -2863,8 +2863,6 @@ pub struct AutoReviewRuleConfig {
     pub tool: Option<String>,
     #[serde(default, alias = "actionKind", alias = "action_kind")]
     pub action_kind: Option<String>,
-    #[serde(default, alias = "textContains", alias = "text_contains")]
-    pub text_contains: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -2958,15 +2956,6 @@ impl AutoReviewRuleConfig {
         {
             rule = rule.action_kind(action_kind);
         }
-        if let Some(text) = self
-            .text_contains
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            rule = rule.text_contains(text.to_string());
-        }
-
         rule
     }
 
@@ -2978,10 +2967,6 @@ impl AutoReviewRuleConfig {
                 .action_kind
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
-            || self
-                .text_contains
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
     }
 }
 
@@ -2989,14 +2974,14 @@ fn validate_auto_review_rules(kind: &str, rules: &[AutoReviewRuleConfig]) -> Res
     for (index, rule) in rules.iter().enumerate() {
         if !rule.has_matcher() {
             anyhow::bail!(
-                "Invalid auto_review.{kind}[{index}]: set at least one of tool, action_kind, or text_contains."
+                "Invalid auto_review.{kind}[{index}]: set at least one of tool or action_kind."
             );
         }
         if let Some(action_kind) = rule.action_kind.as_deref()
             && parse_auto_review_action_kind(action_kind.trim()).is_none()
         {
             anyhow::bail!(
-                "Invalid auto_review.{kind}[{index}].action_kind '{action_kind}': expected read, write, shell, network, git, mcp_read, mcp_action, browser, secret, publish, destructive, or unknown."
+                "Invalid auto_review.{kind}[{index}].action_kind '{action_kind}': expected read, write, shell, external, publish, or destructive."
             );
         }
     }
@@ -3008,15 +2993,9 @@ fn parse_auto_review_action_kind(raw: &str) -> Option<crate::tui::auto_review::T
         "read" => Some(crate::tui::auto_review::ToolActionKind::Read),
         "write" => Some(crate::tui::auto_review::ToolActionKind::Write),
         "shell" => Some(crate::tui::auto_review::ToolActionKind::Shell),
-        "network" => Some(crate::tui::auto_review::ToolActionKind::Network),
-        "git" => Some(crate::tui::auto_review::ToolActionKind::Git),
-        "mcp_read" => Some(crate::tui::auto_review::ToolActionKind::McpRead),
-        "mcp_action" => Some(crate::tui::auto_review::ToolActionKind::McpAction),
-        "browser" => Some(crate::tui::auto_review::ToolActionKind::Browser),
-        "secret" => Some(crate::tui::auto_review::ToolActionKind::Secret),
+        "external" => Some(crate::tui::auto_review::ToolActionKind::External),
         "publish" => Some(crate::tui::auto_review::ToolActionKind::Publish),
         "destructive" => Some(crate::tui::auto_review::ToolActionKind::Destructive),
-        "unknown" => Some(crate::tui::auto_review::ToolActionKind::Unknown),
         _ => None,
     }
 }
