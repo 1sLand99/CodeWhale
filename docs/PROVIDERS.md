@@ -299,6 +299,63 @@ environment. Project-local config overlays intentionally cannot set those keys,
 so a repository cannot silently redirect prompts or credentials to another
 endpoint.
 
+## Local Models (Ollama, vLLM, SGLang)
+
+Self-hosted OpenAI-compatible runtimes are first-class routes and are keyless
+by default — set an API key only when your server requires one. Start your
+runner, then point Codewhale at it with `--provider` / `/provider` or a config
+table.
+
+| Runner | Default base URL | Default model | Base URL override |
+| --- | --- | --- | --- |
+| `ollama` | `http://localhost:11434/v1` | `deepseek-v4-flash` | `OLLAMA_BASE_URL` |
+| `vllm` | `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `VLLM_BASE_URL` |
+| `sglang` | `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `SGLANG_BASE_URL` |
+
+### Ollama
+
+```bash
+ollama serve          # if not already running
+ollama pull <model>   # e.g. deepseek-v4-flash, or any tag you prefer
+codewhale --provider ollama --model <model>
+```
+
+Provider-hinted model names are sent as-is, so `--model qwen3:8b` works with
+any tag Ollama has pulled.
+
+### vLLM
+
+```bash
+vllm serve <model> --port 8000
+# or: python -m vllm.entrypoints.openai.api_server --model <model> --port 8000
+codewhale --provider vllm --model <model>
+```
+
+vLLM's OpenAI-compatible server listens on port 8000 by default, matching
+Codewhale's `VLLM_BASE_URL`.
+
+### SGLang
+
+```bash
+python -m sglang.launch_server --model-path <model> --port 30000
+codewhale --provider sglang --model <model>
+```
+
+SGLang's default port 30000 matches Codewhale's `SGLANG_BASE_URL`.
+
+### Pinning a local route in config
+
+```toml
+provider = "ollama"       # or "vllm" / "sglang"
+
+[providers.ollama]
+model = "qwen3:8b"        # default is deepseek-v4-flash
+# base_url defaults to http://localhost:11434/v1
+```
+
+Local models that print tool-call JSON without the wire markers: see
+[When a Local Model Prints Tool JSON](#when-a-local-model-prints-tool-json).
+
 ## Credential Links
 
 Provider setup surfaces use the same typed credential metadata as onboarding,
