@@ -498,6 +498,11 @@ jobs:
         run: npm test
       - name: Publish npm wrapper with trusted publishing
         working-directory: npm/codewhale
+        env:
+          # npm runs prepublishOnly in this step; that guard revalidates the
+          # public GitHub Release and therefore needs the same read token as
+          # the explicit asset gate above.
+          GH_TOKEN: ${{ github.token }}
         run: npm publish --access public
 
   homebrew:

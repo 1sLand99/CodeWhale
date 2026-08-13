@@ -41,6 +41,11 @@ pin that caused it rather than living around it.
 
 ### Fixed
 
+- Auto-Review once again executes proven read/build/test shell commands and
+  bounded workspace writes without opening an approval modal. Explicit policy
+  blocks, unknown tools, publish operations, secret actions, MCP mutations,
+  and shell commands requiring approval still fail closed (#5323; reported by
+  USTHzhanglu and root-caused by Lstarsky0).
 - Copying a user or assistant message takes its canonical content instead of
   reserialized transcript lines, keeping role glyphs, continuation rails, and
   visual wrapping out of the clipboard while preserving authored Unicode,
@@ -75,6 +80,9 @@ pin that caused it rather than living around it.
 - XhesicaFrost (@XhesicaFrost) — canonical message copy (#5319).
 - h3c-hexin (@h3c-hexin) — session snapshot and crash-recovery split (#5320).
 - XiaoHuo888-hue (@XiaoHuo888-hue) — OrcaRouter provider registration (#5321).
+- USTHzhanglu (@USTHzhanglu) — Auto-Review regression report and Windows
+  evidence (#5323).
+- Lstarsky0 (@Lstarsky0) — Auto-Review regression root-cause analysis (#5323).
 
 ## [0.9.6] - 2026-08-11
 

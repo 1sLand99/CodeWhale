@@ -5,6 +5,7 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
+use super::dispatch::normalize_schema_json_containers;
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
@@ -1618,6 +1619,17 @@ impl Engine {
                 }
             }
 
+            for tool in &mut tool_uses {
+                let Some(schema) = tool_catalog
+                    .iter()
+                    .find(|candidate| candidate.name == tool.name)
+                    .map(|candidate| &candidate.input_schema)
+                else {
+                    continue;
+                };
+                normalize_schema_json_containers(&mut tool.input, schema);
+            }
+
             if !final_text.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: final_text,
@@ -2438,7 +2450,7 @@ impl Engine {
                 }
 
                 if blocked_error.is_none() {
-                    let (decision, audit_event) = auto_review_plan_decision(
+                    let (decision, audit_event) = auto_review_plan_decision_in_workspace(
                         &self.config.auto_review_policy,
                         &tool_name,
                         &tool_input,
@@ -2447,6 +2459,7 @@ impl Engine {
                         None,
                         crate::config::is_workspace_trusted(&self.session.workspace),
                         false,
+                        Some(&self.session.workspace),
                     );
                     emit_tool_audit(json!({
                         "event": "tool.auto_review_decision",
