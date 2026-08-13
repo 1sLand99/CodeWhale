@@ -386,6 +386,81 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
     None
 }
 
+/// Strip `dependentSchemas` / `dependentRequired` from every node, returning a
+/// note describing the requirements that stopped being advertised.
+///
+/// MFJS validates each node against a closed keyword allow-list, so a schema
+/// carrying either keyword is refused outright — and that refusal reaches
+/// `sanitize_moonshot_chat_tools`, which fails the whole request build, so one
+/// composed schema would break *every* tool-bearing Moonshot turn rather than
+/// degrade its own tool. Dropping the keywords leaves the canonical flat
+/// schema: the same properties are advertised, only the discrimination between
+/// them goes unstated, and the tool parser enforces it regardless.
+fn drop_dependent_keywords(schema: &mut Value) -> Option<String> {
+    let mut dropped: Vec<String> = Vec::new();
+    strip_dependent_keywords(schema, &mut dropped);
+    if dropped.is_empty() {
+        return None;
+    }
+    dropped.sort();
+    dropped.dedup();
+    Some(format!(
+        "This provider cannot express conditional requirements, so they are not \
+         part of the schema above: {}. They are still enforced.",
+        dropped.join("; ")
+    ))
+}
+
+fn strip_dependent_keywords(schema: &mut Value, dropped: &mut Vec<String>) {
+    match schema {
+        Value::Object(obj) => {
+            if let Some(Value::Object(groups)) = obj.remove("dependentRequired") {
+                for (trigger, names) in groups {
+                    let mut names: Vec<String> = names
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(|name| format!("`{name}`"))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if names.is_empty() {
+                        continue;
+                    }
+                    names.sort();
+                    names.dedup();
+                    dropped.push(format!(
+                        "with `{trigger}` present, {} is also required",
+                        names.join(" + ")
+                    ));
+                }
+            }
+            if let Some(Value::Object(groups)) = obj.remove("dependentSchemas") {
+                for (trigger, branch) in groups {
+                    match required_group_label(&branch) {
+                        Some(label) => dropped.push(format!(
+                            "with `{trigger}` present, {label} is also required"
+                        )),
+                        None => dropped
+                            .push(format!("`{trigger}` carries extra conditional constraints")),
+                    }
+                }
+            }
+            for value in obj.values_mut() {
+                strip_dependent_keywords(value, dropped);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_dependent_keywords(item, dropped);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn required_group_label(item: &Value) -> Option<String> {
     let mut names: Vec<String> = item
         .get("required")?
@@ -1187,6 +1262,13 @@ fn sanitize_kimi_parameters_candidate(
     // simultaneously be `type: object`. Flatten the actual root shape used by
     // apply_patch and retain its dropped required-group contract as a prompt
     // note for the model.
+    // MFJS has no conditional keywords. Degrade to the canonical flat schema
+    // instead of refusing it, which would fail the whole request build. This
+    // runs before the Responses pass: that pass prunes `required` entries with
+    // no sibling `properties`, which is exactly the shape a `dependentSchemas`
+    // branch has, and the note would lose the field names it is reporting.
+    let dependent_note = drop_dependent_keywords(parameters);
+
     let constraint_note = sanitize_for_responses(parameters);
 
     // Restore nullable unions collapsed by the registry's provider-neutral
@@ -1212,7 +1294,11 @@ fn sanitize_kimi_parameters_candidate(
         return Err(KimiParameterSchemaError::RootMustBeObject);
     }
 
-    Ok(constraint_note)
+    Ok(match (constraint_note, dependent_note) {
+        (Some(root), Some(dependent)) => Some(format!("{root} {dependent}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    })
 }
 
 fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParameterSchemaError> {
@@ -2709,6 +2795,112 @@ mod kimi_tests {
         assert_eq!(error, KimiParameterSchemaError::UnresolvedRootReference);
         assert!(!error.to_string().contains("private-schema-name-9217"));
         assert_eq!(schema, original, "a rejected schema must never be emitted");
+    }
+
+    fn contains_key_anywhere(value: &Value, key: &str) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.contains_key(key) || map.values().any(|v| contains_key_anywhere(v, key))
+            }
+            Value::Array(items) => items.iter().any(|v| contains_key_anywhere(v, key)),
+            _ => false,
+        }
+    }
+
+    fn action_discriminated_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "status"]},
+                "prompt": {"type": "string"},
+                "agent_id": {"type": "string"}
+            },
+            "required": ["action"],
+            "dependentRequired": {
+                "prompt": ["action"]
+            },
+            "dependentSchemas": {
+                "action": {"required": ["prompt"]}
+            }
+        })
+    }
+
+    #[test]
+    fn kimi_degrades_dependent_keywords_to_the_flat_schema() {
+        let mut schema = action_discriminated_schema();
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("must not refuse the schema");
+
+        assert!(!contains_key_anywhere(&schema, "dependentSchemas"));
+        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
+        let properties = schema["properties"].as_object().expect("properties");
+        for name in ["action", "prompt", "agent_id"] {
+            assert!(properties.contains_key(name), "{name} left the flat schema");
+        }
+        assert_eq!(schema["required"], json!(["action"]));
+        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
+
+        // Pin the wording, not just the field names: the note is built before
+        // the Responses pass precisely because that pass prunes the branch's
+        // `required`, and a reordering would silently degrade this to the
+        // "carries extra conditional constraints" fallback.
+        let note = note.expect("dropping a requirement must be reported to the model");
+        assert_eq!(
+            note,
+            "This provider cannot express conditional requirements, so they are \
+             not part of the schema above: with `action` present, `prompt` is \
+             also required; with `prompt` present, `action` is also required. \
+             They are still enforced."
+        );
+    }
+
+    #[test]
+    fn kimi_leaves_schemas_without_dependent_keywords_unannotated() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        });
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
+
+        assert_eq!(
+            note, None,
+            "a schema that lost nothing must not gain a note"
+        );
+        assert_eq!(schema["required"], json!(["path"]));
+    }
+
+    #[test]
+    fn kimi_degrades_dependent_keywords_nested_under_properties() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "path": {"type": "string"}
+                    },
+                    "dependentRequired": {"kind": ["path"]}
+                }
+            }
+        });
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("nested composition");
+
+        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
+        assert!(
+            schema["properties"]["target"]["properties"]
+                .as_object()
+                .expect("nested properties")
+                .contains_key("path")
+        );
+        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
+        assert!(
+            note.expect("nested drop is still a dropped constraint")
+                .contains("`path`")
+        );
     }
 
     #[test]
