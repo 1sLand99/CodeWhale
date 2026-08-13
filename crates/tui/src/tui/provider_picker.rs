@@ -2245,7 +2245,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("D", "DS4 local"),
+                    ActionHint::new("D", "DS4"),
                 ],
             )
         } else {
@@ -2258,7 +2258,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("D", "DS4 local"),
+                    ActionHint::new("D", "DS4"),
                     ActionHint::new("R", self.tr(MessageId::PickerActionEditKey)),
                     ActionHint::new("X", self.tr(MessageId::ProviderExternalActionRevoke)),
                     ActionHint::new("M", self.tr(MessageId::PickerActionModels)),

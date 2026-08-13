@@ -1394,7 +1394,6 @@ pub(crate) async fn apply_command_result(
                         .with_locale(app.ui_locale)
                         .with_provider_health(&app.provider_health),
                     );
-                    app.status_message = Some("DS4 local setup opened.".to_string());
                 }
             }
             AppAction::StartXaiDeviceLogin => {
