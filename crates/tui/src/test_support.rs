@@ -58,10 +58,9 @@ pub(crate) fn unsealed_test_state_root() -> PathBuf {
     if !current_thread_holds_test_env_lock() {
         return shared.to_path_buf();
     }
-    // Create the directory once per thread. Path resolution runs on every
-    // settings read, and an unconditional `create_dir_all` there is a syscall
-    // per read — cheap on Linux, not free on Windows, and pure waste after the
-    // first call since a thread keeps its own directory for its whole life.
+    // libtest runs each test in a fresh thread. Keep one root for that thread:
+    // a settings save resolves its path more than once, while different tests
+    // must not inherit each other's files.
     HOLDER_ROOT.with(|cached| {
         cached
             .get_or_init(|| {
@@ -174,17 +173,17 @@ pub(crate) fn guarded_environment_provides_state_paths() -> bool {
     if !current_thread_holds_test_env_lock() {
         return false;
     }
-    // Explicit overrides may arrive from a parent process (the cross-process
-    // settings children), so presence in the environment counts even without
-    // a live guard in this process.
-    let explicit_override_present = [
+    let guarded_override_present = [
         "CODEWHALE_HOME",
         "CODEWHALE_CONFIG_PATH",
         "DEEPSEEK_CONFIG_PATH",
     ]
     .iter()
-    .any(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()));
-    explicit_override_present
+    .any(|var| {
+        env_var_currently_guarded(var)
+            && std::env::var(var).is_ok_and(|value| !value.trim().is_empty())
+    });
+    guarded_override_present
         || env_var_currently_guarded("HOME")
         || env_var_currently_guarded("USERPROFILE")
 }
@@ -358,6 +357,31 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn ambient_codewhale_home_is_not_a_test_seal() {
+        let _lock = lock_test_env();
+        let _ambient = EnvVarGuard::set("CODEWHALE_HOME", "/tmp/ambient-codewhale-home");
+        unregister_guarded_env_key("CODEWHALE_HOME");
+
+        let sealed = guarded_environment_provides_state_paths();
+
+        register_guarded_env_key("CODEWHALE_HOME");
+        assert!(!sealed, "ambient developer state must remain confined");
+    }
+
+    #[test]
+    fn removing_overrides_does_not_seal_the_ambient_home() {
+        let _lock = lock_test_env();
+        let _codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+        assert!(
+            !guarded_environment_provides_state_paths(),
+            "removing an override must not expose the developer's HOME"
+        );
+    }
 
     #[test]
     fn unguarded_state_writes_use_isolated_test_root() {

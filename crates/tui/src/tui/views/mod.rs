@@ -4685,7 +4685,6 @@ mod tests {
         style::{Color, Style},
     };
     use std::borrow::Cow;
-    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -5027,8 +5026,8 @@ mod tests {
     }
 
     struct ConfigSettingsEnvGuard {
+        _config_path: crate::test_support::EnvVarGuard,
         _tmp: TempDir,
-        previous_config_path: Option<OsString>,
         _lock: crate::test_support::TestEnvLock,
     }
 
@@ -5044,25 +5043,12 @@ mod tests {
             std::fs::create_dir_all(config_path.parent().expect("config parent"))
                 .expect("config dir");
             std::fs::write(&settings_path, settings_toml).expect("settings file");
-            let previous_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-            unsafe {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-            }
+            let config_path_guard =
+                crate::test_support::EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
             Self {
+                _config_path: config_path_guard,
                 _tmp: tmp,
-                previous_config_path,
                 _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for ConfigSettingsEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous_config_path.take() {
-                    Some(previous) => std::env::set_var("DEEPSEEK_CONFIG_PATH", previous),
-                    None => std::env::remove_var("DEEPSEEK_CONFIG_PATH"),
-                }
             }
         }
     }

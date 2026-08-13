@@ -95,11 +95,7 @@ thread_local! {
 
 #[cfg(test)]
 fn pinned_probe() -> DisplayRefreshProbeResult {
-    PINNED.with(|pinned| {
-        let current = pinned.get();
-        pinned.set(current);
-        current.unwrap_or(UNMEASURED)
-    })
+    PINNED.with(|pinned| pinned.get().unwrap_or(UNMEASURED))
 }
 
 /// Pin the probe for the current thread until dropped.
@@ -116,10 +112,11 @@ pub(crate) struct DisplayRefreshPin {
 impl DisplayRefreshPin {
     /// Pin a measured panel at `hz`, as if the host reported it.
     pub(crate) fn measured(hz: u32) -> Self {
+        let accepted = accept_hz(hz);
         Self::install(DisplayRefreshProbeResult {
-            hz: accept_hz(hz),
+            hz: accepted,
             source: DisplayRefreshSource::EnvOverride,
-            skip_reason: if accept_hz(hz).is_some() {
+            skip_reason: if accepted.is_some() {
                 ""
             } else {
                 "out_of_range"

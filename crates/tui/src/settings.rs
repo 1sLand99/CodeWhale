@@ -2755,6 +2755,9 @@ mod tests {
         // the isolated per-process test root and never touch the parent's file.
         // The child is a fresh process, so the acquisition is uncontended.
         let _env_lock = crate::test_support::lock_test_env();
+        let inherited_home = std::env::var_os("CODEWHALE_HOME")
+            .expect("settings child needs an inherited Codewhale home");
+        let _state_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", inherited_home);
         let signal = PathBuf::from(
             std::env::var(CHILD_SIGNAL_ENV).expect("child helper needs a signal path"),
         );
@@ -4987,19 +4990,9 @@ mod tests {
         // Point config path at a non-existent location so tui.toml is absent.
         let tmp = std::env::temp_dir().join("dst_tui_prefs_absent_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var(
-                "DEEPSEEK_CONFIG_PATH",
-                tmp.join("config.toml").to_str().unwrap(),
-            );
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
         let prefs = TuiPrefs::load().expect("load should not fail when file absent");
         assert_eq!(prefs.theme, "dark", "should fall back to default theme");
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5008,13 +5001,7 @@ mod tests {
         let _g = config_path_test_guard();
         let tmp = std::env::temp_dir().join("dst_tui_prefs_save_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var(
-                "DEEPSEEK_CONFIG_PATH",
-                tmp.join("config.toml").to_str().unwrap(),
-            );
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
 
         let prefs = TuiPrefs {
             theme: "light".to_string(),
@@ -5031,10 +5018,6 @@ mod tests {
         assert_eq!(loaded.font_size, 14);
         assert_eq!(loaded.keybinds.submit.as_deref(), Some("ctrl+enter"));
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5044,10 +5027,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("dst_tui_prefs_comment_test");
         std::fs::create_dir_all(&tmp).unwrap();
         let config_file = tmp.join("config.toml");
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", &config_file);
 
         // tui.toml lives next to config.toml
         let tui_path = tmp.join("tui.toml");
@@ -5068,10 +5048,6 @@ mod tests {
         assert!(body.contains("# footer note"), "footer lost: {body}");
         assert!(body.contains("light"), "new value not written: {body}");
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5081,10 +5057,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("dst_settings_comment_test");
         std::fs::create_dir_all(&tmp).unwrap();
         let config_file = tmp.join("config.toml");
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", &config_file);
 
         // settings.toml lives next to config.toml
         let settings_path = tmp.join("settings.toml");
@@ -5104,10 +5077,6 @@ mod tests {
         assert!(body.contains("# trailing"), "trailing lost: {body}");
         assert!(body.contains("cny"), "new value not written: {body}");
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
