@@ -375,7 +375,10 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
         .await
         .expect("send exact custom turn");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // This test runs alongside more than ten thousand TUI tests in the release
+    // parity job. Keep the assertion bounded, but leave enough headroom for a
+    // saturated shared runner to schedule the loopback SSE response.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut lifecycle_stage = 0u8;
     let mut diagnostics = Vec::new();
     let mut rx = handle.rx_event.write().await;
