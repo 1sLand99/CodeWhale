@@ -3143,7 +3143,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
         std::fs::create_dir_all(&codex_home)?;
         std::fs::write(
             codewhale_home.join("config.toml"),
-            "reasoning_effort = \"low\"\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+            "reasoning_effort = \"low\"\n\n# QA frames pin the deterministic-only auto-review tier: the model\n# guardian has no provider in the sealed harness, and a fail-closed\n# denial would change every frame this test pins.\n[auto_review]\nreviewer = false\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
         )?;
         let initial_mode = if persist_through_restart {
             "full"
