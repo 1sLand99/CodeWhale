@@ -2438,7 +2438,7 @@ impl Engine {
                 }
 
                 if blocked_error.is_none() {
-                    let (decision, audit_event) = auto_review_plan_decision(
+                    let (decision, audit_event) = auto_review_plan_decision_in_workspace(
                         &self.config.auto_review_policy,
                         &tool_name,
                         &tool_input,
@@ -2447,6 +2447,7 @@ impl Engine {
                         None,
                         crate::config::is_workspace_trusted(&self.session.workspace),
                         false,
+                        Some(&self.session.workspace),
                     );
                     emit_tool_audit(json!({
                         "event": "tool.auto_review_decision",

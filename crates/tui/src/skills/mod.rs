@@ -34,7 +34,8 @@ pub use system::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::sync::{OnceLock, RwLock};
 
 use crate::logging;
@@ -277,11 +278,15 @@ pub struct SkillRegistry {
 ///
 /// Some filesystems expose modification times at a coarse resolution. Keeping
 /// the file length alongside the timestamp lets an immediate content rewrite
-/// invalidate the cache even when the timestamp is unchanged.
+/// invalidate the cache even when the timestamp is unchanged. Directories also
+/// carry a fingerprint of their immediate entry names so an added or removed
+/// skill invalidates immediately on filesystems whose directory timestamp has
+/// not advanced yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WatchedPathStamp {
     modified: Option<std::time::SystemTime>,
     len: u64,
+    directory_entries: Option<u64>,
 }
 
 /// One cached discovery's watched filesystem entries: a path and the metadata
@@ -290,10 +295,26 @@ pub(crate) struct WatchedPathStamp {
 /// invalidates the entry.
 pub(crate) type WatchedPaths = Vec<(PathBuf, Option<WatchedPathStamp>)>;
 
+fn directory_entry_fingerprint(path: &Path) -> Option<u64> {
+    let mut names = fs::read_dir(path)
+        .ok()?
+        .map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect::<Option<Vec<_>>>()?;
+    names.sort_unstable();
+
+    let mut hasher = DefaultHasher::new();
+    names.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 pub(crate) fn watched_path_stamp(path: &Path) -> Option<WatchedPathStamp> {
     fs::metadata(path).ok().map(|metadata| WatchedPathStamp {
         modified: metadata.modified().ok(),
         len: metadata.len(),
+        directory_entries: metadata
+            .is_dir()
+            .then(|| directory_entry_fingerprint(path))
+            .flatten(),
     })
 }
 

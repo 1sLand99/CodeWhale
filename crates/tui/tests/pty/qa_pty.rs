@@ -2975,7 +2975,7 @@ diff --git a/delete.txt b/delete.txt
     let expected_result_marker = if tool_allowed {
         "files_applied"
     } else {
-        "destructive action requires explicit review"
+        "inside the workspace and outside sensitive paths"
     };
 
     let handle = std::thread::spawn(move || -> anyhow::Result<()> {
@@ -3183,8 +3183,9 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             );
         }
 
-        // Auto-Review deliberately has no approval escape hatch for destructive
-        // create/delete work; Ask and Full Access can complete the transaction.
+        // This sealed fixture is intentionally not a git work tree, so
+        // Auto-Review cannot prove the multi-file transaction is recoverable.
+        // Ask and Full Access can still complete it through their own posture.
         let tool_allowed = permission_posture != "auto";
         let (base_url, server) = spawn_file_mutation_screen_fixture(tool_allowed)?;
         let mut h = spawn_file_mutation_harness(&ws, &base_url, rows, cols, ascii_safe)?;
@@ -3210,7 +3211,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             h.wait_for(
                 |frame| {
                     frame.contains("tool issue")
-                        && frame.contains("destructive action")
+                        && frame.contains("inside the workspace")
                         && frame.contains("done")
                 },
                 Duration::from_secs(10),
@@ -3296,7 +3297,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                     "held Auto-Review mutation omitted semantic stats:\n{}",
                     h.frame().debug_dump()
                 );
-                assert!(h.frame().contains("explicit review"));
+                assert!(h.frame().contains("inside the workspace"));
                 assert!(!scroll_until(&mut h, ScrollDir::Up, "DIFF-NEW-SENTINEL"));
                 assert!(!scroll_until(&mut h, ScrollDir::Down, "DIFF-NEW-SENTINEL"));
             }
