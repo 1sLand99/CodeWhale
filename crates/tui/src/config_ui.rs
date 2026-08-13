@@ -77,7 +77,7 @@ pub struct SettingsSection {
     pub inline_diffs: InlineDiffValue,
     #[schemars(
         title = "UI locale",
-        description = "Locale used by the TUI. zh-Hant is a partial pack; missing strings fall back to English."
+        description = "Locale used by the TUI. Every shipped locale pack holds full English parity; nothing falls back."
     )]
     pub locale: UiLocale,
     pub theme: UiThemeValue,
@@ -1770,9 +1770,8 @@ background_color = "#1A1B26"
             schema["$defs"]["SettingsSection"]["properties"]["locale"]["description"]
                 .as_str()
                 .is_some_and(|copy| {
-                    copy.contains("zh-Hant")
-                        && copy.contains("partial")
-                        && copy.contains("fall back to English")
+                    copy.contains("Every shipped locale pack holds full English parity")
+                        && copy.contains("nothing falls back")
                 })
         );
         let approval_mode = &schema["$defs"]["ApprovalModeValue"]["enum"];

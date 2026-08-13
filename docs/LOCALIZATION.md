@@ -15,7 +15,8 @@ Customer-visible copy also follows the [Codewhale voice and terminal
 charter](VOICE.md); commands, key names, and glyphs remain code-owned around
 localized prose.
 
-Last updated: 2026-08-03 (v0.9.4 website dictionary spine, #4934).
+Last updated: 2026-08-12 (retire the stale `zh-Hant` partial declaration
+left behind by #5143).
 Source-of-truth README: `README.md` (English, post-#3087).
 
 ## Status legend
@@ -43,7 +44,7 @@ authoring contract.
 | English | `en.json` | 1299/1299 | **shipped** | Reference pack. |
 | Japanese | `ja.json` | 1299/1299 | **shipped** | Complete. |
 | Simplified Chinese | `zh-Hans.json` | 1299/1299 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 1299/1299 | **partial** | Key-complete — nothing falls back at runtime. Still declared partial in `PARTIAL_PACKS` per #4057; promoting it out is an open decision. |
+| Traditional Chinese | `zh-Hant.json` | 1299/1299 | **shipped** | Complete (#5143). Awaiting native-speaker review. |
 | Brazilian Portuguese | `pt-BR.json` | 1299/1299 | **shipped** | Complete. |
 | Latin American Spanish | `es-419.json` | 1299/1299 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
 | Vietnamese | `vi.json` | 1299/1299 | **shipped** | Complete. |
@@ -172,10 +173,12 @@ carry an explicit `planned`/`partial`/`deferred` row in this matrix.
    tied to `Locale::shipped()` so these surfaces cannot silently drift.
 4. Run `python3 scripts/check-tui-locale-parity.py` and
    `cargo test -p codewhale-tui localization`.
-5. If the pack must ship incomplete, declare it partial (see `zh-Hant` /
-   #4057): keep it out of `shipped_complete()`, mark it in
-   `is_partial_pack()`, and add it to `PARTIAL_PACKS` in
-   `scripts/check-tui-locale-parity.py` with a tracking issue.
+5. If the pack must ship incomplete, declare it partial: keep it out of
+   `shipped_complete()`, mark it in `is_partial_pack()`, and add it to
+   `PARTIAL_PACKS` in `scripts/check-tui-locale-parity.py` with a tracking
+   issue. No pack is partial today — `PARTIAL_PACKS` is empty and
+   `is_partial_pack()` returns false for every shipped locale — so a new
+   entry is the only thing that reopens the English-fallback path.
 
 ### 2. README
 

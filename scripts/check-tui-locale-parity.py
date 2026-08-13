@@ -33,9 +33,9 @@ REFERENCE = "en"
 # Packs that ship deliberately incomplete, with English fallback for the
 # missing keys. Mirrors `Locale::is_partial_pack()`. Every entry needs an
 # issue reference; a partial pack without a tracking issue is silent drift.
-PARTIAL_PACKS = {
-    "zh-Hant": "#4057",  # Setup core only; English fallback for the rest.
-}
+# Empty since #5143 brought `zh-Hant` to full `en.json` parity and
+# `Locale::is_partial_pack()` began returning false for every shipped locale.
+PARTIAL_PACKS: dict[str, str] = {}
 
 PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
