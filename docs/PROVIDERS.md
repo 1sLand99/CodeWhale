@@ -314,7 +314,8 @@ table.
 
 ### DS4 (DwarfStar)
 
-[DS4](https://github.com/antirez/ds4) serves DeepSeek V4 Flash and Pro locally
+[DS4](https://github.com/antirez/ds4/tree/84cc882352757baf628a1776badf7cc54d584e28)
+serves DeepSeek V4 Flash and Pro locally
 through an OpenAI-compatible API. Start DS4, then open Codewhale's prefilled,
 keyless setup form:
 
@@ -351,6 +352,16 @@ context_window = 100000
 Codewhale reuses its existing OpenAI-compatible transport and DeepSeek
 reasoning/tool-call shaping for DS4. It does not invent an API key, confuse an
 API alias with the loaded GGUF, or silently switch to a hosted DeepSeek route.
+The pinned DS4 [agent-client contract](https://github.com/antirez/ds4/blob/84cc882352757baf628a1776badf7cc54d584e28/README.md#agent-client-usage)
+documents Chat Completions at `/v1`, DeepSeek thinking replay, streamed usage,
+`max_tokens`, and no strict-tool mode; Codewhale follows those exact route
+facts instead of inheriting unsupported capabilities from a generic gateway.
+The model-facing behavior follows DeepSeek's official
+[thinking-mode](https://api-docs.deepseek.com/guides/thinking_mode),
+[tool-call](https://api-docs.deepseek.com/guides/tool_calls), and
+[Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)
+contracts, also used as the source of truth by the pinned
+[DeepSeek Harness adapter](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm-deepseek/README.md).
 
 ### Ollama
 

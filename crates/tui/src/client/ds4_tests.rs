@@ -1,7 +1,7 @@
 use super::DeepSeekClient;
 use super::chat::{parse_chat_message, parse_sse_chunk};
 use crate::config::{Config, ProviderConfig, ProvidersConfig};
-use crate::models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent};
+use crate::models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Tool};
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -60,6 +60,31 @@ fn named_ds4_route_uses_deepseek_reasoning_controls() -> Result<()> {
     let max = client.prepare_outbound_request(request("max"), true)?;
     assert_eq!(max.body["thinking"]["type"], "enabled");
     assert_eq!(max.body["reasoning_effort"], "max");
+    Ok(())
+}
+
+#[test]
+fn named_ds4_route_removes_unsupported_strict_tool_flag() -> Result<()> {
+    let client = ds4_client();
+    let mut request = request("high");
+    request.tools = Some(vec![Tool {
+        tool_type: Some("function".to_string()),
+        name: "read_file".to_string(),
+        description: "Read one file".to_string(),
+        input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: Some(true),
+        cache_control: None,
+    }]);
+
+    let outbound = client.prepare_outbound_request(request, true)?;
+    assert!(
+        outbound.body["tools"][0]["function"]
+            .get("strict")
+            .is_none()
+    );
     Ok(())
 }
 

@@ -992,18 +992,21 @@ fn add_extra_root_certs(
 }
 
 impl DeepSeekClient {
-    /// DS4 is configured as a named custom route so its endpoint and billing
-    /// identity remain exact, but its chat payload deliberately speaks the
-    /// first-party DeepSeek reasoning/tool dialect that DS4 implements.
-    fn chat_shape_provider(&self, model: &str) -> ApiProvider {
-        if self.api_provider == ApiProvider::Custom
+    fn is_local_ds4_model(&self, model: &str) -> bool {
+        self.api_provider == ApiProvider::Custom
             && self.provider_identity.eq_ignore_ascii_case("ds4")
             && crate::config::base_url_uses_local_host(&self.base_url)
             && matches!(
                 model.trim().to_ascii_lowercase().as_str(),
                 "deepseek-v4-flash" | "deepseek-v4-pro"
             )
-        {
+    }
+
+    /// DS4 is configured as a named custom route so its endpoint and billing
+    /// identity remain exact, but its chat payload deliberately speaks the
+    /// first-party DeepSeek reasoning/tool dialect that DS4 implements.
+    fn chat_shape_provider(&self, model: &str) -> ApiProvider {
+        if self.is_local_ds4_model(model) {
             ApiProvider::Deepseek
         } else {
             self.api_provider
@@ -1785,7 +1788,15 @@ impl DeepSeekClient {
         request: MessageRequest,
         stream: bool,
     ) -> Result<PreparedOutboundRequest> {
-        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
+        let mut request =
+            self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
+        if self.is_local_ds4_model(&request.model)
+            && let Some(tools) = request.tools.as_mut()
+        {
+            for tool in tools {
+                tool.strict = None;
+            }
+        }
         let requested_effort = request.reasoning_effort.clone();
         let dialect = WireDialect::from_wire_format(self.wire_format);
         // `stream` is the caller's entry point, not a wire fact: each dialect
