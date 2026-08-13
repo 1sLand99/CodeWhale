@@ -171,7 +171,7 @@ pub(crate) const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/
 pub(crate) const DEFAULT_META_MODEL: &str = "muse-spark-1.2";
 pub(crate) const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
 // xAI / Grok API-key route defaults
-pub(crate) const DEFAULT_XAI_MODEL: &str = "grok-4.5";
+pub(crate) const DEFAULT_XAI_MODEL: &str = "grok-4.6";
 pub(crate) const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 // Mistral AI (la Plateforme) defaults
 pub(crate) const DEFAULT_MISTRAL_MODEL: &str = "mistral-code-latest";

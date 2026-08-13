@@ -1148,9 +1148,16 @@ impl Default for ModelRegistry {
             },
             // xAI / Grok (https://api.x.ai/v1)
             ModelInfo {
+                id: "grok-4.6".to_string(),
+                provider: ProviderKind::Xai,
+                aliases: vec!["grok".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
                 id: "grok-4.5".to_string(),
                 provider: ProviderKind::Xai,
-                aliases: vec!["grok".to_string(), "xai-grok-4.5".to_string()],
+                aliases: vec!["xai-grok-4.5".to_string()],
                 supports_tools: true,
                 supports_reasoning: true,
             },
@@ -1978,7 +1985,7 @@ mod tests {
             (ProviderKind::MinimaxAnthropic, "MiniMax-M3"),
             (ProviderKind::Openmodel, "deepseek-v4-flash"),
             (ProviderKind::Meta, "muse-spark-1.2"),
-            (ProviderKind::Xai, "grok-4.5"),
+            (ProviderKind::Xai, "grok-4.6"),
         ] {
             assert!(
                 models
@@ -2058,12 +2065,12 @@ mod tests {
 
         let default = registry.resolve(None, Some(ProviderKind::Xai));
         assert_eq!(default.resolved.provider, ProviderKind::Xai);
-        assert_eq!(default.resolved.id, "grok-4.5");
+        assert_eq!(default.resolved.id, "grok-4.6");
         assert!(default.used_fallback);
 
         let alias = registry.resolve(Some("grok"), Some(ProviderKind::Xai));
         assert_eq!(alias.resolved.provider, ProviderKind::Xai);
-        assert_eq!(alias.resolved.id, "grok-4.5");
+        assert_eq!(alias.resolved.id, "grok-4.6");
         assert!(!alias.used_fallback);
 
         let fast = registry.resolve(
@@ -2106,6 +2113,7 @@ mod tests {
 
     #[test]
     fn grok_ids_stay_in_grok_family() {
+        assert_eq!(model_family("grok-4.6"), ModelFamily::Grok);
         assert_eq!(model_family("grok-4.5"), ModelFamily::Grok);
         assert_eq!(
             model_family("grok-4.20-0309-non-reasoning"),

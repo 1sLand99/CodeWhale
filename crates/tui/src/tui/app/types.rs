@@ -280,8 +280,10 @@ impl ReasoningEffort {
     /// lowest supported tier. The Kimi Code membership route otherwise keeps
     /// its low/high/max mapping; direct Moonshot K3 additionally maps `medium`
     /// to `high`. First-party DeepSeek routes keep `low` (the wire documents
-    /// low/high/max) while rounding `medium` up to `high`. Generic Moonshot
-    /// and every other non-Codex route retain the historic high coercion.
+    /// low/high/max) while rounding `medium` up to `high`. Models that publish
+    /// a Models.dev `reasoning_options` effort list keep that vocabulary
+    /// instead of the historic Low/Medium collapse. Generic Moonshot and
+    /// every other non-Codex route retain the historic high coercion.
     /// This intentionally does not change [`Self::normalize_for_provider`],
     /// whose generic wire semantics are used by older callers that do not yet
     /// have a route receipt.
@@ -320,9 +322,91 @@ impl ReasoningEffort {
                 other => other,
             };
         }
+        if let Some(values) = Self::catalog_effort_values(provider, wire_model) {
+            return Self::clamp_to_catalog_efforts(normalized, provider, wire_model, &values);
+        }
         match normalized {
             Self::Low | Self::Medium => Self::High,
             other => other,
+        }
+    }
+
+    pub(crate) fn catalog_default(provider: ApiProvider, wire_model: &str) -> Option<Self> {
+        let offering = crate::provider_lake::catalog_offering_for_model(provider, wire_model)?;
+        offering.reasoning_options.iter().find_map(|option| {
+            option
+                .get("type")
+                .and_then(|value| value.as_str())
+                .filter(|kind| kind.eq_ignore_ascii_case("effort"))?;
+            option
+                .get("default")
+                .and_then(|value| value.as_str())
+                .and_then(Self::from_catalog_token)
+        })
+    }
+
+    pub(crate) fn catalog_effort_values(
+        provider: ApiProvider,
+        wire_model: &str,
+    ) -> Option<Vec<Self>> {
+        let offering = crate::provider_lake::catalog_offering_for_model(provider, wire_model)?;
+        let mut efforts = Vec::new();
+        for option in &offering.reasoning_options {
+            if !option
+                .get("type")
+                .and_then(|value| value.as_str())
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("effort"))
+            {
+                continue;
+            }
+            let Some(values) = option.get("values").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for value in values {
+                if let Some(effort) = value.as_str().and_then(Self::from_catalog_token)
+                    && !efforts.contains(&effort)
+                {
+                    efforts.push(effort);
+                }
+            }
+        }
+        (!efforts.is_empty()).then_some(efforts)
+    }
+
+    fn from_catalog_token(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" | "false" => Some(Self::Off),
+            "minimal" | "minimum" => Some(Self::Minimal),
+            "low" | "light" => Some(Self::Low),
+            "medium" | "mid" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "ultra" | "ultracode" => Some(Self::Ultra),
+            "max" | "maximum" => Some(Self::Max),
+            "auto" | "automatic" | "adaptive" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    fn clamp_to_catalog_efforts(
+        normalized: Self,
+        provider: ApiProvider,
+        wire_model: &str,
+        values: &[Self],
+    ) -> Self {
+        if matches!(normalized, Self::Auto) || values.contains(&normalized) {
+            return normalized;
+        }
+        let aliased = match normalized {
+            Self::Minimal if values.contains(&Self::Low) => Self::Low,
+            Self::Max | Self::Ultra if values.contains(&Self::XHigh) => Self::XHigh,
+            Self::Off => Self::catalog_default(provider, wire_model).unwrap_or(Self::High),
+            other => other,
+        };
+        if values.contains(&aliased) {
+            aliased
+        } else {
+            Self::catalog_default(provider, wire_model).unwrap_or(Self::High)
         }
     }
 

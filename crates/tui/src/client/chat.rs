@@ -16,7 +16,7 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_zai_chat_route, is_exact_zai_tiered_effort_route,
+    is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_tiered_effort_route,
     minimax_m3_route_uses_max_completion_tokens, wire_model_for_provider_route,
 };
 
@@ -98,6 +98,30 @@ fn apply_openai_reasoning_effort(
         return;
     };
     body["reasoning_effort"] = json!(effort);
+}
+
+fn apply_xai_grok_4_6_reasoning_effort(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if !is_exact_xai_grok_4_6_route(provider, base_url, model) {
+        return;
+    }
+    let Some(effort) = effort else {
+        return;
+    };
+    let wire_effort = match effort.trim().to_ascii_lowercase().as_str() {
+        "auto" | "automatic" | "" => return,
+        "off" | "disabled" | "none" | "false" | "high" => "high",
+        "minimal" | "minimum" | "low" | "light" => "low",
+        "medium" | "mid" => "medium",
+        "xhigh" | "max" | "maximum" | "highest" | "ultra" | "ultracode" => "xhigh",
+        _ => return,
+    };
+    body["reasoning_effort"] = json!(wire_effort);
 }
 
 fn apply_inkling_reasoning_effort(
@@ -505,6 +529,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_minimax_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_inkling_reasoning_effort(body, provider, model, effort);
     apply_openai_reasoning_effort(body, provider, model, effort);
+    apply_xai_grok_4_6_reasoning_effort(body, provider, base_url, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
@@ -5035,6 +5060,48 @@ mod alias_thinking_detection_tests {
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["max_completion_tokens"], json!(8192));
         assert_eq!(body["reasoning_effort"], json!("max"));
+    }
+
+    #[test]
+    fn grok_46_uses_exact_first_party_reasoning_effort_ladder() {
+        for (requested, expected) in [
+            ("off", "high"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "xhigh"),
+        ] {
+            let mut body = json!({});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Xai,
+                crate::config::DEFAULT_XAI_BASE_URL,
+                crate::config::XAI_GROK_4_6_MODEL,
+                Some(requested),
+            );
+            assert_eq!(body, json!({ "reasoning_effort": expected }), "{requested}");
+        }
+
+        let mut provider_default = json!({});
+        apply_route_reasoning_controls(
+            &mut provider_default,
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            crate::config::XAI_GROK_4_6_MODEL,
+            Some("auto"),
+        );
+        assert_eq!(provider_default, json!({}));
+
+        let mut custom = json!({});
+        apply_route_reasoning_controls(
+            &mut custom,
+            ApiProvider::Xai,
+            "https://gateway.example/v1",
+            crate::config::XAI_GROK_4_6_MODEL,
+            Some("medium"),
+        );
+        assert_eq!(custom, json!({}));
     }
 
     #[test]

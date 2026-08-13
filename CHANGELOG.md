@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add Grok 4.6 as the direct xAI default with its official 500K context,
+  text/image input, tool and structured-output support, four reasoning efforts,
+  native web search, and usage-aware 200K-token pricing boundary. Reconcile the
+  existing `deepseek-v4-pro` registration with DeepSeek's live
+  `DeepSeek-V4-Pro-0813` backend label without changing the callable API ID.
+
 ## [0.9.6] - 2026-08-11
 
 Codewhale v0.9.6 is a subtractive release: fewer runtime guards, one stable

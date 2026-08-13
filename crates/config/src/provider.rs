@@ -472,6 +472,16 @@ pub fn is_exact_moonshot_platform_route(kind: ProviderKind, base_url: &str) -> b
     kind == ProviderKind::Moonshot && is_exact_https_route(base_url, "api.moonshot.ai", "v1")
 }
 
+/// Whether a configured route is exactly xAI's first-party OpenAI-compatible
+/// API endpoint.
+///
+/// Grok-specific request fields must not leak to a custom compatible gateway
+/// merely because the operator selected the `xai` provider identity.
+#[must_use]
+pub fn is_exact_xai_platform_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Xai && is_exact_https_route(base_url, "api.x.ai", "v1")
+}
+
 /// Whether a configured route is one of Z.ai's exact first-party Chat
 /// Completions endpoints.
 ///
@@ -1800,6 +1810,33 @@ mod tests {
         assert!(!is_exact_moonshot_platform_route(
             ProviderKind::Openai,
             DEFAULT_MOONSHOT_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn direct_xai_route_matching_is_exact() {
+        assert!(is_exact_xai_platform_route(
+            ProviderKind::Xai,
+            "HTTPS://API.X.AI/v1/"
+        ));
+        for neighboring_route in [
+            "https://api.x.ai/V1",
+            "http://api.x.ai/v1",
+            "https://api.x.ai:443/v1",
+            "https://api.x.ai/v1?preview=1",
+            "https://api.x.ai/v1#fragment",
+            "https://api.x.ai/v1//",
+            "https://api.x.ai/v1/chat/completions",
+            "https://gateway.example/v1",
+        ] {
+            assert!(
+                !is_exact_xai_platform_route(ProviderKind::Xai, neighboring_route),
+                "{neighboring_route} must not inherit xAI-only request fields"
+            );
+        }
+        assert!(!is_exact_xai_platform_route(
+            ProviderKind::Openai,
+            DEFAULT_XAI_BASE_URL
         ));
     }
 
