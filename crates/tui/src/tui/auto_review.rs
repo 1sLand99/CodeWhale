@@ -435,6 +435,20 @@ fn shell_params_are_auto_review_routine(params: &Value) -> bool {
         return false;
     };
 
+    // The command-safety analyzer reasons about one argv-shaped command. Do
+    // not let shell composition hide an unsafe second stage or redirect a
+    // routine command into a sensitive target. `&&`, `||`, and `;` are split
+    // and checked below; pipelines, backgrounding, redirection, and command
+    // substitution remain approval-gated in Auto-Review.
+    let command_without_boolean_operators = command.replace("&&", "").replace("||", "");
+    if command_without_boolean_operators
+        .chars()
+        .any(|ch| matches!(ch, '|' | '&' | '>' | '<' | '`'))
+        || command.contains("$(")
+    {
+        return false;
+    }
+
     let segments = split_shell_segments_for_review(command);
     !segments.is_empty()
         && segments.iter().all(|segment| {

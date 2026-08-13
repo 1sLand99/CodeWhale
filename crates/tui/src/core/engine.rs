@@ -5259,6 +5259,31 @@ pub(crate) fn auto_review_plan_decision(
     workspace_trusted: bool,
     dirty_worktree: bool,
 ) -> (AutoReviewPlanDecision, Value) {
+    auto_review_plan_decision_in_workspace(
+        policy,
+        tool_name,
+        tool_input,
+        run_origin,
+        approval_mode,
+        user_intent,
+        workspace_trusted,
+        dirty_worktree,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn auto_review_plan_decision_in_workspace(
+    policy: &crate::tui::auto_review::AutoReviewPolicy,
+    tool_name: &str,
+    tool_input: &Value,
+    run_origin: crate::tui::auto_review::RunOrigin,
+    approval_mode: crate::tui::approval::ApprovalMode,
+    user_intent: Option<&str>,
+    workspace_trusted: bool,
+    dirty_worktree: bool,
+    workspace: Option<&std::path::Path>,
+) -> (AutoReviewPlanDecision, Value) {
     let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
         tool_name,
         tool_input,
@@ -5268,7 +5293,28 @@ pub(crate) fn auto_review_plan_decision(
         workspace_trusted,
         dirty_worktree,
     );
-    let decision = policy.evaluate(&context);
+    let mut decision = policy.evaluate(&context);
+    if approval_mode == crate::tui::approval::ApprovalMode::Auto
+        && context.action_kind == crate::tui::auto_review::ToolActionKind::Write
+        && decision.action == crate::tui::auto_review::AutoReviewAction::Allow
+    {
+        let write_is_bounded = workspace
+            .and_then(|workspace| {
+                file_write_tool_target_paths(tool_name, tool_input).map(|paths| {
+                    crate::core::authority::paths_within_workspace_write_carve_out(
+                        workspace, &paths,
+                    )
+                })
+            })
+            .unwrap_or(false);
+        if !write_is_bounded {
+            decision = crate::tui::auto_review::AutoReviewDecision {
+                action: crate::tui::auto_review::AutoReviewAction::AskUser,
+                reason: "Auto-Review requires every write target to stay inside the workspace and outside sensitive paths".to_string(),
+                rule_id: None,
+            };
+        }
+    }
     let audit_event = policy.audit_event(&context, &decision);
     let plan_decision = if approval_mode == crate::tui::approval::ApprovalMode::Auto
         && tool_name == REQUEST_USER_INPUT_NAME
