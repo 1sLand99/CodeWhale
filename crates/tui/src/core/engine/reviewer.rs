@@ -149,12 +149,9 @@ pub(crate) async fn consult_reviewer(
     };
     let response = match response {
         Err(_) => return ReviewerResult::unavailable("the reviewer timed out", None),
-        Ok(Err(error)) => {
-            return ReviewerResult::unavailable(
-                format!("the reviewer request failed ({error})"),
-                None,
-            );
-        }
+        // Provider errors can include response bodies or credential-shaped
+        // details. The guardian needs only the fail-closed outcome.
+        Ok(Err(_)) => return ReviewerResult::unavailable("the reviewer request failed", None),
         Ok(Ok(response)) => response,
     };
     let outcome = verdict_from_response(&response);

@@ -5649,6 +5649,7 @@ async fn auto_review_guardian_parse_and_transport_failures_deny_closed() {
             let result = results[0];
             assert_eq!(result.1, Some(true));
             assert!(result.0.contains("denied (fail closed)"), "{result:?}");
+            assert!(!result.0.contains("fixture guardian transport failure"));
             canned::simple_text_turn("Stopped after reviewer failure.")
         };
 

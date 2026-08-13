@@ -524,7 +524,7 @@ pub(crate) fn build_reviewer_context(
     held_reason: &str,
     tool_input: &Value,
 ) -> String {
-    serde_json::to_string_pretty(&serde_json::json!({
+    serde_json::to_string(&serde_json::json!({
         "proposed_tool_call": {
             "tool": ctx.tool_name,
             "input": tool_input,
