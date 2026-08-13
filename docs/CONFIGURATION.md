@@ -1833,9 +1833,11 @@ If you are upgrading from older releases:
   required. `action_kind` accepts the six decision-relevant kinds `read`,
   `write`, `shell`, `external`, `publish`, and `destructive`. Invalid names
   fail config validation instead of silently broadening into another policy
-  class. Existing rules should map `network`, `git`, `mcp_action`, `browser`,
-  `agent`, and `unknown` to `external`; `secret` to `destructive`; and
-  `mcp_read` to `read`.
+  class. The old names remain narrow compatibility aliases: `network`, `git`,
+  `mcp_action`, `browser`, `agent`, and `unknown` map to `external`; `secret`
+  maps to `destructive`; and `mcp_read` maps to `read`. The retired
+  `text_contains` matcher now fails validation instead of silently broadening
+  an old intent-dependent rule.
   Fallback holds in interactive Auto-Review escalate to one stateless guardian
   request. The request contains the exact held call and deterministic
   observations as separate JSON fields. Conversation history, skill

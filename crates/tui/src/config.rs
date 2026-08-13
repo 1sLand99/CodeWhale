@@ -2861,6 +2861,8 @@ pub struct AutoReviewRuleConfig {
     pub tool: Option<String>,
     #[serde(default, alias = "actionKind", alias = "action_kind")]
     pub action_kind: Option<String>,
+    #[serde(default, alias = "textContains")]
+    pub(crate) text_contains: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -2963,6 +2965,15 @@ impl AutoReviewRuleConfig {
 
 fn validate_auto_review_rules(kind: &str, rules: &[AutoReviewRuleConfig]) -> Result<()> {
     for (index, rule) in rules.iter().enumerate() {
+        if rule
+            .text_contains
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            anyhow::bail!(
+                "Invalid auto_review.{kind}[{index}].text_contains: user-intent matching was retired; scope the rule with tool and/or action_kind."
+            );
+        }
         if !rule.has_matcher() {
             anyhow::bail!(
                 "Invalid auto_review.{kind}[{index}]: set at least one of tool or action_kind."
@@ -2981,12 +2992,14 @@ fn validate_auto_review_rules(kind: &str, rules: &[AutoReviewRuleConfig]) -> Res
 
 fn parse_auto_review_action_kind(raw: &str) -> Option<crate::tui::auto_review::ToolActionKind> {
     match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "read" => Some(crate::tui::auto_review::ToolActionKind::Read),
+        "read" | "mcp_read" => Some(crate::tui::auto_review::ToolActionKind::Read),
         "write" => Some(crate::tui::auto_review::ToolActionKind::Write),
         "shell" => Some(crate::tui::auto_review::ToolActionKind::Shell),
-        "external" => Some(crate::tui::auto_review::ToolActionKind::External),
+        "external" | "network" | "git" | "mcp_action" | "browser" | "agent" | "unknown" => {
+            Some(crate::tui::auto_review::ToolActionKind::External)
+        }
         "publish" => Some(crate::tui::auto_review::ToolActionKind::Publish),
-        "destructive" => Some(crate::tui::auto_review::ToolActionKind::Destructive),
+        "destructive" | "secret" => Some(crate::tui::auto_review::ToolActionKind::Destructive),
         _ => None,
     }
 }

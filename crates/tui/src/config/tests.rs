@@ -464,7 +464,7 @@ fn auto_review_profile_overrides_base_policy() -> Result<()> {
 action_kind = "shell"
 
 [[profiles.strict.auto_review.block]]
-action_kind = "external"
+action_kind = "network"
 "#,
     )?;
 
@@ -478,6 +478,26 @@ action_kind = "external"
     );
 
     Ok(())
+}
+
+#[test]
+fn auto_review_text_contains_fails_closed_instead_of_broadening_a_rule() {
+    let error = toml::from_str::<Config>(
+        r#"
+[[auto_review.allow]]
+tool = "exec_shell"
+text_contains = "run tests"
+"#,
+    )
+    .expect("shape parses")
+    .validate()
+    .expect_err("retired user-intent matcher must not disappear");
+
+    assert!(
+        error
+            .to_string()
+            .contains("user-intent matching was retired")
+    );
 }
 
 #[test]
