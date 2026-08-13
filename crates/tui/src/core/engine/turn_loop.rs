@@ -351,16 +351,8 @@ impl Engine {
             )))
             .await;
         let started = Instant::now();
-        let review = super::reviewer::consult_reviewer(
-            client,
-            &context_text,
-            self.config
-                .auto_review_policy
-                .natural_language_guidance
-                .as_deref(),
-            &self.cancel_token,
-        )
-        .await;
+        let review =
+            super::reviewer::consult_reviewer(client, &context_text, &self.cancel_token).await;
         if let Some(usage) = &review.usage {
             turn.add_usage(usage);
             if usage_has_reported_data(usage) {

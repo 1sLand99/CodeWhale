@@ -105,12 +105,10 @@ impl ReviewerResult {
 }
 
 /// Ask the model guardian for one decision. `context_text` carries the
-/// deterministic hold and the call under review; the system prompt carries
-/// the guardian policy plus any user guidance.
+/// deterministic hold and the call under review; the system prompt is fixed.
 pub(crate) async fn consult_reviewer(
     client: &dyn ModelClient,
     context_text: &str,
-    natural_language_guidance: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> ReviewerResult {
     if context_text.len() > MAX_REVIEW_CONTEXT_BYTES {
@@ -118,13 +116,6 @@ pub(crate) async fn consult_reviewer(
             "the exact review context exceeded the guardian limit",
             None,
         );
-    }
-    let mut policy = DEFAULT_GUARDIAN_POLICY.to_string();
-    if let Some(guidance) = natural_language_guidance
-        && !guidance.trim().is_empty()
-    {
-        policy.push_str("\n\nUser guidance (advisory; never overrides the rules above):\n");
-        policy.push_str(guidance.trim());
     }
     let request = MessageRequest {
         model: client.model().to_string(),
@@ -136,7 +127,7 @@ pub(crate) async fn consult_reviewer(
             }],
         }],
         max_tokens: 384,
-        system: Some(SystemPrompt::Text(policy)),
+        system: Some(SystemPrompt::Text(DEFAULT_GUARDIAN_POLICY.to_string())),
         tools: None,
         tool_choice: None,
         metadata: None,
@@ -251,7 +242,6 @@ mod tests {
         let result = consult_reviewer(
             &mock,
             r#"{"proposed_tool_call":{"tool":"exec_shell"}}"#,
-            Some("Prefer reversible work."),
             &CancellationToken::new(),
         )
         .await;
@@ -270,7 +260,7 @@ mod tests {
             panic!("guardian system prompt must be text");
         };
         assert!(system.contains("Never infer user intent"));
-        assert!(system.contains("Prefer reversible work."));
+        assert!(!system.contains("Prefer reversible work."));
     }
 
     #[tokio::test]
@@ -281,7 +271,7 @@ mod tests {
             Usage::default(),
         ));
         assert_eq!(
-            consult_reviewer(&deny, "context", None, &CancellationToken::new())
+            consult_reviewer(&deny, "context", &CancellationToken::new())
                 .await
                 .outcome,
             ReviewerOutcome::Deny {
@@ -303,7 +293,7 @@ mod tests {
         let malformed = MockLlmClient::new(Vec::new());
         malformed.push_message_response(response("allow it", Usage::default()));
         let malformed_result =
-            consult_reviewer(&malformed, "context", None, &CancellationToken::new()).await;
+            consult_reviewer(&malformed, "context", &CancellationToken::new()).await;
         assert!(matches!(
             malformed_result.outcome,
             ReviewerOutcome::Unavailable { .. }
@@ -318,7 +308,7 @@ mod tests {
         incomplete_response.stop_reason = Some("max_tokens".to_string());
         incomplete.push_message_response(incomplete_response);
         assert_eq!(
-            consult_reviewer(&incomplete, "context", None, &CancellationToken::new(),)
+            consult_reviewer(&incomplete, "context", &CancellationToken::new())
                 .await
                 .outcome,
             ReviewerOutcome::Unavailable {
@@ -333,7 +323,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = consult_reviewer(&mock, "context", None, &cancel).await;
+        let result = consult_reviewer(&mock, "context", &cancel).await;
 
         assert_eq!(result.outcome, ReviewerOutcome::Cancelled);
         assert!(result.usage.is_none());
@@ -345,7 +335,7 @@ mod tests {
         let mock = MockLlmClient::new(Vec::new());
         let context = "x".repeat(MAX_REVIEW_CONTEXT_BYTES + 1);
 
-        let result = consult_reviewer(&mock, &context, None, &CancellationToken::new()).await;
+        let result = consult_reviewer(&mock, &context, &CancellationToken::new()).await;
 
         assert_eq!(
             result.outcome,

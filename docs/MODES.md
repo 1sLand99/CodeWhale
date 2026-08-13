@@ -195,7 +195,26 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
   holds that explicitly require a person block in Auto-Review rather than
   opening a hidden approval modal.
 
-The safety baseline above is grounded in DeepSeek Harness `0.1.0-rc.5` at
+The LLM reviewer is closest to OpenAI Codex's experimental Auto-Review at
+commit [`95c7265e849e6e360a7fa53ffeac70b25d6051a3`](https://github.com/openai/codex/tree/95c7265e849e6e360a7fa53ffeac70b25d6051a3).
+Codex's [guardian entry point](https://github.com/openai/codex/blob/95c7265e849e6e360a7fa53ffeac70b25d6051a3/codex-rs/core/src/guardian/mod.rs)
+reconstructs conversation context and runs a dedicated review session.
+Codewhale deliberately adopts only the exact-action structured decision,
+90-second deadline, and fail-closed result. It does not copy Codex's transcript
+reconstruction, user-authorization score, reviewer tools, retries, persistent
+review session, or denial ledger.
+
+Kimi Code at commit
+[`1414d4602898f406e540b23342cb18db23ff9efc`](https://github.com/MoonshotAI/kimi-code/tree/1414d4602898f406e540b23342cb18db23ff9efc)
+also has no LLM reviewer. Its ordered
+[permission policy](https://github.com/MoonshotAI/kimi-code/blob/1414d4602898f406e540b23342cb18db23ff9efc/packages/agent-core-v2/src/agent/permissionPolicy/permissionPolicyService.ts)
+applies explicit deny rules and then its
+[Auto policy](https://github.com/MoonshotAI/kimi-code/blob/1414d4602898f406e540b23342cb18db23ff9efc/packages/agent-core-v2/src/agent/permissionPolicy/policies/auto-mode-approve.ts)
+returns `approve` directly. Codewhale borrows Kimi's no-question autonomous UX,
+not that blanket approval rule.
+
+The sandbox and escalation baseline is grounded in DeepSeek Harness
+`0.1.0-rc.5` at
 commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/deepseek-harness/tree/47f943859bef60e4160492346772ded9b24f765a):
 its [sandbox contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/sandbox.md)
 defines per-call `read-only`, `workspace-write`, and `danger-full-access`

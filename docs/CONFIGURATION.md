@@ -1836,8 +1836,8 @@ If you are upgrading from older releases:
   required. `action_kind` accepts the six decision-relevant kinds `read`,
   `write`, `shell`, `external`, `publish`, and `destructive`. Invalid names
   fail config validation instead of silently broadening into another policy
-  class. `natural_language_guidance` is recorded on the runtime policy and
-  audit event, and is fed to the guardian reviewer as advisory guidance.
+  class. `natural_language_guidance` is retained on the deterministic runtime
+  policy and audit event for compatibility; it is not fed to the guardian.
   Existing rules should map `network`, `git`, `mcp_action`, `browser`,
   `agent`, and `unknown` to `external`; `secret` to `destructive`; and
   `mcp_read` to `read`.
@@ -1852,8 +1852,8 @@ If you are upgrading from older releases:
   reviewer request is made; incomplete or malformed output, timeout,
   cancellation, provider failure, or an empty rationale all fail closed. The
   deterministic floor is never model-reviewed, and headless adapters use the
-  deterministic-only tier. The pinned DeepSeek Harness source contracts behind
-  this fail-closed baseline are linked from [Permission Posture](MODES.md#permission-posture).
+  deterministic-only tier. The pinned Codex, Kimi, and DeepSeek source
+  boundaries are linked from [Permission Posture](MODES.md#permission-posture).
   Reviewer outcomes emit `tool.auto_review` audit events with
   `gate = "guardian"`.
 
