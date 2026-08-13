@@ -66,11 +66,14 @@ shell command through the normal approval path.
 
 - **Any model, any provider — and any mix of them.** DeepSeek, Claude, GPT,
   Kimi, GLM, and 30+ providers, plus your own vLLM, SGLang, or Ollama with no
-  key, all through one runtime and one toolset. A saved role records its
-  `provider`, `model`, and reasoning tier explicitly, so a fleet can span
-  vendors in a single run and a role's route never depends on whichever
-  provider happens to be active. Context limits and prices come from the real
-  route, and an unknown price shows as unknown rather than $0.
+  key, all through one runtime and one toolset. The catalog tracks each
+  provider's live lineup — DeepSeek's V4 Pro backend (labeled
+  `DeepSeek-V4-Pro-0813`) stays callable as `deepseek-v4-pro`, Grok 4.6 is the
+  direct xAI default, and OrcaRouter routes through `orcarouter/auto`. A saved
+  role records its `provider`, `model`, and reasoning tier explicitly, so a
+  fleet can span vendors in a single run and a role's route never depends on
+  whichever provider happens to be active. Context limits and prices come from
+  the real route, and an unknown price shows as unknown rather than $0.
 - **A harness you author.** Roles are files you can read and edit — a model, a
   tool posture, and standing instructions per role — kept in the project so the
   team shares them, or beside your other personal settings so they follow you
