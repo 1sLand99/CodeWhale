@@ -1223,9 +1223,32 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
     use crate::route::CapabilityState;
 
     let resolver = RouteResolver::new();
+    let automatic = resolver
+        .resolve(&req(Some(ProviderKind::Xai), None))
+        .expect("xAI default resolves");
+    assert_eq!(automatic.wire_model_id().as_str(), "grok-4.6");
+
     let direct = resolver
-        .resolve(&req(Some(ProviderKind::Xai), Some("grok-4.5")))
+        .resolve(&req(Some(ProviderKind::Xai), Some("grok-4.6")))
         .expect("bundled direct xAI offering resolves");
+    assert_eq!(direct.wire_model_id().as_str(), "grok-4.6");
+    assert_eq!(
+        direct.capabilities().attachments,
+        CapabilityState::Supported
+    );
+    assert_eq!(
+        direct.capabilities().image_input,
+        CapabilityState::Supported
+    );
+    assert_eq!(direct.capabilities().reasoning, CapabilityState::Supported);
+    assert_eq!(
+        direct.capabilities().native_tool_calls,
+        CapabilityState::Supported
+    );
+    assert_eq!(
+        direct.capabilities().structured_output,
+        CapabilityState::Supported
+    );
     assert_eq!(
         direct.capabilities().server_side_web_search,
         CapabilityState::Supported
@@ -1242,7 +1265,7 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
     let custom_endpoint = resolver
         .resolve(&RouteRequest {
             explicit_provider: Some(ProviderKind::Xai),
-            model_selector: Some(LogicalModelRef::from("grok-4.5")),
+            model_selector: Some(LogicalModelRef::from("grok-4.6")),
             saved_provider_model: None,
             base_url_override: Some("https://gateway.example.test/v1".to_string()),
             limit_overrides: Vec::new(),

@@ -1503,6 +1503,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
+            XAI_GROK_4_5_MODEL,
             XAI_GROK_4_3_MODEL,
             XAI_GROK_BUILD_MODEL,
             XAI_GROK_COMPOSER_2_5_FAST_MODEL,
@@ -8697,6 +8698,21 @@ pub(crate) fn is_exact_direct_moonshot_k3_route(
     provider == ApiProvider::Moonshot
         && moonshot_base_url_is_exact_direct_platform(base_url)
         && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
+}
+
+/// Whether a route is exactly xAI's first-party Grok 4.6 endpoint.
+#[must_use]
+pub(crate) fn is_exact_xai_grok_4_6_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Xai
+        && codewhale_config::provider::is_exact_xai_platform_route(
+            codewhale_config::ProviderKind::Xai,
+            base_url,
+        )
+        && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
 }
 
 /// Whether a route is exactly the Kimi Code K3 membership-plan route.

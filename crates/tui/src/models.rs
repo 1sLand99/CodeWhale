@@ -275,7 +275,7 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         | "mimo-v2.5-tts-voicedesign"
         | "mimo-v2.5-tts-voiceclone"
         | "mimo-v2-tts" => Some(8_000),
-        "grok-4.5" => Some(500_000),
+        "grok-4.6" | "grok-4.5" => Some(500_000),
         "grok-4.3" => Some(1_000_000),
         "grok-build" => Some(512_000),
         "grok-composer-2.5-fast" => Some(200_000),
@@ -468,6 +468,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "glm-5.2"
             | "glm-5.3"
             | "glm-5-turbo"
+            | "grok-4.6"
             | "grok-4.5"
             | "grok-4.3"
             | "grok-build"
@@ -1030,6 +1031,7 @@ mod tests {
     #[test]
     fn xai_grok_models_have_static_context_metadata() {
         for (model, expected_window, supports_reasoning) in [
+            ("grok-4.6", 500_000, true),
             ("grok-4.5", 500_000, true),
             ("grok-4.3", 1_000_000, true),
             ("grok-build", 512_000, true),
