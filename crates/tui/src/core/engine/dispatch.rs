@@ -24,6 +24,8 @@ use crate::tools::spec::{
 
 use super::ToolUseState;
 
+const MAX_SCHEMA_CONTAINER_REPAIR_BYTES: usize = 64 * 1024;
+
 // === Types ============================================================
 
 #[allow(dead_code)] // `index` mirrors batch order for diagnostic ergonomics.
@@ -303,6 +305,70 @@ pub(super) fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
         .and_then(|segment| serde_json::from_str::<serde_json::Value>(&segment).ok())
 }
 
+/// Decode a JSON container that a provider encoded as a string when the tool
+/// schema explicitly requires an object or array.
+///
+/// This intentionally avoids general argument coercion: the string must be
+/// bounded, parse as strict JSON, and decode to the declared container type.
+/// Primitive strings are never coerced.
+pub(super) fn normalize_schema_json_containers(
+    value: &mut serde_json::Value,
+    schema: &serde_json::Value,
+) -> usize {
+    let expected_container = if schema_declares_type(schema, "object") {
+        Some("object")
+    } else if schema_declares_type(schema, "array") {
+        Some("array")
+    } else {
+        None
+    };
+
+    if let (Some(expected), serde_json::Value::String(encoded)) = (expected_container, &*value)
+        && encoded.len() <= MAX_SCHEMA_CONTAINER_REPAIR_BYTES
+        && let Ok(decoded) = serde_json::from_str::<serde_json::Value>(encoded)
+        && ((expected == "object" && decoded.is_object())
+            || (expected == "array" && decoded.is_array()))
+    {
+        *value = decoded;
+        return 1 + normalize_schema_json_containers(value, schema);
+    }
+
+    match value {
+        serde_json::Value::Object(object) => {
+            let properties = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            object
+                .iter_mut()
+                .map(|(key, child)| {
+                    properties
+                        .and_then(|items| items.get(key))
+                        .map(|child_schema| normalize_schema_json_containers(child, child_schema))
+                        .unwrap_or(0)
+                })
+                .sum()
+        }
+        serde_json::Value::Array(items) => schema
+            .get("items")
+            .map(|item_schema| {
+                items
+                    .iter_mut()
+                    .map(|item| normalize_schema_json_containers(item, item_schema))
+                    .sum()
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(value)) => value == expected,
+        Some(serde_json::Value::Array(values)) => values.iter().any(|value| value == expected),
+        _ => false,
+    }
+}
+
 pub(super) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value {
     json!({ "raw_arguments": buffer })
 }
@@ -483,5 +549,60 @@ pub(super) fn mcp_tool_approval_description(name: &str) -> String {
         format!("Read-only MCP tool '{name}'")
     } else {
         format!("MCP tool '{name}' may have side effects")
+    }
+}
+
+#[cfg(test)]
+mod schema_json_container_tests {
+    use super::*;
+    use crate::tools::spec::ToolSpec;
+    use serde_json::json;
+
+    #[test]
+    fn decodes_nested_containers_and_passes_tool_validation() {
+        let schema = crate::tools::user_input::RequestUserInputTool.input_schema();
+        let encoded_options = serde_json::to_string(&json!([
+            { "label": "Repository", "description": "Inspect the current repository" },
+            { "label": "Workspace", "description": "Inspect the whole workspace" }
+        ]))
+        .expect("encode options");
+        let encoded_questions = serde_json::to_string(&json!([{
+            "header": "Scope",
+            "id": "scope",
+            "question": "Which scope should be inspected?",
+            "options": encoded_options
+        }]))
+        .expect("encode questions");
+        let mut input = json!({ "questions": encoded_questions });
+
+        assert_eq!(normalize_schema_json_containers(&mut input, &schema), 2);
+        assert!(input["questions"].is_array());
+        assert!(input["questions"][0]["options"].is_array());
+        crate::tools::user_input::UserInputRequest::from_value(&input)
+            .expect("normalized input must still pass tool-specific validation");
+    }
+
+    #[test]
+    fn leaves_primitives_wrong_types_and_unbounded_strings_unchanged() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" },
+                "count": { "type": "integer" },
+                "items": { "type": "array" },
+                "oversized": { "type": "array" }
+            }
+        });
+        let oversized = format!("[\"{}\"]", "x".repeat(MAX_SCHEMA_CONTAINER_REPAIR_BYTES));
+        let mut input = json!({
+            "text": "[\"still text\"]",
+            "count": "10",
+            "items": "{\"wrong\":\"container\"}",
+            "oversized": oversized
+        });
+        let before = input.clone();
+
+        assert_eq!(normalize_schema_json_containers(&mut input, &schema), 0);
+        assert_eq!(input, before);
     }
 }
