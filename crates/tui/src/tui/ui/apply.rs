@@ -1382,6 +1382,21 @@ pub(crate) async fn apply_command_result(
                     app.status_message = Some("Provider setup catalog opened.".to_string());
                 }
             }
+            AppAction::OpenDs4Setup => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    app.view_stack.push(
+                        crate::tui::provider_picker::ProviderPickerView::new_for_ds4_setup(
+                            app.api_provider,
+                            config,
+                            runtime_status,
+                        )
+                        .with_locale(app.ui_locale)
+                        .with_provider_health(&app.provider_health),
+                    );
+                    app.status_message = Some("DS4 local setup opened.".to_string());
+                }
+            }
             AppAction::StartXaiDeviceLogin => {
                 let _switched =
                     run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
@@ -2014,14 +2029,23 @@ pub(crate) async fn apply_provider_picker_custom_provider(
         .or_default();
     entry.kind = Some("openai-compatible".to_string());
     entry.base_url = Some(base_url.trim().trim_end_matches('/').to_string());
+    if provider_id == "ds4" && crate::config::base_url_uses_local_host(&base_url) {
+        entry.context_window = Some(100_000);
+    }
     entry.model = model.clone().and_then(|value| {
         let value = value.trim().to_string();
         (!value.is_empty()).then_some(value)
     });
+    let keyless_local = provider_id == "ds4"
+        && api_key_env
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && crate::config::base_url_uses_local_host(&base_url);
     entry.api_key_env = api_key_env.and_then(|value| {
         let value = value.trim().to_string();
         (!value.is_empty()).then_some(value)
     });
+    entry.auth_mode = keyless_local.then(|| "none".to_string());
 
     app.status_message = Some(format!(
         "Custom provider {provider_id} saved to {}",

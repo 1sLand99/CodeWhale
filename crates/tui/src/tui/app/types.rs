@@ -959,6 +959,8 @@ pub enum AppAction {
     OpenProviderSetup {
         provider: Option<ApiProvider>,
     },
+    /// Open the named, keyless DS4 local-runtime preset for review and save.
+    OpenDs4Setup,
     /// Run the xAI/Grok device-code flow with the TUI temporarily suspended.
     StartXaiDeviceLogin,
     /// Open the `/mode` picker modal for Act / Plan / Operate.

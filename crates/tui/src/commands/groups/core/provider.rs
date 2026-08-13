@@ -50,6 +50,11 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
         return provider_fallback(app, model_arg);
     }
     if name.eq_ignore_ascii_case("setup") {
+        if model_arg.is_some_and(|raw| {
+            raw.eq_ignore_ascii_case("ds4") || raw.eq_ignore_ascii_case("dwarfstar")
+        }) {
+            return CommandResult::action(AppAction::OpenDs4Setup);
+        }
         let provider = match model_arg {
             None => None,
             Some(raw) => match ApiProvider::parse(raw) {
@@ -252,6 +257,14 @@ mod tests {
                 provider: Some(ApiProvider::Anthropic),
             })
         );
+    }
+
+    #[test]
+    fn setup_subcommand_opens_ds4_preset() {
+        let mut app = create_test_app();
+        let result = provider(&mut app, Some("setup ds4"));
+        assert_eq!(result.action, Some(AppAction::OpenDs4Setup));
+        assert!(result.message.is_none());
     }
 
     #[test]

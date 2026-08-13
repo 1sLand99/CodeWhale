@@ -347,6 +347,11 @@ pub(crate) fn persist_custom_provider(
         set_document_value(doc, &["provider"], provider_id.as_str())?;
         set_document_value(doc, &[entry[0], entry[1], "kind"], "openai-compatible")?;
         set_document_value(doc, &[entry[0], entry[1], "base_url"], base_url.as_str())?;
+        if provider_id == "ds4" && crate::config::base_url_uses_local_host(&base_url) {
+            // Match the documented starter server. DS4 explicitly requires
+            // clients not to budget beyond the server's --ctx value.
+            set_document_value(doc, &[entry[0], entry[1], "context_window"], 100_000)?;
+        }
         match model.as_deref() {
             Some(model) => set_document_value(doc, &[entry[0], entry[1], "model"], model)?,
             None => {
@@ -354,9 +359,17 @@ pub(crate) fn persist_custom_provider(
             }
         }
         match api_key_env.as_deref() {
-            Some(env) => set_document_value(doc, &[entry[0], entry[1], "api_key_env"], env)?,
+            Some(env) => {
+                set_document_value(doc, &[entry[0], entry[1], "api_key_env"], env)?;
+                unset_document_value(doc, &[entry[0], entry[1], "auth_mode"])?;
+            }
             None => {
                 unset_document_value(doc, &[entry[0], entry[1], "api_key_env"])?;
+                if provider_id == "ds4" && crate::config::base_url_uses_local_host(&base_url) {
+                    set_document_value(doc, &[entry[0], entry[1], "auth_mode"], "none")?;
+                } else {
+                    unset_document_value(doc, &[entry[0], entry[1], "auth_mode"])?;
+                }
             }
         }
         Ok(())
@@ -875,6 +888,29 @@ mod tests {
         )
         .expect_err("space in name should be rejected");
         assert!(bad_chars.to_string().contains("letters, numbers"));
+    }
+
+    #[test]
+    fn persist_local_custom_provider_records_keyless_auth() {
+        let temp_root = temp_root("codewhale-custom-provider-local-keyless");
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let path = temp_root.join(".codewhale").join("config.toml");
+
+        let written = persist_custom_provider(
+            Some(&path),
+            "ds4",
+            "http://127.0.0.1:8000/v1",
+            Some("deepseek-v4-flash"),
+            None,
+        )
+        .expect("DS4 preset should persist");
+        let body = fs::read_to_string(&written).expect("written config");
+
+        assert!(body.contains("provider = \"ds4\""), "{body}");
+        assert!(body.contains("auth_mode = \"none\""), "{body}");
+        assert!(body.contains("context_window = 100000"), "{body}");
+        assert!(!body.contains("api_key"), "{body}");
     }
 
     #[test]

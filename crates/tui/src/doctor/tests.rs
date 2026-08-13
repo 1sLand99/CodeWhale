@@ -10,6 +10,59 @@ fn default_probe_request_is_fully_offline() {
     assert!(!request.should_probe_mcp());
 }
 
+fn ds4_config() -> crate::config::Config {
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.custom.insert(
+        "ds4".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+            model: Some("deepseek-v4-flash".to_string()),
+            auth_mode: Some("none".to_string()),
+            ..Default::default()
+        },
+    );
+    crate::config::Config {
+        provider: Some("ds4".to_string()),
+        providers: Some(providers),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn recognizes_only_the_explicit_keyless_local_ds4_route() {
+    let ds4 = ds4_config();
+    assert!(is_keyless_ds4_route(&ds4));
+
+    let mut hosted = ds4.clone();
+    hosted
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("ds4"))
+        .expect("DS4 config")
+        .base_url = Some("https://ds4.example/v1".to_string());
+    assert!(!is_keyless_ds4_route(&hosted));
+}
+
+#[test]
+fn ds4_probe_error_reports_status_without_response_body() {
+    let mut config = ds4_config();
+    config
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("ds4"))
+        .expect("DS4 config")
+        .base_url = Some("http://user:secret@127.0.0.1:8000/v1?token=secret".to_string());
+    let message = ds4_probe_error(
+        &config,
+        "Failed to list models: HTTP 404: secret backend response",
+    );
+
+    assert!(message.contains("HTTP 404"));
+    assert!(!message.contains("secret backend response"));
+    assert!(!message.contains("secret"));
+}
+
 #[test]
 fn update_renderer_omits_untrusted_release_tags_and_errors() {
     let release_sentinel = "v9.9.9?token=doctor-update-sentinel";

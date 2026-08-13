@@ -378,6 +378,85 @@ pub(crate) async fn print_update_report(probes: DoctorProbeRequest) {
     }
 }
 
+pub(crate) fn is_keyless_ds4_route(config: &crate::config::Config) -> bool {
+    config
+        .provider
+        .as_deref()
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("ds4"))
+        && crate::config::base_url_uses_local_host(&config.deepseek_base_url())
+        && crate::config::auth_mode_disables_api_key(
+            config
+                .auth_mode_for_provider(config.api_provider())
+                .as_deref(),
+        )
+}
+
+/// Probe DS4 through its cheap `/v1/models` contract instead of waking the
+/// model for a completion. The selected model must be advertised.
+pub(crate) async fn probe_ds4_models(config: &crate::config::Config) -> anyhow::Result<()> {
+    use crate::client::DeepSeekClient;
+    use crate::core::model_client::ModelClient;
+
+    let endpoint = crate::client::redact_url_for_display(&config.deepseek_base_url());
+    let client = DeepSeekClient::new(config)?;
+    let configured_alias = client.model().to_string();
+    let models = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.list_models(),
+    )
+    .await
+    {
+        Ok(Ok(models)) => models,
+        Ok(Err(error)) => anyhow::bail!(ds4_probe_error(config, &error.to_string())),
+        Err(_) => anyhow::bail!("DS4 /v1/models timed out after 15 seconds at {}", endpoint),
+    };
+    if !models
+        .iter()
+        .any(|available| available.id == configured_alias)
+    {
+        let advertised = models
+            .iter()
+            .take(8)
+            .map(|available| available.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "DS4 /v1/models at {} did not list configured alias '{configured_alias}' (advertised: {})",
+            endpoint,
+            if advertised.is_empty() {
+                "none"
+            } else {
+                advertised.as_str()
+            }
+        );
+    }
+    Ok(())
+}
+
+fn ds4_probe_error(config: &crate::config::Config, error: &str) -> String {
+    let endpoint = crate::client::redact_url_for_display(&config.deepseek_base_url());
+    let status = error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| {
+            (pair[0].eq_ignore_ascii_case("HTTP")
+                && pair[1].trim_matches(|ch: char| !ch.is_ascii_digit()).len() == 3)
+                .then(|| {
+                    pair[1]
+                        .trim_matches(|ch: char| !ch.is_ascii_digit())
+                        .to_string()
+                })
+        });
+    match status {
+        Some(status) => format!("DS4 /v1/models returned HTTP {status} at {}", endpoint),
+        None => format!(
+            "DS4 /v1/models could not be reached at {} (is ds4-server running?)",
+            endpoint
+        ),
+    }
+}
+
 #[cfg(test)]
 #[path = "doctor/tests.rs"]
 mod tests;
