@@ -183,6 +183,7 @@ pub struct AutoReviewContext<'a> {
     pub category: ToolCategory,
     pub risk: RiskLevel,
     pub action_kind: ToolActionKind,
+    pub shell_is_auto_review_routine: bool,
     pub run_origin: RunOrigin,
     pub approval_mode: ApprovalMode,
     pub user_intent: Option<&'a str>,
@@ -209,6 +210,8 @@ impl<'a> AutoReviewContext<'a> {
             category,
             risk,
             action_kind,
+            shell_is_auto_review_routine: matches!(category, ToolCategory::Shell)
+                && shell_params_are_auto_review_routine(params),
             run_origin,
             approval_mode,
             user_intent,
@@ -389,18 +392,66 @@ fn safety_floor(ctx: &AutoReviewContext<'_>) -> Option<AutoReviewDecision> {
 
 fn deterministic_fallback(ctx: &AutoReviewContext<'_>) -> AutoReviewDecision {
     match (ctx.category, ctx.risk, ctx.action_kind) {
-        (_, RiskLevel::Benign, _) => {
-            AutoReviewDecision::new(AutoReviewAction::Allow, "read-only action is allowed")
-        }
         (ToolCategory::Unknown, _, _) => AutoReviewDecision::new(
             AutoReviewAction::AskUser,
             "unknown tool category requires explicit review",
         ),
+        (_, _, ToolActionKind::Secret | ToolActionKind::Destructive) => AutoReviewDecision::new(
+            AutoReviewAction::AskUser,
+            "sensitive or destructive action requires explicit review",
+        ),
+        (_, RiskLevel::Benign, _) => {
+            AutoReviewDecision::new(AutoReviewAction::Allow, "read-only action is allowed")
+        }
+        (_, RiskLevel::Destructive, ToolActionKind::Write)
+            if ctx.approval_mode == ApprovalMode::Auto =>
+        {
+            AutoReviewDecision::new(
+                AutoReviewAction::Allow,
+                "Auto-Review allows a bounded workspace write",
+            )
+        }
+        (_, RiskLevel::Destructive, ToolActionKind::Shell)
+            if ctx.approval_mode == ApprovalMode::Auto && ctx.shell_is_auto_review_routine =>
+        {
+            AutoReviewDecision::new(
+                AutoReviewAction::Allow,
+                "Auto-Review allows a proven read/build/test shell command",
+            )
+        }
         (_, RiskLevel::Destructive, _) => AutoReviewDecision::new(
             AutoReviewAction::AskUser,
             "destructive action requires explicit review",
         ),
     }
+}
+
+fn shell_params_are_auto_review_routine(params: &Value) -> bool {
+    let Some(command) = params
+        .get("command")
+        .or_else(|| params.get("cmd"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+
+    let segments = split_shell_segments_for_review(command);
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            matches!(
+                crate::command_safety::analyze_command(segment).level,
+                crate::command_safety::SafetyLevel::Safe
+                    | crate::command_safety::SafetyLevel::WorkspaceSafe
+            ) || shell_segment_is_exact_readonly_git_probe(segment)
+        })
+}
+
+fn shell_segment_is_exact_readonly_git_probe(segment: &str) -> bool {
+    let tokens = segment.split_whitespace().collect::<Vec<_>>();
+    matches!(
+        tokens.as_slice(),
+        ["git", "rev-parse", "--show-toplevel"] | ["git", "rev-parse", "HEAD"]
+    )
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {

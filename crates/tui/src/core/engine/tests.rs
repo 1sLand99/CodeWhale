@@ -5443,7 +5443,7 @@ fn auto_review_classifier_allow_executes_without_prompting() {
 }
 
 #[test]
-fn auto_review_holds_unclassified_shell_probe_without_prompting() {
+fn auto_review_allows_ordinary_shell_probe_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -5455,14 +5455,8 @@ fn auto_review_holds_unclassified_shell_probe_without_prompting() {
         false,
     );
 
-    assert_eq!(
-        decision,
-        AutoReviewPlanDecision::Block(
-            "Auto-Review held tool 'exec_shell': destructive action requires explicit review"
-                .to_string()
-        )
-    );
-    assert_eq!(audit["decision"], "ask_user");
+    assert_eq!(decision, AutoReviewPlanDecision::Allow);
+    assert_eq!(audit["decision"], "allow");
     assert_eq!(audit["action_kind"], "shell");
 }
 
@@ -5690,7 +5684,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
 }
 
 #[test]
-fn auto_review_holds_generic_destructive_call_without_prompting() {
+fn auto_review_allows_ordinary_test_command_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -5702,15 +5696,106 @@ fn auto_review_holds_generic_destructive_call_without_prompting() {
         false,
     );
 
+    assert_eq!(decision, AutoReviewPlanDecision::Allow);
+    assert_eq!(audit["decision"], "allow");
+    assert_eq!(audit["risk"], "destructive");
+}
+
+#[test]
+fn auto_review_allows_ordinary_workspace_write_without_prompting() {
+    let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
+        "write_file",
+        &json!({"path": "src/lib.rs", "content": "pub fn ready() {}\n"}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        Some("update the implementation"),
+        true,
+        false,
+    );
+
+    assert_eq!(decision, AutoReviewPlanDecision::Allow);
+    assert_eq!(audit["decision"], "allow");
+    assert_eq!(audit["action_kind"], "write");
+}
+
+#[test]
+fn auto_review_still_blocks_interactive_destructive_shell() {
+    let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
+        "exec_shell",
+        &json!({"command": "rm -rf /"}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        Some("destroy the system tree"),
+        true,
+        false,
+    );
+
     assert_eq!(
         decision,
         AutoReviewPlanDecision::Block(
-            "Auto-Review held tool 'exec_shell': destructive action requires explicit review"
+            "Auto-Review held tool 'exec_shell': sensitive or destructive action requires explicit review"
                 .to_string()
         )
     );
     assert_eq!(audit["decision"], "ask_user");
-    assert_eq!(audit["risk"], "destructive");
+    assert_eq!(audit["action_kind"], "destructive");
+}
+
+#[test]
+fn auto_review_does_not_bypass_shell_commands_requiring_approval() {
+    for command in [
+        "git reset --hard",
+        "sudo cargo test",
+        "curl https://example.com",
+        "unrecognized-command --mutate",
+    ] {
+        let (decision, audit) = auto_review_plan_decision(
+            &crate::tui::auto_review::AutoReviewPolicy::default(),
+            "exec_shell",
+            &json!({"command": command}),
+            crate::tui::auto_review::RunOrigin::Interactive,
+            crate::tui::approval::ApprovalMode::Auto,
+            Some("exercise the approval boundary"),
+            true,
+            false,
+        );
+
+        assert!(
+            matches!(decision, AutoReviewPlanDecision::Block(_)),
+            "Auto-Review must not auto-approve {command}"
+        );
+        assert_ne!(audit["decision"], "allow", "unexpected allow for {command}");
+    }
+}
+
+#[test]
+fn auto_review_does_not_bypass_mcp_mutations_or_secret_tools() {
+    for (tool_name, input) in [
+        ("mcp_github_merge_pull_request", json!({"number": 5341})),
+        ("read_secret", json!({"name": "provider-token"})),
+    ] {
+        let (decision, audit) = auto_review_plan_decision(
+            &crate::tui::auto_review::AutoReviewPolicy::default(),
+            tool_name,
+            &input,
+            crate::tui::auto_review::RunOrigin::Interactive,
+            crate::tui::approval::ApprovalMode::Auto,
+            Some("exercise the approval boundary"),
+            true,
+            false,
+        );
+
+        assert!(
+            matches!(decision, AutoReviewPlanDecision::Block(_)),
+            "Auto-Review must not auto-approve {tool_name}"
+        );
+        assert_ne!(
+            audit["decision"], "allow",
+            "unexpected allow for {tool_name}"
+        );
+    }
 }
 
 #[test]

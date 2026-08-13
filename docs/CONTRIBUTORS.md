@@ -44,6 +44,15 @@ notes, and relevant issue/PR comments.
   first-class named provider with `ORCAROUTER_API_KEY`, auto-routing,
   CLI `--provider` selection, and TUI picker entries (PR #5321)
 
+**Reports and verification**
+
+- **[USTHzhanglu](https://github.com/USTHzhanglu)** — reported the Auto-Review
+  shell/write regression with a Windows reproduction and audit-log evidence
+  (issue #5323)
+- **[Lstarsky0](https://github.com/Lstarsky0)** — traced the Auto-Review
+  regression to the exact permission-posture change and documented the safe
+  recovery choices (issue #5323)
+
 </details>
 
 <details>
