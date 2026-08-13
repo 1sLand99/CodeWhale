@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way source ownership ceilings. Deletion and line-neutral ownership moves pass; new packages, binaries, 1000-line module paths, a larger maximum module, or aggregate owned Rust growth require an explicit reviewed update. #5324 adds action-dependent agent tool requirements and provider compatibility tests: 689696 -> 689789 owned Rust lines.",
+  "_comment": "One-way source ownership ceilings. Deletion and line-neutral ownership moves pass; new packages, binaries, 1000-line module paths, a larger maximum module, or aggregate owned Rust growth require an explicit reviewed update. #5324 and its provider compatibility fallback add action-dependent agent tool requirements: 689696 -> 689938 owned Rust lines.",
   "allowed_large_modules": [
     "crates/agent/src/lib.rs",
     "crates/app-server/src/chat_completions.rs",
@@ -188,7 +188,7 @@
   "large_module_threshold_lines": 1000,
   "max_large_module_count": 178,
   "max_module_lines": 17739,
-  "max_total_owned_rust_lines": 689974,
+  "max_total_owned_rust_lines": 689938,
   "schema_version": 1,
   "workspace_packages": [
     "codewhale-agent",

@@ -4729,8 +4729,9 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     let mut responses = agent_schema.clone();
     let note = schema_sanitize::sanitize_for_responses(&mut responses);
     assert!(
-        note.is_none(),
-        "agent schema has no root composition to drop"
+        note.as_deref()
+            .is_some_and(|note| note.contains("conditional requirements")),
+        "dropping the action contract must be reported to the model"
     );
     assert_eq!(
         responses["properties"]["type"]["enum"], expected,
