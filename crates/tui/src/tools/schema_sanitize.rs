@@ -406,7 +406,7 @@ fn drop_dependent_keywords(schema: &mut Value) -> Option<String> {
     dropped.dedup();
     Some(format!(
         "This provider cannot express conditional requirements, so they are not \
-         part of the schema above: {}. They are still enforced.",
+         part of the schema above: {}. Honor them when calling the tool.",
         dropped.join("; ")
     ))
 }
@@ -2850,7 +2850,7 @@ mod kimi_tests {
             "This provider cannot express conditional requirements, so they are \
              not part of the schema above: with `action` present, `prompt` is \
              also required; with `prompt` present, `action` is also required. \
-             They are still enforced."
+             Honor them when calling the tool."
         );
     }
 
