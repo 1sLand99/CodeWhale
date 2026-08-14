@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The TUI transcript renders Markdown blockquotes (`>` lines) with a quote
+  rail — nested quotes, inline bold/code/links, wrapped continuation rows, and
+  selection copy that keeps the quote text and skips the rail chrome.
+
+### Fixed
+
+- The TUI markdown parser now honors CommonMark fence-length rules: a ````
+  opener is not closed by a shorter ``` line, so `>` content inside a longer
+  fence stays literal code instead of escaping into a quote.
+
 ## [0.9.7] - 2026-08-12
 
 Codewhale v0.9.7 keeps the catalog ordinary. Grok 4.6 lands as a normal catalog
