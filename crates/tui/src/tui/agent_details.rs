@@ -155,7 +155,7 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
         let role = route
             .map(|route| route.canonical_role.trim())
             .filter(|role| !role.is_empty())
-            .or_else(|| agent.assignment.role.as_deref())
+            .or(agent.assignment.role.as_deref())
             .map(str::trim)
             .filter(|role| !role.is_empty());
         if let Some(role) = role {
