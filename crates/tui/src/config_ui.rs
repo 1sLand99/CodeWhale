@@ -1554,6 +1554,8 @@ mod tests {
         let config_path = temp_root.path().join("config.toml");
         fs::write(&config_path, "reasoning_effort = \"max\"\n").expect("seed config");
         let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
 
         let mut app = app();
         app.config_path = Some(config_path.clone());
@@ -1623,25 +1625,13 @@ cost_currency = "cny"
         )
         .expect("seed settings");
 
-        let old_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        // Safety: test-only environment mutation guarded by a module mutex.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
+        let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
 
         let app = app();
         let config = Config::default();
         let doc = build_document(&app, &config).expect("document");
 
         assert_eq!(doc.settings.cost_currency, CostCurrencyValue::Cny);
-        // Safety: restore the guarded test-only environment mutation above.
-        unsafe {
-            if let Some(value) = old_config_path {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", value);
-            } else {
-                std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-            }
-        }
     }
 
     #[test]
@@ -1667,23 +1657,13 @@ background_color = "#1A1B26"
         )
         .expect("seed settings");
 
-        let old_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
+        let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
 
         let app = app();
         let config = Config::default();
         let doc = build_document(&app, &config).expect("document");
 
         assert_eq!(doc.settings.background_color.as_deref(), Some("#1a1b26"));
-        unsafe {
-            if let Some(value) = old_config_path {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", value);
-            } else {
-                std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-            }
-        }
     }
 
     #[test]
@@ -1695,6 +1675,8 @@ background_color = "#1A1B26"
         let settings_path = codewhale_home.join("settings.toml");
         fs::write(&settings_path, "").expect("seed settings");
         let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
 
         let app = app();
         let config = Config::default();
@@ -1734,6 +1716,8 @@ background_color = "#1A1B26"
         )
         .expect("settings");
         let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
 
         let mut app = app();
         let mut config = Config::default();

@@ -137,12 +137,12 @@ impl TuiPrefs {
         #[cfg(test)]
         {
             let honor_guarded_environment =
-                crate::test_support::current_thread_holds_test_env_lock();
+                crate::test_support::guarded_environment_provides_state_paths();
             crate::test_support::with_test_env_lock(|| {
                 if honor_guarded_environment {
                     tui_prefs_path_from_environment()
                 } else {
-                    Ok(crate::test_support::isolated_test_state_root().join(TUI_PREFS_FILE_NAME))
+                    Ok(crate::test_support::unsealed_test_state_root().join(TUI_PREFS_FILE_NAME))
                 }
             })
         }
@@ -2280,13 +2280,14 @@ fn lock_settings_transaction(
 fn settings_path_candidates() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
     #[cfg(test)]
     {
-        let honor_guarded_environment = crate::test_support::current_thread_holds_test_env_lock();
+        let honor_guarded_environment =
+            crate::test_support::guarded_environment_provides_state_paths();
         crate::test_support::with_test_env_lock(|| {
             if honor_guarded_environment {
                 settings_path_candidates_from_environment()
             } else {
                 (
-                    Some(crate::test_support::isolated_test_state_root().join(SETTINGS_FILE_NAME)),
+                    Some(crate::test_support::unsealed_test_state_root().join(SETTINGS_FILE_NAME)),
                     None,
                     None,
                 )
@@ -2754,6 +2755,9 @@ mod tests {
         // the isolated per-process test root and never touch the parent's file.
         // The child is a fresh process, so the acquisition is uncontended.
         let _env_lock = crate::test_support::lock_test_env();
+        let inherited_home = std::env::var_os("CODEWHALE_HOME")
+            .expect("settings child needs an inherited Codewhale home");
+        let _state_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", inherited_home);
         let signal = PathBuf::from(
             std::env::var(CHILD_SIGNAL_ENV).expect("child helper needs a signal path"),
         );
@@ -4579,42 +4583,14 @@ mod tests {
         crate::test_support::lock_test_env()
     }
 
-    struct EnvVarRestore {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarRestore {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: tests using this helper hold config_path_test_guard.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: tests using this helper hold config_path_test_guard.
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarRestore {
-        fn drop(&mut self) {
-            // SAFETY: tests using this helper hold config_path_test_guard.
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
+    /// The shared guard, under this module's historical name.
+    ///
+    /// It was a byte-for-byte copy of `EnvVarGuard` until #5359 gave the shared
+    /// one a second job: recording which variables a test actually redirected,
+    /// so state-path resolution can tell a sealed environment from a test that
+    /// holds the lock for unrelated reasons. A private copy silently opts every
+    /// caller here out of that record.
+    use crate::test_support::EnvVarGuard as EnvVarRestore;
 
     #[test]
     fn startup_mode_writes_accept_act_plan_operate() {
@@ -5014,19 +4990,9 @@ mod tests {
         // Point config path at a non-existent location so tui.toml is absent.
         let tmp = std::env::temp_dir().join("dst_tui_prefs_absent_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var(
-                "DEEPSEEK_CONFIG_PATH",
-                tmp.join("config.toml").to_str().unwrap(),
-            );
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
         let prefs = TuiPrefs::load().expect("load should not fail when file absent");
         assert_eq!(prefs.theme, "dark", "should fall back to default theme");
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5035,13 +5001,7 @@ mod tests {
         let _g = config_path_test_guard();
         let tmp = std::env::temp_dir().join("dst_tui_prefs_save_test");
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var(
-                "DEEPSEEK_CONFIG_PATH",
-                tmp.join("config.toml").to_str().unwrap(),
-            );
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.join("config.toml"));
 
         let prefs = TuiPrefs {
             theme: "light".to_string(),
@@ -5058,10 +5018,6 @@ mod tests {
         assert_eq!(loaded.font_size, 14);
         assert_eq!(loaded.keybinds.submit.as_deref(), Some("ctrl+enter"));
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5071,10 +5027,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("dst_tui_prefs_comment_test");
         std::fs::create_dir_all(&tmp).unwrap();
         let config_file = tmp.join("config.toml");
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", &config_file);
 
         // tui.toml lives next to config.toml
         let tui_path = tmp.join("tui.toml");
@@ -5095,10 +5048,6 @@ mod tests {
         assert!(body.contains("# footer note"), "footer lost: {body}");
         assert!(body.contains("light"), "new value not written: {body}");
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5108,10 +5057,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("dst_settings_comment_test");
         std::fs::create_dir_all(&tmp).unwrap();
         let config_file = tmp.join("config.toml");
-        // SAFETY: test-only env mutation guarded by config_path_test_guard.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", config_file.to_str().unwrap());
-        }
+        let _config_override = EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", &config_file);
 
         // settings.toml lives next to config.toml
         let settings_path = tmp.join("settings.toml");
@@ -5131,10 +5077,6 @@ mod tests {
         assert!(body.contains("# trailing"), "trailing lost: {body}");
         assert!(body.contains("cny"), "new value not written: {body}");
 
-        // SAFETY: cleanup under the guard.
-        unsafe {
-            std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

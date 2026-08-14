@@ -1147,6 +1147,24 @@ async fn background_shell_job_carries_subagent_owner() {
         metadata.get("owner_agent_name").and_then(Value::as_str),
         Some("verifier")
     );
+    assert!(
+        result
+            .content
+            .contains("not injected into the parent model"),
+        "owned background work must describe its real completion route: {}",
+        result.content
+    );
+    assert!(result.content.contains("Bash action=\"wait\""));
+    assert_eq!(
+        metadata
+            .get("auto_resume_on_completion")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata.get("completion_surface").and_then(Value::as_str),
+        Some("task_status_and_explicit_wait")
+    );
     let task_id = metadata
         .get("task_id")
         .and_then(Value::as_str)
