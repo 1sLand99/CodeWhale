@@ -418,8 +418,8 @@ impl ApiProvider {
         Self::ModelstudioTokenPlanAnthropic,
         Self::ModelstudioCodingPlan,
         Self::ModelstudioCodingPlanAnthropic,
-        Self::Google,
         Self::Antigravity,
+        Self::Google,
         Self::Custom,
     ];
 
