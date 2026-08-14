@@ -1444,6 +1444,7 @@ impl ApprovalView {
         Self::new_for_locale(request, Locale::En)
     }
 
+    #[cfg(test)]
     pub fn new_for_locale(request: ApprovalRequest, locale: Locale) -> Self {
         Self::new_with_default_selection(request, locale, ApprovalDefaultSelection::default())
     }

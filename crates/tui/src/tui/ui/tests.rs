@@ -18516,6 +18516,7 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
         &event_input,
         "approval-key",
         None,
+        crate::config::ApprovalDefaultSelection::Deny,
     );
 
     let mut view = app.view_stack.pop().expect("approval view");
@@ -18538,6 +18539,34 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
 }
 
 #[test]
+fn approval_prompt_uses_configured_default_selection() {
+    let mut app = create_test_app();
+    push_approval_request_view(
+        &mut app,
+        "tool-config-default",
+        "exec_shell",
+        "Run a trusted command",
+        &serde_json::json!({"command": "cargo check"}),
+        "approval-key",
+        None,
+        crate::config::ApprovalDefaultSelection::AllowOnce,
+    );
+
+    let mut view = app.view_stack.pop().expect("approval view");
+    let approval = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalView>()
+        .expect("approval view");
+    assert!(matches!(
+        approval.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision: crate::tui::approval::ReviewDecision::Approved,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
     let mut app = create_test_app();
     let input = serde_json::json!({
@@ -18555,6 +18584,7 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
         &input,
         "approval-key",
         None,
+        crate::config::ApprovalDefaultSelection::Deny,
     );
 
     assert!(

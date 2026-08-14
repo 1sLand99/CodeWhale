@@ -760,6 +760,7 @@ async fn drain_remote_control_events(
                         &approval.input,
                         &approval.approval_key,
                         approval.intent_summary.as_deref(),
+                        config.approval_default_selection(),
                     );
                 }
             }

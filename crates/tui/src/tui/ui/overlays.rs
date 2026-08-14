@@ -414,6 +414,7 @@ pub(crate) fn push_approval_request_view(
     tool_input: &serde_json::Value,
     approval_key: &str,
     intent_summary: Option<&str>,
+    default_selection: crate::config::ApprovalDefaultSelection,
 ) {
     let request = ApprovalRequest::new_with_intent(
         id,
@@ -425,7 +426,11 @@ pub(crate) fn push_approval_request_view(
         &app.workspace,
     );
     app.view_stack
-        .push(ApprovalView::new_for_locale(request, app.ui_locale));
+        .push(ApprovalView::new_with_default_selection(
+            request,
+            app.ui_locale,
+            default_selection,
+        ));
 }
 
 /// Push the new `selected_idx` into the live transcript overlay so the
