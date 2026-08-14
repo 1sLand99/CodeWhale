@@ -3230,10 +3230,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             )?;
         } else {
             h.wait_for(
-                |frame| {
-                    frame.contains("tool issue")
-                        && frame.contains("guardian unavailable")
-                },
+                |frame| frame.contains("tool issue") && frame.contains("guardian unavailable"),
                 Duration::from_secs(10),
             )?;
         }
