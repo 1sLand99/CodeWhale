@@ -3407,6 +3407,21 @@ mod provider_key_validation_tests {
             "status names verification success: {:?}",
             app.status_message
         );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert_eq!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::Ready,
+            "the live check receipt must make this exact route ready once its key is saved",
+        );
 
         let picker = app.view_stack.pop().expect("provider picker reopened");
         let area = Rect::new(0, 0, 90, 16);

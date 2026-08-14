@@ -996,9 +996,15 @@ impl ProviderAuthStatus {
 
 /// Compact Models.dev freshness chip for the provider picker chrome (#4139).
 fn catalog_freshness_title_suffix() -> &'static str {
-    match models_dev_live::status().freshness {
+    catalog_freshness_title_suffix_for(models_dev_live::status().freshness)
+}
+
+fn catalog_freshness_title_suffix_for(freshness: ModelsDevFreshness) -> &'static str {
+    match freshness {
         ModelsDevFreshness::Stale => " · stale",
-        ModelsDevFreshness::Failed => " · cache failed",
+        // A failed optional refresh keeps prior or bundled rows available.
+        // Say what the picker is using instead of implying the catalog broke.
+        ModelsDevFreshness::Failed => " · bundled fallback",
         ModelsDevFreshness::Bundled | ModelsDevFreshness::Live => "",
     }
 }
@@ -3869,6 +3875,14 @@ mod tests {
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn failed_live_catalog_refresh_names_the_working_fallback() {
+        assert_eq!(
+            catalog_freshness_title_suffix_for(ModelsDevFreshness::Failed),
+            " · bundled fallback"
+        );
     }
 
     #[test]

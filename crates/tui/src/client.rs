@@ -1598,7 +1598,6 @@ fn api_provider_skips_models_probe(api_provider: ApiProvider) -> bool {
 }
 
 #[must_use]
-#[cfg(test)]
 pub(crate) fn provider_api_key_verification_is_observed(api_provider: ApiProvider) -> bool {
     !api_provider_skips_models_probe(api_provider)
 }
