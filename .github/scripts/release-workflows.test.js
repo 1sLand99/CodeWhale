@@ -34,6 +34,7 @@ const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
+const republish = read(".github/workflows/release-republish.yml");
 const releaseDockerfile = read("packaging/docker/Dockerfile.release");
 const cnb = read(".cnb.yml");
 const bundles = read("scripts/release/create-release-bundles.sh");
@@ -159,6 +160,7 @@ for (const [label, workflow] of [
   ["release candidate", candidate],
   ["shared artifact", artifacts],
   ["public release", release],
+  ["release republish", republish],
 ]) {
   const remoteActions = [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+([^@\s]+)@([^#\s]+)/gm)]
     .map((match) => ({ action: match[1], ref: match[2] }))
@@ -172,6 +174,25 @@ for (const [label, workflow] of [
     );
   }
 }
+
+const republishHomebrewJob = republish.match(/\n  homebrew:\n([\s\S]*)$/);
+assert.ok(republishHomebrewJob, "republish must retain a Homebrew recovery job");
+const republishHomebrewCheckout = namedStep(
+  republishHomebrewJob[0],
+  "Checkout release infrastructure",
+);
+assert.match(
+  republishHomebrewCheckout,
+  /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/,
+  "Homebrew recovery must use the repaired default-branch infrastructure",
+);
+assert.doesNotMatch(
+  republishHomebrewCheckout,
+  /needs\.resolve\.outputs\.sha/,
+  "Homebrew recovery must not resurrect release-tag infrastructure",
+);
+assert.match(republishHomebrewJob[0], /gh release download "\$\{\{ needs\.resolve\.outputs\.tag \}\}"/);
+assert.match(republishHomebrewJob[0], /MANIFEST: \/tmp\/codewhale-artifacts-sha256\.txt/);
 
 assert.match(artifacts, /^  workflow_call:/m);
 assert.match(artifacts, /^permissions:\n  contents: read$/m);
