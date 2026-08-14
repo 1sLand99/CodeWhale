@@ -1557,8 +1557,12 @@ impl Engine {
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
                 let reason = stop_reason_detail(stop_reason.as_deref());
-                if is_output_limit_stop_reason(stop_reason.as_deref()) {
-                    // Degrade, don't kill the turn. A generation limit is a
+                if is_output_limit_stop_reason(stop_reason.as_deref()) && stream_errors == 0 {
+                    // Degrade, don't kill the turn — but only when the stream
+                    // finished cleanly. A `max_tokens` stop followed by a
+                    // transport error is a billed incomplete response: charge
+                    // it and fail closed instead of continuing into a second
+                    // request. A generation limit on a complete stream is a
                     // normal provider outcome, not an unrecoverable error:
                     // accept whatever complete tool call or content was
                     // produced and continue. The truncation is surfaced as a

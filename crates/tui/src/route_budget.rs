@@ -216,7 +216,12 @@ pub(crate) fn route_output_reservation_for_window(
             route_cap.min(TURN_MAX_OUTPUT_TOKENS)
         })
     } else {
+        // The request cap may honor a documented catalogue ceiling above
+        // 65K (#5373). Internal reservation must not: a 256K window with a
+        // matching output ceiling would otherwise reserve the whole window
+        // and collapse compaction to the 1K headroom floor.
         effective_max_output_tokens_for_route(provider, model, route_limits)
+            .min(API_MAX_OUTPUT_TOKENS)
     }
 }
 
@@ -555,5 +560,19 @@ mod tests {
             escaped >= 2,
             "expected at least two bundled ceilings above the generic floor, found {escaped}"
         );
+    }
+
+    #[test]
+    fn mid_window_internal_reservation_stays_on_the_ordinary_request_floor() {
+        let reservation = route_output_reservation_for_window(
+            ApiProvider::Arcee,
+            "trinity-large-thinking",
+            262_144,
+            None,
+        );
+        assert_eq!(reservation, API_MAX_OUTPUT_TOKENS);
+        let budget = route_context_budget(ApiProvider::Arcee, "trinity-large-thinking", None, 0)
+            .expect("trinity route budget");
+        assert_eq!(budget.compaction_trigger_for_percent(80.0), 195_584);
     }
 }

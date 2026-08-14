@@ -1009,8 +1009,8 @@ mod tests {
                 "kimi-k3",
                 Some(candidate.limits()),
             ),
-            65_536,
-            "route metadata must not raise the ordinary request cap"
+            131_072,
+            "the documented catalogue output ceiling is the request cap; the 1M route window must not raise it further"
         );
     }
 

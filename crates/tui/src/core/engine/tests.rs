@@ -13172,17 +13172,14 @@ fn effective_max_output_tokens_caps_api_request_for_large_window_models() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // v4_cap and flash_cap below see the same env state.
     let _lock = lock_test_env();
-    // V4 models have a 1M context window but the API request cap must stay
-    // well below common provider limits (e.g., 131K total on self-hosted
-    // vLLM/SGLang). The cap should never exceed 65K.
+    // Hosted V4 documents a 384K output ceiling in the bundled catalogue.
+    // That raise is intentional (#5373): the generic 65K floor is only the
+    // fallback for undescribed models. Self-hosted vLLM/SGLang stay
+    // RouteDeclaredUnknown and do not inherit this number.
     let v4_cap = effective_max_output_tokens("deepseek-v4-pro");
-    assert!(
-        v4_cap <= 65_536,
-        "V4 API request cap should be ≤64K, got {v4_cap}"
-    );
-    assert!(
-        v4_cap > 0,
-        "V4 API request cap should be positive, got {v4_cap}"
+    assert_eq!(
+        v4_cap, 384_000,
+        "hosted V4 must use the documented catalogue ceiling, got {v4_cap}"
     );
 
     let flash_cap = effective_max_output_tokens("deepseek-v4-flash");

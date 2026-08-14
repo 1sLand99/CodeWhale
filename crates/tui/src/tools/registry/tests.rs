@@ -1234,7 +1234,7 @@ fn agent_tools_with_shell_policy_readonly_exposes_only_run_only_bash() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["command", "timeout"]
+        ["command", "justification", "sandbox_permissions", "timeout"]
             .into_iter()
             .map(str::to_string)
             .collect()

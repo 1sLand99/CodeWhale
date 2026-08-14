@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A billed `max_tokens` stop followed by a transport error fails the turn
+  instead of continuing into a second request. A clean output-limit stop
+  still continues. Mid-size context windows keep the ordinary 65K internal
+  reservation so compaction does not collapse to the 1K headroom floor
+  when the catalogue documents a matching output ceiling.
+
 - The TUI markdown parser now honors CommonMark fence-length rules: a ````
   opener is not closed by a shorter ``` line, so `>` content inside a longer
   fence stays literal code instead of escaping into a quote.

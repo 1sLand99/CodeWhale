@@ -9,11 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/rc` attach now includes an observed `owner/name` git remote when the
+  folder has a GitHub, CNB, or Gitee origin, so CWC can label the paired
+  session. Paths stay off the wire. Reconnect after both this client and
+  CWC #202 land to backfill existing empty rows.
+
 - The TUI transcript renders Markdown blockquotes (`>` lines) with a quote
   rail — nested quotes, inline bold/code/links, wrapped continuation rows, and
   selection copy that keeps the quote text and skips the rail chrome.
 
 ### Fixed
+
+- A billed `max_tokens` stop followed by a transport error fails the turn
+  instead of continuing into a second request. A clean output-limit stop
+  still continues. Mid-size context windows keep the ordinary 65K internal
+  reservation so compaction does not collapse to the 1K headroom floor
+  when the catalogue documents a matching output ceiling.
 
 - The TUI markdown parser now honors CommonMark fence-length rules: a ````
   opener is not closed by a shorter ``` line, so `>` content inside a longer

@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update",
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). That raise is an explicit maintainer decision; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift.",
   "document_kind": "codewhale.runtime_contract_budget",
   "representative_context": {
     "fixture_id": "representative-v1",
@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 14664,
+          "bytes": 16160,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3666,
+          "tokens_est": 4040,
           "tool_names": [
             "agent",
             "bash",
@@ -100,9 +100,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 69606,
+          "bytes": 71102,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17402,
+          "tokens_est": 17776,
           "tool_names": [
             "Git",
             "Run",
@@ -165,9 +165,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 14664,
+          "bytes": 16160,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3666,
+          "tokens_est": 4040,
           "tool_names": [
             "agent",
             "bash",
@@ -180,9 +180,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 69606,
+          "bytes": 71102,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17402,
+          "tokens_est": 17776,
           "tool_names": [
             "Git",
             "Run",
@@ -245,9 +245,9 @@
       },
       "plan": {
         "active": {
-          "bytes": 14664,
+          "bytes": 16160,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3666,
+          "tokens_est": 4040,
           "tool_names": [
             "agent",
             "bash",
@@ -260,9 +260,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 42600,
+          "bytes": 44096,
           "identity_sha256": "2cf3e5b6810e7840ee2d2df2b6dd81a24058e3e916acdb1199aff3abae916a41",
-          "tokens_est": 10650,
+          "tokens_est": 11024,
           "tool_names": [
             "Git",
             "Web",
