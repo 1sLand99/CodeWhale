@@ -2964,14 +2964,25 @@ diff --git a/delete.txt b/delete.txt
 @@ -1 +0,0 @@
 -DELETE-SENTINEL
 ";
-    let replies = [
-        pty_tool_call_sse(
+    let replies = if tool_allowed {
+        vec![
+            pty_tool_call_sse(
+                "call_file_mutation_pty",
+                "File",
+                serde_json::json!({"action": "patch", "patch": patch}),
+            ),
+            pty_text_sse("FILE-MUTATION-FIXTURE-DONE"),
+        ]
+    } else {
+        // Auto posture fails closed on the guardian denial and the turn ends
+        // after the single tool-call request — no settling request is made,
+        // so the fixture must not wait for one.
+        vec![pty_tool_call_sse(
             "call_file_mutation_pty",
             "File",
             serde_json::json!({"action": "patch", "patch": patch}),
-        ),
-        pty_text_sse("FILE-MUTATION-FIXTURE-DONE"),
-    ];
+        )]
+    };
     let expected_result_marker = if tool_allowed {
         "files_applied"
     } else {
@@ -3209,7 +3220,9 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             h.wait_for_text("Allow once", Duration::from_secs(10))?;
             h.send(b"y")?;
         }
-        h.wait_for_text("FILE-MUTATION-FIXTURE-DONE", Duration::from_secs(60))?;
+        if tool_allowed {
+            h.wait_for_text("FILE-MUTATION-FIXTURE-DONE", Duration::from_secs(60))?;
+        }
         if tool_allowed {
             h.wait_for(
                 |frame| frame.contains("4 files") && frame.contains("done"),
@@ -3220,7 +3233,6 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                 |frame| {
                     frame.contains("tool issue")
                         && frame.contains("guardian unavailable")
-                        && frame.contains("done")
                 },
                 Duration::from_secs(10),
             )?;
