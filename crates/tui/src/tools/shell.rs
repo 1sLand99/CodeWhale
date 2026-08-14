@@ -2605,14 +2605,17 @@ impl ShellManager {
         jobs
     }
 
-    /// Whether a finished job's completion is waiting to be claimed. Unlike
+    /// Whether a finished parent-owned job's completion is waiting to be
+    /// claimed. Unlike
     /// [`Self::may_have_undelivered_completion`] this polls, so it reports
     /// readiness the moment the process exits; the engine's idle shell wake
     /// uses it to fire exactly when evidence exists.
     pub(crate) fn has_finished_unreported_jobs(&mut self) -> bool {
         self.processes.values_mut().any(|shell| {
             shell.poll();
-            shell.status != ShellStatus::Running && !shell.completion_reported
+            shell.owner_agent.is_none()
+                && shell.status != ShellStatus::Running
+                && !shell.completion_reported
         })
     }
 
@@ -2640,7 +2643,8 @@ impl ShellManager {
         }
     }
 
-    /// Whether the next production turn may inject a shell completion event.
+    /// Whether the next production turn may inject a parent-owned shell
+    /// completion event.
     ///
     /// This deliberately does not poll processes or flip
     /// `completion_reported`: preview is read-only. A running job counts as
@@ -2649,7 +2653,7 @@ impl ShellManager {
     pub fn may_have_undelivered_completion(&self) -> bool {
         self.processes
             .values()
-            .any(|shell| !shell.completion_reported)
+            .any(|shell| shell.owner_agent.is_none() && !shell.completion_reported)
     }
 
     /// Return agent owners whose tracked shell work is still running. The
@@ -4408,13 +4412,18 @@ impl ToolSpec for BashTool {
                         "Persistent service staged: {task_id_str}. Probe readiness with a separate command. Codewhale will transfer ownership only if this exec finishes successfully."
                     )
                 } else if result.status == ShellStatus::Running {
+                    let completion_contract = if context.owner_agent_id.is_some() {
+                        "completion stays in task/status and is not injected into the parent model."
+                    } else {
+                        "completion is delivered to the model as an internal runtime event and shown in task/status state."
+                    };
                     if backgrounded_foreground {
                         format!(
-                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
+                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; {completion_contract} Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
                         )
                     } else {
                         format!(
-                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Codewhale terminates this task when the session exits. If a service must survive a successful headless exec, start it with background=true and persist=true. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
+                            "Background task started: {task_id_str}\n\nReturns immediately; {completion_contract} Codewhale terminates this task when the session exits. If a service must survive a successful headless exec, start it with background=true and persist=true. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" at a true dependency to block until completion or timeout."
                         )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
@@ -4505,8 +4514,13 @@ impl ToolSpec for BashTool {
                     metadata["auto_resume_on_completion"] = json!(false);
                     metadata["completion_surface"] = json!("headless_exec_release_receipt");
                 } else if background || backgrounded_foreground {
-                    metadata["auto_resume_on_completion"] = json!(true);
-                    metadata["completion_surface"] = json!("runtime_event_and_task_status");
+                    let child_owned = context.owner_agent_id.is_some();
+                    metadata["auto_resume_on_completion"] = json!(!child_owned);
+                    metadata["completion_surface"] = if child_owned {
+                        json!("task_status_and_explicit_wait")
+                    } else {
+                        json!("runtime_event_and_task_status")
+                    };
                     metadata["background_policy"] = json!("nonblocking");
                 }
                 if result.status == ShellStatus::TimedOut && !background && !interactive {

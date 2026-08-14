@@ -189,6 +189,9 @@ impl Engine {
             .unwrap_or_default();
         completions
             .into_iter()
+            // Child-owned output stays in task/status for explicit child
+            // waits. Only unowned jobs belong in the parent model stream.
+            .filter(|completion| completion.event.owner_agent_id.is_none())
             .map(|mut completion| {
                 let tool_call_id =
                     format!("background-shell-completion-{}", completion.event.task_id);
@@ -4452,6 +4455,180 @@ fn is_turn_metadata_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn child_owned_background_completion_is_not_delivered_to_parent() {
+        let tmp = tempdir().expect("tempdir");
+        let config = EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let (engine, _handle) = Engine::new(config, &Config::default());
+
+        let (parent_task_id, child_task_id) = {
+            let mut shell = engine.shell_manager.lock().expect("shell manager");
+            let parent = shell
+                .execute_with_options_env_for_owner(
+                    "echo parent-shell-done",
+                    None,
+                    30_000,
+                    true,
+                    None,
+                    false,
+                    None,
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .expect("start parent background job")
+                .task_id
+                .expect("parent background task id");
+            let child = shell
+                .execute_with_options_env_for_owner(
+                    "echo child-shell-done",
+                    None,
+                    30_000,
+                    true,
+                    None,
+                    false,
+                    None,
+                    std::collections::HashMap::new(),
+                    Some(crate::tools::shell::ShellJobOwner {
+                        agent_id: "agent_child".to_string(),
+                        agent_name: "child".to_string(),
+                    }),
+                )
+                .expect("start child background job")
+                .task_id
+                .expect("child background task id");
+            (parent, child)
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let both_done = {
+                let mut shell = engine.shell_manager.lock().expect("shell manager");
+                let jobs = shell.list_jobs();
+                [parent_task_id.as_str(), child_task_id.as_str()]
+                    .iter()
+                    .all(|task_id| {
+                        jobs.iter().any(|job| {
+                            job.id == *task_id
+                                && job.status != crate::tools::shell::ShellStatus::Running
+                        })
+                    })
+            };
+            if both_done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background jobs never finished"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let _artifact_lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        struct ArtifactRootReset(Option<PathBuf>);
+        impl Drop for ArtifactRootReset {
+            fn drop(&mut self) {
+                crate::artifacts::set_test_artifact_sessions_root(self.0.take());
+            }
+        }
+        let _artifact_root = ArtifactRootReset(crate::artifacts::set_test_artifact_sessions_root(
+            Some(tmp.path().join("sessions")),
+        ));
+
+        let delivered = engine.drain_shell_completion_events();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the parent stream must suppress child-owned completions"
+        );
+        assert_eq!(delivered[0].task_id, parent_task_id);
+
+        let mut shell = engine.shell_manager.lock().expect("shell manager");
+        assert!(
+            shell.list_jobs().iter().any(|job| job.id == child_task_id),
+            "filtering model delivery must not hide the child task from task/status"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_owned_background_completion_does_not_wake_parent() {
+        let tmp = tempdir().expect("tempdir");
+        let config = EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+        let task_id = {
+            let mut shell = engine.shell_manager.lock().expect("shell manager");
+            shell
+                .execute_with_options_env_for_owner(
+                    "echo child-shell-done",
+                    None,
+                    30_000,
+                    true,
+                    None,
+                    false,
+                    None,
+                    std::collections::HashMap::new(),
+                    Some(crate::tools::shell::ShellJobOwner {
+                        agent_id: "agent_child".to_string(),
+                        agent_name: "child".to_string(),
+                    }),
+                )
+                .expect("start child background job")
+                .task_id
+                .expect("child background task id")
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let done = engine
+                .shell_manager
+                .lock()
+                .expect("shell manager")
+                .list_jobs()
+                .iter()
+                .any(|job| {
+                    job.id == task_id && job.status != crate::tools::shell::ShellStatus::Running
+                });
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child background job never finished"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(!engine.idle_shell_wake_armed());
+        assert!(!engine.finished_background_shell_pending());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(900), engine.next_run_input(false))
+                .await
+                .is_err(),
+            "child completion must not create a synthetic parent turn"
+        );
+        assert!(
+            engine
+                .shell_manager
+                .lock()
+                .expect("shell manager")
+                .list_jobs()
+                .iter()
+                .any(|job| job.id == task_id),
+            "child completion remains visible in task/status"
+        );
+    }
 
     #[test]
     fn subagent_completion_handoff_is_internal_user_message() {
