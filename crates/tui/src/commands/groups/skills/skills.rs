@@ -455,7 +455,10 @@ fn activate_skill(app: &mut App, name: &str) -> CommandResult {
         let plugin_provenance = match &skill.source {
             SkillSource::Native => None,
             SkillSource::Plugin { authority, .. } => {
-                if let Err(reason) = crate::plugins::registry::verify_plugin_authority(authority) {
+                if let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
+                    authority,
+                    crate::plugins::activation::PluginActivationCapability::Skills,
+                ) {
                     return CommandResult::error(format!(
                         "Plugin skill '{}' is no longer active: {reason}",
                         skill.name

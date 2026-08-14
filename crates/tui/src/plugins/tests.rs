@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::activation::PluginActivationCapability;
 use super::discovery::{DiscoveryConfig, discover_with_config};
-use super::types::PluginTrustStatus;
+use super::manifest::{PluginCompatibility, capability_hash_v1};
+use super::types::{PluginDiagnosticLevel, PluginTrustStatus};
 
 fn config(root: &Path) -> DiscoveryConfig {
     DiscoveryConfig {
@@ -286,18 +288,245 @@ fn revoking_trust_does_not_rewrite_enablement() {
     assert!(!plugin.active());
 }
 
+fn write_mixed_bundle(config: &DiscoveryConfig) -> PathBuf {
+    let plugin = write_plugin(
+        config,
+        "\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n",
+    );
+    fs::create_dir_all(plugin.join("skills/demo")).unwrap();
+    fs::write(
+        plugin.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: first\n---\nbody\n",
+    )
+    .unwrap();
+    fs::create_dir_all(plugin.join("commands")).unwrap();
+    fs::create_dir_all(plugin.join("hooks")).unwrap();
+    plugin
+}
+
 #[test]
-fn unsupported_components_can_be_reviewed_but_not_enabled() {
+fn mixed_supported_and_unsupported_components_activate_only_supported_surfaces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    write_mixed_bundle(&config);
+
+    let mut registry = discover_with_config(&config);
+    let plugin = registry.get("demo").unwrap();
+    assert_eq!(plugin.compatibility(), PluginCompatibility::Partial);
+    assert_eq!(plugin.inventory.supported_labels(), vec!["skills"]);
+    assert_eq!(
+        plugin.inventory.unsupported_labels(),
+        vec!["commands", "hooks"]
+    );
+    assert!(
+        plugin.diagnostics.iter().any(|diagnostic| {
+            diagnostic.level == PluginDiagnosticLevel::Warning
+                && diagnostic.code == "component-inactive"
+                && diagnostic.message.contains("commands")
+                && diagnostic.message.contains("hooks")
+        }),
+        "inactive components must stay visible in diagnostics: {:?}",
+        plugin.diagnostics
+    );
+
+    registry.trust("demo").unwrap();
+    registry.enable("demo").unwrap();
+    let plugin = registry.get("demo").unwrap();
+    assert!(plugin.active());
+    assert_eq!(plugin.state_label(), "active");
+    assert_eq!(plugin.compatibility(), PluginCompatibility::Partial);
+    assert_eq!(plugin.inventory.commands, 1);
+    assert_eq!(plugin.inventory.hooks, 1);
+    assert_eq!(plugin.skill_snapshots.len(), 1);
+    assert_eq!(plugin.skill_snapshots[0].name, "demo");
+    assert!(plugin.component_active(PluginActivationCapability::Skills));
+    assert!(!plugin.component_active(PluginActivationCapability::Commands));
+    assert!(!plugin.component_active(PluginActivationCapability::Hooks));
+
+    let skills = crate::skills::discover_from_directories_with_plugins(
+        Vec::<PathBuf>::new(),
+        Some(&registry),
+    );
+    assert_eq!(skills.get("demo:demo").unwrap().body.trim(), "body");
+}
+
+#[test]
+fn all_unsupported_bundles_can_be_reviewed_but_not_enabled() {
     let tmp = tempfile::tempdir().unwrap();
     let config = config(tmp.path());
     let plugin = write_plugin(&config, "\n[commands]\npath = \"commands\"\n");
     fs::create_dir_all(plugin.join("commands")).unwrap();
 
     let mut registry = discover_with_config(&config);
+    let plugin = registry.get("demo").unwrap();
+    assert_eq!(plugin.compatibility(), PluginCompatibility::Unsupported);
+    assert!(!plugin.inventory.has_supported_components());
     registry.trust("demo").unwrap();
     let error = registry.enable("demo").unwrap_err();
-    assert!(error.contains("inactive capabilities"));
+    assert!(
+        error.contains("no supported Skills or MCP"),
+        "all-unsupported enable must name the missing supported surfaces: {error}"
+    );
+    assert!(error.contains("commands"), "{error}");
     assert!(!registry.is_active("demo"));
+    let plugin = registry.get("demo").unwrap();
+    assert!(plugin.trusted());
+    assert!(!plugin.enabled);
+    assert_eq!(plugin.state_label(), "disabled");
+    assert_eq!(plugin.compatibility(), PluginCompatibility::Unsupported);
+}
+
+#[test]
+fn fatal_manifest_errors_fail_closed_and_do_not_activate_mixed_looking_bundles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_plugin(
+        &config,
+        "\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\nunknown_field = true\n",
+    );
+    fs::create_dir_all(plugin.join("skills/demo")).unwrap();
+    fs::write(
+        plugin.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: first\n---\nbody\n",
+    )
+    .unwrap();
+    fs::create_dir_all(plugin.join("commands")).unwrap();
+
+    let mut registry = discover_with_config(&config);
+    assert!(registry.get("demo").is_none());
+    assert!(
+        registry.diagnostics().iter().any(|diagnostic| {
+            diagnostic.level == PluginDiagnosticLevel::Error
+                && diagnostic.code == "manifest-invalid"
+        }),
+        "fatal parse errors must remain registry-level errors: {:?}",
+        registry.diagnostics()
+    );
+    assert!(registry.trust("demo").is_err());
+    assert!(registry.enable("demo").is_err());
+    assert!(!registry.is_active("demo"));
+}
+
+#[test]
+fn mixed_bundle_revocation_and_trust_changes_deactivate_supported_surfaces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_mixed_bundle(&config);
+
+    let mut registry = discover_with_config(&config);
+    registry.trust("demo").unwrap();
+    registry.enable("demo").unwrap();
+    assert!(registry.is_active("demo"));
+
+    registry.revoke_trust("demo").unwrap();
+    let revoked = registry.get("demo").unwrap();
+    assert!(revoked.enabled);
+    assert!(!revoked.trusted());
+    assert!(!revoked.active());
+    assert_eq!(revoked.compatibility(), PluginCompatibility::Partial);
+    let skills = crate::skills::discover_from_directories_with_plugins(
+        Vec::<PathBuf>::new(),
+        Some(&registry),
+    );
+    assert!(
+        skills.get("demo:demo").is_none(),
+        "revoking trust must drop the supported Skill adapter"
+    );
+
+    registry.trust("demo").unwrap();
+    assert!(
+        !registry.is_active("demo"),
+        "re-trust must not reuse the previous enablement bit"
+    );
+    registry.enable("demo").unwrap();
+    assert!(registry.is_active("demo"));
+
+    fs::write(
+        plugin.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: changed\n---\nbody two\n",
+    )
+    .unwrap();
+    let changed = discover_with_config(&config);
+    let plugin = changed.get("demo").unwrap();
+    assert_eq!(plugin.trust_status, PluginTrustStatus::ContentChanged);
+    assert!(plugin.enabled);
+    assert!(!plugin.active());
+    let skills = crate::skills::discover_from_directories_with_plugins(
+        Vec::<PathBuf>::new(),
+        Some(&changed),
+    );
+    assert!(skills.get("demo:demo").is_none());
+}
+
+#[test]
+fn v1_trust_receipts_fail_closed_as_needs_review_under_v2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_plugin(&config, "\n[skills]\npath = \"skills\"\n");
+    fs::create_dir_all(plugin.join("skills/demo")).unwrap();
+    fs::write(
+        plugin.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: first\n---\nbody\n",
+    )
+    .unwrap();
+
+    let mut first = discover_with_config(&config);
+    first.trust("demo").unwrap();
+    first.enable("demo").unwrap();
+    assert!(first.is_active("demo"));
+    let plugin = first.get("demo").unwrap();
+    let v1_hash = capability_hash_v1(&plugin.inventory);
+    let v2_hash = plugin.capability_hash.clone();
+    assert_ne!(
+        v1_hash, v2_hash,
+        "v2 receipts must not collide with the pre-policy v1 domain"
+    );
+    let content_hash = plugin.content_hash.clone();
+
+    let raw = fs::read_to_string(&config.state_path).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    replace_capability_hashes(&mut parsed, &v2_hash, &v1_hash);
+    fs::write(
+        &config.state_path,
+        serde_json::to_string_pretty(&parsed).unwrap(),
+    )
+    .unwrap();
+
+    let second = discover_with_config(&config);
+    let plugin = second.get("demo").unwrap();
+    assert_eq!(plugin.content_hash, content_hash);
+    assert_eq!(plugin.capability_hash, v2_hash);
+    assert_eq!(plugin.trust_status, PluginTrustStatus::CapabilitiesChanged);
+    assert!(plugin.enabled);
+    assert!(!plugin.trusted());
+    assert!(!plugin.active());
+    assert!(second.authority_for("demo").is_some());
+    let skills =
+        crate::skills::discover_from_directories_with_plugins(Vec::<PathBuf>::new(), Some(&second));
+    assert!(
+        skills.get("demo:demo").is_none(),
+        "a v1 receipt must not activate Skills after the v2 policy binding"
+    );
+}
+
+fn replace_capability_hashes(value: &mut serde_json::Value, from: &str, to: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "capability_hash" && child.as_str() == Some(from) {
+                    *child = serde_json::Value::String(to.to_string());
+                } else {
+                    replace_capability_hashes(child, from, to);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                replace_capability_hashes(item, from, to);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]

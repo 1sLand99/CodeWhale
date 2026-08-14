@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod activation;
 pub mod agent_plugin;
 pub mod context;
 pub mod discovery;

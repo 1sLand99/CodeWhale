@@ -696,12 +696,24 @@ impl ReviewedPluginMcpSource {
         Ok(launch)
     }
 
+    fn required_capability(&self) -> crate::plugins::activation::PluginActivationCapability {
+        if self.approved_remote_endpoint.is_some() {
+            crate::plugins::activation::PluginActivationCapability::McpRemote
+        } else {
+            crate::plugins::activation::PluginActivationCapability::McpStdio
+        }
+    }
+
     fn validate_before_use(&self, server_name: &str, operation: &str) -> Result<()> {
         let remediation = format!(
             "Run `/plugin reload`, inspect `/plugin show {0}`, then repeat the displayed trust command and `/plugin enable {0}` before retrying",
             self.authority.plugin_name
         );
-        crate::plugins::registry::verify_plugin_authority(&self.authority).map_err(|reason| {
+        crate::plugins::registry::verify_plugin_component_authority(
+            &self.authority,
+            self.required_capability(),
+        )
+        .map_err(|reason| {
             anyhow::anyhow!(
                 "Refusing to {operation} MCP server '{server_name}' from plugin bundle `{}`: {reason}. {remediation}",
                 self.authority.plugin_name
@@ -726,7 +738,11 @@ impl ReviewedPluginMcpSource {
         // or resource descriptions can steer the model even when the later
         // operation would be denied. Revalidate both the mutable reviewed
         // source and the Codewhale-owned stage before publishing any entry.
-        crate::plugins::registry::verify_plugin_authority(&self.authority).is_ok()
+        crate::plugins::registry::verify_plugin_component_authority(
+            &self.authority,
+            self.required_capability(),
+        )
+        .is_ok()
     }
 }
 
@@ -3602,18 +3618,41 @@ fn merge_plugin_mcp_servers_from_plugins_with_environment(
         if !plugin.active() {
             continue;
         }
-        if crate::plugins::registry::verify_plugin_authority(&authority).is_err() {
-            tracing::warn!(
-                target: "mcp",
-                plugin = %plugin_name,
-                "plugin bundle changed after review; denying its MCP servers until reload and re-review"
-            );
-            continue;
-        }
         if let Some(mcp_servers) = &plugin.manifest.mcp_servers {
             let mut mcp_servers = mcp_servers.iter().collect::<Vec<_>>();
             mcp_servers.sort_by_key(|(name, _)| *name);
             for (server_name, server_config) in mcp_servers {
+                let required_capability = if server_config.command.is_some()
+                    && server_config.url.is_none()
+                {
+                    crate::plugins::activation::PluginActivationCapability::McpStdio
+                } else if server_config.url.is_some() && server_config.command.is_none() {
+                    crate::plugins::activation::PluginActivationCapability::McpRemote
+                } else {
+                    tracing::warn!(
+                        target: "mcp",
+                        plugin = %plugin_name,
+                        server = %server_name,
+                        "plugin MCP server is neither a reviewed stdio nor remote transport; denying it"
+                    );
+                    continue;
+                };
+                if !plugin.component_active(required_capability)
+                    || crate::plugins::registry::verify_plugin_component_authority(
+                        &authority,
+                        required_capability,
+                    )
+                    .is_err()
+                {
+                    tracing::warn!(
+                        target: "mcp",
+                        plugin = %plugin_name,
+                        server = %server_name,
+                        capability = required_capability.as_str(),
+                        "plugin bundle changed after review or this transport is inactive; denying the MCP server until reload and re-review"
+                    );
+                    continue;
+                }
                 let qualified_name = qualified_plugin_server_name(&plugin_name, server_name);
                 if config.servers.contains_key(&qualified_name) {
                     tracing::warn!(

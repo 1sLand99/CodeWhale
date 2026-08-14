@@ -1,10 +1,11 @@
 # Plugin bundles
 
 Codewhale supports a deliberately small plugin-bundle boundary. The boundary
-was drawn in v0.9.1 and is unchanged in shape as of v0.9.6: a bundle may
-contribute declarative Skills and MCP server configuration through Codewhale's
-existing engines, and nothing else activates. Discovery alone never executes,
-enables, trusts, downloads, updates, or installs anything.
+was drawn in v0.9.1 and still holds as of v0.9.8: a bundle may contribute
+declarative Skills and MCP server configuration through Codewhale's existing
+engines, and nothing else activates. Unsupported declarations stay inventoried
+instead of disabling a mixed bundle. Discovery alone never executes, enables,
+trusts, downloads, updates, or installs anything.
 
 This document owns the bundle format (both manifest encodings), discovery,
 validation, and the trust/enable/runtime contract. [PLUGINS.md](PLUGINS.md)
@@ -35,8 +36,8 @@ directories: ambient roots such as `.claude/plugins` or `.cursor/plugins` are
 never scanned.
 
 Pre-v0.9.1 `overrides.json` enablement was intentionally not imported as
-trust; every bundle activates only through the v1 content and capability
-review below.
+trust; every bundle activates only through the content-hash and
+`codewhale-plugin-capabilities-v2` activation-policy review below.
 
 ## Manifest
 
@@ -148,8 +149,9 @@ a manifest declaring OAuth fields on a plugin MCP server fails validation.
 ### Active and inactive component surfaces
 
 `[skills]` and `[mcp_servers.*]` are the only active component adapters as of
-v0.9.6. The manifest can additionally inventory the following future
-surfaces, but a bundle declaring any of them cannot be enabled yet:
+v0.9.8. The manifest can additionally inventory the following future
+surfaces. Those declarations stay hashed, reviewed, and displayed, but they
+do not activate and they no longer disable the whole bundle:
 
 ```toml
 [commands]
@@ -178,14 +180,26 @@ lifecycle_mutation = true
 
 The accept/reject behavior is deliberately loud, never silent:
 
+- Compatibility is per-component: `full` when every declared surface has an
+  adapter (or the bundle is empty), `partial` when Skills and/or MCP can
+  activate beside named inactive surfaces, and `unsupported` when the bundle
+  only declares surfaces Codewhale cannot activate yet. The same versioned
+  activation policy (v2) drives those labels, the runtime adapters, and the
+  capability hash. A future Codewhale that starts executing commands, agents,
+  hooks, LSP, or native code must change that policy, which changes the
+  capability hash and forces re-review. Pre-policy (v1) trust receipts fail
+  closed as `capabilities-changed`.
 - A **recognized-but-inactive** declaration (`commands`, `agents`, `hooks`,
   `lsp`, `native`, a non-empty `capabilities.filesystem_roots`, or
   `capabilities.lifecycle_mutation = true`) parses and is validated like any
   component (contained, present, link-free). It is counted in the inventory,
-  shown in the review as an inactive declaration, and blocks activation:
-  `/plugin enable` fails closed with an error naming each inactive surface
-  (the error text still says "v0.9.1-inactive capabilities"; the behavior is
-  unchanged), and such a bundle is never treated as active at runtime.
+  hashed into the capability receipt, shown in review and `/plugin show` as
+  inactive, and never executed. A reviewed, trusted, applicable mixed bundle
+  can still be enabled: Skills and MCP become active, and the inactive
+  surfaces stay named as inactive.
+- An **all-unsupported** bundle can be reviewed and trusted, but `/plugin
+  enable` fails closed and names the inactive surfaces. There is nothing
+  Codewhale can honestly activate.
 - An **unrecognized** section or field is a validation failure, not an
   inventory entry: unknown top-level TOML tables, unknown MCP server fields,
   unknown `plugin.json` root keys, and unknown keys inside
@@ -218,7 +232,10 @@ hashes, and inactive declarations. It also prints an exact confirmation:
 ```
 
 Run that exact command only after reviewing the bundle. The confirmation token
-uses both complete SHA-256 receipts rather than display prefixes. Trust first
+uses both complete SHA-256 receipts rather than display prefixes. The
+capability receipt is the v2 digest: it still hashes the complete inventory
+and also binds this build's activation policy (which adapters are executable
+versus inventoried-only). Trust first
 copies the complete reviewed tree into a Codewhale-owned, content-addressed
 runtime snapshot and records the matching receipt; it does not activate
 anything.
@@ -271,7 +288,10 @@ on: replaced bytes stop matching the receipt, forcing re-review.
 ## Runtime behavior
 
 An active bundle must be enabled, trusted for its current hashes, applicable to
-the host, free of validation errors, and limited to supported component kinds.
+the host, and free of validation errors. A reviewed mixed bundle may be
+active, but only supported components in the reviewed v2 activation mask are
+consumable. Unsupported components remain listed, hashed, reviewed, and
+inactive.
 
 - Skills are exposed only as `<plugin>:<skill>`. The model-facing catalogue and
   `load_skill` use an in-memory snapshot bound to the reviewed staged tree,

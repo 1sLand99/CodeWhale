@@ -1038,6 +1038,81 @@ fn plugin_server_ids_are_unambiguous_across_hyphenated_plugin_and_server_names()
 }
 
 #[test]
+fn mixed_mcp_and_unsupported_components_activate_only_reviewed_transports() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugin");
+    fs::create_dir_all(plugin_base.join("commands")).unwrap();
+    fs::create_dir_all(plugin_base.join("hooks")).unwrap();
+    fs::write(plugin_base.join("server.js"), "// reviewed entrypoint\n").unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        r#"
+schema_version = 1
+[plugin]
+name = "fleet"
+version = "1.0.0"
+
+[mcp_servers.local]
+command = "node"
+args = ["server.js"]
+
+[mcp_servers.remote]
+url = "https://example.invalid/mcp"
+
+[capabilities]
+network_hosts = ["example.invalid"]
+
+[commands]
+path = "commands"
+
+[hooks]
+path = "hooks"
+"#,
+    )
+    .unwrap();
+    let (plugin, authority) = active_plugin_fixture(&plugin_base);
+    assert!(plugin.active());
+    assert_eq!(
+        plugin.compatibility(),
+        crate::plugins::manifest::PluginCompatibility::Partial
+    );
+    assert!(
+        plugin.component_active(crate::plugins::activation::PluginActivationCapability::McpStdio)
+    );
+    assert!(
+        plugin.component_active(crate::plugins::activation::PluginActivationCapability::McpRemote)
+    );
+    assert!(
+        !plugin.component_active(crate::plugins::activation::PluginActivationCapability::Commands)
+    );
+    assert!(
+        !plugin.component_active(crate::plugins::activation::PluginActivationCapability::Hooks)
+    );
+
+    let cfg = merge_plugin_mcp_servers_from_plugins(
+        McpConfig::default(),
+        vec![("fleet".to_string(), plugin.clone(), authority)],
+    )
+    .unwrap();
+    assert!(cfg.servers.contains_key("plugin-5-fleet-local"));
+    assert!(cfg.servers.contains_key("plugin-5-fleet-remote"));
+    assert_eq!(
+        cfg.servers.len(),
+        2,
+        "only reviewed MCP transports may activate; commands/hooks stay out of the MCP catalog: {:?}",
+        cfg.servers.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cfg.servers["plugin-5-fleet-local"].command.as_deref(),
+        Some("node")
+    );
+    assert_eq!(
+        cfg.servers["plugin-5-fleet-remote"].url.as_deref(),
+        Some("https://example.invalid/mcp")
+    );
+}
+
+#[test]
 fn plugin_mcp_adapter_denies_disabled_and_untrusted_bundles() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_base = dir.path().join("plugin");

@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{PluginInventory, PluginManifest, ResolvedPluginComponents};
+use super::activation::{PluginActivationCapability, PluginActivationPolicy};
+use super::manifest::{
+    PluginCompatibility, PluginInventory, PluginManifest, ResolvedPluginComponents,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -200,16 +203,30 @@ impl LoadedPlugin {
     }
 
     #[must_use]
+    pub fn compatibility(&self) -> PluginCompatibility {
+        self.inventory.compatibility()
+    }
+
+    #[must_use]
     pub fn active(&self) -> bool {
         self.enabled
             && self.trusted()
             && self.staged_root.is_some()
             && self.applicable
-            && !self.inventory.has_unsupported_capabilities()
+            && self.inventory.can_activate_supported_components()
             && !self
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.level == PluginDiagnosticLevel::Error)
+    }
+
+    /// Bundle-wide `active()` is not enough at a consumption boundary. Skills
+    /// must request Skills; each MCP server must request its stdio or remote
+    /// transport. A later policy that drops an adapter refuses that adapter
+    /// even if the bundle stays active for another supported surface.
+    #[must_use]
+    pub fn component_active(&self, capability: PluginActivationCapability) -> bool {
+        self.active() && PluginActivationPolicy::current().is_supported(capability)
     }
 
     #[must_use]
@@ -247,7 +264,7 @@ impl LoadedPlugin {
             "unstaged"
         } else if !self.applicable {
             "inapplicable"
-        } else if self.inventory.has_unsupported_capabilities() {
+        } else if !self.inventory.can_activate_supported_components() {
             "unsupported"
         } else {
             "inactive"

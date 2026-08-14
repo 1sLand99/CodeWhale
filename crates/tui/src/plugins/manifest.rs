@@ -7,6 +7,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::activation::{
+    CAPABILITY_HASH_DOMAIN_V1, PluginActivationCapability, PluginActivationPolicy,
+};
 use super::path_identity::metadata_is_link_or_reparse;
 #[cfg(windows)]
 use super::path_identity::windows_file_identity;
@@ -124,15 +127,16 @@ impl PluginPathSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCapabilities {
-    /// Requested filesystem roots are inventory-only. Declaring any
-    /// keeps the bundle inactive until a later permission adapter exists.
+    /// Requested filesystem roots are inventoried and stay inactive. They do
+    /// not block Skills or MCP once those supported adapters can activate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_roots: Vec<String>,
     /// Requested hosts are inventory-only. MCP URL hosts are added to the
     /// effective capability inventory automatically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_hosts: Vec<String>,
-    /// Lifecycle mutation is inventoried but unsupported.
+    /// Lifecycle mutation is inventoried but unsupported. It does not block
+    /// Skills or MCP once those supported adapters can activate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lifecycle_mutation: bool,
 }
@@ -192,37 +196,129 @@ pub struct PluginInventory {
     pub lifecycle_mutation: bool,
 }
 
+/// Host compatibility of a reviewed bundle. This is independent of trust,
+/// enablement, and staging: it names whether Codewhale can activate the
+/// declared surfaces, not whether the operator has turned the bundle on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginCompatibility {
+    /// Every declared surface has an adapter, or the bundle is empty.
+    Full,
+    /// Skills and/or MCP can activate; other declared surfaces stay inactive.
+    Partial,
+    /// The bundle only declares surfaces Codewhale cannot activate yet.
+    Unsupported,
+}
+
+impl PluginCompatibility {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Partial => "partial",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 impl PluginInventory {
     #[must_use]
-    pub fn unsupported_labels(&self) -> Vec<&'static str> {
-        let mut labels = Vec::new();
+    pub fn declared_capabilities(&self) -> Vec<PluginActivationCapability> {
+        let mut capabilities = Vec::new();
+        if self.skills > 0 {
+            capabilities.push(PluginActivationCapability::Skills);
+        }
+        if self.stdio_mcp_servers > 0 {
+            capabilities.push(PluginActivationCapability::McpStdio);
+        }
+        if self.remote_mcp_servers > 0 {
+            capabilities.push(PluginActivationCapability::McpRemote);
+        }
         if self.commands > 0 {
-            labels.push("commands");
+            capabilities.push(PluginActivationCapability::Commands);
         }
         if self.agents > 0 {
-            labels.push("agents");
+            capabilities.push(PluginActivationCapability::Agents);
         }
         if self.hooks > 0 {
-            labels.push("hooks");
+            capabilities.push(PluginActivationCapability::Hooks);
         }
         if self.lsp > 0 {
-            labels.push("lsp");
+            capabilities.push(PluginActivationCapability::Lsp);
         }
         if self.native > 0 {
-            labels.push("native");
+            capabilities.push(PluginActivationCapability::Native);
         }
         if !self.filesystem_roots.is_empty() {
-            labels.push("filesystem-roots");
+            capabilities.push(PluginActivationCapability::FilesystemRoots);
         }
         if self.lifecycle_mutation {
-            labels.push("lifecycle-mutation");
+            capabilities.push(PluginActivationCapability::LifecycleMutation);
         }
-        labels
+        capabilities
+    }
+
+    #[must_use]
+    pub fn unsupported_labels(&self) -> Vec<&'static str> {
+        let policy = PluginActivationPolicy::current();
+        self.declared_capabilities()
+            .into_iter()
+            .filter(|capability| !policy.is_supported(*capability))
+            .map(PluginActivationCapability::as_str)
+            .collect()
     }
 
     #[must_use]
     pub fn has_unsupported_capabilities(&self) -> bool {
         !self.unsupported_labels().is_empty()
+    }
+
+    /// True when the bundle declares at least one adapter this build activates.
+    #[must_use]
+    pub fn has_supported_components(&self) -> bool {
+        let policy = PluginActivationPolicy::current();
+        self.declared_capabilities()
+            .into_iter()
+            .any(|capability| policy.is_supported(capability))
+    }
+
+    #[must_use]
+    pub fn supported_labels(&self) -> Vec<&'static str> {
+        let policy = PluginActivationPolicy::current();
+        let mut labels = Vec::new();
+        let mut saw_mcp = false;
+        for capability in self.declared_capabilities() {
+            if !policy.is_supported(capability) {
+                continue;
+            }
+            match capability {
+                PluginActivationCapability::McpStdio | PluginActivationCapability::McpRemote => {
+                    if !saw_mcp {
+                        labels.push("mcp");
+                        saw_mcp = true;
+                    }
+                }
+                other => labels.push(other.as_str()),
+            }
+        }
+        labels
+    }
+
+    #[must_use]
+    pub fn compatibility(&self) -> PluginCompatibility {
+        if !self.has_unsupported_capabilities() {
+            PluginCompatibility::Full
+        } else if self.has_supported_components() {
+            PluginCompatibility::Partial
+        } else {
+            PluginCompatibility::Unsupported
+        }
+    }
+
+    /// Empty or fully-supported bundles can activate; mixed bundles can
+    /// activate their Skills/MCP; all-unsupported bundles cannot.
+    #[must_use]
+    pub fn can_activate_supported_components(&self) -> bool {
+        !matches!(self.compatibility(), PluginCompatibility::Unsupported)
     }
 
     #[must_use]
@@ -1532,6 +1628,10 @@ fn ensure_windows_path_still_opened(path: &Path, opened: &fs::File) -> Result<()
 }
 
 fn hash_inventory(inventory: &PluginInventory) -> String {
+    hash_inventory_with_policy(inventory, PluginActivationPolicy::current())
+}
+
+fn hash_inventory_counts(inventory: &PluginInventory) -> BTreeMap<&'static str, String> {
     let mut normalized = BTreeMap::new();
     normalized.insert("skills", inventory.skills.to_string());
     normalized.insert("mcp", inventory.mcp_servers.to_string());
@@ -1545,15 +1645,44 @@ fn hash_inventory(inventory: &PluginInventory) -> String {
     normalized.insert("filesystem", inventory.filesystem_roots.join("\n"));
     normalized.insert("network", inventory.network_hosts.join("\n"));
     normalized.insert("lifecycle", inventory.lifecycle_mutation.to_string());
+    normalized
+}
+
+fn hash_inventory_with_policy(
+    inventory: &PluginInventory,
+    policy: PluginActivationPolicy,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"codewhale-plugin-capabilities-v1\0");
-    for (key, value) in normalized {
+    policy.write_hash_material(&mut hasher);
+    for (key, value) in hash_inventory_counts(inventory) {
         hasher.update(key.as_bytes());
         hasher.update(b"\0");
         hasher.update(value.as_bytes());
         hasher.update(b"\0");
     }
     hex_digest(hasher.finalize())
+}
+
+/// Pre-policy capability digest. Discovery uses this only to prove that a v1
+/// trust receipt cannot match a v2 capability hash.
+pub(crate) fn capability_hash_v1(inventory: &PluginInventory) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CAPABILITY_HASH_DOMAIN_V1);
+    for (key, value) in hash_inventory_counts(inventory) {
+        hasher.update(key.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\0");
+    }
+    hex_digest(hasher.finalize())
+}
+
+#[cfg(test)]
+pub(crate) fn capability_hash_with_policy(
+    inventory: &PluginInventory,
+    policy: PluginActivationPolicy,
+) -> String {
+    hash_inventory_with_policy(inventory, policy)
 }
 
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
@@ -1891,6 +2020,96 @@ mod tests {
                 .unsupported_labels()
                 .contains(&"filesystem-roots")
         );
+        assert_eq!(
+            validated.inventory.compatibility(),
+            PluginCompatibility::Partial,
+            "write_manifest always includes Skills, so hooks stay partial rather than unsupported"
+        );
+        assert!(validated.inventory.can_activate_supported_components());
+    }
+
+    #[test]
+    fn mixed_supported_and_unsupported_components_are_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("commands")).unwrap();
+        let path = write_manifest(tmp.path(), "\n[commands]\npath = \"commands\"\n");
+        let validated = PluginManifest::validate_from_path(&path).unwrap();
+        assert!(validated.inventory.has_supported_components());
+        assert!(validated.inventory.has_unsupported_capabilities());
+        assert_eq!(validated.inventory.supported_labels(), vec!["skills"]);
+        assert_eq!(validated.inventory.unsupported_labels(), vec!["commands"]);
+        assert_eq!(
+            validated.inventory.compatibility(),
+            PluginCompatibility::Partial
+        );
+        assert!(validated.inventory.can_activate_supported_components());
+    }
+
+    #[test]
+    fn activation_policy_change_changes_the_capability_hash() {
+        let inventory = PluginInventory {
+            skills: 1,
+            ..PluginInventory::default()
+        };
+        let current_policy = PluginActivationPolicy::current();
+        let current = capability_hash_with_policy(&inventory, current_policy);
+        let commands_supported = PluginActivationPolicy {
+            version: current_policy.version,
+            supported: &[
+                PluginActivationCapability::Skills,
+                PluginActivationCapability::McpStdio,
+                PluginActivationCapability::McpRemote,
+                PluginActivationCapability::Commands,
+            ],
+            inactive: &[
+                PluginActivationCapability::Agents,
+                PluginActivationCapability::Hooks,
+                PluginActivationCapability::Lsp,
+                PluginActivationCapability::Native,
+                PluginActivationCapability::FilesystemRoots,
+                PluginActivationCapability::LifecycleMutation,
+            ],
+        };
+        assert_ne!(
+            current,
+            capability_hash_with_policy(&inventory, commands_supported),
+            "enabling a previously inactive adapter must move the capability hash"
+        );
+        let bumped = PluginActivationPolicy {
+            version: current_policy.version + 1,
+            supported: current_policy.supported,
+            inactive: current_policy.inactive,
+        };
+        assert_ne!(
+            current,
+            capability_hash_with_policy(&inventory, bumped),
+            "a policy version bump must move the capability hash"
+        );
+        assert_eq!(
+            current,
+            capability_hash_with_policy(&inventory, current_policy)
+        );
+        assert_ne!(current, capability_hash_v1(&inventory));
+    }
+
+    #[test]
+    fn all_unsupported_inventory_cannot_activate() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("commands")).unwrap();
+        let path = tmp.path().join("plugin.toml");
+        fs::write(
+            &path,
+            "schema_version = 1\n[plugin]\nname = \"commands-only\"\nversion = \"1.0.0\"\n[commands]\npath = \"commands\"\n",
+        )
+        .unwrap();
+        let validated = PluginManifest::validate_from_path(&path).unwrap();
+        assert!(!validated.inventory.has_supported_components());
+        assert_eq!(validated.inventory.unsupported_labels(), vec!["commands"]);
+        assert_eq!(
+            validated.inventory.compatibility(),
+            PluginCompatibility::Unsupported
+        );
+        assert!(!validated.inventory.can_activate_supported_components());
     }
 
     #[test]
