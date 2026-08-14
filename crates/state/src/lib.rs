@@ -13,7 +13,12 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+
+/// Serializes all `session_index.jsonl` read/append/compact/rename operations so
+/// concurrent `StateStore` clones cannot interleave an append with a compaction
+/// rename and silently drop entries.
+static SESSION_INDEX_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -1525,6 +1530,9 @@ impl StateStore {
         updated_at: i64,
         rollout_path: Option<PathBuf>,
     ) -> Result<()> {
+        // Hold the index lock for the entire append + compaction so a concurrent
+        // `StateStore` clone cannot rename the index while we are appending.
+        let _guard = SESSION_INDEX_LOCK.lock().unwrap();
         if let Some(parent) = self.session_index_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
