@@ -295,6 +295,17 @@ pub(crate) fn credential_state_for_provider(
 
     if crate::config::has_api_key_for(config, provider) {
         CredentialState::Saved
+    } else if matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekAnthropic
+    ) && official_endpoint
+        && provider != config.api_provider()
+        && config.external_credential_read_consent_configured(
+            provider,
+            codewhale_config::ExternalCredentialSource::DshCli,
+        )
+    {
+        CredentialState::ExternalConsent
     } else {
         CredentialState::MissingKey
     }

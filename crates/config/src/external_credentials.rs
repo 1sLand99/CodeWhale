@@ -175,6 +175,24 @@ pub enum ExternalCredentialSource {
     CodexCli,
     KimiCodeCli,
     GrokCli,
+    /// Official DeepSeek Harness (`dsh`) `$DSH_HOME/.credentials.yaml`.
+    DshCli,
+}
+
+/// Default DeepSeek Harness credentials document, resolved without probing.
+///
+/// Matches dsh-credentials-local: `$DSH_HOME/.credentials.yaml`, or
+/// `~/.dsh/.credentials.yaml` when `DSH_HOME` is unset. Consent is pinned to
+/// this exact path; a later `DSH_HOME` change is reported, never followed.
+#[must_use]
+pub fn default_dsh_credentials_path() -> PathBuf {
+    let home = match std::env::var_os("DSH_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => codewhale_paths::user_home()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".dsh"),
+    };
+    home.join(".credentials.yaml")
 }
 
 impl ExternalCredentialSource {
@@ -184,6 +202,7 @@ impl ExternalCredentialSource {
             Self::CodexCli => "codex_cli",
             Self::KimiCodeCli => "kimi_code_cli",
             Self::GrokCli => "grok_cli",
+            Self::DshCli => "dsh_cli",
         }
     }
 
@@ -194,6 +213,7 @@ impl ExternalCredentialSource {
             Self::CodexCli => "Codex CLI",
             Self::KimiCodeCli => "Kimi Code CLI",
             Self::GrokCli => "Grok CLI",
+            Self::DshCli => "DeepSeek Harness",
         }
     }
 }
@@ -451,6 +471,25 @@ mod tests {
         } else {
             PathBuf::from(format!("/tmp/{file}"))
         }
+    }
+
+    #[test]
+    fn default_dsh_credentials_path_uses_dsh_home_or_dot_dsh() {
+        let previous = std::env::var_os("DSH_HOME");
+        unsafe {
+            std::env::set_var("DSH_HOME", "/opt/dsh-home");
+        }
+        let with_home = default_dsh_credentials_path();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("DSH_HOME", value) },
+            None => unsafe { std::env::remove_var("DSH_HOME") },
+        }
+        assert_eq!(with_home, PathBuf::from("/opt/dsh-home/.credentials.yaml"));
+        assert_eq!(ExternalCredentialSource::DshCli.as_str(), "dsh_cli");
+        assert_eq!(
+            ExternalCredentialSource::DshCli.owner_label(),
+            "DeepSeek Harness"
+        );
     }
 
     #[test]

@@ -2475,6 +2475,10 @@ fn external_credential_target(
             codewhale_config::ExternalCredentialSource::GrokCli,
             grok_auth_file_path(),
         ),
+        ProviderKind::Deepseek | ProviderKind::DeepseekAnthropic => (
+            codewhale_config::ExternalCredentialSource::DshCli,
+            codewhale_config::default_dsh_credentials_path(),
+        ),
         ProviderKind::Moonshot => bail!(
             "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.ai/console/api-keys; Kimi CLI OAuth import is unsupported."
         ),

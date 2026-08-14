@@ -65,8 +65,8 @@ pub use codewhale_secrets::Secrets;
 pub use external_credentials::{
     EXTERNAL_CREDENTIAL_CONSENT_VERSION, EXTERNAL_CREDENTIAL_READ_ONLY_SEMANTICS,
     ExternalCredentialAccess, ExternalCredentialConsentStatus, ExternalCredentialConsentToml,
-    ExternalCredentialReadGrant, ExternalCredentialSource, external_credential_consent_status,
-    quote_os_path, resolve_external_credential_path,
+    ExternalCredentialReadGrant, ExternalCredentialSource, default_dsh_credentials_path,
+    external_credential_consent_status, quote_os_path, resolve_external_credential_path,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

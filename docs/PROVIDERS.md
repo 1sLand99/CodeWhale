@@ -60,7 +60,10 @@ DeepSeek uses the same official API host worldwide.
 `deepseek-anthropic`, the opt-in DeepSeek route that speaks the Anthropic
 Messages API at `https://api.deepseek.com/anthropic`. It keeps the normal
 DeepSeek API key path but uses `x-api-key` plus `anthropic-version: 2023-06-01`
-instead of Bearer auth.
+instead of Bearer auth. If the key already lives in official DeepSeek Harness
+(`dsh`) at `$DSH_HOME/.credentials.yaml`, grant read-only access with
+`codewhale auth external-consent --provider deepseek --mode read-only`.
+Codewhale never writes that file and only reads `DEEPSEEK_API_KEY`.
 
 `huggingface`, `hugging-face`, `hugging_face`, and `hf` all select the
 Hugging Face Inference Providers route. This is the OpenAI-compatible router

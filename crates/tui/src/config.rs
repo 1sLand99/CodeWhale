@@ -3713,6 +3713,16 @@ impl Config {
                 codewhale_config::ExternalCredentialSource::GrokCli,
                 crate::xai_oauth::auth_file_path(),
             ),
+            ApiProvider::Deepseek => (
+                codewhale_config::ProviderKind::Deepseek,
+                codewhale_config::ExternalCredentialSource::DshCli,
+                codewhale_config::default_dsh_credentials_path(),
+            ),
+            ApiProvider::DeepseekAnthropic => (
+                codewhale_config::ProviderKind::DeepseekAnthropic,
+                codewhale_config::ExternalCredentialSource::DshCli,
+                codewhale_config::default_dsh_credentials_path(),
+            ),
             _ => return None,
         };
         let active_kind = self
@@ -6077,6 +6087,24 @@ impl Config {
             return Ok(value);
         }
 
+        // Official DeepSeek Harness credentials, only after explicit
+        // read-only consent to one exact `$DSH_HOME/.credentials.yaml`.
+        if matches!(
+            provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekAnthropic
+        ) && !custom_endpoint
+        {
+            let path = codewhale_config::default_dsh_credentials_path();
+            if let Ok(grant) = self.external_credential_read_grant(
+                provider,
+                codewhale_config::ExternalCredentialSource::DshCli,
+                &path,
+            ) && let Some(value) = crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?
+            {
+                return Ok(value);
+            }
+        }
+
         if !auth_mode_requires_api_key(auth_mode.as_deref())
             && (provider.is_self_hosted() || base_url_uses_local_host(&self.deepseek_base_url()))
         {
@@ -6106,7 +6134,9 @@ impl Config {
                    • export DEEPSEEK_API_KEY=<your-key>      (current shell only;\n\
                      also note: zsh users — exports in ~/.zshrc only reach interactive\n\
                      shells, prefer ~/.zshenv for everything)\n\
-                   • api_key = \"<your-key>\"  in ~/.codewhale/config.toml"
+                   • api_key = \"<your-key>\"  in ~/.codewhale/config.toml\n\
+                   • already configured DeepSeek Harness? grant read-only access:\n\
+                        codewhale auth external-consent --provider deepseek --mode read-only"
             ),
             ApiProvider::SiliconflowCn => anyhow::bail!(
                 "SiliconFlow China API key not found. Get a key: {}. Run 'codewhale auth set --provider siliconflow-CN', \
@@ -10330,6 +10360,28 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         // sufficient, but its absence must fall through to the ordinary API-key
         // checks below instead of masking a configured key.
         return true;
+    }
+    if matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekAnthropic
+    ) && !config.provider_uses_custom_endpoint(provider)
+    {
+        let path = codewhale_config::default_dsh_credentials_path();
+        if config
+            .external_credential_read_grant(
+                provider,
+                codewhale_config::ExternalCredentialSource::DshCli,
+                &path,
+            )
+            .is_ok_and(|grant| {
+                crate::dsh_credentials::deepseek_api_key_from_grant(&grant)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        {
+            return true;
+        }
     }
 
     if !auth_mode_requires_api_key(auth_mode.as_deref())

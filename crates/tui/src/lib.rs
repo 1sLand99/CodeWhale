@@ -44,6 +44,7 @@ mod cost_status;
 mod deepseek_theme;
 mod dependencies;
 mod doctor;
+mod dsh_credentials;
 mod elapsed;
 mod error_taxonomy;
 mod eval;
