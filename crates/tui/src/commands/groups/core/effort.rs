@@ -57,25 +57,35 @@ pub fn effort(app: &mut App, args: Option<&str>) -> CommandResult {
             .collect()
     };
     if arg.is_empty() {
-        // No arg: cycle to next (same as Ctrl+T) and show available
+        // No arg: same path as Ctrl+T / the hotbar so cycle, persist, and
+        // receipts cannot drift by command surface.
         let prev = app.reasoning_effort;
-        let next = prev.cycle_next_for_provider(app.api_provider);
-        app.reasoning_effort_preference = Some(next);
-        app.reasoning_effort = next;
-        app.invalidate_route_receipts_for_reasoning_change();
-        app.update_model_compaction_budget();
+        let _ = app.cycle_effort();
         return CommandResult::message(format!(
             "Effort: {} → {} (available: {})",
             prev.display_label_for_provider(app.api_provider),
-            next.display_label_for_provider(app.api_provider),
+            app.reasoning_effort
+                .display_label_for_provider(app.api_provider),
             available_labels.join("|")
         ));
     }
-    // Validate against the current model's available set (not all 10)
-    let is_available = available_labels
-        .iter()
-        .any(|l| l.eq_ignore_ascii_case(&arg));
-    if !is_available && !arg.eq_ignore_ascii_case("auto") && !arg.eq_ignore_ascii_case("off") {
+    let Ok(effort) = ReasoningEffort::parse_strict(&arg) else {
+        let hint = format!(
+            "Usage: /effort <{}> (also /thinking)",
+            available_labels.join("|")
+        );
+        return CommandResult::error(format!(
+            "{} — {}",
+            tr(app.ui_locale, MessageId::CmdEffortDescription),
+            hint
+        ));
+    };
+    let requested = if app.auto_model {
+        effort
+    } else {
+        effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model)
+    };
+    if !available.is_empty() && !available.contains(&requested) && !available.contains(&effort) {
         return CommandResult::error(format!(
             "'{}' not available for {} — available: {}",
             arg,
@@ -83,26 +93,9 @@ pub fn effort(app: &mut App, args: Option<&str>) -> CommandResult {
             available_labels.join("|")
         ));
     }
-    // from_setting always returns a ReasoningEffort (defaults to Max on unknown), so validate against available set first
-    if let Ok(effort) = ReasoningEffort::parse_strict(&arg) {
-        let normalized = effort.normalize_for_provider(app.api_provider);
-        app.reasoning_effort_preference = Some(normalized);
-        app.reasoning_effort = normalized;
-        app.invalidate_route_receipts_for_reasoning_change();
-        app.update_model_compaction_budget();
-        CommandResult::message(format!(
-            "Effort set to {}",
-            normalized.display_label_for_provider(app.api_provider)
-        ))
-    } else {
-        let hint = format!(
-            "Usage: /effort <{}> (also /thinking)",
-            available_labels.join("|")
-        );
-        CommandResult::error(format!(
-            "{} — {}",
-            tr(app.ui_locale, MessageId::CmdEffortDescription),
-            hint
-        ))
-    }
+    app.commit_reasoning_effort(requested);
+    CommandResult::message(format!(
+        "Effort set to {}",
+        requested.display_label_for_provider(app.api_provider)
+    ))
 }

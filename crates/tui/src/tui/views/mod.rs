@@ -1314,18 +1314,50 @@ struct SettingMeta {
     choices: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SettingsRegistry {
     provider: ApiProvider,
+    base_url: String,
+    model: String,
+    auto_model: bool,
 }
 
 impl SettingsRegistry {
-    fn new(provider: ApiProvider) -> Self {
-        Self { provider }
+    fn new(view: &ConfigView) -> Self {
+        Self {
+            provider: view.api_provider,
+            base_url: view.route_base_url.clone(),
+            model: view.route_model.clone(),
+            auto_model: view.auto_model,
+        }
     }
 
-    fn meta(self, row: &ConfigRow) -> SettingMeta {
-        let choices = config_choice_values(&row.key, self.provider);
+    fn reasoning_effort_choices(&self) -> Vec<String> {
+        let mut values = vec!["default".to_string()];
+        for effort in crate::tui::model_picker::picker_efforts_for_route(
+            self.provider,
+            &self.base_url,
+            &self.model,
+            self.auto_model,
+        ) {
+            let label = if self.provider == ApiProvider::OpenaiCodex {
+                effort.display_label_for_provider(self.provider)
+            } else {
+                effort.as_setting()
+            };
+            if !values.iter().any(|value| value == label) {
+                values.push(label.to_string());
+            }
+        }
+        values
+    }
+
+    fn meta(&self, row: &ConfigRow) -> SettingMeta {
+        let choices = if row.key == "reasoning_effort" {
+            Some(self.reasoning_effort_choices())
+        } else {
+            config_choice_values(&row.key, self.provider)
+        };
         let kind = if !row.editable {
             SettingKind::ReadOnly
         } else if matches!(row.key.as_str(), "provider" | "model") {
@@ -1513,6 +1545,9 @@ pub struct ConfigView {
     last_choice_hitboxes: RefCell<Vec<(u16, usize)>>,
     last_mouse_selected: Option<usize>,
     api_provider: ApiProvider,
+    route_base_url: String,
+    route_model: String,
+    auto_model: bool,
     /// Category tab for the app-style settings shell (v0.9.1).
     active_tab: ConfigTab,
 }
@@ -2120,6 +2155,9 @@ impl ConfigView {
             last_choice_hitboxes: RefCell::new(Vec::new()),
             last_mouse_selected: None,
             api_provider: app.api_provider,
+            route_base_url: app.active_route_base_url.clone(),
+            route_model: app.model.clone(),
+            auto_model: app.auto_model,
             active_tab: ConfigTab::General,
         }
     }
@@ -2159,7 +2197,7 @@ impl ConfigView {
             return true;
         }
 
-        let meta = SettingsRegistry::new(self.api_provider).meta(row);
+        let meta = SettingsRegistry::new(self).meta(row);
         let section = meta.category.label(self.locale).to_lowercase();
         let section_en = meta.category.label(Locale::En).to_lowercase();
         let label = config_label_for_key_for_locale(self.locale, &row.key).to_lowercase();
@@ -2370,7 +2408,7 @@ impl ConfigView {
 
     fn toggle_selected_boolean(&self) -> Option<ViewAction> {
         let row = self.rows.get(self.selected_row_index()?)?;
-        if SettingsRegistry::new(self.api_provider).meta(row).kind != SettingKind::Boolean {
+        if SettingsRegistry::new(self).meta(row).kind != SettingKind::Boolean {
             return None;
         }
         let value = if canonical_config_choice(&row.key, &row.value) == "true" {
@@ -2627,7 +2665,7 @@ impl ConfigView {
             _ => original_value.clone(),
         };
 
-        let meta = SettingsRegistry::new(self.api_provider).meta(row);
+        let meta = SettingsRegistry::new(self).meta(row);
         let choices = meta.choices;
         let selected_choice = choices
             .as_ref()
@@ -2703,11 +2741,7 @@ impl ConfigView {
             return row.value.clone();
         }
 
-        if SettingsRegistry::new(self.api_provider)
-            .meta(row)
-            .choices
-            .is_some()
-        {
+        if SettingsRegistry::new(self).meta(row).choices.is_some() {
             if config_default_placeholder_message(&row.key).is_some_and(|message_id| {
                 row.value == tr(self.locale, message_id) || row.value == tr(Locale::En, message_id)
             }) {
@@ -2723,7 +2757,7 @@ impl ConfigView {
     fn selected_row_hint(&self) -> Option<String> {
         let row_idx = self.selected_row_index()?;
         let row = self.rows.get(row_idx)?;
-        let meta = SettingsRegistry::new(self.api_provider).meta(row);
+        let meta = SettingsRegistry::new(self).meta(row);
         let label = config_label_for_key_for_locale(self.locale, &row.key);
         let hint = config_hint_for_key(&row.key);
         let action_id = if row.key == "provider" {
@@ -3039,7 +3073,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "DeepSeek-only legacy fallback; other providers use their provider-scoped model above"
         }
         "reasoning_effort" => {
-            "DeepSeek: auto/off/low/high/max (medium rounds up to high — the wire has no medium); Codex: low/medium/high/xhigh; default clears saved value"
+            "Per-model thinking ladder from the active route. default clears the saved value and uses that model's official default. Always-thinking models omit off."
         }
         "mcp_config_path" => "path to mcp.json",
         "fleet.exec.max_spawn_depth" => {
@@ -3114,6 +3148,9 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
         "default_mode" => vec!["agent", "plan", "operate"],
         "reasoning_effort" if provider == ApiProvider::OpenaiCodex => {
             vec!["default", "low", "medium", "high", "xhigh"]
+        }
+        "reasoning_effort" if provider == ApiProvider::Xai => {
+            vec!["default", "auto", "low", "medium", "high", "xhigh"]
         }
         "reasoning_effort" => {
             vec!["default", "auto", "off", "low", "medium", "high", "max"]
@@ -6721,7 +6758,7 @@ context_window = 262144
     fn settings_registry_types_every_config_row() {
         let app = create_test_app();
         let view = ConfigView::new_for_app(&app);
-        let registry = SettingsRegistry::new(app.api_provider);
+        let registry = SettingsRegistry::new(&view);
 
         let kind_for = |key: &str| {
             let row = view

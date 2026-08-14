@@ -107,18 +107,39 @@ fn apply_xai_grok_4_6_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_xai_grok_4_6_route(provider, base_url, model) {
+    if !is_exact_xai_grok_4_6_route(provider, base_url, model)
+        && !(provider == ApiProvider::Xai
+            && codewhale_config::provider::is_exact_xai_platform_route(
+                codewhale_config::ProviderKind::Xai,
+                base_url,
+            )
+            && model
+                .trim()
+                .eq_ignore_ascii_case(crate::config::XAI_GROK_4_5_MODEL))
+    {
         return;
     }
     let Some(effort) = effort else {
         return;
     };
+    let model = model.trim().to_ascii_lowercase();
+    let supports_xhigh = model == crate::config::XAI_GROK_4_6_MODEL;
+    let supports_effort = supports_xhigh || model == crate::config::XAI_GROK_4_5_MODEL;
+    if !supports_effort {
+        return;
+    }
     let wire_effort = match effort.trim().to_ascii_lowercase().as_str() {
         "auto" | "automatic" | "" => return,
         "off" | "disabled" | "none" | "false" | "high" => "high",
         "minimal" | "minimum" | "low" | "light" => "low",
         "medium" | "mid" => "medium",
-        "xhigh" | "max" | "maximum" | "highest" | "ultra" | "ultracode" => "xhigh",
+        "xhigh" | "max" | "maximum" | "highest" | "ultra" | "ultracode" => {
+            if supports_xhigh {
+                "xhigh"
+            } else {
+                "high"
+            }
+        }
         _ => return,
     };
     body["reasoning_effort"] = json!(wire_effort);
@@ -5102,6 +5123,28 @@ mod alias_thinking_detection_tests {
             Some("medium"),
         );
         assert_eq!(custom, json!({}));
+    }
+
+    #[test]
+    fn grok_45_uses_first_party_ladder_and_maps_xhigh_to_high() {
+        for (requested, expected) in [
+            ("off", "high"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("max", "high"),
+        ] {
+            let mut body = json!({});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Xai,
+                crate::config::DEFAULT_XAI_BASE_URL,
+                crate::config::XAI_GROK_4_5_MODEL,
+                Some(requested),
+            );
+            assert_eq!(body, json!({ "reasoning_effort": expected }), "{requested}");
+        }
     }
 
     #[test]

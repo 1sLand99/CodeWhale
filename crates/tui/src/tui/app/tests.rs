@@ -542,11 +542,11 @@ fn cycle_effort_updates_effort_status_and_compaction() {
 
     app.cycle_effort();
 
-    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
-    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::High));
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Reasoning effort: high"),
+        Some("Reasoning effort: low"),
         "Ctrl+T must give visible feedback like the hotbar action"
     );
     assert_ne!(
@@ -570,8 +570,8 @@ fn cycle_effort_updates_effort_status_and_compaction() {
             operation,
             ..
         } => {
-            assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::High);
-            assert_eq!(*effective, crate::work_graph::ReasoningEffortTier::High);
+            assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::Low);
+            assert_eq!(*effective, crate::work_graph::ReasoningEffortTier::Low);
             assert_eq!(*provider_kind, Some(ApiProvider::Deepseek));
             assert_eq!(provider, "deepseek");
             assert!(operation.is_none());
@@ -750,8 +750,8 @@ fn compatible_zai_gateway_records_effective_unavailable() {
 #[test]
 fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
     for (previous, requested, label) in [
-        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
-        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+        (ReasoningEffort::Off, ReasoningEffort::Auto, "auto"),
+        (ReasoningEffort::Auto, ReasoningEffort::Off, "off"),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
         app.api_provider = ApiProvider::Minimax;
@@ -763,10 +763,7 @@ fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
         app.cycle_effort();
 
         assert_eq!(app.reasoning_effort, requested);
-        assert_eq!(
-            app.reasoning_effort_display_label(),
-            format!("{label}→thinking enabled; granularity unavailable")
-        );
+        assert_eq!(app.reasoning_effort_display_label(), label);
         let work = app
             .work_state_snapshot()
             .expect("Work snapshot")
@@ -786,7 +783,11 @@ fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
         } = activity;
         assert_eq!(
             effective,
-            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+            if requested == ReasoningEffort::Auto {
+                crate::work_graph::ReasoningEffortTier::Auto
+            } else {
+                crate::work_graph::ReasoningEffortTier::Off
+            }
         );
         assert_eq!(
             endpoint_identity.as_deref(),
@@ -799,8 +800,8 @@ fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
 #[test]
 fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
     for (previous, requested, label) in [
-        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
-        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+        (ReasoningEffort::Off, ReasoningEffort::Auto, "auto"),
+        (ReasoningEffort::Auto, ReasoningEffort::Off, "off"),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
         app.api_provider = ApiProvider::MinimaxAnthropic;
@@ -812,10 +813,7 @@ fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
         app.cycle_effort();
 
         assert_eq!(app.reasoning_effort, requested);
-        assert_eq!(
-            app.reasoning_effort_display_label(),
-            format!("{label}→thinking enabled; granularity unavailable")
-        );
+        assert_eq!(app.reasoning_effort_display_label(), label);
         let work = app
             .work_state_snapshot()
             .expect("Work snapshot")
@@ -837,7 +835,11 @@ fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
         } = activity;
         assert_eq!(
             effective,
-            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+            if requested == ReasoningEffort::Auto {
+                crate::work_graph::ReasoningEffortTier::Auto
+            } else {
+                crate::work_graph::ReasoningEffortTier::Off
+            }
         );
         assert_eq!(provider_kind, Some(ApiProvider::MinimaxAnthropic));
         assert_eq!(provider, "minimax-anthropic");
@@ -941,8 +943,8 @@ fn custom_routes_named_with_builtin_slugs_retain_custom_kind_and_fail_closed() {
 #[test]
 fn zai_gateway_off_and_high_receipts_remain_unavailable() {
     for (previous, requested, label) in [
-        (ReasoningEffort::Max, ReasoningEffort::Off, "off"),
-        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+        (ReasoningEffort::Max, ReasoningEffort::Auto, "auto"),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
         app.api_provider = ApiProvider::Zai;
@@ -964,7 +966,7 @@ fn zai_gateway_off_and_high_receipts_remain_unavailable() {
 #[test]
 fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
     for (previous, requested) in [
-        (ReasoningEffort::Off, ReasoningEffort::High),
+        (ReasoningEffort::Off, ReasoningEffort::Low),
         (ReasoningEffort::High, ReasoningEffort::Max),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
@@ -1131,7 +1133,7 @@ fn reasoning_effort_api_values_are_provider_aware_for_codex() {
     );
     assert_eq!(
         ReasoningEffort::from_setting("ultracode"),
-        ReasoningEffort::Max
+        ReasoningEffort::Ultra
     );
 }
 
@@ -1149,7 +1151,17 @@ fn reasoning_effort_uses_one_strict_alias_table_and_legacy_fallback() {
             Ok(ReasoningEffort::Medium)
         );
     }
-    for raw in ["xhigh", "ultra", "max", "maximum", "ultracode"] {
+    assert_eq!(
+        ReasoningEffort::parse_strict("xhigh"),
+        Ok(ReasoningEffort::XHigh)
+    );
+    for raw in ["ultra", "ultracode"] {
+        assert_eq!(
+            ReasoningEffort::parse_strict(raw),
+            Ok(ReasoningEffort::Ultra)
+        );
+    }
+    for raw in ["max", "maximum"] {
         assert_eq!(ReasoningEffort::parse_strict(raw), Ok(ReasoningEffort::Max));
     }
     assert!(ReasoningEffort::parse_strict("surprise").is_err());
@@ -1339,6 +1351,61 @@ fn app_new_maps_persisted_grok_46_off_to_high_and_max_to_xhigh() {
         assert_eq!(app.reasoning_effort, expected, "raw setting {raw}");
         assert_eq!(app.reasoning_effort_display_label(), display);
     }
+}
+
+#[test]
+fn cycle_effort_walks_grok_46_official_ladder() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Xai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_XAI_BASE_URL.to_string();
+    app.model = crate::config::XAI_GROK_4_6_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    let expected = [
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Auto,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
+    for next in expected {
+        app.cycle_effort();
+        assert_eq!(app.reasoning_effort, next, "next {:?}", next);
+    }
+}
+
+#[test]
+fn cycle_effort_walks_grok_45_official_ladder_without_xhigh() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Xai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_XAI_BASE_URL.to_string();
+    app.model = crate::config::XAI_GROK_4_5_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    app.cycle_effort();
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    app.cycle_effort();
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Medium);
+    app.cycle_effort();
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+}
+
+#[test]
+fn picker_uses_catalog_reasoning_efforts_for_grok_45() {
+    let labels: Vec<&str> = crate::tui::model_picker::picker_efforts_for_route(
+        ApiProvider::Xai,
+        ApiProvider::Xai.default_base_url(),
+        crate::config::XAI_GROK_4_5_MODEL,
+        false,
+    )
+    .iter()
+    .map(|effort| effort.as_setting())
+    .collect();
+    assert_eq!(labels, vec!["auto", "low", "medium", "high"]);
 }
 
 #[test]

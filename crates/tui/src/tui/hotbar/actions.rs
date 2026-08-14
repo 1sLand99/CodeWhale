@@ -2452,12 +2452,9 @@ mod tests {
             reasoning.dispatch(&mut app).expect("dispatch reasoning"),
             HotbarDispatch::AppAction(AppAction::UpdateCompaction(_))
         ));
-        assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
         assert!(reasoning.is_active(&app));
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Reasoning effort: high")
-        );
+        assert_eq!(app.status_message.as_deref(), Some("Reasoning effort: low"));
 
         app.auto_model = true;
         assert!(reasoning.is_active(&app));
@@ -2467,7 +2464,7 @@ mod tests {
                 .expect("dispatch reasoning under auto model"),
             HotbarDispatch::AppAction(AppAction::UpdateCompaction(_))
         ));
-        assert_eq!(app.reasoning_effort, ReasoningEffort::XHigh);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Medium);
     }
 
     #[test]

@@ -188,10 +188,12 @@ impl ReasoningEffort {
             "low" | "minimum" | "minimal" | "light" => Ok(Self::Low),
             "medium" | "mid" => Ok(Self::Medium),
             "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
             "auto" | "automatic" => Ok(Self::Auto),
-            "max" | "maximum" | "xhigh" | "ultra" | "ultracode" => Ok(Self::Max),
+            "ultra" | "ultracode" => Ok(Self::Ultra),
+            "max" | "maximum" => Ok(Self::Max),
             _ => Err(format!(
-                "Unrecognized reasoning effort {trimmed:?}. Expected: auto, off, low, medium, high, or max."
+                "Unrecognized reasoning effort {trimmed:?}. Expected: auto, off, low, medium, high, xhigh, or max."
             )),
         }
     }
@@ -251,6 +253,7 @@ impl ReasoningEffort {
             (ApiProvider::OpenaiCodex, Self::Medium) => "medium",
             (ApiProvider::OpenaiCodex, Self::High) => "high",
             (ApiProvider::OpenaiCodex, Self::XHigh | Self::Ultra | Self::Max) => "xhigh",
+            (ApiProvider::Xai, Self::XHigh) => "xhigh",
             (_, effort) => effort.short_label(),
         }
     }
@@ -472,6 +475,7 @@ impl ReasoningEffort {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn cycle_next_for_provider(self, provider: ApiProvider) -> Self {
         if provider != ApiProvider::OpenaiCodex {
             return self.cycle_next();
@@ -486,6 +490,38 @@ impl ReasoningEffort {
             Self::Max => Self::Low,
             Self::Off | Self::Auto => Self::Low,
         }
+    }
+
+    /// Advance through an exact-route effort list. Unknown current values
+    /// enter at the first listed tier so a persisted `max` on an `xhigh`
+    /// ladder, or `off` on an always-thinking model, still moves.
+    #[must_use]
+    pub fn cycle_next_in(self, efforts: &[Self]) -> Self {
+        if efforts.is_empty() {
+            return self.cycle_next();
+        }
+        if let Some(index) = self.index_in(efforts) {
+            return efforts[(index + 1) % efforts.len()];
+        }
+        efforts[0]
+    }
+
+    fn index_in(self, efforts: &[Self]) -> Option<usize> {
+        efforts
+            .iter()
+            .position(|&effort| effort == self)
+            .or_else(|| {
+                let aliases: &[Self] = match self {
+                    Self::Max | Self::Ultra => &[Self::XHigh],
+                    Self::XHigh => &[Self::Max],
+                    Self::Minimal => &[Self::Low],
+                    Self::Low => &[Self::Minimal],
+                    _ => return None,
+                };
+                aliases
+                    .iter()
+                    .find_map(|alias| efforts.iter().position(|&effort| effort == *alias))
+            })
     }
 
     /// Cycle the unresolved auto-model preference without applying any

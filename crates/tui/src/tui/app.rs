@@ -2691,16 +2691,32 @@ impl App {
     /// Advance reasoning effort to the next tier for the active route and
     /// surface the change: set a status message and refresh the compaction
     /// budget. Auto routing retains the full provider-neutral vocabulary until
-    /// dispatch; a concrete provider uses its distinct supported tiers. Shared
-    /// by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
-    /// `reasoning.cycle` action so the two paths cannot drift.
+    /// dispatch; a concrete model walks the same ladder as `/model` and
+    /// `/effort`. Shared by the Ctrl+T shortcut (`cycle_effort`) and the
+    /// hotbar `reasoning.cycle` action so the two paths cannot drift.
     pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
-        let requested = if self.auto_model {
-            self.reasoning_effort.cycle_next_for_auto_model()
-        } else {
-            self.reasoning_effort
-                .cycle_next_for_provider(self.api_provider)
+        let requested = self.next_reasoning_effort_for_active_route();
+        self.commit_reasoning_effort(requested);
+    }
+
+    fn next_reasoning_effort_for_active_route(&self) -> ReasoningEffort {
+        if self.auto_model {
+            return self.reasoning_effort.cycle_next_for_auto_model();
+        }
+        let (provider, base_url, model) = match self.active_reasoning_route_truth() {
+            Some((provider, _, endpoint, model)) => (provider, endpoint, model),
+            None => (
+                self.api_provider,
+                self.active_route_base_url.as_str(),
+                self.model.as_str(),
+            ),
         };
+        let efforts =
+            crate::tui::model_picker::picker_efforts_for_route(provider, base_url, model, false);
+        self.reasoning_effort.cycle_next_in(&efforts)
+    }
+
+    pub(crate) fn commit_reasoning_effort(&mut self, requested: ReasoningEffort) {
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         let route_truth = self.active_reasoning_route_truth();
         let provider_kind = route_truth.map_or(self.api_provider, |(provider, _, _, _)| provider);

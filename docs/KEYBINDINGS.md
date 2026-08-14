@@ -16,7 +16,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Ctrl-D`             | Quit (only when the composer is empty)                         |
 | `Tab`                | When the composer is empty, cycle TUI mode: Plan → Act → Operate → Plan |
 | `Shift+Tab`          | Cycle permission posture: Ask → Auto-Review → Full Access. Live regardless of composer contents or whether a turn is running (suppressed only while a modal other than Config is open) |
-| `Ctrl-T`             | Cycle reasoning effort for the active provider. DeepSeek-style providers cycle off → high → max → off; OpenAI Codex cycles low → medium → high → xhigh → low. |
+| `Ctrl-T`             | Cycle reasoning effort for the active model. Walks the same ladder as `/model` and `/effort` (catalog or documented route dialect). Always-thinking models omit `off`; Grok 4.6 includes `xhigh`. |
 | `Ctrl-Shift-T`       | Toggle live transcript overlay (sticky-tail auto-scroll)                       |
 | `Ctrl-R`             | Open the resume-session picker                                 |
 | `Ctrl-L`             | Compact the conversation context (status line shows progress; no-op while a compaction is already running) |

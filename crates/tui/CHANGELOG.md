@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reservation so compaction does not collapse to the 1K headroom floor
   when the catalogue documents a matching output ceiling.
 
+- Thinking cycle, `/effort`, and Settings now walk each model's real ladder
+  instead of the DeepSeek off/high/max shortcut. Grok 4.6 is
+  auto/low/medium/high/xhigh (cannot disable); Grok 4.5 is
+  auto/low/medium/high; first-party DeepSeek keeps a documented `low` tier.
+  `/effort` persists and receipts through the same path as Ctrl+T.
 - The TUI markdown parser now honors CommonMark fence-length rules: a ````
   opener is not closed by a shorter ``` line, so `>` content inside a longer
   fence stays literal code instead of escaping into a quote.

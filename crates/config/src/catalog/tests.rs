@@ -705,6 +705,24 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
             .and_then(serde_json::Value::as_str),
         Some("high")
     );
+    let grok_45 = find(&rows, "xai", "grok-4.5");
+    assert_eq!(
+        grok_45.reasoning_options[0]
+            .get("default")
+            .and_then(serde_json::Value::as_str),
+        Some("high")
+    );
+    let grok_45_values = grok_45.reasoning_options[0]
+        .get("values")
+        .and_then(serde_json::Value::as_array)
+        .expect("Grok 4.5 effort values");
+    assert_eq!(
+        grok_45_values
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>(),
+        ["low", "medium", "high"]
+    );
 
     let minimax_m2_7 = find(&rows, "minimax-anthropic", "MiniMax-M2.7");
     assert_eq!(
