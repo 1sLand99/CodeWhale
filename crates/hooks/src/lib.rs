@@ -211,8 +211,8 @@ impl WebhookHookSink {
                 .build()
                 .unwrap_or_else(|_| {
                     codewhale_release::platform_http_client_builder()
-                        .build()
-                        .expect("build fallback HTTP client")
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
                 }),
         }
     }
@@ -599,5 +599,14 @@ mod tests {
         let root = PathBuf::from("/tmp").join(format!("cw-hk-{}-{nanos}", std::process::id()));
         let path = root.join(format!("{label}.sock"));
         (root, path)
+    }
+
+    #[test]
+    fn webhook_sink_new_does_not_panic() {
+        // Construction must never panic: if the configured client builder
+        // fails, the code falls back to a default `reqwest::Client` instead of
+        // calling `.expect(...)`.
+        let sink = WebhookHookSink::new("https://example.invalid/webhook".to_string());
+        let _ = sink;
     }
 }
