@@ -4722,7 +4722,7 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             crate::tui::approval::ApprovalMode::Auto,
             false,
             "Auto-Review",
-            "Auto-Review held tool",
+            "Sandbox escalation requires a one-shot user approval",
         ),
         (
             crate::tui::approval::ApprovalMode::Suggest,
@@ -4740,6 +4740,14 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             ),
             canned::simple_text_turn("Escalation was unavailable."),
         ]));
+        if matches!(approval_mode, crate::tui::approval::ApprovalMode::Auto) {
+            // Let Auto-Review's independent guardian approve the bounded
+            // fixture call so this test reaches the separate rule under test:
+            // unattended postures still cannot mint a sandbox escalation.
+            mock.push_message_response(guardian_fixture_response(
+                r#"{"risk_level":"low","decision":"allow","reason":"isolated fixture write"}"#,
+            ));
+        }
         let client: crate::core::model_client::SharedModelClient = mock.clone();
         let config = Config {
             sandbox_mode: Some("read-only".to_string()),
