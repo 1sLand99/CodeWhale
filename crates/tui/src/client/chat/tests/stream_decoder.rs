@@ -634,7 +634,7 @@ fn decoder_emits_tool_use_block_for_tool_call_delta() {
         events.iter().any(|e| matches!(
             e,
             StreamEvent::ContentBlockStart {
-                content_block: ContentBlockStart::ToolUse { name, .. },
+                content_block: ContentBlockStart::ToolUse { name, ..},
                 ..
             } if name == "grep_files"
         )),
@@ -662,7 +662,7 @@ fn decoder_uses_fallback_name_for_empty_streaming_tool_name() {
         events.iter().any(|event| matches!(
             event,
             StreamEvent::ContentBlockStart {
-                content_block: ContentBlockStart::ToolUse { name, .. },
+                content_block: ContentBlockStart::ToolUse { name, ..},
                 ..
             } if name == "unknown_tool"
         )),
@@ -784,6 +784,7 @@ fn tool_use_message(id: &str, name: &str, input: Value) -> Message {
             name: name.to_string(),
             input,
             caller: None,
+            thought_signature: None,
         }],
     }
 }

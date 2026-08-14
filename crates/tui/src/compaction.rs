@@ -1307,6 +1307,7 @@ mod tests {
                 name: name.to_string(),
                 input,
                 caller: None,
+                thought_signature: None,
             }],
         }
     }
@@ -1841,6 +1842,7 @@ mod tests {
                         name: "read_file".to_string(),
                         input: serde_json::json!({"path": "Cargo.toml"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },

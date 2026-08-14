@@ -33,6 +33,7 @@ fn assistant_thinking_tool_call(
                 name: name.to_string(),
                 input,
                 caller: None,
+                thought_signature: None,
             },
         ],
     }

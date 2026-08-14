@@ -333,7 +333,8 @@ impl DeepSeekClient {
                                                         name: from_api_tool_name(&name),
                                                         input: json!({}),
                                                         caller: None,
-                                                    },
+                                                    thought_signature: None,
+                                                },
                                             });
                                             current_block_index =
                                                 Some(content_block_counter - 1);
@@ -562,11 +563,13 @@ impl DeepSeekClient {
                             name,
                             input,
                             caller,
+                            thought_signature,
                         } => ContentBlock::ToolUse {
                             id,
                             name,
                             input,
                             caller,
+                            thought_signature,
                         },
                         ContentBlockStart::ServerToolUse { id, name, input } => {
                             ContentBlock::ServerToolUse { id, name, input }

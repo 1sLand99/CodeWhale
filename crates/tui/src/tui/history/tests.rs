@@ -1055,6 +1055,7 @@ fn history_replays_update_plan_tool_use_as_plan_card() {
                 ]
             }),
             caller: None,
+            thought_signature: None,
         }],
     };
 

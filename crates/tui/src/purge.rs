@@ -636,6 +636,7 @@ mod tests {
                 name: name.to_string(),
                 input,
                 caller: None,
+                thought_signature: None,
             }],
         }
     }
@@ -827,6 +828,7 @@ mod tests {
                 name: "purge_context".to_string(),
                 input: json!({"operations": operations}),
                 caller: None,
+                thought_signature: None,
             }],
             model: "mock-model".to_string(),
             stop_reason: None,

@@ -1176,12 +1176,14 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "a.txt"}),
                         caller: None,
+                        thought_signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_orphan".to_string(),
                         name: "task".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -1203,6 +1205,7 @@ mod tests {
                     name: "task".to_string(),
                     input: json!({}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
         ];
@@ -1236,7 +1239,7 @@ mod tests {
         // A fully answered history is left alone.
         request.messages.truncate(3);
         request.messages[1].content.retain(
-            |block| !matches!(block, ContentBlock::ToolUse { id, .. } if id == "toolu_orphan"),
+            |block| !matches!(block, ContentBlock::ToolUse { id, ..} if id == "toolu_orphan"),
         );
         let body = client.build_anthropic_body(&request, true);
         let messages = body["messages"].as_array().expect("messages array");
@@ -1501,6 +1504,7 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "a.txt"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },

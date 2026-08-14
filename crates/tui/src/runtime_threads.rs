@@ -6103,6 +6103,7 @@ impl RuntimeThreadManager {
                                 name: tool_name,
                                 input,
                                 caller: None,
+                                thought_signature: None,
                             });
                         }
                     }

@@ -555,6 +555,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_mistral_route_reasoning_controls(body, provider, base_url, model, effort);
+    apply_google_thinking_level(body, provider, base_url, model, effort);
 }
 
 /// Mistral's polymorphic reasoning-content contract is only proven on its
@@ -576,6 +577,124 @@ fn is_exact_mistral_chat_route(provider: ApiProvider, base_url: &str) -> bool {
         host,
         "api.mistral.ai" | "api.eu.mistral.ai" | "api.us.mistral.ai"
     ) && path == "v1"
+}
+
+/// Google's OpenAI-compatibility route. Thought signatures are captured
+/// from tool-call `extra_content.google.thought_signature` and replayed on
+/// the assistant tool-call messages of later turns; thinking models fail
+/// closed when a replayed call has no signature.
+fn is_exact_google_chat_route(provider: ApiProvider, base_url: &str) -> bool {
+    if provider != ApiProvider::Google {
+        return false;
+    }
+    let trimmed = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let Some((host, path)) = trimmed
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+    else {
+        return false;
+    };
+    host == "generativelanguage.googleapis.com" && path == "v1beta/openai"
+}
+
+/// Gemini models whose thinking makes thought signatures load-bearing on
+/// the OpenAI-compat route. Gemini 2.5 Flash-Lite ships with thinking off
+/// by default, so a missing signature there degrades with a warning
+/// instead of failing the turn.
+fn google_model_requires_thought_signatures(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    if model.starts_with("gemini-3") {
+        return true;
+    }
+    if model.starts_with("gemini-2.5-pro") {
+        return true;
+    }
+    model.starts_with("gemini-2.5-flash") && !model.starts_with("gemini-2.5-flash-lite")
+}
+
+/// Thinking level for the OpenAI-compat route rides the documented
+/// `google.thinking_config.thinking_level` body field (low/high; Gemini 3
+/// cannot disable thinking).
+fn apply_google_thinking_level(
+    body: &mut serde_json::Value,
+    provider: ApiProvider,
+    base_url: &str,
+    _model: &str,
+    effort: Option<&str>,
+) {
+    if !is_exact_google_chat_route(provider, base_url) || effort.is_none() {
+        return;
+    }
+    let level = match effort
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "off" | "disabled" | "none" | "false" | "" | "low" | "minimal" | "medium" | "mid" => "low",
+        _ => "high",
+    };
+    body["google"]["thinking_config"]["thinking_level"] = json!(level);
+}
+
+/// Fail closed before transport when the exact Google route would replay
+/// tool calls without the thought signatures Google's thinking models
+/// require. The error names the model and tells the operator how to
+/// recover instead of letting Google reject or corrupt the tool loop.
+fn validate_google_thought_signature_replay(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    messages: &[Value],
+) -> Result<()> {
+    if !is_exact_google_chat_route(provider, base_url)
+        || !google_model_requires_thought_signatures(model)
+    {
+        return Ok(());
+    }
+    for message in messages {
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in tool_calls {
+            let missing = call
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+                .is_none();
+            if missing {
+                let id = call.get("id").and_then(Value::as_str).unwrap_or("?");
+                anyhow::bail!(
+                    "Gemini model `{model}` requires a thought signature to replay tool call \
+                     `{id}`, but none was captured (the turn predates signature capture, or \
+                     the provider omitted it). Start a new session before using tools on \
+                     this route."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Captured Google signatures ride on tool calls as
+/// `extra_content.google.thought_signature`. Only the exact Google route
+/// may carry them on the wire; every other provider gets them stripped so
+/// a route switch never leaks Google-only fields to a foreign gateway.
+fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
+    for message in messages {
+        let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in tool_calls {
+            if let Some(extra) = call.get_mut("extra_content") {
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.remove("google");
+                    if obj.is_empty() {
+                        call.as_object_mut().map(|c| c.remove("extra_content"));
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn mistral_model_has_adjustable_reasoning(model: &str) -> bool {
@@ -870,6 +989,7 @@ pub(crate) fn build_chat_wire_body(
         let wire = wire_model_for_provider_route(provider, base_url, &request.model);
         crate::models::effective_muse_wire_id(&wire).to_string()
     };
+    validate_google_thought_signature_replay(provider, base_url, &model, &messages)?;
     let mut body = if stream {
         json!({
             "model": model.clone(),
@@ -1467,6 +1587,9 @@ impl<'a> PromptBuilder<'a> {
         }
         if is_exact_mistral_chat_route(provider, base_url) {
             reshape_mistral_messages_for_reasoning_replay(&mut messages);
+        }
+        if !is_exact_google_chat_route(provider, base_url) {
+            strip_google_tool_call_extra_content(&mut messages);
         }
         messages
     }
@@ -2328,7 +2451,7 @@ fn build_chat_messages_with_reasoning(
                     name,
                     input,
                     caller,
-                    ..
+                    thought_signature,
                 } => {
                     let args = serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
                     let mut call = json!({
@@ -2339,6 +2462,9 @@ fn build_chat_messages_with_reasoning(
                             "arguments": args,
                         }
                     });
+                    if let Some(signature) = thought_signature {
+                        call["extra_content"]["google"]["thought_signature"] = json!(signature);
+                    }
                     if let Some(caller) = caller {
                         call["caller"] = json!({
                             "type": caller.caller_type,
@@ -3317,11 +3443,16 @@ fn parse_chat_message_for_route(
                     })
             });
 
+            let thought_signature = call
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             content_blocks.push(ContentBlock::ToolUse {
                 id,
                 name: from_api_tool_name(&name),
                 input: arguments,
                 caller,
+                thought_signature,
             });
         }
     }
@@ -3771,6 +3902,10 @@ fn parse_sse_chunk_with_reasoning_style(
                                 })
                             });
 
+                            let thought_signature = tc
+                                .pointer("/extra_content/google/thought_signature")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
                             events.push(StreamEvent::ContentBlockStart {
                                 index: block_index,
                                 content_block: ContentBlockStart::ToolUse {
@@ -3778,6 +3913,7 @@ fn parse_sse_chunk_with_reasoning_style(
                                     name: from_api_tool_name(&name),
                                     input: json!({}),
                                     caller,
+                                    thought_signature,
                                 },
                             });
                             *content_index = (*content_index).saturating_add(1);
@@ -4201,6 +4337,7 @@ mod minimax_reasoning_replay_tests {
                         name: "read".to_string(),
                         input: serde_json::json!({ "path": "widget.rs" }),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -5803,6 +5940,7 @@ mod image_block_wire_tests {
                     name: "read".to_string(),
                     input: serde_json::json!({"path": "shot.png"}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {
@@ -5874,6 +6012,7 @@ mod mistral_reasoning_tests {
                             name: "read_file".to_string(),
                             input: json!({"path": "README.md"}),
                             caller: None,
+                            thought_signature: None,
                         },
                     ],
                 },
@@ -6256,5 +6395,272 @@ mod mistral_reasoning_tests {
         for model in ["mistral-code-latest", "mistral-large-latest"] {
             assert!(!crate::models::model_supports_reasoning(model), "{model}");
         }
+    }
+}
+
+#[cfg(test)]
+mod google_thought_signature_tests {
+    use super::*;
+
+    // ── Google thought signatures (#v0.9.8 Google backend) ──────────────
+    use crate::config::{DEFAULT_GOOGLE_BASE_URL, DEFAULT_OPENAI_BASE_URL};
+
+    fn google_request_with_signed_tool(signature: Option<&str>) -> MessageRequest {
+        MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "Read the config.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "Reading now.".to_string(),
+                            cache_control: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-g-1".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "config.toml"}),
+                            caller: None,
+                            thought_signature: signature.map(str::to_string),
+                        },
+                    ],
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-1".to_string(),
+                        content: "key = \"value\"".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn google_route_round_trips_thought_signatures_on_replayed_tool_calls() {
+        let request = google_request_with_signed_tool(Some("SIG-abc123"));
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+        );
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role") == Some(&json!("assistant")))
+            .expect("assistant replay message");
+        let signature = assistant
+            .pointer("/tool_calls/0/extra_content/google/thought_signature")
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(signature, Some("SIG-abc123"));
+    }
+
+    #[test]
+    fn google_route_fails_closed_when_replayed_signature_is_missing() {
+        let request = google_request_with_signed_tool(None);
+        let error = build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("missing signature must fail closed before transport");
+        assert!(
+            error.to_string().contains("thought signature"),
+            "error must name the missing signature: {error}"
+        );
+    }
+
+    #[test]
+    fn google_missing_signature_is_a_warning_not_an_error_for_flash_lite() {
+        // 2.5 Flash-Lite ships thinking off; Google may legitimately omit
+        // signatures there, so replay proceeds.
+        let mut request = google_request_with_signed_tool(None);
+        request.model = "gemini-2.5-flash-lite".to_string();
+        build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("flash-lite replay must not require a signature");
+    }
+
+    #[test]
+    fn non_google_routes_never_see_google_extra_content() {
+        let request = google_request_with_signed_tool(Some("SIG-abc123"));
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Openai,
+            DEFAULT_OPENAI_BASE_URL,
+        );
+        for message in &messages {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in tool_calls {
+                    assert!(
+                        call.get("extra_content").is_none(),
+                        "Google-only fields must not leak to other providers"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn google_neighbor_base_url_does_not_get_google_dialect() {
+        // A Google provider row pointed at some other gateway must not
+        // carry signatures or fail closed: the dialect binds to the exact
+        // official route, not to provider identity alone.
+        let request = google_request_with_signed_tool(None);
+        build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            "https://gateway.example.com/v1",
+            false,
+        )
+        .expect("non-official Google base URL must not require signatures");
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &google_request_with_signed_tool(Some("SIG")),
+            ApiProvider::Google,
+            "https://gateway.example.com/v1",
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.pointer("/tool_calls/0/extra_content").is_none()),
+            "signatures must not be sent to a non-Google endpoint"
+        );
+    }
+
+    #[test]
+    fn google_thinking_level_maps_effort_onto_documented_body_field() {
+        let mut request = google_request_with_signed_tool(Some("SIG"));
+        request.reasoning_effort = Some("high".to_string());
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("valid google body");
+        assert_eq!(
+            body.body
+                .pointer("/google/thinking_config/thinking_level")
+                .and_then(serde_json::Value::as_str),
+            Some("high")
+        );
+
+        let mut low = google_request_with_signed_tool(Some("SIG"));
+        low.reasoning_effort = Some("low".to_string());
+        let body = build_chat_wire_body(&low, ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL, false)
+            .expect("valid google body");
+        assert_eq!(
+            body.body
+                .pointer("/google/thinking_config/thinking_level")
+                .and_then(serde_json::Value::as_str),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn google_signature_captured_from_non_streaming_tool_call() {
+        let payload = json!({
+            "id": "resp-1",
+            "model": "gemini-3.1-pro-preview",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-g-9",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": "{\"path\":\"x\"}"
+                        },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-stream" }
+                        }
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+        let response = parse_chat_message(&payload).expect("parses");
+        let signature = response.content.iter().find_map(|block| match block {
+            ContentBlock::ToolUse {
+                thought_signature, ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(signature.as_deref(), Some("SIG-stream"));
+    }
+
+    #[test]
+    fn google_signature_captured_from_streaming_first_chunk() {
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-7",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{}" },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-delta" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let events = parse_sse_chunk_with_reasoning_style(
+            &chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut inline_tags,
+            ReasoningStreamStyle::None,
+        );
+        let signature = events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockStart {
+                content_block:
+                    ContentBlockStart::ToolUse {
+                        thought_signature, ..
+                    },
+                ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(signature.as_deref(), Some("SIG-delta"));
     }
 }

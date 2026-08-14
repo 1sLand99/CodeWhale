@@ -5282,6 +5282,7 @@ async fn tool_result_api_content_never_advertises_unowned_live_output_as_retriev
             name: "exec_shell".to_string(),
             input: serde_json::json!({"command": "cargo test"}),
             caller: None,
+            thought_signature: None,
         }],
     });
 
@@ -5314,6 +5315,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
             name: "exec_shell".to_string(),
             input: serde_json::json!({"command": "old"}),
             caller: None,
+            thought_signature: None,
         }],
     });
     app.api_messages.push(Message {
@@ -5332,6 +5334,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
             name: "read_file".to_string(),
             input: serde_json::json!({"path": "src/main.rs"}),
             caller: None,
+            thought_signature: None,
         }],
     });
 
@@ -5340,7 +5343,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
     assert_eq!(messages.len(), 2);
     assert!(matches!(
         &messages[0].content[0],
-        ContentBlock::ToolUse { id, name, .. } if id == "call-new" && name == "read_file"
+        ContentBlock::ToolUse { id, name, ..} if id == "call-new" && name == "read_file"
     ));
     assert!(matches!(
         &messages[1].content[0],
@@ -21471,6 +21474,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
                 name: "read_file".into(),
                 input: serde_json::json!({"path":"x"}),
                 caller: None,
+                thought_signature: None,
             }],
         },
         Message {

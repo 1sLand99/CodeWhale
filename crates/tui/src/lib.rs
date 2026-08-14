@@ -15760,6 +15760,7 @@ mod terminal_mode_tests {
                         name: "exec_shell".to_string(),
                         input: serde_json::json!({"command": "cargo test"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },

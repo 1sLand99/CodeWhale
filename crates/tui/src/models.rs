@@ -651,6 +651,10 @@ pub enum ContentBlockStart {
         input: serde_json::Value, // usually empty or partial
         #[serde(skip_serializing_if = "Option::is_none")]
         caller: Option<ToolCaller>,
+        /// Google thought signature, when the first streaming chunk of this
+        /// tool call carried `extra_content.google.thought_signature`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     #[serde(rename = "server_tool_use")]
     ServerToolUse {

@@ -222,6 +222,7 @@ mod tests {
                 name: "read_file".to_string(),
                 input: json!({"path": "README.md"}),
                 caller: None,
+                thought_signature: None,
             }],
         }
     }

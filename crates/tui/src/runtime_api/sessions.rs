@@ -622,6 +622,7 @@ pub(super) fn messages_from_thread_detail(detail: &ThreadDetail) -> Vec<Message>
                             name: tool_name,
                             input,
                             caller: None,
+                            thought_signature: None,
                         });
                     }
                 }
@@ -825,8 +826,7 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                         id,
                         name,
                         input,
-                        caller,
-                    } => {
+                        caller, ..} => {
                         let mut obj =
                             json!({ "type": "tool_use", "id": id, "name": name, "input": input });
                         if let Some(caller) = caller {

@@ -278,6 +278,7 @@ fn block_payload(block: &ContentBlock) -> Value {
             name,
             input,
             caller,
+            ..
         } => json!({
             "type": "tool_use",
             "id": id,
@@ -1294,6 +1295,7 @@ mod tests {
                             caller_type: "code_execution_20250825".to_string(),
                             tool_id: None,
                         }),
+                        thought_signature: None,
                     },
                 ],
             },
@@ -1428,6 +1430,7 @@ mod tests {
             name: "view_image".to_string(),
             input: json!({}),
             caller: None,
+            thought_signature: None,
         });
         let json = stdout_json(&execute_structcopy(
             &mut app,
@@ -1456,6 +1459,7 @@ mod tests {
                     input: json!({}),
                     // No caller recorded: also an unknown, also null.
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {
@@ -1740,6 +1744,7 @@ mod tests {
             name: "exec_command".to_string(),
             input: json!({}),
             caller: None,
+            thought_signature: None,
         });
         let json = stdout_json(&execute_structcopy(
             &mut app,
@@ -1765,6 +1770,7 @@ mod tests {
                 name: "exec_command".to_string(),
                 input: json!({}),
                 caller: None,
+                thought_signature: None,
             });
             let json = stdout_json(&execute_structcopy(
                 &mut app,
@@ -1804,6 +1810,7 @@ mod tests {
                 name: "exec_command".to_string(),
                 input,
                 caller: None,
+                thought_signature: None,
             }],
         }];
 
@@ -1875,6 +1882,7 @@ mod tests {
                     "pass\u{7}word": "another-plain-value-that-must-not-leak",
                 }),
                 caller: None,
+                thought_signature: None,
             }],
         }];
 
@@ -1940,6 +1948,7 @@ mod tests {
                 name: "exec_command".to_string(),
                 input: json!({exact: 1, same_after_flatten: 2}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
 
@@ -2254,6 +2263,7 @@ mod tests {
                     "unc": r"\\server\private\customer.txt",
                 }),
                 caller: None,
+                thought_signature: None,
             }],
         }];
 
@@ -2411,6 +2421,7 @@ mod tests {
                 name: "exec_command".to_string(),
                 input: json!({"a": {"b": {"c": {"d": {"e": "too deep"}}}}}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let caps = Caps {
@@ -2453,6 +2464,7 @@ mod tests {
                     "deep": {"one": {"two": ["cut-a", "cut-b"]}},
                 }),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let caps = Caps {
@@ -2521,6 +2533,7 @@ mod tests {
                 name: "exec_command".to_string(),
                 input: json!({"deep": {"one": {long_a: 1, long_b: 2}}}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let caps = Caps {

@@ -13,5 +13,3 @@ pub mod parsers;
 #[cfg(test)]
 mod tests;
 pub mod types;
-
-pub use parsers::MarketplaceDocument;

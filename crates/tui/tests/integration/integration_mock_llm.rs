@@ -93,6 +93,7 @@ fn assistant_tool_call(id: &str, name: &str, input: serde_json::Value) -> Messag
             name: name.to_string(),
             input,
             caller: None,
+            thought_signature: None,
         }],
     }
 }

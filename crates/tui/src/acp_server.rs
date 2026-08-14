@@ -457,7 +457,7 @@ where
                         match event {
                             StreamEvent::ContentBlockStart {
                                 index,
-                                content_block: ContentBlockStart::ToolUse { id, name, input, .. },
+                                content_block: ContentBlockStart::ToolUse { id, name, input, ..},
                             } => {
                                 pending_tool_uses.insert(
                                     index,
@@ -1313,6 +1313,7 @@ where
                 name: call.name.clone(),
                 input: call.input.clone(),
                 caller: None,
+                thought_signature: None,
             });
         }
         if !assistant_content.is_empty() {
@@ -2652,6 +2653,7 @@ mod tests {
                     name: name.to_string(),
                     input: json!({}),
                     caller: None,
+                    thought_signature: None,
                 },
             },
             StreamEvent::ContentBlockDelta {

@@ -90,6 +90,7 @@ pub(crate) fn push_assistant_message(
             name,
             input,
             caller: None,
+            thought_signature: None,
         });
     }
 

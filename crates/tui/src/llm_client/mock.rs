@@ -400,6 +400,7 @@ pub mod canned {
                 name: name.to_string(),
                 input: Value::Null,
                 caller: None,
+                thought_signature: None,
             },
         }
     }

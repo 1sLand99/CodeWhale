@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use super::MarketplaceDocument;
+use super::parsers::MarketplaceDocument;
 use super::parsers::parse_catalog;
 use super::types::{
     CatalogTier, MarketplaceCatalogId, MarketplaceFormat, MarketplaceInstallPlan,

@@ -108,6 +108,8 @@ enum ProviderArg {
         alias = "la_plateforme"
     )]
     Mistral,
+    /// Google Gemini (official OpenAI-compatible endpoint).
+    Google,
 }
 
 impl From<ProviderArg> for ProviderKind {
@@ -148,6 +150,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Meta => ProviderKind::Meta,
             ProviderArg::Xai => ProviderKind::Xai,
             ProviderArg::Mistral => ProviderKind::Mistral,
+            ProviderArg::Google => ProviderKind::Google,
         }
     }
 }

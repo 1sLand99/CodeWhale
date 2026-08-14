@@ -75,6 +75,8 @@ pub enum ModelProvider {
     Xai,
     /// Mistral AI la Plateforme models.
     Mistral,
+    /// Google Gemini models (official OpenAI-compatible route).
+    Google,
     /// Anything not otherwise classified (still gets real metadata via the
     /// `models.rs` heuristics where possible).
     Other,
@@ -201,6 +203,15 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("grok-4.20-0309-non-reasoning", ModelProvider::Xai),
     // --- Mistral AI (current first-party roster; deprecated Magistral remains
     // accepted through the long-tail models.rs compatibility path) ---
+    // --- Google Gemini (official OpenAI-compatible route; preview flagships
+    // as listed by Google's model pages, 2026-08).
+    ("gemini-3.1-pro-preview", ModelProvider::Google),
+    ("gemini-3-pro-preview", ModelProvider::Google),
+    ("gemini-3.6-flash", ModelProvider::Google),
+    ("gemini-3.5-flash", ModelProvider::Google),
+    ("gemini-3.5-flash-lite", ModelProvider::Google),
+    ("gemini-2.5-pro", ModelProvider::Google),
+    ("gemini-2.5-flash", ModelProvider::Google),
     ("mistral-code-latest", ModelProvider::Mistral),
     ("mistral-medium-latest", ModelProvider::Mistral),
     ("mistral-small-latest", ModelProvider::Mistral),

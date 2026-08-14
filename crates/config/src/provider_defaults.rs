@@ -190,3 +190,9 @@ pub(crate) const DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL: &str =
     "https://coding-intl.dashscope.aliyuncs.com/v1";
 pub(crate) const MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL: &str =
     "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic";
+
+/// Google Gemini OpenAI-compatible Chat Completions base URL.
+pub const DEFAULT_GOOGLE_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai/";
+/// Default Gemini model for the Google provider (preview flagship, 2026-08).
+pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";

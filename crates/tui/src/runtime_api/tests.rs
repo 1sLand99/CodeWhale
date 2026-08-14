@@ -226,6 +226,7 @@ fn session_detail_tool_use_preserves_caller_metadata() {
                 caller_type: "subagent".to_string(),
                 tool_id: Some("parent-tool".to_string()),
             }),
+            thought_signature: None,
         },
     ]));
 

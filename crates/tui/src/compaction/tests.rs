@@ -192,6 +192,7 @@ fn oversized_tool_pair(id: &str, content: String) -> Vec<Message> {
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "src/compaction.rs"}),
                 caller: None,
+                thought_signature: None,
             }],
         },
         Message {

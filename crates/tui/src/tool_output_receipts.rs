@@ -317,6 +317,7 @@ mod tests {
                 name: name.to_string(),
                 input,
                 caller: None,
+                thought_signature: None,
             }],
         }
     }

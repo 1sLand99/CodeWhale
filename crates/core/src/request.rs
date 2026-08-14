@@ -158,6 +158,12 @@ pub enum ContentBlock {
         input: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         caller: Option<ToolCaller>,
+        /// Google thought signature captured from the OpenAI-compat route's
+        /// `extra_content.google.thought_signature` on the tool call. Google
+        /// requires replaying it with the tool result for thinking models;
+        /// skipped on the wire and in storage for every other provider.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        thought_signature: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
