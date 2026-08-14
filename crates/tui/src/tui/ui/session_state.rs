@@ -874,6 +874,7 @@ pub(crate) fn mirror_saved_api_key_in_config(
         ApiProvider::Xai => &mut providers.xai,
         ApiProvider::Mistral => &mut providers.mistral,
         ApiProvider::Google => &mut providers.google,
+        ApiProvider::Antigravity => &mut providers.antigravity,
         ApiProvider::Telecomjs => &mut providers.telecomjs,
         ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
         ApiProvider::ModelstudioTokenPlanAnthropic => {

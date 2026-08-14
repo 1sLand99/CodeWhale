@@ -21,6 +21,7 @@ use rust_i18n::i18n;
 i18n!("locales", fallback = ["en"]);
 
 mod acp_server;
+mod agy_credentials;
 mod artifacts;
 mod audit;
 mod auto_reasoning;

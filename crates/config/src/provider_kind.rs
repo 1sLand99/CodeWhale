@@ -189,6 +189,11 @@ pub enum ProviderKind {
         alias = "alibaba-coding-plan-anthropic"
     )]
     ModelstudioCodingPlanAnthropic,
+    /// Google Antigravity (`agy` CLI) — consent-gated read-only credential
+    /// import only; the cloud-code wire protocol is not implemented and
+    /// requests fail closed with an actionable message.
+    #[serde(alias = "agy")]
+    Antigravity,
     /// Google — Gemini OpenAI-compatible endpoint. Its own backend, not an
     /// OpenAI alias: thought signatures on tool calls are captured and
     /// replayed per Google's contract.
@@ -219,7 +224,7 @@ impl ProviderKind {
     /// stay on the enum for serde and `provider_for_kind`, but they are not
     /// first-class catalog rows. Plan is `mode` / base_url; dialect is
     /// `wire = openai|anthropic` on the primary provider config.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -258,6 +263,7 @@ impl ProviderKind {
         Self::Telecomjs,
         Self::ModelstudioTokenPlan,
         Self::Google,
+        Self::Antigravity,
         Self::Custom,
     ];
 

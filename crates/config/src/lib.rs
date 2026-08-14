@@ -422,6 +422,14 @@ pub struct ProvidersToml {
         alias = "gemini"
     )]
     pub google: ProviderConfigToml,
+    /// Google Antigravity (`agy`) — consent-gated credential import only;
+    /// sends fail closed until the cloud-code wire protocol exists.
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "agy"
+    )]
+    pub antigravity: ProviderConfigToml,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     #[serde(
         default,
@@ -652,6 +660,7 @@ impl ProvidersToml {
             ProviderKind::Xai => &self.xai,
             ProviderKind::Mistral => &self.mistral,
             ProviderKind::Google => &self.google,
+            ProviderKind::Antigravity => &self.antigravity,
             ProviderKind::Telecomjs => &self.telecomjs,
             ProviderKind::ModelstudioTokenPlan => &self.modelstudio_token_plan,
             ProviderKind::ModelstudioTokenPlanAnthropic => &self.modelstudio_token_plan_anthropic,
@@ -701,6 +710,7 @@ impl ProvidersToml {
             ProviderKind::Xai => &mut self.xai,
             ProviderKind::Mistral => &mut self.mistral,
             ProviderKind::Google => &mut self.google,
+            ProviderKind::Antigravity => &mut self.antigravity,
             ProviderKind::Telecomjs => &mut self.telecomjs,
             ProviderKind::ModelstudioTokenPlan => &mut self.modelstudio_token_plan,
             ProviderKind::ModelstudioTokenPlanAnthropic => {
@@ -3222,6 +3232,7 @@ impl ConfigToml {
                 ProviderKind::Xai => DEFAULT_XAI_BASE_URL.to_string(),
                 ProviderKind::Mistral => DEFAULT_MISTRAL_BASE_URL.to_string(),
                 ProviderKind::Google => DEFAULT_GOOGLE_BASE_URL.to_string(),
+                ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL.to_string(),
                 ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL.to_string(),
                 ProviderKind::ModelstudioTokenPlan
                 | ProviderKind::ModelstudioTokenPlanAnthropic
@@ -4314,6 +4325,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Xai => DEFAULT_XAI_MODEL,
         ProviderKind::Mistral => DEFAULT_MISTRAL_MODEL,
         ProviderKind::Google => DEFAULT_GOOGLE_MODEL,
+        ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_MODEL,
         ProviderKind::ModelstudioTokenPlan
         | ProviderKind::ModelstudioTokenPlanAnthropic
@@ -4364,6 +4376,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Xai => DEFAULT_XAI_BASE_URL,
         ProviderKind::Mistral => DEFAULT_MISTRAL_BASE_URL,
         ProviderKind::Google => DEFAULT_GOOGLE_BASE_URL,
+        ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
         ProviderKind::ModelstudioTokenPlan => DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
         ProviderKind::ModelstudioTokenPlanAnthropic => MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL,
@@ -6625,6 +6638,8 @@ struct EnvRuntimeOverrides {
     mistral_model: Option<String>,
     google_base_url: Option<String>,
     google_model: Option<String>,
+    antigravity_base_url: Option<String>,
+    antigravity_model: Option<String>,
     telecomjs_base_url: Option<String>,
     telecomjs_model: Option<String>,
     modelstudio_token_plan_base_url: Option<String>,
@@ -6935,6 +6950,12 @@ impl EnvRuntimeOverrides {
             xai_model: std::env::var("XAI_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            antigravity_base_url: std::env::var("ANTIGRAVITY_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            antigravity_model: std::env::var("ANTIGRAVITY_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             google_base_url: std::env::var("GOOGLE_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -7060,6 +7081,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Xai => self.xai_base_url.clone(),
             ProviderKind::Mistral => self.mistral_base_url.clone(),
             ProviderKind::Google => self.google_base_url.clone(),
+            ProviderKind::Antigravity => self.antigravity_base_url.clone(),
             ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {
                 self.modelstudio_token_plan_base_url.clone()
@@ -7105,6 +7127,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Xai => self.xai_model.clone(),
             ProviderKind::Mistral => self.mistral_model.clone(),
             ProviderKind::Google => self.google_model.clone(),
+            ProviderKind::Antigravity => self.antigravity_model.clone(),
             ProviderKind::Telecomjs => self.telecomjs_model.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {
                 self.modelstudio_token_plan_model.clone()

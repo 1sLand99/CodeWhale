@@ -92,6 +92,10 @@ pub enum ApiProvider {
     /// backend, not an OpenAI alias: thought signatures on tool calls are
     /// captured and replayed per Google's contract.
     Google,
+    /// Google Antigravity (`agy`). Credential plane only: consent-gated
+    /// read-only import of the official CLI's login. Sends fail closed
+    /// until the cloud-code wire protocol is implemented.
+    Antigravity,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     Telecomjs,
     /// Alibaba Cloud Model Studio — Token Plan (OpenAI-compatible Chat Completions).
@@ -321,7 +325,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 45] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 46] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -361,6 +365,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Xai),
         Some(codewhale_config::ProviderKind::Mistral),
         Some(codewhale_config::ProviderKind::Google),
+        Some(codewhale_config::ProviderKind::Antigravity),
         Some(codewhale_config::ProviderKind::Telecomjs),
         Some(codewhale_config::ProviderKind::ModelstudioTokenPlan),
         Some(codewhale_config::ProviderKind::ModelstudioTokenPlanAnthropic),
@@ -370,7 +375,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 44] = [
+    const FROM_KIND_LOOKUP: [Self; 45] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -414,6 +419,7 @@ impl ApiProvider {
         Self::ModelstudioCodingPlan,
         Self::ModelstudioCodingPlanAnthropic,
         Self::Google,
+        Self::Antigravity,
         Self::Custom,
     ];
 
@@ -1564,6 +1570,9 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ],
+        // The cloud-code wire protocol is not implemented; no model is
+        // advertised for the credential-import-only route.
+        ApiProvider::Antigravity => Vec::new(),
         // Custom endpoints expose no built-in completion names; the user
         // supplies their own model id (#1519).
         ApiProvider::Custom => Vec::new(),
@@ -3464,6 +3473,8 @@ pub struct ProvidersConfig {
         alias = "gemini"
     )]
     pub google: ProviderConfig,
+    #[serde(default, alias = "agy")]
+    pub antigravity: ProviderConfig,
     #[serde(
         default,
         alias = "telecom-js",
@@ -4922,6 +4933,7 @@ impl Config {
             ApiProvider::Xai => &providers.xai,
             ApiProvider::Mistral => &providers.mistral,
             ApiProvider::Google => &providers.google,
+            ApiProvider::Antigravity => &providers.antigravity,
             ApiProvider::Telecomjs => &providers.telecomjs,
             ApiProvider::ModelstudioTokenPlan => &providers.modelstudio_token_plan,
             ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -5000,6 +5012,7 @@ impl Config {
             ApiProvider::Xai => &mut providers.xai,
             ApiProvider::Mistral => &mut providers.mistral,
             ApiProvider::Google => &mut providers.google,
+            ApiProvider::Antigravity => &mut providers.antigravity,
             ApiProvider::Telecomjs => &mut providers.telecomjs,
             ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
             ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -5363,6 +5376,7 @@ impl Config {
             ApiProvider::Xai => DEFAULT_XAI_MODEL,
             ApiProvider::Mistral => DEFAULT_MISTRAL_MODEL,
             ApiProvider::Google => DEFAULT_GOOGLE_MODEL,
+            ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
             ApiProvider::Telecomjs => DEFAULT_TELECOMJS_MODEL,
             ApiProvider::ModelstudioTokenPlan
             | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -5483,6 +5497,7 @@ impl Config {
             | ApiProvider::Xai
             | ApiProvider::Mistral
             | ApiProvider::Google
+            | ApiProvider::Antigravity
             | ApiProvider::Telecomjs
             | ApiProvider::ModelstudioTokenPlan
             | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -5590,6 +5605,7 @@ impl Config {
                         ApiProvider::Xai => DEFAULT_XAI_BASE_URL,
                         ApiProvider::Mistral => DEFAULT_MISTRAL_BASE_URL,
                         ApiProvider::Google => DEFAULT_GOOGLE_BASE_URL,
+                        ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
                         ApiProvider::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
                         ApiProvider::ModelstudioTokenPlan
                         | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -7161,6 +7177,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Xai => &["XAI_BASE_URL"],
         ApiProvider::Mistral => &["MISTRAL_BASE_URL"],
         ApiProvider::Google => &["GOOGLE_BASE_URL", "GEMINI_BASE_URL"],
+        ApiProvider::Antigravity => &["ANTIGRAVITY_BASE_URL"],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioTokenPlanAnthropic => {
             &["MODELSTUDIO_TOKEN_PLAN_BASE_URL"]
@@ -7510,6 +7527,13 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .providers
                     .get_or_insert_with(ProvidersConfig::default)
                     .google
+                    .base_url = Some(value);
+            }
+            ApiProvider::Antigravity => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .antigravity
                     .base_url = Some(value);
             }
             ApiProvider::Telecomjs => {
@@ -7874,6 +7898,8 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Mistral => &mut providers.mistral,
                 ApiProvider::Google => &mut providers.google,
+                ApiProvider::Antigravity => &mut providers.antigravity,
+                ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
                 ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -8220,6 +8246,8 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Mistral => &mut providers.mistral,
                 ApiProvider::Google => &mut providers.google,
+                ApiProvider::Antigravity => &mut providers.antigravity,
+                ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
                 ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -9619,6 +9647,7 @@ fn merge_providers(
             xai: merge_provider_config(base.xai, override_cfg.xai),
             mistral: merge_provider_config(base.mistral, override_cfg.mistral),
             google: merge_provider_config(base.google, override_cfg.google),
+            antigravity: merge_provider_config(base.antigravity, override_cfg.antigravity),
             telecomjs: merge_provider_config(base.telecomjs, override_cfg.telecomjs),
             modelstudio_token_plan: merge_provider_config(
                 base.modelstudio_token_plan,

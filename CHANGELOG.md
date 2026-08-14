@@ -66,6 +66,14 @@ templates moved to v0.9.9.
   auto/low/medium/high; first-party DeepSeek keeps a documented `low` tier.
   `/effort` persists and receipts through the same path as Ctrl+T.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - The source-structure budget ratchet (CI step, checker, baseline JSON).
@@ -366,6 +374,14 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   native runners from the already-verified static release binaries, then
   publishes and checks one multi-architecture manifest. It no longer rebuilds
   both targets through the single long-running QEMU job that lost its runner.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 
@@ -910,6 +926,14 @@ File edits, terminal width, and Windows installation.
   zero could loop indefinitely), restoring a zero-advisory `npm audit` for
   the website.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - The default model-facing SlopLedger implementation, its storage-oriented
@@ -1015,6 +1039,14 @@ stale runtime and dependency surface.
   supported inputs.
 - Bracketed-paste contents are redacted from traces, and credential diagnostics
   never treat placeholder sentinels as usable keys.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 
@@ -2508,6 +2540,14 @@ largest curated model-and-pricing expansion in the project so far.
   show a one-shot deprecation notice. Removal is deferred beyond v0.9.0 so
   this release does not break existing scripts without a dedicated cutover.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - Remove the deprecated `deepseek` and `deepseek-tui` binary shims in this
@@ -3004,6 +3044,14 @@ reproductions shaped v0.9.0:
   @cyq1017.
 - Added an untrusted constitution-draft gate with authoring provenance so
   model-drafted constitutions require explicit human ratification.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 
@@ -4034,6 +4082,14 @@ folds in several community contributions.
 - Stale `--bin deepseek` examples, `DeepSeek-TUI` strings in `/change`
   output, and pre-rebrand doc comments.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - Unused dependencies: `tracing-appender` and `zeroize` (TUI crate),
@@ -4685,6 +4741,14 @@ patches, retesting, and release-stabilization signals that shaped this pass.
 - The invalid-model error now names the active provider and lists Arcee among
   the options.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - **The session "cycle" / checkpoint-restart system.** Removed the `/cycles`,
@@ -4878,6 +4942,14 @@ release: **@A-Corner** (#2438), **@taiwan988** (#2483), **@AiurArtanis**
   support, Vietnamese localization, Java/Vue language-server defaults, runtime
   event envelopes, task migration/env isolation fixes, and state-message
   parent IDs for future forks (#2383, #2358, #2367, #2252, #2272, #2308).
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 

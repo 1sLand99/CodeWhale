@@ -5,13 +5,13 @@
 //! providers; runtime routing remains in `ConfigToml::resolve_runtime_options`.
 
 use super::{
-    DEFAULT_ARCEE_BASE_URL, DEFAULT_ARCEE_MODEL, DEFAULT_ATLASCLOUD_BASE_URL,
-    DEFAULT_ATLASCLOUD_MODEL, DEFAULT_DEEPINFRA_BASE_URL, DEFAULT_DEEPINFRA_MODEL,
-    DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_ANTHROPIC_MODEL,
-    DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL, DEFAULT_FIREWORKS_BASE_URL,
-    DEFAULT_FIREWORKS_MODEL, DEFAULT_GOOGLE_BASE_URL, DEFAULT_GOOGLE_MODEL,
-    DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL, DEFAULT_LONGCAT_BASE_URL,
-    DEFAULT_LONGCAT_MODEL, DEFAULT_META_BASE_URL, DEFAULT_META_MODEL,
+    DEFAULT_ANTIGRAVITY_BASE_URL, DEFAULT_ANTIGRAVITY_MODEL, DEFAULT_ARCEE_BASE_URL,
+    DEFAULT_ARCEE_MODEL, DEFAULT_ATLASCLOUD_BASE_URL, DEFAULT_ATLASCLOUD_MODEL,
+    DEFAULT_DEEPINFRA_BASE_URL, DEFAULT_DEEPINFRA_MODEL, DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL,
+    DEFAULT_DEEPSEEK_ANTHROPIC_MODEL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL, DEFAULT_GOOGLE_BASE_URL,
+    DEFAULT_GOOGLE_MODEL, DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL,
+    DEFAULT_LONGCAT_BASE_URL, DEFAULT_LONGCAT_MODEL, DEFAULT_META_BASE_URL, DEFAULT_META_MODEL,
     DEFAULT_MINIMAX_ANTHROPIC_BASE_URL, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_MODEL,
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL,
     DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL,
@@ -420,6 +420,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             credential_url: Some("https://bailian.console.aliyun.com/"),
             docs_url: Some("https://www.alibabacloud.com/help/en/model-studio/"),
             guidance: "Sign in to Alibaba Cloud Model Studio (Bailian console), create or copy an API key, and select the plan endpoint matching your subscription (Token Plan or Coding Plan).",
+        },
+        ProviderKind::Antigravity => CredentialHelp {
+            acquisition: OAuth,
+            credential_url: None,
+            docs_url: Some("https://antigravity.google/docs/cli/reference"),
+            guidance: "Sign in with the official agy CLI (1.1.13). Codewhale can read that login's token read-only from the exact pinned state.vscdb after `codewhale auth external-consent`; it never writes or refreshes it. An ANTIGRAVITY_API_KEY or AGY_ADC_AUTH in the process wins over the file.",
         },
         ProviderKind::Google => CredentialHelp {
             acquisition: ApiKey,
@@ -957,6 +963,18 @@ provider!(
     ["MISTRAL_API_KEY"],
     "mistral",
     aliases: ["mistral-ai", "mistral_ai", "mistralai", "la-plateforme", "la_plateforme"]
+);
+
+provider!(
+    Antigravity,
+    Antigravity,
+    "antigravity",
+    "Google Antigravity",
+    DEFAULT_ANTIGRAVITY_BASE_URL,
+    DEFAULT_ANTIGRAVITY_MODEL,
+    ["ANTIGRAVITY_API_KEY"],
+    "antigravity",
+    aliases: ["agy"]
 );
 
 provider!(
@@ -1590,6 +1608,7 @@ static OPENCODE_ZEN: OpencodeZen = OpencodeZen;
 static META: Meta = Meta;
 static XAI: Xai = Xai;
 static MISTRAL: Mistral = Mistral;
+static ANTIGRAVITY: Antigravity = Antigravity;
 static TELECOMJS: Telecomjs = Telecomjs;
 static MODELSTUDIO_TOKEN_PLAN: ModelstudioTokenPlan = ModelstudioTokenPlan;
 static MODELSTUDIO_TOKEN_PLAN_ANTHROPIC: ModelstudioTokenPlanAnthropic =
@@ -1599,7 +1618,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 44] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 45] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1643,6 +1662,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 44] = [
     &MODELSTUDIO_CODING_PLAN,
     &MODELSTUDIO_CODING_PLAN_ANTHROPIC,
     &Google,
+    &ANTIGRAVITY,
     &CUSTOM,
 ];
 

@@ -177,6 +177,8 @@ pub enum ExternalCredentialSource {
     GrokCli,
     /// Official DeepSeek Harness (`dsh`) `$DSH_HOME/.credentials.yaml`.
     DshCli,
+    /// Official Antigravity CLI (`agy`) `state.vscdb` OAuth token.
+    AgyCli,
 }
 
 /// Default DeepSeek Harness credentials document, resolved without probing.
@@ -195,6 +197,46 @@ pub fn default_dsh_credentials_path() -> PathBuf {
     home.join(".credentials.yaml")
 }
 
+/// Default Antigravity credential store, resolved without probing: the
+/// official `agy` CLI persists its OAuth token in the Antigravity app's
+/// VSCode-style `state.vscdb` under the user profile. Consent is pinned to
+/// this exact path; an ambient move is reported, never followed.
+#[must_use]
+pub fn default_agy_credentials_path() -> PathBuf {
+    let base = match std::env::var_os("ANTIGRAVITY_STATE_DIR") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => agy_profile_base(),
+    };
+    base.join("User").join("globalStorage").join("state.vscdb")
+}
+
+#[cfg(target_os = "macos")]
+fn agy_profile_base() -> PathBuf {
+    codewhale_paths::user_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/Application Support/Antigravity")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn agy_profile_base() -> PathBuf {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => codewhale_paths::user_home()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config"),
+    }
+    .join("Antigravity")
+}
+
+#[cfg(windows)]
+fn agy_profile_base() -> PathBuf {
+    match std::env::var_os("APPDATA") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => codewhale_paths::user_home().unwrap_or_else(|| PathBuf::from(".")),
+    }
+    .join("Antigravity")
+}
+
 impl ExternalCredentialSource {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -203,6 +245,7 @@ impl ExternalCredentialSource {
             Self::KimiCodeCli => "kimi_code_cli",
             Self::GrokCli => "grok_cli",
             Self::DshCli => "dsh_cli",
+            Self::AgyCli => "agy_cli",
         }
     }
 
@@ -214,6 +257,7 @@ impl ExternalCredentialSource {
             Self::KimiCodeCli => "Kimi Code CLI",
             Self::GrokCli => "Grok CLI",
             Self::DshCli => "DeepSeek Harness",
+            Self::AgyCli => "Antigravity CLI",
         }
     }
 }

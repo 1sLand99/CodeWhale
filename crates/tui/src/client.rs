@@ -1787,6 +1787,19 @@ impl DeepSeekClient {
         request: MessageRequest,
         stream: bool,
     ) -> Result<PreparedOutboundRequest> {
+        // Antigravity is credential-plane only: the agy login can be
+        // imported read-only with consent, but Google's cloud-code wire
+        // protocol is not implemented, and pretending it is OpenAI
+        // compatible would send credentials to a route that cannot serve
+        // them. Fail closed before any body is built.
+        if self.api_provider == crate::config::ApiProvider::Antigravity {
+            anyhow::bail!(
+                "Antigravity (agy) requests are not implemented yet: Codewhale can import the \
+                 official CLI's login read-only (`codewhale auth external-consent`), but the \
+                 cloud-code wire protocol is unavailable, so no request is sent. Use the \
+                 `google` provider for Gemini models."
+            );
+        }
         let mut request =
             self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         if self.is_local_ds4_model(&request.model)
@@ -3240,6 +3253,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
             ApiProvider::Google => {}
+            ApiProvider::Antigravity => {}
         },
         "low" | "minimal" | "medium" | "mid" | "high" | "" => match provider {
             // Handled by the shared DeepSeek table above, before this match.
@@ -3350,6 +3364,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
             ApiProvider::Google => {}
+            ApiProvider::Antigravity => {}
         },
         "xhigh" | "max" | "highest" | "ultracode" => match provider {
             // Handled by the shared DeepSeek table above, before this match.
@@ -3437,6 +3452,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
             ApiProvider::Google => {}
+            ApiProvider::Antigravity => {}
         },
         _ => {}
     }

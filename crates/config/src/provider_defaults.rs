@@ -196,3 +196,9 @@ pub const DEFAULT_GOOGLE_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai/";
 /// Default Gemini model for the Google provider (preview flagship, 2026-08).
 pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
+
+/// Antigravity cloud-code internal endpoint (credential plane only; the
+/// wire protocol is not implemented and sends fail closed).
+pub const DEFAULT_ANTIGRAVITY_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+/// Placeholder model id; never sent — the route fails closed before transport.
+pub const DEFAULT_ANTIGRAVITY_MODEL: &str = "gemini-3-pro-preview";
