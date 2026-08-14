@@ -96,6 +96,10 @@ pub struct RemoteStart {
     /// runs memory-only and is reserved for tests; production callers must
     /// always provide a private directory under the Codewhale home.
     pub journal_dir: Option<PathBuf>,
+    /// Observed `owner/name` from `git remote get-url origin`, when the folder
+    /// is a Git checkout. This is a display receipt, never a path or GitHub App
+    /// grant.
+    pub git_remote: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2254,7 +2258,7 @@ async fn connect_runner(
 }
 
 fn connect_runner_body(enrollment: &LiveEnrollment, start: &RemoteStart) -> Value {
-    json!({
+    let mut body = json!({
         "deviceId": enrollment.persisted.device_id,
         "targetRef": start.target_ref,
         "displayLabel": start.workspace_label,
@@ -2265,7 +2269,69 @@ fn connect_runner_body(enrollment: &LiveEnrollment, start: &RemoteStart) -> Valu
         // This is the only session attachment input. It is an opaque runtime
         // id, never a workspace path, prompt, environment, or credential.
         "sessionRef": start.session_id,
-    })
+    });
+    if let Some(repo) = start
+        .git_remote
+        .as_deref()
+        .and_then(normalize_observed_git_repo)
+    {
+        body["gitRemote"] = json!(repo);
+    }
+    body
+}
+
+/// Collapse a git remote to `owner/name`. Paths, credentials, and unknown
+/// hosts are dropped so the control plane never receives a folder identity.
+pub fn normalize_observed_git_repo(input: &str) -> Option<String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let stripped = raw
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .replace("https://github.com/", "")
+        .replace("https://www.github.com/", "")
+        .replace("http://github.com/", "")
+        .replace("https://cnb.cool/", "")
+        .replace("https://gitee.com/", "")
+        .replace("git@github.com:", "")
+        .replace("git@gitee.com:", "");
+    if stripped.starts_with('/') || stripped.contains(":\\") || stripped.contains("\\\\") {
+        return None;
+    }
+    let parts: Vec<&str> = stripped.split('/').filter(|part| !part.is_empty()).collect();
+    let owner = *parts.get(parts.len().checked_sub(2)?)?;
+    let name = *parts.last()?;
+    if owner.len() > 80 || name.len() > 80 {
+        return None;
+    }
+    if !owner
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return None;
+    }
+    if matches!(owner, "." | "..") || matches!(name, "." | "..") {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
+}
+
+pub fn observed_git_repo(workspace: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    normalize_observed_git_repo(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 fn parse_runner_connection(
@@ -2934,6 +3000,7 @@ mod tests {
             runtime_version: "0.9.6".to_string(),
             runtime_commit: "a".repeat(40),
             journal_dir: None,
+            git_remote: None,
         }
     }
 
@@ -2983,6 +3050,33 @@ mod tests {
                 "snapshotPresent": false
             }
         })
+    }
+
+    #[test]
+    fn observed_git_repo_is_owner_name_not_a_path() {
+        assert_eq!(
+            normalize_observed_git_repo("git@github.com:Hmbown/CodeWhale.git").as_deref(),
+            Some("Hmbown/CodeWhale")
+        );
+        assert_eq!(
+            normalize_observed_git_repo("https://github.com/Hmbown/cwc.git").as_deref(),
+            Some("Hmbown/cwc")
+        );
+        assert_eq!(
+            normalize_observed_git_repo("/Volumes/VIXinSSD/CW/codewhale"),
+            None
+        );
+    }
+
+    #[test]
+    fn connect_body_can_carry_an_observed_repo_without_a_path() {
+        let enrollment = fixture_enrollment("https://api.codewhale.net/");
+        let mut start = fixture_start();
+        start.git_remote = Some("git@github.com:Hmbown/CodeWhale.git".to_string());
+        let body = connect_runner_body(&enrollment, &start);
+        assert_eq!(body["gitRemote"], "Hmbown/CodeWhale");
+        assert!(body.get("workspacePath").is_none());
+        assert!(body.get("path").is_none());
     }
 
     #[test]
@@ -3631,6 +3725,7 @@ mod tests {
             runtime_version: "0.9.1".to_string(),
             runtime_commit: "a".repeat(40),
             journal_dir: None,
+            git_remote: None,
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("previous remote lease"));

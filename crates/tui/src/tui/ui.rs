@@ -920,6 +920,7 @@ fn start_remote_control_session(app: &mut App) {
         .filter(|value| !value.is_empty())
         .unwrap_or("Codewhale session")
         .to_string();
+    let git_remote = crate::remote_control::observed_git_repo(&app.workspace);
     let runtime_commit = option_env!("CODEWHALE_BUILD_COMMIT")
         .unwrap_or("")
         .to_string();
@@ -946,6 +947,7 @@ fn start_remote_control_session(app: &mut App) {
             runtime_version: env!("CARGO_PKG_VERSION").to_string(),
             runtime_commit,
             journal_dir: Some(journal_dir),
+            git_remote,
         }) {
         Ok(()) => {
             let status = app.remote_control.status_line();
