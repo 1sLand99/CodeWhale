@@ -4315,6 +4315,8 @@ async fn run_doctor(
                     println!("    DNS resolution failed. Check your network connection");
                 } else if error_msg.contains("connect") {
                     println!("    Connection failed. Check firewall settings or try again");
+                } else if crate::doctor::is_keyless_ds4_route(config) {
+                    println!("    {error_msg}");
                 } else {
                     println!(
                         "    Error details omitted because provider failures can contain credential material."
@@ -7236,6 +7238,10 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
 
     let client = DeepSeekClient::new(config)?;
     let model = client.model().to_string();
+
+    if crate::doctor::is_keyless_ds4_route(config) {
+        return crate::doctor::probe_ds4_models(config).await;
+    }
 
     // Minimal request: single word prompt, 1 max token
     let request = MessageRequest {

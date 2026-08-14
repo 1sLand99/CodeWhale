@@ -299,7 +299,7 @@ environment. Project-local config overlays intentionally cannot set those keys,
 so a repository cannot silently redirect prompts or credentials to another
 endpoint.
 
-## Local Models (Ollama, vLLM, SGLang)
+## Local Models (DS4, Ollama, vLLM, SGLang)
 
 Self-hosted OpenAI-compatible runtimes are first-class routes and are keyless
 by default — set an API key only when your server requires one. Start your
@@ -311,6 +311,58 @@ table.
 | `ollama` | `http://localhost:11434/v1` | `deepseek-v4-flash` | `OLLAMA_BASE_URL` |
 | `vllm` | `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `VLLM_BASE_URL` |
 | `sglang` | `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `SGLANG_BASE_URL` |
+
+### DS4 (DwarfStar)
+
+[DS4](https://github.com/antirez/ds4/tree/84cc882352757baf628a1776badf7cc54d584e28)
+serves DeepSeek V4 Flash and Pro locally
+through an OpenAI-compatible API. Start DS4, then open Codewhale's prefilled,
+keyless setup form:
+
+```bash
+./ds4-server --ctx 100000 --kv-disk-dir /tmp/ds4-kv --kv-disk-space-mb 8192
+codewhale
+# In Codewhale: /setup provider ds4
+```
+
+Review the prefilled route and press Enter to save it. The preset budgets a
+100,000-token context to match that starter command and defaults to the Flash
+compatibility alias. Check the local route explicitly with
+`codewhale doctor --probe-local`.
+
+DS4 loads the actual GGUF when the server starts. Its `deepseek-v4-flash` and
+`deepseek-v4-pro` API ids are compatibility aliases; changing `/model` does
+not swap the resident model. To run Pro, download the supported Pro weights
+and start `ds4-server -m <pro.gguf> ...` as described by DS4. Update
+`context_window` whenever the server's `--ctx` value changes.
+
+The equivalent config is:
+
+```toml
+provider = "ds4"
+
+[providers.ds4]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+model = "deepseek-v4-flash"
+auth_mode = "none"
+context_window = 100000
+```
+
+Codewhale reuses its existing OpenAI-compatible transport and DeepSeek
+reasoning/tool-call shaping for DS4. It does not invent an API key, confuse an
+API alias with the loaded GGUF, or silently switch to a hosted DeepSeek route.
+The pinned DS4 [agent-client contract](https://github.com/antirez/ds4/blob/84cc882352757baf628a1776badf7cc54d584e28/README.md#agent-client-usage)
+documents Chat Completions at `/v1`, DeepSeek thinking replay, streamed usage,
+`max_tokens`, and no strict-tool mode; Codewhale follows those exact route
+facts instead of inheriting unsupported capabilities from a generic gateway.
+The primary sources for model-facing behavior are DeepSeek's official
+[thinking-mode](https://api-docs.deepseek.com/guides/thinking_mode),
+[tool-call](https://api-docs.deepseek.com/guides/tool_calls), and
+[Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)
+contracts. The pinned
+[DeepSeek Harness adapter](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm-deepseek/README.md)
+is only a secondary implementation cross-check; it is not the API contract.
 
 ### Ollama
 

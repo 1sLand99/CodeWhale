@@ -63,6 +63,10 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+const DS4_PROVIDER_ID: &str = "ds4";
+const DS4_BASE_URL: &str = "http://127.0.0.1:8000/v1";
+const DS4_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     List,
@@ -1636,6 +1640,20 @@ impl ProviderPickerView {
         Self::new_for_setup_inner(active, target, config, runtime_status, true)
     }
 
+    /// Open the named OpenAI-compatible form with DS4's keyless local
+    /// defaults filled in. DS4 uses the existing transport, not a new adapter.
+    #[must_use]
+    pub fn new_for_ds4_setup(
+        active: ApiProvider,
+        config: &Config,
+        runtime_status: Option<ProviderRuntimeStatus>,
+    ) -> Self {
+        let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
+        picker.setup_mode = true;
+        picker.enter_ds4_form();
+        picker
+    }
+
     /// Open the setup catalog for first-run/recovery onboarding (#4763).
     /// Identical to [`Self::new_for_setup`] except that a missing-auth
     /// `target` is only *focused*: onboarding must show the navigable
@@ -2062,6 +2080,15 @@ impl ProviderPickerView {
         self.custom_provider_api_key_env.clear();
     }
 
+    fn enter_ds4_form(&mut self) {
+        self.stage = Stage::CustomForm;
+        self.custom_provider_field = CustomProviderField::ApiKeyEnv;
+        self.custom_provider_id = DS4_PROVIDER_ID.to_string();
+        self.custom_provider_base_url = DS4_BASE_URL.to_string();
+        self.custom_provider_model = DS4_DEFAULT_MODEL.to_string();
+        self.custom_provider_api_key_env.clear();
+    }
+
     fn custom_form_field_mut(&mut self) -> &mut String {
         match self.custom_provider_field {
             CustomProviderField::Name => &mut self.custom_provider_id,
@@ -2218,6 +2245,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
+                    ActionHint::new("D", "DS4"),
                 ],
             )
         } else {
@@ -2230,6 +2258,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
+                    ActionHint::new("D", "DS4"),
                     ActionHint::new("R", self.tr(MessageId::PickerActionEditKey)),
                     ActionHint::new("X", self.tr(MessageId::ProviderExternalActionRevoke)),
                     ActionHint::new("M", self.tr(MessageId::PickerActionModels)),
@@ -3359,6 +3388,14 @@ impl ModalView for ProviderPickerView {
                         && c.eq_ignore_ascii_case(&'c') =>
                 {
                     self.enter_custom_form();
+                    ViewAction::None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && self.query.is_empty()
+                        && c.eq_ignore_ascii_case(&'d') =>
+                {
+                    self.enter_ds4_form();
                     ViewAction::None
                 }
                 // Jump to the `/model` picker pre-filtered to this provider
@@ -5305,6 +5342,33 @@ mod tests {
                 assert_eq!(api_key_env.as_deref(), Some("ACME_API_KEY"));
             }
             other => panic!("expected custom provider submit event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ds4_preset_is_keyless_and_ready_to_save() {
+        let mut picker =
+            ProviderPickerView::new_for_ds4_setup(ApiProvider::Deepseek, &Config::default(), None);
+
+        assert_eq!(picker.stage, Stage::CustomForm);
+        assert_eq!(picker.custom_provider_id, "ds4");
+        assert_eq!(picker.custom_provider_base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(picker.custom_provider_model, "deepseek-v4-flash");
+        assert!(picker.custom_provider_api_key_env.is_empty());
+
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerCustomProviderSubmitted {
+                provider_id,
+                base_url,
+                model,
+                api_key_env,
+            }) => {
+                assert_eq!(provider_id, "ds4");
+                assert_eq!(base_url, "http://127.0.0.1:8000/v1");
+                assert_eq!(model.as_deref(), Some("deepseek-v4-flash"));
+                assert_eq!(api_key_env, None);
+            }
+            other => panic!("expected DS4 custom-provider submit event, got {other:?}"),
         }
     }
 
