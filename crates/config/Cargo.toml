@@ -9,9 +9,9 @@ description = "Config schema and precedence model for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.7" }
-codewhale-paths = { path = "../paths", version = "0.9.7" }
-codewhale-secrets = { path = "../secrets", version = "0.9.7" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.8" }
+codewhale-paths = { path = "../paths", version = "0.9.8" }
+codewhale-secrets = { path = "../secrets", version = "0.9.8" }
 fd-lock = "4.0.4"
 libc = "0.2"
 serde.workspace = true

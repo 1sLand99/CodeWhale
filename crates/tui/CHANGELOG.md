@@ -7,11 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-v0.9.8 is the release cut on this Unreleased block. Plugin marketplace
-parity (#5311), remaining web settings polish, and prefab third-party
-templates moved to v0.9.9.
+_Nothing yet._
+
+## [0.9.8] - 2026-08-14
+
+Remaining web settings polish and prefab third-party templates move to
+v0.9.9.
+
+### Changed
+
+- Plugin compatibility is now per-component. A reviewed, trusted, enabled
+  bundle that mixes Skills or MCP with unsupported commands, agents, hooks,
+  LSP, native, filesystem-roots, or lifecycle-mutation declarations keeps the
+  supported adapters active and reports the rest as inactive (`full` /
+  `partial` / `unsupported`). All-unsupported bundles still cannot be enabled.
+  The capability hash is now v2 and binds this build's activation policy, so
+  older v1 receipts and any later adapter-enablement change fail closed as
+  needs-review. Skills and each MCP transport re-request their own capability
+  at the consumption boundary.
 
 ### Added
+
+- `/plugin marketplace add|list|show|remove|install` completes the
+  federated marketplace journey (#5311). `add` reads one LOCAL catalog
+  document in the real published schemas (Kimi, Claude, Codex, or
+  Codewhale native) — no network, regular files only — and persists it
+  beside the plugin state with the same hardened, fail-closed store.
+  `list`/`show` render every candidate with per-entry diagnostics,
+  display-only tiers, and honest install plans that say when Codewhale
+  cannot fetch a source; `install` routes through the existing reviewed
+  installer, so installed bundles still enter disabled and untrusted.
+  Foreign auto-install policy (Codex `INSTALLED_BY_DEFAULT`) is visibly
+  ignored; nothing is auto-installed, auto-trusted, or granted vendor
+  trust.
 
 - `/rc` attach now includes an observed `owner/name` git remote when the
   folder has a GitHub, CNB, or Gitee origin, so CWC can label the paired
@@ -42,6 +70,24 @@ templates moved to v0.9.9.
 
 ### Fixed
 
+- Selecting the `google` provider kind resolved to the `antigravity`
+  TUI identity (and vice versa): the agy provider entry was inserted at
+  different positions in the config-level enum and the TUI's
+  discriminant-indexed lookup table. The table now matches the enum, so
+  provider pickers, sorted display, and kind round-trips are correct.
+
+- The provider picker's key-entry stage accepted typed input and pastes
+  for OAuth-only providers after `antigravity` declared OAuth
+  acquisition; those gates now key off the OAuth acquisition class
+  instead of a hard-coded provider identity.
+
+- The webhook hook sink no longer panics when its HTTP client fails to
+  build; it falls back to a default client (#5381, EvanProgramming).
+
+- Session-index JSONL writes are serialized behind a process-wide mutex
+  so concurrent state stores cannot drop an append during compaction
+  (#5382, EvanProgramming; complements the cross-process file lock).
+
 - A billed `max_tokens` stop followed by a transport error fails the turn
   instead of continuing into a second request. A clean output-limit stop
   still continues. Mid-size context windows keep the ordinary 65K internal
@@ -53,6 +99,22 @@ templates moved to v0.9.9.
   auto/low/medium/high/xhigh (cannot disable); Grok 4.5 is
   auto/low/medium/high; first-party DeepSeek keeps a documented `low` tier.
   `/effort` persists and receipts through the same path as Ctrl+T.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
+### Removed
+
+- The source-structure budget ratchet (CI step, checker, baseline JSON).
+  It measured line counts, not quality: every legitimate feature required
+  a hand-edited ceiling and the accompanying "review" was self-review, so
+  it bought ceremony, not protection. Behavior-measuring gates (dead-code,
+  runtime-contract, persistence-backlog) stay enforced.
 - DeepSeek can reuse a key already stored by official DeepSeek Harness
   (`dsh`) after
   `codewhale auth external-consent --provider deepseek --mode read-only`.
@@ -346,6 +408,14 @@ runs against Pi 0.8.41 and by dogfooding repeated manual compaction.
   native runners from the already-verified static release binaries, then
   publishes and checks one multi-architecture manifest. It no longer rebuilds
   both targets through the single long-running QEMU job that lost its runner.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 
@@ -890,6 +960,14 @@ File edits, terminal width, and Windows installation.
   zero could loop indefinitely), restoring a zero-advisory `npm audit` for
   the website.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - The default model-facing SlopLedger implementation, its storage-oriented
@@ -995,6 +1073,14 @@ stale runtime and dependency surface.
   supported inputs.
 - Bracketed-paste contents are redacted from traces, and credential diagnostics
   never treat placeholder sentinels as usable keys.
+
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
 
 ### Removed
 
@@ -2488,6 +2574,14 @@ largest curated model-and-pricing expansion in the project so far.
   show a one-shot deprecation notice. Removal is deferred beyond v0.9.0 so
   this release does not break existing scripts without a dedicated cutover.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - Remove the deprecated `deepseek` and `deepseek-tui` binary shims in this
@@ -2985,6 +3079,14 @@ reproductions shaped v0.9.0:
 - Added an untrusted constitution-draft gate with authoring provenance so
   model-drafted constitutions require explicit human ratification.
 
+- Google Gemini is its own backend (`/provider google`) on the official
+  OpenAI-compatible route with thought-signature capture/replay and
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
+  as a separate credential-plane provider: consent-gated read-only import
+  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
+  precedence; requests fail closed until the cloud-code wire protocol is
+  implemented.
+
 ### Removed
 
 - Removed unused model-registry helpers. Harvested from #3872 by @cyq1017.
@@ -3403,143 +3505,6 @@ reproductions shaped v0.9.0:
   rejects rooted/prefixed subdir strings such as `/etc` before resolving or
   migrating state directories, keeping the `.codewhale` write resolver inside
   its state root across platforms.
-
-## [0.8.62] - 2026-06-17
-
-### Changed
-
-- **GLM-5.2 is now the default direct Z.AI model.** `DEFAULT_ZAI_MODEL` resolves
-  to `GLM-5.2` in both `codewhale-tui` and `codewhale-config`; the `glm-5.1`
-  alias still resolves to `GLM-5.1` (the defaulting was decoupled from the alias
-  arm so it no longer tracks the default). Docs and `config.example.toml` no
-  longer describe GLM-5.2 as an opt-in preview.
-- **GLM-5-Turbo registered as a real model** and wired as the faster/explore
-  sub-agent sibling for the GLM family: a `GLM-5.2` parent routes
-  faster/explore children to `GLM-5-Turbo` (direct Z.ai) and `z-ai/glm-5-turbo`
-  (OpenRouter), instead of down to GLM-5.1. GLM-5.1 and GLM-5-Turbo themselves
-  have no cheaper tier and keep children on the parent.
-- **`type: "explore"` sub-agents default to `model_strength: "faster"`.** Bounded
-  read-only lookup/search/status work now uses the cheaper same-family sibling
-  automatically, unless an explicit `model` or `model_strength: "same"` is
-  supplied. Non-explore roles keep the conservative `same` default.
-- **GPT-5.5 / OpenAI Codex faster route stays on GPT-5.5** with reasoning
-  resolved to `low` (the Codex Responses API has no true `off`, so the resolved
-  effort is now honest `low` rather than `off` silently rewritten). No
-  DeepSeek/GLM fallback is fabricated when no cheaper same-provider sibling
-  exists. DeepSeek Pro→Flash routing and its no-thinking faster lane are
-  unchanged.
-- **Base prompt / delegate skill guidance** updated to encourage parallel
-  read-only exploration (2-4 `type: "explore"` sub-agents) for broad repo,
-  version, branch, release, and API-surface investigations, while keeping
-  architecture, integration, and final verification in the parent. The
-  delegate skill examples now use provider-neutral `model_strength` instead of
-  hardcoded DeepSeek model ids.
-- **Agent synthesis guardrails.** The base constitution now frames tools around
-  sufficient evidence rather than open-ended persistence: extra reads, searches,
-  and delegation must target a missing fact, and agents should answer with
-  limits instead of broadening searches indefinitely. The runtime loop guard
-  now blocks duplicate read-only/delegated calls earlier and caps repeated
-  broad lookup/delegation loops in a single turn with a synthesis-forcing tool
-  error. Guard metadata distinguishes exact duplicates
-  (`identical_tool_call`) from no-progress loops (`no_progress_tool_loop`).
-- **Sub-agent handoff and visibility.** Direct sub-agent completions are drained
-  before the next parent model request, so finished children can wake the main
-  model promptly instead of waiting for an empty-tool-use branch or idle engine
-  path. Nested sub-agents now report completions to their immediate parent
-  inbox; the main model still receives only direct-child completions, avoiding
-  grandchild floods while preserving nested evidence flow. Sub-agent output
-  guidance now requires child-agent provenance when a sub-agent relies on a
-  child report: cite the child `agent_id` and the child's EVIDENCE line(s), and
-  do not present child findings as directly verified facts. The sidebar orders
-  sub-agents as a parent/child tree and annotates nested rows with parent and
-  depth information in hover text.
-- **Sub-agent summary provenance (#2652).** A sub-agent's free-text result is now
-  explicitly treated as an unverified self-report rather than confirmed
-  evidence. The completion sentinel carries `summary_kind: complete | truncated`
-  so the parent model can branch on whether it saw the full report or a clipped
-  excerpt. Short summaries (≤ 12,000 chars) get a soft "re-verify material
-  claims" suffix; longer ones are head+tail truncated with an honest marker
-  stating the elided middle is not retrievable via `retrieve_tool_result`.
-  Every summary therefore carries exactly one boundary marker, never both.
-- **Provider metadata centralization.** Provider env vars, config keys, aliases,
-  and auth hints are now resolved through the shared `ProviderMetadata` registry
-  across `codewhale-config`, `codewhale-tui`, and `codewhale-cli`, reducing drift
-  between the provider picker, `codewhale auth`, `doctor --json`, and setup
-  hints.
-
-### Added
-
-- **Agent clarification questions (#3102).** Agents now have a first-class
-  `request_user_input` tool to ask the user structured clarifying questions
-  through a modal UI surface instead of only emitting a chat message and hoping
-  the user notices. Mirrors the approval/secret-request flow the harness
-  already used for permissions. The tool accepts 1-3 questions, each with a
-  header, an id, 2-4 selectable options (label + description), and
-  `allow_free_text` / `multi_select` flags (both default to `false` for
-  back-compat). Input is validated up front with actionable errors. Wired
-  across all layers: the `request_user_input` tool, engine handling
-  (`turn_loop` → `approval`), an interactive TUI modal (`UserInputView`) with
-  full keyboard navigation, and the runtime protocol
-  (`EventFrame::UserInputRequest` + `AppRequest::SubmitUserInput`) so headless
-  / app-server clients can answer programmatically. Parity tests cover the
-  wire round-trip and the omitted-flags default.
-- **Transcript hyperlinks — out-of-band OSC 8 (#3029).** Clickable file /
-  file:line / URL links now reach the terminal through a column-drift-safe
-  path. Link payloads are embedded in-band by the markdown renderer, then
-  extracted out of the ratatui buffer cells and re-emitted out-of-band by
-  `ColorCompatBackend` — so the `ESC` bytes never occupy display columns or
-  corrupt selection. Supporting terminals get live hyperlinks; others see the
-  label text unchanged. Clipboard/selection extraction strips residual codes as
-  defense-in-depth.
-- **CodeWhale-only skill discovery gate (#3296).** New
-  `[skills].scan_codewhale_only = true` limits session-time skill discovery to
-  CodeWhale-owned roots (`<workspace>/.codewhale/skills`, `~/.codewhale/skills`,
-  and any explicit `skills_dir`) while ignoring cross-tool directories such as
-  `.claude/skills`, `.opencode/skills`, `.cursor/skills`, and `~/.agents/skills`.
-  The default remains the broad compatibility scan.
-- **Permission/ask runtime rules (#3295).** Sibling `permissions.toml` ask-only
-  rules are now loaded by the TUI engine and applied to `exec_shell` before
-  Auto/session approval shortcuts. Matching ask rules force an approval prompt
-  in otherwise auto-approved flows and are rejected under
-  `approval_mode = "never"`.
-- **Runtime API no-auth documentation.** `docs/RUNTIME_API.md` now documents
-  `codewhale app-server --insecure-no-auth` for loopback-only testing and warns
-  against combining it with `--mobile` on `0.0.0.0`.
-
-### Fixed
-
-- **TUI polish.** The empty-startup welcome block is centered by the actual
-  rendered text width, fixing the off-center layout left over from the old
-  sidebar-oriented welcome composition. Streaming HTTP body read errors now
-  explain whether CodeWhale can retry before output, or is surfacing a warning
-  after partial output to avoid replaying and duplicating streamed text.
-- **Config comment preservation.** Rewriting `config.toml`, `settings.toml`, or
-  `tui.toml` now merges user comments and formatting back into the serialized
-  document; if comment merge fails, the write falls back to plain serialized
-  output rather than failing.
-- **Snapshot gate respected for per-tool snapshots (#3292).** Per-tool snapshots
-  now check `[snapshots].enabled` before writing, matching the existing
-  session-level gate.
-- **Poppler `pdftotext` detection (#1667).** The dependency resolver now probes
-  `pdftotext -v` instead of `--version`, because Poppler treats `--version` as
-  an input filename. Fixes detection on systems where only Poppler is installed.
-- **Plan confirmation checklist visibility.** The Plan-mode confirmation modal
-  now shows the active checklist under the plan details, so users can review the
-  concrete `checklist_write` work breakdown before accepting or revising a plan.
-
-### Retroactive credits
-
-A credit-reconciliation pass found shipped community fixes that were never
-recorded in this changelog. Crediting them now, with the version they shipped in:
-
-- Global `~/.deepseek/AGENTS.md` fallback loading — thanks @manaskarra (fix) and @xfy6238 (report) (#1157, v0.8.27)
-- CRLF SSE event parsing for MCP — thanks @reidliu41 (fix) and @djairjr (report) (#1309, v0.8.29)
-- Reduce-motion default on VTE/flicker terminals — thanks @Geallier (report) (#1470, v0.8.34)
-- `portable-pty` 0.9 upgrade for LoongArch64 — thanks @quentin-lian (fix) and @k0tran (report) (#1531, #1992, v0.8.46)
-- `DEEPSEEK_ALLOW_INSECURE_HTTP` guard for LAN vLLM — thanks @F1LT3R (report) (#1656, v0.8.47)
-- Hidden `reasoning_content` kept in English regardless of locale — thanks @cmyyy (report) (#1842, v0.8.47)
-- `ExternalTool` abstraction layer — thanks @aboimpinto (#1794, #2294, v0.8.48)
-- Ephemeral generated project context — thanks @Final527 (report) (#3058, v0.8.59)
 
 ---
 
