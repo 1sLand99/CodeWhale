@@ -610,7 +610,7 @@ codewhale doctor`;
           </div>
           <div className="grid md:grid-cols-3 gap-0 col-rule hairline-t hairline-b">
             <Link
-              href={isZh ? "/zh/docs" : "/en/docs"}
+              href={`/${locale}/docs`}
               className="p-6 hover:bg-paper-deep transition-colors"
             >
               <div className="font-display text-xl mb-2">Docs</div>
