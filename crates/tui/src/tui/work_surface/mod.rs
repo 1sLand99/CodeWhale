@@ -83,9 +83,10 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::tools::subagent::{
-        AgentWorkerStatus, FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus,
+        AgentWorkerStatus, FleetRole, MailboxMessage, SubAgentAssignment, SubAgentResult,
+        SubAgentStatus,
     };
     use crate::tools::todo::TodoStatus;
     use crate::tui::app::{
@@ -1272,10 +1273,7 @@ mod tests {
     #[test]
     fn fleet_row_repaints_resolved_model_and_each_distinct_usage_total() {
         let mut app = fleet_app(None);
-        app.agent_progress_meta
-            .get_mut("agent_stream")
-            .expect("progress meta")
-            .resolved_model = Some("deepseek-v4-pro".to_string());
+        crate::tui::ui::record_agent_spawned_route(&mut app, "agent_stream", "deepseek-v4-pro");
         let launched = fleet_row(&render_rows(&mut app, 120, 4));
         assert!(launched.contains("deepseek-v4-pro"), "{launched}");
         assert!(!launched.contains("tokens"), "{launched}");

@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Record the model frozen into a child's runtime at spawn time.
+///
+/// This is child-route evidence, not an inference from the parent session. A
+/// later usage envelope may confirm or replace it with the provider's
+/// effective route while also adding provider and token facts.
+pub(crate) fn record_agent_spawned_route(app: &mut App, agent_id: &str, model: &str) {
+    let model =
+        bound_agent_activity_text(&crate::cost_status::sanitize_persisted_route_label(model));
+    app.agent_progress_meta
+        .entry(agent_id.to_string())
+        .or_default()
+        .resolved_model = Some(model).filter(|model| !model.trim().is_empty());
+}
+
 /// Apply the normal spawn status first, then submit its observer event.
 /// Submission diagnostics go to the independent toast queue, so they remain
 /// visible without replacing the agent's authoritative lifecycle status.

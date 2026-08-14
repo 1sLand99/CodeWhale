@@ -448,9 +448,10 @@ pub(super) fn handle_subagent_mailbox_for_turn(
             .subagent_usage_sources
             .insert((agent_id.clone(), stable_source))
         {
-            // Preserve the effective child route for Agent Details. Keep it
-            // behind the stable response guard so replayed usage envelopes do
-            // not repaint receipts or inflate the Work-row token total.
+            // Update the Work-row receipt under the same replay guard as
+            // cost. A mailbox replay must not make either total grow twice.
+            // Usage confirms or replaces the child's frozen spawn model; the
+            // parent's configured/default route is never child evidence.
             record_agent_current_activity(app, message);
             let audit = route.audit(usage);
             app.record_turn_cost_audit(&audit);
@@ -459,7 +460,9 @@ pub(super) fn handle_subagent_mailbox_for_turn(
                 app.accrue_subagent_cost_estimate(cost);
             }
         }
-        return false; // No card visual change needed; the footer handles display.
+        // No transcript card changed. The event-loop redraw still repaints
+        // the Work row and footer from the updated receipt state.
+        return false;
     }
 
     // Resolve (or allocate) the target cell for this envelope. ChildSpawned

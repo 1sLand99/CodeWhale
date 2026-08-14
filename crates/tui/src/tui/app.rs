@@ -474,8 +474,10 @@ pub struct AgentProgressMeta {
     /// At most three tool outcomes observed through structured lifecycle
     /// envelopes, oldest to newest.
     pub recent_actions: VecDeque<AgentRecentAction>,
-    /// Effective route facts observed from a real child token-usage envelope.
-    /// These stay absent until the provider actually reports usage.
+    /// Effective route facts observed from the child's installed spawn route
+    /// or a later provider usage envelope. The launch event carries the exact
+    /// model frozen into the child runtime; usage may confirm it while also
+    /// supplying provider identity.
     pub resolved_provider: Option<String>,
     pub resolved_model: Option<String>,
     /// Tokens this child has *used* (input + output), accumulated across its

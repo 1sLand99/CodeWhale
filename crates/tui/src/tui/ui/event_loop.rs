@@ -2072,10 +2072,7 @@ pub(crate) async fn run_event_loop(
                         prompt,
                         parent_run_id,
                         spawn_depth,
-                        // Attribution is consumed by structured-output hosts;
-                        // the interactive TUI shows the child's model in the
-                        // work surface from its own record.
-                        model: _,
+                        model,
                         route_source: _,
                     } => {
                         let prompt_summary = bound_agent_activity_text(&prompt);
@@ -2091,6 +2088,7 @@ pub(crate) async fn run_event_loop(
                             None,
                         ));
                         meta.current_tool = None;
+                        record_agent_spawned_route(app, &id, &model);
                         if app.agent_activity_started_at.is_none() {
                             app.agent_activity_started_at = Some(Instant::now());
                         }

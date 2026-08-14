@@ -54,7 +54,7 @@ pub(super) struct AgentRowText {
     /// (2026-08-04 regression report).
     pub(super) status: String,
     pub(super) objective: String,
-    /// `12m 33s · ↓ 111.9k tokens`. Empty once dropped.
+    /// `deepseek-v4-pro · 12m 33s · ↓ 111.9k tokens`. Empty once dropped.
     pub(super) receipt: String,
     /// Spaces separating the objective from the receipt.
     pub(super) gap: usize,
@@ -64,6 +64,12 @@ pub(super) struct AgentRowText {
 /// reported is absent, never zero: an agent with no usage envelope shows no
 /// token count at all.
 pub(super) fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String {
+    let model = facts
+        .model
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
+        .map(str::to_string);
     let elapsed = facts
         .elapsed_secs
         .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
@@ -85,7 +91,7 @@ pub(super) fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String
         .filter(|n| *n > 0)
         .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
         .map(|n| format!("{n} left"));
-    [elapsed, tokens, todos_left]
+    [model, elapsed, tokens, todos_left]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()

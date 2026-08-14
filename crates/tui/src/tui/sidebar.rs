@@ -582,7 +582,7 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     parent_run_id: meta.and_then(|meta| meta.parent_run_id.clone()),
                     spawn_depth,
                     name: display_name,
-                    model: None,
+                    model: meta.and_then(|meta| meta.resolved_model.clone()),
                     status: current_activity
                         .map(|activity| sidebar_current_activity_status_text(activity.status))
                         .unwrap_or(sidebar_worker_status_text(AgentWorkerStatus::Running))
@@ -2180,8 +2180,10 @@ mod tests {
                 ..AgentProgressMeta::default()
             },
         );
+        crate::tui::ui::record_agent_spawned_route(&mut app, "agent_queued", "deepseek-v4-pro");
         let rows = sidebar_agent_rows(&app);
         assert_eq!(rows[0].status, "queued");
+        assert_eq!(rows[0].model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(
             rows[0].progress.as_deref(),
             Some("queued · waiting for launch permit")

@@ -150,7 +150,10 @@ pub(super) struct AgentRowFacts {
     /// Wall-clock seconds, frozen once the agent is observed terminal so a
     /// finished agent stops ticking. `None` when no duration is known.
     pub elapsed_secs: Option<u64>,
-    /// Tokens received from the provider. `None` means *genuinely unknown* —
+    /// Model from the child's frozen spawn route or a later effective-route
+    /// usage envelope; never inferred from the parent session's model.
+    pub model: Option<String>,
+    /// Tokens used by the child. `None` means *genuinely unknown* —
     /// the row then renders no token figure rather than claiming zero.
     pub tokens: Option<u64>,
     /// Unsettled items on this child's to-do list. `None` when no list has
@@ -1440,6 +1443,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             status: status.to_string(),
                             objective,
                             elapsed_secs: Some(agent_elapsed_ms(app, agent) / 1_000),
+                            model: meta.and_then(|meta| meta.resolved_model.clone()),
                             tokens: meta.and_then(|meta| meta.received_tokens),
                             todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                         }),
@@ -1524,6 +1528,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                                 // been seen for this id. Both render as
                                 // nothing rather than as `0s` / `0 tokens`.
                                 elapsed_secs: None,
+                                model: meta.and_then(|meta| meta.resolved_model.clone()),
                                 tokens: meta.and_then(|meta| meta.received_tokens),
                                 todos_remaining: meta.and_then(|meta| meta.todos_remaining),
                             }),
