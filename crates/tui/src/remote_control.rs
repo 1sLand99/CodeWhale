@@ -2300,7 +2300,10 @@ pub fn normalize_observed_git_repo(input: &str) -> Option<String> {
     if stripped.starts_with('/') || stripped.contains(":\\") || stripped.contains("\\\\") {
         return None;
     }
-    let parts: Vec<&str> = stripped.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = stripped
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     let owner = *parts.get(parts.len().checked_sub(2)?)?;
     let name = *parts.last()?;
     if owner.len() > 80 || name.len() > 80 {
