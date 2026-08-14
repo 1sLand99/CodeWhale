@@ -330,7 +330,9 @@ remain a distinct system and are listed under `/plugin tools`.
 
 ## Explicit non-goals as of v0.9.6
 
-There is no remote marketplace or registry index (`/plugin install` fetches
+Federated marketplace catalogs (`/plugin marketplace add|list|show|remove|install`)
+parse local Kimi-, Claude-, Codex-, and Codewhale-format catalog documents; see
+the marketplace section below (`/plugin install` fetches
 one reviewed source, and `/plugin suggest` ranks only what is already
 installed), no ambient compatibility discovery, no automatic trust, no
 plugin-contributed MCP OAuth, no hook adapter, command adapter, agent adapter,
@@ -338,3 +340,31 @@ LSP adapter, native extension runtime, or MCP subscription adapter, no
 migration of another application's bundle, and no on-disk auto-migration of a
 legacy `plugin.toml` to `plugin.json`. These remain later work rather than
 implied capabilities.
+
+## Marketplace catalogs (#5311)
+
+`/plugin marketplace` reads LOCAL catalog documents in the real published
+schemas (Kimi, Claude, Codex, Codewhale native; Codex via its policy markers)
+and renders every candidate with an honest install plan:
+
+```text
+/plugin marketplace add <name> <path>   # parse a local catalog file (no network)
+/plugin marketplace list                # catalogs + candidates + diagnostics
+/plugin marketplace show <name>          # one catalog in detail
+/plugin marketplace remove <name>        # forget a catalog (plugins unaffected)
+/plugin marketplace install <catalog> <candidate>
+```
+
+- `add` never fetches anything: it reads one local JSON file (≤4 MiB, regular
+  files only, symlinks refused) and stores the parsed catalog next to the
+  plugin state file.
+- Catalog tiers and provenance (`official`, `curated`, …) are **display
+  only** — they never grant trust, enablement, or installation.
+- Foreign policies are visibly ignored: a Codex `INSTALLED_BY_DEFAULT` entry
+  is listed with a `NO_AUTO_INSTALL` warning and nothing is installed until
+  an operator runs the install verb.
+- Sources Codewhale cannot fetch (npm packages, `command:` sources, non-tarball
+  URLs) are listed as `not installable` with the reason.
+- `install` routes through the same reviewed installer as `/plugin install`:
+  the bundle lands disabled and untrusted, and enters the hash-bound trust
+  review before anything activates.

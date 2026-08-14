@@ -519,9 +519,12 @@ fn save_state(path: &Path, state: &PluginStateFile) -> Result<(), String> {
     save_state_with_hardener(path, state, harden_plugin_state_file)
 }
 
-fn save_state_with_hardener(
+/// Publish a hardened JSON document atomically. Generic over the schema so
+/// sibling Codewhale-owned stores (e.g. the marketplace catalog store) share
+/// the exact durability and no-follow path this registry was audited for.
+pub(crate) fn save_state_with_hardener<T: serde::Serialize>(
     path: &Path,
-    state: &PluginStateFile,
+    state: &T,
     harden_temporary: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let parent = path
@@ -663,7 +666,7 @@ fn persist_plugin_state(temporary: tempfile::NamedTempFile, path: &Path) -> Resu
         .map_err(|error| format!("failed to atomically persist {}: {error}", path.display()))
 }
 
-fn state_lock_path(path: &Path) -> PathBuf {
+pub(crate) fn state_lock_path(path: &Path) -> PathBuf {
     let mut name = path
         .file_name()
         .map(|name| name.to_os_string())
@@ -673,7 +676,7 @@ fn state_lock_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
+pub(crate) fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -701,7 +704,7 @@ fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
 }
 
 #[cfg(windows)]
-fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
+pub(crate) fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     const LOCK_ACCESS_WITH_OWNER: u32 = 0x001e_019f;
@@ -769,7 +772,7 @@ fn open_windows_state_lock(
         .open(path)
 }
 
-fn path_entry_exists(path: &Path) -> Result<bool, String> {
+pub(crate) fn path_entry_exists(path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -780,7 +783,10 @@ fn path_entry_exists(path: &Path) -> Result<bool, String> {
 /// Open an existing state file without following its final link/reparse point.
 /// `None` is returned only for a genuinely absent entry; an existing unsafe
 /// object always fails closed.
-fn open_existing_regular_file(path: &Path, write: bool) -> Result<Option<fs::File>, String> {
+pub(crate) fn open_existing_regular_file(
+    path: &Path,
+    write: bool,
+) -> Result<Option<fs::File>, String> {
     if !path_entry_exists(path)? {
         return Ok(None);
     }
@@ -850,7 +856,7 @@ fn validate_opened_regular_file(path: &Path, file: &fs::File) -> Result<(), Stri
     Ok(())
 }
 
-fn validate_existing_plugin_state_parent(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_existing_plugin_state_parent(path: &Path) -> Result<(), String> {
     let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -913,7 +919,7 @@ fn validate_plugin_state_directory_for_read(_path: &Path) -> Result<(), String> 
 }
 
 #[cfg(unix)]
-fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt as _;
 
     if !path_entry_exists(path)? {
@@ -927,20 +933,20 @@ fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path)
         .map_err(|error| format!("failed to create plugin state directory: {error}"))?;
     set_windows_owner_only_acl(path)
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_private_plugin_state_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path)
         .map_err(|error| format!("failed to create plugin state directory: {error}"))
 }
 
 #[cfg(windows)]
-fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
+pub(crate) fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
     set_windows_owner_only_acl(path)
 }
 
@@ -956,7 +962,7 @@ fn harden_opened_plugin_state_file(
 }
 
 #[cfg(unix)]
-fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
+pub(crate) fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         format!(
@@ -967,7 +973,7 @@ fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn harden_plugin_state_file(_path: &Path) -> Result<(), String> {
+pub(crate) fn harden_plugin_state_file(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

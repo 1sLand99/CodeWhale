@@ -10,6 +10,7 @@
 //! when an operator explicitly installs a candidate.
 
 pub mod parsers;
+pub mod store;
 #[cfg(test)]
 mod tests;
 pub mod types;

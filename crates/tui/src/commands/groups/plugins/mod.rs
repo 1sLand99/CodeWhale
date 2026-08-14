@@ -30,6 +30,9 @@ use crate::plugins::types::{LoadedPlugin, PluginDiagnosticLevel};
 use crate::tui::app::{App, AppAction};
 
 mod legacy;
+mod marketplace;
+#[cfg(test)]
+mod marketplace_tests;
 mod render;
 
 #[cfg(test)]
@@ -54,7 +57,7 @@ impl CommandGroup for PluginsCommands {
 pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
     name: "plugin",
     aliases: &["plugins"],
-    usage: "/plugin [list|show|suggest|validate|export|install|update|uninstall|trust|enable|disable|revoke|reload|tools]",
+    usage: "/plugin [list|show|suggest|validate|export|install|update|uninstall|trust|enable|disable|revoke|reload|tools|marketplace]",
     description_id: MessageId::CmdPluginDescription,
 };
 
@@ -78,6 +81,7 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
     match words.as_slice() {
         [] | ["list"] => list_bundles_and_legacy_tools(app),
         ["help"] => CommandResult::message(tr(app.ui_locale, MessageId::CmdPluginBundleUsage)),
+        ["marketplace", rest @ ..] => marketplace::dispatch(app, rest),
         ["show", selector] => show_bundle(app, selector),
         ["suggest"] | ["recommend"] => CommandResult::error("Usage: /plugin suggest <task>"),
         ["suggest", task @ ..] | ["recommend", task @ ..] => suggest_bundles(app, &task.join(" ")),
