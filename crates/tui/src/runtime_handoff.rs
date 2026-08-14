@@ -225,6 +225,43 @@ Authority: non-authoritative runtime checkpoint"
     message.clone()
 }
 
+/// True when a persisted message is runtime-owned control traffic rather than
+/// something a person typed at the composer.
+///
+/// This covers every handoff the module builds — sub-agent completion, failure
+/// and waiting events, background-shell completions, and the restore
+/// checkpoints projected from them. [`raw_runtime_handoff_text`] answers a
+/// narrower question — can the restore projection rewrite *this* message? —
+/// and stays limited to the sub-agent shapes it knows how to rewrite.
+///
+/// Recognition is structural, matching what [`runtime_handoff_message_with_meta`]
+/// builds: two text blocks, no cache markers, and a runtime provenance line in
+/// the trailing envelope. Someone who pastes a raw envelope into the composer
+/// produces a single block and is not matched, which is the same discriminator
+/// that keeps the restore projection off user-authored lookalikes.
+pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
+    if message.role != "user" {
+        return false;
+    }
+    let [
+        ContentBlock::Text {
+            cache_control: first_cache,
+            ..
+        },
+        ContentBlock::Text {
+            text: turn_meta,
+            cache_control: meta_cache,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    if first_cache.is_some() || meta_cache.is_some() {
+        return false;
+    }
+    is_subagent_handoff_turn_meta(turn_meta) || is_handoff_turn_meta(turn_meta, "shell_completion")
+}
+
 fn raw_runtime_handoff_text(message: &Message) -> Option<&str> {
     if message.role != "user" {
         return None;
@@ -249,9 +286,11 @@ fn raw_runtime_handoff_text(message: &Message) -> Option<&str> {
 }
 
 fn is_subagent_handoff_turn_meta(text: &str) -> bool {
-    if text == SUBAGENT_HANDOFF_TURN_META {
-        return true;
-    }
+    text == SUBAGENT_HANDOFF_TURN_META || is_handoff_turn_meta(text, "subagent_handoff")
+}
+
+/// Recognize a runtime-owned `<turn_meta>` envelope by its provenance kind.
+fn is_handoff_turn_meta(text: &str, provenance: &str) -> bool {
     let Some(body) = text
         .strip_prefix("<turn_meta>\n")
         .and_then(|body| body.strip_suffix("\n</turn_meta>"))
@@ -263,7 +302,7 @@ fn is_subagent_handoff_turn_meta(text: &str) -> bool {
     if has_one_exact_metadata_line(
         body,
         "Input provenance:",
-        "Input provenance: subagent_handoff (non-authoritative)",
+        &format!("Input provenance: {provenance} (non-authoritative)"),
     ) {
         return true;
     }
@@ -271,7 +310,7 @@ fn is_subagent_handoff_turn_meta(text: &str) -> bool {
     has_one_exact_metadata_line(
         body,
         "Input provenance:",
-        "Input provenance: subagent_handoff",
+        &format!("Input provenance: {provenance}"),
     ) && has_one_exact_metadata_line(
         body,
         "Input authority:",
