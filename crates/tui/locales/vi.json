@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Thẻ công cụ",
   "ConfigLabelComposerDensity": "Mật độ ô soạn thảo",
   "ConfigLabelComposerBorder": "Viền ô soạn thảo",
+  "ConfigLabelComposerMultilineMode": "Chế độ nhiều dòng của ô soạn thảo",
   "ConfigLabelComposerVimMode": "Chế độ Vim của ô soạn thảo",
   "ConfigLabelBracketedPaste": "Dán có dấu ngoặc",
   "ConfigLabelPasteBurstDetection": "Phát hiện thao tác dán",

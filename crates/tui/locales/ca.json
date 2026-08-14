@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Targetes d'eines",
   "ConfigLabelComposerDensity": "Densitat del redactor",
   "ConfigLabelComposerBorder": "Vora del redactor",
+  "ConfigLabelComposerMultilineMode": "Mode multilínia del redactor",
   "ConfigLabelComposerVimMode": "Mode Vim del redactor",
   "ConfigLabelBracketedPaste": "Enganxada amb claudàtors",
   "ConfigLabelPasteBurstDetection": "Detecció d'enganxades",

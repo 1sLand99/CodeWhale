@@ -285,6 +285,7 @@ impl App {
         };
         let composer_density = ComposerDensity::from_setting(&settings.composer_density);
         let composer_border = settings.composer_border;
+        let composer_multiline_mode = settings.composer_multiline_mode;
         let composer_vim_enabled = settings
             .composer_vim_mode
             .trim()
@@ -784,6 +785,7 @@ impl App {
             billing_presentation: crate::route_billing::for_route(config, provider),
             composer_density,
             composer_border,
+            composer_multiline_mode,
             voice_enabled: false,
             voice_send_enabled: false,
             voice_control_enabled: false,

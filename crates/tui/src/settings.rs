@@ -379,6 +379,10 @@ pub struct Settings {
     pub composer_density: String,
     /// Show a border around the composer input area
     pub composer_border: bool,
+    /// Keep bare Enter available for multiline drafting. When enabled,
+    /// Shift+Enter submits; Ctrl+J and Alt+Enter remain newline shortcuts.
+    #[serde(default)]
+    pub composer_multiline_mode: bool,
     /// Composer editing mode: "normal" (default) or "vim" for modal editing.
     /// When set to "vim" the composer starts in Normal mode; press i/a/o to
     /// enter Insert mode and Esc to return to Normal.
@@ -559,6 +563,7 @@ impl Default for Settings {
             background_color: None,
             composer_density: "comfortable".to_string(),
             composer_border: true,
+            composer_multiline_mode: false,
             composer_vim_mode: "normal".to_string(),
             transcript_spacing: "comfortable".to_string(),
             launch_screen: false,
@@ -1322,6 +1327,9 @@ impl Settings {
             "composer_border" | "border" => {
                 self.composer_border = parse_bool(value)?;
             }
+            "composer_multiline_mode" | "multiline_mode" | "multiline" => {
+                self.composer_multiline_mode = parse_bool(value)?;
+            }
             "composer_vim_mode" | "vim_mode" | "vim" => {
                 let normalized = value.trim().to_ascii_lowercase();
                 if !["vim", "normal"].contains(&normalized.as_str()) {
@@ -1531,6 +1539,10 @@ impl Settings {
         ));
         lines.push(format!("  composer_density:   {}", self.composer_density));
         lines.push(format!("  composer_border:    {}", self.composer_border));
+        lines.push(format!(
+            "  composer_multiline_mode: {}",
+            self.composer_multiline_mode
+        ));
         lines.push(format!("  composer_vim_mode:  {}", self.composer_vim_mode));
         lines.push(format!("  transcript_spacing: {}", self.transcript_spacing));
         lines.push(format!("  status_indicator:   {}", self.status_indicator));
@@ -1699,6 +1711,10 @@ impl Settings {
             (
                 "composer_border",
                 "Show a border around the composer input area: on/off",
+            ),
+            (
+                "composer_multiline_mode",
+                "Enter inserts a newline and Shift+Enter sends: on/off",
             ),
             ("composer_vim_mode", "Composer editing mode: normal, vim"),
             (
@@ -4383,6 +4399,20 @@ mod tests {
             err.to_string().contains("synchronized_output"),
             "error names the offending key: {err}"
         );
+    }
+
+    #[test]
+    fn composer_multiline_mode_defaults_off_and_accepts_boolean_aliases() {
+        let mut settings = Settings::default();
+        assert!(!settings.composer_multiline_mode);
+
+        settings.set("multiline", "on").expect("enable multiline");
+        assert!(settings.composer_multiline_mode);
+
+        settings
+            .set("composer_multiline_mode", "false")
+            .expect("disable multiline");
+        assert!(!settings.composer_multiline_mode);
     }
 
     #[test]

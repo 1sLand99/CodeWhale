@@ -1862,6 +1862,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Composer,
+                key: "composer_multiline_mode".to_string(),
+                value: settings.composer_multiline_mode.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Composer,
                 key: "composer_vim_mode".to_string(),
                 value: settings.composer_vim_mode.clone(),
                 editable: true,
@@ -2888,6 +2895,7 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "tool_collapse" => MessageId::ConfigLabelToolCollapse,
         "composer_density" => MessageId::ConfigLabelComposerDensity,
         "composer_border" => MessageId::ConfigLabelComposerBorder,
+        "composer_multiline_mode" => MessageId::ConfigLabelComposerMultilineMode,
         "composer_vim_mode" => MessageId::ConfigLabelComposerVimMode,
         "bracketed_paste" => MessageId::ConfigLabelBracketedPaste,
         "paste_burst_detection" => MessageId::ConfigLabelPasteBurstDetection,
@@ -2961,6 +2969,9 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "a project, profile, environment, or managed config controls shell access"
         }
         "allow_shell" => "on exposes shell tools in Agent mode; permission rules still apply",
+        "composer_multiline_mode" => {
+            "off: Enter sends, Shift+Enter adds a line; on: Enter adds a line, Shift+Enter sends"
+        }
         "auto_compact"
         | "launch_screen"
         | "show_tool_details"
@@ -3069,6 +3080,7 @@ fn config_boolean_key(key: &str) -> bool {
             | "thinking_highlight"
             | "show_tool_details"
             | "composer_border"
+            | "composer_multiline_mode"
             | "bracketed_paste"
             | "paste_burst_detection"
             | "workspace_follow_symlinks"
@@ -5418,6 +5430,7 @@ mod tests {
         assert!(keys.contains(&"auto_compact"));
         assert!(keys.contains(&"tool_collapse"));
         assert!(keys.contains(&"composer_border"));
+        assert!(keys.contains(&"composer_multiline_mode"));
         assert!(keys.contains(&"composer_vim_mode"));
         assert!(keys.contains(&"bracketed_paste"));
         assert!(keys.contains(&"context_panel"));

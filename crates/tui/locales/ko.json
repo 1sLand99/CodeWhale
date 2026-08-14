@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "도구 카드",
   "ConfigLabelComposerDensity": "작성기 밀도",
   "ConfigLabelComposerBorder": "작성기 테두리",
+  "ConfigLabelComposerMultilineMode": "작성기 여러 줄 모드",
   "ConfigLabelComposerVimMode": "작성기 Vim 모드",
   "ConfigLabelBracketedPaste": "괄호 붙여넣기",
   "ConfigLabelPasteBurstDetection": "붙여넣기 감지",

@@ -163,13 +163,15 @@ pub(crate) fn handle_composer_alt_word_motion_key(app: &mut App, key: KeyEvent) 
     }
 }
 
-pub(crate) fn is_composer_newline_key(key: KeyEvent) -> bool {
+pub(crate) fn is_composer_newline_key(key: KeyEvent, multiline_mode: bool) -> bool {
     match key.code {
         KeyCode::Char('j') => key.modifiers.contains(KeyModifiers::CONTROL),
         KeyCode::Enter => {
             key.modifiers.contains(KeyModifiers::ALT)
                 || (key.modifiers.contains(KeyModifiers::SHIFT)
-                    && !key.modifiers.contains(KeyModifiers::CONTROL))
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !multiline_mode)
+                || (key.modifiers == KeyModifiers::NONE && multiline_mode)
         }
         _ => false,
     }
@@ -177,24 +179,26 @@ pub(crate) fn is_composer_newline_key(key: KeyEvent) -> bool {
 
 pub(crate) fn is_forced_submit_key(key: KeyEvent) -> bool {
     matches!(
-        composer_submit_chord(key),
+        composer_submit_chord(key, false),
         Some(ComposerSubmitChord::CtrlEnter)
     )
 }
 
-pub(crate) fn composer_submit_chord(key: KeyEvent) -> Option<ComposerSubmitChord> {
+pub(crate) fn composer_submit_chord(
+    key: KeyEvent,
+    multiline_mode: bool,
+) -> Option<ComposerSubmitChord> {
     if !matches!(key.code, KeyCode::Enter) {
         return None;
     }
-    if key.modifiers.contains(KeyModifiers::ALT)
-        || (key.modifiers.contains(KeyModifiers::SHIFT)
-            && !key.modifiers.contains(KeyModifiers::CONTROL))
-    {
+    if key.modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         Some(ComposerSubmitChord::CtrlEnter)
-    } else if key.modifiers == KeyModifiers::NONE {
+    } else if (key.modifiers == KeyModifiers::NONE && !multiline_mode)
+        || (key.modifiers == KeyModifiers::SHIFT && multiline_mode)
+    {
         Some(ComposerSubmitChord::Enter)
     } else {
         None

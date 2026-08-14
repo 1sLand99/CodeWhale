@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Kartu alat",
   "ConfigLabelComposerDensity": "Kepadatan komposer",
   "ConfigLabelComposerBorder": "Bingkai komposer",
+  "ConfigLabelComposerMultilineMode": "Mode multibaris komposer",
   "ConfigLabelComposerVimMode": "Mode Vim komposer",
   "ConfigLabelBracketedPaste": "Bracketed paste",
   "ConfigLabelPasteBurstDetection": "Deteksi tempel",

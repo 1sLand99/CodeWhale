@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Tool cards",
   "ConfigLabelComposerDensity": "Composer density",
   "ConfigLabelComposerBorder": "Composer border",
+  "ConfigLabelComposerMultilineMode": "Composer multiline mode",
   "ConfigLabelComposerVimMode": "Composer Vim mode",
   "ConfigLabelBracketedPaste": "Bracketed paste",
   "ConfigLabelPasteBurstDetection": "Paste detection",

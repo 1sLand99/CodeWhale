@@ -404,6 +404,14 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "composer_border" | "border" => {
             Some(if app.composer_border { "true" } else { "false" }.to_string())
         }
+        "composer_multiline_mode" | "multiline_mode" | "multiline" => Some(
+            if app.composer_multiline_mode {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
         "composer_vim_mode" | "vim_mode" | "vim" => Some(
             if app.composer.vim_enabled {
                 "vim"
@@ -2035,6 +2043,10 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.composer_border = settings.composer_border;
             app.needs_redraw = true;
         }
+        "composer_multiline_mode" | "multiline_mode" | "multiline" => {
+            app.composer_multiline_mode = settings.composer_multiline_mode;
+            app.needs_redraw = true;
+        }
         "composer_vim_mode" | "vim_mode" | "vim" => {
             app.composer.vim_enabled = settings.composer_vim_mode == "vim";
             app.composer.vim_mode = if app.composer.vim_enabled {
@@ -2180,6 +2192,9 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             },
         ),
         "composer_vim_mode" | "vim_mode" | "vim" => settings.composer_vim_mode.clone(),
+        "composer_multiline_mode" | "multiline_mode" | "multiline" => {
+            settings.composer_multiline_mode.to_string()
+        }
         "low_motion" | "motion" => settings.low_motion.to_string(),
         "fancy_animations" | "fancy" | "animations" => settings.fancy_animations.to_string(),
         _ => value.to_string(),
@@ -4277,6 +4292,19 @@ context_window = 262144
 
         assert!(result.message.is_some());
         assert!(!app.composer_border);
+        assert!(app.needs_redraw);
+    }
+
+    #[test]
+    fn config_composer_multiline_mode_updates_live_app() {
+        let _lock = lock_test_env();
+        let mut app = create_test_app();
+        app.composer_multiline_mode = false;
+
+        let result = config_command(&mut app, Some("composer_multiline_mode true"));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert!(app.composer_multiline_mode);
         assert!(app.needs_redraw);
     }
 

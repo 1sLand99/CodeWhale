@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "टूल कार्ड",
   "ConfigLabelComposerDensity": "कम्पोज़र घनत्व",
   "ConfigLabelComposerBorder": "कम्पोज़र बॉर्डर",
+  "ConfigLabelComposerMultilineMode": "कम्पोज़र बहुपंक्ति मोड",
   "ConfigLabelComposerVimMode": "कम्पोज़र Vim मोड",
   "ConfigLabelBracketedPaste": "ब्रैकेटेड पेस्ट",
   "ConfigLabelPasteBurstDetection": "पेस्ट पहचान",

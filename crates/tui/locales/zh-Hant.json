@@ -348,6 +348,7 @@
   "ConfigLabelCalmMode": "簡潔對話",
   "ConfigLabelComposerBorder": "輸入框邊框",
   "ConfigLabelComposerDensity": "輸入框密度",
+  "ConfigLabelComposerMultilineMode": "輸入框多行模式",
   "ConfigLabelComposerVimMode": "輸入框 Vim 模式",
   "ConfigLabelContextPanel": "上下文面板",
   "ConfigLabelCostCurrency": "費用幣別",

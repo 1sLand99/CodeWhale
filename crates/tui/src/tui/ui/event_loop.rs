@@ -4125,8 +4125,8 @@ pub(crate) async fn run_event_loop(
             // A second, empty Enter after queueing is the portable steer
             // gesture. Handle it before transcript/detail Enter shortcuts so
             // it can never open an unrelated overlay instead (#382).
-            if matches!(key.code, KeyCode::Enter)
-                && key.modifiers == KeyModifiers::NONE
+            let portable_submit_chord = composer_submit_chord(key, app.composer_multiline_mode);
+            if matches!(portable_submit_chord, Some(ComposerSubmitChord::Enter))
                 && matches!(
                     app.decide_composer_submit(ComposerSubmitChord::Enter),
                     ComposerSubmitAction::SendQueuedNow
@@ -4137,7 +4137,8 @@ pub(crate) async fn run_event_loop(
             }
             match key.code {
                 KeyCode::Enter
-                    if app.input.is_empty()
+                    if key.modifiers == KeyModifiers::NONE
+                        && app.input.is_empty()
                         && app.viewport.transcript_selection.is_active()
                         && open_pager_for_selection(app) =>
                 {
@@ -4617,11 +4618,14 @@ pub(crate) async fn run_event_loop(
                 // shell_key_routing::is_help_shortcut so printable layout
                 // characters stay text.
                 // Input handling
-                _ if is_composer_newline_key(key) => {
+                _ if is_composer_newline_key(key, app.composer_multiline_mode)
+                    && !(is_plain_enter && (slash_menu_open || mention_menu_open)) =>
+                {
                     app.insert_char('\n');
                 }
                 KeyCode::Enter
-                    if mention_menu_open
+                    if key.modifiers == KeyModifiers::NONE
+                        && mention_menu_open
                         && crate::tui::file_mention::apply_mention_menu_selection(
                             app,
                             &mention_menu_entries,
@@ -4670,7 +4674,9 @@ pub(crate) async fn run_event_loop(
                     }
                 }
                 KeyCode::Enter => {
-                    let action = app.decide_composer_submit(ComposerSubmitChord::Enter);
+                    let action = app.decide_composer_submit(
+                        portable_submit_chord.unwrap_or(ComposerSubmitChord::Enter),
+                    );
                     // #573: when the user typed a slash-command prefix that
                     // the popup is matching (e.g. `/mo` → `/model`), Enter
                     // should run the *highlighted match* rather than

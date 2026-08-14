@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "ツールカード",
   "ConfigLabelComposerDensity": "入力欄の密度",
   "ConfigLabelComposerBorder": "入力欄の枠線",
+  "ConfigLabelComposerMultilineMode": "入力欄の複数行モード",
   "ConfigLabelComposerVimMode": "入力欄の Vim モード",
   "ConfigLabelBracketedPaste": "ブラケットペースト",
   "ConfigLabelPasteBurstDetection": "ペースト検出",

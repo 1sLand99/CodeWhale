@@ -1432,6 +1432,7 @@ pub struct App {
     pub billing_presentation: crate::route_billing::BillingPresentation,
     pub composer_density: ComposerDensity,
     pub composer_border: bool,
+    pub composer_multiline_mode: bool,
     /// Voice input state — toggled by `/voice` and the voice hotbar action.
     pub voice_enabled: bool,
     /// Auto-send after transcription when the transcript ends with an

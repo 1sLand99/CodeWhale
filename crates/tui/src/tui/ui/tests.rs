@@ -1507,30 +1507,51 @@ fn terminal_origin_reset_resets_scroll_region_origin_without_destructive_clear()
 
 #[test]
 fn composer_newline_shortcuts_do_not_steal_ctrl_enter() {
-    assert!(is_composer_newline_key(KeyEvent::new(
-        KeyCode::Char('j'),
-        KeyModifiers::CONTROL,
-    )));
-    assert!(is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::ALT,
-    )));
-    assert!(is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::SHIFT,
-    )));
-    assert!(!is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::NONE,
-    )));
-    assert!(!is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::CONTROL,
-    )));
-    assert!(!is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    )));
+    assert!(is_composer_newline_key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        false
+    ));
+    assert!(is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        false
+    ));
+    assert!(is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        false
+    ));
+    assert!(!is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        false
+    ));
+    assert!(!is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        false
+    ));
+    assert!(!is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        false
+    ));
+}
+
+#[test]
+fn multiline_mode_inverts_only_enter_and_shift_enter() {
+    assert!(is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        true,
+    ));
+    assert!(!is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        true,
+    ));
+    for (code, modifiers) in [
+        (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        (KeyCode::Enter, KeyModifiers::ALT),
+    ] {
+        assert!(is_composer_newline_key(
+            KeyEvent::new(code, modifiers),
+            true,
+        ));
+    }
 }
 
 #[test]
@@ -1564,23 +1585,34 @@ fn forced_submit_accepts_only_ctrl_enter() {
 #[test]
 fn composer_key_events_map_to_portable_submit_chords() {
     assert_eq!(
-        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false),
         Some(ComposerSubmitChord::Enter)
     );
     assert_eq!(
-        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), false),
         Some(ComposerSubmitChord::CtrlEnter)
     );
     for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
         assert_eq!(
-            composer_submit_chord(KeyEvent::new(KeyCode::Enter, modifiers)),
+            composer_submit_chord(KeyEvent::new(KeyCode::Enter, modifiers), false),
             None,
             "newline chord must not submit: {modifiers:?}"
         );
     }
     assert_eq!(
-        composer_submit_chord(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+        composer_submit_chord(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            false,
+        ),
         None
+    );
+    assert_eq!(
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true),
+        None
+    );
+    assert_eq!(
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), true),
+        Some(ComposerSubmitChord::Enter)
     );
 }
 
@@ -1591,10 +1623,10 @@ fn cmd_enter_normalizes_to_control_enter_not_newline() {
 
     let normalized = normalize_macos_modifiers(KeyModifiers::SUPER);
     assert!(normalized.contains(KeyModifiers::CONTROL));
-    assert!(!is_composer_newline_key(KeyEvent::new(
-        KeyCode::Enter,
-        normalized,
-    )));
+    assert!(!is_composer_newline_key(
+        KeyEvent::new(KeyCode::Enter, normalized),
+        false
+    ));
 }
 
 #[test]

@@ -95,6 +95,11 @@ pub struct SettingsSection {
     pub bracketed_paste: bool,
     pub composer_density: ComposerDensityValue,
     pub composer_border: bool,
+    #[schemars(
+        title = "Multiline composer mode",
+        description = "When enabled, Enter inserts a newline and Shift+Enter sends. Ctrl+J and Alt+Enter remain newline shortcuts."
+    )]
+    pub composer_multiline_mode: bool,
     pub composer_vim_mode: ComposerVimModeValue,
     #[schemars(range(min = 0))]
     pub mention_menu_limit: usize,
@@ -449,6 +454,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             bracketed_paste: settings.bracketed_paste,
             composer_density: settings.composer_density.as_str().into(),
             composer_border: settings.composer_border,
+            composer_multiline_mode: settings.composer_multiline_mode,
             composer_vim_mode: settings.composer_vim_mode.as_str().into(),
             mention_menu_limit: settings.mention_menu_limit,
             mention_menu_behavior: settings.mention_menu_behavior.as_str().into(),
@@ -661,6 +667,10 @@ pub fn apply_document(
             doc.settings.composer_density.as_setting(),
         ),
         ("composer_border", bool_str(doc.settings.composer_border)),
+        (
+            "composer_multiline_mode",
+            bool_str(doc.settings.composer_multiline_mode),
+        ),
         (
             "composer_vim_mode",
             doc.settings.composer_vim_mode.as_setting(),

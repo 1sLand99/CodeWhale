@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Карточки инструментов",
   "ConfigLabelComposerDensity": "Плотность поля ввода",
   "ConfigLabelComposerBorder": "Рамка поля ввода",
+  "ConfigLabelComposerMultilineMode": "Многострочный режим поля ввода",
   "ConfigLabelComposerVimMode": "Режим Vim в поле ввода",
   "ConfigLabelBracketedPaste": "Режим bracketed paste",
   "ConfigLabelPasteBurstDetection": "Определение вставки",

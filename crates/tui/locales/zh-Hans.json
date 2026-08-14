@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "工具卡片",
   "ConfigLabelComposerDensity": "输入框密度",
   "ConfigLabelComposerBorder": "输入框边框",
+  "ConfigLabelComposerMultilineMode": "输入框多行模式",
   "ConfigLabelComposerVimMode": "输入框 Vim 模式",
   "ConfigLabelBracketedPaste": "括号粘贴",
   "ConfigLabelPasteBurstDetection": "粘贴检测",

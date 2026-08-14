@@ -146,6 +146,7 @@
   "ConfigLabelToolCollapse": "Картки інструментів",
   "ConfigLabelComposerDensity": "Щільність композера",
   "ConfigLabelComposerBorder": "Рамка композера",
+  "ConfigLabelComposerMultilineMode": "Багаторядковий режим композера",
   "ConfigLabelComposerVimMode": "Режим Vim у композері",
   "ConfigLabelBracketedPaste": "Дужкове вставлення",
   "ConfigLabelPasteBurstDetection": "Виявлення вставлення",

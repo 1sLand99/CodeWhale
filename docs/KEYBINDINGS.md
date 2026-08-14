@@ -67,6 +67,11 @@ Editing the message you're about to send.
 | `Ctrl-Shift-O` / `F4`       | Open the composer draft in `$VISUAL` / `$EDITOR`; F4 works when the terminal cannot distinguish Ctrl-Shift-O from Ctrl-O |
 | `! command`                 | Run a shell command through normal approval, sandbox, and output surfaces |
 
+Set `composer_multiline_mode = true` to swap the portable `Enter` and
+`Shift-Enter` behaviors: `Enter` inserts a newline and `Shift-Enter` sends.
+`Alt-Enter`, `Ctrl-J`, and supported `Ctrl-Enter` / `Cmd-Enter` behavior stays
+unchanged.
+
 ### Selection semantics
 
 Typing, pasting, `Backspace`, or `Delete` with an active selection replaces or
