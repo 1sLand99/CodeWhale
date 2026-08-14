@@ -123,7 +123,6 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
           <ul className="grid gap-3 sm:grid-cols-2">
             {facts.providers.map((provider) => (
               <li key={provider.id} className="flex items-start gap-3 border hairline rounded-lg bg-paper px-4 py-3 min-w-0">
-                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-jade" aria-hidden="true" />
                 <div className="min-w-0">
                   <div className="text-sm text-ink font-medium">{provider.label}</div>
                   <code className="font-mono text-[0.66rem] text-indigo break-all">{provider.id}</code>

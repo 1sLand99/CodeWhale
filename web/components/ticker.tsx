@@ -141,15 +141,14 @@ export function Ticker({ items, labels }: { items: FeedItem[]; labels: TickerLab
   // flat run of children. The second half is hidden from assistive tech.
   const doubled = [...ordered, ...ordered];
 
-  // A fixed 80s loop reads broken on /zh: CJK titles are much longer than
-  // English, so the same duration scrolls 2-4x faster. Derive the duration
-  // from total glyph count (title + fixed chrome per entry) so reading speed
-  // stays roughly constant across locales.
+  // Loop duration: never faster than the original 80s baseline; longer feeds
+  // (CJK titles run 2-4x wider than English) get proportionally more time so
+  // every locale scrolls at a readable pace.
   const glyphCount = ordered.reduce(
     (sum, item) => sum + (item.title?.length ?? 0) + 24,
     0,
   );
-  const durationSeconds = Math.max(50, Math.round(glyphCount / 22));
+  const durationSeconds = Math.max(80, Math.round(glyphCount / 22));
 
   return (
     <div className="hairline-t hairline-b bg-paper-deep overflow-hidden">
