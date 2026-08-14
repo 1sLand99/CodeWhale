@@ -60,6 +60,25 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
         return tokens;
     }
 
+    // The documented catalogue ceiling is authoritative when it speaks: it
+    // can *raise* the request above the generic floor, not merely narrow it
+    // in `effective_max_output_tokens_for_route`. `API_MAX_OUTPUT_TOKENS`
+    // remains strictly the fallback for models the catalogue does not
+    // describe, and any concrete route/offering maximum still intersects.
+    //
+    // Provenance for the raise (deepseek-v4-flash/pro: 384_000 output):
+    // - models_dev.bundled.json documents limit.output = 384000.
+    // - The DS4 provider contract corroborates 384K
+    //   (crates/config/src/model_reference.rs pins max_output 384_000 / "384K").
+    // - Official DeepSeek API docs confirm the model ids (deepseek-v4-flash ->
+    //   V4-Flash-0731, deepseek-v4-pro -> V4-Pro-0813) but do not publish the
+    //   output ceiling in a machine-readable form; that number remains a
+    //   catalogue-sourced value to re-verify against official docs when they
+    //   publish one (#5373).
+    if let Some(documented) = crate::models::max_output_tokens_for_model(model) {
+        return documented;
+    }
+
     let window = context_window_for_model(model).unwrap_or(128_000);
     if window >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
         API_MAX_OUTPUT_TOKENS
@@ -103,6 +122,17 @@ impl OutputCeilingSource {
         match self {
             Self::Documented(tokens) | Self::Uncatalogued(tokens) => Some(tokens),
             Self::RouteDeclaredUnknown => None,
+        }
+    }
+
+    /// Stable provenance label, surfaced in exec stream metadata so a wrong
+    /// ceiling is visible in a receipt rather than requiring packet capture.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Documented(_) => "documented",
+            Self::Uncatalogued(_) => "uncatalogued",
+            Self::RouteDeclaredUnknown => "route-declared",
         }
     }
 }
@@ -485,6 +515,45 @@ mod tests {
         assert_eq!(
             effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k2.7-code", None),
             32_768,
+        );
+    }
+
+    /// A documented catalogue ceiling must escape the generic floor, not just
+    /// narrow it. Before the fix, every model with a context window >= 500K
+    /// was clamped to [`API_MAX_OUTPUT_TOKENS`] even when the catalogue
+    /// documented a larger `max_output`. This test fails if any such ceiling
+    /// is ever clamped again (or if the bundled catalogue stops carrying any
+    /// above-floor ceiling at all).
+    #[test]
+    fn documented_ceiling_escapes_generic_floor() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        let bundled = crate::model_catalog::bundled_catalog();
+        let mut escaped = 0usize;
+        for id in bundled.entries.keys() {
+            let Some(documented) = crate::model_catalog::resolved_max_output(id) else {
+                continue;
+            };
+            let window = context_window_for_model(id).unwrap_or(128_000);
+            let pre_fix_floor = if window >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
+                API_MAX_OUTPUT_TOKENS
+            } else {
+                (window / 2).min(API_MAX_OUTPUT_TOKENS)
+            };
+            if documented > pre_fix_floor {
+                assert_eq!(
+                    effective_max_output_tokens(id),
+                    documented,
+                    "{id}: documented ceiling {documented} must escape the pre-fix floor {pre_fix_floor}"
+                );
+                escaped += 1;
+            }
+        }
+        assert!(
+            escaped >= 2,
+            "expected at least two bundled ceilings above the generic floor, found {escaped}"
         );
     }
 }
