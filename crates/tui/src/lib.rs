@@ -22,6 +22,7 @@ i18n!("locales", fallback = ["en"]);
 
 mod acp_server;
 mod agy_credentials;
+mod approval_log;
 mod artifacts;
 mod audit;
 mod auto_reasoning;

@@ -6,6 +6,7 @@
 //! - Resuming sessions by ID
 //! - Managing session lifecycle
 
+use crate::approval_log::{ApprovalReceipt, ApprovalReceiptStore, ApprovalReplay};
 use crate::artifacts::ArtifactRecord;
 use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
@@ -533,6 +534,11 @@ pub struct SavedSession {
     /// Artifact contents are stored in the session-owned artifact directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactRecord>,
+    /// Session-owned approval evidence. The append-only sidecar is canonical
+    /// during a live turn; this projection makes saved snapshots self-
+    /// describing without putting receipts in the model transcript.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) approval_receipts: Vec<ApprovalReceipt>,
     /// To-do and plan state shown in the Work sidebar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_state: Option<SessionWorkState>,
@@ -674,6 +680,7 @@ impl SavedSession {
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
+            approval_receipts: Vec::new(),
             work_state: None,
             last_auto_route: None,
         })
@@ -716,6 +723,26 @@ const LEGACY_CHECKPOINT_FILE: &str = "latest.json";
 const OFFLINE_QUEUE_FILE: &str = "offline_queue.json";
 
 impl SessionManager {
+    fn approval_receipt_store(&self) -> ApprovalReceiptStore {
+        ApprovalReceiptStore::new(self.sessions_dir.clone())
+    }
+
+    fn hydrate_approval_receipts(&self, session: &mut SavedSession) -> io::Result<()> {
+        let durable = self.approval_receipt_store().load(&session.metadata.id)?;
+        if !durable.is_empty() {
+            session.approval_receipts = durable;
+        }
+        ApprovalReplay::from_receipts(&session.approval_receipts)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(())
+    }
+
+    /// Reconstruct completed approvals and interrupted unmatched asks for one
+    /// session without consulting the model transcript.
+    pub(crate) fn replay_approvals(&self, session_id: &str) -> io::Result<ApprovalReplay> {
+        self.approval_receipt_store().replay(session_id)
+    }
+
     fn validated_session_id<'a>(&self, id: &'a str) -> std::io::Result<&'a str> {
         let trimmed = id.trim();
         if trimmed.is_empty() {
@@ -794,7 +821,9 @@ impl SessionManager {
 
         self.archive_before_first_graph_write(session, &path)?;
 
-        let content = serialize_saved_session(session)?;
+        let mut durable_session = session.clone();
+        self.hydrate_approval_receipts(&mut durable_session)?;
+        let content = serialize_saved_session(&durable_session)?;
 
         // Atomic write via write_atomic (NamedTempFile + fsync + persist)
         write_atomic(&path, content.as_bytes())?;
@@ -816,7 +845,9 @@ impl SessionManager {
         self.archive_before_first_graph_write(session, &session_path)?;
         fs::create_dir_all(self.checkpoints_dir())?;
         let already_persisted = path.exists() || session_path.exists();
-        let content = serialize_saved_session(session)?;
+        let mut durable_session = session.clone();
+        self.hydrate_approval_receipts(&mut durable_session)?;
+        let content = serialize_saved_session(&durable_session)?;
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
         Ok(path)
@@ -964,6 +995,7 @@ impl SessionManager {
             ));
         }
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
+        self.hydrate_approval_receipts(&mut session)?;
         Ok(Some(session))
     }
 
@@ -1139,6 +1171,7 @@ impl SessionManager {
 
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
         session.ensure_journal();
+        self.hydrate_approval_receipts(&mut session)?;
 
         Ok(session)
     }
@@ -1796,6 +1829,7 @@ pub fn create_saved_session_with_id_and_mode(
         system_prompt: system_prompt_to_string(system_prompt),
         context_references: Vec::new(),
         artifacts: Vec::new(),
+        approval_receipts: Vec::new(),
         work_state: None,
         last_auto_route: None,
     }
@@ -2112,6 +2146,7 @@ fn format_age(dt: &DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_log::ApprovalOutcome;
     use crate::models::ContentBlock;
     use crate::tools::plan::StepStatus;
     use crate::tui::history::{HistoryCell, ToolCell, history_cells_from_message};
@@ -2362,6 +2397,7 @@ mod tests {
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
+            approval_receipts: Vec::new(),
             work_state: None,
             last_auto_route: None,
         };
@@ -2401,10 +2437,67 @@ mod tests {
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
+            approval_receipts: Vec::new(),
             work_state: None,
             last_auto_route: None,
         };
         manager.save_session(&session).expect("save empty");
+    }
+
+    #[test]
+    fn save_and_resume_reconstructs_closed_and_interrupted_approvals() {
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
+        let session = create_saved_session(
+            &[make_test_message("user", "approval recovery")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let session_id = session.metadata.id.clone();
+        let store = ApprovalReceiptStore::new(sessions_dir);
+        store
+            .append(
+                &session_id,
+                &ApprovalReceipt::asked("tool-complete", "exec_shell"),
+            )
+            .expect("persist completed ask");
+        store
+            .append(
+                &session_id,
+                &ApprovalReceipt::decided("tool-complete", ApprovalOutcome::Denied),
+            )
+            .expect("persist completed decision");
+        store
+            .append(
+                &session_id,
+                &ApprovalReceipt::asked("tool-interrupted", "write_file"),
+            )
+            .expect("persist interrupted ask");
+
+        manager.save_session(&session).expect("save session");
+        let resumed = manager
+            .load_session_snapshot(&session_id)
+            .expect("resume session");
+        let replay = ApprovalReplay::from_receipts(&resumed.approval_receipts)
+            .expect("replay resumed approval evidence");
+
+        assert_eq!(resumed.messages, session.messages);
+        assert_eq!(replay.completed.len(), 1);
+        assert_eq!(replay.completed[0].outcome, ApprovalOutcome::Denied);
+        assert_eq!(replay.unmatched_asks.len(), 1);
+        assert!(matches!(
+            &replay.unmatched_asks[0],
+            ApprovalReceipt::Asked { tool_call_id, .. } if tool_call_id == "tool-interrupted"
+        ));
+        assert_eq!(
+            manager
+                .replay_approvals(&session_id)
+                .expect("replay canonical sidecar"),
+            replay
+        );
     }
 
     #[test]

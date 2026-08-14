@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::approval_log::ApprovalReceiptStore;
 use crate::client::DeepSeekClient;
 use crate::compaction::{CompactionConfig, PreparedCompactionEnvelope, compact_messages_safe};
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
@@ -627,6 +628,10 @@ pub struct Engine {
     scheduled_goal_continuation: Option<ScheduledGoalContinuation>,
     goal_continuation_schedule_seq: u64,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
+    /// Canonical per-session approval evidence. A missing/unwritable store is
+    /// retained as an error so construction can stay infallible while every
+    /// approval gate still fails closed.
+    approval_receipt_store: Result<ApprovalReceiptStore, String>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
     rx_steer: mpsc::Receiver<String>,
     tx_event: mpsc::Sender<Event>,
@@ -1318,6 +1323,13 @@ impl Engine {
 
         let active_route_limits = config.active_route_limits;
         let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
+        #[cfg(not(test))]
+        let approval_receipt_store =
+            ApprovalReceiptStore::default_location().map_err(|err| err.to_string());
+        #[cfg(test)]
+        let approval_receipt_store = Ok(ApprovalReceiptStore::new(
+            std::env::temp_dir().join(format!("codewhale-approval-tests-{}", uuid::Uuid::new_v4())),
+        ));
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1346,6 +1358,7 @@ impl Engine {
             scheduled_goal_continuation: None,
             goal_continuation_schedule_seq: 0,
             rx_approval,
+            approval_receipt_store,
             rx_user_input,
             rx_steer,
             tx_event,

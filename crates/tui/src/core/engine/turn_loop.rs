@@ -3538,25 +3538,25 @@ impl Engine {
                                     &tool_input,
                                 )
                                 .0;
-                            let _ = self
-                                .tx_event
-                                .send(Event::ApprovalRequired {
-                                    id: tool_id.clone(),
-                                    tool_name: tool_name.clone(),
-                                    input: tool_input.clone(),
-                                    description: plan.approval_description.clone(),
-                                    approval_key,
-                                    approval_grouping_key,
-                                    intent_summary: if plan.read_only {
-                                        None
-                                    } else {
-                                        intent_summary.clone()
-                                    },
-                                    approval_force_prompt: plan.approval_force_prompt,
-                                })
-                                .await;
+                            let approval_event = Event::ApprovalRequired {
+                                id: tool_id.clone(),
+                                tool_name: tool_name.clone(),
+                                input: tool_input.clone(),
+                                description: plan.approval_description.clone(),
+                                approval_key,
+                                approval_grouping_key,
+                                intent_summary: if plan.read_only {
+                                    None
+                                } else {
+                                    intent_summary.clone()
+                                },
+                                approval_force_prompt: plan.approval_force_prompt,
+                            };
 
-                            match self.await_tool_approval(&tool_id).await {
+                            match self
+                                .request_tool_approval(&tool_id, &tool_name, approval_event)
+                                .await
+                            {
                                 Ok(ApprovalResult::Approved) => {
                                     let decision = if model_requested_policy.is_some() {
                                         "approved_with_requested_policy"

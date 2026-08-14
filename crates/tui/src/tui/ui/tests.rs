@@ -5414,6 +5414,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         system_prompt: None,
         context_references: Vec::new(),
         artifacts: Vec::new(),
+        approval_receipts: Vec::new(),
         work_state: None,
         last_auto_route: None,
     }
