@@ -4,7 +4,6 @@
 //! clamp to sane bounds, and never panic into the render loop. SSH / missing
 //! FFI paths fall back to the fixed [`crate::tui::frame_rate_limiter`] defaults.
 
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Inclusive lower bound for accepted refresh rates.
@@ -58,9 +57,85 @@ impl DisplayRefreshProbeResult {
 const _: fn(DisplayRefreshProbeResult) -> &'static str = DisplayRefreshProbeResult::outcome;
 
 /// Once per process. Infallible.
+///
+/// Under `cfg(test)` the host panel is not consulted. The probe is
+/// `OnceLock`-cached and reads real hardware, so a cadence test on a 60 Hz
+/// developer machine computed a different interval than the same test on CI,
+/// with no way to pin the input the way `low_motion` and `fancy_animations`
+/// are already pinned (#5359). Tests get the unmeasured result — the same one
+/// a headless CI runner sees — and any test that wants a specific panel says
+/// so with [`DisplayRefreshPin`].
 pub fn probe_display_refresh() -> DisplayRefreshProbeResult {
-    static CACHE: OnceLock<DisplayRefreshProbeResult> = OnceLock::new();
-    *CACHE.get_or_init(probe_uncached)
+    #[cfg(test)]
+    {
+        pinned_probe()
+    }
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<DisplayRefreshProbeResult> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(probe_uncached)
+    }
+}
+
+/// What a test observes when it has not pinned a panel: no measurement, so
+/// [`animation_interval_for_hz`] falls back to [`FALLBACK_ANIMATION_MS`].
+#[cfg(test)]
+const UNMEASURED: DisplayRefreshProbeResult = DisplayRefreshProbeResult {
+    hz: None,
+    source: DisplayRefreshSource::None,
+    skip_reason: "not_probed_under_test",
+    duration_ms: 0,
+};
+
+#[cfg(test)]
+thread_local! {
+    static PINNED: std::cell::Cell<Option<DisplayRefreshProbeResult>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn pinned_probe() -> DisplayRefreshProbeResult {
+    PINNED.with(|pinned| pinned.get().unwrap_or(UNMEASURED))
+}
+
+/// Pin the probe for the current thread until dropped.
+///
+/// Thread-local rather than process-global: the cadence tests run in parallel
+/// with everything else, and a shared cell would let one test's panel decide
+/// another's interval.
+#[cfg(test)]
+pub(crate) struct DisplayRefreshPin {
+    previous: Option<DisplayRefreshProbeResult>,
+}
+
+#[cfg(test)]
+impl DisplayRefreshPin {
+    /// Pin a measured panel at `hz`, as if the host reported it.
+    pub(crate) fn measured(hz: u32) -> Self {
+        let accepted = accept_hz(hz);
+        Self::install(DisplayRefreshProbeResult {
+            hz: accepted,
+            source: DisplayRefreshSource::EnvOverride,
+            skip_reason: if accepted.is_some() {
+                ""
+            } else {
+                "out_of_range"
+            },
+            duration_ms: 0,
+        })
+    }
+
+    fn install(next: DisplayRefreshProbeResult) -> Self {
+        let previous = PINNED.with(|pinned| pinned.replace(Some(next)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DisplayRefreshPin {
+    fn drop(&mut self) {
+        PINNED.with(|pinned| pinned.set(self.previous));
+    }
 }
 
 fn probe_uncached() -> DisplayRefreshProbeResult {
@@ -304,5 +379,67 @@ mod tests {
         assert_eq!(a, b);
         // Either measured or skipped — never panics.
         assert!(a.outcome() == "ok" || a.outcome() == "skipped" || a.outcome() == "error");
+    }
+
+    /// The real host probe, which `probe_display_refresh` no longer reaches
+    /// under test. Its result is whatever this machine reports, so assert only
+    /// the invariants that hold everywhere — but keep calling it, so the FFI
+    /// and env-override paths stay compiled and exercised rather than becoming
+    /// dead code the moment tests stopped consulting the panel.
+    #[test]
+    fn the_host_probe_itself_stays_infallible_and_in_range() {
+        let probe = probe_uncached();
+        assert!(
+            probe.outcome() == "ok" || probe.outcome() == "skipped" || probe.outcome() == "error"
+        );
+        if let Some(hz) = probe.hz {
+            assert!(
+                (MIN_HZ..=MAX_HZ).contains(&hz),
+                "{hz} outside accepted range"
+            );
+            assert!(probe.skip_reason.is_empty());
+        } else {
+            assert!(!probe.skip_reason.is_empty(), "a skip must name its reason");
+        }
+    }
+
+    #[test]
+    fn unpinned_tests_never_see_the_host_panel() {
+        let probe = probe_display_refresh();
+        assert_eq!(probe.hz, None, "a test must not inherit the developer's Hz");
+        assert_eq!(probe.skip_reason, "not_probed_under_test");
+        assert_eq!(
+            adaptive_animation_interval_ms(false),
+            FALLBACK_ANIMATION_MS,
+            "the unmeasured fallback is what CI computes"
+        );
+    }
+
+    #[test]
+    fn a_pinned_panel_drives_the_cadence_and_is_restored_on_drop() {
+        assert_eq!(probe_display_refresh().hz, None);
+        {
+            let _pin = DisplayRefreshPin::measured(144);
+            assert_eq!(probe_display_refresh().hz, Some(144));
+            assert_eq!(
+                adaptive_animation_interval_ms(false),
+                animation_interval_for_hz(Some(144), false).as_millis() as u64
+            );
+            assert!(adaptive_animation_interval_ms(false) < FALLBACK_ANIMATION_MS);
+        }
+        assert_eq!(
+            probe_display_refresh().hz,
+            None,
+            "the pin must not outlive its scope"
+        );
+    }
+
+    #[test]
+    fn a_pin_outside_the_accepted_range_reads_as_unmeasured() {
+        let _pin = DisplayRefreshPin::measured(1);
+        let probe = probe_display_refresh();
+        assert_eq!(probe.hz, None);
+        assert_eq!(probe.skip_reason, "out_of_range");
+        assert_eq!(adaptive_animation_interval_ms(false), FALLBACK_ANIMATION_MS);
     }
 }

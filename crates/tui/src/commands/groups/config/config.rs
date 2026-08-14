@@ -2467,169 +2467,39 @@ pub fn logout(app: &mut App) -> CommandResult {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::test_support::lock_test_env;
+    use crate::test_support::{EnvVarGuard, TestEnvLock, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::approval::ApprovalMode;
     use std::env;
-    use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct EnvGuard {
-        home: Option<OsString>,
-        userprofile: Option<OsString>,
-        codewhale_config_path: Option<OsString>,
-        deepseek_config_path: Option<OsString>,
-        codewhale_allow_shell: Option<OsString>,
-        deepseek_allow_shell: Option<OsString>,
-        deepseek_approval_policy: Option<OsString>,
-        no_animations: Option<OsString>,
-        term_program: Option<OsString>,
-        ptyxis_version: Option<OsString>,
-        _lock: crate::test_support::TestEnvLock,
+        _vars: Vec<EnvVarGuard>,
+        _lock: TestEnvLock,
     }
 
     impl EnvGuard {
         fn new(home: &Path) -> Self {
-            let lock = crate::test_support::lock_test_env();
-            let home_str = OsString::from(home.as_os_str());
+            let lock = lock_test_env();
             let config_path = home.join(".deepseek").join("config.toml");
-            let config_str = OsString::from(config_path.as_os_str());
-            let home_prev = env::var_os("HOME");
-            let userprofile_prev = env::var_os("USERPROFILE");
-            let codewhale_config_prev = env::var_os("CODEWHALE_CONFIG_PATH");
-            let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
-            let codewhale_allow_shell_prev = env::var_os("CODEWHALE_ALLOW_SHELL");
-            let deepseek_allow_shell_prev = env::var_os("DEEPSEEK_ALLOW_SHELL");
-            let deepseek_approval_policy_prev = env::var_os("DEEPSEEK_APPROVAL_POLICY");
-            let no_animations_prev = env::var_os("NO_ANIMATIONS");
-            let term_program_prev = env::var_os("TERM_PROGRAM");
-            let ptyxis_version_prev = env::var_os("PTYXIS_VERSION");
-
-            // Safety: test-only environment mutation guarded by process-wide mutex.
-            unsafe {
-                env::set_var("HOME", &home_str);
-                env::set_var("USERPROFILE", &home_str);
-                env::remove_var("CODEWHALE_CONFIG_PATH");
-                env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
-                env::remove_var("CODEWHALE_ALLOW_SHELL");
-                env::remove_var("DEEPSEEK_ALLOW_SHELL");
-                env::remove_var("DEEPSEEK_APPROVAL_POLICY");
-                env::remove_var("NO_ANIMATIONS");
-                env::remove_var("TERM_PROGRAM");
-                env::remove_var("PTYXIS_VERSION");
-            }
-
+            let vars = vec![
+                EnvVarGuard::set("HOME", home),
+                EnvVarGuard::set("USERPROFILE", home),
+                EnvVarGuard::remove("CODEWHALE_CONFIG_PATH"),
+                EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", config_path),
+                EnvVarGuard::remove("CODEWHALE_ALLOW_SHELL"),
+                EnvVarGuard::remove("DEEPSEEK_ALLOW_SHELL"),
+                EnvVarGuard::remove("DEEPSEEK_APPROVAL_POLICY"),
+                EnvVarGuard::remove("NO_ANIMATIONS"),
+                EnvVarGuard::remove("TERM_PROGRAM"),
+                EnvVarGuard::remove("PTYXIS_VERSION"),
+            ];
             Self {
-                home: home_prev,
-                userprofile: userprofile_prev,
-                codewhale_config_path: codewhale_config_prev,
-                deepseek_config_path: deepseek_config_prev,
-                codewhale_allow_shell: codewhale_allow_shell_prev,
-                deepseek_allow_shell: deepseek_allow_shell_prev,
-                deepseek_approval_policy: deepseek_approval_policy_prev,
-                no_animations: no_animations_prev,
-                term_program: term_program_prev,
-                ptyxis_version: ptyxis_version_prev,
+                _vars: vars,
                 _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(value) = self.home.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("HOME", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("HOME");
-                }
-            }
-
-            if let Some(value) = self.userprofile.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("USERPROFILE", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("USERPROFILE");
-                }
-            }
-
-            if let Some(value) = self.codewhale_config_path.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("CODEWHALE_CONFIG_PATH", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("CODEWHALE_CONFIG_PATH");
-                }
-            }
-
-            if let Some(value) = self.deepseek_config_path.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("DEEPSEEK_CONFIG_PATH", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("DEEPSEEK_CONFIG_PATH");
-                }
-            }
-
-            for (key, value) in [
-                ("CODEWHALE_ALLOW_SHELL", self.codewhale_allow_shell.take()),
-                ("DEEPSEEK_ALLOW_SHELL", self.deepseek_allow_shell.take()),
-                (
-                    "DEEPSEEK_APPROVAL_POLICY",
-                    self.deepseek_approval_policy.take(),
-                ),
-            ] {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    if let Some(value) = value {
-                        env::set_var(key, value);
-                    } else {
-                        env::remove_var(key);
-                    }
-                }
-            }
-
-            if let Some(value) = self.no_animations.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("NO_ANIMATIONS", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("NO_ANIMATIONS");
-                }
-            }
-
-            for (key, value) in [
-                ("TERM_PROGRAM", self.term_program.take()),
-                ("PTYXIS_VERSION", self.ptyxis_version.take()),
-            ] {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    if let Some(value) = value {
-                        env::set_var(key, value);
-                    } else {
-                        env::remove_var(key);
-                    }
-                }
             }
         }
     }
