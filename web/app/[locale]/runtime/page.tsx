@@ -1,4 +1,5 @@
 import { Seal } from "@/components/seal";
+import { getFacts } from "@/lib/facts";
 import { buildPageMetadata } from "@/lib/page-meta";
 
 const REPO_BLOB_BASE = "https://github.com/Hmbown/CodeWhale/blob/main";
@@ -68,14 +69,24 @@ const INTEGRATIONS: Integration[] = [
   },
 ];
 
+function FactRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="py-3 hairline-b grid gap-1 sm:grid-cols-[10rem_1fr] sm:gap-6 sm:items-baseline">
+      <div className="eyebrow">{label}</div>
+      <div className="min-w-0 font-mono text-sm text-ink-soft break-words">{children}</div>
+    </div>
+  );
+}
+
 export default async function RuntimePage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
+  const facts = await getFacts();
 
   return (
     <>
       {/* Hero */}
-      <section className="mx-auto max-w-[1100px] px-6 pt-12 pb-10">
+      <section className="site-container section">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="接" />
           <div className="eyebrow">{isZh ? "Runtime & 集成" : "Runtime & Integrations"}</div>
@@ -95,8 +106,29 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
         </p>
       </section>
 
+      {/* Runtime facts */}
+      <section className="site-container py-8 hairline-t">
+        <div className="flex items-baseline gap-4 mb-4">
+          <Seal char="数" />
+          <div className="eyebrow">{isZh ? "运行时事实" : "Runtime facts"}</div>
+        </div>
+        <div className="hairline-t">
+          <FactRow label={isZh ? "版本" : "Version"}>{facts.version ?? "—"}</FactRow>
+          <FactRow label={isZh ? "工具数量" : "Tool count"}>{facts.toolCount ?? "—"}</FactRow>
+          <FactRow label={isZh ? "沙箱后端" : "Sandbox backends"}>
+            {facts.sandboxBackends.length ? facts.sandboxBackends.join(" · ") : "—"}
+          </FactRow>
+          <FactRow label={isZh ? "Crates" : "Crates"}>
+            {facts.crates.length ? `${facts.crates.length} · ${facts.crates.join(", ")}` : "—"}
+          </FactRow>
+          <FactRow label={isZh ? "源码版本" : "Source revision"}>
+            <code className="inline break-all">{facts.sourceRevision ?? "—"}</code>
+          </FactRow>
+        </div>
+      </section>
+
       {/* Trust boundary */}
-      <section className="mx-auto max-w-[1100px] px-6 py-8 hairline-t">
+      <section className="site-container py-8 hairline-t">
         <div className="flex items-baseline gap-4 mb-4">
           <Seal char="信" />
           <div className="eyebrow">{isZh ? "信任边界" : "Trust boundary"}</div>
@@ -138,7 +170,7 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
       </section>
 
       {/* Integration cards */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-6">
           <Seal char="集" />
           <h2 className="eyebrow">{isZh ? "集成方式" : "Integration surfaces"}</h2>
@@ -161,7 +193,7 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
       </section>
 
       {/* Read more */}
-      <section className="mx-auto max-w-[1100px] px-6 py-8 hairline-t">
+      <section className="site-container py-8 hairline-t">
         <p className="text-sm text-ink-soft">
           {isZh ? (
             <>

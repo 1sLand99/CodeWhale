@@ -18,7 +18,7 @@ export default async function DocsLayout({
 
   return (
     <div className="docs-theme docs-portal min-h-screen">
-      <section className="docs-portal-hero">
+      <section className="hero">
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container docs-portal-hero-inner">
           <div className="portal-mark">

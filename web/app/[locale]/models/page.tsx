@@ -62,7 +62,7 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
 
   return (
     <div className="models-page">
-      <section className="community-welcome">
+      <section className="hero">
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container community-welcome-inner">
           <div className="eyebrow">{isZh ? "模型与提供商" : "Models and providers"}</div>
@@ -96,7 +96,7 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
           </div>
           <div className="portal-topic-list">
             {setupPatterns.map((pattern) => (
-              <Link key={pattern.title} href={p("/docs#providers")}>
+              <Link key={pattern.title} href={p("/docs/configuration")}>
                 <strong>{pattern.title}</strong>
                 <span>{pattern.detail}</span>
                 <span className="font-mono break-all">{pattern.reference}</span>
@@ -120,12 +120,17 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
               ? "下面的列表由仓库中的提供商注册表生成，并随发布更新。这里列出路由 ID 和常用认证环境变量；传输协议、默认端点、模型解析和完整认证优先级以 docs/PROVIDERS.md 为准。"
               : "This list is generated from the provider registry in the repository and updated with releases. It shows route IDs and common authentication environment variables; docs/PROVIDERS.md is the source for wire protocols, default endpoints, model resolution, and full authentication precedence."}
           </p>
-          <ul className="grid gap-x-10 sm:grid-cols-2 hairline-t">
+          <ul className="grid gap-3 sm:grid-cols-2">
             {facts.providers.map((provider) => (
-              <li key={provider.id} className="py-4 hairline-b min-w-0">
-                <div className="font-display text-base">{provider.label}</div>
-                <div className="mt-1 font-mono text-[0.68rem] text-indigo break-all">{provider.id}</div>
-                <div className="mt-1 font-mono text-[0.64rem] text-ink-mute break-all leading-relaxed">{provider.env}</div>
+              <li key={provider.id} className="flex items-start gap-3 border hairline rounded-lg bg-paper px-4 py-3 min-w-0">
+                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-jade" aria-hidden="true" />
+                <div className="min-w-0">
+                  <div className="text-sm text-ink font-medium">{provider.label}</div>
+                  <code className="font-mono text-[0.66rem] text-indigo break-all">{provider.id}</code>
+                  <div className="mt-1 font-mono text-[0.62rem] text-ink-mute break-all leading-relaxed">
+                    <code className="inline">{provider.env}</code>
+                  </div>
+                </div>
               </li>
             ))}
           </ul>
@@ -144,6 +149,33 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
               </>
             )}
           </p>
+        </div>
+      </section>
+
+      <section className="portal-section">
+        <div className="portal-container">
+          <div className="portal-docs-heading">
+            <div>
+              <span>{isZh ? "模型目录" : "Model catalog"}</span>
+              <h2>{isZh ? "默认模型与 crate 清单" : "Default model & crate inventory"}</h2>
+            </div>
+          </div>
+          <div className="grid gap-8 sm:grid-cols-2">
+            <div>
+              <div className="eyebrow mb-1">{isZh ? "默认模型" : "Default model"}</div>
+              <code className="inline font-mono text-sm break-all">{facts.defaultModel ?? "—"}</code>
+            </div>
+            <div>
+              <div className="eyebrow mb-1">{isZh ? "Crates" : "Crates"}</div>
+              <ul className="flex flex-wrap gap-1.5">
+                {facts.crates.map((crate) => (
+                  <li key={crate}>
+                    <code className="inline font-mono text-[0.68rem] break-all">{crate}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
     </div>

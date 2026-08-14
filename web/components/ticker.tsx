@@ -141,9 +141,19 @@ export function Ticker({ items, labels }: { items: FeedItem[]; labels: TickerLab
   // flat run of children. The second half is hidden from assistive tech.
   const doubled = [...ordered, ...ordered];
 
+  // A fixed 80s loop reads broken on /zh: CJK titles are much longer than
+  // English, so the same duration scrolls 2-4x faster. Derive the duration
+  // from total glyph count (title + fixed chrome per entry) so reading speed
+  // stays roughly constant across locales.
+  const glyphCount = ordered.reduce(
+    (sum, item) => sum + (item.title?.length ?? 0) + 24,
+    0,
+  );
+  const durationSeconds = Math.max(50, Math.round(glyphCount / 22));
+
   return (
     <div className="hairline-t hairline-b bg-paper-deep overflow-hidden">
-      <div className="mx-auto max-w-[1400px] flex items-stretch">
+      <div className="site-container flex items-stretch">
         <div className="bg-ink text-paper px-4 py-2 flex items-center shrink-0 gap-2">
           <span className="w-1.5 h-1.5 bg-indigo rounded-full inline-block animate-pulse" />
           <span className="font-cjk text-sm font-semibold tracking-wider">{labels.liveLabel}</span>
@@ -152,7 +162,10 @@ export function Ticker({ items, labels }: { items: FeedItem[]; labels: TickerLab
           </span>
         </div>
         <div className="ticker-viewport" role="group" aria-label={labels.ariaLabel}>
-          <div className="ticker-track py-2 font-mono text-[0.78rem]">
+          <div
+            className="ticker-track py-2 font-mono text-[0.78rem]"
+            style={{ animationDuration: `${durationSeconds}s` }}
+          >
             {doubled.map((item, i) => (
               <TickerEntry
                 key={`${item.url}-${i}`}

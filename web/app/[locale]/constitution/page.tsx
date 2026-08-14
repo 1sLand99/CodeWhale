@@ -52,7 +52,7 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
   return (
     <>
       {/* THE THESIS */}
-      <section className="mx-auto max-w-[1100px] px-6 pt-12 pb-10">
+      <section className="site-container section">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="法" />
           <div className="eyebrow">{isZh ? "立论" : "The thesis"}</div>
@@ -81,7 +81,7 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
       </section>
 
       {/* THE THREE LAYERS */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-6">
           <Seal char="序" />
           <div className="eyebrow">{isZh ? "位阶，从最稳到最活" : "The rank, most-static first"}</div>
@@ -120,7 +120,7 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
       </section>
 
       {/* OBSERVABLE IN THE REASONING */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="证" />
           <div className="eyebrow">{isZh ? "在推理里可以被看到" : "Observable in the reasoning"}</div>
@@ -134,7 +134,7 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
       </section>
 
       {/* WHERE TO GO NEXT */}
-      <section className="mx-auto max-w-[1100px] px-6 py-8 hairline-t">
+      <section className="site-container py-8 hairline-t">
         <div className="flex flex-wrap items-center gap-3">
           <Link
             href={p("/install")}

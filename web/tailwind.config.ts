@@ -10,6 +10,7 @@ export default {
         paper: "rgb(var(--c-paper) / <alpha-value>)",
         "paper-deep": "rgb(var(--c-paper-deep) / <alpha-value>)",
         "paper-edge": "rgb(var(--c-paper-edge) / <alpha-value>)",
+        "paper-card": "var(--paper-card)",
         "paper-line": "#1B2230",
         "paper-line-soft": "#CBD3DF",
         ink: "rgb(var(--c-ink) / <alpha-value>)",

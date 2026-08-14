@@ -96,7 +96,7 @@ codewhale doctor`;
   return (
     <>
       {/* ① INSTALL */}
-      <section className="mx-auto max-w-[1100px] px-6 pt-12 pb-10">
+      <section className="site-container section">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="装" />
           <div className="eyebrow">{isZh ? "01 · 安装" : "01 · Install"}</div>
@@ -140,7 +140,7 @@ codewhale doctor`;
       </section>
 
       {/* ② VERIFY */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-5">
           <Seal char="验" />
           <div className="eyebrow">{isZh ? "02 · 验证" : "02 · Verify"}</div>
@@ -166,7 +166,7 @@ codewhale doctor`;
       </section>
 
       {/* ③ UPDATE */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-5">
           <Seal char="新" />
           <div className="eyebrow">{isZh ? "03 · 更新" : "03 · Update"}</div>
@@ -210,7 +210,7 @@ codewhale doctor`;
       </section>
 
       {/* ④ FIRST RUN */}
-      <section className="mx-auto max-w-[1100px] px-6 py-10 hairline-t">
+      <section className="site-container py-10 hairline-t">
         <div className="flex items-baseline gap-4 mb-5">
           <Seal char="始" />
           <div className="eyebrow">{isZh ? "04 · 首次运行" : "04 · First run"}</div>
@@ -289,7 +289,7 @@ codewhale doctor`;
 
       {/* ⑤ OTHER WAYS TO INSTALL */}
       <section id="other-ways" className="bg-paper-deep hairline-t hairline-b">
-        <div className="mx-auto max-w-[1100px] px-6 py-12">
+        <div className="site-container py-12">
           <div className="flex items-baseline gap-4 mb-5">
             <Seal char="备" />
             <div className="eyebrow">{isZh ? "05 · 其他安装方式" : "05 · Other ways to install"}</div>
@@ -500,7 +500,7 @@ codewhale doctor`;
       </section>
 
       {/* ⑥ WHERE CONFIG LIVES */}
-      <section className="mx-auto max-w-[1100px] px-6 py-12">
+      <section className="site-container py-12">
         <div className="flex items-baseline gap-4 mb-5">
           <Seal char="件" />
           <div className="eyebrow">{isZh ? "06 · 配置文件在哪" : "06 · Where config lives"}</div>
@@ -526,7 +526,7 @@ codewhale doctor`;
       </section>
 
       {/* ⑦ PROVENANCE */}
-      <section className="mx-auto max-w-[1100px] px-6 py-12 hairline-t">
+      <section className="site-container py-12 hairline-t">
         <div className="flex items-baseline gap-4 mb-5">
           <Seal char="源" />
           <div className="eyebrow">{isZh ? "07 · 来源与镜像" : "07 · Provenance & mirrors"}</div>
@@ -603,7 +603,7 @@ codewhale doctor`;
 
       {/* ⑧ NEXT STEPS */}
       <section className="bg-paper-deep hairline-t hairline-b">
-        <div className="mx-auto max-w-[1100px] px-6 py-12">
+        <div className="site-container py-12">
           <div className="flex items-baseline gap-4 mb-5">
             <Seal char="续" />
             <div className="eyebrow">{isZh ? "08 · 下一步" : "08 · Next steps"}</div>

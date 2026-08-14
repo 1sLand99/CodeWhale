@@ -55,7 +55,7 @@ brew tap Hmbown/deepseek-tui && brew install deepseek-tui
           Run <code className="inline">codewhale</code> to start. First run creates <code className="inline">~/.codewhale/</code> automatically. Legacy <code className="inline">~/.deepseek/</code> is still read as a compatibility fallback.
           Android arm64 / Termux is preview support: npm works only when the
           selected package version has matching Android assets in its GitHub Release.
-          See the <Link href="/install" className="body-link">full install guide</Link> for China mirrors, Docker, and troubleshooting.
+          See the <Link href="/en/install" className="body-link">full install guide</Link> for China mirrors, Docker, and troubleshooting.
         </p>
       </>
     ),
@@ -119,7 +119,7 @@ codewhale doctor         # full connectivity check`}
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — bundled default with a native API route, reasoning streaming, cache metrics, and thinking effort control.</li>
           <li><strong>OpenRouter</strong> — unified API for DeepSeek models and other open-model routes.</li>
-          <li><strong>{FACTS.providers.length - 2} more routes</strong> — including OpenAI-compatible, Anthropic, Mistral AI, OpenAI Codex, xAI, Moonshot/Kimi, Z.ai, MiniMax, StepFun, Volcengine Ark, Baidu Qianfan, Model Studio, NVIDIA NIM, Fireworks AI, Together AI, DeepInfra, SiliconFlow, Novita AI, Hugging Face, Arcee AI, AtlasCloud, and the keyless local endpoints SGLang, vLLM, and Ollama. <Link href="/models" className="body-link">The full list is generated from the provider registry</Link>.</li>
+          <li><strong>{FACTS.providers.length - 2} more routes</strong> — including OpenAI-compatible, Anthropic, Mistral AI, OpenAI Codex, xAI, Moonshot/Kimi, Z.ai, MiniMax, StepFun, Volcengine Ark, Baidu Qianfan, Model Studio, NVIDIA NIM, Fireworks AI, Together AI, DeepInfra, SiliconFlow, Novita AI, Hugging Face, Arcee AI, AtlasCloud, and the keyless local endpoints SGLang, vLLM, and Ollama. <Link href="/en/models" className="body-link">The full list is generated from the provider registry</Link>.</li>
         </ul>
         <p>
           Set the corresponding env var (e.g. <code className="inline">OPENROUTER_API_KEY</code>) and your provider in <code className="inline">~/.codewhale/config.toml</code>.
@@ -169,13 +169,13 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
     sources: ["#574", "#1303", "docs/CONFIGURATION.md"],
   },
   {
-    q: "What are Plan, Act, and Operate modes?",
+    q: "What are Plan, Work, and Operate modes?",
     a: (
       <>
         <ul className="list-disc pl-5 space-y-2 text-sm text-ink-soft">
           <li><strong>Plan</strong> — Read-only investigation. Can grep, read files, list directories, fetch URLs. Cannot write or execute shell.</li>
-          <li><strong>Act</strong> — Normal interactive coding. Tool availability and approval prompts follow the active configuration and permission posture.</li>
-          <li><strong>Operate</strong> — Direct tools follow the same permission, sandbox, shell, and safety rules as Act. Fleet workers are preferred for independent, parallel, background, or long-running work, but delegation is not mandatory. Workflow is optional for ordered phases and gates.</li>
+          <li><strong>Work</strong> — Normal interactive coding. Tool availability and approval prompts follow the active configuration and permission posture.</li>
+          <li><strong>Operate</strong> — Direct tools follow the same permission, sandbox, shell, and safety rules as Work. Fleet workers are preferred for independent, parallel, background, or long-running work, but delegation is not mandatory. Workflow is optional for ordered phases and gates.</li>
         </ul>
         <p className="mt-2">
           When the composer is idle, press <kbd className="font-mono text-xs px-1.5 py-0.5 hairline-t hairline-b hairline-l hairline-r">Tab</kbd> to cycle modes.
@@ -209,7 +209,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
         <code className="inline">/goal</code> sets a goal for the current TUI session.
         App-server clients can also persist a thread-scoped goal through the
         <code className="inline">thread/goal/*</code> methods. It does not add another
-        app mode; the mode switcher remains Plan, Act, and Operate, while permission posture is selected independently.
+        app mode; the mode switcher remains Plan, Work, and Operate, while permission posture is selected independently.
         Track progress in <a href="https://github.com/Hmbown/CodeWhale/issues/891" className="body-link">#891</a>.
       </>
     ),
@@ -252,7 +252,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
       <>
         Codewhale is a bidirectional MCP client and server. Define servers in <code className="inline">~/.codewhale/mcp.json</code>.
         Tools appear as <code className="inline">mcp_&lt;server&gt;_&lt;tool&gt;</code>. You can also expose Codewhale as an MCP server with <code className="inline">codewhale mcp</code>.
-        See the <Link href="/docs#mcp" className="body-link">docs page</Link> for configuration examples.
+        See the <Link href="/en/docs/mcp" className="body-link">docs page</Link> for configuration examples.
       </>
     ),
     sources: ["docs/MCP.md"],
@@ -263,7 +263,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
       <>
         No CLA required. Fork, branch with conventional commits (<code className="inline">feat:</code>, <code className="inline">fix:</code>, etc.), run the local checks, open a PR.
         The maintainer reads everything personally. Start with issues labeled <code className="inline">good first issue</code>.
-        See the <Link href="/contribute" className="body-link">contribute page</Link> and <a href="https://github.com/Hmbown/CodeWhale/blob/main/CONTRIBUTING.md" className="body-link">CONTRIBUTING.md</a>.
+        See the <Link href="/en/contribute" className="body-link">contribute page</Link> and <a href="https://github.com/Hmbown/CodeWhale/blob/main/CONTRIBUTING.md" className="body-link">CONTRIBUTING.md</a>.
       </>
     ),
     sources: ["CONTRIBUTING.md"],
@@ -311,7 +311,7 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"`}
         </p>
         <p className="mb-2">
           A CNB mirror is maintained for users who cannot reliably reach GitHub
-          (<Link href="/docs#cnb-mirror" className="body-link">docs/CNB_MIRROR.md</Link>).
+          (<Link href="/en/install" className="body-link">docs/CNB_MIRROR.md</Link>).
           Cargo users can use the TUNA mirror for faster downloads in China.
         </p>
         <p>
@@ -482,7 +482,7 @@ codewhale doctor         # 完整连接检查`}
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — 内置默认原生 API 路由，支持推理流、缓存指标和思考力度控制。</li>
           <li><strong>OpenRouter</strong> — 统一 API，可访问 DeepSeek 和其他开放模型路由。</li>
-          <li><strong>另外 {FACTS.providers.length - 2} 条路由</strong>——包括 OpenAI 兼容、Anthropic、Mistral AI、OpenAI Codex、xAI、Moonshot/Kimi、Z.ai、MiniMax、StepFun、Volcengine Ark、百度千帆、Model Studio、NVIDIA NIM、Fireworks、Together AI、DeepInfra、SiliconFlow、Novita、Hugging Face、Arcee AI、AtlasCloud，以及无需密钥的本地端点 SGLang、vLLM 和 Ollama。<Link href="/models" className="body-link">完整列表由提供商注册表生成</Link>。</li>
+          <li><strong>另外 {FACTS.providers.length - 2} 条路由</strong>——包括 OpenAI 兼容、Anthropic、Mistral AI、OpenAI Codex、xAI、Moonshot/Kimi、Z.ai、MiniMax、StepFun、Volcengine Ark、百度千帆、Model Studio、NVIDIA NIM、Fireworks、Together AI、DeepInfra、SiliconFlow、Novita、Hugging Face、Arcee AI、AtlasCloud，以及无需密钥的本地端点 SGLang、vLLM 和 Ollama。<Link href="/zh/models" className="body-link">完整列表由提供商注册表生成</Link>。</li>
         </ul>
         <p>
           设置对应的环境变量（如 <code className="inline">OPENROUTER_API_KEY</code>）并在 <code className="inline">~/.codewhale/config.toml</code> 中配置你的提供商。
@@ -538,7 +538,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
         <ul className="list-disc pl-5 space-y-2 text-sm text-ink-soft">
           <li><strong>Plan（计划）</strong> — 只读调查。可以 grep、读文件、列目录、抓取 URL。不能写入或执行 Shell。</li>
           <li><strong>Work（执行）</strong> — 常规交互式编码。工具是否可用以及何时请求批准，取决于当前配置和权限姿态。</li>
-          <li><strong>Operate（编排）</strong> — 直接工具遵循与 Act 相同的权限、沙箱、Shell 和安全规则。独立、并行、后台或长时间工作会优先交给 Fleet worker，但不强制委派；只有需要有序阶段和门禁时才需要 Workflow。</li>
+          <li><strong>Operate（编排）</strong> — 直接工具遵循与 Work 相同的权限、沙箱、Shell 和安全规则。独立、并行、后台或长时间工作会优先交给 Fleet worker，但不强制委派；只有需要有序阶段和门禁时才需要 Workflow。</li>
         </ul>
         <p className="mt-2">
           输入区空闲时，按 <kbd className="font-mono text-xs px-1.5 py-0.5 hairline-t hairline-b hairline-l hairline-r">Tab</kbd> 切换模式。
@@ -571,7 +571,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
       <>
         <code className="inline">/goal</code> 为当前 TUI 会话设置目标，支持 <code className="inline">pause</code>、<code className="inline">resume</code>、<code className="inline">complete</code>、<code className="inline">blocked</code> 和 <code className="inline">clear</code> 控制。
         App-server 客户端也可以通过 <code className="inline">thread/goal/*</code> 方法持久化线程范围的目标，支持 <code className="inline">set</code>、<code className="inline">get</code> 和 <code className="inline">clear</code>。
-        它不会新增一个应用模式；模式切换器仍然是 Plan、Act 和 Operate，权限姿态独立选择。
+        它不会新增一个应用模式；模式切换器仍然是 Plan、Work 和 Operate，权限姿态独立选择。
         跟踪进展：<a href="https://github.com/Hmbown/CodeWhale/issues/891" className="body-link">#891</a>。
       </>
     ),
@@ -604,7 +604,7 @@ codewhale --provider openrouter --model deepseek/deepseek-v4-pro
       <>
         Codewhale 是双向 MCP 客户端和服务器。在 <code className="inline">~/.codewhale/mcp.json</code> 中定义服务器。
         工具以 <code className="inline">mcp_&lt;server&gt;_&lt;tool&gt;</code> 形式呈现。你也可以通过 <code className="inline">codewhale mcp</code> 将 Codewhale 暴露为 MCP 服务器。
-        查看 <Link href="/zh/docs#mcp" className="body-link">文档页面</Link> 了解配置示例。
+        查看 <Link href="/zh/docs/mcp" className="body-link">文档页面</Link> 了解配置示例。
       </>
     ),
     sources: ["docs/MCP.md"],
@@ -662,7 +662,7 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"`}
         </p>
         <p className="mb-2">
           面向无法稳定访问 GitHub 的用户，提供 CNB 镜像（
-          <Link href="/docs#cnb-mirror" className="body-link">docs/CNB_MIRROR.md</Link>）。
+          <Link href="/zh/install" className="body-link">docs/CNB_MIRROR.md</Link>）。
           Cargo 用户可使用 TUNA 镜像在国内加速下载。
         </p>
         <p>
@@ -746,7 +746,7 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
 
   return (
     <>
-      <section className="mx-auto max-w-[1400px] px-6 pt-12 pb-8">
+      <section className="site-container section">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="问" />
           <div className="eyebrow">{isZh ? "常见问题" : "FAQ"}</div>
@@ -765,7 +765,7 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
         </p>
       </section>
 
-      <section className="mx-auto max-w-[1400px] px-6 pb-20">
+      <section className="site-container pb-20">
         <FaqSearch items={items} locale={locale} />
 
         <div className="mt-12 text-center">

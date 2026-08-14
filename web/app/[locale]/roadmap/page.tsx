@@ -211,7 +211,7 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
 
   return (
     <div className="roadmap-page">
-      <section className="community-welcome">
+      <section className="hero">
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container community-welcome-inner">
           <div className="eyebrow">{copy.eyebrow}</div>

@@ -73,7 +73,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           observer does the rest, and reduced motion skips it wholesale. */}
       <RevealOnScroll />
       {/* HERO — newspaper split: claim + live terminal proof */}
-      <section className="product-hero paper-hero">
+      <section className="hero">
         <div className="product-container product-hero-grid paper-hero-grid">
           <div className="product-hero-copy paper-hero-copy">
             <div className="mb-5">

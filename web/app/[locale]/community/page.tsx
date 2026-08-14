@@ -93,7 +93,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
 
   return (
     <>
-      <section className="community-welcome">
+      <section className="hero">
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container community-welcome-inner">
           <div className="eyebrow">{isZh ? "国际开源社区" : "International open-source community"}</div>

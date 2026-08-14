@@ -82,10 +82,10 @@ export default async function DigestArchivePage({ params }: { params: Promise<{ 
   if (digests.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center max-w-xl mx-auto px-4">
-        <h1 className="text-3xl font-bold mb-4 tracking-tight">
+        <h1 className="font-display text-3xl mb-4 tracking-crisp text-ink">
           {isZh ? "社区摘要" : "Community Digest"}
         </h1>
-        <p className="text-gray-500 dark:text-gray-400">
+        <p className="text-ink-mute">
           {isZh
             ? "本周社区动态整理中，请稍后再来！"
             : "We are gathering this week's community updates. Check back soon!"}
@@ -96,34 +96,34 @@ export default async function DigestArchivePage({ params }: { params: Promise<{ 
 
   return (
     <div className="max-w-4xl mx-auto py-12 px-6">
-      <h1 className="text-4xl font-extrabold mb-2 tracking-tight">
+      <h1 className="font-display text-4xl mb-2 tracking-crisp text-ink">
         {isZh ? "每周社区更新" : "Weekly Community Updates"}
       </h1>
-      <p className="text-gray-500 dark:text-gray-400 mb-8">
+      <p className="text-ink-mute mb-8">
         {isZh ? "由 Codewhale 维护者审核的摘要" : "Maintainer-approved summaries from Codewhale"}
       </p>
 
       <div className="space-y-12">
         {digests.map((digest: WeeklyDigest) => (
-          <article key={digest.weekId} className="border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm bg-white dark:bg-black">
-            <header className="mb-6 border-b border-gray-100 dark:border-gray-900 pb-4">
-              <span className="text-xs bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-400 px-2.5 py-1 rounded-md font-mono uppercase">
+          <article key={digest.weekId} className="border hairline rounded-lg p-6 bg-paper-card">
+            <header className="mb-6 hairline-b pb-4">
+              <span className="pill">
                 {digest.weekId}
               </span>
-              <h2 className="text-2xl font-bold mt-3 text-gray-900 dark:text-gray-50">{digest.titleEn}</h2>
-              <h3 className="text-xl text-gray-500 dark:text-gray-400 mt-1 font-medium">{digest.titleZh}</h3>
+              <h2 className="font-display text-2xl mt-3 text-ink">{digest.titleEn}</h2>
+              <h3 className="font-cjk text-lg text-ink-soft mt-1">{digest.titleZh}</h3>
             </header>
 
             <div className="mb-6 space-y-4">
-              <p className="text-gray-700 dark:text-gray-300 leading-relaxed">{digest.summaryEn}</p>
-              <p className="text-gray-500 dark:text-gray-400 leading-relaxed italic">{digest.summaryZh}</p>
+              <p className="text-ink-soft leading-relaxed">{digest.summaryEn}</p>
+              <p className="text-ink-mute leading-relaxed italic">{digest.summaryZh}</p>
             </div>
 
             <div className="space-y-6">
               {digest.sections.map((section: DigestSection, idx: number) => (
-                <section key={idx} className="border-l-2 border-gray-200 dark:border-gray-800 pl-4">
-                  <h4 className="font-bold text-lg mb-2 text-gray-900 dark:text-gray-100">{section.heading}</h4>
-                  <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400 font-mono text-sm">
+                <section key={idx} className="border-l-2 border-paper-edge pl-4">
+                  <h4 className="font-display text-lg mb-2 text-ink">{section.heading}</h4>
+                  <ul className="list-disc list-inside space-y-1 text-ink-soft font-mono text-sm">
                     {section.items.map((item: string, itemIdx: number) => (
                       <li key={itemIdx}>{item}</li>
                     ))}

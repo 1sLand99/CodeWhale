@@ -143,7 +143,7 @@ export default async function ContributePage({ params }: { params: Promise<{ loc
 
   return (
     <div className="contribute-page">
-      <section className="community-welcome">
+      <section className="hero">
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container community-welcome-inner">
           <div className="eyebrow">{isZh ? "参与国际开源社区" : "Contribute to an international open-source project"}</div>

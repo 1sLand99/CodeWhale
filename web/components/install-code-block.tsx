@@ -11,11 +11,15 @@ interface Props {
 export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copied ✓" }: Props) {
   const [copied, setCopied] = useState(false);
 
-  const copy = () => {
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(cmd);
+  const copy = async () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(cmd);
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // Clipboard write failed (permissions, non-secure context, or a focused
+      // write race) — never show a false "Copied" confirmation.
     }
   };
 

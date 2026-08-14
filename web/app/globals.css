@@ -70,6 +70,12 @@
   --hairline: rgba(20, 35, 70, 0.14);
   --code-bg: #03070d;
   --code-fg: #f6f2e8;
+
+  /* One site container and one vertical rhythm. Every page gutter aligns
+     with the nav; every hero and section shares a single padding token. */
+  --container: min(100% - 2rem, 76rem);
+  --hero-pad: clamp(3rem, 6vw, 4.75rem);
+  --section-pad: clamp(2.75rem, 5vw, 4rem);
 }
 
 /* ---------- base ---------- */
@@ -200,6 +206,30 @@ html[lang="ko"] h3 {
 .hairline-b { border-bottom: 1px solid var(--hairline); }
 .hairline-l { border-left: 1px solid var(--hairline); }
 .hairline-r { border-right: 1px solid var(--hairline); }
+
+/* The single site container: width + auto margins so every page's gutters
+   line up with the nav. */
+.site-container {
+  width: var(--container);
+  margin-inline: auto;
+}
+
+/* The single hero band shared by home, docs, and the community portals. */
+.hero {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--hairline);
+  background:
+    radial-gradient(circle at 82% 0%, rgba(125, 177, 197, 0.16), transparent 28rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--paper) 72%, white) 0%, var(--paper-deep) 100%);
+  color: var(--ink);
+  padding-block: var(--hero-pad);
+}
+
+/* The single section rhythm for per-route hero/section blocks. */
+.section {
+  padding-block: var(--section-pad);
+}
 
 .double-rule {
   background-image:
@@ -366,7 +396,7 @@ mark.search-highlight {
 
 .site-nav-inner {
   display: flex;
-  width: min(100% - 2.5rem, 74rem);
+  width: var(--container);
   min-height: 4.25rem;
   align-items: center;
   justify-content: space-between;
@@ -394,7 +424,7 @@ mark.search-highlight {
 
 .paper-issue-inner {
   display: flex;
-  width: min(100% - 2.5rem, 74rem);
+  width: var(--container);
   margin-inline: auto;
   align-items: center;
   justify-content: space-between;
@@ -556,7 +586,7 @@ mark.search-highlight {
 
 .site-footer-main,
 .site-footer-meta {
-  width: min(100% - 2.5rem, 74rem);
+  width: var(--container);
   margin-inline: auto;
 }
 
@@ -645,7 +675,13 @@ mark.search-highlight {
   color: var(--ink-mute);
 }
 
-.ticker-title { color: var(--ink); }
+.ticker-title {
+  color: var(--ink);
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* The contributor's handle is the point of the line, not a footnote. */
 .ticker-handle {
@@ -956,9 +992,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 @media (max-width: 700px) {
-  .site-nav-inner,
-  .site-footer-main,
-  .site-footer-meta { width: min(100% - 2rem, 74rem); }
   .site-wordmark { font-size: 1.05rem; }
 }
 
@@ -975,17 +1008,8 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 .portal-container {
-  width: min(100% - 2.5rem, 72rem);
+  width: var(--container);
   margin-inline: auto;
-}
-
-.portal-hero {
-  position: relative;
-  overflow: hidden;
-  border-bottom: 1px solid var(--hairline);
-  background:
-    radial-gradient(circle at 84% 8%, rgba(125, 177, 197, 0.15), transparent 28rem),
-    linear-gradient(180deg, #ffffff 0%, var(--ocean-mist) 100%);
 }
 
 .portal-current {
@@ -1434,10 +1458,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 @media (max-width: 760px) {
-  .portal-container {
-    width: min(100% - 2rem, 72rem);
-  }
-
   .portal-doc-groups {
     grid-template-columns: 1fr;
   }
@@ -1507,20 +1527,11 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 .product-container {
-  width: min(100% - 2.5rem, 76rem);
+  width: var(--container);
   margin-inline: auto;
 }
 
-.product-hero,
-.paper-hero {
-  position: relative;
-  overflow: hidden;
-  border-bottom: 1px solid var(--hairline);
-  background:
-    linear-gradient(180deg, rgba(232, 238, 248, 0.55) 0%, transparent 42%),
-    var(--paper);
-  color: var(--ink);
-}
+/* Product hero background is now the shared `.hero` band defined above. */
 
 .product-hero-brandline {
   display: flex;
@@ -1564,7 +1575,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   gap: clamp(1.75rem, 3.5vw, 3.5rem);
   align-items: start;
   min-height: 0;
-  padding-block: clamp(2.5rem, 5vw, 4.25rem);
 }
 
 .product-hero-copy h1,
@@ -2436,14 +2446,6 @@ html[lang="ko"] .ocean-column h2 {
 }
 
 @media (max-width: 760px) {
-  .product-container {
-    width: min(100% - 2rem, 76rem);
-  }
-
-  .paper-issue-inner {
-    width: min(100% - 2rem, 74rem);
-  }
-
   .paper-wordmark-tag {
     max-width: 11rem;
   }
@@ -2505,10 +2507,6 @@ html[lang="ko"] .ocean-column h2 {
     display: none;
   }
 
-  .product-hero-grid {
-    padding-block: 2.75rem 3.5rem;
-  }
-
   .product-hero-copy h1,
   .paper-hero-copy h1 {
     max-width: 100%;
@@ -2561,13 +2559,6 @@ html[lang="ko"] .ocean-column h2 {
   }
 }
 
-@media (min-width: 1536px) {
-  .site-nav-inner,
-  .paper-issue-inner {
-    width: min(100% - 2.5rem, 92rem);
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /*  Documentation portal                                              */
 /* ------------------------------------------------------------------ */
@@ -2576,39 +2567,28 @@ html[lang="ko"] .ocean-column h2 {
   background: var(--paper);
 }
 
-.docs-portal-hero,
-.community-welcome {
-  position: relative;
-  overflow: hidden;
-  border-bottom: 1px solid var(--hairline);
-  background:
-    radial-gradient(circle at 82% 0%, rgba(125, 177, 197, 0.16), transparent 28rem),
-    linear-gradient(180deg, color-mix(in srgb, var(--paper) 72%, white) 0%, var(--paper-deep) 100%);
-}
-
 .docs-portal-hero-inner,
 .community-welcome-inner {
   position: relative;
-  padding-block: clamp(2.75rem, 5vw, 4rem);
 }
 
-.docs-portal-hero .portal-mark {
+.hero .portal-mark {
   margin-bottom: 1rem;
 }
 
-.docs-portal-hero h1,
-.community-welcome h1 {
+.docs-portal-hero-inner h1,
+.community-welcome-inner h1 {
   max-width: 50rem;
   font-size: clamp(2.2rem, 4.8vw, 3.55rem);
   line-height: 1.03;
 }
 
-.community-welcome h1 {
+.community-welcome-inner h1 {
   margin-top: 0.85rem;
 }
 
-.docs-portal-hero p,
-.community-welcome p {
+.docs-portal-hero-inner p,
+.community-welcome-inner p {
   max-width: 47rem;
   margin-top: 1rem;
   color: var(--ink-soft);
