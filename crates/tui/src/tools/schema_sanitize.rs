@@ -99,6 +99,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     let constraint_note = schema
         .as_object()
         .and_then(root_composition_constraint_note);
+    let dependent_note = drop_dependent_keywords(schema);
 
     sanitize(schema);
 
@@ -107,7 +108,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     }
 
     let Some(obj) = schema.as_object_mut() else {
-        return constraint_note;
+        return combine_constraint_notes(constraint_note, dependent_note);
     };
 
     merge_root_composition_properties(obj);
@@ -119,7 +120,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     obj.remove("not");
     ensure_properties_object(obj);
     prune_dangling_required(schema);
-    constraint_note
+    combine_constraint_notes(constraint_note, dependent_note)
 }
 
 fn strict_schema_supported(schema: &Value) -> bool {
@@ -130,7 +131,10 @@ fn strict_schema_supported(schema: &Value) -> bool {
 
 fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
     if let Some(obj) = schema.as_object() {
-        if obj.contains_key("oneOf") || obj.contains_key("allOf") {
+        if obj.contains_key("oneOf")
+            || obj.contains_key("allOf")
+            || obj.contains_key("dependentSchemas")
+        {
             return true;
         }
         if is_root && obj.contains_key("anyOf") {
@@ -384,6 +388,50 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         }
     }
     None
+}
+
+/// Strip `dependentSchemas` / `dependentRequired` from every node.
+///
+/// MFJS validates each node against a closed keyword allow-list, so a schema
+/// carrying either keyword is refused outright — and that refusal reaches
+/// `sanitize_moonshot_chat_tools`, which fails the whole request build, so one
+/// composed schema would break *every* tool-bearing Moonshot turn rather than
+/// degrade its own tool.
+fn drop_dependent_keywords(schema: &mut Value) -> Option<String> {
+    strip_dependent_keywords(schema).then(|| {
+        "This provider cannot express conditional requirements from the original schema. \
+         Honor any such requirements documented by the tool when calling it."
+            .to_string()
+    })
+}
+
+fn combine_constraint_notes(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (Some(note), None) | (None, Some(note)) => Some(note),
+        (None, None) => None,
+    }
+}
+
+fn strip_dependent_keywords(schema: &mut Value) -> bool {
+    match schema {
+        Value::Object(obj) => {
+            let mut dropped = obj.remove("dependentRequired").is_some();
+            dropped |= obj.remove("dependentSchemas").is_some();
+            for value in obj.values_mut() {
+                dropped |= strip_dependent_keywords(value);
+            }
+            dropped
+        }
+        Value::Array(items) => {
+            let mut dropped = false;
+            for item in items {
+                dropped |= strip_dependent_keywords(item);
+            }
+            dropped
+        }
+        _ => false,
+    }
 }
 
 fn required_group_label(item: &Value) -> Option<String> {
@@ -826,6 +874,28 @@ mod tests {
     }
 
     #[test]
+    fn strict_mode_leaves_dependent_schema_tools_non_strict() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "message": {"type": "string"}
+            },
+            "dependentSchemas": {
+                "action": {
+                    "properties": {"message": {}},
+                    "required": ["message"]
+                }
+            }
+        });
+        let mut tools = vec![test_tool("agent", schema.clone())];
+
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, schema);
+    }
+
+    #[test]
     fn strict_mode_marks_compatible_tools_strict() {
         let mut tools = vec![Tool {
             tool_type: None,
@@ -1187,12 +1257,14 @@ fn sanitize_kimi_parameters_candidate(
     // simultaneously be `type: object`. Flatten the actual root shape used by
     // apply_patch and retain its dropped required-group contract as a prompt
     // note for the model.
+    // MFJS has no conditional keywords. The shared compatibility pass drops
+    // them with a bounded description note instead of failing the whole turn.
     let constraint_note = sanitize_for_responses(parameters);
 
     // Restore nullable unions collapsed by the registry's provider-neutral
     // sanitizer, translate MFJS-safe scalar const values, and normalize nested
-    // composition. Codewhale still validates tool input before execution, so
-    // widening oneOf to MFJS's anyOf remains safe; allOf fails closed.
+    // composition. This changes model-facing schema guidance only; each tool
+    // keeps responsibility for validating its own arguments. allOf fails closed.
     normalize_kimi_compatibility(parameters, true)?;
 
     // MFJS requires `type` to live inside each anyOf branch, never alongside
@@ -2709,6 +2781,119 @@ mod kimi_tests {
         assert_eq!(error, KimiParameterSchemaError::UnresolvedRootReference);
         assert!(!error.to_string().contains("private-schema-name-9217"));
         assert_eq!(schema, original, "a rejected schema must never be emitted");
+    }
+
+    fn contains_key_anywhere(value: &Value, key: &str) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.contains_key(key) || map.values().any(|v| contains_key_anywhere(v, key))
+            }
+            Value::Array(items) => items.iter().any(|v| contains_key_anywhere(v, key)),
+            _ => false,
+        }
+    }
+
+    fn action_discriminated_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "status"]},
+                "prompt": {"type": "string"},
+                "agent_id": {"type": "string"}
+            },
+            "required": ["action"],
+            "dependentRequired": {
+                "prompt": ["action"]
+            },
+            "dependentSchemas": {
+                "action": {"required": ["prompt"]}
+            }
+        })
+    }
+
+    #[test]
+    fn kimi_degrades_dependent_keywords_to_the_flat_schema() {
+        let mut schema = action_discriminated_schema();
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("must not refuse the schema");
+
+        assert!(!contains_key_anywhere(&schema, "dependentSchemas"));
+        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
+        let properties = schema["properties"].as_object().expect("properties");
+        for name in ["action", "prompt", "agent_id"] {
+            assert!(properties.contains_key(name), "{name} left the flat schema");
+        }
+        assert_eq!(schema["required"], json!(["action"]));
+        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
+
+        let note = note.expect("dropping a requirement must be reported to the model");
+        assert_eq!(
+            note,
+            "This provider cannot express conditional requirements from the original schema. \
+             Honor any such requirements documented by the tool when calling it."
+        );
+    }
+
+    #[test]
+    fn kimi_leaves_schemas_without_dependent_keywords_unannotated() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        });
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
+
+        assert_eq!(
+            note, None,
+            "a schema that lost nothing must not gain a note"
+        );
+        assert_eq!(schema["required"], json!(["path"]));
+    }
+
+    #[test]
+    fn kimi_degrades_dependent_keywords_nested_under_properties() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "path": {"type": "string"}
+                    },
+                    "dependentRequired": {"kind": ["path"]}
+                }
+            }
+        });
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("nested composition");
+
+        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
+        assert!(
+            schema["properties"]["target"]["properties"]
+                .as_object()
+                .expect("nested properties")
+                .contains_key("path")
+        );
+        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
+        assert!(note.is_some(), "nested drop must still be reported");
+    }
+
+    #[test]
+    fn kimi_reports_malformed_dependent_keywords_that_it_drops() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "dependentRequired": false,
+            "dependentSchemas": ["invalid"]
+        });
+
+        let note = sanitize_for_kimi_parameters(&mut schema).expect("degraded schema");
+
+        assert!(note.is_some(), "every dropped dependency must be reported");
+        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
+        assert!(!contains_key_anywhere(&schema, "dependentSchemas"));
     }
 
     #[test]

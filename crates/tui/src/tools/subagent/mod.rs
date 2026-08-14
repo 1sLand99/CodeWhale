@@ -7083,6 +7083,7 @@ impl ToolSpec for AgentTool {
             "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
+            "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; status and wait may be unscoped. ",
             "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
             "In Operate, background workers are the default for independent or long work; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
@@ -7090,6 +7091,16 @@ impl ToolSpec for AgentTool {
     }
 
     fn input_schema(&self) -> Value {
+        let target_required = json!([
+            {
+                "properties": {"agent_id": {}},
+                "required": ["agent_id"]
+            },
+            {
+                "properties": {"name": {}},
+                "required": ["name"]
+            }
+        ]);
         json!({
             "type": "object",
             "properties": {
@@ -7239,6 +7250,53 @@ impl ToolSpec for AgentTool {
                 "resume_from": {
                     "type": "string",
                     "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                }
+            },
+            "dependentSchemas": {
+                "action": {
+                    "anyOf": [
+                        {
+                            "properties": {
+                                "action": {"const": "start"},
+                                "prompt": {}
+                            },
+                            "required": ["prompt"]
+                        },
+                        {
+                            "properties": {"action": {"const": "status"}}
+                        },
+                        {
+                            "properties": {"action": {"const": "peek"}},
+                            "anyOf": target_required.clone()
+                        },
+                        {
+                            "properties": {
+                                "action": {"const": "message"},
+                                "message": {}
+                            },
+                            "required": ["message"],
+                            "anyOf": target_required.clone()
+                        },
+                        {
+                            "properties": {
+                                "action": {"const": "followup"},
+                                "message": {}
+                            },
+                            "required": ["message"],
+                            "anyOf": target_required.clone()
+                        },
+                        {
+                            "properties": {"action": {"const": "interrupt"}},
+                            "anyOf": target_required.clone()
+                        },
+                        {
+                            "properties": {"action": {"const": "wait"}}
+                        },
+                        {
+                            "properties": {"action": {"const": "cancel"}},
+                            "anyOf": target_required
+                        }
+                    ]
                 }
             },
             "required": []

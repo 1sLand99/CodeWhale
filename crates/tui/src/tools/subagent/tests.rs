@@ -4701,6 +4701,15 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     // Generic Chat Completions sanitize pass.
     let mut plain = agent_schema.clone();
     schema_sanitize::sanitize(&mut plain);
+    assert!(
+        plain.get("dependentSchemas").is_some(),
+        "generic chat schemas should retain action-dependent requirements"
+    );
+    assert_eq!(
+        plain["dependentSchemas"]["action"]["anyOf"][0]["required"],
+        json!(["prompt"]),
+        "generic sanitization must not prune requirements that refer to root properties"
+    );
     assert_eq!(
         plain["properties"]["type"]["enum"], expected,
         "chat completions sanitize must not erase or widen the role enum"
@@ -4720,21 +4729,31 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     let mut responses = agent_schema.clone();
     let note = schema_sanitize::sanitize_for_responses(&mut responses);
     assert!(
-        note.is_none(),
-        "agent schema has no root composition to drop"
+        note.as_deref()
+            .is_some_and(|note| note.contains("conditional requirements")),
+        "dropping the action contract must be reported to the model"
     );
     assert_eq!(
         responses["properties"]["type"]["enum"], expected,
         "responses/anthropic sanitize must not erase or widen the role enum"
     );
+    assert!(
+        responses.get("dependentSchemas").is_none(),
+        "responses/anthropic must drop their unsupported dependency keyword"
+    );
 
-    // Moonshot/Kimi validating sanitizer must accept the schema unchanged.
+    // Moonshot/Kimi must retain the supported field vocabulary while dropping
+    // the one root dependency keyword MFJS cannot represent.
     let mut kimi = agent_schema.clone();
     schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
         .expect("agent schema must stay Kimi-compatible");
     assert_eq!(
         kimi["properties"]["type"]["enum"], expected,
         "kimi sanitize must not erase or widen the role enum"
+    );
+    assert!(
+        kimi.get("dependentSchemas").is_none(),
+        "Kimi MFJS must receive a schema without dependentSchemas"
     );
 }
 
@@ -4777,6 +4796,46 @@ fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     assert!(agent_schema["properties"].get("agent_id").is_some());
     assert!(agent_schema["properties"].get("message").is_some());
     assert!(agent_schema["properties"].get("reason").is_some());
+}
+
+#[test]
+fn agent_tool_schema_bounds_fields_by_explicit_action() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
+    let branches = agent_schema["dependentSchemas"]["action"]["anyOf"]
+        .as_array()
+        .expect("agent action must have dependent schema branches");
+
+    let branch = |action: &str| {
+        branches
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == action)
+            .unwrap_or_else(|| panic!("missing dependent schema for action {action}"))
+    };
+    assert_eq!(branch("start")["required"], json!(["prompt"]));
+    for action in ["message", "followup"] {
+        assert_eq!(branch(action)["required"], json!(["message"]));
+    }
+    for action in ["peek", "message", "followup", "interrupt", "cancel"] {
+        assert_eq!(
+            branch(action)["anyOf"],
+            json!([
+                {
+                    "properties": {"agent_id": {}},
+                    "required": ["agent_id"]
+                },
+                {
+                    "properties": {"name": {}},
+                    "required": ["name"]
+                }
+            ])
+        );
+    }
+    for action in ["status", "wait"] {
+        assert!(branch(action).get("required").is_none());
+        assert!(branch(action).get("anyOf").is_none());
+    }
 }
 
 #[tokio::test]
