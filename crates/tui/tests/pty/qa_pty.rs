@@ -2975,7 +2975,7 @@ diff --git a/delete.txt b/delete.txt
     let expected_result_marker = if tool_allowed {
         "files_applied"
     } else {
-        "inside the workspace and outside sensitive paths"
+        "guardian unavailable"
     };
 
     let handle = std::thread::spawn(move || -> anyhow::Result<()> {
@@ -3143,7 +3143,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
         std::fs::create_dir_all(&codex_home)?;
         std::fs::write(
             codewhale_home.join("config.toml"),
-            "reasoning_effort = \"low\"\n\n# QA frames pin the deterministic-only auto-review tier: the model\n# guardian has no provider in the sealed harness, and a fail-closed\n# denial would change every frame this test pins.\n[auto_review]\nreviewer = false\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+            "reasoning_effort = \"low\"\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
         )?;
         let initial_mode = if persist_through_restart {
             "full"
@@ -3183,9 +3183,13 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             );
         }
 
-        // This sealed fixture is intentionally not a git work tree, so
-        // Auto-Review cannot prove the multi-file transaction is recoverable.
-        // Ask and Full Access can still complete it through their own posture.
+        // This sealed fixture is intentionally not a git work tree, so the
+        // deterministic Auto-Review tier cannot prove the multi-file
+        // transaction is recoverable. The residual fallback hold then reaches
+        // the model guardian, which has no provider in the sealed harness and
+        // fails closed — so Auto posture pins the honest guardian-denial
+        // frame. Ask and Full Access can still complete the call through
+        // their own posture.
         let tool_allowed = permission_posture != "auto";
         let (base_url, server) = spawn_file_mutation_screen_fixture(tool_allowed)?;
         let mut h = spawn_file_mutation_harness(&ws, &base_url, rows, cols, ascii_safe)?;
@@ -3211,7 +3215,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             h.wait_for(
                 |frame| {
                     frame.contains("tool issue")
-                        && frame.contains("inside the workspace")
+                        && frame.contains("guardian unavailable")
                         && frame.contains("done")
                 },
                 Duration::from_secs(10),
@@ -3297,7 +3301,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                     "held Auto-Review mutation omitted semantic stats:\n{}",
                     h.frame().debug_dump()
                 );
-                assert!(h.frame().contains("inside the workspace"));
+                assert!(h.frame().contains("guardian unavailable"));
                 assert!(!scroll_until(&mut h, ScrollDir::Up, "DIFF-NEW-SENTINEL"));
                 assert!(!scroll_until(&mut h, ScrollDir::Down, "DIFF-NEW-SENTINEL"));
             }
