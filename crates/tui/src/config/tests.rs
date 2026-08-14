@@ -407,7 +407,7 @@ fn auto_review_config_builds_runtime_policy() -> Result<()> {
     let config: Config = toml::from_str(
         r#"
 [auto_review]
-guidance = "Prefer review before remote side effects."
+natural_language_guidance = "retired compatibility key"
 
 [[auto_review.block]]
 id = "block-shell"
@@ -423,19 +423,13 @@ reason = "read_file is allowed"
     config.validate()?;
 
     let policy = config.auto_review_policy();
-    assert_eq!(
-        policy.natural_language_guidance.as_deref(),
-        Some("Prefer review before remote side effects.")
-    );
-
     let shell_context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
         "exec_shell",
         &serde_json::json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
-        false,
+        None,
     );
     let shell_decision = policy.evaluate(&shell_context);
     assert_eq!(
@@ -449,9 +443,8 @@ reason = "read_file is allowed"
         &serde_json::json!({"path": "README.md"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("read the docs"),
         true,
-        false,
+        None,
     );
     let read_decision = policy.evaluate(&read_context);
     assert_eq!(
@@ -467,14 +460,8 @@ reason = "read_file is allowed"
 fn auto_review_profile_overrides_base_policy() -> Result<()> {
     let parsed: ConfigFile = toml::from_str(
         r#"
-[auto_review]
-guidance = "base"
-
 [[auto_review.block]]
 action_kind = "shell"
-
-[profiles.strict.auto_review]
-guidance = "strict"
 
 [[profiles.strict.auto_review.block]]
 action_kind = "network"
@@ -484,14 +471,48 @@ action_kind = "network"
     let merged = apply_profile(parsed, Some("strict"))?;
     let policy = merged.auto_review_policy();
 
-    assert_eq!(policy.natural_language_guidance.as_deref(), Some("strict"));
     assert_eq!(policy.block_rules.len(), 1);
     assert_eq!(
         policy.block_rules[0].action_kind,
-        Some(crate::tui::auto_review::ToolActionKind::Network)
+        Some(crate::tui::auto_review::ToolActionKind::External)
     );
 
     Ok(())
+}
+
+#[test]
+fn auto_review_text_contains_fails_closed_instead_of_broadening_a_rule() {
+    let error = toml::from_str::<Config>(
+        r#"
+[[auto_review.allow]]
+tool = "exec_shell"
+text_contains = "run tests"
+"#,
+    )
+    .expect("shape parses")
+    .validate()
+    .expect_err("retired user-intent matcher must not disappear");
+
+    assert!(
+        error
+            .to_string()
+            .contains("user-intent matching was retired")
+    );
+}
+
+#[test]
+fn auto_review_legacy_allow_kind_fails_closed_instead_of_widening() {
+    let error = toml::from_str::<Config>(
+        r#"
+[[auto_review.allow]]
+action_kind = "git"
+"#,
+    )
+    .expect("shape parses")
+    .validate()
+    .expect_err("narrow legacy allow kind must not widen to external");
+
+    assert!(error.to_string().contains("cannot safely widen"));
 }
 
 #[test]

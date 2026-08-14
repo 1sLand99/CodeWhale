@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way source ownership ceilings. Deletion and line-neutral ownership moves pass; new packages, binaries, 1000-line module paths, a larger maximum module, or aggregate owned Rust growth require an explicit reviewed update. FEAT-014 adds the small, unused codewhale-command-contract prototype (shapes + tests only; no TUI production rewiring): 688035 -> 688916 owned Rust lines (includes main's provider, auto-review, and engine growth across two merges).",
+  "_comment": "One-way source ownership ceilings. Deletion and line-neutral ownership moves pass; new packages, binaries, 1000-line module paths, a larger maximum module, or aggregate owned Rust growth require an explicit reviewed update. FEAT-014 adds the small, unused codewhale-command-contract prototype (shapes + tests only; no TUI production rewiring): 688035 -> 688916 owned Rust lines. The v0.9.8 Auto-Review simplification tightens the current aggregate ceiling after removing reviewer retries and intent state.",
   "allowed_large_modules": [
     "crates/agent/src/lib.rs",
     "crates/app-server/src/chat_completions.rs",

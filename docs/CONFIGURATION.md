@@ -1808,19 +1808,16 @@ If you are upgrading from older releases:
   slot = 2
   action = "session.compact"
   ```
-- `[auto_review]` (table, optional): deterministic tool-call review policy.
+- `[auto_review]` (table, optional): tool-call review policy — a deterministic floor plus a model guardian tier.
   This layer sits on top of the existing permission posture; it can hold or block a
   tool call, but it is not an auto-push, auto-merge, or hosted review service.
   Block rules are checked first, then the built-in safety floor, then allow
-  rules. In Ask and Auto-Review, a safety hold opens approval; in Full Access
+  rules. In Ask, a safety hold opens approval; in Auto-Review, Full Access,
   or a non-interactive `never` posture it fails closed as a hard block. The
   safety floor still covers publish-like actions and destructive
   background/headless actions even if an allow rule matches.
 
   ```toml
-  [auto_review]
-  natural_language_guidance = "Prefer read-only inspection until the user asks for writes."
-
   [[auto_review.allow]]
   id = "read-only-inspection"
   action_kind = "read"
@@ -1832,16 +1829,34 @@ If you are upgrading from older releases:
   reason = "Release and publish actions require maintainer review."
   ```
 
-  Rule matchers are exact `tool`, `action_kind`, and/or
-  `text_contains` against the current user intent. At least one matcher is
-  required. `action_kind` accepts `read`, `write`, `shell`, `network`, `git`,
-  `mcp_read`, `mcp_action`, `browser`, `secret`, `publish`, `destructive`, or
-  `unknown`; invalid names fail config validation instead of becoming broad
-  rules. `natural_language_guidance` is recorded on the runtime policy and audit
-  event, but deterministic rules and the built-in safety floor are the enforced
-  behavior in current builds.
+  Rule matchers are exact `tool` and/or `action_kind`. At least one matcher is
+  required. `action_kind` accepts the six decision-relevant kinds `read`,
+  `write`, `shell`, `external`, `publish`, and `destructive`. Invalid names
+  fail config validation instead of silently broadening into another policy
+  class. In block rules, the old names remain conservative compatibility
+  aliases: `network`, `git`, `mcp_action`, `browser`, and `unknown` map to
+  `external`; `secret` maps to `destructive`; and `mcp_read` maps to `read`.
+  Retired narrow kinds in allow rules fail validation rather than widening to
+  a broader class. The retired `text_contains` matcher likewise fails
+  validation instead of silently broadening an old intent-dependent rule.
+  Fallback holds in interactive Auto-Review escalate to one stateless guardian
+  request. The request contains the exact held call and deterministic
+  observations as separate JSON fields. Conversation history, skill
+  instructions, attached file contents, and other expanded model context are
+  excluded. The guardian does not infer user intent or compute an authorization
+  score. It exposes no tools and returns a risk level, allow/deny, and a
+  rationale. High or critical risk cannot auto-run even if the model says
+  allow. An oversized exact call is denied rather than truncated. Exactly one
+  reviewer request is made; incomplete or malformed output, timeout,
+  cancellation, provider failure, or an empty rationale all fail closed. The
+  deterministic floor is never model-reviewed, and headless adapters use the
+  deterministic-only tier. The pinned Codex, Kimi, and DeepSeek source
+  boundaries are linked from [Permission Posture](MODES.md#permission-posture).
+  Reviewer outcomes emit `tool.auto_review` audit events with
+  `gate = "guardian"`.
 
-  Auto-review decisions emit `tool.auto_review_decision` audit events when tool
+  Auto-review decisions emit `tool.auto_review` audit events with
+  `gate = "deterministic"` when tool
   audit logging is enabled. Future PreToolUse/PostToolUse hooks can add
   observer input around this layer, but the configured auto-review policy is
   evaluated before a tool call is allowed to proceed.

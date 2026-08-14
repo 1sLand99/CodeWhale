@@ -177,10 +177,57 @@ Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
 - `auto` (**Auto-Review**): the fully autonomous posture. It never opens a user
   question; the model resolves ambiguity from context, chooses a safe reversible
   interpretation, or reports that it cannot proceed safely. Tool safety holds
-  remain separate from user questions. Approval decisions here are
-  **deterministic**: rules and the built-in safety floor allow proven-safe
-  calls, and any call that would otherwise need a human decision is denied
-  rather than executed. No AI reviewer approves actions on your behalf.
+  remain separate from user questions. Two layers decide approvals. The
+  **deterministic floor** (configured block rules plus the built-in safety
+  floor) allows proven-safe calls and hard-blocks publish-like actions and
+  destructive background/headless work; it is never model-reviewed. Fallback
+  holds — calls the deterministic engine could not prove safe — escalate to a
+  one-shot **model guardian** (v0.9.8) that returns risk, allow/deny, and a
+  rationale. The guardian sees the exact held call and deterministic
+  observations in separate JSON fields; conversation history, skill
+  instructions, attachments, and expanded model context are excluded. It does
+  not infer user intent or compute a generic user-intent score.
+  High or critical risk cannot auto-run even if the model says allow. It has no
+  tools, remembers no rules, and denies rather than truncates an oversized
+  exact call. Exactly one reviewer request is made; incomplete or malformed
+  output, timeout, cancellation, or provider failure fails closed. Headless
+  adapters use the deterministic-only tier. Repo-law
+  holds that explicitly require a person block in Auto-Review rather than
+  opening a hidden approval modal.
+
+The LLM reviewer is closest to OpenAI Codex's experimental Auto-Review at
+commit [`6fc6b9d6d2580d62622fc9884b5f5707f6505a5e`](https://github.com/openai/codex/tree/6fc6b9d6d2580d62622fc9884b5f5707f6505a5e).
+Codex's [guardian entry point](https://github.com/openai/codex/blob/6fc6b9d6d2580d62622fc9884b5f5707f6505a5e/codex-rs/core/src/guardian/mod.rs)
+reconstructs conversation context and runs a dedicated review session.
+Codewhale deliberately adopts only the exact-action structured decision,
+90-second deadline, and fail-closed result. It does not copy Codex's transcript
+reconstruction, user-authorization score, reviewer tools, retries, persistent
+review session, or denial ledger.
+
+Kimi Code at commit
+[`1414d4602898f406e540b23342cb18db23ff9efc`](https://github.com/MoonshotAI/kimi-code/tree/1414d4602898f406e540b23342cb18db23ff9efc)
+also has no LLM reviewer. Its ordered
+[permission policy](https://github.com/MoonshotAI/kimi-code/blob/1414d4602898f406e540b23342cb18db23ff9efc/packages/agent-core-v2/src/agent/permissionPolicy/permissionPolicyService.ts)
+applies explicit deny rules and then its
+[Auto policy](https://github.com/MoonshotAI/kimi-code/blob/1414d4602898f406e540b23342cb18db23ff9efc/packages/agent-core-v2/src/agent/permissionPolicy/policies/auto-mode-approve.ts)
+returns `approve` directly. Codewhale borrows Kimi's no-question autonomous UX,
+not that blanket approval rule.
+
+The sandbox and escalation baseline is grounded in DeepSeek Harness
+`0.1.0-rc.5` at
+commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/deepseek-harness/tree/47f943859bef60e4160492346772ded9b24f765a):
+its [sandbox contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/sandbox.md)
+defines per-call `read-only`, `workspace-write`, and `danger-full-access`
+boundaries and forbids silent unconfined fallback; its
+[approval contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/approval.md)
+grants only `allowed-once` and fails closed on rejection, cancellation, or an
+unavailable answerer; and its
+[sandbox result contract](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/shell/bash-sandbox/README.md)
+tells the model to retry a denied command exactly once with the narrowest wider
+mode plus a justification. DeepSeek Harness does not add an LLM reviewer to
+that path. Codewhale's autonomous posture adds only the single stateless
+guardian request described above; deterministic hard blocks remain
+non-bypassable.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
   while deliberate user questions remain available. Non-bypassable safety,
   repository-law, and managed-policy holds fail closed as hard blocks instead

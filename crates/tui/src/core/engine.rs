@@ -2496,7 +2496,7 @@ impl Engine {
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
                         self.handle_send_message(
-                            new_message,
+                            new_message.clone(),
                             mode,
                             route,
                             self.config.compaction.clone(),
@@ -5233,6 +5233,9 @@ pub(crate) enum AutoReviewPlanDecision {
     Allow,
     ForcePrompt(String),
     Block(String),
+    /// Fallback hold routed to the model guardian in interactive Auto posture
+    /// instead of a hard block.
+    ConsultReviewer(String),
 }
 
 pub(super) fn auto_review_run_origin_for_plan(
@@ -5245,79 +5248,14 @@ pub(super) fn auto_review_run_origin_for_plan(
     }
 }
 
-// The parameter list intentionally mirrors `AutoReviewContext::from_tool_call`,
-// which this thin wrapper builds; the 8 call sites (1 prod + tests) read clearer
-// passing the fields than constructing a context first.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn auto_review_plan_decision(
+pub(crate) fn auto_review_plan_decision_for_context(
     policy: &crate::tui::auto_review::AutoReviewPolicy,
-    tool_name: &str,
-    tool_input: &Value,
-    run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    user_intent: Option<&str>,
-    workspace_trusted: bool,
-    dirty_worktree: bool,
+    context: &crate::tui::auto_review::AutoReviewContext<'_>,
 ) -> (AutoReviewPlanDecision, Value) {
-    auto_review_plan_decision_in_workspace(
-        policy,
-        tool_name,
-        tool_input,
-        run_origin,
-        approval_mode,
-        user_intent,
-        workspace_trusted,
-        dirty_worktree,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn auto_review_plan_decision_in_workspace(
-    policy: &crate::tui::auto_review::AutoReviewPolicy,
-    tool_name: &str,
-    tool_input: &Value,
-    run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    user_intent: Option<&str>,
-    workspace_trusted: bool,
-    dirty_worktree: bool,
-    workspace: Option<&std::path::Path>,
-) -> (AutoReviewPlanDecision, Value) {
-    let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
-        tool_name,
-        tool_input,
-        run_origin,
-        approval_mode,
-        user_intent,
-        workspace_trusted,
-        dirty_worktree,
-    );
-    let mut decision = policy.evaluate(&context);
-    if approval_mode == crate::tui::approval::ApprovalMode::Auto
-        && context.action_kind == crate::tui::auto_review::ToolActionKind::Write
-        && decision.action == crate::tui::auto_review::AutoReviewAction::Allow
-    {
-        let write_is_bounded = workspace
-            .and_then(|workspace| {
-                file_write_tool_target_paths(tool_name, tool_input).map(|paths| {
-                    crate::core::authority::paths_within_workspace_write_carve_out(
-                        workspace, &paths,
-                    )
-                })
-            })
-            .unwrap_or(false);
-        if !write_is_bounded {
-            decision = crate::tui::auto_review::AutoReviewDecision {
-                action: crate::tui::auto_review::AutoReviewAction::AskUser,
-                reason: "Auto-Review requires every write target to stay inside the workspace and outside sensitive paths".to_string(),
-                rule_id: None,
-            };
-        }
-    }
-    let audit_event = policy.audit_event(&context, &decision);
-    let plan_decision = if approval_mode == crate::tui::approval::ApprovalMode::Auto
-        && tool_name == REQUEST_USER_INPUT_NAME
+    let decision = policy.evaluate(context);
+    let audit_event = policy.audit_event(context, &decision);
+    let plan_decision = if context.approval_mode == crate::tui::approval::ApprovalMode::Auto
+        && context.tool_name == REQUEST_USER_INPUT_NAME
     {
         // This synthetic tool does not execute user work. Let the turn loop
         // return its ordinary autonomous guidance result instead of treating
@@ -5326,31 +5264,19 @@ pub(crate) fn auto_review_plan_decision_in_workspace(
     } else {
         match decision.action {
             crate::tui::auto_review::AutoReviewAction::Allow
-                if approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
             {
                 AutoReviewPlanDecision::Allow
             }
             crate::tui::auto_review::AutoReviewAction::Allow => AutoReviewPlanDecision::NoChange,
-            crate::tui::auto_review::AutoReviewAction::AskUser
-                if approval_mode == crate::tui::approval::ApprovalMode::Auto =>
-            {
-                AutoReviewPlanDecision::Block(format!(
-                    "Auto-Review held tool '{tool_name}': {}",
-                    decision.reason
-                ))
-            }
-            crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
-            crate::tui::auto_review::AutoReviewAction::HoldForReview => {
-                // HoldForReview only originates from the built-in safety floor
-                // (configured rules produce Allow/Block), so name the gate
-                // honestly instead of blaming an "auto-review policy" the user
-                // may never have configured (#3883).
+            crate::tui::auto_review::AutoReviewAction::AskUser if decision.built_in_safety_gate => {
+                // Name the built-in gate honestly.
                 let reason = format!(
                     "Built-in safety gate requires approval: {}",
                     decision.reason
                 );
                 if matches!(
-                    approval_mode,
+                    context.approval_mode,
                     crate::tui::approval::ApprovalMode::Auto
                         | crate::tui::approval::ApprovalMode::Never
                         | crate::tui::approval::ApprovalMode::Bypass
@@ -5363,10 +5289,16 @@ pub(crate) fn auto_review_plan_decision_in_workspace(
                     AutoReviewPlanDecision::ForcePrompt(reason)
                 }
             }
+            crate::tui::auto_review::AutoReviewAction::AskUser
+                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+            {
+                AutoReviewPlanDecision::ConsultReviewer(decision.reason.clone())
+            }
+            crate::tui::auto_review::AutoReviewAction::AskUser => AutoReviewPlanDecision::NoChange,
             crate::tui::auto_review::AutoReviewAction::Block => {
                 AutoReviewPlanDecision::Block(format!(
-                    "Auto-review policy blocked tool '{tool_name}': {}",
-                    decision.reason
+                    "Auto-review policy blocked tool '{}': {}",
+                    context.tool_name, decision.reason
                 ))
             }
         }
@@ -5963,6 +5895,7 @@ use context::{
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
 mod dispatch;
 mod lsp_hooks;
+mod reviewer;
 mod streaming;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;

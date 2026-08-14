@@ -37,6 +37,14 @@ fn approval_intent_summary(text: &str) -> Option<String> {
     Some(summary)
 }
 
+/// Tell the model how to proceed after a deterministic Auto-Review denial.
+/// Keeping the original reason first preserves the audit trail.
+pub(super) fn auto_review_block_tool_error(reason: &str) -> ToolError {
+    ToolError::permission_denied(format!(
+        "{reason}. This block is automatic - do not work around it; take a safer approach inside the current permissions, or stop and tell the user."
+    ))
+}
+
 pub(super) fn registered_tool_approval_required(
     tool_name: &str,
     requirement: ApprovalRequirement,
@@ -86,6 +94,15 @@ pub(super) fn registered_tool_forces_prompt(
 ) -> bool {
     requirement != ApprovalRequirement::Auto
         && registered_tool_requires_non_bypassable_approval(tool_name)
+}
+
+/// Repo-law `ask` rules require a human decision. Only Ask posture can open
+/// that decision; every autonomous or no-prompt posture must fail closed.
+pub(super) fn repo_law_must_block_without_prompt(
+    approval_mode: crate::tui::approval::ApprovalMode,
+    auto_approve: bool,
+) -> bool {
+    auto_approve || approval_mode != crate::tui::approval::ApprovalMode::Suggest
 }
 
 /// Whether a [`Usage`] carries any provider-reported data. The
@@ -316,6 +333,54 @@ impl Engine {
                 reason: "no model client resolved for this turn".to_string(),
             }
         }
+    }
+
+    async fn consult_auto_review_guardian(
+        &self,
+        client: &dyn crate::core::model_client::ModelClient,
+        context: &crate::tui::auto_review::AutoReviewContext<'_>,
+        tool_input: &Value,
+        held_reason: &str,
+        tool_id: &str,
+        turn: &mut TurnContext,
+    ) -> Result<(), ToolError> {
+        let context_text =
+            crate::tui::auto_review::build_reviewer_context(context, held_reason, tool_input);
+        let _ = self
+            .tx_event
+            .send(Event::status(format!(
+                "Auto-Review checking '{}'",
+                context.tool_name
+            )))
+            .await;
+        let started = Instant::now();
+        let review =
+            super::reviewer::consult_reviewer(client, &context_text, &self.cancel_token).await;
+        if let Some(usage) = &review.usage {
+            turn.add_usage(usage);
+            if usage_has_reported_data(usage) {
+                let _ = self
+                    .tx_event
+                    .send(Event::TurnUsage {
+                        usage: usage.clone(),
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    })
+                    .await;
+            }
+        }
+        let decision = review.outcome.audit_decision();
+        let risk = review.outcome.audit_risk();
+        let result = review.outcome.into_tool_result(context.tool_name);
+        emit_tool_audit(json!({
+            "event": "tool.auto_review",
+            "gate": "guardian",
+            "tool_id": tool_id,
+            "decision": decision,
+            "risk": risk,
+            "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
+        }));
+        result.map(|_| ())
     }
 
     pub(super) async fn handle_deepseek_turn(
@@ -2453,19 +2518,21 @@ impl Engine {
                 }
 
                 if blocked_error.is_none() {
-                    let (decision, audit_event) = auto_review_plan_decision_in_workspace(
-                        &self.config.auto_review_policy,
+                    let review_context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
                         &tool_name,
                         &tool_input,
                         auto_review_run_origin_for_plan(detached_start),
                         self.session.approval_mode,
-                        None,
                         crate::config::is_workspace_trusted(&self.session.workspace),
-                        false,
                         Some(&self.session.workspace),
                     );
+                    let (decision, audit_event) = auto_review_plan_decision_for_context(
+                        &self.config.auto_review_policy,
+                        &review_context,
+                    );
                     emit_tool_audit(json!({
-                        "event": "tool.auto_review_decision",
+                        "event": "tool.auto_review",
+                        "gate": "deterministic",
                         "tool_id": tool_id.clone(),
                         "auto_review": audit_event,
                     }));
@@ -2488,7 +2555,24 @@ impl Engine {
                         AutoReviewPlanDecision::Block(reason) => {
                             approval_required = false;
                             approval_force_prompt = false;
-                            blocked_error = Some(ToolError::permission_denied(reason));
+                            blocked_error = Some(auto_review_block_tool_error(&reason));
+                        }
+                        AutoReviewPlanDecision::ConsultReviewer(held_reason) => {
+                            if let Err(error) = self
+                                .consult_auto_review_guardian(
+                                    client.as_ref(),
+                                    &review_context,
+                                    &tool_input,
+                                    &held_reason,
+                                    &tool_id,
+                                    turn,
+                                )
+                                .await
+                            {
+                                blocked_error = Some(error);
+                            } else if !hook_requires_approval && !approval_force_prompt {
+                                approval_required = false;
+                            }
                         }
                     }
                 }
@@ -2518,11 +2602,15 @@ impl Engine {
                     }));
                     match decision {
                         crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
-                            if self.session.auto_approve {
+                            if repo_law_must_block_without_prompt(
+                                self.session.approval_mode,
+                                self.session.auto_approve,
+                            ) {
                                 approval_required = false;
                                 approval_force_prompt = false;
                                 blocked_error = Some(ToolError::permission_denied(format!(
-                                    "Repository law blocked tool '{tool_name}' in Full Access: {reason}. Switch to Ask to review this protected change."
+                                    "Repository law blocked tool '{tool_name}' in {}: {reason}. Switch to Ask to review this protected change.",
+                                    self.session.approval_mode.permission_chip_label(),
                                 )));
                             } else {
                                 approval_required = true;

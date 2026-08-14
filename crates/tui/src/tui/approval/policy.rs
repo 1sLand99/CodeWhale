@@ -156,8 +156,7 @@ pub fn classify_stakes(
     let semantic_name = canonical_action_alias(tool_name, params);
     match crate::tui::auto_review::ToolActionKind::from_tool_call(semantic_name, params, category) {
         crate::tui::auto_review::ToolActionKind::Publish
-        | crate::tui::auto_review::ToolActionKind::Destructive
-        | crate::tui::auto_review::ToolActionKind::Secret => ApprovalStakes::Critical,
+        | crate::tui::auto_review::ToolActionKind::Destructive => ApprovalStakes::Critical,
         _ => ApprovalStakes::Elevated,
     }
 }
