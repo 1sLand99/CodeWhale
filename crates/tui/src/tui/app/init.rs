@@ -820,6 +820,7 @@ impl App {
             agent_activity_started_at: None,
             agent_counter: 0,
             agent_label_map: HashMap::new(),
+            agent_role_counters: HashMap::new(),
             last_agent_progress_redraw: None,
             last_workflow_budget_redraw: None,
             ui_theme,

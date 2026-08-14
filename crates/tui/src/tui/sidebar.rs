@@ -1911,6 +1911,125 @@ mod tests {
         assert_eq!(app.agent_display_label("agent_zzz999"), "agent_zzz999");
     }
 
+    #[test]
+    fn ensure_agent_label_prefers_identity_over_the_counter() {
+        let mut app = create_test_app();
+        let route = |profile: Option<&str>, role: &str| {
+            Some(crate::tools::subagent::ChildRouteReceipt {
+                requested_type: "custom".to_string(),
+                requested_profile: profile.map(str::to_string),
+                resolved_profile_id: None,
+                profile_origin: None,
+                canonical_role: role.to_string(),
+                provider_id: "deepseek".to_string(),
+                model_id: "deepseek-v4-pro".to_string(),
+                route_source: "roster".to_string(),
+                requested_reasoning: "inherit".to_string(),
+                effective_reasoning: None,
+                runtime_version: "test".to_string(),
+                runtime_build_sha: "unknown".to_string(),
+            })
+        };
+
+        let mut named = cached_agent("agent_named", None);
+        named.name = "branch-triage".to_string();
+        app.subagent_cache.push(named);
+
+        let mut role = cached_agent("agent_role", None);
+        role.assignment.role = Some("reviewer".to_string());
+        app.subagent_cache.push(role);
+
+        let mut profile = cached_agent("agent_profile", None);
+        profile.assignment.role = None;
+        profile.child_route = route(Some("release-lead"), "custom");
+        app.subagent_cache.push(profile);
+
+        let mut canonical = cached_agent("agent_canonical", None);
+        canonical.assignment.role = None;
+        canonical.child_route = route(None, "planner");
+        app.subagent_cache.push(canonical);
+
+        let mut typed = cached_agent("agent_typed", None);
+        typed.assignment.role = None;
+        typed.agent_type = crate::tools::subagent::FleetRole::Builder;
+        app.subagent_cache.push(typed);
+
+        // The dispatch name leads, annotated with the role when the role is
+        // not already part of the name.
+        assert_eq!(
+            app.ensure_agent_label("agent_named"),
+            "branch-triage · worker"
+        );
+        // Unnamed children are disambiguated per role (each role's counter
+        // starts at 1).
+        assert_eq!(app.ensure_agent_label("agent_role"), "reviewer · 1");
+        assert_eq!(app.ensure_agent_label("agent_profile"), "release-lead · 1");
+        assert_eq!(app.ensure_agent_label("agent_canonical"), "planner · 1");
+        assert_eq!(app.ensure_agent_label("agent_typed"), "builder · 1");
+
+        // A progress-only agent first seen before its metadata arrives gets a
+        // counter placeholder, then upgrades once the identity is observed.
+        assert_eq!(app.ensure_agent_label("agent_late"), "Agent 1");
+        let mut late = cached_agent("agent_late", None);
+        late.assignment.role = Some("verifier".to_string());
+        app.subagent_cache.push(late);
+        assert_eq!(app.ensure_agent_label("agent_late"), "verifier · 1");
+    }
+
+    #[test]
+    fn ensure_agent_label_disambiguates_concurrent_same_role_children() {
+        let mut app = create_test_app();
+
+        let mut first = cached_agent("agent_builder_a", None);
+        first.assignment.role = None;
+        first.agent_type = crate::tools::subagent::FleetRole::Builder;
+        app.subagent_cache.push(first);
+
+        let mut second = cached_agent("agent_builder_b", None);
+        second.assignment.role = None;
+        second.agent_type = crate::tools::subagent::FleetRole::Builder;
+        app.subagent_cache.push(second);
+
+        assert_eq!(app.ensure_agent_label("agent_builder_a"), "builder · 1");
+        assert_eq!(app.ensure_agent_label("agent_builder_b"), "builder · 2");
+        // Stability: re-seeing a known builder keeps its assigned label.
+        assert_eq!(app.ensure_agent_label("agent_builder_a"), "builder · 1");
+        assert_eq!(app.ensure_agent_label("agent_builder_b"), "builder · 2");
+
+        // A different role has its own sequence.
+        let mut reviewer = cached_agent("agent_reviewer_a", None);
+        reviewer.assignment.role = Some("reviewer".to_string());
+        app.subagent_cache.push(reviewer);
+        assert_eq!(app.ensure_agent_label("agent_reviewer_a"), "reviewer · 1");
+    }
+
+    #[test]
+    fn ensure_agent_label_named_child_skips_role_suffix_when_present() {
+        let mut app = create_test_app();
+
+        let mut named = cached_agent("agent_named", None);
+        named.name = "release-lead".to_string();
+        named.assignment.role = None;
+        named.child_route = Some(crate::tools::subagent::ChildRouteReceipt {
+            requested_type: "custom".to_string(),
+            requested_profile: Some("release-lead".to_string()),
+            resolved_profile_id: None,
+            profile_origin: None,
+            canonical_role: "release-lead".to_string(),
+            provider_id: "deepseek".to_string(),
+            model_id: "deepseek-v4-pro".to_string(),
+            route_source: "roster".to_string(),
+            requested_reasoning: "inherit".to_string(),
+            effective_reasoning: None,
+            runtime_version: "test".to_string(),
+            runtime_build_sha: "unknown".to_string(),
+        });
+        app.subagent_cache.push(named);
+
+        // The role is already part of the name, so no duplicate suffix.
+        assert_eq!(app.ensure_agent_label("agent_named"), "release-lead");
+    }
+
     fn cached_agent(
         agent_id: &str,
         nickname: Option<&str>,

@@ -1516,6 +1516,10 @@ pub struct App {
     /// Maps raw agent_id to a stable user-facing label (#3030).
     /// Populated when `AgentSpawned` fires; read by sidebar rendering.
     pub agent_label_map: HashMap<String, String>,
+    /// Per-role sequence counters for unnamed children (#3030). Two concurrent
+    /// builders render as `builder · 1` and `builder · 2` instead of sharing a
+    /// bare, indistinguishable role label.
+    pub agent_role_counters: HashMap<String, u64>,
     /// Last time a sub-agent progress event triggered a redraw.
     /// Used to throttle redraws under high sub-agent concurrency (#3033).
     pub last_agent_progress_redraw: Option<Instant>,
@@ -3535,14 +3539,112 @@ impl App {
         self.collapsed_cell_map.clear();
     }
 
-    /// #3030: return the stable user-facing label for an agent id
-    /// ("Agent 3"), assigning the next sequential label on first sight.
-    pub(crate) fn ensure_agent_label(&mut self, agent_id: &str) -> String {
-        if let Some(label) = self.agent_label_map.get(agent_id) {
-            return label.clone();
+    /// Resolve the dispatch/session name for an agent. `None` when the agent
+    /// is unnamed (the manager seeds `name` with the raw id) or absent from
+    /// the cache — the raw id is a lookup handle, never a display name.
+    fn agent_session_name(&self, agent_id: &str) -> Option<String> {
+        let agent = self
+            .subagent_cache
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)?;
+        let name = agent.name.trim();
+        (!name.is_empty() && name != agent.agent_id).then(|| name.to_string())
+    }
+
+    /// Resolve the most specific role/profile token for an agent, in priority
+    /// order: the advisory `assignment.role`, the resolved profile name, the
+    /// canonical route role, and finally the Fleet type. `None` only for a
+    /// progress-only agent whose dispatch metadata has not arrived yet.
+    fn agent_role_label(&self, agent_id: &str) -> Option<String> {
+        let agent = self
+            .subagent_cache
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)?;
+        agent
+            .assignment
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                agent
+                    .child_route
+                    .as_ref()
+                    .and_then(|route| route.requested_profile.as_deref())
+                    .map(str::trim)
+                    .filter(|profile| !profile.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                agent
+                    .child_route
+                    .as_ref()
+                    .map(|route| route.canonical_role.trim())
+                    .filter(|role| !role.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                let role = agent.agent_type.as_str().trim();
+                (!role.is_empty()).then(|| role.to_string())
+            })
+    }
+
+    /// `true` for the `Agent N` counter placeholder assigned before a child's
+    /// dispatch metadata arrives. Placeholders are the only label that may be
+    /// upgraded once the child's identity is observed.
+    fn is_agent_counter_placeholder(label: &str) -> bool {
+        label
+            .strip_prefix("Agent ")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// Resolve the identity-backed label for an agent, or `None` when no
+    /// identity field is populated (so the caller falls back to a counter
+    /// placeholder). Named children keep their name and gain a role suffix
+    /// when the role is not already part of the name; unnamed children are
+    /// disambiguated with a per-role sequence counter.
+    fn resolved_identity_label(&mut self, agent_id: &str) -> Option<String> {
+        let name = self.agent_session_name(agent_id);
+        let role = self.agent_role_label(agent_id);
+        match (name, role) {
+            (Some(name), Some(role)) if !name.contains(&role) => Some(format!("{name} · {role}")),
+            (Some(name), _) => Some(name),
+            (None, Some(role)) => {
+                let next = self.agent_role_counters.entry(role.clone()).or_insert(0);
+                *next += 1;
+                Some(format!("{role} · {next}"))
+            }
+            (None, None) => None,
         }
+    }
+
+    fn next_agent_placeholder(&mut self) -> String {
         self.agent_counter = self.agent_counter.saturating_add(1);
-        let label = format!("Agent {}", self.agent_counter);
+        format!("Agent {}", self.agent_counter)
+    }
+
+    /// #3030: return the stable user-facing label for an agent id. Labels are
+    /// resolved from the child's own identity and never downgraded once set;
+    /// only the generic `Agent N` placeholder upgrades when dispatch metadata
+    /// arrives. A raw agent id is never used as a label.
+    pub(crate) fn ensure_agent_label(&mut self, agent_id: &str) -> String {
+        let existing = self.agent_label_map.get(agent_id).cloned();
+        if let Some(existing) = existing {
+            if !Self::is_agent_counter_placeholder(&existing) {
+                return existing;
+            }
+            // Upgrade a placeholder only once identity metadata is available.
+            if let Some(label) = self.resolved_identity_label(agent_id) {
+                self.agent_label_map
+                    .insert(agent_id.to_string(), label.clone());
+                return label;
+            }
+            return existing;
+        }
+        let label = self
+            .resolved_identity_label(agent_id)
+            .unwrap_or_else(|| self.next_agent_placeholder());
         self.agent_label_map
             .insert(agent_id.to_string(), label.clone());
         label

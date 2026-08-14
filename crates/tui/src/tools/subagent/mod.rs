@@ -7174,9 +7174,12 @@ impl ToolSpec for AgentTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start one focused background worker and return immediately with its agent_id; a prompt is enough for a read-only role. ",
-            "Use multiple starts for independent parallel tasks. Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
-            "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
-            "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
+            "Use multiple starts for independent parallel tasks. ",
+            "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (analysis-only), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (exactly allowed_tools). ",
+            "profile runs the child as a named Fleet profile (roster member) — its role posture, model route, and instruction overlay — so pass a profile only when the task needs that member and never pass model alongside it. ",
+            "max_depth caps how deep the child may spawn its own descendants (it can only narrow the inherited budget). workspace_policy=shared (default) runs in the parent checkout; worktree=true (or workspace_policy=worktree) gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
+            "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) and exact_files (individual files) so parallel children claim disjoint scope. ",
+            "Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; status and wait may be unscoped. ",
             "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",

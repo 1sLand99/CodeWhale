@@ -148,10 +148,28 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
     if let Some(agent) = agent {
         push_safe_line(app, &mut lines, "Assignment", &agent.assignment.objective);
 
-        if let Some(role) = agent.assignment.role.as_deref() {
+        // The child's own route receipt is the authoritative resolved truth
+        // for a fleet-dispatched child; `assignment.role` is only the caller's
+        // advisory token and may be absent on a `type`-only dispatch.
+        let route = agent.child_route.as_ref();
+        let role = route
+            .map(|route| route.canonical_role.trim())
+            .filter(|role| !role.is_empty())
+            .or_else(|| agent.assignment.role.as_deref())
+            .map(str::trim)
+            .filter(|role| !role.is_empty());
+        if let Some(role) = role {
             push_safe_line(app, &mut lines, "Role", role);
         }
-        push_safe_line(app, &mut lines, "Profile", agent.agent_type.as_str());
+        // Profile is the named roster member when one was resolved; otherwise
+        // the canonical Fleet type is the only identity we can truthfully show.
+        let profile = route
+            .and_then(|route| route.requested_profile.as_deref())
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .unwrap_or_else(|| agent.agent_type.as_str());
+        push_safe_line(app, &mut lines, "Profile", profile);
+        push_safe_line(app, &mut lines, "Type", agent.agent_type.as_str());
         lines.push(format!("Parent: {}", safe_parent_name(app, agent)));
     } else {
         lines.push(format!("Parent: {}", safe_parent_from_meta(app, meta)));
@@ -179,9 +197,27 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
         && let Some(provider) = meta.resolved_provider.as_deref()
     {
         push_safe_line(app, &mut lines, "Provider", provider);
+    } else if let Some(route) = agent.and_then(|agent| agent.child_route.as_ref())
+        && !route.provider_id.trim().is_empty()
+    {
+        push_safe_line(app, &mut lines, "Provider", &route.provider_id);
     }
-    if let Some(model) = surface_row.model.as_deref() {
-        push_safe_line(app, &mut lines, "Model", model);
+    // Model truth: the resolved route model wins, then the Work-row receipt
+    // (which itself carries `agent.model` or usage-envelope route evidence),
+    // then the child's spawn model.
+    let model = agent
+        .and_then(|agent| agent.child_route.as_ref())
+        .map(|route| route.model_id.clone())
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| surface_row.model.clone())
+        .or_else(|| {
+            agent
+                .map(|agent| agent.model.clone())
+                .filter(|model| !model.trim().is_empty())
+        })
+        .or_else(|| meta.and_then(|meta| meta.resolved_model.clone()));
+    if let Some(model) = model {
+        push_safe_line(app, &mut lines, "Model", &model);
     }
 
     if let Some(agent) = agent {
@@ -483,7 +519,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::tools::subagent::{
-        AgentWorkerStatus, FleetRole, SubAgentAssignment, SubAgentNeedsInput,
+        AgentWorkerStatus, ChildRouteReceipt, FleetRole, SubAgentAssignment, SubAgentNeedsInput,
     };
     use crate::tui::app::{
         AgentCurrentActivity, AgentRecentAction, MAX_AGENT_RECENT_ACTIONS, TuiOptions,
@@ -651,6 +687,44 @@ mod tests {
         )));
         assert!(details.body.contains("Model: kimi-k3"));
         assert!(!details.body.contains("stale-meta-model"));
+    }
+
+    #[test]
+    fn details_projection_shows_resolved_route_truth_for_fleet_child() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let agent_id = "agent_fleet_child";
+        let mut child = agent(agent_id, SubAgentStatus::Running);
+        // A `type`-only fleet dispatch leaves the advisory role empty and the
+        // spawn model is a requested placeholder; the child's own route receipt
+        // is the authoritative resolved truth.
+        child.assignment.role = None;
+        child.model = "stale-requested-model".to_string();
+        child.child_route = Some(ChildRouteReceipt {
+            requested_type: "custom".to_string(),
+            requested_profile: Some("release-lead".to_string()),
+            resolved_profile_id: Some("roster-release-lead".to_string()),
+            profile_origin: Some("roster".to_string()),
+            canonical_role: "release-lead".to_string(),
+            provider_id: "deepseek".to_string(),
+            model_id: "deepseek-v4-pro".to_string(),
+            route_source: "roster".to_string(),
+            requested_reasoning: "inherit".to_string(),
+            effective_reasoning: Some("high".to_string()),
+            runtime_version: "test".to_string(),
+            runtime_build_sha: "unknown".to_string(),
+        });
+        app.subagent_cache.push(child);
+
+        let body = project_agent_details(&app, agent_id)
+            .expect("projection")
+            .body;
+        assert!(body.contains("Role: release-lead"), "{body}");
+        assert!(body.contains("Profile: release-lead"), "{body}");
+        assert!(body.contains("Type: builder"), "{body}");
+        assert!(body.contains("Model: deepseek-v4-pro"), "{body}");
+        assert!(body.contains("Provider: deepseek"), "{body}");
+        assert!(!body.contains("stale-requested-model"), "{body}");
     }
 
     #[test]
