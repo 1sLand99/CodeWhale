@@ -2803,6 +2803,12 @@ impl Engine {
                 sandbox_posture.posture_label()
             ),
         ];
+        if approval_mode == crate::tui::approval::ApprovalMode::Never {
+            lines.push(
+                "Approval prompts are disabled; do not request escalation for this turn."
+                    .to_string(),
+            );
+        }
         // On ordinary external turns the user's own message is authoritative by
         // construction, so provenance is redundant. On non-external turns
         // (sub-agent handoff, runtime events) the *reduced* authority is the

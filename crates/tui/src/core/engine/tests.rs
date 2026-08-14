@@ -14057,8 +14057,9 @@ fn turn_metadata_leaves_mode_entirely_to_runtime_policy() {
 
 #[test]
 fn turn_metadata_projects_permission_posture_as_fact_only() {
-    // #4780 + turn-meta diet: the active posture remains an actionable fact;
-    // question-discipline prose stays out of turn_meta.
+    // #4780 + turn-meta diet: the active posture remains an actionable fact.
+    // Never adds one actionable constraint so the model cannot waste a turn
+    // asking for an approval the host is configured not to provide.
     use crate::tui::approval::ApprovalMode;
 
     let cases = [
@@ -14097,6 +14098,13 @@ fn turn_metadata_projects_permission_posture_as_fact_only() {
         assert!(
             !text.contains("Current question discipline"),
             "{posture}: question discipline must not re-enter turn_meta: {text}"
+        );
+        assert_eq!(
+            text.contains(
+                "Approval prompts are disabled; do not request escalation for this turn."
+            ),
+            approval_mode == ApprovalMode::Never,
+            "{posture}: {text}"
         );
     }
 }
