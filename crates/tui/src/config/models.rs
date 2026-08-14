@@ -168,17 +168,12 @@ pub const OFFICIAL_DEEPSEEK_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-
 pub const DEFAULT_ZAI_MODEL: &str = "GLM-5.2";
 pub const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
 pub const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
-// TODO(2026-08-03): GLM-5.3 metadata is INHERITED FROM glm-5.2 PENDING OFFICIAL
-// Z.AI RELEASE METADATA. The id follows the family's own naming convention; no
-// limit, capability, or price here is a vendor-published GLM-5.3 fact. Z.ai's
-// live `/models` catalog did not list GLM-5.3 on that date, so the route is
-// registered (the alias resolves to Z.ai instead of another vendor's model)
-// but will fail upstream until Z.ai ships it. Scope is first-party Z.ai plus
-// its OpenRouter mirror only: metadata inheritance is not evidence that a
-// third-party gateway carries the model, so no OpenCode Zen / OpenCode Go /
-// Model Studio / TelecomJS roster lists it. Correct at the catalog definition
-// (crates/config/assets/models_dev.bundled.json) once Z.ai publishes real
-// metadata, then re-check every site that greps for this marker.
+// GLM-5.3 is live on the Z.ai Coding Plan (2026-08-13). The id follows the
+// family's naming convention. Limits and reasoning options still inherit
+// from glm-5.2 until Z.ai publishes distinct 5.3 numbers; no USD price is
+// claimed. Scope is first-party Z.ai plus its OpenRouter mirror only.
+// Correct at crates/config/assets/models_dev.bundled.json
+// `_meta.pending_release_metadata` when distinct 5.3 facts exist.
 pub const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
 pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";

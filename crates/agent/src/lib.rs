@@ -414,8 +414,8 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
-            // GLM-5.3 capabilities are INHERITED FROM glm-5.2 PENDING OFFICIAL
-            // Z.AI RELEASE METADATA (2026-08-03); see
+            // GLM-5.3 is live; capabilities still inherit from glm-5.2 until
+            // Z.ai publishes distinct 5.3 numbers. See
             // crates/config/assets/models_dev.bundled.json
             // `_meta.pending_release_metadata`.
             ModelInfo {

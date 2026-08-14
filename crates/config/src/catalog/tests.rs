@@ -623,8 +623,8 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
     assert_eq!(glm.limit.as_ref().and_then(|l| l.context), Some(1_000_000));
     assert!(glm.default_for_provider);
 
-    // GLM-5.3 is a peer row whose limits are INHERITED FROM glm-5.2 pending
-    // official Z.ai release metadata. Adding it must not move the default.
+    // GLM-5.3 is a live peer whose limits still inherit from glm-5.2 until
+    // Z.ai publishes distinct 5.3 numbers. Adding it must not move the default.
     let glm53 = find(&rows, "zai", "GLM-5.3");
     assert_eq!(
         glm53.limit.as_ref().and_then(|l| l.context),
@@ -779,9 +779,9 @@ fn bundled_asset_pricing_is_honest() {
     assert_eq!(cost.output, Some(4.40));
     assert_eq!(cost.cache_read, Some(0.26));
 
-    // GLM-5.3 was not live on the Z.ai API when it was added (2026-08-03) and
-    // Zhipu has published no rate for it, so every glm-5.3 row stays unpriced
-    // rather than inheriting glm-5.2's published rates.
+    // GLM-5.3 is live on the Coding Plan, but Z.ai has published no USD PAYG
+    // rate for it. Coding Plan credit multipliers are not USD, so every
+    // glm-5.3 row stays unpriced rather than inheriting glm-5.2's rates.
     for row in &rows {
         if row.wire_model_id.to_ascii_lowercase().contains("glm-5.3") {
             assert!(

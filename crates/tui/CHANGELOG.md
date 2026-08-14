@@ -22,6 +22,13 @@ templates moved to v0.9.9.
   thread** cannot paint over the session fact chips. Chips wrap instead
   of sliding under the rail.
 
+- Z.ai `GLM-5.3` is a live Coding Plan picker option (`/model` after
+  `/provider zai`, or `model = "GLM-5.3"`). `GLM-5.2` stays the default.
+  Limits and reasoning options still inherit from `GLM-5.2` until Z.ai
+  publishes distinct 5.3 numbers. No USD price is claimed. A live call
+  can still 429 with entitlement code 1311 on accounts that are not
+  provisioned for 5.3.
+
 - The TUI transcript renders Markdown blockquotes (`>` lines) with a quote
   rail — nested quotes, inline bold/code/links, wrapped continuation rows, and
   selection copy that keeps the quote text and skips the rail chrome.
