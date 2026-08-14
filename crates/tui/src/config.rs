@@ -6148,6 +6148,42 @@ impl Config {
             }
         }
 
+        // Official Antigravity (`agy`) login. `ANTIGRAVITY_API_KEY` config
+        // and env slots were already checked above; here the process's own
+        // `AGY_ADC_AUTH` wins over the consented `state.vscdb`, which is
+        // imported read-only from the one pinned path. The token only ever
+        // reaches the credential plane — sends still fail closed in the
+        // client because the cloud-code wire protocol is unimplemented.
+        if provider == ApiProvider::Antigravity && !custom_endpoint {
+            let grant = self
+                .external_credential_read_grant(
+                    provider,
+                    codewhale_config::ExternalCredentialSource::AgyCli,
+                    &codewhale_config::default_agy_credentials_path(),
+                )
+                .ok();
+            let process_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+            match crate::agy_credentials::antigravity_credential_precedence(
+                None,
+                &process_env,
+                grant.as_ref(),
+            ) {
+                crate::agy_credentials::AntigravityCredential::ProcessEnv(token) => {
+                    return Ok(token);
+                }
+                crate::agy_credentials::AntigravityCredential::ExternalFile(token) => {
+                    return Ok(token);
+                }
+                other => {
+                    tracing::debug!(
+                        target: "config",
+                        source = other.source_label(),
+                        "antigravity credential plane resolved; sends remain fail-closed"
+                    );
+                }
+            }
+        }
+
         if !auth_mode_requires_api_key(auth_mode.as_deref())
             && (provider.is_self_hosted() || base_url_uses_local_host(&self.deepseek_base_url()))
         {
@@ -7899,7 +7935,6 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Mistral => &mut providers.mistral,
                 ApiProvider::Google => &mut providers.google,
                 ApiProvider::Antigravity => &mut providers.antigravity,
-                ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
                 ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -8246,7 +8281,6 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Mistral => &mut providers.mistral,
                 ApiProvider::Google => &mut providers.google,
-                ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
