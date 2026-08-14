@@ -103,6 +103,17 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
   assert.match(html, /name="theme-color" content="#03070d"/);
 });
 
+test("rail New thread cannot paint over the session fact chips", async () => {
+  const styles = await readFile(
+    new URL("../src/runtime_web/styles.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(cssDeclarations(styles, "\\.rail"), /overflow:\s*hidden/);
+  assert.match(cssDeclarations(styles, "\\.new-thread"), /max-width:\s*100%/);
+  assert.match(cssDeclarations(styles, "\\.session-header"), /overflow:\s*hidden/);
+  assert.match(cssDeclarations(styles, "\\.session-facts"), /flex-wrap:\s*wrap/);
+});
+
 test("uses the v0.9.6 Work vocabulary for the agent wire mode", () => {
   assert.equal(modeLabel("agent"), "Work");
   assert.equal(modeLabel("plan"), "Plan");

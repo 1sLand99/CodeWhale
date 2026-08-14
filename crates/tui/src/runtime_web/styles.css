@@ -83,6 +83,7 @@ summary:focus-visible {
   gap: 14px;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   padding: 18px 14px 12px;
   border-right: 1px solid var(--line);
   background: rgba(8, 17, 28, 0.96);
@@ -191,6 +192,8 @@ summary:focus-visible {
 .new-thread {
   display: flex;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   align-items: center;
   justify-content: center;
   gap: 7px;
@@ -462,6 +465,8 @@ textarea::placeholder {
   grid-area: header;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px 20px;
+  min-width: 0;
+  overflow: hidden;
   padding: 15px 24px 13px;
   border-bottom: 1px solid var(--line);
   background: rgba(8, 17, 28, 0.72);
@@ -495,11 +500,11 @@ textarea::placeholder {
 
 .session-facts {
   display: flex;
+  flex-wrap: wrap;
   grid-column: 1 / -1;
   min-width: 0;
   gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  overflow: hidden;
 }
 
 .session-facts::-webkit-scrollbar {

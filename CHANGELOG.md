@@ -18,6 +18,10 @@ templates moved to v0.9.9.
   session. Paths stay off the wire. Reconnect after both this client and
   CWC #202 land to backfill existing empty rows.
 
+- The local Runtime web client keeps the thread rail clipped so **New
+  thread** cannot paint over the session fact chips. Chips wrap instead
+  of sliding under the rail.
+
 - The TUI transcript renders Markdown blockquotes (`>` lines) with a quote
   rail — nested quotes, inline bold/code/links, wrapped continuation rows, and
   selection copy that keeps the quote text and skips the rail chrome.
