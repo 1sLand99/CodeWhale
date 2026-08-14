@@ -77,6 +77,9 @@ pub enum Block {
     HorizontalRule,
     /// A bullet (`-`/`*`) or ordered (`1.`) list item with its prefix and body.
     ListItem { bullet: String, text: String },
+    /// A `>` quote line with its nesting depth (1 = single `>`). The text has
+    /// the quote markers stripped; depth is capped at [`MAX_QUOTE_DEPTH`].
+    Quote { depth: usize, text: String },
     /// A line inside a fenced code block. Fences themselves are dropped, but
     /// their language token and block identity stay available to syntect.
     Code {
@@ -191,7 +194,7 @@ thread_local! {
 /// Resumable parser state.
 ///
 /// The parser is strictly line-oriented: each source line maps to blocks using
-/// only a three-field carry (`in_code_block`, `code_language`,
+/// only a three-field carry (`open_fence_len`, `code_language`,
 /// `code_block_id`). That is what makes resuming *exact* rather than
 /// approximate — appending text can never change how an earlier complete line
 /// parsed, so committed blocks never need revisiting.
@@ -209,7 +212,10 @@ pub struct ParseState {
     /// Length of `prefix`. Always ends just past a newline, so only whole
     /// lines are ever committed.
     consumed: usize,
-    in_code_block: bool,
+    /// Length of the opening code fence in backticks while inside a fenced
+    /// code block (`None` outside). A closing fence must be at least this
+    /// long per CommonMark; shorter backtick lines are code content.
+    open_fence_len: Option<usize>,
     code_language: Option<String>,
     code_block_id: usize,
 }
@@ -232,7 +238,7 @@ impl ParseState {
             push_parsed_line(
                 raw_line,
                 &mut self.blocks,
-                &mut self.in_code_block,
+                &mut self.open_fence_len,
                 &mut self.code_language,
                 &mut self.code_block_id,
             );
@@ -251,14 +257,14 @@ impl ParseState {
             };
         }
         let mut blocks = self.blocks.clone();
-        let mut in_code_block = self.in_code_block;
+        let mut open_fence_len = self.open_fence_len;
         let mut code_language = self.code_language.clone();
         let mut code_block_id = self.code_block_id;
         for raw_line in tail.lines() {
             push_parsed_line(
                 raw_line,
                 &mut blocks,
-                &mut in_code_block,
+                &mut open_fence_len,
                 &mut code_language,
                 &mut code_block_id,
             );
@@ -454,14 +460,14 @@ impl ParseState {
     fn snapshot_tail(&self, content: &str) -> Vec<Block> {
         let tail = content.get(self.consumed..).unwrap_or_default();
         let mut blocks = Vec::new();
-        let mut in_code_block = self.in_code_block;
+        let mut open_fence_len = self.open_fence_len;
         let mut code_language = self.code_language.clone();
         let mut code_block_id = self.code_block_id;
         for raw_line in tail.lines() {
             push_parsed_line(
                 raw_line,
                 &mut blocks,
-                &mut in_code_block,
+                &mut open_fence_len,
                 &mut code_language,
                 &mut code_block_id,
             );
@@ -491,28 +497,50 @@ fn stable_block_prefix_len(blocks: &[Block]) -> usize {
 fn push_parsed_line(
     raw_line: &str,
     blocks: &mut Vec<Block>,
-    in_code_block: &mut bool,
+    open_fence_len: &mut Option<usize>,
     code_language: &mut Option<String>,
     code_block_id: &mut usize,
 ) {
     let trimmed = raw_line.trim_start();
-    if trimmed.starts_with("```") {
-        if *in_code_block {
-            *in_code_block = false;
-            *code_language = None;
-        } else {
-            *in_code_block = true;
-            *code_block_id = code_block_id.saturating_add(1);
-            *code_language = normalized_fence_language(trimmed.trim_start_matches('`'));
+    let fence_len = trimmed.chars().take_while(|c| *c == '`').count();
+    if fence_len >= 3 {
+        match *open_fence_len {
+            // Inside a code block: a fence at least as long as the opener
+            // closes it; a shorter backtick line is code content per
+            // CommonMark and must not flip the state or escape the block.
+            Some(open) if fence_len >= open && trimmed[fence_len..].trim().is_empty() => {
+                *open_fence_len = None;
+                *code_language = None;
+            }
+            Some(_) => {
+                blocks.push(Block::Code {
+                    line: raw_line.to_string(),
+                    language: code_language.clone(),
+                    block_id: *code_block_id,
+                });
+            }
+            None => {
+                *open_fence_len = Some(fence_len);
+                *code_block_id = code_block_id.saturating_add(1);
+                *code_language = normalized_fence_language(&trimmed[fence_len..]);
+            }
         }
         return;
     }
 
-    if *in_code_block {
+    if open_fence_len.is_some() {
         blocks.push(Block::Code {
             line: raw_line.to_string(),
             language: code_language.clone(),
             block_id: *code_block_id,
+        });
+        return;
+    }
+
+    if let Some((depth, text)) = parse_blockquote(trimmed) {
+        blocks.push(Block::Quote {
+            depth,
+            text: text.to_string(),
         });
         return;
     }
@@ -705,6 +733,13 @@ pub(crate) fn render_parsed_tagged_with_palette(
                 ));
             }
             Block::Code { .. } => unreachable!(),
+            Block::Quote { depth, text } => {
+                let rail_style = Style::default().fg(palette::WHALE_INFO);
+                let text_style = Style::default().fg(palette::TEXT_DIM);
+                out.extend(render_quote_line_tagged(
+                    text, *depth, width, rail_style, text_style,
+                ));
+            }
             Block::Paragraph { text } => {
                 let link_style = Style::default()
                     .fg(palette::WHALE_ACTION)
@@ -1020,6 +1055,32 @@ fn parse_list_item(line: &str) -> Option<(String, &str)> {
         return None;
     }
     Some((format!("{}.", &trimmed[..idx]), rest.trim_start()))
+}
+
+/// Upper bound on the nesting depth rendered for a `>` quote. Deeper quotes
+/// are clamped and the extra markers dropped from the rendered text; capping
+/// stops a pathological input like `>>>>>>>>>>>> text` from consuming the
+/// whole line width in rails.
+const MAX_QUOTE_DEPTH: usize = 4;
+
+/// Parse a `>` blockquote line, returning `(depth, text)`.
+///
+/// CommonMark nests with `>>` or `> >`; we count every leading `>` regardless
+/// of interleaved spaces, then trim the remaining content. A lone `>` yields
+/// an empty quote line. Deliberately lenient about missing space after `>` so
+/// model output like `>note` still renders as a quote.
+fn parse_blockquote(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('>') {
+        return None;
+    }
+    let mut rest = trimmed;
+    let mut depth = 0usize;
+    while rest.starts_with('>') {
+        depth = depth.saturating_add(1);
+        rest = rest[1..].trim_start_matches([' ', '\t']);
+    }
+    Some((depth.clamp(1, MAX_QUOTE_DEPTH), rest.trim()))
 }
 
 fn normalized_fence_language(info: &str) -> Option<String> {
@@ -1340,6 +1401,55 @@ fn render_list_line_tagged(
                 copy_separator_after: rendered.copy_separator_after,
             });
         }
+    }
+    out
+}
+
+/// Render a `>` quote line: a vertical-rule rail per nesting depth plus the
+/// quote text with inline formatting (bold, code, links).
+///
+/// The rail is display chrome, not source markup. On the first row the
+/// transcript rail-scan (`compute_rail_prefix_width`) already strips it along
+/// with the assistant glyph, so `copy_prefix_width` must be `0` there — like
+/// list items — or selection copy would strip the rail twice and lose quote
+/// text. Wrapped continuation rows have no rail scan (plain spaces), so they
+/// report the rail width so selection copy skips their alignment.
+fn render_quote_line_tagged(
+    text: &str,
+    depth: usize,
+    width: usize,
+    rail_style: Style,
+    text_style: Style,
+) -> Vec<RenderedMarkdownLine> {
+    let depth = depth.clamp(1, MAX_QUOTE_DEPTH);
+    let rail = "│ ".repeat(depth);
+    let rail_width = rail.width();
+    let available = width.saturating_sub(rail_width).max(1);
+    let wrapped = render_line_with_links_tagged(text, available, text_style, link_style());
+
+    let mut out = Vec::new();
+    for (idx, rendered) in wrapped.into_iter().enumerate() {
+        let links = rendered
+            .links
+            .iter()
+            .map(|link| link.shifted(rail_width))
+            .collect();
+        let mut spans = if idx == 0 {
+            (0..depth).map(|_| Span::styled("│ ", rail_style)).collect()
+        } else {
+            vec![Span::raw(" ".repeat(rail_width))]
+        };
+        spans.extend(rendered.line.spans);
+        out.push(RenderedMarkdownLine {
+            line: Line::from(spans),
+            links,
+            is_code: false,
+            // First row: the transcript rail-scan strips the visible rail
+            // (mirror `render_list_line_tagged`); continuation rows: report
+            // the alignment width so selection copy skips it.
+            copy_prefix_width: if idx == 0 { 0 } else { rail_width },
+            copy_separator_after: rendered.copy_separator_after,
+        });
     }
     out
 }
@@ -2885,6 +2995,232 @@ mod tests {
             })
             .collect();
         assert_eq!(items, vec![("-", "alpha"), ("-", "beta"), ("1.", "gamma")]);
+    }
+
+    #[test]
+    fn blockquote_lines_parse_with_depth() {
+        let parsed =
+            parse("> hello\n>\n>> nested\n> > spaced\n>no-space\n>\t tabbed\nlone > arrow\n");
+        let quotes: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Quote { depth, text } => Some((*depth, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            quotes,
+            vec![
+                (1, "hello"),
+                (1, ""),
+                (2, "nested"),
+                (2, "spaced"),
+                (1, "no-space"),
+                (1, "tabbed"),
+            ]
+        );
+        // `lone > arrow` starts with prose, so it stays a paragraph.
+        assert_eq!(parsed.blocks.len(), 7);
+    }
+
+    #[test]
+    fn code_fence_contains_quote_lines_untouched() {
+        // Fenced-code lines are collected before blockquote classification, so
+        // `>` inside a fence must stay literal code content.
+        let parsed = parse("```\n> not a quote\n\n> but this is\n```\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["> not a quote", "", "> but this is"]);
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .all(|b| !matches!(b, Block::Quote { .. })),
+            "lines inside a fence must stay code, never quotes"
+        );
+    }
+
+    #[test]
+    fn four_backtick_fence_keeps_shorter_fence_and_quotes_as_code() {
+        // A ```` opener must not be closed by a shorter ``` line: the shorter
+        // fence and any `>` lines after it stay code content (CommonMark
+        // fence-length rule), and the block only closes on a fence >= opener.
+        let parsed = parse("````\n```\n> still code\n`````\n> now a quote\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["```", "> still code"]);
+        let quotes: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Quote { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(quotes, vec!["now a quote"]);
+    }
+
+    #[test]
+    fn longer_fence_closes_shorter_opener() {
+        // CommonMark: a closing fence may be longer than the opener; only the
+        // opener's length is the minimum.
+        let parsed = parse("```\ncode\n````\nplain\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code, vec!["code"]);
+        let paragraphs: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs, vec!["plain"]);
+    }
+
+    #[test]
+    fn backticks_with_info_do_not_close_an_open_fence() {
+        let parsed = parse("```\n```rust\n> still code\n```\n");
+        let code: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Code { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(code, vec!["```rust", "> still code"]);
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .all(|block| !matches!(block, Block::Quote { .. }))
+        );
+    }
+
+    #[test]
+    fn blockquote_renders_rail_and_inline_formatting() {
+        let rendered = render_markdown_tagged(
+            "> **bold** `code` and see https://example.com",
+            80,
+            Style::default(),
+        );
+        assert_eq!(
+            tagged_visible(&rendered),
+            vec!["│ bold code and see https://example.com"]
+        );
+        let spans = &rendered[0].line.spans;
+        assert_eq!(spans[0].content, "│ ");
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == "bold"
+                    && span.style.add_modifier.contains(Modifier::BOLD)),
+            "inline bold must survive inside a quote"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == "code"
+                    && span.style.bg == Some(palette::SURFACE_ELEVATED)),
+            "inline code is styled distinctly from plain text"
+        );
+        // First-row rail is stripped by the transcript rail-scan along with
+        // the assistant glyph, so copy must report 0 here (mirror list items)
+        // — reporting the rail width would strip it twice and lose text.
+        assert_eq!(rendered[0].copy_prefix_width, 0);
+        assert_eq!(
+            rendered[0].links,
+            vec![osc8::LineLink {
+                col_start: 20,
+                col_end: 38,
+                target: "https://example.com".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn nested_blockquote_renders_multiple_rails_capped() {
+        let rendered =
+            render_markdown_tagged(">>> deep\n>>>>>>>>>> too deep\n", 80, Style::default());
+        assert_eq!(
+            tagged_visible(&rendered),
+            vec!["│ │ │ deep", "│ │ │ │ too deep"]
+        );
+        assert_eq!(
+            rendered[0]
+                .line
+                .spans
+                .iter()
+                .take(3)
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["│ ", "│ ", "│ "],
+            "each rail must remain independently discoverable by selection copy"
+        );
+    }
+
+    #[test]
+    fn blockquote_wraps_with_continuation_rail_indent() {
+        let source = "> alpha beta gamma delta epsilon zeta";
+        let rendered = render_markdown_tagged(source, 12, Style::default());
+        let visible = tagged_visible(&rendered);
+        assert!(visible.len() > 1, "fixture must wrap: {visible:?}");
+        assert!(visible[0].starts_with("│ "), "first row starts with rail");
+        // Copy-prefix accounting: first row reports 0 (rail-scan strips it),
+        // continuation rows report the rail width (plain spaces are not
+        // stripped by the rail-scan).
+        assert_eq!(rendered[0].copy_prefix_width, 0);
+        for row in rendered.iter().skip(1) {
+            assert_eq!(row.copy_prefix_width, 2);
+        }
+        for row in &visible[1..] {
+            assert!(
+                row.starts_with("  "),
+                "continuation rows keep the rail width indent: {row:?}"
+            );
+            assert!(
+                !row.starts_with('│'),
+                "rail appears only on the first row: {row:?}"
+            );
+        }
+        for width in rendered.iter().map(|row| {
+            row.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref().width())
+                .sum::<usize>()
+        }) {
+            assert!(width <= 12, "rendered width {width} exceeds budget");
+        }
+        // Rows re-join into the quote content (rail and alignment stripped).
+        let combined = visible
+            .iter()
+            .map(|row| row.trim_start_matches('│').trim_start())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(combined, &source[2..]);
     }
 
     fn tagged_visible(lines: &[RenderedMarkdownLine]) -> Vec<String> {

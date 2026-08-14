@@ -1914,6 +1914,28 @@ fn selection_to_text_strips_list_continuation_prefixes() {
 }
 
 #[test]
+fn selection_to_text_strips_nested_blockquote_rails() {
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: ">>> nested quoted text".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    select_full_transcript(&mut app);
+
+    assert_eq!(
+        selection_to_text(&app).as_deref(),
+        Some("nested quoted text")
+    );
+}
+
+#[test]
 fn selection_to_text_copies_rendered_transcript_block() {
     let mut app = create_test_app();
     app.history = vec![
