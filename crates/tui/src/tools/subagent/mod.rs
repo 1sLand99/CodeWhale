@@ -338,6 +338,7 @@ const SUBAGENT_STATE_SCHEMA_VERSION: u32 = 1;
 const SUBAGENT_STATE_FILE: &str = "subagents.v1.json";
 const SUBAGENT_STATE_LOCK_FILE: &str = "subagents.v1.lock";
 const SUBAGENT_RESTART_REASON: &str = "Interrupted by process restart";
+const SUBAGENT_SESSION_CLOSED_REASON: &str = "Interrupted: parent session closed";
 #[cfg(test)]
 const SUBAGENT_MODEL_WAIT_REASON: &str = "waiting for model response";
 const SUBAGENT_QUEUED_LAUNCH_REASON: &str = "queued: waiting for a sub-agent launch slot";
@@ -3961,6 +3962,85 @@ impl SubAgentManager {
         orphaned.len()
     }
 
+    /// Finalize the live fleet when the parent session closes without a
+    /// process restart (#5372). A session switch in the same process keeps
+    /// the manager (and its coordination ledger) alive, so running children
+    /// and their write claims would otherwise survive into the next
+    /// conversation and keep blocking new writers.
+    ///
+    /// Loaded prior-session agents are already `Interrupted` and loaded
+    /// workers are already terminal (reconciled on `load_state`), so only the
+    /// currently-live fleet is finalized here. Write claims owned by absent
+    /// or prior-session owners stay put — a sibling session's live claim must
+    /// never be released by this process.
+    pub fn finalize_session_close(&mut self) -> usize {
+        let reason = SUBAGENT_SESSION_CLOSED_REASON;
+        let running_agent_ids = self
+            .agents
+            .values()
+            .filter(|agent| agent.status == SubAgentStatus::Running)
+            .map(|agent| agent.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut finalized = 0usize;
+        for agent_id in &running_agent_ids {
+            let Some(snapshot) = self.agents.get(agent_id).map(SubAgent::snapshot) else {
+                continue;
+            };
+            let mut terminal = snapshot;
+            terminal.status = SubAgentStatus::Interrupted(reason.to_string());
+            terminal.result = Some(reason.to_string());
+            terminal.needs_input = None;
+            if self.finish_terminal_result(agent_id, terminal, true, true) {
+                finalized += 1;
+            }
+        }
+        // Headless workers keep no agent entry, and a waiting-for-user worker
+        // may survive its agent's transition above, so reconcile every live
+        // (non-terminal) worker record directly.
+        let live_worker_ids = self
+            .worker_records
+            .values()
+            .filter(|record| !record.status.is_terminal())
+            .map(|record| (record.spec.worker_id.clone(), record.steps_taken))
+            .collect::<Vec<_>>();
+        for (worker_id, steps_taken) in &live_worker_ids {
+            self.record_worker_event(
+                worker_id,
+                AgentWorkerStatus::Interrupted,
+                Some(reason.to_string()),
+                Some(*steps_taken),
+                None,
+            );
+            finalized += 1;
+        }
+        // Release write claims owned by the fleet being finalized. Claims from
+        // absent owners (sibling sessions) and prior-session records stay put.
+        let finalized_owners = running_agent_ids
+            .into_iter()
+            .chain(live_worker_ids.into_iter().map(|(id, _)| id))
+            .collect::<std::collections::HashSet<_>>();
+        let mut released = 0usize;
+        self.coordination.write_claims.retain(|record| {
+            if finalized_owners.contains(&record.claim.owner) {
+                released += 1;
+                false
+            } else {
+                true
+            }
+        });
+        // Drop finalized agents from the in-memory roster so they can never
+        // be counted active again. Prior-session archive rows remain.
+        self.agents.retain(|id, _| !finalized_owners.contains(id));
+        let _ = self.persist_state_synchronously();
+        tracing::debug!(
+            target: "subagent",
+            finalized,
+            released,
+            "finalized sub-agent fleet on session close"
+        );
+        finalized
+    }
+
     fn sorted_worker_records(&self) -> Vec<AgentWorkerRecord> {
         let mut workers: Vec<_> = self.worker_records.values().cloned().collect();
         workers.sort_by(|a, b| {
@@ -4143,17 +4223,32 @@ impl SubAgentManager {
     }
 
     fn active_coordination_owners(&self) -> std::collections::HashSet<String> {
-        self.agents
-            .iter()
-            .filter(|(_, agent)| agent.status == SubAgentStatus::Running)
-            .map(|(id, _)| id.clone())
-            .chain(
-                self.worker_records
-                    .iter()
-                    .filter(|(_, record)| !record.status.is_terminal())
-                    .map(|(id, _)| id.clone()),
-            )
-            .collect()
+        let mut owners = std::collections::HashSet::new();
+        for (id, agent) in &self.agents {
+            // A prior-session agent (mismatched/empty boot id) is not a live
+            // claimant even if its restored status still reads Running.
+            if agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent) {
+                owners.insert(id.clone());
+            }
+        }
+        for (id, record) in &self.worker_records {
+            if record.status.is_terminal() {
+                continue;
+            }
+            // Worker records don't carry their own boot id, so consult the
+            // paired agent when one exists. A headless worker (no agent
+            // entry) is a live current-session owner by virtue of its
+            // non-terminal record; a paired agent from a prior session means
+            // the worker is an orphan that must never gate a new writer.
+            let prior_session = self
+                .agents
+                .get(id)
+                .is_some_and(|agent| self.is_from_prior_session(agent));
+            if !prior_session {
+                owners.insert(id.clone());
+            }
+        }
+        owners
     }
 
     fn namespace_write_claim(

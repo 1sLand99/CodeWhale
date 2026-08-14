@@ -2346,10 +2346,31 @@ impl Engine {
                         self.session.tool_activation_cache.clear();
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
+                        let previous_session_id = self.session.id.clone();
                         if let Some(session_id) = session_id {
                             self.session.id = session_id;
                         } else if messages.is_empty() && system_prompt.is_none() {
                             self.session.id = uuid::Uuid::new_v4().to_string();
+                        }
+                        // SyncSession installs a conversation's identity; an id
+                        // change IS a conversation boundary in this runtime —
+                        // callers must pass their own conversation id for
+                        // same-conversation re-syncs. A boundary in the same
+                        // process does not rebuild the sub-agent manager, so the
+                        // previous conversation's live children and write claims
+                        // must be finalized here or they keep gating writers in
+                        // the new conversation (#5372). Same-session reloads
+                        // keep their id and are deliberately left untouched.
+                        if self.session.id != previous_session_id {
+                            let finalized =
+                                self.subagent_manager.write().await.finalize_session_close();
+                            if finalized > 0 {
+                                tracing::info!(
+                                    target: "subagent",
+                                    finalized,
+                                    "finalized sub-agent fleet for closed session"
+                                );
+                            }
                         }
                         let compaction_checkpoint =
                             extract_compaction_summary_prompt(system_prompt.clone());

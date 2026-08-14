@@ -1033,6 +1033,177 @@ fn headless_worker_registration_enforces_live_claims_and_projects_context() {
 }
 
 #[test]
+fn session_close_finalizes_live_fleet_and_releases_write_claims() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+    let mut manager = SubAgentManager::new(workspace.clone(), 8);
+
+    // A live legacy agent holding a claim blocks an overlapping claim.
+    let legacy_id = manager.insert_test_running_agent("legacy", &workspace);
+    let active = [legacy_id.clone()].into_iter().collect::<HashSet<_>>();
+    manager
+        .coordination
+        .register_claim(
+            WriteScopeClaim {
+                owner: legacy_id.clone(),
+                roots: vec!["experiments".into()],
+                exact_files: Vec::new(),
+                contracts: Vec::new(),
+            },
+            false,
+            |candidate| active.contains(candidate),
+        )
+        .expect("legacy claim");
+    assert!(manager.active_coordination_owners().contains(&legacy_id));
+
+    // A headless Fleet worker holds a claim through the production path.
+    manager
+        .register_worker_with_coordination(make_write_worker_spec(
+            "worker-a",
+            workspace.clone(),
+            "src/a",
+        ))
+        .expect("worker-a claim");
+    assert!(manager.active_coordination_owners().contains("worker-a"));
+
+    // While both owners are live, an overlapping writer is blocked.
+    let overlap = manager
+        .preflight_worker_coordination(&make_write_worker_spec(
+            "worker-b",
+            workspace.clone(),
+            "src/a/nested",
+        ))
+        .expect_err("overlap must block while the owner is live");
+    assert!(overlap.contains("worker-a"), "{overlap}");
+
+    // Session close finalizes both owners and releases their claims.
+    assert!(manager.finalize_session_close() > 0);
+    assert!(!manager.active_coordination_owners().contains(&legacy_id));
+    assert!(!manager.active_coordination_owners().contains("worker-a"));
+    assert!(manager.coordination.write_claims.is_empty());
+
+    // The previously-rejected overlapping claim is now admitted.
+    manager
+        .preflight_worker_coordination(&make_write_worker_spec(
+            "worker-b",
+            workspace.clone(),
+            "src/a/nested",
+        ))
+        .expect("overlapping claim admitted after session close");
+
+    // Idempotent: a second close pass has no live fleet to finalize and
+    // must not release (or re-own) anything.
+    assert_eq!(manager.finalize_session_close(), 0);
+    assert!(manager.coordination.write_claims.is_empty());
+    manager
+        .preflight_worker_coordination(&make_write_worker_spec(
+            "worker-b",
+            workspace.clone(),
+            "src/a/nested",
+        ))
+        .expect("claim stays released after a second close pass");
+}
+
+#[test]
+fn terminal_result_releases_owner_from_write_claim_contention() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+    let mut manager = SubAgentManager::new(workspace.clone(), 8);
+
+    let owner = manager.insert_test_running_agent("owner", &workspace);
+    let active = [owner.clone()].into_iter().collect::<HashSet<_>>();
+    manager
+        .coordination
+        .register_claim(
+            WriteScopeClaim {
+                owner: owner.clone(),
+                roots: vec!["src".into()],
+                exact_files: Vec::new(),
+                contracts: Vec::new(),
+            },
+            false,
+            |candidate| active.contains(candidate),
+        )
+        .expect("owner claim");
+    assert!(manager.active_coordination_owners().contains(&owner));
+
+    // Overlap is blocked while the owner is live.
+    let overlap = manager
+        .preflight_worker_coordination(&make_write_worker_spec(
+            "rival",
+            workspace.clone(),
+            "src/nested",
+        ))
+        .expect_err("overlap must block while the owner is live");
+    assert!(overlap.contains(&owner), "{overlap}");
+
+    // A natural terminal transition (finish_terminal_result via cancel_agent)
+    // drops the owner from active contention even though the persisted claim
+    // ledger row intentionally outlives the agent.
+    let result = manager.cancel_agent(&owner).expect("cancel owner");
+    assert_eq!(result.status, SubAgentStatus::Cancelled);
+    assert!(!manager.active_coordination_owners().contains(&owner));
+    assert!(
+        manager
+            .coordination
+            .write_claims
+            .iter()
+            .any(|record| record.claim.owner == owner),
+        "the persisted claim may outlive the agent"
+    );
+
+    // The previously-rejected overlapping claim is now admitted.
+    manager
+        .preflight_worker_coordination(&make_write_worker_spec(
+            "rival",
+            workspace.clone(),
+            "src/nested",
+        ))
+        .expect("overlapping claim admitted after terminal result");
+}
+
+#[test]
+fn prior_session_owners_never_count_as_active_coordination_owners() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+    let mut manager = SubAgentManager::new(workspace.clone(), 8);
+
+    // Simulate a persisted record from a different session instance by
+    // stamping a mismatched boot id after seeding a running agent + worker.
+    let stale_id = manager.insert_test_running_agent("stale", &workspace);
+    if let Some(agent) = manager.agents.get_mut(&stale_id) {
+        agent.session_boot_id = "boot_stale_other".to_string();
+    }
+    let active = [stale_id.clone()].into_iter().collect::<HashSet<_>>();
+    manager
+        .coordination
+        .register_claim(
+            WriteScopeClaim {
+                owner: stale_id.clone(),
+                roots: vec!["tests".into()],
+                exact_files: Vec::new(),
+                contracts: Vec::new(),
+            },
+            false,
+            |candidate| active.contains(candidate),
+        )
+        .expect("stale claim");
+
+    // The mismatched boot id excludes the owner even though its status is
+    // still Running and its worker record is still non-terminal.
+    assert!(!manager.active_coordination_owners().contains(&stale_id));
+
+    // A new overlapping claim is admitted without a finalize pass.
+    manager
+        .register_worker_with_coordination(make_write_worker_spec(
+            "fresh-worker",
+            workspace.clone(),
+            "tests/nested",
+        ))
+        .expect("prior-session owner must not block a new writer");
+}
+
+#[test]
 fn isolated_worktree_workers_skip_the_coordination_process_lock() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().canonicalize().expect("canonical workspace");

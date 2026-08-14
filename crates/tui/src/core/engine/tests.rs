@@ -12504,6 +12504,141 @@ async fn sync_session_restores_current_mode() {
 }
 
 #[tokio::test]
+async fn sync_session_same_id_does_not_finalize_live_worker() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().to_path_buf();
+    let config = EngineConfig {
+        workspace: workspace.clone(),
+        model: "deepseek-v4-pro".to_string(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+    let manager = engine.subagent_manager.clone();
+
+    let run = tokio::spawn(engine.run());
+    // Install the conversation identity first so the manager is not
+    // finalized by the very first identity transition away from the
+    // construction-time UUID.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("session-keep".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: workspace.clone(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("install session");
+    handle.get_session_snapshot().await.expect("drain install");
+
+    let agent_id = {
+        let mut manager = manager.write().await;
+        manager.insert_test_running_agent("keep", &workspace)
+    };
+
+    // A same-id re-sync is a reload, not a conversation boundary.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("session-keep".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: workspace.clone(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("re-sync same session");
+    handle.get_session_snapshot().await.expect("drain re-sync");
+
+    let record = manager
+        .read()
+        .await
+        .get_worker_record(&agent_id)
+        .expect("live worker record");
+    assert!(
+        !record.status.is_terminal(),
+        "same-id re-sync must not finalize the worker: {:?}",
+        record.status
+    );
+
+    run.abort();
+}
+
+#[tokio::test]
+async fn sync_session_different_id_finalizes_live_worker() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().to_path_buf();
+    let config = EngineConfig {
+        workspace: workspace.clone(),
+        model: "deepseek-v4-pro".to_string(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+    let manager = engine.subagent_manager.clone();
+
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("session-a".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: workspace.clone(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("install session-a");
+    handle.get_session_snapshot().await.expect("drain install");
+
+    let agent_id = {
+        let mut manager = manager.write().await;
+        manager.insert_test_running_agent("close", &workspace)
+    };
+
+    // A different id is a conversation boundary: the live worker must be
+    // finalized with the session-closed reason.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("session-b".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: workspace.clone(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("switch to session-b");
+    handle.get_session_snapshot().await.expect("drain switch");
+
+    let record = manager
+        .read()
+        .await
+        .get_worker_record(&agent_id)
+        .expect("worker record after close");
+    assert!(
+        record.status.is_terminal(),
+        "different-id switch must finalize the worker: {:?}",
+        record.status
+    );
+    assert_eq!(
+        record.status,
+        crate::tools::subagent::AgentWorkerStatus::Interrupted
+    );
+    let reason = record.latest_message.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("parent session closed"),
+        "session-closed reason missing: {reason}"
+    );
+
+    run.abort();
+}
+
+#[tokio::test]
 async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
