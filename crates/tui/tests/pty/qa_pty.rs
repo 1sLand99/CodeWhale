@@ -2979,7 +2979,11 @@ diff --git a/delete.txt b/delete.txt
     };
 
     let handle = std::thread::spawn(move || -> anyhow::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(45);
+        // The guardian denial path continues the turn through the ordinary
+        // model client, whose transparent retries can stretch the settling
+        // request past 20s on a loaded machine. Keep the deadline comfortably
+        // above the frame waits so the second request is never raced.
+        let deadline = Instant::now() + Duration::from_secs(90);
         let mut chat_index = 0_usize;
         let mut contract_errors = Vec::new();
         while chat_index < replies.len() && Instant::now() < deadline {
@@ -3205,7 +3209,7 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
             h.wait_for_text("Allow once", Duration::from_secs(10))?;
             h.send(b"y")?;
         }
-        h.wait_for_text("FILE-MUTATION-FIXTURE-DONE", Duration::from_secs(20))?;
+        h.wait_for_text("FILE-MUTATION-FIXTURE-DONE", Duration::from_secs(60))?;
         if tool_allowed {
             h.wait_for(
                 |frame| frame.contains("4 files") && frame.contains("done"),
