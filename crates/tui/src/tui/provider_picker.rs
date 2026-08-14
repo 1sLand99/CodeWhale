@@ -1478,7 +1478,6 @@ fn codex_jwt_expiry(token: &str) -> Option<u64> {
 }
 
 impl ProviderPickerView {
-
     /// OAuth-only providers never collect a typed credential: the key entry
     /// stage for them is a routing step (device flow / external consent), so
     /// typed input and pastes are accepted events but never stored.

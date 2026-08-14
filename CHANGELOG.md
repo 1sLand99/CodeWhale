@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-v0.9.8 is the release cut on this Unreleased block. Plugin marketplace
-parity (#5311), remaining web settings polish, and prefab third-party
-templates moved to v0.9.9.
+_Nothing yet._
+
+## [0.9.8] - 2026-08-14
+
+Remaining web settings polish and prefab third-party templates move to
+v0.9.9.
 
 ### Changed
 
@@ -24,6 +27,19 @@ templates moved to v0.9.9.
   at the consumption boundary.
 
 ### Added
+
+- `/plugin marketplace add|list|show|remove|install` completes the
+  federated marketplace journey (#5311). `add` reads one LOCAL catalog
+  document in the real published schemas (Kimi, Claude, Codex, or
+  Codewhale native) — no network, regular files only — and persists it
+  beside the plugin state with the same hardened, fail-closed store.
+  `list`/`show` render every candidate with per-entry diagnostics,
+  display-only tiers, and honest install plans that say when Codewhale
+  cannot fetch a source; `install` routes through the existing reviewed
+  installer, so installed bundles still enter disabled and untrusted.
+  Foreign auto-install policy (Codex `INSTALLED_BY_DEFAULT`) is visibly
+  ignored; nothing is auto-installed, auto-trusted, or granted vendor
+  trust.
 
 - `/rc` attach now includes an observed `owner/name` git remote when the
   folder has a GitHub, CNB, or Gitee origin, so CWC can label the paired
@@ -53,6 +69,24 @@ templates moved to v0.9.9.
   killing it (#5373).
 
 ### Fixed
+
+- Selecting the `google` provider kind resolved to the `antigravity`
+  TUI identity (and vice versa): the agy provider entry was inserted at
+  different positions in the config-level enum and the TUI's
+  discriminant-indexed lookup table. The table now matches the enum, so
+  provider pickers, sorted display, and kind round-trips are correct.
+
+- The provider picker's key-entry stage accepted typed input and pastes
+  for OAuth-only providers after `antigravity` declared OAuth
+  acquisition; those gates now key off the OAuth acquisition class
+  instead of a hard-coded provider identity.
+
+- The webhook hook sink no longer panics when its HTTP client fails to
+  build; it falls back to a default client (#5381, EvanProgramming).
+
+- Session-index JSONL writes are serialized behind a process-wide mutex
+  so concurrent state stores cannot drop an append during compaction
+  (#5382, EvanProgramming; complements the cross-process file lock).
 
 - A billed `max_tokens` stop followed by a transport error fails the turn
   instead of continuing into a second request. A clean output-limit stop
