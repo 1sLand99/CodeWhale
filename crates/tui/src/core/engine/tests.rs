@@ -3,7 +3,8 @@ use super::*;
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    merge_new_runtime_mcp_tools, registered_tool_approval_required, registered_tool_forces_prompt,
+    auto_review_block_tool_error, merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    registered_tool_forces_prompt, repo_law_must_block_without_prompt,
     workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
@@ -13,7 +14,7 @@ use crate::prompts::{
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -3950,6 +3951,31 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
     }
 }
 
+fn auto_review_message_op(content: &str, config: &Config) -> Op {
+    Op::SendMessage {
+        content: content.to_string(),
+        mode: AppMode::Agent,
+        route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
+        compaction: Box::new(CompactionConfig::default()),
+        goal_objective: None,
+        goal_token_budget: None,
+        goal_status: crate::tools::goal::GoalStatus::Active,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+        auto_model: false,
+        allow_shell: true,
+        trust_mode: false,
+        auto_approve: false,
+        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        translation_enabled: false,
+        allowed_tools: None,
+        dynamic_tools: Vec::new(),
+        hook_executor: None,
+        verbosity: None,
+        provenance: UserInputProvenance::ExternalUser,
+    }
+}
+
 struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for DropSignal {
@@ -3961,6 +3987,91 @@ impl Drop for DropSignal {
 struct BlockingModelClient {
     entered: std::sync::Arc<tokio::sync::Notify>,
     request_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct BlockingGuardianModelClient {
+    guardian_entered: std::sync::Arc<tokio::sync::Notify>,
+    guardian_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    streaming_calls: std::sync::atomic::AtomicUsize,
+}
+
+struct FailingGuardianModelClient {
+    inner: crate::llm_client::mock::MockLlmClient,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for FailingGuardianModelClient {
+    fn provider_name(&self) -> &str {
+        self.inner.provider_name()
+    }
+
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("fixture guardian transport failure")
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        crate::core::model_client::ModelClient::create_message_stream(&self.inner, request).await
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for BlockingGuardianModelClient {
+    fn provider_name(&self) -> &str {
+        "deterministic-blocking-guardian"
+    }
+
+    fn model(&self) -> &str {
+        "deterministic-blocking-guardian-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        let _drop_signal = DropSignal(std::sync::Arc::clone(&self.guardian_dropped));
+        self.guardian_entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+
+        assert_eq!(
+            self.streaming_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cancellation must prevent a follow-up model request"
+        );
+        let events = canned::tool_call_turn(
+            "call-cancelled-guardian",
+            "File",
+            r#"{"action":"write","path":".env","content":"must-not-run\n"}"#,
+        );
+        Ok(Box::pin(futures_util::stream::iter(
+            events.into_iter().map(Ok),
+        )))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
 }
 
 #[async_trait::async_trait]
@@ -5308,6 +5419,327 @@ async fn engine_cancellation_drops_active_injected_model_request() {
     task.await.expect("engine task");
 }
 
+fn guardian_fixture_response(text: &str) -> crate::models::MessageResponse {
+    crate::models::MessageResponse {
+        id: "guardian-fixture".to_string(),
+        r#type: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+        model: "mock-model".to_string(),
+        stop_reason: Some("end_turn".to_string()),
+        stop_sequence: None,
+        container: None,
+        usage: Usage {
+            input_tokens: 17,
+            output_tokens: 3,
+            ..Usage::default()
+        },
+    }
+}
+
+fn guardian_tool_results<'a>(
+    request: &'a crate::models::MessageRequest,
+    call_id: &str,
+) -> Vec<(&'a str, Option<bool>)> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == call_id => Some((content.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn collect_guardian_journey(
+    handle: &EngineHandle,
+    call_id: &str,
+) -> (
+    Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+    Vec<Usage>,
+    Usage,
+) {
+    let mut completion = None;
+    let mut usage_events = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    let terminal_usage = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for Auto-Review journey")
+            .expect("engine event stream closed");
+        match event {
+            Event::ToolCallComplete { id, result, .. } if id == call_id => {
+                assert!(
+                    completion.replace(result).is_none(),
+                    "duplicate tool result"
+                );
+            }
+            Event::TurnUsage { usage, .. } => usage_events.push(usage),
+            Event::TurnComplete {
+                status,
+                error,
+                usage,
+                ..
+            } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break usage;
+            }
+            _ => {}
+        }
+    };
+    drop(rx);
+    (
+        completion.expect("held call must have one paired result"),
+        usage_events,
+        terminal_usage,
+    )
+}
+
+#[tokio::test]
+async fn auto_review_guardian_allow_executes_once_and_accounts_usage_without_prompt_leak() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const REVIEW_REASON: &str = "bounded fixture write is reversible";
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir(workspace.path().join(".git")).expect("git marker");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::tool_call_turn(
+        "call-guardian-allow",
+        "File",
+        r#"{"action":"write","path":".env","content":"assembled=true\n"}"#,
+    )]));
+    mock.push_factory(|request| {
+        let tool_results = guardian_tool_results(request, "call-guardian-allow");
+        assert_eq!(tool_results.len(), 1, "one call must produce one result");
+        assert_ne!(tool_results[0].1, Some(true));
+        let request_json = serde_json::to_string(request).expect("serialize follow-up request");
+        assert!(!request_json.contains(REVIEW_REASON), "{request_json}");
+        assert!(
+            !request_json.contains("deterministic_observations"),
+            "{request_json}"
+        );
+        assert!(!request_json.contains("hold_reason"), "{request_json}");
+        canned::simple_text_turn("Guardian-approved write complete.")
+    });
+    mock.push_message_response(guardian_fixture_response(&format!(
+        r#"{{"risk_level":"low","decision":"allow","reason":"{REVIEW_REASON}"}}"#
+    )));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(auto_review_message_op(
+            "Write the isolated fixture.",
+            &config,
+        ))
+        .await
+        .expect("send Auto-Review allow journey");
+
+    let (completion, usage_events, terminal_usage) =
+        collect_guardian_journey(&handle, "call-guardian-allow").await;
+    assert!(completion.expect("guardian-approved tool result").success);
+    assert!(
+        usage_events
+            .iter()
+            .any(|usage| usage.input_tokens == 17 && usage.output_tokens == 3),
+        "guardian usage must reach the cost UI"
+    );
+    assert_eq!(terminal_usage.input_tokens, 17);
+    assert_eq!(terminal_usage.output_tokens, 3);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".env")).expect("written fixture"),
+        "assembled=true\n"
+    );
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 3, "main, guardian, follow-up");
+    assert_eq!(requests[1].stream, Some(false));
+    assert!(requests[1].tools.is_none());
+    let guardian_json = serde_json::to_string(&requests[1]).expect("guardian request JSON");
+    assert!(guardian_json.contains("call") || guardian_json.contains("proposed_tool_call"));
+    assert!(guardian_json.contains(".env"));
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn auto_review_guardian_deny_returns_one_paired_failed_result() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const DENIAL: &str = "sensitive configuration must remain untouched";
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir(workspace.path().join(".git")).expect("git marker");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::tool_call_turn(
+        "call-guardian-deny",
+        "File",
+        r#"{"action":"write","path":".env","content":"must-not-run\n"}"#,
+    )]));
+    mock.push_factory(|request| {
+        let tool_results = guardian_tool_results(request, "call-guardian-deny");
+        assert_eq!(tool_results.len(), 1, "denied call must not be orphaned");
+        assert_eq!(tool_results[0].1, Some(true));
+        assert!(tool_results[0].0.contains(DENIAL), "{tool_results:?}");
+        assert!(
+            tool_results[0].0.contains("Do not work around this denial"),
+            "{tool_results:?}"
+        );
+        let request_json = serde_json::to_string(request).expect("serialize follow-up request");
+        assert!(
+            !request_json.contains("deterministic_observations"),
+            "{request_json}"
+        );
+        assert!(!request_json.contains("hold_reason"), "{request_json}");
+        canned::simple_text_turn("Stopped after the guardian denial.")
+    });
+    mock.push_message_response(guardian_fixture_response(&format!(
+        r#"{{"risk_level":"medium","decision":"deny","reason":"{DENIAL}"}}"#
+    )));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(auto_review_message_op("Attempt the held write.", &config))
+        .await
+        .expect("send Auto-Review deny journey");
+
+    let (completion, _, _) = collect_guardian_journey(&handle, "call-guardian-deny").await;
+    let error = completion.expect_err("guardian denial must fail the tool call");
+    assert!(error.to_string().contains(DENIAL), "{error}");
+    assert!(!workspace.path().join(".env").exists());
+    assert_eq!(mock.captured_requests().len(), 3);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn auto_review_guardian_parse_and_transport_failures_deny_closed() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for failure in ["parse", "transport"] {
+        let workspace = tempdir().expect("tempdir");
+        fs::create_dir(workspace.path().join(".git")).expect("git marker");
+        let call_id = format!("call-guardian-{failure}");
+        let initial = canned::tool_call_turn(
+            &call_id,
+            "File",
+            r#"{"action":"write","path":".env","content":"must-not-run\n"}"#,
+        );
+        let follow_up_id = call_id.clone();
+        let follow_up = move |request: &crate::models::MessageRequest| {
+            let results = guardian_tool_results(request, &follow_up_id);
+            assert_eq!(results.len(), 1, "reviewer failure must pair one result");
+            let result = results[0];
+            assert_eq!(result.1, Some(true));
+            assert!(result.0.contains("denied (fail closed)"), "{result:?}");
+            assert!(!result.0.contains("fixture guardian transport failure"));
+            canned::simple_text_turn("Stopped after reviewer failure.")
+        };
+
+        let config = Config::default();
+        let client: crate::core::model_client::SharedModelClient = if failure == "parse" {
+            let mock = MockLlmClient::new(vec![initial]);
+            mock.push_factory(follow_up);
+            mock.push_message_response(guardian_fixture_response("not valid guardian JSON"));
+            std::sync::Arc::new(mock)
+        } else {
+            let mock = MockLlmClient::new(vec![initial]);
+            mock.push_factory(follow_up);
+            std::sync::Arc::new(FailingGuardianModelClient { inner: mock })
+        };
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            client,
+        );
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(auto_review_message_op("Attempt the held write.", &config))
+            .await
+            .expect("send reviewer failure journey");
+
+        let (completion, _, _) = collect_guardian_journey(&handle, &call_id).await;
+        let error = completion.expect_err("reviewer failure must deny");
+        assert!(error.to_string().contains("fail closed"), "{error}");
+        assert!(!workspace.path().join(".env").exists());
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
+}
+
+#[tokio::test]
+async fn auto_review_cancellation_promptly_drops_the_guardian_request() {
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir(workspace.path().join(".git")).expect("git marker");
+    let guardian_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let guardian_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model = std::sync::Arc::new(BlockingGuardianModelClient {
+        guardian_entered: std::sync::Arc::clone(&guardian_entered),
+        guardian_dropped: std::sync::Arc::clone(&guardian_dropped),
+        streaming_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(auto_review_message_op("Attempt the held write.", &config))
+        .await
+        .expect("send blocking guardian journey");
+    tokio::time::timeout(model_turn_event_timeout(), guardian_entered.notified())
+        .await
+        .expect("guardian request was never entered");
+
+    handle.cancel();
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("guardian cancellation did not settle promptly")
+            .expect("engine event stream closed");
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+
+    assert!(
+        guardian_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "cancellation must drop the guardian provider future"
+    );
+    assert_eq!(
+        model
+            .streaming_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(!workspace.path().join(".env").exists());
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
@@ -5404,6 +5836,26 @@ async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
     operate_task.await.expect("Operate engine task");
 }
 
+fn auto_review_plan_decision(
+    policy: &crate::tui::auto_review::AutoReviewPolicy,
+    tool_name: &str,
+    tool_input: &Value,
+    run_origin: crate::tui::auto_review::RunOrigin,
+    approval_mode: crate::tui::approval::ApprovalMode,
+    workspace_trusted: bool,
+    workspace: Option<&Path>,
+) -> (AutoReviewPlanDecision, Value) {
+    let context = crate::tui::auto_review::AutoReviewContext::from_tool_call(
+        tool_name,
+        tool_input,
+        run_origin,
+        approval_mode,
+        workspace_trusted,
+        workspace,
+    );
+    auto_review_plan_decision_for_context(policy, &context)
+}
+
 #[test]
 fn auto_review_classifies_publish_and_holds_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
@@ -5412,9 +5864,8 @@ fn auto_review_classifies_publish_and_holds_without_prompting() {
         &json!({"command": "git push origin main"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("push the release branch"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
@@ -5436,9 +5887,8 @@ fn auto_review_classifier_allow_executes_without_prompting() {
         &json!({"path": "Cargo.toml"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("inspect the manifest"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
@@ -5453,14 +5903,34 @@ fn auto_review_allows_ordinary_shell_probe_without_prompting() {
         &json!({"command": "git remote -v && git rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git tag --list 'v0.8.65'"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("inspect release status"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
     assert_eq!(audit["decision"], "allow");
     assert_eq!(audit["action_kind"], "shell");
+}
+
+#[test]
+fn auto_review_routes_unknown_tool_to_reviewer_in_auto() {
+    let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
+        "mystery_tool",
+        &json!({"value": true}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        true,
+        None,
+    );
+
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::ConsultReviewer(
+            "unknown tool category requires explicit review".to_string()
+        )
+    );
+    assert_eq!(audit["decision"], "ask_user");
 }
 
 #[test]
@@ -5471,9 +5941,8 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
         &json!({"tag": "v0.8.64"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Never,
-        Some("publish release"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
@@ -5485,6 +5954,31 @@ fn auto_review_policy_blocks_publish_when_approval_is_never() {
     );
     assert_eq!(audit["approval_mode"], "NEVER");
     assert_eq!(audit["decision"], "hold_for_review");
+}
+
+#[test]
+fn repo_law_asks_only_in_ask_posture() {
+    use crate::tui::approval::ApprovalMode;
+
+    assert!(!repo_law_must_block_without_prompt(
+        ApprovalMode::Suggest,
+        false
+    ));
+    for mode in [
+        ApprovalMode::Auto,
+        ApprovalMode::Never,
+        ApprovalMode::Bypass,
+    ] {
+        assert!(
+            repo_law_must_block_without_prompt(mode, false),
+            "{} must not open a human repo-law approval",
+            mode.permission_chip_label()
+        );
+    }
+    assert!(repo_law_must_block_without_prompt(
+        ApprovalMode::Suggest,
+        true
+    ));
 }
 
 #[test]
@@ -5694,9 +6188,8 @@ fn auto_review_allows_ordinary_test_command_without_prompting() {
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(decision, AutoReviewPlanDecision::Allow);
@@ -5709,15 +6202,13 @@ fn auto_review_allows_ordinary_workspace_write_without_prompting() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     std::fs::create_dir(tmp.path().join("src")).expect("source directory");
-    let (decision, audit) = auto_review_plan_decision_in_workspace(
+    let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "write_file",
         &json!({"path": "src/lib.rs", "content": "pub fn ready() {}\n"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("update the implementation"),
         true,
-        false,
         Some(tmp.path()),
     );
 
@@ -5727,55 +6218,51 @@ fn auto_review_allows_ordinary_workspace_write_without_prompting() {
 }
 
 #[test]
-fn auto_review_rejects_unbounded_or_sensitive_workspace_writes() {
+fn auto_review_routes_unbounded_or_sensitive_workspace_writes_to_reviewer() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     for path in ["../outside.rs", "/etc/hostname", ".env", ".git/config"] {
-        let (decision, audit) = auto_review_plan_decision_in_workspace(
+        let (decision, audit) = auto_review_plan_decision(
             &crate::tui::auto_review::AutoReviewPolicy::default(),
             "write_file",
             &json!({"path": path, "content": "blocked"}),
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the write boundary"),
             true,
-            false,
             Some(tmp.path()),
         );
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {path}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {path} without reviewer judgment"
         );
         assert_eq!(audit["decision"], "ask_user", "unexpected audit for {path}");
     }
 }
 
 #[test]
-fn auto_review_still_blocks_interactive_destructive_shell() {
+fn auto_review_routes_interactive_destructive_shell_to_reviewer() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
         &json!({"command": "rm -rf /"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("destroy the system tree"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
         decision,
-        AutoReviewPlanDecision::Block(
-            "Auto-Review held tool 'exec_shell': sensitive or destructive action requires explicit review"
-                .to_string()
+        AutoReviewPlanDecision::ConsultReviewer(
+            "sensitive or destructive action requires explicit review".to_string()
         )
     );
     assert_eq!(audit["decision"], "ask_user");
-    assert_eq!(audit["action_kind"], "destructive");
+    assert_eq!(audit["risk"], "destructive");
 }
 
 #[test]
-fn auto_review_does_not_bypass_shell_commands_requiring_approval() {
+fn auto_review_routes_shell_commands_requiring_approval_to_reviewer() {
     for command in [
         "git reset --hard",
         "sudo cargo test",
@@ -5792,21 +6279,20 @@ fn auto_review_does_not_bypass_shell_commands_requiring_approval() {
             &json!({"command": command}),
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the approval boundary"),
             true,
-            false,
+            None,
         );
 
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {command}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {command} without reviewer judgment"
         );
         assert_ne!(audit["decision"], "allow", "unexpected allow for {command}");
     }
 }
 
 #[test]
-fn auto_review_does_not_bypass_mcp_mutations_or_secret_tools() {
+fn auto_review_routes_mcp_mutations_or_secret_tools_to_reviewer() {
     for (tool_name, input) in [
         ("mcp_github_merge_pull_request", json!({"number": 5341})),
         ("read_secret", json!({"name": "provider-token"})),
@@ -5817,14 +6303,13 @@ fn auto_review_does_not_bypass_mcp_mutations_or_secret_tools() {
             &input,
             crate::tui::auto_review::RunOrigin::Interactive,
             crate::tui::approval::ApprovalMode::Auto,
-            Some("exercise the approval boundary"),
             true,
-            false,
+            None,
         );
 
         assert!(
-            matches!(decision, AutoReviewPlanDecision::Block(_)),
-            "Auto-Review must not auto-approve {tool_name}"
+            matches!(decision, AutoReviewPlanDecision::ConsultReviewer(_)),
+            "Auto-Review must not auto-approve {tool_name} without reviewer judgment"
         );
         assert_ne!(
             audit["decision"], "allow",
@@ -5853,9 +6338,8 @@ fn auto_review_policy_holds_background_destructive_under_suggest() {
         &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Suggest,
-        Some("wipe the home directory in the background"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
@@ -5881,9 +6365,8 @@ fn full_access_blocks_detached_catastrophic_tools_without_prompting() {
             &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
             crate::tui::approval::ApprovalMode::Bypass,
-            Some("wipe the home directory in the background"),
             true,
-            false,
+            None,
         );
 
         assert_eq!(
@@ -5907,9 +6390,8 @@ fn auto_review_policy_blocks_background_destructive_under_never() {
         &json!({"command": "rm -rf ~/", "background": true}),
         crate::tui::auto_review::RunOrigin::Background,
         crate::tui::approval::ApprovalMode::Never,
-        Some("wipe the home directory in the background"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
@@ -5943,9 +6425,8 @@ fn auto_review_plan_decision_uses_configured_policy() {
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
         crate::tui::approval::ApprovalMode::Auto,
-        Some("run tests"),
         true,
-        false,
+        None,
     );
 
     assert_eq!(
@@ -5957,6 +6438,16 @@ fn auto_review_plan_decision_uses_configured_policy() {
     );
     assert_eq!(audit["decision"], "block");
     assert_eq!(audit["rule_id"], "configured-shell-block");
+}
+
+#[test]
+fn auto_review_block_error_preserves_reason_and_names_the_safe_next_step() {
+    let error = auto_review_block_tool_error("policy reason");
+    let message = error.to_string();
+
+    assert!(message.contains("policy reason."), "{message}");
+    assert!(message.contains("do not work around it"), "{message}");
+    assert!(message.contains("take a safer approach"), "{message}");
 }
 
 #[test]
