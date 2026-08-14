@@ -65,6 +65,14 @@ templates moved to v0.9.9.
   auto/low/medium/high/xhigh (cannot disable); Grok 4.5 is
   auto/low/medium/high; first-party DeepSeek keeps a documented `low` tier.
   `/effort` persists and receipts through the same path as Ctrl+T.
+
+### Removed
+
+- The source-structure budget ratchet (CI step, checker, baseline JSON).
+  It measured line counts, not quality: every legitimate feature required
+  a hand-edited ceiling and the accompanying "review" was self-review, so
+  it bought ceremony, not protection. Behavior-measuring gates (dead-code,
+  runtime-contract, persistence-backlog) stay enforced.
 - DeepSeek can reuse a key already stored by official DeepSeek Harness
   (`dsh`) after
   `codewhale auth external-consent --provider deepseek --mode read-only`.
