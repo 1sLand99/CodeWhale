@@ -70,6 +70,9 @@ pub struct SessionPeek {
     pub model: String,
     pub mode: String,
     pub archived: bool,
+    /// Messages of conversation, runtime control traffic excluded. The peek
+    /// never shows that traffic, so counting it here would print a total the
+    /// pane cannot account for.
     pub message_count: usize,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     /// Entries actually carried, oldest-first within the tail.
@@ -87,10 +90,22 @@ pub struct SessionPeek {
 #[must_use]
 pub fn build_peek(session: &SavedSession, max_entries: usize) -> SessionPeek {
     let max_entries = max_entries.clamp(1, MAX_PEEK_ENTRIES);
-    let total = session.messages.len();
+    // Runtime control traffic is persisted with `role = "user"` because strict
+    // chat templates reject anything else mid-conversation — see
+    // `runtime_handoff`, which owns both the envelope and its recognition.
+    // Rendering that transport role would attribute the runtime's own
+    // bookkeeping to the person, and in a session with busy sub-agents it is
+    // most of what the pane would show. Drop it before the tail is taken:
+    // filtering afterwards spends the entry budget on rows nobody sees.
+    let conversation: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|message| !crate::runtime_handoff::is_internal_runtime_handoff(message))
+        .collect();
+    let total = conversation.len();
     let start = total.saturating_sub(max_entries);
 
-    let entries: Vec<PeekEntry> = session.messages[start..]
+    let entries: Vec<PeekEntry> = conversation[start..]
         .iter()
         .map(|message| {
             let kind = match message.role.as_str() {
@@ -436,5 +451,194 @@ mod tests {
         let mut session = session_with(vec![user("hello")]);
         session.metadata.archived = true;
         assert!(build_peek(&session, 4).archived);
+    }
+
+    /// Every runtime handoff shape that can reach a saved session, including
+    /// the restore checkpoints a post-resume save persists.
+    fn runtime_handoffs() -> Vec<(&'static str, Message)> {
+        let waiting = crate::runtime_handoff::waiting_for_subagents_runtime_message(2);
+        let restored =
+            crate::runtime_handoff::project_messages_for_restore(std::slice::from_ref(&waiting));
+        vec![
+            ("waiting_for_subagents", waiting),
+            (
+                "background_shell_completion",
+                crate::runtime_handoff::shell_completion_runtime_message(&[]),
+            ),
+            (
+                "restored_checkpoint",
+                restored.into_iter().next().expect("projected"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn internal_runtime_events_are_absent_from_a_peek() {
+        for (kind, handoff) in runtime_handoffs() {
+            let peek = build_peek(
+                &session_with(vec![user("ship the release"), handoff]),
+                MAX_PEEK_ENTRIES,
+            );
+
+            assert_eq!(
+                peek.entries.len(),
+                1,
+                "{kind} was rendered as conversation: {:?}",
+                peek.entries
+            );
+            assert_eq!(peek.entries[0].text, "ship the release");
+            for entry in &peek.entries {
+                assert!(
+                    !entry.text.contains("<codewhale:runtime_event"),
+                    "{kind} leaked its envelope into a peek entry: {}",
+                    entry.text
+                );
+                assert!(
+                    !entry.text.contains("[Codewhale restored"),
+                    "{kind} leaked a restore checkpoint into a peek entry: {}",
+                    entry.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_user_messages_survive_the_runtime_filter() {
+        let mut messages = vec![user("first")];
+        for (_, handoff) in runtime_handoffs() {
+            messages.push(handoff);
+        }
+        messages.push(user("second"));
+
+        let peek = build_peek(&session_with(messages), MAX_PEEK_ENTRIES);
+
+        let texts: Vec<&str> = peek.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second"]);
+        assert!(peek.entries.iter().all(|e| e.kind == PeekEntryKind::User));
+    }
+
+    #[test]
+    fn a_person_who_pastes_a_runtime_envelope_is_still_the_person_talking() {
+        // The filter keys on runtime provenance, never on the envelope text.
+        // A composer turn is `ExternalUser`, whose authority is implicit, so
+        // its metadata carries no provenance line — which is what keeps the
+        // second shape here visible even though it is block-for-block what a
+        // handoff looks like.
+        let question = "why did I get <codewhale:runtime_event \
+                        kind=\"waiting_for_subagents\" visibility=\"internal\"> \
+                        in my transcript?";
+        let pastes = [
+            user(question),
+            Message {
+                role: "user".to_string(),
+                content: vec![
+                    text_block(question),
+                    text_block(concat!(
+                        "<turn_meta>\n",
+                        "Current approval mode: on-request\n",
+                        "</turn_meta>",
+                    )),
+                ],
+            },
+        ];
+
+        for paste in pastes {
+            let peek = build_peek(&session_with(vec![paste]), MAX_PEEK_ENTRIES);
+
+            assert_eq!(peek.entries.len(), 1);
+            assert_eq!(peek.entries[0].kind, PeekEntryKind::User);
+            assert!(peek.entries[0].text.contains("why did I get"));
+        }
+    }
+
+    /// Rebuild a handoff the way the engine's ordinary send path does, with
+    /// the blocks `user_content_blocks` inserts for an `[Attached image: …]`
+    /// line in the payload. Idle completions take that path rather than
+    /// `runtime_handoff_message_with_meta`, so this shape reaches saved
+    /// sessions too.
+    fn with_attachment_blocks(handoff: &Message) -> Message {
+        let (
+            ContentBlock::Text { text: envelope, .. },
+            Some(ContentBlock::Text { text: meta, .. }),
+        ) = (&handoff.content[0], handoff.content.last())
+        else {
+            panic!("handoff should be text-anchored");
+        };
+        Message {
+            role: handoff.role.clone(),
+            content: vec![
+                text_block(envelope),
+                text_block("<image path=\"/tmp/shot.png\">"),
+                ContentBlock::ImageUrl {
+                    image_url: crate::models::ImageUrlContent {
+                        url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    },
+                },
+                text_block("</image>"),
+                text_block(meta),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_handoff_that_carried_an_attachment_is_still_recognized() {
+        for (kind, handoff) in runtime_handoffs() {
+            let expanded = with_attachment_blocks(&handoff);
+            let peek = build_peek(
+                &session_with(vec![user("look at this"), expanded]),
+                MAX_PEEK_ENTRIES,
+            );
+
+            assert_eq!(
+                peek.entries.len(),
+                1,
+                "{kind} leaked once its payload mentioned an attachment: {:?}",
+                peek.entries
+            );
+            assert_eq!(peek.entries[0].text, "look at this");
+        }
+    }
+
+    #[test]
+    fn runtime_traffic_does_not_spend_the_entry_budget() {
+        // Filtering after the tail was taken would leave a session with chatty
+        // sub-agents showing two or three lines of conversation out of twelve.
+        let mut messages = Vec::new();
+        for i in 0..MAX_PEEK_ENTRIES {
+            messages.push(user(&format!("message {i}")));
+            messages.push(crate::runtime_handoff::shell_completion_runtime_message(&[]));
+        }
+
+        let peek = build_peek(&session_with(messages), MAX_PEEK_ENTRIES);
+
+        assert_eq!(peek.entries.len(), MAX_PEEK_ENTRIES);
+        assert!(peek.entries[0].text.contains("message 0"));
+        assert!(
+            peek.entries
+                .last()
+                .expect("tail")
+                .text
+                .contains(&format!("message {}", MAX_PEEK_ENTRIES - 1))
+        );
+    }
+
+    #[test]
+    fn the_counters_describe_what_the_pane_can_show() {
+        // The dashboard prints both numbers next to the rows it rendered, so a
+        // count that included hidden runtime traffic would not add up.
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(user(&format!("m{i}")));
+            messages.push(crate::runtime_handoff::waiting_for_subagents_runtime_message(1));
+        }
+
+        let peek = build_peek(&session_with(messages), MAX_PEEK_ENTRIES);
+
+        assert_eq!(peek.message_count, 20);
+        assert_eq!(
+            peek.omitted_before + peek.entries.len(),
+            peek.message_count,
+            "omitted + shown must account for every message the peek claims"
+        );
     }
 }
