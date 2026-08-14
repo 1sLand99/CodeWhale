@@ -9985,6 +9985,13 @@ struct ExecStreamMeta {
     prompt_cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_tokens: Option<u32>,
+    /// Resolved output ceiling the route actually requested (post-catalogue).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codewhale_max_output_tokens: Option<u32>,
+    /// Provenance of that ceiling: `documented`, `uncatalogued`, or
+    /// `route-declared`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codewhale_max_output_tokens_source: Option<&'static str>,
     duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_count: Option<u32>,
@@ -10395,6 +10402,8 @@ async fn run_workflow_tool_command_inner(
             prompt_cache_miss_tokens: None,
             prompt_cache_write_tokens: None,
             reasoning_tokens: None,
+            codewhale_max_output_tokens: None,
+            codewhale_max_output_tokens_source: None,
             duration_ms: u64::try_from(tool_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             retry_count: None,
             approval_posture: "explicit_workflow_command".to_string(),
@@ -11790,6 +11799,21 @@ async fn run_exec_agent(
                             content: exec_stream_session_ref(id),
                         })?;
                     }
+                    // Resolved output ceiling and its provenance, surfaced so a
+                    // wrong ceiling is visible in the receipt rather than
+                    // requiring packet capture.
+                    let codewhale_max_output_tokens =
+                        crate::route_budget::effective_max_output_tokens_for_route(
+                            effective_provider,
+                            &latest_model,
+                            active_route_limits,
+                        );
+                    let codewhale_max_output_tokens_source =
+                        crate::route_budget::output_ceiling_source(
+                            effective_provider,
+                            &latest_model,
+                        )
+                        .as_str();
                     emit_exec_stream_event(&ExecStreamEvent::Metadata {
                         meta: Box::new(ExecStreamMeta {
                             receipt_kind: "terminal",
@@ -11803,6 +11827,10 @@ async fn run_exec_agent(
                             prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
                             prompt_cache_write_tokens: usage.prompt_cache_write_tokens,
                             reasoning_tokens: usage.reasoning_tokens,
+                            codewhale_max_output_tokens: Some(codewhale_max_output_tokens),
+                            codewhale_max_output_tokens_source: Some(
+                                codewhale_max_output_tokens_source,
+                            ),
                             duration_ms: u64::try_from(exec_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX),
                             retry_count: None,
@@ -15652,6 +15680,8 @@ mod terminal_mode_tests {
                 prompt_cache_miss_tokens: None,
                 prompt_cache_write_tokens: None,
                 reasoning_tokens: Some(3),
+                codewhale_max_output_tokens: Some(384_000),
+                codewhale_max_output_tokens_source: Some("documented"),
                 duration_ms: 2500,
                 retry_count: None,
                 approval_posture: "ask".to_string(),
