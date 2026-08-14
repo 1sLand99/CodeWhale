@@ -33,7 +33,7 @@ fn lowercase_bash_schema_is_small_contract() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["command", "timeout"]
+        ["command", "justification", "sandbox_permissions", "timeout"]
             .into_iter()
             .map(str::to_string)
             .collect()
@@ -62,6 +62,7 @@ fn contract_bash_nonzero_is_an_error_with_status_after_output() {
             sandbox_denied: false,
         },
         None,
+        &ToolContext::new("."),
     )
     .expect_err("nonzero must be a failed tool call");
     assert!(
@@ -1676,7 +1677,31 @@ fn sandbox_denied_hint_names_the_effective_posture() {
     let hint = shell_sandbox_denied_hint(&ctx, &result).expect("sandbox-denied hint");
 
     assert!(hint.contains("read-only"), "{hint}");
-    assert!(hint.contains("approval"), "{hint}");
+    assert!(hint.contains("Ask-only escalation"), "{hint}");
+    assert!(
+        hint.contains("retry this exact command once with sandbox_permissions"),
+        "{hint}"
+    );
+    assert!(hint.contains("justification"), "{hint}");
+}
+
+#[test]
+fn contract_bash_denial_surfaces_the_escalation_shape() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx =
+        ToolContext::new(tmp.path()).with_elevated_sandbox_policy(ExecutionSandboxPolicy::ReadOnly);
+    let mut result = failed_network_shell_result("", "Operation not permitted");
+    result.sandbox_denied = true;
+
+    let error = finish_contract_bash_result(result, None, &ctx)
+        .expect_err("sandbox denial is a failed call");
+
+    assert!(
+        error
+            .to_string()
+            .contains("retry this exact command once with sandbox_permissions"),
+        "{error}"
+    );
 }
 
 #[test]

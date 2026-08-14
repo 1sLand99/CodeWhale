@@ -2985,18 +2985,16 @@ fn shell_network_restricted_hint<'a>(
 }
 
 /// Coaching line when the execution sandbox denied a command and the
-/// Plan-mode network hint did not already explain it. Most often a write
-/// under a read-only posture: name the effective posture and state that a
-/// tool-approval grant does not lift the sandbox, so the model reports the
-/// restriction instead of debugging the command (DGF-02, dogfood
-/// 2026-08-02).
+/// Plan-mode network hint did not already explain it. Most often a write under
+/// a read-only posture: name the effective posture and the Ask-only retry shape
+/// so other postures do not mistake it for autonomous authority.
 fn shell_sandbox_denied_hint(context: &ToolContext, result: &ShellResult) -> Option<String> {
     if !result.sandbox_denied {
         return None;
     }
     let policy = context.elevated_sandbox_policy.as_ref()?;
     Some(format!(
-        "The execution sandbox blocked this command. Effective sandbox posture: {}. This posture is session policy — user approval of a tool call does not lift it. If the task needs more access, say which access is missing instead of retrying command variants.",
+        "The execution sandbox blocked this command. Effective sandbox posture: {}. [sandbox: Ask-only escalation — retry this exact command once with sandbox_permissions (the narrowest wider mode that suffices) + justification; the approval prompt asks the user]",
         policy.posture_label()
     ))
 }
@@ -3518,9 +3516,18 @@ fn contract_bash_error_status(result: &ShellResult, timeout_ms: Option<u64>) -> 
 fn finish_contract_bash_result(
     result: ShellResult,
     timeout_ms: Option<u64>,
+    context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
+    let sandbox_denied_hint = shell_sandbox_denied_hint(context, &result);
     let mut output = result.stdout.clone();
     output.push_str(&result.stderr);
+    if let Some(hint) = sandbox_denied_hint {
+        output = if output.is_empty() {
+            hint
+        } else {
+            format!("{hint}\n\n{output}")
+        };
+    }
     let metadata = json!({
         "evidence_routing": "inline", "exit_code": result.exit_code,
         "status": format!("{:?}", result.status), "duration_ms": result.duration_ms,
@@ -3562,7 +3569,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted there is no default timeout."
+        "Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted there is no default timeout. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -3570,7 +3577,16 @@ impl ToolSpec for LowercaseBashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "Bash command to execute." },
-                "timeout": { "type": "number", "description": "Optional timeout in seconds; there is no default timeout." }
+                "timeout": { "type": "number", "description": "Optional timeout in seconds; there is no default timeout." },
+                "sandbox_permissions": {
+                    "type": "string",
+                    "enum": ["workspace-write", "danger-full-access"],
+                    "description": "The wider sandbox mode this exact command needs. Use only as a one-shot retry after a sandbox denial; requires justification and user approval in Ask."
+                },
+                "justification": {
+                    "type": "string",
+                    "description": "Required with sandbox_permissions: one sentence explaining why this exact command needs wider access."
+                }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -3615,7 +3631,12 @@ fn contract_bash_legacy_input(input: &serde_json::Value) -> Result<serde_json::V
         .ok_or_else(|| ToolError::invalid_input("bash input must be an object"))?;
     let unexpected = object
         .keys()
-        .filter(|key| !matches!(key.as_str(), "command" | "timeout"))
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "command" | "timeout" | "sandbox_permissions" | "justification"
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
     if !unexpected.is_empty() {
@@ -3643,6 +3664,11 @@ fn contract_bash_legacy_input(input: &serde_json::Value) -> Result<serde_json::V
             )));
         }
         translated["timeout_ms"] = json!((millis as u64).max(1));
+    }
+    for field in ["sandbox_permissions", "justification"] {
+        if let Some(value) = input.get(field) {
+            translated[field] = value.clone();
+        }
     }
     Ok(translated)
 }
@@ -3801,6 +3827,15 @@ impl ToolSpec for BashTool {
                 "persist": {
                     "type": "boolean",
                     "description": "Keep this background service running after a successful headless exec (default: false). Requires background:true and explicit danger-full-access. Run the service itself in the foreground; do not use nohup or a trailing `&`."
+                },
+                "sandbox_permissions": {
+                    "type": "string",
+                    "enum": ["workspace-write", "danger-full-access"],
+                    "description": "The wider sandbox mode this exact command needs. Use only as a one-shot retry after a sandbox denial; requires justification and user approval in Ask."
+                },
+                "justification": {
+                    "type": "string",
+                    "description": "Required with sandbox_permissions: one sentence explaining why this exact command needs wider access."
                 }
             },
             // The schema used to declare nothing required at all, so
@@ -4375,7 +4410,7 @@ impl ToolSpec for BashTool {
                     .as_ref()
                     .is_some_and(|token| token.is_cancelled());
                 if self.pi_timeout {
-                    return finish_contract_bash_result(result, timeout_ms);
+                    return finish_contract_bash_result(result, timeout_ms, context);
                 }
                 let task_id_str = result.task_id.clone().unwrap_or_default();
                 let stdout_summary = summarize_output(&result.stdout);

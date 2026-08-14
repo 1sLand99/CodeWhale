@@ -105,6 +105,73 @@ pub(super) fn repo_law_must_block_without_prompt(
     auto_approve || approval_mode != crate::tui::approval::ApprovalMode::Suggest
 }
 
+pub(super) fn requested_sandbox_escalation(
+    tool_name: &str,
+    input: &serde_json::Value,
+    effective: &crate::sandbox::SandboxPolicy,
+) -> Result<Option<(crate::sandbox::SandboxPolicy, String)>, ToolError> {
+    let requested = input.get("sandbox_permissions");
+    let justification = input.get("justification");
+    if !matches!(tool_name, "bash" | "Bash" | "exec_shell")
+        || (requested.is_none() && justification.is_none())
+    {
+        return Ok(None);
+    }
+    if input
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|action| action != "run")
+    {
+        return Err(ToolError::invalid_input(
+            "sandbox_permissions is only valid for Bash action=run",
+        ));
+    }
+    let requested = requested
+        .ok_or_else(|| {
+            ToolError::invalid_input(
+                "invalid escalation: justification is only valid together with sandbox_permissions",
+            )
+        })?
+        .as_str()
+        .ok_or_else(|| ToolError::invalid_input("sandbox_permissions must be a string"))?;
+    let justification = justification
+        .ok_or_else(|| {
+            ToolError::invalid_input(
+                "invalid escalation: sandbox_permissions requires a justification",
+            )
+        })?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ToolError::invalid_input("invalid justification: expected a non-empty sentence")
+        })?
+        .to_string();
+
+    let policy = match (effective, requested) {
+        (crate::sandbox::SandboxPolicy::ReadOnly, "workspace-write") => {
+            crate::sandbox::SandboxPolicy::default()
+        }
+        (
+            crate::sandbox::SandboxPolicy::ReadOnly
+            | crate::sandbox::SandboxPolicy::WorkspaceWrite { .. },
+            "danger-full-access",
+        ) => crate::sandbox::SandboxPolicy::DangerFullAccess,
+        (_, "workspace-write" | "danger-full-access") => {
+            return Err(ToolError::permission_denied(format!(
+                "sandbox escalation to '{requested}' is not strictly wider than this call's current '{}' posture",
+                effective.posture_label()
+            )));
+        }
+        (_, other) => {
+            return Err(ToolError::invalid_input(format!(
+                "invalid sandbox_permissions '{other}': expected workspace-write or danger-full-access"
+            )));
+        }
+    };
+    Ok(Some((policy, justification)))
+}
+
 /// Whether a [`Usage`] carries any provider-reported data. The
 /// chat-completions streaming adapter emits a synthetic `MessageStart` with a
 /// zeroed [`Usage`]; treating that as reported would fabricate zero-valued
@@ -2202,20 +2269,21 @@ impl Engine {
             let mut hook_contexts: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
             let mut plans: Vec<ToolExecutionPlan> = Vec::with_capacity(tool_uses.len());
-            // DGF-02: an approval grant does not lift the execution sandbox.
-            // Resolve the batch's effective policy once so a read-only
-            // posture can be named on the approval gate below instead of
-            // letting an approved write fail with a bare sandbox denial.
+            // Resolve the batch's effective policy once. Ordinary approval
+            // preserves it; an explicit sandbox escalation can replace it for
+            // only the exact call that receives separate user approval.
+            let batch_approval_mode = crate::core::authority::agent_approval_mode_for_turn(
+                self.session.auto_approve,
+                self.session.approval_mode,
+            );
+            let batch_sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
+                self.current_mode,
+                batch_approval_mode,
+                self.api_config.sandbox_mode.as_deref(),
+                &self.session.workspace,
+            );
             let batch_sandbox_read_only = matches!(
-                crate::core::authority::sandbox_policy_for_turn(
-                    self.current_mode,
-                    crate::core::authority::agent_approval_mode_for_turn(
-                        self.session.auto_approve,
-                        self.session.approval_mode,
-                    ),
-                    self.api_config.sandbox_mode.as_deref(),
-                    &self.session.workspace,
-                ),
+                &batch_sandbox_policy,
                 crate::sandbox::SandboxPolicy::ReadOnly
             );
             for (index, tool) in tool_uses.iter_mut().enumerate() {
@@ -2668,19 +2736,60 @@ impl Engine {
                     guard_result = Some(result);
                 }
 
-                // DGF-02: when the gate will prompt for a sandbox-executed
-                // command under a read-only posture, say on the gate itself
-                // that approval cannot lift the sandbox. Scoped to the shell
-                // family — file tools do not execute through the sandbox.
+                // Bind escalation last so remembered rules cannot remove its
+                // prompt and later safety/repo-law holds cannot hide what the
+                // elevated approval grants. A hard block above still wins.
+                if blocked_error.is_none() {
+                    match requested_sandbox_escalation(
+                        &tool_name,
+                        &tool_input,
+                        &batch_sandbox_policy,
+                    ) {
+                        Ok(Some((_policy, justification)))
+                            if batch_approval_mode
+                                == crate::tui::approval::ApprovalMode::Suggest =>
+                        {
+                            let escalation_description = format!(
+                                "Sandbox escalation to '{}' for this exact call: {justification}",
+                                tool_input["sandbox_permissions"]
+                                    .as_str()
+                                    .expect("validated sandbox permission")
+                            );
+                            approval_description = if approval_force_prompt {
+                                format!(
+                                    "{escalation_description}. Additional approval gate: {approval_description}"
+                                )
+                            } else {
+                                escalation_description
+                            };
+                            approval_required = true;
+                            approval_force_prompt = true;
+                        }
+                        Ok(Some(_)) => {
+                            blocked_error = Some(ToolError::permission_denied(format!(
+                                "Sandbox escalation requires a one-shot user approval, but the current {} posture cannot provide it. Switch to Ask or continue without escalation.",
+                                batch_approval_mode.permission_chip_label()
+                            )));
+                        }
+                        Ok(None) => {}
+                        Err(error) => blocked_error = Some(error),
+                    }
+                }
+
+                // An ordinary approval does not change the sandbox. Say that
+                // on the gate itself; an explicit sandbox_permissions request
+                // takes the separate exact-call path above. Scoped to shell —
+                // file tools do not execute through the sandbox.
                 if approval_required
                     && batch_sandbox_read_only
+                    && tool_input.get("sandbox_permissions").is_none()
                     && matches!(
                         tool_name.as_str(),
                         "bash" | "Bash" | "Run" | "exec_shell" | "task_shell_start"
                     )
                 {
                     approval_description = format!(
-                        "{approval_description} — note: the execution sandbox is read-only for this session; approving runs the command without write access (approval cannot lift the sandbox)"
+                        "{approval_description} — note: the execution sandbox is read-only for this session; ordinary approval runs the command without write access (sandbox escalation requires a separate exact-call request)"
                     );
                 }
 
@@ -3213,6 +3322,13 @@ impl Engine {
                         }
 
                         // Handle approval flow: returns (result_override, context_override, approval_stamp)
+                        let model_requested_policy = requested_sandbox_escalation(
+                            &tool_name,
+                            &tool_input,
+                            &batch_sandbox_policy,
+                        )
+                        .expect("sandbox escalation was validated while planning")
+                        .map(|(policy, _)| policy);
                         let (result_override, context_override, approval_stamp): (
                             Option<Result<ToolResult, ToolError>>,
                             Option<crate::tools::ToolContext>,
@@ -3254,14 +3370,34 @@ impl Engine {
 
                             match self.await_tool_approval(&tool_id).await {
                                 Ok(ApprovalResult::Approved) => {
+                                    let decision = if model_requested_policy.is_some() {
+                                        "approved_with_requested_policy"
+                                    } else {
+                                        "approved"
+                                    };
                                     emit_tool_audit(json!({
                                         "event": "tool.approval_decision",
                                         "tool_id": tool_id.clone(),
                                         "tool_name": tool_name.clone(),
-                                        "decision": "approved",
+                                        "decision": decision,
+                                        "policy": model_requested_policy.as_ref().map(|policy| format!("{policy:?}")),
                                         "caller": caller_type_for_tool_use(tool_caller.as_ref()),
                                     }));
-                                    (None, None, Some(ToolApprovalStamp::ApprovedByUser))
+                                    if let Some(policy) = model_requested_policy {
+                                        let elevated_context = Some(
+                                            batch_tool_context
+                                                .clone()
+                                                .expect("registered shell tool context")
+                                                .with_elevated_sandbox_policy(policy),
+                                        );
+                                        (
+                                            None,
+                                            elevated_context,
+                                            Some(ToolApprovalStamp::ApprovedWithPolicy),
+                                        )
+                                    } else {
+                                        (None, None, Some(ToolApprovalStamp::ApprovedByUser))
+                                    }
                                 }
                                 Ok(ApprovalResult::Denied) => {
                                     emit_tool_audit(json!({

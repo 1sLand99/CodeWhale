@@ -147,7 +147,8 @@ impl SandboxPolicy {
         match self {
             SandboxPolicy::DangerFullAccess => "full access (sandbox disabled)".to_string(),
             SandboxPolicy::ReadOnly => {
-                "read-only (shell writes are blocked; tool approval cannot lift this)".to_string()
+                "read-only (shell writes are blocked; ordinary approval does not change this)"
+                    .to_string()
             }
             SandboxPolicy::ExternalSandbox { network_access } => format!(
                 "external sandbox (host-managed; network {})",
@@ -478,12 +479,11 @@ mod tests {
 
     #[test]
     fn posture_labels_name_the_binding_fact() {
-        // DGF-02: the read-only label must state that approval cannot lift
-        // the sandbox — that sentence is what stops the model (and the
-        // user) from treating a denial as a bug to debug.
+        // This label is shared by interactive and non-interactive postures, so
+        // state only the invariant. The denial hint names the Ask-only path.
         let read_only = SandboxPolicy::ReadOnly.posture_label();
         assert!(read_only.contains("read-only"), "{read_only}");
-        assert!(read_only.contains("approval cannot lift"), "{read_only}");
+        assert!(read_only.contains("ordinary approval"), "{read_only}");
 
         assert!(
             SandboxPolicy::default()
