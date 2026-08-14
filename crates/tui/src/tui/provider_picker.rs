@@ -57,7 +57,7 @@ use crate::tui::views::{
     centered_modal_area, render_modal_footer, render_modal_surface,
 };
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
-use codewhale_config::provider::WireFormat;
+use codewhale_config::provider::{CredentialAcquisition, WireFormat};
 use codewhale_config::route::{PricingSku, RequestProtocol};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -1478,6 +1478,13 @@ fn codex_jwt_expiry(token: &str) -> Option<u64> {
 }
 
 impl ProviderPickerView {
+
+    /// OAuth-only providers never collect a typed credential: the key entry
+    /// stage for them is a routing step (device flow / external consent), so
+    /// typed input and pastes are accepted events but never stored.
+    fn key_entry_is_oauth_locked(&self) -> bool {
+        self.selected_provider().credential_help().acquisition == CredentialAcquisition::OAuth
+    }
     #[cfg(test)]
     #[must_use]
     pub fn new(active: ApiProvider, config: &Config) -> Self {
@@ -3257,7 +3264,7 @@ impl ModalView for ProviderPickerView {
     fn handle_paste(&mut self, text: &str) -> bool {
         match self.stage {
             Stage::KeyEntry => {
-                if self.selected_provider() == ApiProvider::OpenaiCodex {
+                if self.key_entry_is_oauth_locked() {
                     return true;
                 }
                 let sanitized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -3491,14 +3498,14 @@ impl ModalView for ProviderPickerView {
                     ViewAction::None
                 }
                 KeyCode::Backspace => {
-                    if self.selected_provider() != ApiProvider::OpenaiCodex {
+                    if !self.key_entry_is_oauth_locked() {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
                     ViewAction::None
                 }
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if self.selected_provider() != ApiProvider::OpenaiCodex {
+                    if !self.key_entry_is_oauth_locked() {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
@@ -3529,7 +3536,7 @@ impl ModalView for ProviderPickerView {
                         KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                     ) =>
                 {
-                    if self.selected_provider() == ApiProvider::OpenaiCodex {
+                    if self.key_entry_is_oauth_locked() {
                         return ViewAction::None;
                     }
                     // Reject ASCII whitespace so a stray space/tab doesn't slip
