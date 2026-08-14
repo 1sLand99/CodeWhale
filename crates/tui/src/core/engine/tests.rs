@@ -5207,36 +5207,28 @@ async fn duplicate_raw_read_errors_each_touch_the_working_set() {
 }
 
 #[tokio::test]
-async fn injected_model_partial_text_at_max_tokens_fails_truthfully() {
+async fn truncated_response_continues_turn() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let workspace = tempdir().expect("tempdir");
-    let start_usage = Usage {
-        input_tokens: 41,
-        prompt_cache_hit_tokens: Some(13),
-        prompt_cache_write_tokens: Some(5),
-        ..Default::default()
-    };
-    let delta_usage = Usage {
-        output_tokens: 7,
-        reasoning_tokens: Some(3),
-        ..Default::default()
-    };
-    let mut message_start = canned::message_start("mock_msg_truncated_text");
-    if let StreamEvent::MessageStart { message } = &mut message_start {
-        message.usage = start_usage;
-    } else {
-        panic!("canned message_start must produce MessageStart");
-    }
-    let partial_turn = vec![
-        message_start,
+    let truncated_turn = vec![
+        canned::message_start("mock_msg_truncated_continue"),
         canned::text_block_start(0),
         canned::text_delta(0, "Partial answer before the output budget ran out"),
         canned::block_stop(0),
-        canned::message_delta("max_tokens", Some(delta_usage)),
+        canned::message_delta(
+            "max_output_tokens",
+            Some(Usage {
+                input_tokens: 41,
+                output_tokens: 7,
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            }),
+        ),
         canned::message_stop(),
     ];
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![partial_turn]));
+    let followup_turn = canned::simple_text_turn("Continued after the truncation.");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![truncated_turn, followup_turn]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
     let (engine, handle) = Engine::new_with_model_client(
         deterministic_engine_config(workspace.path()),
@@ -5251,15 +5243,15 @@ async fn injected_model_partial_text_at_max_tokens_fails_truthfully() {
             &Config::default(),
         ))
         .await
-        .expect("send truncated-text trajectory");
+        .expect("send truncated-then-continue trajectory");
 
     let mut saw_turn_usage = false;
-    let mut saw_message_complete = false;
+    let mut saw_truncation_observation = false;
     let mut last_session_messages = None;
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
         .await
-        .expect("timed out waiting for truncated-text trajectory")
+        .expect("timed out waiting for truncated-then-continue trajectory")
     {
         match event {
             Event::TurnUsage {
@@ -5268,22 +5260,24 @@ async fn injected_model_partial_text_at_max_tokens_fails_truthfully() {
                 assert_eq!(reported.input_tokens, 41);
                 assert_eq!(reported.output_tokens, 7);
                 assert_eq!(reported.reasoning_tokens, Some(3));
-                assert_eq!(reported.prompt_cache_hit_tokens, Some(13));
-                assert_eq!(reported.prompt_cache_write_tokens, Some(5));
                 saw_turn_usage = true;
             }
-            Event::MessageComplete { .. } => saw_message_complete = true,
             Event::SessionUpdated { messages, .. } => {
+                saw_truncation_observation |= messages.iter().any(|message| {
+                    message.content.iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Text { text, .. }
+                                if text.contains("output limit")
+                                    && text.contains("Continue from where you left off")
+                        )
+                    })
+                });
                 last_session_messages = Some(messages);
             }
-            Event::ToolCallStarted { .. } | Event::ToolCallComplete { .. } => {
-                panic!("no tool may run from a truncated response");
-            }
             Event::TurnComplete { status, error, .. } => {
-                assert_eq!(status, TurnOutcomeStatus::Failed);
-                let error = error.expect("truncated turn must carry a truthful error");
-                assert!(error.contains("Model output truncated"), "{error}");
-                assert!(error.contains("max_tokens"), "{error}");
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert!(error.is_none(), "no terminal error expected: {error:?}");
                 break;
             }
             _ => {}
@@ -5293,16 +5287,16 @@ async fn injected_model_partial_text_at_max_tokens_fails_truthfully() {
 
     assert!(
         saw_turn_usage,
-        "reported usage must be accounted and emitted before the turn fails"
+        "reported usage must be accounted before the turn continues"
     );
     assert!(
-        !saw_message_complete,
-        "partial text must not be recorded as a completed assistant item"
+        saw_truncation_observation,
+        "the truncation must be surfaced to the model as a bounded observation"
     );
-    let messages = last_session_messages.expect("session updated after interrupted text");
+    let messages = last_session_messages.expect("session updated after truncation");
     assert!(
         messages.iter().any(|message| {
-            message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE
+            message.role == "assistant"
                 && message.content.iter().any(|block| {
                     matches!(
                         block,
@@ -5311,11 +5305,15 @@ async fn injected_model_partial_text_at_max_tokens_fails_truthfully() {
                     )
                 })
         }),
-        "the partial text must be preserved as an interrupted assistant message"
+        "the partial text must be accepted as a completed assistant message"
     );
 
     let requests = mock.captured_requests();
-    assert_eq!(requests.len(), 1, "exactly one provider request");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the loop must continue with a follow-up request"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }
@@ -5384,10 +5382,15 @@ async fn injected_chat_content_filter_never_becomes_a_completed_answer() {
 }
 
 #[tokio::test]
-async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes() {
+async fn injected_model_complete_tool_block_at_max_output_tokens_executes() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let workspace = tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("truncated-tool-ran.txt"),
+        "truncated-tool-executed",
+    )
+    .expect("write fixture");
     let usage = Usage {
         input_tokens: 52,
         output_tokens: 23,
@@ -5395,16 +5398,14 @@ async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes(
     };
     let truncated_tool_turn = vec![
         canned::message_start("mock_msg_truncated_tool"),
-        canned::tool_use_block_start(0, "call-truncated", "Bash"),
-        canned::tool_input_delta(
-            0,
-            r#"{"action":"run","command":"touch truncated-tool-ran.txt"}"#,
-        ),
+        canned::tool_use_block_start(0, "call-truncated", "File"),
+        canned::tool_input_delta(0, r#"{"action":"read","path":"truncated-tool-ran.txt"}"#),
         canned::block_stop(0),
         canned::message_delta("max_output_tokens", Some(usage.clone())),
         canned::message_stop(),
     ];
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![truncated_tool_turn]));
+    let followup_turn = canned::simple_text_turn("Done.");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![truncated_tool_turn, followup_turn]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
     let (engine, handle) = Engine::new_with_model_client(
         deterministic_engine_config(workspace.path()),
@@ -5414,7 +5415,7 @@ async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes(
     let task = tokio::spawn(engine.run());
     handle
         .send(external_user_message_op(
-            "Use Bash to prepare the workspace.",
+            "Read the fixture file.",
             AppMode::Agent,
             &Config::default(),
         ))
@@ -5423,7 +5424,7 @@ async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes(
 
     let mut saw_turn_usage = false;
     let mut saw_tool_start = false;
-    let mut saw_tool_terminal_error = false;
+    let mut saw_tool_success = false;
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
         .await
@@ -5433,28 +5434,24 @@ async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes(
             Event::TurnUsage { .. } => saw_turn_usage = true,
             Event::ToolCallStarted { id, name, .. } => {
                 assert_eq!(id, "call-truncated");
-                assert_eq!(name, "Bash");
+                assert_eq!(name, "File");
                 saw_tool_start = true;
             }
             Event::ToolCallComplete {
                 id, name, result, ..
             } => {
                 assert_eq!(id, "call-truncated");
-                assert_eq!(name, "Bash");
-                let result = result.expect("truncated call closes with a tool result");
-                assert!(!result.success);
-                assert!(result.content.contains("Not executed"), "{result:?}");
-                let metadata = result.metadata.expect("non-execution metadata");
-                assert_eq!(metadata["side_effect_status"], "not_started");
-                assert_eq!(metadata["error_category"], "model_output_incomplete");
-                assert_eq!(metadata["model_output_incomplete"], true);
-                saw_tool_terminal_error = true;
+                assert_eq!(name, "File");
+                let result = result.expect("complete tool call closes with a tool result");
+                assert!(
+                    result.success,
+                    "complete tool call must be accepted and executed: {result:?}"
+                );
+                saw_tool_success = true;
             }
             Event::TurnComplete { status, error, .. } => {
-                assert_eq!(status, TurnOutcomeStatus::Failed);
-                let error = error.expect("truncated turn must carry a truthful error");
-                assert!(error.contains("Model output truncated"), "{error}");
-                assert!(error.contains("max_output_tokens"), "{error}");
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert!(error.is_none(), "no terminal error expected: {error:?}");
                 break;
             }
             _ => {}
@@ -5462,21 +5459,18 @@ async fn injected_model_complete_tool_block_at_max_output_tokens_never_executes(
     }
     drop(rx);
 
-    assert!(
-        saw_turn_usage,
-        "reported usage must be emitted before the turn fails"
-    );
+    assert!(saw_turn_usage, "reported usage must be emitted");
     assert!(saw_tool_start, "the streamed tool lifecycle must open");
     assert!(
-        saw_tool_terminal_error,
-        "every opened tool lifecycle must close even though execution was refused"
-    );
-    assert!(
-        !workspace.path().join("truncated-tool-ran.txt").exists(),
-        "the complete-looking tool block must never be executed"
+        saw_tool_success,
+        "the complete tool call must be accepted and executed"
     );
     let requests = mock.captured_requests();
-    assert_eq!(requests.len(), 1, "exactly one provider request");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the loop must continue with a follow-up request after the tool result"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }

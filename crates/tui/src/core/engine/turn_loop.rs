@@ -968,6 +968,12 @@ impl Engine {
             // must not surface as fabricated zeros.
             let mut usage_reported = false;
             let mut stop_reason: Option<String> = None;
+            // Set when the provider ends the response at its output limit
+            // (`length` / `max_tokens` / `max_output_tokens`). The turn
+            // degrades instead of failing: the partial assistant message is
+            // accepted, the truncation is surfaced to the model as a bounded
+            // runtime observation, and the loop continues.
+            let mut output_limit_truncated: Option<String> = None;
             let mut current_block_kind: Option<ContentBlockKind> = None;
             // Map block_index → tool_uses position. Required because the
             // OpenAI-compatible streaming parser emits multiple
@@ -1551,32 +1557,42 @@ impl Engine {
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
                 let reason = stop_reason_detail(stop_reason.as_deref());
-                for tool in &tool_uses {
-                    let _ = self
-                        .tx_event
-                        .send(Event::ToolCallComplete {
-                            id: tool.id.clone(),
-                            name: tool.name.clone(),
-                            result: Ok(incomplete_tool_result(reason)),
-                        })
-                        .await;
-                }
-                // Do not emit MessageComplete: hosts must retain the visible
-                // fragment as interrupted/failed rather than recording it as
-                // a completed assistant item.
-                self.add_interrupted_assistant_text(&current_text_visible)
-                    .await;
-                let error = if is_output_limit_stop_reason(stop_reason.as_deref()) {
-                    format!(
-                        "Model output truncated: provider stop reason `{reason}`; no complete response or tool call was accepted."
-                    )
+                if is_output_limit_stop_reason(stop_reason.as_deref()) {
+                    // Degrade, don't kill the turn. A generation limit is a
+                    // normal provider outcome, not an unrecoverable error:
+                    // accept whatever complete tool call or content was
+                    // produced and continue. The truncation is surfaced as a
+                    // bounded observation after the partial assistant message
+                    // is committed (and, for a tool-call response, after the
+                    // tool result is appended) so the transcript stays
+                    // well-formed.
+                    crate::logging::warn(format!(
+                        "Model output truncated: provider stop reason `{reason}`; accepting partial response and continuing the turn."
+                    ));
+                    output_limit_truncated = Some(reason.to_string());
+                    // Fall through to the normal content/tool dispatch below.
                 } else {
-                    format!(
+                    for tool in &tool_uses {
+                        let _ = self
+                            .tx_event
+                            .send(Event::ToolCallComplete {
+                                id: tool.id.clone(),
+                                name: tool.name.clone(),
+                                result: Ok(incomplete_tool_result(reason)),
+                            })
+                            .await;
+                    }
+                    // Do not emit MessageComplete: hosts must retain the visible
+                    // fragment as interrupted/failed rather than recording it as
+                    // a completed assistant item.
+                    self.add_interrupted_assistant_text(&current_text_visible)
+                        .await;
+                    let error = format!(
                         "Model response incomplete: provider stop reason `{reason}`; no complete response or tool call was accepted."
-                    )
-                };
-                crate::logging::warn(&error);
-                return (TurnOutcomeStatus::Failed, Some(error));
+                    );
+                    crate::logging::warn(&error);
+                    return (TurnOutcomeStatus::Failed, Some(error));
+                }
             }
 
             // #103 Phase 3 — transparent retry. The inner loop above bails
@@ -1816,6 +1832,34 @@ impl Engine {
                     content: content_blocks,
                 })
                 .await;
+            }
+
+            // A truncated response with no tool call cannot continue through
+            // tool execution: surface the truncation as a bounded observation
+            // and resume the loop so the model can act on it instead of the
+            // turn silently ending on a cut-off answer.
+            if output_limit_truncated.is_some() && tool_uses.is_empty() {
+                let reason = output_limit_truncated
+                    .take()
+                    .expect("output_limit_truncated checked above");
+                self.add_session_message(
+                    self.runtime_text_message_with_turn_metadata(
+                        format!(
+                            "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
+                        ),
+                        UserInputProvenance::Runtime,
+                    ),
+                )
+                .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Continuing — provider output limit reached; asking the model to continue"
+                            .to_string(),
+                    ))
+                    .await;
+                turn.next_step();
+                continue;
             }
 
             // If no tool uses, check for inline REPL blocks (paper §2) or
@@ -3767,6 +3811,21 @@ impl Engine {
                     self.add_session_message(self.user_text_message_with_turn_metadata(steer))
                         .await;
                 }
+            }
+
+            // Surface an output-limit truncation after the tool result so the
+            // transcript stays well-formed (a `tool_result` must follow the
+            // assistant `tool_use` directly) and the model can act on it.
+            if let Some(reason) = output_limit_truncated.take() {
+                self.add_session_message(
+                    self.runtime_text_message_with_turn_metadata(
+                        format!(
+                            "[runtime] The provider stopped generation at its output limit (`{reason}`) before completing. Your last response was cut off. Continue from where you left off; do not repeat content already delivered."
+                        ),
+                        UserInputProvenance::Runtime,
+                    ),
+                )
+                .await;
             }
 
             // A successful tool step is productive progress, not a runaway
