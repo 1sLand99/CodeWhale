@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+v0.9.8 is the release cut on this Unreleased block. Plugin marketplace
+parity (#5311), remaining web settings polish, and prefab third-party
+templates moved to v0.9.9.
+
 ### Added
 
 - `/rc` attach now includes an observed `owner/name` git remote when the
@@ -17,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The TUI transcript renders Markdown blockquotes (`>` lines) with a quote
   rail — nested quotes, inline bold/code/links, wrapped continuation rows, and
   selection copy that keeps the quote text and skips the rail chrome.
+
+- Sub-agent details show the resolved model, fleet role, and type. Labels
+  use the session/role name instead of a generic Agent N (#5371, #5287).
+
+- Documented catalogue output ceilings (DeepSeek V4 384K) are honored on
+  the request. A clean output-limit stop continues the turn instead of
+  killing it (#5373).
 
 ### Fixed
 
@@ -39,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The TUI markdown parser now honors CommonMark fence-length rules: a ````
   opener is not closed by a shorter ``` line, so `>` content inside a longer
   fence stays literal code instead of escaping into a quote.
+- Sub-agents finalize when the parent session id changes, so a closed
+  session cannot block new children as a live owner (#5372).
+- Child spawn-route receipts stay live and usage is deduped by response
+  (#5366).
+- Doctor keeps persisted setup readiness across first-run / update
+  checkpoints (#5340).
+- Approval default selection is applied and explained; agents are told
+  when approvals are disabled (#5293).
+- A `/models` 2xx probe is a connection check, not model readiness.
+- Site layout uses one container, the ticker no longer implies false
+  provider readiness, and install links stay in the active locale.
 
 ## [0.9.7] - 2026-08-12
 
