@@ -5627,11 +5627,12 @@ fn print_doctor_setup_report(
     use colored::Colorize;
 
     let credential = resolve_credential_diagnostic(config);
-    let credential_ready = credential.availability.certifies_ready();
-    let first_run_ready = state.first_run_ready() && credential_ready;
-    let update_ready =
-        state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION) && credential_ready;
-    let operate_ready = state.operate_ready() && credential_ready;
+    // Setup completion is persisted independently from credential probing.
+    // Ordinary doctor deliberately does not read environment values or the
+    // durable secret store, so `not_probed` must not erase a completed lane.
+    let first_run_ready = state.first_run_ready();
+    let update_ready = state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION);
+    let operate_ready = state.operate_ready();
     let first_run_icon = if first_run_ready {
         "✓".truecolor(ok_rgb.0, ok_rgb.1, ok_rgb.2)
     } else {
@@ -6109,10 +6110,9 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
         "schema_version": state.schema_version,
         "inherited": state.inherited,
         "checkpoint_version": crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
-        "first_run_ready": state.first_run_ready() && credential_ready,
-        "update_ready": state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION)
-            && credential_ready,
-        "operate_ready": state.operate_ready() && credential_ready,
+        "first_run_ready": state.first_run_ready(),
+        "update_ready": state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION),
+        "operate_ready": state.operate_ready(),
         "credential": {
             "ready": credential_ready,
             "source": doctor_api_key_source_label(credential.source),
@@ -12981,6 +12981,16 @@ mod doctor_setup_state_tests {
             "config"
         );
         assert_eq!(provider_step(&report)["result"], "deepseek/deepseek-chat");
+
+        let unprobed_config = Config {
+            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
+            ..config.clone()
+        };
+        let unprobed_report = doctor_setup_report_json(&unprobed_config, &workspace);
+        assert_eq!(unprobed_report["credential"]["ready"], false);
+        assert_eq!(unprobed_report["credential"]["availability"], "not_probed");
+        assert_eq!(unprobed_report["first_run_ready"], true);
+        assert_eq!(unprobed_report["update_ready"], true);
     }
 
     #[test]
