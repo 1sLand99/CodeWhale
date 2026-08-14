@@ -384,6 +384,8 @@ pub(crate) fn route_is_valid_for_model(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LastProviderCheck {
     Passed,
+    /// A 2xx `/models` response proves reachability only — never model readiness.
+    ModelsEndpointPassed,
     Failed {
         category: ErrorCategory,
         message: String,
@@ -401,6 +403,7 @@ pub(crate) enum ResolvedProviderReadiness {
     NoAuthUnchecked,
     LocalUnchecked,
     Ready,
+    ConnectionCheckedModelUnchecked,
     SavedLastCheckFailed {
         category: ErrorCategory,
         message: String,
@@ -422,6 +425,9 @@ impl ResolvedProviderReadiness {
             Self::NoAuthUnchecked => Cow::Borrowed("no auth · not checked"),
             Self::LocalUnchecked => Cow::Borrowed("local · not checked"),
             Self::Ready => Cow::Borrowed("ready"),
+            Self::ConnectionCheckedModelUnchecked => {
+                Cow::Borrowed("models endpoint 2xx · model not checked")
+            }
             Self::SavedLastCheckFailed { category, .. } => {
                 Cow::Owned(format!("last check failed ({category})"))
             }
@@ -464,6 +470,7 @@ impl ResolvedProviderReadiness {
             Self::MissingLogin => Some(Cow::Borrowed("missing login")),
             Self::InvalidRoute => Some(Cow::Borrowed("invalid route")),
             Self::Legacy => Some(Cow::Borrowed("legacy route")),
+            Self::ConnectionCheckedModelUnchecked => Some(Cow::Borrowed("model not checked")),
             Self::SavedLastCheckFailed { message, .. } => Some(Cow::Owned(message.clone())),
             Self::SavedUnchecked
             | Self::ImportedTokenUnchecked
@@ -497,6 +504,19 @@ impl ProviderReadinessSnapshot {
         self.replace(
             route_identity_for_model(config, provider, model),
             LastProviderCheck::Passed,
+        );
+    }
+
+    /// Records a 2xx `/models` probe as connection-checked, never `Ready`.
+    pub(crate) fn record_models_probe_success(
+        &mut self,
+        config: &crate::config::Config,
+        provider: ApiProvider,
+        model: &str,
+    ) {
+        self.replace(
+            route_identity_for_model(config, provider, model),
+            LastProviderCheck::ModelsEndpointPassed,
         );
     }
 
@@ -558,6 +578,9 @@ pub(crate) fn resolve_with_identity(
         CredentialState::MissingLogin => ResolvedProviderReadiness::MissingLogin,
         CredentialState::ExternalConsent => match checks.last(identity) {
             Some(LastProviderCheck::Passed) => ResolvedProviderReadiness::Ready,
+            Some(LastProviderCheck::ModelsEndpointPassed) => {
+                ResolvedProviderReadiness::ConnectionCheckedModelUnchecked
+            }
             Some(LastProviderCheck::Failed { category, message }) => {
                 ResolvedProviderReadiness::SavedLastCheckFailed {
                     category: *category,
@@ -571,6 +594,9 @@ pub(crate) fn resolve_with_identity(
         | CredentialState::NoAuth
         | CredentialState::Local => match checks.last(identity) {
             Some(LastProviderCheck::Passed) => ResolvedProviderReadiness::Ready,
+            Some(LastProviderCheck::ModelsEndpointPassed) => {
+                ResolvedProviderReadiness::ConnectionCheckedModelUnchecked
+            }
             Some(LastProviderCheck::Failed { category, message }) => {
                 ResolvedProviderReadiness::SavedLastCheckFailed {
                     category: *category,
@@ -809,6 +835,29 @@ mod tests {
             ),
             ResolvedProviderReadiness::ExternalConsentPendingSelection
         );
+    }
+
+    #[test]
+    fn models_probe_success_marks_connection_checked_not_ready() {
+        let config = crate::config::Config::default();
+        let mut checks = ProviderReadinessSnapshot::default();
+        checks.record_models_probe_success(&config, ApiProvider::Deepseek, "deepseek-v4-pro");
+        assert_eq!(
+            resolve_test_route(
+                &config,
+                ApiProvider::Deepseek,
+                "deepseek-v4-pro",
+                CredentialState::Saved,
+                true,
+                &checks,
+            ),
+            ResolvedProviderReadiness::ConnectionCheckedModelUnchecked
+        );
+        assert_eq!(
+            ResolvedProviderReadiness::ConnectionCheckedModelUnchecked.label(),
+            "models endpoint 2xx · model not checked"
+        );
+        assert!(!ResolvedProviderReadiness::ConnectionCheckedModelUnchecked.can_attempt());
     }
 
     #[test]

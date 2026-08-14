@@ -3401,10 +3401,10 @@ mod provider_key_validation_tests {
         assert!(!saved.contains("sk-verified"));
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
         assert!(
-            app.status_message
-                .as_deref()
-                .is_some_and(|status| status.contains("API key verified")),
-            "status names verification success: {:?}",
+            app.status_message.as_deref().is_some_and(|status| {
+                status.contains("Connection checked (/models returned 2xx)")
+            }),
+            "status names connection-probe success: {:?}",
             app.status_message
         );
         let verified_route = crate::provider_readiness::route_identity_for_model(
@@ -3419,8 +3419,8 @@ mod provider_key_validation_tests {
                 true,
                 &app.provider_health,
             ),
-            crate::provider_readiness::ResolvedProviderReadiness::Ready,
-            "the live check receipt must make this exact route ready once its key is saved",
+            crate::provider_readiness::ResolvedProviderReadiness::ConnectionCheckedModelUnchecked,
+            "the live connection probe must not be reported as model ready",
         );
 
         let picker = app.view_stack.pop().expect("provider picker reopened");
@@ -3436,7 +3436,8 @@ mod provider_key_validation_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            rendered.contains("Default model") || rendered.contains("Pick a default model"),
+            rendered.contains("Connection checked (/models returned 2xx)")
+                && rendered.contains("Pick a default model"),
             "expected model-pick stage UI, got:\n{rendered}"
         );
     }

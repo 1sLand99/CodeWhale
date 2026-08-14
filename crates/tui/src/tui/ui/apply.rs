@@ -2101,13 +2101,18 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
     match verifier.verify(provider, &api_key, &base_url).await {
         Ok(()) => {
             // Keep the readiness row aligned with the live check the wizard
-            // just completed. The proof is route-scoped, so switching the
-            // endpoint or model still returns to "not checked". Providers
-            // without a real `/models` probe remain unchecked.
+            // just completed. This probe only proves the endpoint and
+            // credentials are reachable: the model is chosen after the probe,
+            // so record a distinct connection-checked state rather than
+            // claiming the model is ready. Providers without a real `/models`
+            // probe remain unchecked.
             if crate::client::provider_api_key_verification_is_observed(provider) {
                 let verified_model = scoped_config.default_model();
-                app.provider_health
-                    .record_success(&scoped_config, provider, &verified_model);
+                app.provider_health.record_models_probe_success(
+                    &scoped_config,
+                    provider,
+                    &verified_model,
+                );
             }
             // Key is valid — continue the guided flow at model pick without
             // writing the secret yet.
@@ -2128,13 +2133,13 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
                 })
             {
                 app.view_stack.push(picker);
-                app.status_message = Some(format!(
-                    "{} API key verified — pick a default model.",
-                    provider.as_str()
-                ));
+                app.status_message = Some(
+                    "Connection checked (/models returned 2xx). Pick a default model; model availability is not checked."
+                        .to_string(),
+                );
             } else {
                 app.status_message = Some(format!(
-                    "{} API key verified, but the guided setup could not be re-opened.",
+                    "{} connection checked (/models returned 2xx), but the guided setup could not be re-opened.",
                     provider.as_str()
                 ));
             }

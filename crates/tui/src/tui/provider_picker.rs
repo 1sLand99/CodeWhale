@@ -1004,7 +1004,7 @@ fn catalog_freshness_title_suffix_for(freshness: ModelsDevFreshness) -> &'static
         ModelsDevFreshness::Stale => " · stale",
         // A failed optional refresh keeps prior or bundled rows available.
         // Say what the picker is using instead of implying the catalog broke.
-        ModelsDevFreshness::Failed => " · bundled fallback",
+        ModelsDevFreshness::Failed => " · refresh failed; catalog available",
         ModelsDevFreshness::Bundled | ModelsDevFreshness::Live => "",
     }
 }
@@ -2889,7 +2889,7 @@ impl ProviderPickerView {
         );
 
         let header = Paragraph::new(Line::from(Span::styled(
-            "Key verified. Pick a default model for this provider.",
+            "Connection checked (/models returned 2xx). Pick a default model; model availability is not checked.",
             Style::default().fg(palette::TEXT_MUTED),
         )));
         let layout = Layout::default()
@@ -3881,7 +3881,7 @@ mod tests {
     fn failed_live_catalog_refresh_names_the_working_fallback() {
         assert_eq!(
             catalog_freshness_title_suffix_for(ModelsDevFreshness::Failed),
-            " · bundled fallback"
+            " · refresh failed; catalog available"
         );
     }
 
