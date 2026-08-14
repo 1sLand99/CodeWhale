@@ -234,11 +234,19 @@ Authority: non-authoritative runtime checkpoint"
 /// narrower question — can the restore projection rewrite *this* message? —
 /// and stays limited to the sub-agent shapes it knows how to rewrite.
 ///
-/// Recognition is structural, matching what [`runtime_handoff_message_with_meta`]
-/// builds: two text blocks, no cache markers, and a runtime provenance line in
-/// the trailing envelope. Someone who pastes a raw envelope into the composer
-/// produces a single block and is not matched, which is the same discriminator
-/// that keeps the restore projection off user-authored lookalikes.
+/// Recognition is structural: text leading, no cache markers on either anchor,
+/// and a runtime provenance line in the trailing `<turn_meta>` envelope.
+///
+/// It anchors on the first and last blocks rather than on an exact pair. Not
+/// every handoff is built by [`runtime_handoff_message_with_meta`] — idle
+/// completions go out through the engine's ordinary send path, where
+/// `user_content_blocks` expands any `[Attached image: …]` line in the payload
+/// into image or notice blocks between the envelope and its marker.
+///
+/// The provenance line is what actually separates runtime traffic from a
+/// person: a composer turn is `ExternalUser`, whose authority is implicit, so
+/// its metadata carries no provenance line at all. Someone quoting an envelope
+/// while asking about it is not matched no matter how many blocks they send.
 pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
     if message.role != "user" {
         return false;
@@ -248,6 +256,7 @@ pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
             cache_control: first_cache,
             ..
         },
+        ..,
         ContentBlock::Text {
             text: turn_meta,
             cache_control: meta_cache,

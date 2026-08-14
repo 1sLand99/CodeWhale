@@ -518,20 +518,84 @@ mod tests {
 
     #[test]
     fn a_person_who_pastes_a_runtime_envelope_is_still_the_person_talking() {
-        // The filter keys on the two-block shape the runtime builds, never on
-        // the envelope text. Someone quoting an event while asking about it
-        // submits one block, and hiding their question would be the same
-        // authority confusion in the other direction.
-        let quoted = user(
-            "why did I get <codewhale:runtime_event kind=\"waiting_for_subagents\" \
-             visibility=\"internal\"> in my transcript?",
-        );
+        // The filter keys on runtime provenance, never on the envelope text.
+        // A composer turn is `ExternalUser`, whose authority is implicit, so
+        // its metadata carries no provenance line — which is what keeps the
+        // second shape here visible even though it is block-for-block what a
+        // handoff looks like.
+        let question = "why did I get <codewhale:runtime_event \
+                        kind=\"waiting_for_subagents\" visibility=\"internal\"> \
+                        in my transcript?";
+        let pastes = [
+            user(question),
+            Message {
+                role: "user".to_string(),
+                content: vec![
+                    text_block(question),
+                    text_block(concat!(
+                        "<turn_meta>\n",
+                        "Current approval mode: on-request\n",
+                        "</turn_meta>",
+                    )),
+                ],
+            },
+        ];
 
-        let peek = build_peek(&session_with(vec![quoted]), MAX_PEEK_ENTRIES);
+        for paste in pastes {
+            let peek = build_peek(&session_with(vec![paste]), MAX_PEEK_ENTRIES);
 
-        assert_eq!(peek.entries.len(), 1);
-        assert_eq!(peek.entries[0].kind, PeekEntryKind::User);
-        assert!(peek.entries[0].text.contains("why did I get"));
+            assert_eq!(peek.entries.len(), 1);
+            assert_eq!(peek.entries[0].kind, PeekEntryKind::User);
+            assert!(peek.entries[0].text.contains("why did I get"));
+        }
+    }
+
+    /// Rebuild a handoff the way the engine's ordinary send path does, with
+    /// the blocks `user_content_blocks` inserts for an `[Attached image: …]`
+    /// line in the payload. Idle completions take that path rather than
+    /// `runtime_handoff_message_with_meta`, so this shape reaches saved
+    /// sessions too.
+    fn with_attachment_blocks(handoff: &Message) -> Message {
+        let (
+            ContentBlock::Text { text: envelope, .. },
+            Some(ContentBlock::Text { text: meta, .. }),
+        ) = (&handoff.content[0], handoff.content.last())
+        else {
+            panic!("handoff should be text-anchored");
+        };
+        Message {
+            role: handoff.role.clone(),
+            content: vec![
+                text_block(envelope),
+                text_block("<image path=\"/tmp/shot.png\">"),
+                ContentBlock::ImageUrl {
+                    image_url: crate::models::ImageUrlContent {
+                        url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    },
+                },
+                text_block("</image>"),
+                text_block(meta),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_handoff_that_carried_an_attachment_is_still_recognized() {
+        for (kind, handoff) in runtime_handoffs() {
+            let expanded = with_attachment_blocks(&handoff);
+            let peek = build_peek(
+                &session_with(vec![user("look at this"), expanded]),
+                MAX_PEEK_ENTRIES,
+            );
+
+            assert_eq!(
+                peek.entries.len(),
+                1,
+                "{kind} leaked once its payload mentioned an attachment: {:?}",
+                peek.entries
+            );
+            assert_eq!(peek.entries[0].text, "look at this");
+        }
     }
 
     #[test]
