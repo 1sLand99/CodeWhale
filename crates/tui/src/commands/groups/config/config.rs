@@ -3058,7 +3058,8 @@ mod tests {
 
         let result = set_config_value(&mut app, "reasoning_effort", "xhigh", false);
 
-        assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+        // `xhigh` stopped collapsing into `Max` when the ladder gave it a rung.
+        assert_eq!(app.reasoning_effort, ReasoningEffort::XHigh);
         assert_eq!(
             result.message.as_deref(),
             Some("reasoning_effort = xhigh (session only, add --save to persist)")

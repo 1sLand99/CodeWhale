@@ -5775,8 +5775,12 @@ mod tests {
     }
 
     #[test]
-    fn picker_keeps_default_when_catalog_has_no_reasoning_options() {
-        // grok-4.5 is reasoning-capable but ships no reasoning_options list.
+    fn picker_walks_the_catalogued_ladder_for_grok_4_5() {
+        // grok-4.5 shipped without a `reasoning_options` list until the
+        // thinking-ladder change gave it one, so this stopped being a
+        // DEFAULT_PICKER_EFFORTS fallback case. That fallback still has
+        // coverage in `picker_normalizes_low_medium_to_high`, which reaches it
+        // through a generic Moonshot base URL.
         let labels: Vec<&str> = picker_efforts_for_route(
             crate::config::ApiProvider::Xai,
             crate::config::ApiProvider::Xai.default_base_url(),
@@ -5788,8 +5792,8 @@ mod tests {
         .collect();
         assert_eq!(
             labels,
-            vec!["auto", "off", "high", "max"],
-            "absent reasoning_options must keep DEFAULT_PICKER_EFFORTS, not invent Low/Medium"
+            vec!["auto", "low", "medium", "high"],
+            "grok-4.5's documented ladder, not the generic DEFAULT_PICKER_EFFORTS"
         );
     }
 

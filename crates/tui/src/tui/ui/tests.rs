@@ -209,7 +209,9 @@ fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
         &mut app,
         &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
     ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    // Ctrl+T walks DeepSeek's real ladder now, not the off/high/max shortcut,
+    // and DeepSeek's first-party route documents a Low tier above Off.
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert!(
         !handle_reasoning_effort_key(
             &mut app,

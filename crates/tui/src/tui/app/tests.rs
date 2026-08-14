@@ -6027,13 +6027,14 @@ fn reasoning_cycle_persists_through_the_same_owner_as_the_picker() {
     // `apply_reasoning_effort_cycle`.
     app.apply_reasoning_effort_cycle();
 
-    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    // One step up DeepSeek's ladder from Off is Low, not the old shortcut's High.
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert_eq!(
         Settings::load()
             .expect("reload settings")
             .reasoning_effort
             .as_deref(),
-        Some("high"),
+        Some("low"),
         "a restart must restore the last thinking choice"
     );
 }
@@ -6174,15 +6175,20 @@ async fn fixed_route_thinking_cycle_persists_raw_preference() {
     app.apply_reasoning_effort_cycle();
     app.startup_defaults.flush();
 
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
-    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
+    // Cycling off the top of K3's ladder wraps to Auto rather than Off now
+    // that the cycle walks `picker_efforts_for_route`. What this test is
+    // about is unchanged: whatever tier the cycle lands on is the raw
+    // preference that has to survive a restart, not whatever the route
+    // executes.
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Auto));
     assert_eq!(
         Settings::load()
             .expect("reload")
             .reasoning_effort
             .as_deref(),
-        Some("off"),
-        "the always-thinking route may execute Low, but the raw Off preference must survive restart"
+        Some("auto"),
+        "the raw preference the cycle landed on must survive restart"
     );
 }
 

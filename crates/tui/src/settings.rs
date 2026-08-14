@@ -3431,14 +3431,20 @@ mod tests {
     #[test]
     fn reasoning_effort_setting_normalizes_and_clears() {
         let mut settings = Settings::default();
-        settings
-            .set("reasoning_effort", "xhigh")
-            .expect("normalize xhigh");
-        assert_eq!(settings.reasoning_effort.as_deref(), Some("max"));
-        settings
-            .set("reasoning_effort", "ultracode")
-            .expect("normalize ultracode");
-        assert_eq!(settings.reasoning_effort.as_deref(), Some("max"));
+        // `xhigh` and `ultra` are their own rungs since the thinking ladder,
+        // so normalizing collapses spellings *within* a tier instead of
+        // folding the top three tiers into `max`.
+        for (input, stored) in [
+            ("xhigh", "xhigh"),
+            ("ultracode", "ultra"),
+            ("maximum", "max"),
+            ("minimal", "low"),
+        ] {
+            settings
+                .set("reasoning_effort", input)
+                .unwrap_or_else(|error| panic!("normalize {input}: {error}"));
+            assert_eq!(settings.reasoning_effort.as_deref(), Some(stored));
+        }
         settings
             .set("reasoning_effort", "default")
             .expect("clear effort");

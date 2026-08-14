@@ -14727,9 +14727,17 @@ mod terminal_mode_tests {
 
     #[test]
     fn cli_reasoning_effort_normalizes_aliases_and_rejects_typos() {
+        // The thinking ladder split these: `xhigh` is a tier the CLI can now
+        // name, `ultracode` is still an alias and resolves to `ultra`.
         assert_eq!(
             normalize_cli_reasoning_effort("xhigh").unwrap().as_deref(),
-            Some("max")
+            Some("xhigh")
+        );
+        assert_eq!(
+            normalize_cli_reasoning_effort("ultracode")
+                .unwrap()
+                .as_deref(),
+            Some("ultra")
         );
         assert_eq!(normalize_cli_reasoning_effort("default").unwrap(), None);
         assert!(normalize_cli_reasoning_effort("expensive").is_err());

@@ -6299,6 +6299,9 @@ context_window = 262144
         assert_eq!(
             visible_row_keys(&view),
             vec![
+                // `reasoning_effort` joined this filter when the thinking
+                // ladder gave it a config row.
+                "reasoning_effort",
                 "show_thinking",
                 "thinking_default_expanded",
                 "thinking_highlight"

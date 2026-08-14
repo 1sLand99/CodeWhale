@@ -969,7 +969,7 @@ mod tests {
             r#"
 id = "scout"
 role_hint = "scout"
-thinking = "xhigh"
+thinking = "ultracode"
 
 [instructions]
 text = "Scout deeply."
@@ -978,7 +978,12 @@ text = "Scout deeply."
 
         let profiles = load_agent_profiles_from_dir(dir.path()).expect("profile TOML loads");
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].profile.reasoning_effort.as_deref(), Some("max"));
+        // `xhigh` used to land here too; the thinking ladder made it a rung of
+        // its own, so `ultracode` is the alias left to exercise.
+        assert_eq!(
+            profiles[0].profile.reasoning_effort.as_deref(),
+            Some("ultra")
+        );
     }
 
     #[test]
