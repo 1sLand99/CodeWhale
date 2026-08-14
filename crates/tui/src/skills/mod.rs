@@ -1152,8 +1152,12 @@ fn merge_plugin_skills_from_plugins(
 ) {
     for (plugin, authority) in plugins {
         // Keep the adapter independently fail-closed for headless callers.
-        if !plugin.active()
-            || crate::plugins::registry::verify_plugin_authority(&authority).is_err()
+        if !plugin.component_active(crate::plugins::activation::PluginActivationCapability::Skills)
+            || crate::plugins::registry::verify_plugin_component_authority(
+                &authority,
+                crate::plugins::activation::PluginActivationCapability::Skills,
+            )
+            .is_err()
         {
             continue;
         }

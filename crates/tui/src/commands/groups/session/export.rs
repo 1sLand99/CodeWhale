@@ -476,6 +476,7 @@ fn render_content_block(out: &mut String, index: usize, block: &ContentBlock) {
             name,
             input,
             caller,
+            ..
         } => {
             let _ = writeln!(out, "### Content {index}: Tool call\n");
             let _ = writeln!(out, "- ID: {}", inline_text(id));
@@ -961,6 +962,7 @@ mod tests {
                             caller_type: "code_execution_20250825".to_string(),
                             tool_id: Some("server-tool-1".to_string()),
                         }),
+                        thought_signature: None,
                     },
                 ],
             },

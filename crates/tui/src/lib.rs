@@ -3215,9 +3215,10 @@ fn plugins_readme_template() -> &'static str {
      content-addressed runtime snapshot, then enable the bundle. Remote MCP\n\
      authentication must name environment sources; never store secret values\n\
      in `plugin.toml`.\n\n\
-     v0.9.1 activates only declarative Skills and MCP servers through their\n\
+     Codewhale activates only declarative Skills and MCP servers through their\n\
      existing engines. Commands, agents, hooks, LSP, native extensions,\n\
-     filesystem grants, and lifecycle mutation are inventoried but inactive.\n\
+     filesystem grants, and lifecycle mutation stay inventoried and inactive;\n\
+     a mixed bundle can still activate its supported Skills and MCP.\n\
      There is no marketplace, install, update, ambient compatibility scan, or\n\
      automatic trust surface in this release.\n"
 }
@@ -15767,6 +15768,7 @@ mod terminal_mode_tests {
                         name: "exec_shell".to_string(),
                         input: serde_json::json!({"command": "cargo test"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },

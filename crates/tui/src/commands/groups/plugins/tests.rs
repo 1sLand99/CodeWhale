@@ -211,6 +211,76 @@ fn trust_requires_content_and_capability_bound_review_token() {
     assert!(!app.plugin_registry.is_active("demo"));
 }
 
+fn write_mixed_bundle(root: &Path) {
+    let bundle = root.join(".codewhale/plugins/mixed");
+    fs::create_dir_all(bundle.join("skills/hello")).unwrap();
+    fs::create_dir_all(bundle.join("commands")).unwrap();
+    fs::create_dir_all(bundle.join("hooks")).unwrap();
+    fs::write(
+        bundle.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"mixed\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n",
+    )
+    .unwrap();
+    fs::write(
+        bundle.join("skills/hello/SKILL.md"),
+        "---\nname: hello\ndescription: hello\n---\nbody\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn mixed_bundle_review_and_enable_keep_supported_components_active() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+    write_mixed_bundle(root.path());
+    let (mut app, _temp) = create_test_app(root.path());
+
+    let list = plugins(&mut app, Some("list")).message.unwrap();
+    assert!(list.contains("compatibility=partial"), "{list}");
+    assert!(list.contains("commands=1"), "{list}");
+    assert!(list.contains("hooks=1"), "{list}");
+
+    let show = plugins(&mut app, Some("show mixed")).message.unwrap();
+    assert!(show.contains("Compatibility: partial"), "{show}");
+    assert!(
+        show.contains("Inactive components: [commands, hooks]"),
+        "{show}"
+    );
+    assert!(show.contains("Active components: [none]"), "{show}");
+
+    let review = plugins(&mut app, Some("trust mixed")).message.unwrap();
+    let confirmation = review
+        .lines()
+        .find(|line| line.starts_with("/plugin trust mixed "))
+        .unwrap();
+    let arg = confirmation.trim_start_matches("/plugin ");
+    assert!(!plugins(&mut app, Some(arg)).is_error);
+    let enabled = plugins(&mut app, Some("enable mixed"));
+    assert!(!enabled.is_error, "{:?}", enabled.message);
+    let message = enabled.message.unwrap();
+    assert!(message.contains("Compatibility: partial"), "{message}");
+    assert!(message.contains("inactive: commands, hooks"), "{message}");
+    assert!(app.plugin_registry.is_active("mixed"));
+    assert_eq!(
+        app.plugin_registry
+            .get("mixed")
+            .unwrap()
+            .compatibility()
+            .as_str(),
+        "partial"
+    );
+
+    let show = plugins(&mut app, Some("show mixed")).message.unwrap();
+    assert!(show.contains("State: active"), "{show}");
+    assert!(show.contains("Active components: [skills]"), "{show}");
+    assert!(
+        show.contains("Inactive components: [commands, hooks]"),
+        "{show}"
+    );
+    assert!(show.contains("Qualified skills: [mixed:hello]"), "{show}");
+}
+
 #[test]
 fn mcp_review_discloses_host_authority_and_names_without_secret_values() {
     let _lock = crate::test_support::lock_test_env();

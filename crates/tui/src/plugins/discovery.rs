@@ -276,6 +276,19 @@ fn load_plugin(
     let (skill_snapshots, skill_diagnostics) = parse_skill_snapshots(&validated)?;
     diagnostics.extend(skill_diagnostics);
 
+    let unsupported = validated.inventory.unsupported_labels();
+    if !unsupported.is_empty() {
+        diagnostics.push(PluginDiagnostic::warning(
+            "component-inactive",
+            format!(
+                "compatibility {}; inactive components remain inventoried but are not activated: {}",
+                validated.inventory.compatibility().as_str(),
+                unsupported.join(", ")
+            ),
+            Some(manifest_path.to_path_buf()),
+        ));
+    }
+
     // Skill parsing happens after hashing. Revalidate once so a concurrent
     // bundle edit cannot pair a reviewed hash with different in-memory Skill
     // instructions or MCP configuration. Active Skill bodies are replaced by

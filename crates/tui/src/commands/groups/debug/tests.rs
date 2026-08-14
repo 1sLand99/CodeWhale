@@ -733,6 +733,7 @@ fn cache_inspect_displays_tool_result_budget_metadata() {
             name: "shell_command".to_string(),
             input: serde_json::json!({"command": "cargo test"}),
             caller: None,
+            thought_signature: None,
         }],
     });
     app.api_messages.push(Message {
@@ -751,6 +752,7 @@ fn cache_inspect_displays_tool_result_budget_metadata() {
             name: "shell_command".to_string(),
             input: serde_json::json!({"command": "cargo test"}),
             caller: None,
+            thought_signature: None,
         }],
     });
     app.api_messages.push(Message {
@@ -1466,6 +1468,7 @@ fn test_patch_undo_prunes_tool_turn_context() {
                 name: "write_file".to_string(),
                 input: serde_json::json!({"path": "a.txt"}),
                 caller: None,
+                thought_signature: None,
             },
         ],
     });
@@ -1648,12 +1651,14 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
                 name: "write_file".to_string(),
                 input: serde_json::json!({"path": "a.txt"}),
                 caller: None,
+                thought_signature: None,
             },
             ContentBlock::ToolUse {
                 id: "call-b".to_string(),
                 name: "write_file".to_string(),
                 input: serde_json::json!({"path": "b.txt"}),
                 caller: None,
+                thought_signature: None,
             },
         ],
     });
@@ -1691,7 +1696,7 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
         &app.api_messages[1].content[..],
         [
             ContentBlock::Text { .. },
-            ContentBlock::ToolUse { id, .. }
+            ContentBlock::ToolUse { id, ..}
         ] if id == "call-a"
     ));
     assert!(matches!(

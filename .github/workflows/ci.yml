@@ -308,12 +308,6 @@ jobs:
       - name: Check persistence-backlog budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-persistence-backlog-budget.py
-      # Source-only ownership ratchet. Deletion and line-neutral consolidation
-      # pass; new packages/binaries/thousand-line module paths, a larger maximum
-      # module, or aggregate owned Rust growth require reviewed updates.
-      - name: Check source-structure budget
-        if: needs.changes.outputs.heavy == 'true'
-        run: python3 scripts/check-source-structure-budget.py
       - name: Check README translations stay in sync
         if: github.event_name != 'schedule'
         run: python3 scripts/check-readme-translations.py

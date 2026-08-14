@@ -90,6 +90,7 @@ pub(crate) fn push_assistant_message(
             name,
             input,
             caller: None,
+            thought_signature: None,
         });
     }
 
@@ -311,7 +312,11 @@ pub(crate) fn queued_message_content_for_app(
         if authority.workspace != app.workspace {
             anyhow::bail!("Queued plugin skill belongs to a different workspace and was denied");
         }
-        crate::plugins::registry::verify_plugin_authority(authority).map_err(anyhow::Error::msg)?;
+        crate::plugins::registry::verify_plugin_component_authority(
+            authority,
+            crate::plugins::activation::PluginActivationCapability::Skills,
+        )
+        .map_err(anyhow::Error::msg)?;
     }
     // Pass the process CWD explicitly so the resolver's two-pass logic can
     // honor the user's launch directory when it differs from `--workspace`

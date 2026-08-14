@@ -390,6 +390,7 @@ mod tests {
                     name: "read_file".to_string(),
                     input: serde_json::json!({ "path": "/etc/shadow" }),
                     caller: None,
+                    thought_signature: None,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "call-1".to_string(),

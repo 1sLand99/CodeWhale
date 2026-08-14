@@ -11696,6 +11696,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
                 name: "read_file".to_string(),
                 input: json!({"path": "Cargo.toml"}),
                 caller: None,
+                thought_signature: None,
             },
         ],
     };
@@ -14668,6 +14669,7 @@ fn turn_metadata_skips_tool_result_messages() {
             name: "read_file".to_string(),
             input: serde_json::json!({"path": "src/lib.rs"}),
             caller: None,
+            thought_signature: None,
         }],
     });
     // Tool result, stored as role="user" internally.
@@ -15665,6 +15667,7 @@ fn tool_state(initial: serde_json::Value, buffer: &str) -> ToolUseState {
         name: "exec_shell".into(),
         input: initial,
         caller: None,
+        thought_signature: None,
         input_buffer: buffer.into(),
         input_parse_error: None,
     }

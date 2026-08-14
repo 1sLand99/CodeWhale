@@ -2545,6 +2545,7 @@ mod tests {
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
@@ -2579,6 +2580,7 @@ mod tests {
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
@@ -2615,6 +2617,7 @@ mod tests {
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
                 caller: None,
+                thought_signature: None,
             }],
         }];
         let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
@@ -2678,6 +2681,7 @@ mod tests {
                         ]
                     }),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {
@@ -2725,6 +2729,7 @@ mod tests {
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": "cargo test -p codewhale-tui"}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {
@@ -2777,6 +2782,7 @@ mod tests {
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": "cargo check"}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {

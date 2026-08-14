@@ -121,7 +121,7 @@ fn non_streaming_fixture_preserves_tool_call_and_usage() -> Result<()> {
 
     assert!(matches!(
         response.content.as_slice(),
-        [ContentBlock::ToolUse { id, name, input, .. }]
+        [ContentBlock::ToolUse { id, name, input, ..}]
             if id == "call_ds4_0"
                 && name == "read_file"
                 && input == &json!({"path": "src/main.rs"})
@@ -152,7 +152,7 @@ fn malformed_tool_arguments_remain_visible_for_feedback() -> Result<()> {
 
     assert!(matches!(
         response.content.as_slice(),
-        [ContentBlock::ToolUse { input: Value::String(raw), .. }] if raw == "{bad json"
+        [ContentBlock::ToolUse { input: Value::String(raw), ..}] if raw == "{bad json"
     ));
     Ok(())
 }

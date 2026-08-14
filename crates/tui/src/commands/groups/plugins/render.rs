@@ -24,6 +24,16 @@ pub(super) fn render_bundle_detail(
     } else {
         unsupported.join(", ")
     };
+    let active_components = if plugin.active() {
+        let labels = plugin.inventory.supported_labels();
+        if labels.is_empty() {
+            "none".to_string()
+        } else {
+            labels.join(", ")
+        }
+    } else {
+        "none".to_string()
+    };
     let (content_hash, capability_hash) = if include_hashes {
         (
             plugin.content_hash.as_str(),
@@ -57,7 +67,8 @@ pub(super) fn render_bundle_detail(
         .collect::<Vec<_>>();
     let _ = write!(
         output,
-        "\nQualified skills: [{}]\nActivation boundary: trust stages the exact reviewed content but does not activate it; enable rebuilds this workspace's Skill/MCP catalog immediately; disable or revoke cancels in-flight plugin MCP operations and denies queued Skills.",
+        "\nCompatibility: {}\nActive components: [{active_components}]\nInactive components: [{unsupported}]\nQualified skills: [{}]\nActivation boundary: trust stages the exact reviewed content but does not activate it; enable rebuilds this workspace's Skill/MCP catalog immediately; disable or revoke cancels in-flight plugin MCP operations and denies queued Skills. Commands, agents, hooks, LSP, native, filesystem-roots, and lifecycle-mutation stay inventoried and inactive.",
+        plugin.compatibility().as_str(),
         if skills.is_empty() {
             "none".to_string()
         } else {

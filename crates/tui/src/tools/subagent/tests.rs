@@ -6538,6 +6538,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
                     name: TOOL_SEARCH_NAME.to_string(),
                     input: json!({"query": "web"}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {

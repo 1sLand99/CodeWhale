@@ -189,6 +189,19 @@ pub enum ProviderKind {
         alias = "alibaba-coding-plan-anthropic"
     )]
     ModelstudioCodingPlanAnthropic,
+    /// Google — Gemini OpenAI-compatible endpoint. Its own backend, not an
+    /// OpenAI alias: thought signatures on tool calls are captured and
+    /// replayed per Google's contract.
+    #[serde(
+        alias = "google-gemini",
+        alias = "google_gemini",
+        alias = "gemini",
+        alias = "google-ai",
+        alias = "google_ai",
+        alias = "ai-studio",
+        alias = "aistudio"
+    )]
+    Google,
     /// User-defined OpenAI-compatible endpoint (#1519).
     ///
     /// A single dynamic identity for arbitrary `[providers.<name>]
@@ -206,7 +219,7 @@ impl ProviderKind {
     /// stay on the enum for serde and `provider_for_kind`, but they are not
     /// first-class catalog rows. Plan is `mode` / base_url; dialect is
     /// `wire = openai|anthropic` on the primary provider config.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -244,6 +257,7 @@ impl ProviderKind {
         Self::Mistral,
         Self::Telecomjs,
         Self::ModelstudioTokenPlan,
+        Self::Google,
         Self::Custom,
     ];
 

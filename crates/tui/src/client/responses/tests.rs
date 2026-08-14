@@ -938,6 +938,7 @@ fn responses_input_includes_user_role_tool_results() {
                     name: "checklist_write".to_string(),
                     input: json!({"items": []}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             Message {
@@ -983,6 +984,7 @@ fn responses_input_encodes_tool_call_names() {
                 name: "web.run".to_string(),
                 input: json!({}),
                 caller: None,
+                thought_signature: None,
             }],
         }],
         max_tokens: 128,
@@ -1158,6 +1160,7 @@ fn tool_result_image_becomes_native_function_output_content() {
                 name: "read".to_string(),
                 input: serde_json::json!({"path": "shot.png"}),
                 caller: None,
+                thought_signature: None,
             }],
         },
         Message {

@@ -11,6 +11,18 @@ v0.9.8 is the release cut on this Unreleased block. Plugin marketplace
 parity (#5311), remaining web settings polish, and prefab third-party
 templates moved to v0.9.9.
 
+### Changed
+
+- Plugin compatibility is now per-component. A reviewed, trusted, enabled
+  bundle that mixes Skills or MCP with unsupported commands, agents, hooks,
+  LSP, native, filesystem-roots, or lifecycle-mutation declarations keeps the
+  supported adapters active and reports the rest as inactive (`full` /
+  `partial` / `unsupported`). All-unsupported bundles still cannot be enabled.
+  The capability hash is now v2 and binds this build's activation policy, so
+  older v1 receipts and any later adapter-enablement change fail closed as
+  needs-review. Skills and each MCP transport re-request their own capability
+  at the consumption boundary.
+
 ### Added
 
 - `/rc` attach now includes an observed `owner/name` git remote when the
@@ -53,6 +65,14 @@ templates moved to v0.9.9.
   auto/low/medium/high/xhigh (cannot disable); Grok 4.5 is
   auto/low/medium/high; first-party DeepSeek keeps a documented `low` tier.
   `/effort` persists and receipts through the same path as Ctrl+T.
+
+### Removed
+
+- The source-structure budget ratchet (CI step, checker, baseline JSON).
+  It measured line counts, not quality: every legitimate feature required
+  a hand-edited ceiling and the accompanying "review" was self-review, so
+  it bought ceremony, not protection. Behavior-measuring gates (dead-code,
+  runtime-contract, persistence-backlog) stay enforced.
 - DeepSeek can reuse a key already stored by official DeepSeek Harness
   (`dsh`) after
   `codewhale auth external-consent --provider deepseek --mode read-only`.

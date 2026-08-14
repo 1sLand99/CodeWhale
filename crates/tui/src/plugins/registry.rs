@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::activation::{PluginActivationCapability, PluginActivationPolicy};
 use super::manifest::PluginInventory;
 use super::path_identity::metadata_is_link_or_reparse;
 #[cfg(windows)]
@@ -398,10 +399,10 @@ impl PluginRegistry {
                 plugin.name()
             ));
         }
-        let unsupported = plugin.inventory.unsupported_labels();
-        if !unsupported.is_empty() {
+        if !plugin.inventory.can_activate_supported_components() {
+            let unsupported = plugin.inventory.unsupported_labels();
             return Err(format!(
-                "Plugin bundle `{}` declares inactive capabilities: {}",
+                "Plugin bundle `{}` has no supported Skills or MCP components to activate; inactive: {}",
                 plugin.name(),
                 unsupported.join(", ")
             ));
@@ -1907,6 +1908,26 @@ fn preserve_owner_only_file_mode(path: &Path, _source: &fs::Metadata) -> Result<
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)
         .map_err(|e| format!("failed to restrict staged plugin file permissions: {e}"))
+}
+
+/// Recheck a persisted plugin receipt, the mutable reviewed source, and the
+/// Codewhale-owned immutable runtime copy, then require the named adapter to
+/// be in this build's activation policy. Skills and MCP must call this with
+/// their specific capability rather than treating bundle-wide activity as
+/// authority to run every inventoried surface.
+pub fn verify_plugin_component_authority(
+    authority: &PluginAuthority,
+    capability: PluginActivationCapability,
+) -> Result<(), String> {
+    verify_plugin_authority(authority)?;
+    if !PluginActivationPolicy::current().is_supported(capability) {
+        return Err(format!(
+            "Plugin bundle `{}` capability `{}` is inactive in this Codewhale build",
+            authority.plugin_name,
+            capability.as_str()
+        ));
+    }
+    Ok(())
 }
 
 /// Recheck a persisted plugin receipt, the mutable reviewed source, and the

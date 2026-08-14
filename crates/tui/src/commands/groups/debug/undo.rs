@@ -61,7 +61,7 @@ pub(crate) fn prune_undone_tool_context(app: &mut App, tool_id: &str) {
                 msg.content
                     .iter()
                     .position(
-                        |block| matches!(block, ContentBlock::ToolUse { id, .. } if id == tool_id),
+                        |block| matches!(block, ContentBlock::ToolUse { id, ..} if id == tool_id),
                     )
                     .map(|block_idx| (msg_idx, block_idx))
             })

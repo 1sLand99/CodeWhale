@@ -230,11 +230,12 @@ fn list_bundles_and_legacy_tools(app: &App) -> CommandResult {
             for plugin in plugins {
                 let _ = writeln!(
                     output,
-                    "• {} — {}\n  {} · {} · {}\n  {}",
+                    "• {} — {}\n  {} · {} · compatibility={} · {}\n  {}",
                     escape_review_text(plugin.name()),
                     plugin.state_label(),
                     plugin.scope,
                     plugin.trust_status.as_str(),
+                    plugin.compatibility().as_str(),
                     plugin.inventory.summary(),
                     escape_review_text(plugin.id.as_str())
                 );
@@ -660,12 +661,23 @@ fn mutate_bundle(app: &mut App, selector: &str, mutation: Mutation<'_>) -> Comma
                 app.active_skill = None;
                 app.active_skill_provenance = None;
             }
-            CommandResult::with_message_and_action(
-                tr(app.ui_locale, MessageId::CmdPluginBundleMutationSuccess)
-                    .replace("{name}", selector)
-                    .replace("{action}", action),
-                AppAction::PluginRegistryChanged,
-            )
+            let mut message = tr(app.ui_locale, MessageId::CmdPluginBundleMutationSuccess)
+                .replace("{name}", selector)
+                .replace("{action}", action);
+            if matches!(mutation, Mutation::Enable)
+                && let Some(plugin) = app.plugin_registry.get(selector)
+            {
+                let inactive = plugin.inventory.unsupported_labels();
+                if !inactive.is_empty() {
+                    message.push(' ');
+                    message.push_str(&format!(
+                        "Compatibility: {}. Supported Skills/MCP are active; inactive: {}.",
+                        plugin.compatibility().as_str(),
+                        inactive.join(", ")
+                    ));
+                }
+            }
+            CommandResult::with_message_and_action(message, AppAction::PluginRegistryChanged)
         }
         Err(error) => action_error(app, &error),
     }

@@ -20,6 +20,9 @@ pub(super) struct ToolUseState {
     pub(super) name: String,
     pub(super) input: serde_json::Value,
     pub(super) caller: Option<ToolCaller>,
+    /// Google thought signature captured on the tool call; replayed with the
+    /// assistant tool-call message on later turns.
+    pub(super) thought_signature: Option<String>,
     pub(super) input_buffer: String,
     pub(super) input_parse_error: Option<String>,
 }

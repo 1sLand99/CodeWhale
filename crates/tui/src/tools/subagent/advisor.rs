@@ -450,6 +450,7 @@ mod tests {
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": format!("echo {i}")}),
                     caller: None,
+                    thought_signature: None,
                 }],
             });
             // user message with ToolResult

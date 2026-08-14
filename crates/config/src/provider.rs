@@ -9,8 +9,9 @@ use super::{
     DEFAULT_ATLASCLOUD_MODEL, DEFAULT_DEEPINFRA_BASE_URL, DEFAULT_DEEPINFRA_MODEL,
     DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_ANTHROPIC_MODEL,
     DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL, DEFAULT_FIREWORKS_BASE_URL,
-    DEFAULT_FIREWORKS_MODEL, DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL,
-    DEFAULT_LONGCAT_BASE_URL, DEFAULT_LONGCAT_MODEL, DEFAULT_META_BASE_URL, DEFAULT_META_MODEL,
+    DEFAULT_FIREWORKS_MODEL, DEFAULT_GOOGLE_BASE_URL, DEFAULT_GOOGLE_MODEL,
+    DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL, DEFAULT_LONGCAT_BASE_URL,
+    DEFAULT_LONGCAT_MODEL, DEFAULT_META_BASE_URL, DEFAULT_META_MODEL,
     DEFAULT_MINIMAX_ANTHROPIC_BASE_URL, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_MODEL,
     DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL,
     DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL,
@@ -419,6 +420,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             credential_url: Some("https://bailian.console.aliyun.com/"),
             docs_url: Some("https://www.alibabacloud.com/help/en/model-studio/"),
             guidance: "Sign in to Alibaba Cloud Model Studio (Bailian console), create or copy an API key, and select the plan endpoint matching your subscription (Token Plan or Coding Plan).",
+        },
+        ProviderKind::Google => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://aistudio.google.com/apikey"),
+            docs_url: Some("https://ai.google.dev/gemini-api/docs/openai"),
+            guidance: "Create a Google AI Studio API key. Codewhale uses the official Gemini OpenAI-compatible endpoint and never reads Google OAuth files.",
         },
         ProviderKind::Custom => CredentialHelp {
             acquisition: Configuration,
@@ -950,6 +957,18 @@ provider!(
     ["MISTRAL_API_KEY"],
     "mistral",
     aliases: ["mistral-ai", "mistral_ai", "mistralai", "la-plateforme", "la_plateforme"]
+);
+
+provider!(
+    Google,
+    Google,
+    "google",
+    "Google Gemini",
+    DEFAULT_GOOGLE_BASE_URL,
+    DEFAULT_GOOGLE_MODEL,
+    ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+    "google",
+    aliases: ["google-gemini", "google_gemini", "gemini", "google-ai", "google_ai", "ai-studio", "aistudio"]
 );
 
 /// OpenAI Codex / ChatGPT OAuth provider using the Responses API.
@@ -1580,7 +1599,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 43] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 44] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1623,6 +1642,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 43] = [
     &MODELSTUDIO_TOKEN_PLAN_ANTHROPIC,
     &MODELSTUDIO_CODING_PLAN,
     &MODELSTUDIO_CODING_PLAN_ANTHROPIC,
+    &Google,
     &CUSTOM,
 ];
 

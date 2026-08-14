@@ -221,7 +221,11 @@ fn ensure_reviewed_plugin_skill_is_current(
         )));
     }
 
-    crate::plugins::registry::verify_plugin_authority(authority).map_err(|reason| {
+    crate::plugins::registry::verify_plugin_component_authority(
+        authority,
+        crate::plugins::activation::PluginActivationCapability::Skills,
+    )
+    .map_err(|reason| {
         ToolError::execution_failed(format!(
             "Plugin skill `{}` was denied: {reason}. Run `/plugin reload`, inspect `/plugin show {plugin_name}`, then repeat the displayed trust command and enable it before retrying",
             skill.name

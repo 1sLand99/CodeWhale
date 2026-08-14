@@ -586,7 +586,7 @@ pub(crate) fn live_tool_receipt_messages(
     let mut messages = Vec::with_capacity(2);
     if let Some(tool_use_msg) = app.api_messages.iter().rev().find(|message| {
         message.content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolUse { id: tool_use_id, .. } if tool_use_id == id)
+            matches!(block, ContentBlock::ToolUse { id: tool_use_id, ..} if tool_use_id == id)
         })
     }) {
         messages.push(tool_use_msg.clone());

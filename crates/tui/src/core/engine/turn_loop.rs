@@ -1315,6 +1315,7 @@ impl Engine {
                             name,
                             input,
                             caller,
+                            thought_signature,
                         } => {
                             crate::logging::info(format!(
                                 "Tool '{name}' block start. Initial input: {input:?}"
@@ -1330,6 +1331,7 @@ impl Engine {
                                 name,
                                 input,
                                 caller,
+                                thought_signature,
                                 input_buffer: String::new(),
                                 input_parse_error: None,
                             });
@@ -1345,6 +1347,7 @@ impl Engine {
                                 name,
                                 input,
                                 caller: None,
+                                thought_signature: None,
                                 input_buffer: String::new(),
                                 input_parse_error: None,
                             });
@@ -1691,6 +1694,7 @@ impl Engine {
                                 name: tool.name.clone(),
                                 input: tool.input.clone(),
                                 caller: tool.caller.clone(),
+                                thought_signature: tool.thought_signature.clone(),
                             });
                         }
                         let has_sendable_assistant_content = resume_blocks.iter().any(|block| {
@@ -1768,6 +1772,7 @@ impl Engine {
                         name: call.name,
                         input: call.args,
                         caller: None,
+                        thought_signature: None,
                         input_buffer: String::new(),
                         input_parse_error: None,
                     });
@@ -1797,6 +1802,7 @@ impl Engine {
                     name: tool.name.clone(),
                     input: tool.input.clone(),
                     caller: tool.caller.clone(),
+                    thought_signature: tool.thought_signature.clone(),
                 });
             }
 
@@ -5094,12 +5100,12 @@ mod tests {
     /// assistant message, the streaming parser emits the events in this order:
     ///
     /// ```text
-    /// ContentBlockStart::ToolUse { index: 0, .. }   // tool #1
+    /// ContentBlockStart::ToolUse { index: 0, ..}   // tool #1
     /// ContentBlockDelta { index: 0, .. }            // its arguments
-    /// ContentBlockStart::ToolUse { index: 1, .. }   // tool #2
+    /// ContentBlockStart::ToolUse { index: 1, ..}   // tool #2
     /// ContentBlockDelta { index: 1, .. }
     /// …
-    /// ContentBlockStart::ToolUse { index: N-1, .. }
+    /// ContentBlockStart::ToolUse { index: N-1, ..}
     /// ContentBlockDelta { index: N-1, .. }
     /// ContentBlockStop { index: 0 }                 // ── only flushed at
     /// ContentBlockStop { index: 1 }                 //    finish_reason
@@ -5119,7 +5125,7 @@ mod tests {
         let mut current_tool_indices: std::collections::HashMap<u32, usize> =
             std::collections::HashMap::new();
 
-        // Simulate `ContentBlockStart::ToolUse { index: i }` for 7 tools.
+        // Simulate `ContentBlockStart::ToolUse { index: i, ..}` for 7 tools.
         for block_index in 0..7u32 {
             current_tool_indices.insert(block_index, block_index as usize);
         }

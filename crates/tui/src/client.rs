@@ -3239,6 +3239,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
+            ApiProvider::Google => {}
         },
         "low" | "minimal" | "medium" | "mid" | "high" | "" => match provider {
             // Handled by the shared DeepSeek table above, before this match.
@@ -3348,6 +3349,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
+            ApiProvider::Google => {}
         },
         "xhigh" | "max" | "highest" | "ultracode" => match provider {
             // Handled by the shared DeepSeek table above, before this match.
@@ -3434,6 +3436,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
             ApiProvider::Mistral => {}
+            ApiProvider::Google => {}
         },
         _ => {}
     }
@@ -4784,6 +4787,7 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "src/lib.rs"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -5545,6 +5549,7 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "config.toml"}),
                         caller: None,
+                        thought_signature: None,
                     }],
                 },
                 Message {
@@ -6877,6 +6882,7 @@ mod tests {
                         name: "get_date".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -6930,6 +6936,7 @@ mod tests {
                         name: "get_date".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -7101,6 +7108,7 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "Cargo.toml"}),
                         caller: None,
+                        thought_signature: None,
                     }],
                 },
                 Message {
@@ -8324,6 +8332,7 @@ mod tests {
                         name: "list_dir".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -8366,6 +8375,7 @@ mod tests {
                         name: "web.run".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -8411,6 +8421,7 @@ mod tests {
                     name: "read_file".to_string(),
                     input: json!({"path": "src/main.rs"}),
                     caller: None,
+                    thought_signature: None,
                 }],
             },
             // No tool result follows — it was removed by compaction.
@@ -8457,6 +8468,7 @@ mod tests {
                         name: "list_dir".to_string(),
                         input: json!({}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },
@@ -8498,18 +8510,21 @@ mod tests {
                         name: "read_file".to_string(),
                         input: json!({"path": "a.rs"}),
                         caller: None,
+                        thought_signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "t2".to_string(),
                         name: "read_file".to_string(),
                         input: json!({"path": "b.rs"}),
                         caller: None,
+                        thought_signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "t3".to_string(),
                         name: "shell".to_string(),
                         input: json!({"cmd": "ls"}),
                         caller: None,
+                        thought_signature: None,
                     },
                 ],
             },

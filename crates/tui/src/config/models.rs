@@ -222,6 +222,9 @@ pub const XAI_GROK_4_20_0309_NON_REASONING_MODEL: &str = "grok-4.20-0309-non-rea
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-code-latest";
 pub const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
+pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
+pub const DEFAULT_GOOGLE_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai/";
 pub const DEFAULT_TELECOMJS_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_TELECOMJS_BASE_URL: &str = "https://aigw.telecomjs.com/v1";
 // Alibaba Cloud Model Studio (DashScope) defaults
