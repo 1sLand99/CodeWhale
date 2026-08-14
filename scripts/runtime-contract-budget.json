@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 13435,
+          "bytes": 14664,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3359,
+          "tokens_est": 3666,
           "tool_names": [
             "agent",
             "bash",
@@ -100,9 +100,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 68377,
+          "bytes": 69606,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17095,
+          "tokens_est": 17402,
           "tool_names": [
             "Git",
             "Run",
@@ -165,9 +165,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 13435,
+          "bytes": 14664,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3359,
+          "tokens_est": 3666,
           "tool_names": [
             "agent",
             "bash",
@@ -180,9 +180,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 68377,
+          "bytes": 69606,
           "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 17095,
+          "tokens_est": 17402,
           "tool_names": [
             "Git",
             "Run",
@@ -245,9 +245,9 @@
       },
       "plan": {
         "active": {
-          "bytes": 13435,
+          "bytes": 14664,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3359,
+          "tokens_est": 3666,
           "tool_names": [
             "agent",
             "bash",
@@ -260,9 +260,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 41371,
+          "bytes": 42600,
           "identity_sha256": "2cf3e5b6810e7840ee2d2df2b6dd81a24058e3e916acdb1199aff3abae916a41",
-          "tokens_est": 10343,
+          "tokens_est": 10650,
           "tool_names": [
             "Git",
             "Web",
