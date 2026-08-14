@@ -141,7 +141,7 @@ pub struct PluginCapabilities {
     pub lifecycle_mutation: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginWhen {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,7 +199,8 @@ pub struct PluginInventory {
 /// Host compatibility of a reviewed bundle. This is independent of trust,
 /// enablement, and staging: it names whether Codewhale can activate the
 /// declared surfaces, not whether the operator has turned the bundle on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PluginCompatibility {
     /// Every declared surface has an adapter, or the bundle is empty.
     Full,

@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod export;
 pub mod install;
 pub mod manifest;
+pub mod marketplace;
 pub mod mutation;
 mod path_identity;
 pub mod registry;
