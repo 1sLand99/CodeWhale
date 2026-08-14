@@ -202,7 +202,7 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.session.session_cost_cny = 0.0;
     app.session.subagent_cost = 0.0;
     app.session.subagent_cost_cny = 0.0;
-    app.session.subagent_cost_event_seqs.clear();
+    app.session.subagent_usage_sources.clear();
     app.session.displayed_cost_high_water = 0.0;
     app.session.displayed_cost_high_water_cny = 0.0;
     app.reset_cost_coverage();
@@ -975,8 +975,8 @@ mod tests {
         app.session.subagent_cost = 0.11;
         app.session.subagent_cost_cny = 0.80;
         app.session
-            .subagent_cost_event_seqs
-            .insert(("turn-test".to_string(), 7));
+            .subagent_usage_sources
+            .insert(("agent-test".to_string(), "response-test".to_string()));
         app.session.displayed_cost_high_water = 0.53;
         app.session.displayed_cost_high_water_cny = 3.85;
         app.session.last_prompt_cache_hit_tokens = Some(70);
@@ -1016,7 +1016,7 @@ mod tests {
         assert_eq!(app.session.session_cost_cny, 0.0);
         assert_eq!(app.session.subagent_cost, 0.0);
         assert_eq!(app.session.subagent_cost_cny, 0.0);
-        assert!(app.session.subagent_cost_event_seqs.is_empty());
+        assert!(app.session.subagent_usage_sources.is_empty());
         assert_eq!(app.session.displayed_cost_high_water, 0.0);
         assert_eq!(app.session.displayed_cost_high_water_cny, 0.0);
         assert_eq!(app.session.last_prompt_cache_hit_tokens, None);

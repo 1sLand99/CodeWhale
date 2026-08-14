@@ -1236,8 +1236,8 @@ mod tests {
         app.session.subagent_cost = 0.75;
         app.session.subagent_cost_cny = 5.48;
         app.session
-            .subagent_cost_event_seqs
-            .insert(("turn-test".to_string(), 42));
+            .subagent_usage_sources
+            .insert(("agent-test".to_string(), "response-test".to_string()));
         app.session.displayed_cost_high_water = 2.0;
         app.session.displayed_cost_high_water_cny = 14.61;
         app.session.last_prompt_tokens = Some(120);

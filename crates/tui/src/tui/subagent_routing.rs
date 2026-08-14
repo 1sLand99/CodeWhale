@@ -423,11 +423,13 @@ pub(super) fn handle_subagent_mailbox_for_turn(
     message: &MailboxMessage,
 ) -> bool {
     // Accumulate sub-agent token costs for the real-time footer counter (#166).
-    if let MailboxMessage::TokenUsage { route, usage, .. } = message {
-        // Preserve the effective child route for Agent Details. This is the
-        // only provider source used by that projection: configured/default
-        // parent routes are not evidence that the child actually used them.
-        record_agent_current_activity(app, message);
+    if let MailboxMessage::TokenUsage {
+        agent_id,
+        source_id,
+        route,
+        usage,
+    } = message
+    {
         // The child's own route truth always wins and is never guessed from
         // provider identity: `route` is the immutable envelope its client was
         // frozen with at construction, so its billing mode, billing surface
@@ -436,11 +438,20 @@ pub(super) fn handle_subagent_mailbox_for_turn(
         //
         // Sub-agent spend joins the parent total, so it also joins the
         // completeness counters `/cost` reports against that total.
+        let stable_source = if source_id.trim().is_empty() {
+            format!("mailbox:{turn_id}:{seq}")
+        } else {
+            source_id.clone()
+        };
         if app
             .session
-            .subagent_cost_event_seqs
-            .insert((turn_id.to_string(), seq))
+            .subagent_usage_sources
+            .insert((agent_id.clone(), stable_source))
         {
+            // Preserve the effective child route for Agent Details. Keep it
+            // behind the stable response guard so replayed usage envelopes do
+            // not repaint receipts or inflate the Work-row token total.
+            record_agent_current_activity(app, message);
             let audit = route.audit(usage);
             app.record_turn_cost_audit(&audit);
             app.record_turn_cost_route_receipt(route.receipt(&audit));

@@ -794,9 +794,9 @@ pub struct SessionState {
     pub session_cost_cny: f64,
     pub subagent_cost: f64,
     pub subagent_cost_cny: f64,
-    /// Mailbox usage envelopes already accrued, keyed by engine turn and the
-    /// mailbox-local sequence. Sequences restart at one for every turn.
-    pub subagent_cost_event_seqs: HashSet<(String, u64)>,
+    /// Child usage envelopes already accrued, keyed by child and the stable
+    /// provider-response identity carried by `TokenUsage`.
+    pub subagent_usage_sources: HashSet<(String, String)>,
     pub displayed_cost_high_water: f64,
     pub displayed_cost_high_water_cny: f64,
     pub last_prompt_tokens: Option<u32>,
@@ -977,7 +977,7 @@ impl Default for SessionState {
             session_cost_cny: 0.0,
             subagent_cost: 0.0,
             subagent_cost_cny: 0.0,
-            subagent_cost_event_seqs: HashSet::new(),
+            subagent_usage_sources: HashSet::new(),
             displayed_cost_high_water: 0.0,
             displayed_cost_high_water_cny: 0.0,
             last_prompt_tokens: None,

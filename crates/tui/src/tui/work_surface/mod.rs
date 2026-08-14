@@ -1270,6 +1270,64 @@ mod tests {
     }
 
     #[test]
+    fn fleet_row_repaints_resolved_model_and_each_distinct_usage_total() {
+        let mut app = fleet_app(None);
+        app.agent_progress_meta
+            .get_mut("agent_stream")
+            .expect("progress meta")
+            .resolved_model = Some("deepseek-v4-pro".to_string());
+        let launched = fleet_row(&render_rows(&mut app, 120, 4));
+        assert!(launched.contains("deepseek-v4-pro"), "{launched}");
+        assert!(!launched.contains("tokens"), "{launched}");
+
+        let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek.as_str(),
+            "deepseek-v4-pro",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            chrono::Utc::now(),
+        );
+        let usage = |source_id: &str, input_tokens, output_tokens| MailboxMessage::TokenUsage {
+            agent_id: "agent_stream".to_string(),
+            source_id: source_id.to_string(),
+            route: route.clone(),
+            usage: crate::models::Usage {
+                input_tokens,
+                output_tokens,
+                ..Default::default()
+            },
+        };
+
+        crate::tui::subagent_routing::handle_subagent_mailbox(
+            &mut app,
+            99,
+            &usage("response-1", 10_000, 1_000),
+        );
+        let first = fleet_row(&render_rows(&mut app, 120, 4));
+        assert!(first.contains("deepseek-v4-pro"), "{first}");
+        assert!(first.contains("11.0k tokens"), "{first}");
+
+        // Replaying the same mailbox envelope must not inflate the receipt.
+        crate::tui::subagent_routing::handle_subagent_mailbox(
+            &mut app,
+            1,
+            &usage("response-1", 10_000, 1_000),
+        );
+        let replay = fleet_row(&render_rows(&mut app, 120, 4));
+        assert!(replay.contains("11.0k tokens"), "{replay}");
+
+        crate::tui::subagent_routing::handle_subagent_mailbox(
+            &mut app,
+            2,
+            &usage("response-2", 20_000, 2_000),
+        );
+        let second = fleet_row(&render_rows(&mut app, 120, 4));
+        assert!(second.contains("deepseek-v4-pro"), "{second}");
+        assert!(second.contains("33.0k tokens"), "{second}");
+    }
+
+    #[test]
     fn fleet_row_shows_remaining_todos_only_when_the_ledger_has_unsettled_work() {
         let mut app = fleet_app(Some(1_200));
         app.agent_progress_meta

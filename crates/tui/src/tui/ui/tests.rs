@@ -5628,8 +5628,8 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.subagent_cost = 0.75;
     app.session.subagent_cost_cny = 5.48;
     app.session
-        .subagent_cost_event_seqs
-        .insert(("turn-test".to_string(), 42));
+        .subagent_usage_sources
+        .insert(("agent-test".to_string(), "response-test".to_string()));
     app.session.displayed_cost_high_water = 2.0;
     app.session.displayed_cost_high_water_cny = 14.61;
     app.session.last_prompt_tokens = Some(120);
@@ -5667,7 +5667,7 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     assert_eq!(app.session.session_cost_cny, 0.0);
     assert_eq!(app.session.subagent_cost, 0.0);
     assert_eq!(app.session.subagent_cost_cny, 0.0);
-    assert!(app.session.subagent_cost_event_seqs.is_empty());
+    assert!(app.session.subagent_usage_sources.is_empty());
     assert_eq!(app.session.displayed_cost_high_water, 0.0);
     assert_eq!(app.session.displayed_cost_high_water_cny, 0.0);
     assert_eq!(app.session.last_prompt_tokens, None);
@@ -10711,7 +10711,7 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
 }
 
 #[test]
-fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
+fn subagent_token_usage_is_deduped_by_response_source() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
@@ -10726,14 +10726,19 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
 
     handle_subagent_mailbox(&mut app, 7, &usage);
     let first = app.session.subagent_cost;
-    handle_subagent_mailbox(&mut app, 7, &usage);
-    assert_eq!(app.session.subagent_cost, first);
     handle_subagent_mailbox(&mut app, 8, &usage);
+    assert_eq!(app.session.subagent_cost, first);
+    let mut distinct = usage.clone();
+    let crate::tools::subagent::MailboxMessage::TokenUsage { source_id, .. } = &mut distinct else {
+        unreachable!()
+    };
+    *source_id = "response-b".to_string();
+    handle_subagent_mailbox(&mut app, 9, &distinct);
     assert!(app.session.subagent_cost > first);
 }
 
 #[test]
-fn subagent_token_usage_sequence_is_scoped_to_engine_turn() {
+fn subagent_token_usage_source_is_stable_across_engine_turns() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
@@ -10748,12 +10753,17 @@ fn subagent_token_usage_sequence_is_scoped_to_engine_turn() {
 
     handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
     let first = app.session.subagent_cost;
-    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
-    assert_eq!(app.session.subagent_cost, first, "same envelope dedupes");
     handle_subagent_mailbox_for_turn(&mut app, "engine-turn-b", 1, &usage);
+    assert_eq!(app.session.subagent_cost, first, "same response dedupes");
+    let mut distinct = usage.clone();
+    let crate::tools::subagent::MailboxMessage::TokenUsage { source_id, .. } = &mut distinct else {
+        unreachable!()
+    };
+    *source_id = "response-b".to_string();
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-b", 2, &distinct);
     assert!(
         app.session.subagent_cost > first,
-        "a new turn's sequence one must accrue independently"
+        "a distinct provider response must accrue independently"
     );
 }
 
@@ -19666,15 +19676,21 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
     let baseline = app.displayed_session_cost();
     assert!(baseline > 0.0);
 
-    // Re-emit the same seq — must be deduped, displayed cost unchanged.
-    handle_subagent_mailbox(&mut app, 11, &usage);
+    // Re-emit the same response under a fresh mailbox sequence — it must still
+    // dedupe and leave displayed cost unchanged.
+    handle_subagent_mailbox(&mut app, 12, &usage);
     assert!(
         (app.displayed_session_cost() - baseline).abs() < 1e-9,
-        "duplicate mailbox seq must not move displayed cost"
+        "duplicate provider response must not move displayed cost"
     );
 
-    // A fresh seq must extend the displayed cost upward.
-    handle_subagent_mailbox(&mut app, 12, &usage);
+    // A distinct provider response must extend the displayed cost upward.
+    let mut distinct = usage.clone();
+    let crate::tools::subagent::MailboxMessage::TokenUsage { source_id, .. } = &mut distinct else {
+        unreachable!()
+    };
+    *source_id = "response-y".to_string();
+    handle_subagent_mailbox(&mut app, 13, &distinct);
     assert!(app.displayed_session_cost() > baseline);
 }
 #[test]

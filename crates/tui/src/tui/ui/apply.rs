@@ -2444,7 +2444,7 @@ pub(crate) fn apply_loaded_session(
     app.session.session_cost_cny = restored_parent.cny;
     app.session.subagent_cost = restored_background.usd;
     app.session.subagent_cost_cny = restored_background.cny;
-    app.session.subagent_cost_event_seqs.clear();
+    app.session.subagent_usage_sources.clear();
     // Coverage is restored *with* the money, and the live counters are cleared
     // first: whatever the previous session in this process priced is not inside
     // the total being loaded, so carrying those counters over would describe the

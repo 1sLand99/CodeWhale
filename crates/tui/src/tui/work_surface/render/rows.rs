@@ -20,7 +20,8 @@ const AGENT_OBJECTIVE_MIN: usize = 24;
 /// How much of a sub-agent row survives at the current width.
 ///
 /// Degradation order, widest to narrowest: the token figure goes first, then
-/// the elapsed time, then the agent-type column. The objective is the last
+/// the remaining receipt, then the agent identity column. The objective is the
+/// last
 /// thing to go — a fleet row that cannot say what the agent is doing has
 /// stopped being worth a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
