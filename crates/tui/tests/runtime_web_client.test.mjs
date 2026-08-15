@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import {
+  NO_TARGET,
   STREAM_EVENT_NAMES,
+  answersForUserInput,
   applyRuntimeEvent,
   applySnapshot,
   createThreadState,
@@ -11,11 +13,14 @@ import {
   formatRuntimeProvenance,
   modeLabel,
   renderRuntimeProvenance,
+  resolveUserInputTarget,
   restoreDraft,
   runtimeEventContinuity,
   saveDraft,
+  sessionTarget,
   setSafeText,
   snapshotThenSubscribe,
+  threadTarget,
 } from "../src/runtime_web/app.mjs";
 
 function snapshot(threadId = "thread-a", latestSeq = 7) {
@@ -310,6 +315,77 @@ test("gap recovery snapshot restores approval and user-input attention before re
   );
   assert.equal(applyRuntimeEvent(state, duplicate), false);
   assert.equal(state.approvals.size, 1);
+});
+
+test("user-input answers stay bound to the selected live thread and pending request", () => {
+  const state = createThreadState("thread-a");
+  state.userInputs.set("input-1", {});
+
+  assert.deepEqual(
+    resolveUserInputTarget("input-1", threadTarget("thread-a"), state),
+    { ok: true, threadId: "thread-a", inputId: "input-1" },
+  );
+  assert.deepEqual(
+    resolveUserInputTarget("input-1", sessionTarget("session-a"), state),
+    { ok: false, reason: "session-not-live" },
+  );
+  assert.deepEqual(
+    resolveUserInputTarget("input-1", NO_TARGET, state),
+    { ok: false, reason: "no-target" },
+  );
+  assert.deepEqual(
+    resolveUserInputTarget("input-2", threadTarget("thread-a"), state),
+    { ok: false, reason: "stale-user-input" },
+  );
+  assert.deepEqual(
+    resolveUserInputTarget("input-1", threadTarget("thread-b"), state),
+    { ok: false, reason: "stale-target" },
+  );
+});
+
+test("user-input payloads preserve TUI custom-answer parity and single-select cardinality", () => {
+  const single = {
+    questions: [{
+      id: "path",
+      header: "Path",
+      question: "Which path?",
+      options: [{ label: "A" }, { label: "B" }],
+      allow_free_text: false,
+      multi_select: false,
+    }],
+  };
+  assert.deepEqual(answersForUserInput(single, {}, { path: "A different path" }), {
+    ok: true,
+    answers: [{ id: "path", label: "Other", value: "A different path" }],
+  });
+  assert.equal(
+    answersForUserInput(single, { path: ["A"] }, { path: "also B" }).reason,
+    "multiple-answers",
+  );
+  assert.equal(
+    answersForUserInput(single, { path: ["forged"] }, {}).reason,
+    "invalid-option",
+  );
+  assert.equal(answersForUserInput(single, {}, {}).reason, "missing-answer");
+
+  const multi = {
+    questions: [{
+      ...single.questions[0],
+      id: "checks",
+      multi_select: true,
+    }],
+  };
+  assert.deepEqual(
+    answersForUserInput(multi, { checks: ["A", "B"] }, { checks: "C" }),
+    {
+      ok: true,
+      answers: [
+        { id: "checks", label: "A", value: "A" },
+        { id: "checks", label: "B", value: "B" },
+        { id: "checks", label: "Other", value: "C" },
+      ],
+    },
+  );
 });
 
 test("assembles deltas and replaces the live item with its settled receipt", () => {

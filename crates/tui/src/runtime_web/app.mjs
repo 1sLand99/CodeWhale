@@ -285,6 +285,79 @@ export function resolveApprovalTarget(approvalId, target, streamState) {
   return { ok: true, threadId: reply.threadId, approvalId };
 }
 
+// Resolve a user-input submission to the live thread and pending request that
+// own it. User-input answers can resume a paused turn, so a stale card must not
+// be able to answer a request from another thread or one already settled by a
+// different client.
+export function resolveUserInputTarget(inputId, target, streamState) {
+  const reply = resolveReplyTarget(target, streamState);
+  if (!reply.ok) return reply;
+  if (!inputId) return { ok: false, reason: "no-user-input" };
+  if (!streamState || streamState.threadId !== reply.threadId) {
+    return { ok: false, reason: "stale-target" };
+  }
+  if (!streamState.userInputs || !streamState.userInputs.has(inputId)) {
+    return { ok: false, reason: "stale-user-input" };
+  }
+  return { ok: true, threadId: reply.threadId, inputId };
+}
+
+function ownAnswerValue(collection, id) {
+  if (collection instanceof Map) return collection.get(id);
+  if (collection && typeof collection === "object" && Object.hasOwn(collection, id)) {
+    return collection[id];
+  }
+  return undefined;
+}
+
+// Build the exact Runtime answer payload from selected options and custom
+// text. This keeps single-select questions single, rejects stale/forged option
+// values, and preserves the TUI rule that a custom answer is always reachable.
+export function answersForUserInput(request, selections = {}, freeText = {}) {
+  const questions = Array.isArray(request?.questions) ? request.questions : [];
+  if (questions.length === 0) {
+    return { ok: false, reason: "invalid-request", question: "the question" };
+  }
+
+  const answers = [];
+  const questionIds = new Set();
+  for (const question of questions) {
+    const id = String(question?.id || "");
+    const questionLabel = String(question?.header || question?.question || id || "the question");
+    if (!id || questionIds.has(id)) {
+      return { ok: false, reason: "invalid-request", question: questionLabel };
+    }
+    questionIds.add(id);
+
+    const optionLabels = new Set(
+      (Array.isArray(question.options) ? question.options : [])
+        .map((option) => String(option?.label || ""))
+        .filter((value) => Boolean(value.trim())),
+    );
+    const selectedValue = ownAnswerValue(selections, id);
+    const selected = Array.isArray(selectedValue)
+      ? [...new Set(selectedValue.map((value) => String(value)).filter((value) => value.trim()))]
+      : [];
+    if (selected.some((value) => !optionLabels.has(value))) {
+      return { ok: false, reason: "invalid-option", question: questionLabel };
+    }
+
+    const otherValue = ownAnswerValue(freeText, id);
+    const other = String(otherValue || "").trim();
+    const count = selected.length + (other ? 1 : 0);
+    if (count === 0) {
+      return { ok: false, reason: "missing-answer", question: questionLabel };
+    }
+    if (!question.multi_select && count !== 1) {
+      return { ok: false, reason: "multiple-answers", question: questionLabel };
+    }
+
+    for (const value of selected) answers.push({ id, label: value, value });
+    if (other) answers.push({ id, label: "Other", value: other });
+  }
+  return { ok: true, answers };
+}
+
 // Human-readable reason for a refusal, for the status banner.
 export function refusalMessage(reason) {
   switch (reason) {
@@ -296,6 +369,10 @@ export function refusalMessage(reason) {
       return "That request was already answered or has expired — nothing was sent.";
     case "no-approval":
       return "No approval was identified — nothing was sent.";
+    case "stale-user-input":
+      return "That question was already answered or has expired — nothing was sent.";
+    case "no-user-input":
+      return "No user-input request was identified — nothing was sent.";
     default:
       return "Select a live thread first — nothing was sent.";
   }
@@ -1005,15 +1082,26 @@ function startBrowserClient() {
         fieldset.append(label);
         controls.push({ input, label: option.label || "", value: option.label || "" });
       }
-      let other = null;
-      if (question.allow_free_text) {
-        other = document.createElement("input");
-        other.className = "other-answer";
-        other.type = "text";
-        other.placeholder = "Other response";
-        other.setAttribute("aria-label", `${question.header || "Question"} other response`);
-        fieldset.append(other);
+      // Match the terminal surface: a custom answer stays available even when
+      // an older request omitted or disabled the legacy allow_free_text hint.
+      const other = document.createElement("input");
+      other.className = "other-answer";
+      other.type = "text";
+      other.placeholder = "Other response";
+      other.setAttribute("aria-label", `${question.header || "Question"} other response`);
+      if (!question.multi_select) {
+        other.addEventListener("input", () => {
+          if (other.value.trim()) {
+            for (const control of controls) control.input.checked = false;
+          }
+        });
+        for (const control of controls) {
+          control.input.addEventListener("change", () => {
+            if (control.input.checked) other.value = "";
+          });
+        }
       }
+      fieldset.append(other);
       card.append(fieldset);
       groups.push({ question, controls, other });
     }
@@ -1024,24 +1112,36 @@ function startBrowserClient() {
     card.append(actions);
     card.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const answers = [];
+      const selections = new Map();
+      const freeText = new Map();
       for (const group of groups) {
+        const selected = [];
         for (const control of group.controls) {
-          if (control.input.checked) {
-            answers.push({ id: group.question.id, label: control.label, value: control.value });
-          }
+          if (control.input.checked) selected.push(control.value);
         }
-        const otherValue = group.other?.value.trim();
-        if (otherValue) answers.push({ id: group.question.id, label: "Other", value: otherValue });
-        if (!answers.some((answer) => answer.id === group.question.id)) {
-          showStatus(`Choose an answer for ${group.question.header || group.question.question || "each question"}.`);
-          return;
-        }
+        selections.set(group.question.id, selected);
+        freeText.set(group.question.id, group.other.value);
+      }
+      const resolved = resolveUserInputTarget(inputId, app.target, app.threadState);
+      if (!resolved.ok) {
+        showStatus(refusalMessage(resolved.reason));
+        renderAttention();
+        return;
+      }
+      const built = answersForUserInput(envelope.request, selections, freeText);
+      if (!built.ok) {
+        const message = built.reason === "missing-answer"
+          ? `Choose an answer for ${built.question}.`
+          : built.reason === "multiple-answers"
+            ? `Choose one answer for ${built.question}.`
+            : `That question changed before it could be submitted — nothing was sent.`;
+        showStatus(message);
+        return;
       }
       try {
-        await api(`/v1/user-input/${encodeURIComponent(app.selectedThreadId)}/${encodeURIComponent(inputId)}`, {
+        await api(`/v1/user-input/${encodeURIComponent(resolved.threadId)}/${encodeURIComponent(resolved.inputId)}`, {
           method: "POST",
-          body: JSON.stringify({ answers }),
+          body: JSON.stringify({ answers: built.answers }),
         });
         app.threadState.userInputs.delete(inputId);
         showStatus("");
