@@ -662,7 +662,7 @@ detected from its path:
 | --- | --- |
 | GitHub release binary (including Termux) | `codewhale update` |
 | npm (`node_modules` on the path) | `npm install -g codewhale@latest` |
-| Homebrew (`Cellar` / `linuxbrew` prefix) | `brew upgrade deepseek-tui` |
+| Homebrew (`Cellar` / `linuxbrew` prefix) | `brew upgrade codewhale` |
 | `cargo install` (`~/.cargo/bin`) | `cargo install codewhale-cli --locked --force` |
 
 For package-managed installs the notice also warns against `codewhale update`:
@@ -688,6 +688,20 @@ variables such as `CODEWHALE_RELEASE_BASE_URL` before falling back to the
 official GitHub API endpoint. If a configured `update_uri` cannot be fetched or
 parsed and a release mirror env var is set, the TUI falls back to that mirror
 instead of failing startup.
+
+## Workshop output budgets
+
+`[workshop]` still routes oversized tool results through the synthesis
+path when they exceed `large_output_threshold_tokens`. Two optional
+byte ceilings (#5367) raise the model-visible floor after that routing
+and never lower it:
+
+- `read_result_max_bytes` — cap for a single `read` / `read_file`
+  result. Absent keeps the compile-time defaults (50KiB / 2000 lines
+  for `read`, 16KiB / 500 lines for `read_file`).
+- `tool_result_max_bytes` — cap for a generic tool result after
+  spillover. Absent keeps the 12K-character compact floor (48K on
+  windows ≥500K tokens). Hard cap is 2MiB.
 
 ## Context length (context window)
 

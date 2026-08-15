@@ -1349,15 +1349,20 @@ impl DeepSeekClient {
                     tokio::time::sleep(Duration::from_millis(SSE_BACKPRESSURE_SLEEP_MS)).await;
                 }
 
-                // Process complete SSE lines from the buffer
+                // Process complete SSE lines from the buffer. Strict UTF-8:
+                // never `from_utf8_lossy` here — a mid-character TCP split
+                // stays in `byte_buf` until `\n`, and a genuinely invalid
+                // line fails closed instead of injecting U+FFFD (#5374).
                 let mut lines_processed = 0usize;
-                while let Some(newline_pos) = byte_buf.iter().position(|&b| b == b'\n') {
-                    let mut end = newline_pos;
-                    if end > 0 && byte_buf[end - 1] == b'\r' {
-                        end -= 1;
-                    }
-                    let line = String::from_utf8_lossy(&byte_buf[..end]).into_owned();
-                    byte_buf.drain(..newline_pos + 1);
+                loop {
+                    let line = match super::take_sse_line(&mut byte_buf) {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(err) => {
+                            yield Err(anyhow::anyhow!("{err}"));
+                            break 'stream;
+                        }
+                    };
 
                     if line.is_empty() {
                         // Empty line = event boundary, process accumulated data
@@ -1426,18 +1431,20 @@ impl DeepSeekClient {
             // — last tokens, finish_reason, and usage — is silently dropped.
             // Skipped after `[DONE]`, whose frame was already processed.
             if !saw_done {
-                if !byte_buf.is_empty() {
-                    let mut end = byte_buf.len();
-                    if end > 0 && byte_buf[end - 1] == b'\r' {
-                        end -= 1;
+                let residual = match super::flush_sse_line(&mut byte_buf) {
+                    Ok(line) => line,
+                    Err(err) => {
+                        yield Err(anyhow::anyhow!("{err}"));
+                        None
                     }
-                    let line = String::from_utf8_lossy(&byte_buf[..end]).into_owned();
-                    if let Some(data) = super::extract_sse_data_value(&line) {
-                        if !line_buf.is_empty() {
-                            line_buf.push('\n');
-                        }
-                        line_buf.push_str(data);
+                };
+                if let Some(line) = residual
+                    && let Some(data) = super::extract_sse_data_value(&line)
+                {
+                    if !line_buf.is_empty() {
+                        line_buf.push('\n');
                     }
+                    line_buf.push_str(data);
                 }
                 if !line_buf.is_empty() {
                     let data = std::mem::take(&mut line_buf);
@@ -1740,6 +1747,12 @@ fn push_text_part(parts: &mut Vec<Value>, text: &str) {
 pub(crate) const CACHE_WARMUP_USER_TAIL: &str = "请只回复 OK";
 pub(crate) const CACHE_WARMUP_MAX_TOKENS: u32 = 8;
 const TOOL_RESULT_SENT_CHAR_BUDGET: usize = 12_000;
+
+fn tool_result_sent_char_budget() -> usize {
+    crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes()
+        .map(|bytes| bytes.clamp(TOOL_RESULT_SENT_CHAR_BUDGET, 2 * 1024 * 1024))
+        .unwrap_or(TOOL_RESULT_SENT_CHAR_BUDGET)
+}
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
 /// Tool results shorter than this stay inline even when repeated. The
@@ -2257,8 +2270,8 @@ fn compact_tool_result_for_wire(
     // Only medium, non-mutation results can point back to a full earlier
     // message in this one request. Oversized results are already excerpts, so
     // a back-reference would falsely imply the exact bytes remain available.
-    let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=TOOL_RESULT_SENT_CHAR_BUDGET)
-        .contains(&original_chars)
+    let sent_budget = tool_result_sent_char_budget();
+    let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=sent_budget).contains(&original_chars)
         && !is_mutation_tool(tool_name);
 
     if dedup_eligible && let Some(previous) = seen_tool_results.get(&sha) {
@@ -2288,7 +2301,7 @@ fn compact_tool_result_for_wire(
         );
     }
 
-    if original_chars <= TOOL_RESULT_SENT_CHAR_BUDGET {
+    if original_chars <= sent_budget {
         return WireToolResult {
             content: content.to_string(),
             original_chars,

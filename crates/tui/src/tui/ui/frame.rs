@@ -279,7 +279,12 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         goal_status: app.hunt.verdict.goal_status(),
         goal_max_continuations: config.goal_max_continuations(),
         locale_tag: app.ui_locale.tag().to_string(),
-        workshop: config.workshop.clone(),
+        workshop: {
+            crate::tools::large_output_router::WorkshopConfig::install_active(
+                config.workshop.as_ref(),
+            );
+            config.workshop.clone()
+        },
         search_provider: config.search_provider(),
         search_api_key: config.search.as_ref().and_then(|s| s.api_key.clone()),
         search_base_url: config.search.as_ref().and_then(|s| s.base_url.clone()),

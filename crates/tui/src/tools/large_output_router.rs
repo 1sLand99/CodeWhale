@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,12 @@ const CHARS_PER_TOKEN_ESTIMATE: usize = 3;
 /// Workshop variable name where the raw tool output is stored.
 pub const WORKSHOP_LAST_TOOL_RESULT_VAR: &str = "last_tool_result";
 
+static ACTIVE_WORKSHOP: OnceLock<Mutex<WorkshopConfig>> = OnceLock::new();
+
+fn active_workshop_slot() -> &'static Mutex<WorkshopConfig> {
+    ACTIVE_WORKSHOP.get_or_init(|| Mutex::new(WorkshopConfig::default()))
+}
+
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Existing `[workshop]` threshold configuration, retained for compatibility.
@@ -47,9 +54,45 @@ pub struct WorkshopConfig {
     /// `large_output_threshold_tokens`.
     #[serde(default)]
     pub per_tool_thresholds: Option<HashMap<String, usize>>,
+
+    /// Optional model-visible byte budget for a single `read` / `read_file`
+    /// result. Absent keeps the compile-time default (#5367).
+    #[serde(default)]
+    pub read_result_max_bytes: Option<usize>,
+
+    /// Optional model-visible byte budget for a generic tool result after
+    /// spillover. Absent keeps the compile-time default (#5367).
+    #[serde(default)]
+    pub tool_result_max_bytes: Option<usize>,
 }
 
 impl WorkshopConfig {
+    /// Install the process-wide workshop budgets used by read/tool compactors.
+    pub fn install_active(config: Option<&Self>) {
+        let snapshot = config.cloned().unwrap_or_default();
+        if let Ok(mut slot) = active_workshop_slot().lock() {
+            *slot = snapshot;
+        }
+    }
+
+    /// Optional model-visible read budget, when the user opted in (#5367).
+    #[must_use]
+    pub fn active_read_result_max_bytes() -> Option<usize> {
+        active_workshop_slot()
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.read_result_max_bytes.filter(|n| *n > 0))
+    }
+
+    /// Optional model-visible tool-result budget, when the user opted in (#5367).
+    #[must_use]
+    pub fn active_tool_result_max_bytes() -> Option<usize> {
+        active_workshop_slot()
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.tool_result_max_bytes.filter(|n| *n > 0))
+    }
+
     /// Resolve the effective threshold for the given tool name.
     #[must_use]
     pub fn threshold_for(&self, tool_name: &str) -> usize {
@@ -384,6 +427,8 @@ mod tests {
         let config = WorkshopConfig {
             large_output_threshold_tokens: Some(4096),
             per_tool_thresholds: Some(per_tool),
+            read_result_max_bytes: None,
+            tool_result_max_bytes: None,
         };
         let router = LargeOutputRouter::new(config);
         // 100 tokens * 3 = 300 chars → trigger with 400 chars
@@ -398,6 +443,24 @@ mod tests {
             router.route("read_file", &result, false),
             RouteDecision::PassThrough
         );
+    }
+
+    #[test]
+    fn workshop_byte_budgets_raise_floor_only() {
+        WorkshopConfig::install_active(Some(&WorkshopConfig {
+            large_output_threshold_tokens: None,
+            per_tool_thresholds: None,
+            read_result_max_bytes: Some(102_400),
+            tool_result_max_bytes: Some(80_000),
+        }));
+        assert_eq!(
+            WorkshopConfig::active_read_result_max_bytes(),
+            Some(102_400)
+        );
+        assert_eq!(WorkshopConfig::active_tool_result_max_bytes(), Some(80_000));
+        WorkshopConfig::install_active(None);
+        assert_eq!(WorkshopConfig::active_read_result_max_bytes(), None);
+        assert_eq!(WorkshopConfig::active_tool_result_max_bytes(), None);
     }
 
     #[test]

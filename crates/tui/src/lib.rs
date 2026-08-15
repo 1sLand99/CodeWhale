@@ -11268,7 +11268,12 @@ async fn run_exec_agent(
         locale_tag: crate::localization::resolve_locale(&settings.locale)
             .tag()
             .to_string(),
-        workshop: config.workshop.clone(),
+        workshop: {
+            crate::tools::large_output_router::WorkshopConfig::install_active(
+                config.workshop.as_ref(),
+            );
+            config.workshop.clone()
+        },
         search_provider: execution_config.search_provider(),
         search_api_key: execution_config
             .search
