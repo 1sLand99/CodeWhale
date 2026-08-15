@@ -11,8 +11,9 @@ _Nothing yet._
 
 ## [0.9.8] - 2026-08-14
 
-Remaining web settings polish and prefab third-party templates move to
-v0.9.9.
+Remaining web settings polish moves to v0.9.9. Prefab third-party
+templates that have a published OpenAI-compatible host ship here
+(#5350).
 
 ### Changed
 
@@ -68,6 +69,18 @@ v0.9.9.
   the request. A clean output-limit stop continues the turn instead of
   killing it (#5373).
 
+- Ollama Cloud is a first-class hosted provider (`/provider ollama-cloud`)
+  on the official OpenAI-compatible `https://ollama.com/v1` route. Local
+  Ollama stays keyless. The exact released `ollama` + Cloud URL tuple keeps
+  a bounded compatibility path across saved sessions, Fleet, and nested
+  subagents; neighboring remotes stay custom and fail closed against
+  inherited official credentials.
+
+- Homebrew ships a `codewhale` formula. `brew tap Hmbown/deepseek-tui &&
+  brew install codewhale` is the install path; `brew upgrade codewhale`
+  updates it. The legacy `deepseek-tui` formula remains a deprecated alias
+  for one overlap release.
+
 ### Fixed
 
 - Selecting the `google` provider kind resolved to the `antigravity`
@@ -102,11 +115,58 @@ v0.9.9.
 
 - Google Gemini is its own backend (`/provider google`) on the official
   OpenAI-compatible route with thought-signature capture/replay and
-  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) joins
-  as a separate credential-plane provider: consent-gated read-only import
-  of the official CLI's login with `ANTIGRAVITY_API_KEY`/`AGY_ADC_AUTH`
-  precedence; requests fail closed until the cloud-code wire protocol is
-  implemented.
+  fail-closed replay for thinking models. Antigravity (`agy` 1.1.13) is
+  a separate provider: consent-gated read-only import of the official
+  CLI's login, then a text-only cloud-code stream
+  (`/v1internal:streamGenerateContent`). Tools, images, and unknown SSE
+  shapes fail closed. Gemini 3.7 Flash is not advertised until a live
+  turn succeeds on this wire. The website 44-count still excludes
+  Antigravity.
+
+- DeepSeek Flash SSE on macOS no longer turns mid-character HTTP/2
+  flushes into U+FFFD replacement characters (#5374). Invalid UTF-8
+  fails the line instead of using lossy decode.
+
+- `[workshop] read_result_max_bytes` and `tool_result_max_bytes` raise
+  the model-visible read/tool-result floor; they never lower the
+  compile-time defaults and cap at 2MiB (#5367).
+
+- Fireworks and OpenCode Zen DeepSeek V4 Flash/Pro keep a bundled
+  family rate when the live control plane is down, so session cost is
+  not stuck on `unverified_live_pricing` (#5241). `kimi-k3` stays
+  unpriced until a published rate exists.
+
+- Provider setup ships a SenseNova OpenAI-compatible preset (`S`) on
+  the published `https://token.sensenova.cn/v1` host (#5350). OpenCode
+  Zen/Go stay first-class rows. Agnes has no published URL, so it has
+  no preset.
+
+- Privileged release workflows no longer restore rust-cache, sccache,
+  or npm caches after checking out a caller-supplied SHA (CodeQL
+  cache-poisoning #88–#106). Catalog drift no longer prints raw
+  bundled/upstream blobs (#107).
+
+- Cancelling a turn now cancels its foreground child agents with it.
+
+- Empty compaction no longer wipes conversation history.
+
+- Wide terminals and tmux panes fill the full available width again for the
+  transcript and composer (#5322). The brief v0.9 session-shell side gutter
+  is gone so expanding a pane rematerializes layout the same way shrinking
+  does.
+
+- The agent tool schema rejects empty calls.
+
+- The local web client keeps recovered stream gaps closed, user questions
+  answerable, manual bootstrap access intact, and streamed prose quiet for
+  assistive tech.
+
+- Website zh-Hans copy now says 宪章, matching the TUI pack (#5397,
+  Lstarsky0).
+
+- Public website provider facts include Google Gemini and Ollama Cloud
+  (44 runnable routes). Antigravity stays credential-plane-only.
+  Harvested from #5398 (Lstarsky0) with that correction.
 
 ### Removed
 
@@ -134,6 +194,16 @@ v0.9.9.
 - A `/models` 2xx probe is a connection check, not model readiness.
 - Site layout uses one container, the ticker no longer implies false
   provider readiness, and install links stay in the active locale.
+
+### Contributors
+
+- EvanProgramming (@EvanProgramming) — webhook client panic fallback
+  (#5381); session-index JSONL mutex (#5382).
+- Lstarsky0 (@Lstarsky0) — session peek hides internal runtime events
+  (#5376); thinking-ladder test re-pin (#5378); provider-count follow-ups
+  (#5383/#5384); macOS agy fixture canonicalization (#5392); zh-Hans 宪章
+  terminology (#5397); regenerated website facts harvested and corrected
+  from #5398.
 
 ## [0.9.7] - 2026-08-12
 
