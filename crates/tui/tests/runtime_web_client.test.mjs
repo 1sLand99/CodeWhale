@@ -91,7 +91,7 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
   );
   assert.match(
     cssDeclarations(styles, "\\.message\\.user \\.message-body"),
-    /background: rgba\(246, 196, 83/,
+    /background: rgba\(24, 39, 66/,
   );
   assert.match(
     cssDeclarations(styles, "\\.attention-card"),
