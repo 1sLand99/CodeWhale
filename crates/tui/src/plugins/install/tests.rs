@@ -259,6 +259,159 @@ async fn install_from_local_path_copies_and_marks_the_bundle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_imports_official_kimi_datasource_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = tmp.path().join("src/kimi-datasource");
+    fs::create_dir_all(source.join("bin")).unwrap();
+    fs::write(
+        source.join("kimi.plugin.json"),
+        r#"{
+          "name": "kimi-datasource",
+          "version": "3.3.0",
+          "description": "Kimi datasource",
+          "mcpServers": {
+            "data": {
+              "command": "node",
+              "args": ["./bin/kimi-datasource.mjs"],
+              "cwd": "./"
+            }
+          },
+          "interface": {
+            "displayName": "Kimi Datasource",
+            "shortDescription": "Data tools",
+            "developerName": "Moonshot AI"
+          }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: kimi-datasource\ndescription: data\n---\n",
+    )
+    .unwrap();
+    fs::write(source.join("bin/kimi-datasource.mjs"), "// fixture\n").unwrap();
+
+    let outcome = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap();
+    let PluginInstallOutcome::Installed(installed) = outcome else {
+        panic!("expected Kimi plugin install to succeed");
+    };
+    assert_eq!(installed.name, "kimi-datasource");
+    assert!(installed.path.join("kimi.plugin.json").exists());
+    let validated = crate::plugins::manifest::PluginManifest::validate_from_path(
+        &installed.path.join("kimi.plugin.json"),
+    )
+    .unwrap();
+    assert_eq!(validated.inventory.skills, 1);
+    assert_eq!(validated.inventory.mcp_servers, 1);
+    assert_eq!(validated.inventory.stdio_mcp_servers, 1);
+    assert_eq!(
+        validated.manifest.plugin.display_name.as_deref(),
+        Some("Kimi Datasource")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_imports_official_kimi_webbridge_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = tmp.path().join("src/kimi-webbridge");
+    fs::create_dir_all(source.join("skills/kimi-webbridge")).unwrap();
+    fs::write(
+        source.join("kimi.plugin.json"),
+        r#"{
+          "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
+          "name": "kimi-webbridge",
+          "version": "1.11.3",
+          "description": "Control the real browser",
+          "keywords": ["browser", "automation"],
+          "author": "Moonshot AI",
+          "license": "Proprietary",
+          "skills": "./skills/",
+          "interface": {
+            "displayName": "Kimi WebBridge",
+            "shortDescription": "Browser control",
+            "longDescription": "Requires the local daemon and browser extension.",
+            "developerName": "Moonshot AI",
+            "websiteURL": "https://www.kimi.com/features/webbridge"
+          }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("skills/kimi-webbridge/SKILL.md"),
+        "---\nname: kimi-webbridge\ndescription: browser\n---\n",
+    )
+    .unwrap();
+
+    let outcome = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap();
+    let PluginInstallOutcome::Installed(installed) = outcome else {
+        panic!("expected Kimi plugin install to succeed");
+    };
+    let validated = crate::plugins::manifest::PluginManifest::validate_from_path(
+        &installed.path.join("kimi.plugin.json"),
+    )
+    .unwrap();
+    assert_eq!(validated.inventory.skills, 1);
+    assert_eq!(validated.inventory.mcp_servers, 0);
+    assert_eq!(
+        validated.manifest.plugin.author.as_deref(),
+        Some("Moonshot AI")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kimi_import_rejects_unsupported_runtime_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = tmp.path().join("src/kimi-hooks");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("kimi.plugin.json"),
+        r#"{
+          "name": "kimi-hooks",
+          "version": "1.0.0",
+          "hooks": [{"event":"PreToolUse","command":"node ./hook.mjs"}]
+        }"#,
+    )
+    .unwrap();
+
+    let error = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unknown field `hooks`"),
+        "unsupported Kimi runtime fields must fail closed: {error:#}"
+    );
+    assert!(!plugins.join("kimi-hooks").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_refuses_to_overwrite_a_hand_placed_bundle() {
     let tmp = tempfile::tempdir().unwrap();
     let plugins = tmp.path().join("plugins");
