@@ -684,6 +684,26 @@ impl ReviewedPluginMcpSource {
                 launch.args[index] = launch.bind_file(staged_root, path, &validated.file_hashes)?;
             }
         }
+        #[cfg(target_os = "macos")]
+        if is_node_command(command)
+            && args.iter().any(|argument| {
+                let path = Path::new(argument);
+                path.is_absolute()
+                    && path.starts_with(staged_root)
+                    && path.extension().is_some_and(|extension| extension == "mjs")
+            })
+        {
+            // Node determines the entrypoint module type from its filename.
+            // Darwin's reviewed-launch binding deliberately replaces the
+            // staged `.mjs` path with an inherited `/dev/fd/N` descriptor,
+            // which has no extension; without this flag Node 22 exits cleanly
+            // without evaluating the module. Preserve ESM semantics while
+            // continuing to execute the exact reviewed bytes by descriptor.
+            launch.args.insert(
+                0,
+                std::ffi::OsString::from("--experimental-default-type=module"),
+            );
+        }
         if let Some(cwd) = cwd {
             if !cwd.starts_with(staged_root) {
                 anyhow::bail!("reviewed plugin stdio cwd escaped its staged root");
@@ -744,6 +764,14 @@ impl ReviewedPluginMcpSource {
         )
         .is_ok()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn is_node_command(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "nodejs"))
 }
 
 pub(crate) struct ReviewedStdioLaunch {
