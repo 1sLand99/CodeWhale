@@ -320,6 +320,31 @@ export function streamCursor(state, { gap = false, connected = true } = {}) {
   };
 }
 
+// Keep machine diagnostics available without making them the conversation's
+// loudest content. Known transport failures get one calm product sentence;
+// the byte-for-byte receipt remains behind the disclosure.
+export function receiptPresentation(item = {}) {
+  const detail = String(item.detail || item.summary || "");
+  const raw = String(item.summary || detail || humanize(item.kind));
+  const mcpFailure = raw.match(/Failed to connect MCP server ['"]?([^'":\s]+)['"]?/i);
+  if (mcpFailure) {
+    const server = mcpFailure[1] || "server";
+    return {
+      label: "MCP · Unavailable",
+      summary: `${server} could not connect`,
+      raw,
+      failed: true,
+    };
+  }
+  const failed = item.status === "failed" || /^(?:error|failed|failure)\b/i.test(raw);
+  return {
+    label: `${humanize(item.kind)} · ${humanize(item.status)}`,
+    summary: raw,
+    raw: detail && detail !== raw ? `${raw}\n\n${detail}` : raw,
+    failed,
+  };
+}
+
 export function eventStreamUrl(threadId, latestSeq) {
   return `/v1/threads/${encodeURIComponent(threadId)}/events?since_seq=${normalizedSequence(latestSeq)}`;
 }
@@ -861,7 +886,11 @@ function startBrowserClient() {
 
   function emptyState(title, description) {
     const empty = element("div", "empty-state");
-    empty.append(element("div", "empty-orbit", "◌"));
+    const mark = document.createElement("img");
+    mark.className = "empty-mark";
+    mark.src = "/assets/codewhale-192.png";
+    mark.alt = "";
+    empty.append(mark);
     empty.append(element("h2", "", title));
     empty.append(element("p", "", description));
     return empty;
@@ -885,13 +914,14 @@ function startBrowserClient() {
       return reasoning;
     }
 
-    const receipt = element("article", `receipt ${item.status === "failed" ? "failed" : ""}`.trim());
-    receipt.append(element("div", "receipt-label", `${humanize(item.kind)} · ${humanize(item.status)}`));
-    receipt.append(element("div", "receipt-summary", item.summary || detail || humanize(item.kind)));
-    if (detail && detail !== item.summary) {
+    const presentation = receiptPresentation(item);
+    const receipt = element("article", `receipt ${presentation.failed ? "failed" : ""}`.trim());
+    receipt.append(element("div", "receipt-label", presentation.label));
+    receipt.append(element("div", "receipt-summary", presentation.summary));
+    if (presentation.raw && presentation.raw !== presentation.summary) {
       const disclosure = element("details");
       disclosure.append(element("summary", "", "Show receipt"));
-      disclosure.append(element("pre", "", detail));
+      disclosure.append(element("pre", "", presentation.raw));
       receipt.append(disclosure);
     }
     return receipt;

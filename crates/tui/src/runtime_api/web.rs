@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -14,6 +15,7 @@ use super::RuntimeApiState;
 const WEB_HTML: &str = include_str!("../runtime_web/index.html");
 const WEB_CSS: &str = include_str!("../runtime_web/styles.css");
 const WEB_JS: &str = include_str!("../runtime_web/app.mjs");
+const WEB_ICON: &[u8] = include_bytes!("../runtime_web/codewhale-192.png");
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(120);
 const WEB_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const BOOTSTRAP_PREFIX: &str = "cwwb_";
@@ -151,6 +153,15 @@ pub(super) async fn web_script(State(state): State<RuntimeApiState>) -> Response
         return not_found();
     }
     secured_asset("text/javascript; charset=utf-8", WEB_JS)
+}
+
+pub(super) async fn web_icon(State(state): State<RuntimeApiState>) -> Response {
+    if state.web.is_none() {
+        return not_found();
+    }
+    let mut response = Response::new(Body::from(WEB_ICON));
+    secure_headers(&mut response, "image/png");
+    response
 }
 
 fn web_session_cookie(session_token: &str) -> String {

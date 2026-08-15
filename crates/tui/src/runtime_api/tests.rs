@@ -1321,6 +1321,19 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
     assert!(!page_body.contains(&token));
     assert!(!page_body.contains(&nonce));
 
+    let icon = client
+        .get(format!("http://{addr}/assets/codewhale-192.png"))
+        .send()
+        .await?;
+    assert_eq!(icon.status(), StatusCode::OK);
+    assert_eq!(
+        icon.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert!(icon.bytes().await?.starts_with(b"\x89PNG\r\n\x1a\n"));
+
     let wrong = client
         .get(format!(
             "http://{addr}/__codewhale/bootstrap/cwwb_00000000000000000000000000000000"
@@ -1424,7 +1437,12 @@ async fn web_assets_are_absent_outside_web_mode() -> Result<()> {
         return Ok(());
     };
     let client = crate::tls::reqwest_client();
-    for path in ["/", "/assets/codewhale-web.css", "/assets/codewhale-web.js"] {
+    for path in [
+        "/",
+        "/assets/codewhale-web.css",
+        "/assets/codewhale-web.js",
+        "/assets/codewhale-192.png",
+    ] {
         let response = client.get(format!("http://{addr}{path}")).send().await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
     }

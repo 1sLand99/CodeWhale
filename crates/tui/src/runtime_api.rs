@@ -1082,6 +1082,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/", get(web::web_page))
         .route("/assets/codewhale-web.css", get(web::web_styles))
         .route("/assets/codewhale-web.js", get(web::web_script))
+        .route("/assets/codewhale-192.png", get(web::web_icon))
         .route(
             "/__codewhale/bootstrap/{nonce}",
             get(web::exchange_bootstrap),
