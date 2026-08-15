@@ -60,6 +60,15 @@ fn thread_route_credential_error_is_bad_request_not_not_found() {
 }
 
 #[test]
+fn web_launcher_failure_is_a_recoverable_manual_bootstrap_warning() {
+    assert!(web_launcher_warning(Ok(())).is_none());
+    let warning = web_launcher_warning(Err(anyhow::anyhow!("launcher unavailable")))
+        .expect("launcher failure should be reported without failing Runtime startup");
+    assert!(warning.contains("could not open the default browser"));
+    assert!(warning.contains("open the bootstrap URL above manually"));
+}
+
+#[test]
 fn runtime_tui_settings_reject_legacy_modes_and_do_not_save_env_overlays() -> Result<()> {
     let _lock = lock_test_env();
     let tmp = tempfile::tempdir()?;

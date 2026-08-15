@@ -12,6 +12,7 @@ import {
   eventStreamUrl,
   formatRuntimeProvenance,
   modeLabel,
+  recoverSnapshotAndSubscribe,
   renderRuntimeProvenance,
   resolveUserInputTarget,
   restoreDraft,
@@ -232,6 +233,52 @@ test("loads a consistent snapshot before subscribing from latest_seq", async () 
   assert.equal(state.latestSeq, 42);
 });
 
+test("snapshot recovery waits for the replacement stream to open", async () => {
+  const state = createThreadState("thread-a");
+  let finishOpening;
+  let settled = false;
+  const opening = new Promise((resolve) => {
+    finishOpening = resolve;
+  });
+  const recovery = snapshotThenSubscribe({
+    state,
+    threadId: "thread-a",
+    loadSnapshot: async () => snapshot("thread-a", 43),
+    subscribe: () => opening,
+  }).then((result) => {
+    settled = true;
+    return result;
+  });
+
+  await Promise.resolve();
+  assert.equal(settled, false, "snapshot success alone must not finish recovery");
+  finishOpening();
+  assert.equal(await recovery, true);
+  assert.equal(settled, true);
+});
+
+test("a failed replacement stream keeps the gap until a later stream opens", async () => {
+  const state = createThreadState("thread-a");
+  let gap = true;
+  let attempts = 0;
+  const recover = () => recoverSnapshotAndSubscribe({
+    state,
+    threadId: "thread-a",
+    loadSnapshot: async () => snapshot("thread-a", 44 + attempts),
+    subscribe: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("replacement stream did not reopen");
+    },
+  }, () => {
+    gap = false;
+  });
+
+  await assert.rejects(recover(), /did not reopen/);
+  assert.equal(gap, true, "snapshot success must not hide a failed stream handshake");
+  assert.equal(await recover(), true);
+  assert.equal(gap, false, "a later snapshot plus open stream clears the gap");
+});
+
 test("drops a stale snapshot selection without opening an event stream", async () => {
   const state = createThreadState("thread-a");
   let current = true;
@@ -387,7 +434,11 @@ test("browser clears its surfaced gap only after a replacement snapshot subscrib
   const source = await readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8");
   assert.match(
     source,
-    /async function recoverProjection[\s\S]*?if \(!subscribed\) return;\s+(?:\/\/[^\n]*\n\s*){2}app\.streamGap = false;\s+renderAll\(\);/,
+    /async function recoverProjection[\s\S]*?connectStream\(id, sequence, generation, true\)/,
+  );
+  assert.match(
+    source,
+    /async function recoverProjection[\s\S]*?recoverSnapshotAndSubscribe\([\s\S]*?app\.streamGap = false;[\s\S]*?if \(!subscribed\) return;\s+renderAll\(\);/,
   );
 });
 

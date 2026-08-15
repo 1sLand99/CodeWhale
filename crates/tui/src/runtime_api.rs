@@ -868,10 +868,8 @@ pub async fn run_http_server(
             "Codewhale web bootstrap (single-use, expires in {} min): {bootstrap_url}",
             web::BOOTSTRAP_TTL.as_secs() / 60
         );
-        if let Err(error) = crate::utils::open_url(&bootstrap_url) {
-            println!(
-                "warning: could not open the default browser ({error}); open the bootstrap URL above manually"
-            );
+        if let Some(warning) = web_launcher_warning(crate::utils::open_url(&bootstrap_url)) {
+            println!("{warning}");
         }
     }
     let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
@@ -903,6 +901,14 @@ pub async fn run_http_server(
     scheduler_cancel.cancel();
     scheduler_handle.abort();
     serve_result
+}
+
+fn web_launcher_warning(result: Result<()>) -> Option<String> {
+    result.err().map(|error| {
+        format!(
+            "warning: could not open the default browser ({error}); open the bootstrap URL above manually"
+        )
+    })
 }
 
 fn fallback_sessions_dir() -> PathBuf {

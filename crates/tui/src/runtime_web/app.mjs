@@ -207,7 +207,17 @@ export async function snapshotThenSubscribe({
     return false;
   }
   if (!isCurrent()) return false;
-  subscribe(threadId, state.latestSeq);
+  // A recovery caller may return a stream-open handshake. Await it so a
+  // replacement snapshot is not called continuous until the replacement SSE
+  // stream has actually opened. Synchronous subscribers remain supported.
+  await subscribe(threadId, state.latestSeq);
+  return true;
+}
+
+export async function recoverSnapshotAndSubscribe(options, onRecovered) {
+  const subscribed = await snapshotThenSubscribe(options);
+  if (!subscribed) return false;
+  onRecovered();
   return true;
 }
 
@@ -528,6 +538,7 @@ function startBrowserClient() {
     runtimeInfo: null,
     drafts: new Map(),
     stream: null,
+    streamOpenCancel: null,
     reconnectTimer: null,
     generation: 0,
     searchTimer: null,
@@ -887,6 +898,8 @@ function startBrowserClient() {
   }
 
   function stopStream() {
+    if (app.streamOpenCancel) app.streamOpenCancel();
+    app.streamOpenCancel = null;
     if (app.stream) app.stream.close();
     app.stream = null;
     if (app.reconnectTimer) clearTimeout(app.reconnectTimer);
@@ -920,7 +933,9 @@ function startBrowserClient() {
         state: app.threadState,
         threadId,
         loadSnapshot: (id) => api(`/v1/threads/${encodeURIComponent(id)}`),
-        subscribe: (id, sequence) => connectStream(id, sequence, generation),
+        subscribe: (id, sequence) => {
+          connectStream(id, sequence, generation);
+        },
         isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
       });
       if (!subscribed) return;
@@ -933,12 +948,41 @@ function startBrowserClient() {
     }
   }
 
-  function connectStream(threadId, sequence, generation) {
+  function connectStream(threadId, sequence, generation, waitForOpen = false) {
     if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+    if (app.streamOpenCancel) app.streamOpenCancel();
+    app.streamOpenCancel = null;
     if (app.stream) app.stream.close();
     const stream = new EventSource(eventStreamUrl(threadId, sequence), { withCredentials: true });
     app.stream = stream;
-    stream.onopen = () => setConnection("ready", "Local runtime connected");
+    let opened = false;
+    let resolveOpen;
+    let rejectOpen;
+    const openHandshake = waitForOpen
+      ? new Promise((resolve, reject) => {
+          resolveOpen = resolve;
+          rejectOpen = reject;
+        })
+      : undefined;
+    const cancelOpen = () => {
+      if (!rejectOpen) return;
+      const reject = rejectOpen;
+      resolveOpen = null;
+      rejectOpen = null;
+      reject(new Error("Runtime event stream open was cancelled"));
+    };
+    if (waitForOpen) app.streamOpenCancel = cancelOpen;
+    const clearOpenHandshake = () => {
+      if (app.streamOpenCancel === cancelOpen) app.streamOpenCancel = null;
+    };
+    stream.onopen = () => {
+      opened = true;
+      setConnection("ready", "Local runtime connected");
+      clearOpenHandshake();
+      if (resolveOpen) resolveOpen();
+      resolveOpen = null;
+      rejectOpen = null;
+    };
     const receive = (message) => {
       if (
         app.stream !== stream
@@ -972,12 +1016,21 @@ function startBrowserClient() {
       stream.close();
       app.stream = null;
       if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+      if (waitForOpen && !opened) {
+        clearOpenHandshake();
+        const reject = rejectOpen;
+        resolveOpen = null;
+        rejectOpen = null;
+        reject?.(new Error("Runtime event stream did not reopen"));
+        return;
+      }
       setConnection("", "Reconnecting to local runtime…");
       app.reconnectTimer = setTimeout(
         () => connectStream(threadId, app.threadState.latestSeq, generation),
         900,
       );
     };
+    return openHandshake;
   }
 
   async function recoverProjection(threadId, generation, sourceStream = null) {
@@ -994,17 +1047,18 @@ function startBrowserClient() {
     setConnection("", "Refreshing thread snapshot…");
 
     try {
-      const subscribed = await snapshotThenSubscribe({
+      const subscribed = await recoverSnapshotAndSubscribe({
         state: app.threadState,
         threadId,
         loadSnapshot: (id) => api(`/v1/threads/${encodeURIComponent(id)}`),
-        subscribe: (id, sequence) => connectStream(id, sequence, generation),
+        subscribe: (id, sequence) => connectStream(id, sequence, generation, true),
         isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
+      }, () => {
+        // A gap is continuous again only after both the replacement snapshot
+        // and the replacement EventSource open handshake have succeeded.
+        app.streamGap = false;
       });
       if (!subscribed) return;
-      // A successful replacement snapshot closes the detected continuity
-      // gap. Keep the error state only while recovery is still pending.
-      app.streamGap = false;
       renderAll();
       showStatus("");
       setConnection("ready", "Local runtime connected");

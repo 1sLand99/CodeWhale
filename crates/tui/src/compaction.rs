@@ -1125,8 +1125,13 @@ fn validate_compaction_summary(summary: &str) -> Result<()> {
         anyhow::bail!("Compaction summary response was unusable: no text was returned.");
     }
 
+    // Strip every non-word edge, not just ASCII punctuation. Providers can
+    // return visually non-empty Unicode punctuation or emoji-only payloads;
+    // neither is a usable continuation checkpoint. `is_alphanumeric` keeps
+    // this language-neutral for CJK and other scripts without imposing a
+    // prose-length heuristic.
     let normalized = trimmed
-        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
+        .trim_matches(|ch: char| !ch.is_alphanumeric())
         .to_ascii_lowercase();
     if normalized.is_empty() {
         anyhow::bail!(
@@ -1138,6 +1143,9 @@ fn validate_compaction_summary(summary: &str) -> Result<()> {
         "no summary available"
             | "summary unavailable"
             | "no summary"
+            | "n/a"
+            | "na"
+            | "not available"
             | "i cannot provide a summary"
             | "i can't provide a summary"
             | "unable to provide a summary"
@@ -1851,6 +1859,9 @@ mod tests {
             "",
             " \n\t ",
             "...",
+            "。。。",
+            "🫧",
+            "N/A",
             "(no summary available)",
             "I cannot provide a summary.",
         ] {
