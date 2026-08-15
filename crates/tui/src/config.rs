@@ -131,8 +131,10 @@ pub(crate) struct ProviderIdentity {
     /// root-level `provider = "custom"` route and must never be upgraded to an
     /// exact `[providers.custom]` table merely because one exists later.
     pub(crate) exact_id: Option<String>,
-    /// Runtime-only provenance for the released `ollama` + exact Cloud route.
-    /// This is never persisted; current receipts use the canonical Cloud id.
+    /// Runtime provenance for the released `ollama` + exact Cloud route.
+    /// Persistence writes the canonical Cloud kind plus the original `ollama`
+    /// id, then reconstructs this flag on resume; the flag itself is not
+    /// serialized.
     pub(crate) migrated_legacy_ollama_cloud_route: bool,
 }
 
@@ -4531,6 +4533,14 @@ impl Config {
         &self,
         provider: ApiProvider,
     ) -> std::result::Result<ProviderIdentity, String> {
+        if provider == ApiProvider::OllamaCloud
+            && (self.migrated_legacy_ollama_cloud_route
+                || self.provider.as_deref().and_then(ApiProvider::parse)
+                    == Some(ApiProvider::Ollama))
+            && self.legacy_ollama_cloud_route_configured()
+        {
+            return self.resolve_provider_identity(ApiProvider::Ollama.as_str());
+        }
         self.resolve_provider_identity(&self.provider_identity_for(provider))
     }
 
@@ -4564,17 +4574,19 @@ impl Config {
             && let Some(mut provider) = ApiProvider::parse(key)
             && provider != ApiProvider::Custom
         {
-            let migrated_legacy_ollama_cloud_route = (provider == ApiProvider::Ollama
-                && self.legacy_ollama_cloud_route_configured())
-                || (provider == ApiProvider::OllamaCloud
-                    && self.selects_legacy_ollama_cloud_route());
+            let migrated_legacy_ollama_cloud_route =
+                provider == ApiProvider::Ollama && self.legacy_ollama_cloud_route_configured();
             if provider == ApiProvider::Ollama && migrated_legacy_ollama_cloud_route {
                 provider = ApiProvider::OllamaCloud;
             }
             return Ok(ProviderIdentity {
                 provider,
                 key: provider.as_str().to_string(),
-                exact_id: Some(provider.as_str().to_string()),
+                exact_id: Some(if migrated_legacy_ollama_cloud_route {
+                    ApiProvider::Ollama.as_str().to_string()
+                } else {
+                    provider.as_str().to_string()
+                }),
                 migrated_legacy_ollama_cloud_route,
             });
         }
@@ -4682,6 +4694,28 @@ impl Config {
         })
     }
 
+    /// Resolve a provider explicitly pinned by a current Fleet/subagent
+    /// declaration.
+    ///
+    /// A scoped legacy Ollama Cloud config retains its migration marker so the
+    /// active client can keep reading `[providers.ollama]` and the old secret
+    /// slot. That marker is provenance for the active route, not an alias for a
+    /// newly declared `ollama-cloud` pin: the explicit pin must bind the
+    /// first-class table and credential slot even when it is declared by a
+    /// child of the migrated route.
+    pub(crate) fn resolve_provider_pin_identity(
+        &self,
+        provider_id: &str,
+    ) -> std::result::Result<ProviderIdentity, String> {
+        let mut identity = self.resolve_provider_identity(provider_id)?;
+        if identity.provider == ApiProvider::OllamaCloud
+            && ApiProvider::parse(provider_id.trim()) == Some(ApiProvider::OllamaCloud)
+        {
+            identity.migrated_legacy_ollama_cloud_route = false;
+        }
+        Ok(identity)
+    }
+
     /// Resolve an additive exact provider id. Unlike raw selector resolution,
     /// this never interprets the literal id `custom` as the legacy root route:
     /// an id means the record requires that exact `[providers.<id>]` table.
@@ -4770,7 +4804,9 @@ impl Config {
         };
         let migrated_legacy_ollama_cloud = (provider == ApiProvider::Ollama
             && self.legacy_ollama_cloud_route_configured())
-            || (provider == ApiProvider::OllamaCloud && self.selects_legacy_ollama_cloud_route());
+            || (provider == ApiProvider::OllamaCloud
+                && id.and_then(ApiProvider::parse) == Some(ApiProvider::Ollama)
+                && self.legacy_ollama_cloud_route_configured());
         if migrated_legacy_ollama_cloud {
             provider = ApiProvider::OllamaCloud;
         }
@@ -4831,7 +4867,11 @@ impl Config {
         Ok(ProviderIdentity {
             provider,
             key: provider.as_str().to_string(),
-            exact_id: Some(provider.as_str().to_string()),
+            exact_id: Some(if migrated_legacy_ollama_cloud {
+                ApiProvider::Ollama.as_str().to_string()
+            } else {
+                provider.as_str().to_string()
+            }),
             migrated_legacy_ollama_cloud_route: migrated_legacy_ollama_cloud,
         })
     }

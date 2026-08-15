@@ -325,6 +325,17 @@ impl ReasoningEffort {
                 other => other,
             };
         }
+        // Ollama's current OpenAI-compatible Chat Completions contract
+        // documents the complete none/low/medium/high/max ladder. Keep every
+        // real tier distinct for normal turns; only Codewhale-only synonyms
+        // are folded onto the nearest documented spelling.
+        if provider == ApiProvider::OllamaCloud {
+            return match normalized {
+                Self::Minimal => Self::Low,
+                Self::XHigh | Self::Ultra => Self::Max,
+                other => other,
+            };
+        }
         if let Some(values) = Self::catalog_effort_values(provider, wire_model) {
             return Self::clamp_to_catalog_efforts(normalized, provider, wire_model, &values);
         }

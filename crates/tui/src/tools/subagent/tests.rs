@@ -12315,6 +12315,145 @@ fn spawn_child_client_inherits_session_provider_without_pin() {
     );
 }
 
+fn coexisting_ollama_cloud_config(active_provider: &str) -> crate::config::Config {
+    crate::config::Config {
+        provider: Some(active_provider.to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            ollama: crate::config::ProviderConfig {
+                api_key: Some("legacy-cloud-inline-key".to_string()),
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                model: Some("legacy-cloud-model".to_string()),
+                ..Default::default()
+            },
+            ollama_cloud: crate::config::ProviderConfig {
+                api_key: Some("explicit-cloud-inline-key".to_string()),
+                base_url: Some(crate::config::DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()),
+                model: Some("explicit-cloud-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn legacy_ollama_cloud_session_reuses_only_the_legacy_pin() {
+    let config = coexisting_ollama_cloud_config("ollama");
+    let client = DeepSeekClient::new(&config).expect("legacy Cloud session client");
+    let mut runtime = stub_runtime().with_api_config(config);
+    runtime.client = client;
+
+    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
+    let legacy_binding =
+        child_provider_binding(&runtime, Some(&legacy)).expect("legacy pin reuses session");
+    assert!(std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("session config"),
+        legacy_binding.api_config.as_ref().expect("child config")
+    ));
+
+    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
+    let explicit_binding = child_provider_binding(&runtime, Some(&explicit))
+        .expect("explicit Cloud pin builds its own route");
+    let explicit_config = explicit_binding.api_config.as_ref().expect("scoped config");
+    assert!(!std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("session config"),
+        explicit_config
+    ));
+    assert!(!explicit_config.migrated_legacy_ollama_cloud_route);
+    assert_eq!(explicit_config.default_model(), "explicit-cloud-model");
+}
+
+#[test]
+fn scoped_legacy_ollama_cloud_child_does_not_capture_an_explicit_cloud_pin() {
+    let config = coexisting_ollama_cloud_config("ollama");
+    let identity = config
+        .resolve_provider_identity("ollama")
+        .expect("legacy Cloud identity");
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(&identity);
+    assert!(scoped.migrated_legacy_ollama_cloud_route);
+    assert_eq!(
+        scoped
+            .deepseek_api_key()
+            .expect("scoped child reads the legacy credential"),
+        "legacy-cloud-inline-key"
+    );
+
+    let client = DeepSeekClient::new(&scoped).expect("scoped legacy Cloud child client");
+    let mut runtime = stub_runtime().with_api_config(scoped);
+    runtime.client = client;
+
+    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
+    let legacy_binding =
+        child_provider_binding(&runtime, Some(&legacy)).expect("nested legacy pin reuses child");
+    assert!(std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("child config"),
+        legacy_binding.api_config.as_ref().expect("nested config")
+    ));
+
+    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
+    let explicit_binding = child_provider_binding(&runtime, Some(&explicit))
+        .expect("nested explicit Cloud pin builds its own route");
+    let explicit_config = explicit_binding.api_config.as_ref().expect("scoped config");
+    assert!(!std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("child config"),
+        explicit_config
+    ));
+    assert!(!explicit_config.migrated_legacy_ollama_cloud_route);
+    assert_eq!(explicit_config.default_model(), "explicit-cloud-model");
+    assert_eq!(
+        explicit_config
+            .deepseek_api_key()
+            .expect("explicit pin reads the first-class credential"),
+        "explicit-cloud-inline-key"
+    );
+}
+
+#[test]
+fn explicit_ollama_cloud_session_reuses_only_the_explicit_pin() {
+    let config = coexisting_ollama_cloud_config("ollama-cloud");
+    let client = DeepSeekClient::new(&config).expect("explicit Cloud session client");
+    let mut runtime = stub_runtime().with_api_config(config);
+    runtime.client = client;
+
+    let explicit = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
+    let explicit_binding =
+        child_provider_binding(&runtime, Some(&explicit)).expect("explicit pin reuses session");
+    assert!(std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("session config"),
+        explicit_binding.api_config.as_ref().expect("child config")
+    ));
+
+    let legacy = member_pinning_provider("ollama", "legacy-cloud-model");
+    let legacy_binding =
+        child_provider_binding(&runtime, Some(&legacy)).expect("legacy pin builds its own route");
+    let legacy_config = legacy_binding.api_config.as_ref().expect("scoped config");
+    assert!(!std::sync::Arc::ptr_eq(
+        runtime.api_config.as_ref().expect("session config"),
+        legacy_config
+    ));
+    assert!(legacy_config.migrated_legacy_ollama_cloud_route);
+    assert_eq!(legacy_config.default_model(), "legacy-cloud-model");
+}
+
+#[test]
+fn ollama_cloud_pin_without_config_fails_closed_on_unknown_provenance() {
+    let config = coexisting_ollama_cloud_config("ollama-cloud");
+    let client = DeepSeekClient::new(&config).expect("explicit Cloud session client");
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.api_config = None;
+
+    assert!(!provider_pin_matches_session(&runtime, "ollama-cloud"));
+    let member = member_pinning_provider("ollama-cloud", "explicit-cloud-model");
+    let err = match child_client_for_member(&runtime, Some(&member)) {
+        Ok(_) => panic!("a Cloud pin with unknown provenance must not reuse the session client"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("Config was not threaded"), "{err}");
+}
+
 #[test]
 fn spawn_child_client_fails_closed_when_pinned_provider_unavailable() {
     // Defense in depth (#4093): if the pinned provider's client cannot be built

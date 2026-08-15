@@ -838,6 +838,9 @@ pub(crate) fn preflight_route(
     Ok(PreflightedRoute {
         member_id: member_id.to_string(),
         provider_id: identity.key.clone(),
+        provider_config_id: identity
+            .migrated_legacy_ollama_cloud_route
+            .then(|| provider.trim().to_string()),
         provider_kind: if identity.provider == ApiProvider::OllamaCloud {
             identity.provider.as_str().to_string()
         } else {
@@ -865,7 +868,7 @@ pub(crate) fn preflight_route(
 /// would create two objects that could drift apart.
 fn validate_route_client(route: &PreflightedRoute, config: &Config) -> Result<(), String> {
     let mut scoped = config.clone();
-    let identity = config.resolve_provider_identity(&route.provider_id)?;
+    let identity = config.resolve_provider_identity(route.provider_config_id())?;
     scoped.scope_to_provider_identity(&identity);
     crate::client::DeepSeekClient::new(&scoped)
         .map(|_| ())
@@ -946,7 +949,7 @@ impl LiveFleetRouter {
         })?;
 
         let identity = config
-            .resolve_provider_identity(route.provider_id.trim())
+            .resolve_provider_identity(route.provider_config_id())
             .map_err(|detail| RouterBindError {
                 reason: format!(
                     "reasoning router provider `{}` did not resolve: {detail}",
@@ -1637,7 +1640,7 @@ fn exact_member_profile(
     );
     let provider = route.map_or_else(
         || member.route.provider.clone(),
-        |route| route.provider_id.clone(),
+        |route| route.provider_config_id().to_string(),
     );
 
     let profile = codewhale_config::FleetProfile {
@@ -1855,6 +1858,7 @@ fn test_route(
     PreflightedRoute {
         member_id: member.to_string(),
         provider_id: provider.to_string(),
+        provider_config_id: None,
         provider_kind: provider.to_string(),
         declared_model: model.to_string(),
         wire_model: model.to_string(),
@@ -3034,6 +3038,7 @@ permissions = "read_only"
         )
         .expect("official Cloud route");
         assert_eq!(cloud_route.provider_id, "ollama-cloud");
+        assert_eq!(cloud_route.provider_config_id.as_deref(), Some("ollama"));
         assert_eq!(cloud_route.provider_kind, "ollama-cloud");
         assert_eq!(cloud_route.credential, CredentialReadiness::Configured);
         assert!(!cloud_route.endpoint.local);
@@ -3063,6 +3068,106 @@ permissions = "read_only"
         ));
         assert!(!custom_route.endpoint.local);
         assert!(custom_route.require_ready().is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_ollama_cloud_fleet_start_builds_clients_from_the_frozen_source_route() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("isolated credential home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _cloud_env = crate::test_support::EnvVarGuard::remove("OLLAMA_CLOUD_API_KEY");
+        let _official_env = crate::test_support::EnvVarGuard::remove("OLLAMA_API_KEY");
+        codewhale_secrets::Secrets::auto_detect()
+            .set("ollama", "legacy-cloud-fleet-key")
+            .expect("seed released Ollama Cloud slot");
+
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                ollama: crate::config::ProviderConfig {
+                    base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                    model: Some(crate::config::DEFAULT_OLLAMA_CLOUD_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let document = FleetDocument::parse(&format!(
+            r#"
+name = "glm-pair"
+schema = "exact"
+
+[[members]]
+id = "cloud-worker"
+role = "builder"
+provider = "ollama"
+model = "{}"
+reasoning = "medium"
+permissions = "read_only"
+"#,
+            crate::config::DEFAULT_OLLAMA_CLOUD_MODEL
+        ))
+        .expect("legacy Cloud fleet parses");
+
+        // `capture` is the real Workflow-start path: it preflights readiness,
+        // constructs every worker client, and freezes the run-scoped roster.
+        let workflow = ExactFleetWorkflow::capture(
+            &document,
+            id(),
+            "2026-08-14T00:00:00Z",
+            Some(&config),
+            &[],
+        )
+        .expect("legacy Cloud fleet starts");
+        let route = workflow
+            .preflight
+            .worker("cloud-worker")
+            .expect("preflighted worker");
+        assert_eq!(route.provider_id, "ollama-cloud");
+        assert_eq!(route.provider_config_id.as_deref(), Some("ollama"));
+        assert_eq!(
+            workflow
+                .roster()
+                .get("cloud-worker")
+                .and_then(|profile| profile.profile.provider.as_deref()),
+            Some("ollama"),
+            "the child pin must rebuild the legacy table/slot even though receipts are canonical"
+        );
+
+        let binding = workflow
+            .bind_member(Some("cloud-worker"), None, full_session())
+            .expect("worker binds");
+        let launch = workflow
+            .route_admitted_task(&binding, "verify the frozen Cloud route")
+            .await
+            .expect("manual-tier launch needs no provider call");
+        assert_eq!(launch.provider, "ollama-cloud");
+        assert_eq!(launch.receipt.provider, "ollama-cloud");
+
+        let router_profile = ReasoningRouterProfile::parse(&format!(
+            r#"
+name = "legacy-cloud-router"
+schema = "reasoning_router"
+provider = "ollama"
+model = "{}"
+call_reasoning = "low"
+"#,
+            crate::config::DEFAULT_OLLAMA_CLOUD_MODEL
+        ))
+        .expect("legacy Cloud router profile parses");
+        let captured =
+            CapturedReasoningRouter::from_profile(&router_profile, "workspace".to_string());
+        let live = LiveFleetRouter::bind(&captured, &config)
+            .expect("legacy Cloud Router binds its source table and secret");
+        assert_eq!(live.route.provider_id, "ollama-cloud");
+        assert_eq!(live.route.provider_config_id.as_deref(), Some("ollama"));
+        assert_eq!(live.client.api_provider(), ApiProvider::OllamaCloud);
+        assert_eq!(
+            live.client.base_url(),
+            codewhale_config::provider::OLLAMA_CLOUD_BASE_URL
+        );
     }
 
     /// A tier label is a selector concept; what a request may carry is a

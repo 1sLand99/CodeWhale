@@ -11285,7 +11285,8 @@ fn persisted_legacy_ollama_cloud_receipts_upgrade_only_on_exact_live_route() {
             .expect("exact released tuple migrates");
         assert_eq!(identity.provider, ApiProvider::OllamaCloud);
         assert_eq!(identity.key, "ollama-cloud");
-        assert_eq!(identity.exact_id.as_deref(), Some("ollama-cloud"));
+        assert_eq!(identity.exact_id.as_deref(), Some("ollama"));
+        assert!(identity.migrated_legacy_ollama_cloud_route);
     }
 
     let neighbor = Config {
@@ -11314,6 +11315,37 @@ fn persisted_legacy_ollama_cloud_receipts_upgrade_only_on_exact_live_route() {
         .expect("new receipt remains first-class cloud identity");
     assert_eq!(identity.provider, ApiProvider::OllamaCloud);
     assert_eq!(identity.key, "ollama-cloud");
+    assert_eq!(identity.exact_id.as_deref(), Some("ollama-cloud"));
+    assert!(!identity.migrated_legacy_ollama_cloud_route);
+
+    let coexisting = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ollama_cloud: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let explicit = coexisting
+        .resolve_persisted_provider_identity(Some("ollama-cloud"), Some("ollama-cloud"))
+        .expect("explicit receipt stays on the first-class route");
+    assert!(!explicit.migrated_legacy_ollama_cloud_route);
+    assert_eq!(explicit.exact_id.as_deref(), Some("ollama-cloud"));
+
+    let mut explicit_live = coexisting.clone();
+    explicit_live.provider = Some("ollama-cloud".to_string());
+    let migrated = explicit_live
+        .resolve_persisted_provider_identity(Some("ollama-cloud"), Some("ollama"))
+        .expect("legacy receipt retains its source route after a live provider switch");
+    assert!(migrated.migrated_legacy_ollama_cloud_route);
+    assert_eq!(migrated.exact_id.as_deref(), Some("ollama"));
 }
 
 #[test]

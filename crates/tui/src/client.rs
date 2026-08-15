@@ -3439,10 +3439,7 @@ pub(super) fn apply_reasoning_effort(
                 body["think"] = json!(true);
             }
             ApiProvider::OllamaCloud => {
-                // Ollama's OpenAI-compatible chat wire documents only
-                // none/low/medium/high. Preserve Codewhale's strongest tier
-                // by clamping `max` to the strongest accepted value.
-                body["reasoning_effort"] = json!("high");
+                body["reasoning_effort"] = json!("max");
             }
             ApiProvider::Anthropic
             | ApiProvider::DeepseekAnthropic
@@ -4097,48 +4094,55 @@ mod tests {
                     "total_tokens": 2
                 }
             })))
-            .expect(1)
+            .expect(5)
             .mount(&server)
             .await;
 
         let client = ollama_cloud_request_boundary_client(server.uri());
-        client
-            .create_message(MessageRequest {
-                model: "gpt-oss:120b".to_string(),
-                messages: vec![Message {
-                    role: "user".to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: "Ollama Cloud request boundary".to_string(),
-                        cache_control: None,
+        for requested in ["off", "low", "medium", "high", "max"] {
+            client
+                .create_message(MessageRequest {
+                    model: "gpt-oss:120b".to_string(),
+                    messages: vec![Message {
+                        role: "user".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "Ollama Cloud request boundary".to_string(),
+                            cache_control: None,
+                        }],
                     }],
-                }],
-                max_tokens: 64,
-                system: None,
-                tools: None,
-                tool_choice: None,
-                metadata: None,
-                thinking: None,
-                reasoning_effort: Some("medium".to_string()),
-                stream: Some(false),
-                temperature: None,
-                top_p: None,
-            })
-            .await
-            .expect("Ollama Cloud request succeeds");
+                    max_tokens: 64,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: Some(requested.to_string()),
+                    stream: Some(false),
+                    temperature: None,
+                    top_p: None,
+                })
+                .await
+                .expect("Ollama Cloud request succeeds");
+        }
 
         let requests = server.received_requests().await.expect("recorded request");
-        assert_eq!(requests.len(), 1);
-        let body: Value = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
-        assert_eq!(body["model"], "gpt-oss:120b");
-        assert_eq!(body["reasoning_effort"], "medium");
-        assert!(
-            body.get("think").is_none(),
-            "native Ollama field leaked: {body}"
-        );
-        assert!(
-            body.get("thinking").is_none(),
-            "foreign field leaked: {body}"
-        );
+        assert_eq!(requests.len(), 5);
+        for (request, expected) in requests
+            .iter()
+            .zip(["none", "low", "medium", "high", "max"])
+        {
+            let body: Value = serde_json::from_slice(&request.body).expect("captured request JSON");
+            assert_eq!(body["model"], "gpt-oss:120b");
+            assert_eq!(body["reasoning_effort"], expected);
+            assert!(
+                body.get("think").is_none(),
+                "native Ollama field leaked: {body}"
+            );
+            assert!(
+                body.get("thinking").is_none(),
+                "foreign field leaked: {body}"
+            );
+        }
     }
 
     // This synchronous guard deliberately spans every await: the assertions
@@ -7910,7 +7914,7 @@ mod tests {
             ("low", "low"),
             ("medium", "medium"),
             ("high", "high"),
-            ("max", "high"),
+            ("max", "max"),
         ] {
             let mut body = json!({});
             apply_reasoning_effort(&mut body, Some(effort), ApiProvider::OllamaCloud);

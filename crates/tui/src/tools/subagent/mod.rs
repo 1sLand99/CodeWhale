@@ -2597,7 +2597,7 @@ impl SubAgentRuntime {
         if provider_id.is_empty() {
             return Err("provider pin was blank".to_string());
         }
-        let identity = api_config.resolve_provider_identity(provider_id)?;
+        let identity = api_config.resolve_provider_pin_identity(provider_id)?;
         let mut provider_config = (**api_config).clone();
         // EPIC #2608: the provider is taken verbatim from the profile pin
         // (built-in id or configured custom id), never inferred from the model
@@ -8107,18 +8107,25 @@ fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) ->
     let provider_id = provider_id.trim();
     let session_provider = runtime.client.api_provider();
     if let Some(config) = runtime.api_config.as_ref() {
-        let Ok(pinned) = config.resolve_provider_identity(provider_id) else {
+        let Ok(pinned) = config.resolve_provider_pin_identity(provider_id) else {
             return false;
         };
-        let active_identity = config.provider_identity_for(session_provider);
-        if pinned.provider == crate::config::ApiProvider::Custom
-            || session_provider == crate::config::ApiProvider::Custom
-        {
-            return pinned.provider == session_provider && pinned.key == active_identity;
-        }
-        return pinned.provider == session_provider;
+        let Ok(active) = config.active_provider_identity(session_provider) else {
+            return false;
+        };
+        return pinned.provider == active.provider
+            && pinned.key == active.key
+            && pinned.migrated_legacy_ollama_cloud_route
+                == active.migrated_legacy_ollama_cloud_route;
     }
     if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
+        // A Cloud client alone cannot reveal whether it was built from the
+        // explicit Cloud table/slot or the released legacy Ollama tuple. With
+        // no Config to prove provenance, a provider pin must not guess that
+        // either identity is reusable.
+        if session_provider == crate::config::ApiProvider::OllamaCloud {
+            return false;
+        }
         return provider == session_provider;
     }
     false
