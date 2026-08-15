@@ -156,12 +156,14 @@ enum CustomProviderField {
 }
 
 /// Which subset of `rows` the list stage shows (#3830). `Configured` is the
-/// default; `A` toggles to `Catalog` to add a new provider or look at one
-/// that hasn't been set up yet.
+/// normal `/provider` default; first-run onboarding opens `Local` so a user
+/// can start with Ollama, SGLang, or vLLM without walking through cloud-key
+/// setup. `A` still exposes the full catalog and `L` returns to local routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderListView {
     Configured,
     Catalog,
+    Local,
 }
 
 pub struct ProviderPickerView {
@@ -781,6 +783,11 @@ impl ProviderDashboardRow {
                 format!("{} | {}", self.readiness.label(), self.auth_status.label())
             }
             ProviderListView::Catalog => self.compact_hint(),
+            ProviderListView::Local => format!(
+                "local · no cloud key · {} · {}",
+                compact_base_url(&self.base_url),
+                self.default_route.logical_model
+            ),
         }
     }
 
@@ -1707,7 +1714,11 @@ impl ProviderPickerView {
         key_entry_for_missing_auth: bool,
     ) -> Self {
         let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
-        picker.view = ProviderListView::Catalog;
+        picker.view = if !key_entry_for_missing_auth && target.is_none() {
+            ProviderListView::Local
+        } else {
+            ProviderListView::Catalog
+        };
         picker.setup_mode = true;
         if let Some(target) = target
             && let Some(idx) = picker.rows.iter().position(|row| row.provider == target)
@@ -1716,6 +1727,16 @@ impl ProviderPickerView {
             if key_entry_for_missing_auth && !picker.selected_has_key() {
                 picker.begin_setup();
             }
+        } else if picker.view == ProviderListView::Local
+            && let Some(idx) = picker
+                .rows
+                .iter()
+                .position(|row| row.provider == ApiProvider::Ollama)
+        {
+            // Ollama is the broadest beginner path and uses the standard local
+            // OpenAI-compatible endpoint. This only changes the first-run
+            // highlight; nothing is persisted until the user presses Enter.
+            picker.selected_idx = idx;
         }
         picker
     }
@@ -1753,6 +1774,7 @@ impl ProviderPickerView {
         match self.view {
             ProviderListView::Catalog => true,
             ProviderListView::Configured => self.rows[idx].is_configured,
+            ProviderListView::Local => self.rows[idx].provider.is_self_hosted(),
         }
     }
 
@@ -1771,10 +1793,27 @@ impl ProviderPickerView {
         self.view = match self.view {
             ProviderListView::Configured => ProviderListView::Catalog,
             ProviderListView::Catalog => ProviderListView::Configured,
+            ProviderListView::Local => ProviderListView::Catalog,
         };
         if !self.rows.is_empty() && !self.row_visible(self.selected_idx) {
             self.selected_idx = (0..self.rows.len())
                 .find(|idx| self.row_visible(*idx))
+                .unwrap_or(0);
+        }
+    }
+
+    /// Show only the built-in keyless/self-hosted routes. Kept separate from
+    /// `Configured`: merely supporting a local route does not mean the user
+    /// configured it, while first-run should still make those routes obvious.
+    fn show_local_routes(&mut self) {
+        self.view = ProviderListView::Local;
+        self.query.clear();
+        if !self.rows.is_empty() && !self.row_visible(self.selected_idx) {
+            self.selected_idx = self
+                .rows
+                .iter()
+                .position(|row| row.provider == ApiProvider::Ollama)
+                .or_else(|| (0..self.rows.len()).find(|idx| self.row_visible(*idx)))
                 .unwrap_or(0);
         }
     }
@@ -2238,12 +2277,14 @@ impl ProviderPickerView {
             (true, ProviderListView::Catalog) => {
                 format!(" Provider setup · all{} ", catalog_freshness_title_suffix())
             }
+            (true, ProviderListView::Local) => " Local models · no cloud key ".to_string(),
             (false, ProviderListView::Configured) => {
                 format!(" Provider{} ", catalog_freshness_title_suffix())
             }
             (false, ProviderListView::Catalog) => {
                 format!(" Provider · all{} ", catalog_freshness_title_suffix())
             }
+            (false, ProviderListView::Local) => " Provider · local only ".to_string(),
         };
         let outer = Block::default()
             .title(Line::from(Span::styled(
@@ -2261,6 +2302,7 @@ impl ProviderPickerView {
         let view_action = match self.view {
             ProviderListView::Configured => self.tr(MessageId::PickerActionBrowseAll),
             ProviderListView::Catalog => self.tr(MessageId::PickerActionConfigured),
+            ProviderListView::Local => self.tr(MessageId::PickerActionBrowseAll),
         };
         let search_active = !self.query.trim().is_empty();
         // The action footer moves into the body so it wraps instead of clipping
@@ -2283,6 +2325,7 @@ impl ProviderPickerView {
                     ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
+                    ActionHint::new("L", "local only"),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
                     ActionHint::new("S", "SenseNova"),
@@ -2297,6 +2340,7 @@ impl ProviderPickerView {
                     ActionHint::new("a-z", self.tr(MessageId::PickerActionJump)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action),
+                    ActionHint::new("L", "local only"),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
                     ActionHint::new("S", "SenseNova"),
@@ -3421,6 +3465,14 @@ impl ModalView for ProviderPickerView {
                         && c.eq_ignore_ascii_case(&'a') =>
                 {
                     self.toggle_view();
+                    ViewAction::None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && self.query.is_empty()
+                        && c.eq_ignore_ascii_case(&'l') =>
+                {
+                    self.show_local_routes();
                     ViewAction::None
                 }
                 KeyCode::Char(c)
@@ -5947,6 +5999,74 @@ mod tests {
             picker.visible_row_count(),
             picker.rows.len(),
             "onboarding must show the whole provider catalog"
+        );
+    }
+
+    #[test]
+    fn first_run_onboarding_starts_with_local_models_and_no_cloud_rows() {
+        let _lock = crate::test_support::lock_test_env();
+        let config = Config::default();
+        let mut picker =
+            ProviderPickerView::new_for_onboarding(ApiProvider::Deepseek, None, &config, None);
+
+        assert_eq!(picker.stage, Stage::List);
+        assert_eq!(picker.view, ProviderListView::Local);
+        assert_eq!(picker.selected_provider(), ApiProvider::Ollama);
+
+        let visible = picker
+            .filtered_rows()
+            .into_iter()
+            .map(|(_, row)| row.provider)
+            .collect::<Vec<_>>();
+        assert!(!visible.is_empty());
+        assert!(visible.iter().all(|provider| provider.is_self_hosted()));
+        assert!(visible.contains(&ApiProvider::Ollama));
+        assert!(visible.contains(&ApiProvider::Sglang));
+        assert!(visible.contains(&ApiProvider::Vllm));
+        assert!(!visible.contains(&ApiProvider::OllamaCloud));
+        assert!(!visible.contains(&ApiProvider::Deepseek));
+
+        let rendered = render_text(&picker, 100, 28);
+        assert!(
+            rendered.contains("Local models · no cloud key"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("local · no cloud key"), "{rendered}");
+
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied {
+                provider,
+                provider_id,
+            }) => {
+                assert_eq!(provider, ApiProvider::Ollama);
+                assert_eq!(provider_id, None);
+            }
+            other => panic!("expected keyless local provider apply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_shortcut_filters_cloud_rows_from_the_catalog() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new_for_onboarding(
+            ApiProvider::Deepseek,
+            Some(ApiProvider::Deepseek),
+            &config,
+            None,
+        );
+        assert_eq!(picker.view, ProviderListView::Catalog);
+
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('l'))),
+            ViewAction::None
+        ));
+        assert_eq!(picker.view, ProviderListView::Local);
+        assert_eq!(picker.selected_provider(), ApiProvider::Ollama);
+        assert!(
+            picker
+                .filtered_rows()
+                .into_iter()
+                .all(|(_, row)| row.provider.is_self_hosted())
         );
     }
 
