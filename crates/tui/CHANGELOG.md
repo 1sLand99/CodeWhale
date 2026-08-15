@@ -11,9 +11,9 @@ _Nothing yet._
 
 ## [0.9.8] - 2026-08-14
 
-Remaining web settings polish moves to v0.9.9. Prefab third-party
-templates that have a published OpenAI-compatible host ship here
-(#5350).
+Codewhale v0.9.8 ships the remaining assigned finish. Remaining web
+settings polish moves to v0.9.9. Prefab third-party templates that have
+a published OpenAI-compatible host ship here (#5350).
 
 ### Changed
 
