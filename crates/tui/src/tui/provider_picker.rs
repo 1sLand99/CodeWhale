@@ -66,6 +66,13 @@ use std::sync::OnceLock;
 const DS4_PROVIDER_ID: &str = "ds4";
 const DS4_BASE_URL: &str = "http://127.0.0.1:8000/v1";
 const DS4_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+/// SenseTime SenseNova OpenAI-compatible host (#5350). Custom form only —
+/// not a first-class provider. Agnes has no published URL, so it has no
+/// preset. OpenCode Zen/Go stay first-class rows.
+const SENSENOVA_PROVIDER_ID: &str = "sensenova";
+const SENSENOVA_BASE_URL: &str = "https://token.sensenova.cn/v1";
+const SENSENOVA_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+const SENSENOVA_API_KEY_ENV: &str = "SENSENOVA_API_KEY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -2111,6 +2118,15 @@ impl ProviderPickerView {
         self.custom_provider_api_key_env.clear();
     }
 
+    fn enter_sensenova_form(&mut self) {
+        self.stage = Stage::CustomForm;
+        self.custom_provider_field = CustomProviderField::ApiKeyEnv;
+        self.custom_provider_id = SENSENOVA_PROVIDER_ID.to_string();
+        self.custom_provider_base_url = SENSENOVA_BASE_URL.to_string();
+        self.custom_provider_model = SENSENOVA_DEFAULT_MODEL.to_string();
+        self.custom_provider_api_key_env = SENSENOVA_API_KEY_ENV.to_string();
+    }
+
     fn custom_form_field_mut(&mut self) -> &mut String {
         match self.custom_provider_field {
             CustomProviderField::Name => &mut self.custom_provider_id,
@@ -2268,6 +2284,7 @@ impl ProviderPickerView {
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
+                    ActionHint::new("S", "SenseNova"),
                 ],
             )
         } else {
@@ -2281,6 +2298,7 @@ impl ProviderPickerView {
                     ActionHint::new("A", view_action),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
+                    ActionHint::new("S", "SenseNova"),
                     ActionHint::new("R", self.tr(MessageId::PickerActionEditKey)),
                     ActionHint::new("X", self.tr(MessageId::ProviderExternalActionRevoke)),
                     ActionHint::new("M", self.tr(MessageId::PickerActionModels)),
@@ -3169,7 +3187,7 @@ impl ProviderPickerView {
             .split(content);
 
         Paragraph::new(Line::from(Span::styled(
-            "OpenAI-compatible endpoint. Store an env var name here, not a raw key.",
+            "OpenAI-compatible endpoint. Store an env var name, not a raw key. OpenCode Zen/Go are first-class rows. SenseNova: S. Agnes has no published URL.",
             Style::default().fg(palette::TEXT_MUTED),
         )))
         .render(layout[0], buf);
@@ -3418,6 +3436,14 @@ impl ModalView for ProviderPickerView {
                         && c.eq_ignore_ascii_case(&'d') =>
                 {
                     self.enter_ds4_form();
+                    ViewAction::None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && self.query.is_empty()
+                        && c.eq_ignore_ascii_case(&'s') =>
+                {
+                    self.enter_sensenova_form();
                     ViewAction::None
                 }
                 // Jump to the `/model` picker pre-filtered to this provider
@@ -5430,6 +5456,24 @@ mod tests {
             }
             other => panic!("expected custom provider submit event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sensenova_preset_fills_published_openai_host() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('s'))),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::CustomForm);
+        assert_eq!(picker.custom_provider_id, "sensenova");
+        assert_eq!(
+            picker.custom_provider_base_url,
+            "https://token.sensenova.cn/v1"
+        );
+        assert_eq!(picker.custom_provider_model, "deepseek-v4-flash");
+        assert_eq!(picker.custom_provider_api_key_env, "SENSENOVA_API_KEY");
     }
 
     #[test]
