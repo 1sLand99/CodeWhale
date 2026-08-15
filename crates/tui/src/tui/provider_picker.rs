@@ -1175,6 +1175,7 @@ fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoni
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn auth_status_for(
     provider: ApiProvider,
     base_url: &str,

@@ -2655,7 +2655,7 @@ impl SubAgentRuntime {
     fn foreground_child_registration(&self) -> Option<ForegroundChildRegistration> {
         (self.spawn_depth == 1)
             .then_some(())
-            .and_then(|_| self.foreground_children.as_ref())
+            .and(self.foreground_children.as_ref())
             .map(|registry| registry.register(self.cancel_token.clone()))
     }
 

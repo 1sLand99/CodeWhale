@@ -2023,14 +2023,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 "keep_footer" => app.mini_window.keep_footer = value,
                 _ => unreachable!("mini_window field matched above"),
             }
-            if persist {
-                if let Err(err) = crate::config_persistence::persist_mini_window_bool_key(
+            if persist
+                && let Err(err) = crate::config_persistence::persist_mini_window_bool_key(
                     app.config_path.as_deref(),
                     field,
                     value,
-                ) {
-                    return CommandResult::error(format!("Failed to persist: {err}"));
-                }
+                )
+            {
+                return CommandResult::error(format!("Failed to persist: {err}"));
             }
             app.needs_redraw = true;
         }

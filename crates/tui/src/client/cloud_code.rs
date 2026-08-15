@@ -17,6 +17,7 @@ use super::PreparedOutboundRequest;
 use super::stream_entry;
 
 /// Model id advertised only after a live cloud-code turn succeeds.
+#[cfg(test)]
 pub const GEMINI_37_FLASH: &str = "gemini-3.7-flash";
 
 /// Build the cloud-code streaming URL from the configured `/v1internal` base.

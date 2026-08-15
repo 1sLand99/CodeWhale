@@ -270,12 +270,11 @@ fn install(app: &mut App, catalog_name: &str, candidate_name: &str) -> CommandRe
 }
 
 fn resolve_spec(source_path: &str, source: &MarketplaceSourceSpec, spec: &str) -> String {
-    if let MarketplaceSourceSpec::LocalPath { path } = source {
-        if path.is_relative() {
-            if let Some(dir) = Path::new(source_path).parent() {
-                return format!("path:{}", dir.join(path).display());
-            }
-        }
+    if let MarketplaceSourceSpec::LocalPath { path } = source
+        && path.is_relative()
+        && let Some(dir) = Path::new(source_path).parent()
+    {
+        return format!("path:{}", dir.join(path).display());
     }
     spec.to_string()
 }

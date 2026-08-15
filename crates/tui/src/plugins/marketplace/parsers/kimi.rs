@@ -205,15 +205,15 @@ fn parse_kimi_entry(
         entry_diags.push(diag);
     }
     let tier = tier_raw.map(CatalogTier::parse).unwrap_or_default();
-    if let Some(raw) = tier_raw {
-        if !matches!(raw, "official" | "curated") {
-            entry_diags.push(MarketplaceDiagnostic::warning(
-                "UNKNOWN_TIER",
-                format!("Kimi tier `{raw}` is not documented; shown as community"),
-                Some(name.clone()),
-                Some(index),
-            ));
-        }
+    if let Some(raw) = tier_raw
+        && !matches!(raw, "official" | "curated")
+    {
+        entry_diags.push(MarketplaceDiagnostic::warning(
+            "UNKNOWN_TIER",
+            format!("Kimi tier `{raw}` is not documented; shown as community"),
+            Some(name.clone()),
+            Some(index),
+        ));
     }
     let (keywords, bad_keywords) = str_array_field(obj, "keywords");
     if let Some(diag) = bad_keywords {

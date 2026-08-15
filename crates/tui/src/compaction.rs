@@ -1297,8 +1297,7 @@ no replacement checkpoint was committed",
             quality_retry_used = true;
             *quality_retries = (*quality_retries).saturating_add(1);
             logging::warn(
-                "Compaction provider returned an unusable successful response; retrying once with the conservative handoff prompt"
-                    .to_string(),
+                "Compaction provider returned an unusable successful response; retrying once with the conservative handoff prompt",
             );
             let Some(instruction) = request_messages.last_mut() else {
                 return Err(error.context(

@@ -685,12 +685,12 @@ fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
             continue;
         };
         for call in tool_calls {
-            if let Some(extra) = call.get_mut("extra_content") {
-                if let Some(obj) = extra.as_object_mut() {
-                    obj.remove("google");
-                    if obj.is_empty() {
-                        call.as_object_mut().map(|c| c.remove("extra_content"));
-                    }
+            if let Some(extra) = call.get_mut("extra_content")
+                && let Some(obj) = extra.as_object_mut()
+            {
+                obj.remove("google");
+                if obj.is_empty() {
+                    call.as_object_mut().map(|c| c.remove("extra_content"));
                 }
             }
         }
