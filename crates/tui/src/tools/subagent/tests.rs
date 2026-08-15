@@ -2604,8 +2604,8 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     let tool = AgentTool::new(manager, stub_runtime());
     let description = tool.description();
 
-    assert!(description.contains("Start one focused background worker"));
-    assert!(description.contains("prompt is enough"));
+    assert!(description.contains("Start with action=start and prompt"));
+    assert!(description.contains("Read-only roles need no extra fields"));
     assert!(description.contains("multiple starts"));
     assert!(description.contains("agents/list"));
     assert!(description.contains("agents/wait"));
@@ -10490,6 +10490,9 @@ fn subagent_registry_with_mcp_action(auto_approve: bool) -> SubAgentToolRegistry
 
 #[tokio::test]
 async fn child_write_tool_fails_closed_outside_registered_scope() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempdir().expect("isolated CODEWHALE_HOME");
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
     std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
