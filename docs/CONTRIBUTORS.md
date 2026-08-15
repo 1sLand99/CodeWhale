@@ -28,6 +28,24 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.8 — marketplace, Google, Ollama Cloud</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[EvanProgramming](https://github.com/EvanProgramming)** — webhook hook
+  sink no longer panics when its HTTP client fails to build (#5381); session-index
+  JSONL writes are serialized so concurrent stores cannot drop an append
+  (#5382)
+- **[Lstarsky0](https://github.com/Lstarsky0)** — session peek hides internal
+  runtime events (#5376); thinking-ladder tests re-pinned (#5378);
+  provider-count follow-ups (#5383/#5384); macOS agy fixture
+  canonicalization (#5392); website zh-Hans 宪章 terminology (#5397);
+  regenerated website facts harvested and corrected so Google and Ollama
+  Cloud are listed and Antigravity is not advertised as a route (#5398)
+
+</details>
+
+<details>
 <summary><strong>v0.9.7 — the catalog stays ordinary</strong></summary>
 
 **Merged or adapted contributions**
