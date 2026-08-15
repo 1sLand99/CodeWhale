@@ -4,6 +4,8 @@
   --ink-1: #08111c;
   --ink-2: #0e1729;
   --ink-3: #182742;
+  --stage-surface: #0e1729;
+  --plate: rgba(22, 34, 56, 0.88);
   --line: rgba(122, 160, 230, 0.14);
   --line-strong: rgba(122, 160, 230, 0.25);
   --text: #f6f2e8;
@@ -67,10 +69,13 @@ summary:focus-visible {
 }
 
 .shell {
+  --visual-viewport-height: 100dvh;
+  --visual-viewport-offset-top: 0px;
   display: grid;
   grid-template-columns: var(--rail) minmax(0, 1fr);
   width: 100%;
-  height: 100%;
+  height: var(--visual-viewport-height);
+  min-height: 0;
   background: var(--ink-0);
 }
 
@@ -471,6 +476,7 @@ textarea::placeholder {
   grid-template-rows: 58px auto minmax(0, 1fr) auto auto;
   min-width: 0;
   min-height: 0;
+  background: var(--stage-surface);
 }
 
 .session-header {
@@ -483,7 +489,7 @@ textarea::placeholder {
   overflow: hidden;
   padding: 0 18px;
   border-bottom: 1px solid var(--line);
-  background: rgba(6, 12, 24, 0.92);
+  background: rgba(14, 23, 41, 0.94);
   backdrop-filter: blur(10px);
 }
 
@@ -514,11 +520,13 @@ textarea::placeholder {
 
 .session-facts {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   grid-column: auto;
   min-width: 0;
   gap: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
 .session-facts::-webkit-scrollbar {
@@ -571,6 +579,7 @@ textarea::placeholder {
   overscroll-behavior: contain;
   scroll-behavior: smooth;
   scrollbar-color: var(--ink-3) transparent;
+  background: var(--stage-surface);
 }
 
 .empty-state {
@@ -616,10 +625,9 @@ textarea::placeholder {
 .receipt-label {
   margin-bottom: 6px;
   color: var(--text-dim);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
 }
 
 .message-body {
@@ -629,8 +637,8 @@ textarea::placeholder {
   border-radius: 0;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.68;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -641,10 +649,11 @@ textarea::placeholder {
   margin-left: auto;
   padding: 10px 14px;
   border-radius: 17px 17px 5px 17px;
-  background: rgba(24, 39, 66, 0.76);
+  background: var(--plate);
+  font-size: 13px;
 }
 
-.message.user .message-label { text-align: right; }
+.message.user .message-label { display: none; }
 
 .message.in-progress .message-body::after {
   content: "";
@@ -662,22 +671,45 @@ textarea::placeholder {
 }
 
 .receipt {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 8px;
   margin-top: -8px;
-  padding: 8px 10px;
-  border: 0;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
+  color: var(--text-dim);
 }
 
-.receipt.failed {
-  border-color: rgba(255, 134, 178, 0.46);
+.receipt-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--live);
+}
+
+.receipt.failed .receipt-dot {
+  background: var(--danger);
+}
+
+.receipt-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.receipt-copy strong {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 .receipt-summary {
-  color: var(--text-soft);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  color: var(--text-dim);
+  font-size: 10.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -797,14 +829,14 @@ textarea::placeholder {
 .composer-wrap {
   grid-area: composer;
   padding: 0 max(18px, calc((100% - 724px) / 2)) 16px;
-  background: linear-gradient(transparent, var(--ink-0) 24%);
+  background: linear-gradient(transparent, var(--stage-surface) 24%);
 }
 
 .composer {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(14, 23, 41, 0.94);
+  background: var(--plate);
   box-shadow: none;
 }
 
@@ -914,8 +946,11 @@ noscript {
 
   .rail {
     position: fixed;
-    inset: 0 auto 0 0;
+    top: var(--visual-viewport-offset-top);
+    bottom: auto;
+    left: 0;
     width: min(84vw, 292px);
+    height: var(--visual-viewport-height);
     transform: translateX(-102%);
     box-shadow: 24px 0 70px rgba(0, 0, 0, 0.45);
     transition: transform 160ms ease-out;
@@ -932,12 +967,15 @@ noscript {
 
   .rail-scrim {
     position: fixed;
-    inset: 0;
+    top: var(--visual-viewport-offset-top);
+    right: 0;
+    bottom: auto;
+    left: 0;
     z-index: 15;
     display: block;
     visibility: hidden;
     width: 100%;
-    height: 100%;
+    height: var(--visual-viewport-height);
     padding: 0;
     border: 0;
     opacity: 0;
@@ -986,9 +1024,16 @@ noscript {
 }
 
 @media (max-width: 430px) {
+  .session {
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  }
+
   .session-header {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 6px;
+    min-height: 82px;
+    padding-top: 6px;
+    padding-bottom: 5px;
   }
 
   .header-actions {
@@ -1007,7 +1052,22 @@ noscript {
   }
 
   .session-facts {
+    display: flex;
+    grid-column: 1 / -1;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-top: 2px;
+    scrollbar-width: none;
+  }
+
+  .session-facts .fact-chip[data-fact="workspace"],
+  .session-facts .fact-chip[data-fact="branch"] {
     display: none;
+  }
+
+  .session-facts .fact-chip:first-child:not([data-fact="workspace"]):not([data-fact="branch"]),
+  .session-facts .fact-chip[data-fact="model"] {
+    border-left: 0;
   }
 
   .composer-hint {
@@ -1016,6 +1076,32 @@ noscript {
 
   .composer-bar {
     justify-content: flex-end;
+  }
+}
+
+@media (pointer: coarse) {
+  .primary-button,
+  .quiet-button,
+  .send-button,
+  .icon-button,
+  .new-thread,
+  .thread-row,
+  .search-field,
+  .other-answer,
+  .rename-dialog input,
+  .answer-option,
+  .remember-field,
+  .receipt summary,
+  .reasoning summary {
+    min-height: 44px;
+  }
+
+  .answer-option,
+  .remember-field,
+  .receipt summary,
+  .reasoning summary {
+    display: flex;
+    align-items: center;
   }
 }
 

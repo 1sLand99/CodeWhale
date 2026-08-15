@@ -480,6 +480,7 @@ function appendItemDelta(state, itemId, payload) {
 function startBrowserClient() {
   const dom = {
     shell: document.querySelector("#app-shell"),
+    rail: document.querySelector("#thread-rail"),
     railOpen: document.querySelector("#rail-open"),
     railClose: document.querySelector("#rail-close"),
     railScrim: document.querySelector("#rail-scrim"),
@@ -507,6 +508,7 @@ function startBrowserClient() {
     peek: document.querySelector("#session-peek"),
     savedSessions: document.querySelector("#saved-sessions"),
     sessionList: document.querySelector("#session-list"),
+    session: document.querySelector(".session"),
   };
 
   const app = {
@@ -529,7 +531,11 @@ function startBrowserClient() {
     reconnectTimer: null,
     generation: 0,
     searchTimer: null,
+    railReturnFocus: null,
+    pendingAttentionFocus: "",
   };
+
+  const narrowRail = globalThis.matchMedia("(max-width: 800px)");
 
   function element(tag, className, text) {
     const created = document.createElement(tag);
@@ -538,9 +544,128 @@ function startBrowserClient() {
     return created;
   }
 
-  function closeRail() {
+  function setInert(element, inert) {
+    element.inert = inert;
+    if (inert) element.setAttribute("inert", "");
+    else element.removeAttribute("inert");
+  }
+
+  function applyDesktopRailAccessibility() {
     dom.shell.classList.remove("rail-visible");
-    dom.railOpen.focus({ preventScroll: true });
+    dom.rail.removeAttribute("aria-hidden");
+    dom.rail.removeAttribute("aria-modal");
+    dom.rail.removeAttribute("role");
+    dom.session.removeAttribute("aria-hidden");
+    setInert(dom.rail, false);
+    setInert(dom.session, false);
+    dom.railScrim.hidden = true;
+    dom.railOpen.setAttribute("aria-expanded", "false");
+    app.railReturnFocus = null;
+  }
+
+  function applyClosedMobileRailAccessibility() {
+    dom.shell.classList.remove("rail-visible");
+    dom.session.removeAttribute("aria-hidden");
+    setInert(dom.session, false);
+    dom.rail.setAttribute("role", "dialog");
+    dom.rail.setAttribute("aria-modal", "true");
+    dom.rail.setAttribute("aria-hidden", "true");
+    setInert(dom.rail, true);
+    dom.railScrim.hidden = true;
+    dom.railOpen.setAttribute("aria-expanded", "false");
+  }
+
+  function openRail() {
+    if (!narrowRail.matches) return;
+    app.railReturnFocus = document.activeElement;
+    dom.rail.setAttribute("role", "dialog");
+    dom.rail.setAttribute("aria-modal", "true");
+    dom.rail.setAttribute("aria-hidden", "false");
+    setInert(dom.rail, false);
+    dom.railScrim.hidden = false;
+    dom.shell.classList.add("rail-visible");
+    dom.railOpen.setAttribute("aria-expanded", "true");
+    dom.railClose.focus({ preventScroll: true });
+    dom.session.setAttribute("aria-hidden", "true");
+    setInert(dom.session, true);
+  }
+
+  function closeRail({ restoreFocus = true } = {}) {
+    if (!narrowRail.matches) {
+      applyDesktopRailAccessibility();
+      return;
+    }
+    dom.session.removeAttribute("aria-hidden");
+    setInert(dom.session, false);
+    const returnTarget = app.railReturnFocus?.isConnected
+      ? app.railReturnFocus
+      : dom.railOpen;
+    if (restoreFocus) returnTarget.focus({ preventScroll: true });
+    applyClosedMobileRailAccessibility();
+    app.railReturnFocus = null;
+
+    if (app.pendingAttentionFocus) {
+      const pendingKey = app.pendingAttentionFocus;
+      requestAnimationFrame(() => focusPendingAttention(pendingKey));
+    }
+  }
+
+  function syncRailAccessibility() {
+    if (!narrowRail.matches) {
+      applyDesktopRailAccessibility();
+      return;
+    }
+    if (dom.shell.classList.contains("rail-visible")) {
+      dom.rail.setAttribute("role", "dialog");
+      dom.rail.setAttribute("aria-modal", "true");
+      dom.rail.setAttribute("aria-hidden", "false");
+      setInert(dom.rail, false);
+      dom.session.setAttribute("aria-hidden", "true");
+      setInert(dom.session, true);
+      dom.railScrim.hidden = false;
+      dom.railOpen.setAttribute("aria-expanded", "true");
+      return;
+    }
+    if (dom.rail.contains(document.activeElement)) {
+      dom.railOpen.focus({ preventScroll: true });
+    }
+    applyClosedMobileRailAccessibility();
+  }
+
+  function syncVisualViewport() {
+    const viewport = globalThis.visualViewport;
+    const height = viewport?.height || globalThis.innerHeight;
+    const offsetTop = viewport?.offsetTop || 0;
+    if (Number.isFinite(height) && height > 0) {
+      dom.shell.style.setProperty("--visual-viewport-height", `${Math.round(height)}px`);
+    }
+    dom.shell.style.setProperty("--visual-viewport-offset-top", `${Math.max(0, Math.round(offsetTop))}px`);
+  }
+
+  function trapRailFocus(event) {
+    if (
+      event.key !== "Tab"
+      || !narrowRail.matches
+      || !dom.shell.classList.contains("rail-visible")
+    ) return false;
+    const focusable = [...dom.rail.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    )].filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    if (focusable.length === 0) return false;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dom.rail.contains(active))) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+      return true;
+    }
+    if (!event.shiftKey && (active === last || !dom.rail.contains(active))) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+      return true;
+    }
+    return false;
   }
 
   function setConnection(kind, message) {
@@ -784,6 +909,7 @@ function startBrowserClient() {
     dom.composerInput.value = restoreDraft(app.drafts, threadId);
     resizeComposer();
     renderThreadList();
+    renderSessionList();
     renderAll();
     closeRailIfNarrow();
     setConnection("", "Loading thread snapshot…");
@@ -899,8 +1025,6 @@ function startBrowserClient() {
     renderTranscript(preserveScroll);
     renderAttention();
     renderComposer();
-    renderThreadList();
-    renderSessionList();
     renderStreamCursor();
   }
 
@@ -936,6 +1060,7 @@ function startBrowserClient() {
 
   function factChip(label, value) {
     const chip = element("span", "fact-chip");
+    chip.dataset.fact = String(label || "").toLowerCase();
     chip.append(element("span", "", label));
     chip.append(element("strong", "", value));
     return chip;
@@ -943,24 +1068,68 @@ function startBrowserClient() {
 
   function renderTranscript(preserveScroll) {
     const wasNearBottom = dom.transcript.scrollHeight - dom.transcript.scrollTop - dom.transcript.clientHeight < 120;
-    dom.transcript.replaceChildren();
     if (!app.threadState.thread) {
-      dom.transcript.append(emptyState("Your local agent, in the browser.", "Create a thread or choose one from the rail. This client uses the same Runtime as the terminal."));
+      renderTranscriptEmpty(
+        "choose-thread",
+        "Your local agent, in the browser.",
+        "Create a thread or choose one from the rail. This client uses the same Runtime as the terminal.",
+      );
       return;
     }
     if (app.threadState.itemOrder.length === 0) {
-      dom.transcript.append(emptyState("Ready for a task.", "Send a message below. Model, mode, and permission posture come from the Runtime and are shown read-only above."));
+      renderTranscriptEmpty(
+        "ready",
+        "Ready for a task.",
+        "Send a message below. Model, mode, and permission posture come from the Runtime and are shown read-only above.",
+      );
       return;
     }
+
+    const selection = captureTranscriptSelection();
+    const existing = new Map(
+      [...dom.transcript.children]
+        .filter((node) => node.dataset.itemId)
+        .map((node) => [node.dataset.itemId, node]),
+    );
+    const desired = [];
     for (const itemId of app.threadState.itemOrder) {
       const item = app.threadState.items.get(itemId);
       if (!item) continue;
-      dom.transcript.append(renderItem(item));
+      let node = existing.get(itemId);
+      if (!node || !updateItemNode(node, item)) node = renderItem(item);
+      desired.push(node);
     }
+    reconcileChildren(dom.transcript, desired);
+    restoreTranscriptSelection(selection);
     if (!preserveScroll || wasNearBottom) {
       requestAnimationFrame(() => {
         dom.transcript.scrollTop = dom.transcript.scrollHeight;
       });
+    }
+  }
+
+  function renderTranscriptEmpty(kind, title, description) {
+    const current = dom.transcript.children.length === 1
+      ? dom.transcript.firstElementChild
+      : null;
+    if (current?.dataset.emptyState === kind) return;
+    const empty = emptyState(title, description);
+    empty.dataset.emptyState = kind;
+    reconcileChildren(dom.transcript, [empty]);
+  }
+
+  function reconcileChildren(container, desired) {
+    const keep = new Set(desired);
+    let cursor = container.firstElementChild;
+    for (const node of desired) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+      } else {
+        container.insertBefore(node, cursor);
+      }
+    }
+    for (const child of [...container.children]) {
+      if (!keep.has(child)) child.remove();
     }
   }
 
@@ -977,51 +1146,203 @@ function startBrowserClient() {
   }
 
   function renderItem(item) {
+    let card;
+    if (item.kind === "user_message" || item.kind === "agent_message") {
+      const role = item.kind === "user_message" ? "user" : "agent";
+      card = element("article", `message ${role}`);
+      const label = element("div", "message-label");
+      label.dataset.itemPart = "label";
+      const body = element("div", "message-body");
+      body.dataset.itemPart = "body";
+      card.append(label, body);
+    } else if (item.kind === "agent_reasoning") {
+      card = element("article", "reasoning");
+      const disclosure = element("details");
+      const summary = element("summary");
+      summary.dataset.itemPart = "summary";
+      const detail = element("pre");
+      detail.dataset.itemPart = "detail";
+      disclosure.append(summary, detail);
+      card.append(disclosure);
+    } else {
+      card = element("article", "receipt");
+      card.append(element("span", "receipt-dot"));
+      const copy = element("span", "receipt-copy");
+      const label = element("strong");
+      label.dataset.itemPart = "label";
+      const summary = element("span", "receipt-summary");
+      summary.dataset.itemPart = "summary";
+      copy.append(label, summary);
+      card.append(copy);
+    }
+    card.dataset.itemId = item.id;
+    card.dataset.itemKind = item.kind;
+    updateItemNode(card, item);
+    return card;
+  }
+
+  function updateItemNode(card, item) {
+    if (card.dataset.itemKind !== item.kind) return false;
     const detail = item.detail || item.summary || "";
     if (item.kind === "user_message" || item.kind === "agent_message") {
       const role = item.kind === "user_message" ? "user" : "agent";
-      const card = element("article", `message ${role} ${item.status === "in_progress" ? "in-progress" : ""}`.trim());
-      card.append(element("div", "message-label", role === "user" ? "You" : "Codewhale"));
-      card.append(element("div", "message-body", detail));
-      return card;
+      card.className = `message ${role} ${item.status === "in_progress" ? "in-progress" : ""}`.trim();
+      setTextIfChanged(card.querySelector('[data-item-part="label"]'), role === "user" ? "You" : "Codewhale");
+      setTextIfChanged(card.querySelector('[data-item-part="body"]'), detail);
+      return true;
     }
     if (item.kind === "agent_reasoning") {
-      const reasoning = element("article", "reasoning");
-      const disclosure = element("details");
-      disclosure.append(element("summary", "", item.status === "in_progress" ? "Reasoning…" : "Reasoning"));
-      disclosure.append(element("pre", "", detail));
-      reasoning.append(disclosure);
-      return reasoning;
+      setTextIfChanged(
+        card.querySelector('[data-item-part="summary"]'),
+        item.status === "in_progress" ? "Reasoning…" : "Reasoning",
+      );
+      setTextIfChanged(card.querySelector('[data-item-part="detail"]'), detail);
+      return true;
     }
 
     const presentation = receiptPresentation(item);
-    const receipt = element("article", `receipt ${presentation.failed ? "failed" : ""}`.trim());
-    receipt.append(element("div", "receipt-label", presentation.label));
-    receipt.append(element("div", "receipt-summary", presentation.summary));
+    card.className = `receipt ${presentation.failed ? "failed" : ""}`.trim();
+    setTextIfChanged(card.querySelector('[data-item-part="label"]'), presentation.label);
+    setTextIfChanged(card.querySelector('[data-item-part="summary"]'), presentation.summary);
+    const copy = card.querySelector(".receipt-copy");
+    let disclosure = copy.querySelector("details");
     if (presentation.raw && presentation.raw !== presentation.summary) {
-      const disclosure = element("details");
-      disclosure.append(element("summary", "", "Show receipt"));
-      disclosure.append(element("pre", "", presentation.raw));
-      receipt.append(disclosure);
+      if (!disclosure) {
+        disclosure = element("details");
+        const summary = element("summary", "", "Show receipt");
+        const raw = element("pre");
+        raw.dataset.itemPart = "raw";
+        disclosure.append(summary, raw);
+        copy.append(disclosure);
+      }
+      setTextIfChanged(disclosure.querySelector('[data-item-part="raw"]'), presentation.raw);
+    } else if (disclosure) {
+      disclosure.remove();
     }
-    return receipt;
+    return true;
+  }
+
+  function setTextIfChanged(target, value) {
+    const next = value == null ? "" : String(value);
+    if (target.textContent !== next) setSafeText(target, next);
+  }
+
+  function captureTranscriptSelection() {
+    const selection = globalThis.getSelection?.();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+    const range = selection.getRangeAt(0);
+    const start = transcriptSelectionEndpoint(range.startContainer, range.startOffset);
+    const end = transcriptSelectionEndpoint(range.endContainer, range.endOffset);
+    return start && end ? { start, end } : null;
+  }
+
+  function transcriptSelectionEndpoint(node, offset) {
+    const elementNode = node.nodeType === 1 ? node : node.parentElement;
+    const item = elementNode?.closest?.("[data-item-id]");
+    if (!item || !dom.transcript.contains(item)) return null;
+    const prefix = document.createRange();
+    prefix.selectNodeContents(item);
+    try {
+      prefix.setEnd(node, offset);
+    } catch (_error) {
+      return null;
+    }
+    return { itemId: item.dataset.itemId, offset: prefix.toString().length };
+  }
+
+  function restoreTranscriptSelection(captured) {
+    if (!captured) return;
+    const startRoot = [...dom.transcript.children]
+      .find((node) => node.dataset.itemId === captured.start.itemId);
+    const endRoot = [...dom.transcript.children]
+      .find((node) => node.dataset.itemId === captured.end.itemId);
+    if (!startRoot || !endRoot) return;
+    const start = textPointAt(startRoot, captured.start.offset);
+    const end = textPointAt(endRoot, captured.end.offset);
+    if (!start || !end) return;
+    const range = document.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+    } catch (_error) {
+      return;
+    }
+    const selection = globalThis.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function textPointAt(root, requestedOffset) {
+    const walker = document.createTreeWalker(
+      root,
+      globalThis.NodeFilter?.SHOW_TEXT || 4,
+    );
+    let remaining = Math.max(0, requestedOffset);
+    let last = null;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      last = node;
+      const length = node.data.length;
+      if (remaining <= length) return { node, offset: remaining };
+      remaining -= length;
+    }
+    return last ? { node: last, offset: last.data.length } : null;
   }
 
   function renderAttention() {
-    dom.attention.replaceChildren();
+    const existing = new Map(
+      [...dom.attention.children]
+        .filter((node) => node.dataset.attentionKey)
+        .map((node) => [node.dataset.attentionKey, node]),
+    );
+    const desired = [];
+    const added = [];
     for (const [approvalId, approval] of app.threadState.approvals) {
-      dom.attention.append(renderApproval(approvalId, approval));
+      const key = `approval:${approvalId}`;
+      const card = existing.get(key) || renderApproval(approvalId, approval);
+      card.dataset.attentionKey = key;
+      desired.push(card);
+      if (!existing.has(key)) added.push(card);
     }
     for (const [inputId, input] of app.threadState.userInputs) {
-      dom.attention.append(renderUserInput(inputId, input));
+      const key = `input:${inputId}`;
+      const card = existing.get(key) || renderUserInput(inputId, input);
+      card.dataset.attentionKey = key;
+      desired.push(card);
+      if (!existing.has(key)) added.push(card);
     }
-    dom.attention.hidden = dom.attention.childElementCount === 0;
+    reconcileChildren(dom.attention, desired);
+    dom.attention.hidden = desired.length === 0;
+    if (added[0]) {
+      app.pendingAttentionFocus = added[0].dataset.attentionKey;
+      requestAnimationFrame(() => focusPendingAttention(app.pendingAttentionFocus));
+    } else if (desired.length === 0) {
+      app.pendingAttentionFocus = "";
+    }
+  }
+
+  function focusPendingAttention(key) {
+    if (!key || dom.session.inert) return;
+    const card = [...dom.attention.children]
+      .find((node) => node.dataset.attentionKey === key);
+    if (!card) {
+      if (app.pendingAttentionFocus === key) app.pendingAttentionFocus = "";
+      return;
+    }
+    card.focus({ preventScroll: false });
+    if (app.pendingAttentionFocus === key) app.pendingAttentionFocus = "";
   }
 
   function renderApproval(approvalId, approval) {
     const card = element("article", "attention-card");
+    const titleId = `attention-approval-${safeDomId(approvalId)}`;
+    card.tabIndex = -1;
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-labelledby", titleId);
     card.append(element("p", "eyebrow", "Approval required"));
-    card.append(element("h2", "", approval.tool_name || "Tool request"));
+    const title = element("h2", "", approval.tool_name || "Tool request");
+    title.id = titleId;
+    card.append(title);
     card.append(element("p", "", approval.intent_summary || approval.description || "Codewhale is waiting for permission."));
     const actions = element("div", "attention-actions");
     const rememberLabel = element("label", "remember-field");
@@ -1064,8 +1385,14 @@ function startBrowserClient() {
 
   function renderUserInput(inputId, envelope) {
     const card = element("form", "attention-card");
+    const titleId = `attention-input-${safeDomId(inputId)}`;
+    card.tabIndex = -1;
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-labelledby", titleId);
     card.append(element("p", "eyebrow", "Input required"));
-    card.append(element("h2", "", "Codewhale has a question"));
+    const title = element("h2", "", "Codewhale has a question");
+    title.id = titleId;
+    card.append(title);
     const questions = Array.isArray(envelope.request?.questions) ? envelope.request.questions : [];
     const groups = [];
     for (const question of questions) {
@@ -1154,6 +1481,10 @@ function startBrowserClient() {
       }
     });
     return card;
+  }
+
+  function safeDomId(value) {
+    return String(value || "item").replace(/[^a-zA-Z0-9_-]/g, "-");
   }
 
   function latestTurn() {
@@ -1310,7 +1641,7 @@ function startBrowserClient() {
     if (globalThis.matchMedia("(max-width: 800px)").matches) closeRail();
   }
 
-  dom.railOpen.addEventListener("click", () => dom.shell.classList.add("rail-visible"));
+  dom.railOpen.addEventListener("click", openRail);
   dom.railClose.addEventListener("click", closeRail);
   dom.railScrim.addEventListener("click", closeRail);
   dom.newThread.addEventListener("click", createThread);
@@ -1340,9 +1671,22 @@ function startBrowserClient() {
       loadSessions().catch(() => {});
     }, 180);
   });
+  document.addEventListener("keydown", (event) => {
+    if (trapRailFocus(event)) return;
+    if (event.key === "Escape" && narrowRail.matches && dom.shell.classList.contains("rail-visible")) {
+      event.preventDefault();
+      closeRail();
+    }
+  });
+  narrowRail.addEventListener("change", syncRailAccessibility);
+  globalThis.visualViewport?.addEventListener("resize", syncVisualViewport);
+  globalThis.visualViewport?.addEventListener("scroll", syncVisualViewport);
+  globalThis.addEventListener("resize", syncVisualViewport);
   globalThis.addEventListener("beforeunload", stopStream);
 
   async function initialize() {
+    syncVisualViewport();
+    syncRailAccessibility();
     try {
       [app.runtimeInfo, app.workspace] = await Promise.all([
         api("/v1/runtime/info"),

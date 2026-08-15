@@ -71,6 +71,7 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
     "--ink-0: #03070d",
     "--ink-1: #08111c",
     "--ink-2: #0e1729",
+    "--stage-surface: #0e1729",
     "--text: #f6f2e8",
     "--action: #6aaef2",
     "--human: #f6c453",
@@ -91,7 +92,7 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
   );
   assert.match(
     cssDeclarations(styles, "\\.message\\.user \\.message-body"),
-    /background: rgba\(24, 39, 66/,
+    /background: var\(--plate\)/,
   );
   assert.match(
     cssDeclarations(styles, "\\.attention-card"),
@@ -105,7 +106,71 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
     cssDeclarations(styles, "\\.connection-dot\\.ready"),
     /background: var\(--ok\)/,
   );
-  assert.match(html, /name="theme-color" content="#03070d"/);
+  assert.match(html, /name="theme-color" content="#0e1729"/);
+});
+
+test("embedded web client keeps the CWC stage, transcript, and receipt hierarchy quiet", async () => {
+  const [styles, html, source] = await Promise.all([
+    readFile(new URL("../src/runtime_web/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(cssDeclarations(styles, "\\.session"), /background: var\(--stage-surface\)/);
+  assert.match(cssDeclarations(styles, "\\.transcript"), /background: var\(--stage-surface\)/);
+  assert.match(cssDeclarations(styles, "\\.receipt"), /display:\s*flex/);
+  assert.match(cssDeclarations(styles, "\\.receipt-dot"), /background: var\(--live\)/);
+  assert.match(
+    cssDeclarations(styles, "\\.message\\.user \\.message-label"),
+    /display:\s*none/,
+  );
+  assert.match(html, /id="transcript" role="log"[^>]+aria-relevant="additions text"/);
+  assert.match(source, /card\.append\(element\("span", "receipt-dot"\)\)/);
+});
+
+test("mobile drawer owns focus and background interaction while it is open", async () => {
+  const [html, source] = await Promise.all([
+    readFile(new URL("../src/runtime_web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(html, /id="rail-open"[^>]+aria-controls="thread-rail"[^>]+aria-expanded="false"/);
+  assert.match(html, /id="rail-scrim"[^>]+tabindex="-1" hidden/);
+  assert.match(source, /function openRail\(\)[\s\S]*dom\.railClose\.focus/);
+  assert.match(source, /dom\.session\.setAttribute\("aria-hidden", "true"\)[\s\S]*setInert\(dom\.session, true\)/);
+  assert.match(source, /function closeRail[\s\S]*returnTarget\.focus[\s\S]*applyClosedMobileRailAccessibility/);
+  assert.match(source, /function trapRailFocus[\s\S]*event\.key !== "Tab"[\s\S]*first\.focus/);
+  assert.match(source, /event\.key === "Escape"[\s\S]*closeRail\(\)/);
+});
+
+test("mobile viewport and truth controls survive the software keyboard and coarse input", async () => {
+  const [styles, source] = await Promise.all([
+    readFile(new URL("../src/runtime_web/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(styles, /height: var\(--visual-viewport-height\)/);
+  assert.match(source, /globalThis\.visualViewport\?\.addEventListener\("resize", syncVisualViewport\)/);
+  assert.match(styles, /@media \(pointer: coarse\)[\s\S]*min-height: 44px/);
+  assert.match(styles, /@media \(max-width: 430px\)[\s\S]*\.session-facts \{[\s\S]*display: flex/);
+  assert.match(styles, /\.session-facts \.fact-chip\[data-fact="workspace"\][\s\S]*display: none/);
+  assert.match(source, /chip\.dataset\.fact = String\(label \|\| ""\)\.toLowerCase\(\)/);
+});
+
+test("stream reconciliation preserves live controls, disclosures, and selected transcript text", async () => {
+  const [html, source] = await Promise.all([
+    readFile(new URL("../src/runtime_web/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(html, /id="attention" role="region"[^>]+aria-live="assertive"[^>]+aria-relevant="additions"/);
+  assert.equal(source.includes("dom.transcript.replaceChildren"), false);
+  assert.equal(source.includes("dom.attention.replaceChildren"), false);
+  assert.match(source, /function reconcileChildren\(/);
+  assert.match(source, /captureTranscriptSelection\(\)[\s\S]*restoreTranscriptSelection\(selection\)/);
+  assert.match(source, /card\.dataset\.attentionKey = key/);
+  assert.match(source, /card\.tabIndex = -1/);
+  assert.match(source, /requestAnimationFrame\(\(\) => focusPendingAttention/);
 });
 
 test("rail New thread cannot paint over the session fact chips", async () => {
@@ -116,7 +181,7 @@ test("rail New thread cannot paint over the session fact chips", async () => {
   assert.match(cssDeclarations(styles, "\\.rail"), /overflow:\s*hidden/);
   assert.match(cssDeclarations(styles, "\\.new-thread"), /max-width:\s*100%/);
   assert.match(cssDeclarations(styles, "\\.session-header"), /overflow:\s*hidden/);
-  assert.match(cssDeclarations(styles, "\\.session-facts"), /flex-wrap:\s*wrap/);
+  assert.match(cssDeclarations(styles, "\\.session-facts"), /flex-wrap:\s*nowrap/);
 });
 
 test("uses the v0.9.6 Work vocabulary for the agent wire mode", () => {
