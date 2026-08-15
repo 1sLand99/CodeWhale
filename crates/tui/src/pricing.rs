@@ -1678,10 +1678,34 @@ fn provider_owned_hand_pricing_at(
             model_lower.as_str(),
             "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor"
         ),
+        // Deployment-style ids (Fireworks account prefix, OpenCode Zen
+        // gateway) have no Models.dev cost fields. When the live control
+        // plane 503s, these bundled family rates keep the session priced
+        // instead of `unverified_live_pricing` forever (#5241).
+        ApiProvider::Fireworks => {
+            let bare = model_lower
+                .strip_prefix("accounts/fireworks/models/")
+                .unwrap_or(model_lower.as_str());
+            matches!(bare, "deepseek-v4-flash" | "deepseek-v4-pro")
+        }
+        ApiProvider::OpencodeZen => {
+            matches!(
+                model_lower.as_str(),
+                "deepseek-v4-flash" | "deepseek-v4-pro"
+            )
+        }
         _ => false,
     };
+    let lookup = if provider == ApiProvider::Fireworks {
+        model_lower
+            .strip_prefix("accounts/fireworks/models/")
+            .unwrap_or(model_lower.as_str())
+            .to_string()
+    } else {
+        model_lower
+    };
     provider_owns_row
-        .then(|| pricing_for_model_at(&model_lower, recorded_at))
+        .then(|| pricing_for_model_at(&lookup, recorded_at))
         .flatten()
 }
 
@@ -3535,6 +3559,30 @@ mod tests {
         assert_eq!(pricing.usd.input_cache_hit_per_million, 0.003625);
         assert_eq!(pricing.usd.input_cache_miss_per_million, 0.435);
         assert_eq!(pricing.usd.output_per_million, 0.87);
+    }
+
+    #[test]
+    fn fireworks_and_zen_flash_use_bundled_family_rates() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).single().unwrap();
+        let fireworks = provider_owned_hand_pricing_at(
+            ApiProvider::Fireworks,
+            "accounts/fireworks/models/deepseek-v4-flash",
+            now,
+        )
+        .expect("Fireworks Flash should inherit the bundled DeepSeek family row");
+        let zen =
+            provider_owned_hand_pricing_at(ApiProvider::OpencodeZen, "deepseek-v4-flash", now)
+                .expect("OpenCode Zen Flash should inherit the bundled DeepSeek family row");
+        assert_eq!(fireworks.usd.output_per_million, zen.usd.output_per_million);
+        assert!(
+            provider_owned_hand_pricing_at(
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/kimi-k3",
+                now,
+            )
+            .is_none(),
+            "kimi-k3 has no published bundled rate; do not invent one"
+        );
     }
 
     #[test]
