@@ -93,9 +93,10 @@ pub enum ApiProvider {
     /// backend, not an OpenAI alias: thought signatures on tool calls are
     /// captured and replayed per Google's contract.
     Google,
-    /// Google Antigravity (`agy`). Credential plane only: consent-gated
-    /// read-only import of the official CLI's login. Sends fail closed
-    /// until the cloud-code wire protocol is implemented.
+    /// Google Antigravity (`agy`). Consent-gated read-only import of the
+    /// official CLI's login, then a text-only cloud-code stream
+    /// (`/v1internal:streamGenerateContent`). Tools and non-text parts
+    /// fail closed.
     Antigravity,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     Telecomjs,
@@ -6275,9 +6276,8 @@ impl Config {
         // Official Antigravity (`agy`) login. `ANTIGRAVITY_API_KEY` config
         // and env slots were already checked above; here the process's own
         // `AGY_ADC_AUTH` wins over the consented `state.vscdb`, which is
-        // imported read-only from the one pinned path. The token only ever
-        // reaches the credential plane — sends still fail closed in the
-        // client because the cloud-code wire protocol is unimplemented.
+        // imported read-only from the one pinned path. The token is then
+        // used on the cloud-code stream; it is never logged.
         if provider == ApiProvider::Antigravity && !custom_endpoint {
             let grant = self
                 .external_credential_read_grant(
@@ -6302,7 +6302,7 @@ impl Config {
                     tracing::debug!(
                         target: "config",
                         source = other.source_label(),
-                        "antigravity credential plane resolved; sends remain fail-closed"
+                        "antigravity credential plane did not yield a sendable token"
                     );
                 }
             }
@@ -10651,6 +10651,24 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         // sufficient, but its absence must fall through to the ordinary API-key
         // checks below instead of masking a configured key.
         return true;
+    }
+    if provider == ApiProvider::Antigravity && !config.provider_uses_custom_endpoint(provider) {
+        let path = codewhale_config::default_agy_credentials_path();
+        if config
+            .external_credential_read_grant(
+                provider,
+                codewhale_config::ExternalCredentialSource::AgyCli,
+                &path,
+            )
+            .is_ok_and(|grant| {
+                crate::agy_credentials::antigravity_oauth_token_from_grant(&grant)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        {
+            return true;
+        }
     }
     if matches!(
         provider,

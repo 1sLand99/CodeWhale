@@ -112,6 +112,9 @@ enum ProviderArg {
     Mistral,
     /// Google Gemini (official OpenAI-compatible endpoint).
     Google,
+    /// Google Antigravity (`agy`) — consent-gated OAuth import.
+    #[value(alias = "agy")]
+    Antigravity,
 }
 
 impl From<ProviderArg> for ProviderKind {
@@ -154,6 +157,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Xai => ProviderKind::Xai,
             ProviderArg::Mistral => ProviderKind::Mistral,
             ProviderArg::Google => ProviderKind::Google,
+            ProviderArg::Antigravity => ProviderKind::Antigravity,
         }
     }
 }
@@ -2484,6 +2488,10 @@ fn external_credential_target(
         ProviderKind::Deepseek | ProviderKind::DeepseekAnthropic => (
             codewhale_config::ExternalCredentialSource::DshCli,
             codewhale_config::default_dsh_credentials_path(),
+        ),
+        ProviderKind::Antigravity => (
+            codewhale_config::ExternalCredentialSource::AgyCli,
+            codewhale_config::default_agy_credentials_path(),
         ),
         ProviderKind::Moonshot => bail!(
             "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.ai/console/api-keys; Kimi CLI OAuth import is unsupported."
@@ -5444,6 +5452,13 @@ mod tests {
     fn ollama_cloud_provider_aliases_parse_as_builtin() {
         for alias in ["ollama-cloud", "ollama_cloud"] {
             assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::OllamaCloud));
+        }
+    }
+
+    #[test]
+    fn antigravity_provider_aliases_parse_as_builtin() {
+        for alias in ["antigravity", "agy"] {
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::Antigravity));
         }
     }
 
