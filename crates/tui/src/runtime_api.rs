@@ -864,11 +864,14 @@ pub async fn run_http_server(
     if let Some(bootstrap) = web_bootstrap {
         println!("Codewhale web enabled at http://{bound_addr}/");
         let bootstrap_url = web::bootstrap_url(bound_addr, &bootstrap);
+        println!(
+            "Codewhale web bootstrap (single-use, expires in {} min): {bootstrap_url}",
+            web::BOOTSTRAP_TTL.as_secs() / 60
+        );
         if let Err(error) = crate::utils::open_url(&bootstrap_url) {
-            scheduler_cancel.cancel();
-            scheduler_handle.abort();
-            return Err(error)
-                .context("Failed to open the Codewhale web client in the default browser");
+            println!(
+                "warning: could not open the default browser ({error}); open the bootstrap URL above manually"
+            );
         }
     }
     let is_loopback = options.host == "127.0.0.1" || options.host == "::1";

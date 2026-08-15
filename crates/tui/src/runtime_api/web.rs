@@ -16,7 +16,10 @@ const WEB_HTML: &str = include_str!("../runtime_web/index.html");
 const WEB_CSS: &str = include_str!("../runtime_web/styles.css");
 const WEB_JS: &str = include_str!("../runtime_web/app.mjs");
 const WEB_ICON: &[u8] = include_bytes!("../runtime_web/codewhale-192.png");
-const BOOTSTRAP_TTL: Duration = Duration::from_secs(120);
+// The nonce remains single-use and loopback-only, but it is handed to a
+// person through the browser launcher or terminal. Two minutes proved too
+// short when the launcher was delayed or did not open a tab.
+pub(super) const BOOTSTRAP_TTL: Duration = Duration::from_secs(10 * 60);
 const WEB_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const BOOTSTRAP_PREFIX: &str = "cwwb_";
 const WEB_SESSION_PREFIX: &str = "cwws_";
