@@ -1808,6 +1808,10 @@ struct SpawnRequest {
     /// → verify). The source must be settled (not running), in the same
     /// workspace, and reachable by the spawning agent.
     resume_from: Option<String>,
+    /// Detached children deliberately outlive the active parent turn. The
+    /// default is foreground ownership: a turn-end cancellation stops and
+    /// joins its direct children before the turn becomes terminal.
+    detached: bool,
 }
 
 /// Declared child write authority for a (deliberate) spawn.
@@ -2116,8 +2120,115 @@ impl SubAgentForkContext {
 /// Carries everything a child needs to (a) build its own tool registry —
 /// including the manager so grandchildren can spawn — and (b) cooperate with
 /// lifecycle cancellation and depth caps. `child_runtime()` links cancellation
-/// tokens, while `background_runtime()` deliberately detaches long-running
-/// `agent` sessions from the caller's turn token.
+/// tokens and turn ownership, while `background_runtime()` explicitly detaches
+/// long-running `agent` sessions from the caller's turn token.
+#[derive(Debug)]
+pub(crate) struct ForegroundChildRegistry {
+    state: std::sync::Mutex<ForegroundChildState>,
+    settled: tokio::sync::watch::Sender<()>,
+}
+
+#[derive(Debug, Default)]
+struct ForegroundChildState {
+    cancelled: bool,
+    next_id: u64,
+    tokens: HashMap<u64, CancellationToken>,
+}
+
+pub(crate) struct ForegroundChildRegistration {
+    registry: std::sync::Weak<ForegroundChildRegistry>,
+    id: u64,
+}
+
+impl ForegroundChildRegistry {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        let (settled, _) = tokio::sync::watch::channel(());
+        Self {
+            state: std::sync::Mutex::new(ForegroundChildState::default()),
+            settled,
+        }
+    }
+
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        token: CancellationToken,
+    ) -> ForegroundChildRegistration {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = state.next_id;
+        state.next_id = state.next_id.saturating_add(1);
+        if state.cancelled {
+            token.cancel();
+        }
+        state.tokens.insert(id, token);
+        ForegroundChildRegistration {
+            registry: Arc::downgrade(self),
+            id,
+        }
+    }
+
+    fn release(&self, id: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.tokens.remove(&id).is_some() {
+            self.settled.send_replace(());
+        }
+    }
+
+    /// Cancel every currently-owned direct child and wait until each task has
+    /// released its registration. Multiple terminal paths share this barrier:
+    /// only the first call issues cancellation, while all callers await the
+    /// same settled set. A child registered after cancellation observes the
+    /// latched state and is cancelled before it can reach a provider request.
+    pub(crate) async fn cancel_and_wait(&self) {
+        let mut settled = self.settled.subscribe();
+        let tokens = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.cancelled {
+                Vec::new()
+            } else {
+                state.cancelled = true;
+                state.tokens.values().cloned().collect::<Vec<_>>()
+            }
+        };
+        for token in tokens {
+            token.cancel();
+        }
+
+        loop {
+            let is_settled = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.tokens.is_empty()
+            };
+            if is_settled {
+                return;
+            }
+            // `watch` retains a version change that races this check, unlike a
+            // plain notification created but not yet polled by this task.
+            let _ = settled.changed().await;
+        }
+    }
+}
+
+impl Drop for ForegroundChildRegistration {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.release(self.id);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SubAgentRuntime {
     pub client: DeepSeekClient,
@@ -2184,9 +2295,13 @@ pub struct SubAgentRuntime {
     /// greater than) so equality is allowed — matches codex's pattern.
     pub max_spawn_depth: u32,
     /// Cooperative cancellation token. Direct `child_runtime()` callers derive
-    /// a child token from the parent; model-visible `agent` uses
-    /// `background_runtime()` to replace that token with a detached one.
+    /// a child token from the parent; explicitly detached model-visible
+    /// `agent` starts use `background_runtime()` to replace it.
     pub cancel_token: CancellationToken,
+    /// Turn-scoped ownership barrier for direct foreground children. Nested
+    /// children inherit the Arc but do not register: their direct parent owns
+    /// their lifecycle. Explicitly detached runtimes clear it.
+    foreground_children: Option<Arc<ForegroundChildRegistry>>,
     /// Structured progress / lifecycle stream. Cloned across children so the
     /// whole spawn tree publishes into one ordered, fan-out-able mailbox.
     /// `None` only when no consumer is wired (legacy entry points / tests).
@@ -2282,6 +2397,7 @@ impl SubAgentRuntime {
             parent_agent_id: None,
             max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
             cancel_token: CancellationToken::new(),
+            foreground_children: None,
             mailbox: None,
             runtime_usage_lease: None,
             parent_completion_tx: None,
@@ -2414,6 +2530,17 @@ impl SubAgentRuntime {
         self
     }
 
+    /// Attach the turn-owned direct-child registry. Engine-only wiring keeps
+    /// the ownership boundary out of Fleet scheduling and persisted records.
+    #[must_use]
+    pub(crate) fn with_foreground_children(
+        mut self,
+        foreground_children: Arc<ForegroundChildRegistry>,
+    ) -> Self {
+        self.foreground_children = Some(foreground_children);
+        self
+    }
+
     /// Override the maximum spawn depth (default `DEFAULT_MAX_SPAWN_DEPTH`).
     /// Used by config wiring (`[subagents] max_depth = N`) and tests.
     #[must_use]
@@ -2513,16 +2640,23 @@ impl SubAgentRuntime {
     }
 
     /// Return a child runtime that is deliberately detached from the parent
-    /// turn cancellation token. Background sub-agents should keep running when
-    /// the parent turn is cancelled; explicit agent cancellation still
-    /// aborts their task handles through the manager.
+    /// turn cancellation token and its foreground ownership barrier. Explicit
+    /// agent cancellation still aborts its task handle through the manager.
     #[must_use]
     pub fn background_runtime(&self) -> Self {
         let mut runtime = self.child_runtime();
         let token = CancellationToken::new();
         runtime.cancel_token = token.clone();
         runtime.context.cancel_token = Some(token);
+        runtime.foreground_children = None;
         runtime
+    }
+
+    fn foreground_child_registration(&self) -> Option<ForegroundChildRegistration> {
+        (self.spawn_depth == 1)
+            .then_some(())
+            .and_then(|_| self.foreground_children.as_ref())
+            .map(|registry| registry.register(self.cancel_token.clone()))
     }
 
     /// Build a child runtime cloning this one, incrementing `spawn_depth`,
@@ -2562,6 +2696,7 @@ impl SubAgentRuntime {
             parent_agent_id: self.parent_agent_id.clone(),
             max_spawn_depth: self.max_spawn_depth,
             cancel_token: self.cancel_token.child_token(),
+            foreground_children: self.foreground_children.clone(),
             mailbox: self.mailbox.clone(),
             runtime_usage_lease: self.runtime_usage_lease.clone(),
             parent_completion_tx: self.parent_completion_tx.clone(),
@@ -5759,6 +5894,7 @@ impl SubAgentManager {
         }
 
         let launch_gate = (runtime.spawn_depth == 1).then(|| self.launch_gate.clone());
+        let foreground_child_registration = runtime.foreground_child_registration();
         let task = SubAgentTask {
             manager_handle,
             runtime,
@@ -5774,6 +5910,7 @@ impl SubAgentManager {
             wall_time,
             input_rx,
             launch_gate,
+            _foreground_child_registration: foreground_child_registration,
         };
         let handle = spawn_supervised(
             "subagent-task",
@@ -7173,7 +7310,7 @@ impl ToolSpec for AgentTool {
 
     fn description(&self) -> &'static str {
         concat!(
-            "Start one focused background worker and return immediately with its agent_id; a prompt is enough for a read-only role. ",
+            "Start one focused worker and return immediately with its agent_id; a prompt is enough for a read-only role. By default the child is owned by the active turn and is cancelled before that turn ends; set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (analysis-only), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (exactly allowed_tools). ",
             "profile runs the child as a named Fleet profile (roster member) — its role posture, model route, and instruction overlay — so pass a profile only when the task needs that member and never pass model alongside it. ",
@@ -7183,7 +7320,7 @@ impl ToolSpec for AgentTool {
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; status and wait may be unscoped. ",
             "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
-            "In Operate, background workers are the default for independent or long work; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
+            "In Operate, use detached=true only for independent or long work that must outlive the active turn; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
         )
     }
@@ -7205,7 +7342,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "cancel"],
-                    "description": "start (default) launches a background worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
+                    "description": "start (default) launches a turn-owned worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -7240,7 +7377,11 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The focused task to give the background worker. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts."
+                    "description": "The focused task to give the worker. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts."
+                },
+                "detached": {
+                    "type": "boolean",
+                    "description": "False (default): the active turn owns this direct child and cancels it before ending. true: explicitly detached work remains running and inspectable after the parent turn ends; cancel it with agent(action=cancel)."
                 },
                 "dependencies": {
                     "type": "array",
@@ -7429,13 +7570,12 @@ impl ToolSpec for AgentTool {
         }
     }
 
-    /// #3801: `action=start` launches a background agent and returns immediately —
-    /// it is a detached start that should not hold the global tool-exec write
-    /// lock while the child spins up.  In auto-approved modes (YOLO) this lets
-    /// multiple independent `agent start` calls join a single parallel batch
-    /// instead of being serialized N ways.
+    /// #3801: only explicit `detached=true` starts durable work that should not
+    /// hold the global tool-exec write lock while the child spins up. Foreground
+    /// starts still return promptly, but stay owned by their active turn.
     fn starts_detached_for(&self, input: &Value) -> bool {
         matches!(parse_agent_tool_action(input), Ok(AgentToolAction::Start))
+            && input.get("detached").and_then(Value::as_bool) == Some(true)
     }
 
     /// #3801: Read-only `agent` actions (status, peek) can safely run in
@@ -8086,7 +8226,11 @@ async fn spawn_subagent_from_input(
         )));
     }
 
-    let mut child_runtime = runtime.background_runtime();
+    let mut child_runtime = if spawn_request.detached {
+        runtime.background_runtime()
+    } else {
+        runtime.child_runtime()
+    };
     let provider_binding = child_provider_binding(&runtime, profile_member.as_ref())?;
     child_runtime.client = provider_binding.client;
     child_runtime.api_config = provider_binding.api_config;
@@ -8927,6 +9071,9 @@ struct SubAgentTask {
     /// holds it until completion, so a fanout burst beyond the limit queues
     /// with a visible reason instead of executing all at once.
     launch_gate: Option<Arc<Semaphore>>,
+    /// Releases the parent turn's cancellation-and-join barrier after this
+    /// direct foreground child has completed its terminal fan-in.
+    _foreground_child_registration: Option<ForegroundChildRegistration>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -11212,6 +11359,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let thinking_explicit = explicit_thinking.is_some();
     let thinking = explicit_thinking.unwrap_or(SubAgentThinking::Inherit);
     let resident_file = optional_input_str(input, &["resident_file"])?.map(str::to_string);
+    let detached = parse_optional_bool(input, &["detached"])?.unwrap_or(false);
     let fork_context =
         parse_optional_bool(input, &["fork_context", "forkContext", "inherit_context"])?;
     let max_depth = parse_optional_u64(input, &["max_depth", "maxDepth", "max_spawn_depth"])?
@@ -11380,6 +11528,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         exact_files,
         coordination_contracts,
         resume_from,
+        detached,
     };
     // A roster profile may resolve the parse-time General placeholder to a
     // read-only scout/reviewer or to a write-capable manager/builder. Defer

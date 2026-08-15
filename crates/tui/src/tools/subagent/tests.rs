@@ -7486,6 +7486,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
     let task_handle = tokio::spawn(run_subagent_task(task));
 
@@ -7656,6 +7657,7 @@ async fn subagent_retries_api_timeout_before_succeeding() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
 
     tokio::time::timeout(
@@ -7803,6 +7805,7 @@ async fn subagent_retries_transient_provider_header_timeout_before_succeeding() 
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
 
     tokio::time::timeout(
@@ -7876,6 +7879,7 @@ async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
 
     tokio::time::timeout(
@@ -11262,6 +11266,120 @@ fn detached_background_children_survive_parent_cancellation() {
 }
 
 #[test]
+fn agent_start_is_turn_owned_unless_detached_is_explicit() {
+    let owned = parse_spawn_request(&json!({"prompt": "inspect the workspace"}))
+        .expect("default start parses");
+    let detached = parse_spawn_request(&json!({
+        "prompt": "continue independently",
+        "detached": true
+    }))
+    .expect("explicit detached start parses");
+
+    assert!(
+        !owned.detached,
+        "an omitted selector must retain turn ownership"
+    );
+    assert!(
+        detached.detached,
+        "only an explicit detached=true may outlive the turn"
+    );
+}
+
+#[test]
+fn agent_start_marks_only_explicit_detachment_as_durable_work() {
+    let runtime = stub_runtime();
+    let tool = AgentTool::new(runtime.manager.clone(), runtime);
+
+    assert!(
+        !ToolSpec::starts_detached_for(&tool, &json!({"action": "start", "prompt": "owned"})),
+        "default direct starts must remain owned by the active turn"
+    );
+    assert!(
+        ToolSpec::starts_detached_for(
+            &tool,
+            &json!({"action": "start", "prompt": "durable", "detached": true})
+        ),
+        "only detached=true may opt into durable background scheduling"
+    );
+}
+
+#[tokio::test]
+async fn foreground_turn_cancellation_joins_direct_children_once_and_excludes_detached() {
+    let registry = Arc::new(ForegroundChildRegistry::new());
+    let root = stub_runtime().with_foreground_children(Arc::clone(&registry));
+
+    let foreground = root.child_runtime();
+    let foreground_token = foreground.cancel_token.clone();
+    let foreground_registration = foreground
+        .foreground_child_registration()
+        .expect("a direct child of the turn must register ownership");
+    let foreground_done = tokio::spawn(async move {
+        foreground_token.cancelled().await;
+        drop(foreground_registration);
+    });
+
+    let detached = root.background_runtime();
+    assert!(
+        detached.foreground_child_registration().is_none(),
+        "explicitly detached work must not join the foreground turn barrier"
+    );
+    let detached_token = detached.cancel_token.clone();
+
+    // Two terminal paths may converge in a cancellation race. They must share
+    // one cancellation decision and wait for the same direct child exactly
+    // once, rather than leaking it or deadlocking on a duplicate wait.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(registry.cancel_and_wait(), registry.cancel_and_wait());
+    })
+    .await
+    .expect("foreground cancellation should wait for its child to settle");
+    foreground_done
+        .await
+        .expect("foreground task exits after cancellation");
+    assert!(!detached_token.is_cancelled());
+
+    // A spawn racing turn-end gets a latched cancellation before it can make a
+    // provider request; its later completion cannot reopen the settled barrier.
+    let late = root.child_runtime();
+    let late_token = late.cancel_token.clone();
+    let late_registration = late
+        .foreground_child_registration()
+        .expect("late direct child still registers then observes cancellation");
+    assert!(late_token.is_cancelled());
+    drop(late_registration);
+    tokio::time::timeout(Duration::from_secs(1), registry.cancel_and_wait())
+        .await
+        .expect("late completion keeps cancellation idempotent");
+}
+
+#[tokio::test]
+async fn foreground_registration_releases_when_the_child_future_returns_or_unwinds() {
+    let registry = Arc::new(ForegroundChildRegistry::new());
+
+    let completed = registry.register(CancellationToken::new());
+    let result: Result<(), ()> = async move {
+        let _registration = completed;
+        Err(())
+    }
+    .await;
+    assert!(result.is_err());
+
+    let panicked = registry.register(CancellationToken::new());
+    let task = tokio::spawn(async move {
+        let _registration = panicked;
+        panic!("test direct-child unwind");
+    });
+    assert!(
+        task.await.is_err(),
+        "panic must unwind and drop the task guard"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), registry.cancel_and_wait())
+        .await
+        .expect("return and panic-unwind both release foreground ownership");
+}
+
+#[test]
 fn mailbox_propagates_through_child_runtime_chain() {
     use crate::tools::subagent::mailbox::Mailbox;
     let parent_token = CancellationToken::new();
@@ -11552,6 +11670,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         spawn_depth: 0,
         max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
         cancel_token: CancellationToken::new(),
+        foreground_children: None,
         mailbox: None,
         runtime_usage_lease: None,
         parent_agent_id: None,
@@ -12603,6 +12722,7 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
 
     let manager_lock = manager.write().await;
@@ -12689,6 +12809,7 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
 
     let mut manager_lock = manager.write().await;
@@ -12893,6 +13014,7 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     })
     .await;
 
@@ -12993,6 +13115,7 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: resume_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     })
     .await;
 
@@ -13064,6 +13187,7 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     })
     .await;
 
@@ -13861,6 +13985,7 @@ async fn launch_gate_queues_extra_direct_children() {
             wall_time: DEFAULT_CHILD_WALL_TIME,
             input_rx,
             launch_gate: gate,
+            _foreground_child_registration: None,
         };
         (agent, task)
     };
@@ -14011,6 +14136,7 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
         wall_time: WALL_TIME,
         input_rx,
         launch_gate: Some(Arc::clone(&gate)),
+        _foreground_child_registration: None,
     };
     {
         let mut manager = manager.write().await;
@@ -14283,6 +14409,7 @@ async fn run_incomplete_response_worker(
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     })
     .await;
 
@@ -14475,6 +14602,7 @@ async fn spawn_budget_capped_worker(
         wall_time,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
     let task_handle = tokio::spawn(run_subagent_task(task));
     (manager, agent_id, calls, task_handle)
@@ -14661,6 +14789,7 @@ async fn spawn_scope_budgeted_worker(
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
+        _foreground_child_registration: None,
     };
     let task_handle = tokio::spawn(run_subagent_task(task));
     (calls, task_handle)

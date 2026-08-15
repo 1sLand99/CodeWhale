@@ -55,9 +55,10 @@ use crate::tools::spec::{
     RuntimeToolServices, SharedFileReadTracker, new_shared_file_read_tracker,
 };
 use crate::tools::subagent::{
-    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion,
-    SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus,
-    agent_worker_owner_snapshot, new_shared_subagent_manager_with_state_root_and_timeout,
+    FleetRole, ForegroundChildRegistry, Mailbox, MailboxMessage, SharedSubAgentManager,
+    SubAgentCompletion, SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime,
+    SubAgentStatus, agent_worker_owner_snapshot,
+    new_shared_subagent_manager_with_state_root_and_timeout,
 };
 use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
@@ -3499,6 +3500,7 @@ impl Engine {
         // when every cloned sender is dropped at turn-end.
         let mailbox_for_runtime = if subagents_available && wiring.is_live() {
             let cancel_token = self.cancel_token.child_token();
+            let foreground_children = Arc::new(ForegroundChildRegistry::new());
             let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
             let tx_event_clone = self.tx_event.clone();
             let mailbox_turn_id = turn_id.to_string();
@@ -3544,6 +3546,7 @@ impl Engine {
             Some(TurnMailboxBarrier {
                 mailbox,
                 cancel_token,
+                foreground_children,
                 flush_tx,
                 drain_handle,
             })
@@ -3608,7 +3611,8 @@ impl Engine {
                 if let Some(barrier) = mailbox_for_runtime.as_ref() {
                     rt = rt
                         .with_mailbox(barrier.mailbox.clone())
-                        .with_cancel_token(barrier.cancel_token.clone());
+                        .with_cancel_token(barrier.cancel_token.clone())
+                        .with_foreground_children(Arc::clone(&barrier.foreground_children));
                 }
                 Some(rt)
             } else {
@@ -4164,9 +4168,7 @@ impl Engine {
         // the following turn (or lost by a runtime monitor that already
         // settled the record).
         if let Some(barrier) = mailbox_for_runtime.take() {
-            barrier.mailbox.seal();
-            let _ = barrier.flush_tx.send(());
-            let _ = barrier.drain_handle.await;
+            barrier.cancel_and_flush().await;
         }
 
         // Emit turn complete event — after all post-turn bookkeeping so
@@ -5737,8 +5739,21 @@ impl NextTurnPromptContext {
 pub(crate) struct TurnMailboxBarrier {
     pub(crate) mailbox: Mailbox,
     pub(crate) cancel_token: tokio_util::sync::CancellationToken,
+    pub(crate) foreground_children: Arc<ForegroundChildRegistry>,
     pub(crate) flush_tx: tokio::sync::oneshot::Sender<()>,
     pub(crate) drain_handle: tokio::task::JoinHandle<()>,
+}
+
+impl TurnMailboxBarrier {
+    /// Settle direct foreground work before closing the turn's mailbox.  The
+    /// ordering is intentional: a terminal turn event must never be emitted
+    /// while an owned child can still publish into this turn's shared state.
+    pub(crate) async fn cancel_and_flush(self) {
+        self.foreground_children.cancel_and_wait().await;
+        self.mailbox.seal();
+        let _ = self.flush_tx.send(());
+        let _ = self.drain_handle.await;
+    }
 }
 
 struct TurnToolBuild {

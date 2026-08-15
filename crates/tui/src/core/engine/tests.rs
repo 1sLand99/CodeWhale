@@ -43,6 +43,62 @@ const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT
 const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
 
 #[tokio::test]
+async fn terminal_barrier_joins_foreground_child_before_flushing_mailbox() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let foreground_children = Arc::new(ForegroundChildRegistry::new());
+    let child_token = turn_token.child_token();
+    let registration = foreground_children.register(child_token.clone());
+    let child_settled = Arc::new(AtomicBool::new(false));
+    let child_settled_for_task = Arc::clone(&child_settled);
+    let child = tokio::spawn(async move {
+        child_token.cancelled().await;
+        child_settled_for_task.store(true, Ordering::SeqCst);
+        drop(registration);
+    });
+
+    // Detached work is deliberately not registered in the turn barrier.
+    let detached_token = CancellationToken::new();
+    let flush_after_child_settled = Arc::new(AtomicBool::new(false));
+    let flush_observer = Arc::clone(&flush_after_child_settled);
+    let child_settled_for_flush = Arc::clone(&child_settled);
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async move {
+        let _ = flush_rx.await;
+        flush_observer.store(
+            child_settled_for_flush.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+    });
+
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token,
+        foreground_children,
+        flush_tx,
+        drain_handle,
+    };
+    tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+        .await
+        .expect("the terminal barrier cancels and joins its direct child");
+    child
+        .await
+        .expect("foreground child task exits after cancellation");
+
+    assert!(child_settled.load(Ordering::SeqCst));
+    assert!(
+        flush_after_child_settled.load(Ordering::SeqCst),
+        "mailbox flushing, and therefore TurnComplete, waits for the owned child"
+    );
+    assert!(
+        !detached_token.is_cancelled(),
+        "explicitly detached work is not owned by the terminal barrier"
+    );
+}
+
+#[tokio::test]
 async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
     let _env_lock = lock_test_env();
     let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
