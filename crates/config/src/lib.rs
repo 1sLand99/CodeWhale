@@ -4659,6 +4659,10 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             xiaomi_mimo_base_url_uses_token_plan(base_url)
                 || xiaomi_mimo_base_url_is_pay_as_you_go(base_url)
         }
+        ProviderKind::Ollama => {
+            normalized == DEFAULT_OLLAMA_BASE_URL
+                || provider::is_exact_ollama_cloud_route(provider, base_url)
+        }
         // Custom routes have no Codewhale-owned official endpoint. The
         // descriptor URL is a schema placeholder, never a credential scope.
         ProviderKind::Custom => false,
@@ -4702,10 +4706,10 @@ fn should_skip_secret_store_for_provider(
         return false;
     }
 
-    matches!(
-        provider,
-        ProviderKind::Sglang | ProviderKind::Vllm | ProviderKind::Ollama
-    ) || base_url_uses_local_host(base_url)
+    matches!(provider, ProviderKind::Sglang | ProviderKind::Vllm)
+        || (provider == ProviderKind::Ollama
+            && !provider::is_exact_ollama_cloud_route(provider, base_url))
+        || base_url_uses_local_host(base_url)
 }
 
 fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {

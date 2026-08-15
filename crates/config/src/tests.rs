@@ -5897,6 +5897,88 @@ fn ollama_provider_defaults_to_local_endpoint_and_small_model() {
 }
 
 #[test]
+fn ollama_cloud_endpoint_is_official_but_neighboring_routes_are_custom() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    assert!(provider_base_url_is_official(
+        ProviderKind::Ollama,
+        DEFAULT_OLLAMA_BASE_URL
+    ));
+    for base_url in [
+        provider::OLLAMA_CLOUD_BASE_URL,
+        "https://ollama.com/v1/",
+        "  HTTPS://OLLAMA.COM/v1/  ",
+    ] {
+        assert!(provider_base_url_is_official(
+            ProviderKind::Ollama,
+            base_url
+        ));
+        assert!(!provider_preserves_custom_base_url_model(
+            ProviderKind::Ollama,
+            base_url
+        ));
+    }
+
+    for base_url in [
+        "http://ollama.com/v1",
+        "https://ollama.com/api",
+        "https://ollama.com/v1/preview",
+        "https://ollama.com.evil.example/v1",
+        "https://ollama-gateway.example/v1",
+    ] {
+        assert!(!provider_base_url_is_official(
+            ProviderKind::Ollama,
+            base_url
+        ));
+        assert!(provider_preserves_custom_base_url_model(
+            ProviderKind::Ollama,
+            base_url
+        ));
+    }
+}
+
+#[test]
+fn ollama_cloud_resolves_ambient_api_key() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    // Safety: test-only environment mutation guarded by a module mutex.
+    unsafe {
+        env::set_var("DEEPSEEK_PROVIDER", "ollama");
+        env::set_var("OLLAMA_BASE_URL", "https://ollama.com/v1/");
+        env::set_var("OLLAMA_API_KEY", "ollama-cloud-env-key");
+    }
+
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+
+    assert_eq!(resolved.provider, ProviderKind::Ollama);
+    assert_eq!(resolved.base_url, "https://ollama.com/v1/");
+    assert_eq!(resolved.api_key.as_deref(), Some("ollama-cloud-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
+#[test]
+fn ollama_cloud_resolves_saved_api_key() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let store = Arc::new(RecordingSecretsStore::with_value("ollama-cloud-saved-key"));
+    let secrets = Secrets::new(store.clone());
+    let mut config = ConfigToml {
+        provider: ProviderKind::Ollama,
+        ..ConfigToml::default()
+    };
+    config.providers.ollama.base_url = Some(provider::OLLAMA_CLOUD_BASE_URL.to_string());
+
+    let resolved =
+        config.resolve_runtime_options_with_secrets(&CliRuntimeOverrides::default(), &secrets);
+
+    assert_eq!(resolved.base_url, provider::OLLAMA_CLOUD_BASE_URL);
+    assert_eq!(resolved.api_key.as_deref(), Some("ollama-cloud-saved-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Keyring));
+    assert_eq!(store.gets.lock().unwrap().as_slice(), ["ollama"]);
+}
+
+#[test]
 fn self_hosted_providers_do_not_probe_secret_store_by_default() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
@@ -6242,7 +6324,7 @@ fn ollama_provider_preserves_model_tags() {
 }
 
 #[test]
-fn ollama_remote_env_url_does_not_inherit_ambient_optional_key() {
+fn ollama_custom_remote_does_not_inherit_ambient_or_saved_official_key() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
     // Safety: test-only environment mutation guarded by a module mutex.
@@ -6252,12 +6334,20 @@ fn ollama_remote_env_url_does_not_inherit_ambient_optional_key() {
         env::set_var("OLLAMA_API_KEY", "ollama-env-key");
     }
 
-    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+    let store = Arc::new(RecordingSecretsStore::with_value("ollama-saved-key"));
+    let secrets = Secrets::new(store.clone());
+
+    let resolved = ConfigToml::default()
+        .resolve_runtime_options_with_secrets(&CliRuntimeOverrides::default(), &secrets);
 
     assert_eq!(resolved.provider, ProviderKind::Ollama);
     assert_eq!(resolved.base_url, "http://ollama.example/v1");
     assert_eq!(resolved.api_key, None);
     assert_eq!(resolved.api_key_source, None);
+    assert!(
+        store.gets.lock().unwrap().is_empty(),
+        "a custom Ollama endpoint must not read the official ollama secret slot"
+    );
 }
 
 #[test]

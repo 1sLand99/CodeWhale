@@ -8012,6 +8012,154 @@ fn ollama_provider_uses_local_defaults_without_api_key() -> Result<()> {
 }
 
 #[test]
+fn ollama_cloud_resolves_env_key_and_is_not_keyless() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-ollama-cloud-env-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    // Safety: test-only environment mutation guarded by a global mutex.
+    unsafe { env::set_var("OLLAMA_API_KEY", "ollama-cloud-env-key") };
+
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some("https://ollama.com/v1/".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert!(!provider_route_is_keyless_self_hosted(
+        ApiProvider::Ollama,
+        &config.deepseek_base_url()
+    ));
+    assert_eq!(config.deepseek_api_key()?, "ollama-cloud-env-key");
+    assert!(has_api_key_for(&config, ApiProvider::Ollama));
+    Ok(())
+}
+
+#[test]
+fn ollama_cloud_resolves_saved_provider_key() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+
+    codewhale_secrets::Secrets::auto_detect().set("ollama", "ollama-cloud-saved-key")?;
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "ollama-cloud-saved-key");
+    assert!(has_api_key_for(&config, ApiProvider::Ollama));
+    Ok(())
+}
+
+#[test]
+fn ollama_cloud_without_key_fails_with_cloud_guidance() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-ollama-cloud-missing-key-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some("https://ollama.com/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert!(!has_api_key_for(&config, ApiProvider::Ollama));
+    let error = config
+        .deepseek_api_key()
+        .expect_err("Ollama Cloud must require an API key");
+    let message = error.to_string();
+    assert!(message.contains("Ollama Cloud API key not found"));
+    assert!(message.contains("https://ollama.com/settings/keys"));
+    assert!(message.contains("OLLAMA_API_KEY"));
+    Ok(())
+}
+
+#[test]
+fn ollama_custom_remote_does_not_inherit_cloud_env_key() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-ollama-custom-remote-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    // Safety: test-only environment mutation guarded by a global mutex.
+    unsafe { env::set_var("OLLAMA_API_KEY", "must-not-cross-routes") };
+    codewhale_secrets::Secrets::auto_detect().set("ollama", "must-not-cross-routes-either")?;
+
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some("https://ollama-gateway.example/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert!(config.provider_uses_custom_endpoint(ApiProvider::Ollama));
+    assert!(!has_api_key_for(&config, ApiProvider::Ollama));
+    let error = config
+        .deepseek_api_key()
+        .expect_err("custom remote must bind its credential explicitly");
+    assert!(
+        error
+            .to_string()
+            .contains("Custom endpoint credentials for ollama must be bound explicitly")
+    );
+    Ok(())
+}
+
+#[test]
 fn ollama_model_is_passed_through_verbatim() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()

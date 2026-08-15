@@ -139,6 +139,12 @@ pub struct CredentialHelp {
 /// is never described as a generic Moonshot route.
 pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str = "https://www.kimi.com/code/console";
 
+/// Ollama's account page for creating API keys used by the hosted API.
+pub const OLLAMA_CLOUD_API_KEY_URL: &str = "https://ollama.com/settings/keys";
+
+/// Ollama Cloud's exact OpenAI-compatible API base URL.
+pub const OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
+
 /// Static metadata for a built-in model provider.
 pub trait Provider: Send + Sync {
     /// Provider enum variant represented by this entry.
@@ -475,6 +481,17 @@ pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
     is_exact_https_route(base_url, "api.kimi.com", "coding/v1")
 }
 
+/// Whether a configured Ollama route is exactly the hosted OpenAI-compatible
+/// endpoint.
+///
+/// Local Ollama remains keyless. Neighboring paths, HTTP downgrades, and
+/// lookalike hosts remain custom routes so they cannot inherit an
+/// `OLLAMA_API_KEY` or the durable `ollama` secret-store slot.
+#[must_use]
+pub fn is_exact_ollama_cloud_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Ollama && is_exact_https_route(base_url, "ollama.com", "v1")
+}
+
 /// Whether a configured route is exactly Moonshot's direct API endpoint.
 ///
 /// Direct K3 owns a different reasoning-control dialect from the Kimi Code
@@ -540,6 +557,15 @@ pub fn is_exact_minimax_anthropic_route(kind: ProviderKind, base_url: &str) -> b
 /// endpoint. It performs no discovery, credential lookup, or network I/O.
 #[must_use]
 pub fn credential_help_for_route(kind: ProviderKind, base_url: &str) -> CredentialHelp {
+    if is_exact_ollama_cloud_route(kind, base_url) {
+        return CredentialHelp {
+            acquisition: CredentialAcquisition::ApiKey,
+            credential_url: Some(OLLAMA_CLOUD_API_KEY_URL),
+            docs_url: Some("https://docs.ollama.com/api/authentication"),
+            guidance: "Ollama Cloud requires an API key. Create one in Ollama account settings, then save it for the ollama provider or set OLLAMA_API_KEY.",
+        };
+    }
+
     if is_exact_kimi_code_route(kind, base_url) {
         return CredentialHelp {
             acquisition: CredentialAcquisition::ApiKey,
@@ -1824,6 +1850,46 @@ mod tests {
                 "{neighboring_route} must not inherit Kimi Code membership semantics"
             );
         }
+    }
+
+    #[test]
+    fn ollama_cloud_route_is_exact_and_requires_its_own_key() {
+        for base_url in [
+            OLLAMA_CLOUD_BASE_URL,
+            "https://ollama.com/v1/",
+            "  HTTPS://OLLAMA.COM/v1/  ",
+        ] {
+            assert!(is_exact_ollama_cloud_route(ProviderKind::Ollama, base_url));
+            let help = credential_help_for_route(ProviderKind::Ollama, base_url);
+            assert_eq!(help.acquisition, CredentialAcquisition::ApiKey);
+            assert_eq!(help.credential_url, Some(OLLAMA_CLOUD_API_KEY_URL));
+            assert_eq!(
+                help.docs_url,
+                Some("https://docs.ollama.com/api/authentication")
+            );
+            assert!(help.guidance.contains("OLLAMA_API_KEY"));
+        }
+
+        for base_url in [
+            "http://ollama.com/v1",
+            "https://ollama.com",
+            "https://ollama.com/api",
+            "https://ollama.com/v1/preview",
+            "https://ollama.com.evil.example/v1",
+            "https://api.ollama.com/v1",
+            "https://ollama.com/v1?tenant=other",
+        ] {
+            assert!(!is_exact_ollama_cloud_route(ProviderKind::Ollama, base_url));
+        }
+        assert!(!is_exact_ollama_cloud_route(
+            ProviderKind::Openai,
+            OLLAMA_CLOUD_BASE_URL
+        ));
+
+        let local = credential_help_for_route(ProviderKind::Ollama, DEFAULT_OLLAMA_BASE_URL);
+        assert_eq!(local.acquisition, CredentialAcquisition::LocalOptional);
+        assert_eq!(local.credential_url, None);
+        assert!(local.guidance.contains("keyless by default"));
     }
 
     #[test]

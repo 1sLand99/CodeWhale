@@ -3578,6 +3578,7 @@ impl CredentialDiagnostic {
 
 fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider = config.api_provider();
+    let base_url = config.deepseek_base_url();
     let auth_mode = config.auth_mode_for_provider(provider);
     if crate::config::auth_mode_disables_api_key(auth_mode.as_deref()) {
         return CredentialDiagnostic::new(
@@ -3586,8 +3587,8 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
         );
     }
     if !crate::config::auth_mode_requires_api_key(auth_mode.as_deref())
-        && (provider.is_self_hosted()
-            || crate::config::base_url_uses_local_host(&config.deepseek_base_url()))
+        && (crate::config::provider_route_is_keyless_self_hosted(provider, &base_url)
+            || crate::config::base_url_uses_local_host(&base_url))
     {
         return CredentialDiagnostic::new(
             ApiKeySource::LocalRuntime,
@@ -3972,7 +3973,8 @@ fn doctor_should_probe_api(
     base_url: &str,
     probes: crate::doctor::DoctorProbeRequest,
 ) -> bool {
-    let local = provider.is_self_hosted() || crate::config::base_url_uses_local_host(base_url);
+    let local = crate::config::provider_route_is_keyless_self_hosted(provider, base_url)
+        || crate::config::base_url_uses_local_host(base_url);
     probes.should_probe_api(local)
 }
 
@@ -4274,8 +4276,10 @@ async fn run_doctor(
     }
     let live_api_requested =
         doctor_should_probe_api(config.api_provider(), &api_target.base_url, probes);
-    let endpoint_is_local = config.api_provider().is_self_hosted()
-        || crate::config::base_url_uses_local_host(&api_target.base_url);
+    let endpoint_is_local = crate::config::provider_route_is_keyless_self_hosted(
+        config.api_provider(),
+        &api_target.base_url,
+    ) || crate::config::base_url_uses_local_host(&api_target.base_url);
     if doctor_should_probe_auth(config) && live_api_requested {
         print!("  {} Testing connection...", "·".dimmed());
         use std::io::Write;
@@ -16972,6 +16976,32 @@ mod doctor_live_probe_tests {
     }
 
     #[test]
+    fn ollama_cloud_probe_uses_hosted_opt_in_not_local_opt_in() {
+        let cloud = codewhale_config::provider::OLLAMA_CLOUD_BASE_URL;
+        assert!(!doctor_should_probe_api(
+            crate::config::ApiProvider::Ollama,
+            cloud,
+            crate::doctor::DoctorProbeRequest::default(),
+        ));
+        assert!(doctor_should_probe_api(
+            crate::config::ApiProvider::Ollama,
+            cloud,
+            crate::doctor::DoctorProbeRequest {
+                probe_api: true,
+                ..crate::doctor::DoctorProbeRequest::default()
+            },
+        ));
+        assert!(!doctor_should_probe_api(
+            crate::config::ApiProvider::Ollama,
+            cloud,
+            crate::doctor::DoctorProbeRequest {
+                probe_local: true,
+                ..crate::doctor::DoctorProbeRequest::default()
+            },
+        ));
+    }
+
+    #[test]
     fn custom_loopback_probe_also_requires_explicit_opt_in() {
         assert!(!doctor_should_probe_api(
             crate::config::ApiProvider::Custom,
@@ -17619,6 +17649,50 @@ mod setup_helper_tests {
 
         assert_eq!(resolve_api_key_source(&config), ApiKeySource::Unknown);
         assert!(config.deepseek_api_key().is_err());
+    }
+
+    #[test]
+    fn ollama_doctor_credential_source_is_route_aware() {
+        let local = Config {
+            provider: Some("ollama".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(resolve_api_key_source(&local), ApiKeySource::LocalRuntime);
+        assert_eq!(
+            resolve_credential_diagnostic(&local).availability,
+            CredentialAvailability::NotRequired
+        );
+
+        let ollama_config = |base_url: &str| Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                ollama: crate::config::ProviderConfig {
+                    base_url: Some(base_url.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let cloud = ollama_config(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL);
+        assert_eq!(
+            resolve_api_key_source(&cloud),
+            ApiKeySource::SecretStoreUnprobed
+        );
+        assert_eq!(
+            resolve_credential_diagnostic(&cloud).availability,
+            CredentialAvailability::NotProbed
+        );
+
+        let custom_remote = ollama_config("https://ollama-gateway.example.test/v1");
+        assert_eq!(
+            resolve_api_key_source(&custom_remote),
+            ApiKeySource::Unknown
+        );
+        assert_eq!(
+            resolve_credential_diagnostic(&custom_remote).availability,
+            CredentialAvailability::Unknown
+        );
     }
 
     #[test]

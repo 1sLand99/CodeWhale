@@ -5902,7 +5902,7 @@ impl Config {
             return false;
         }
 
-        provider.is_self_hosted()
+        provider_route_is_keyless_self_hosted(provider, &self.base_url_for_route(provider))
             || (provider == self.api_provider()
                 && base_url_uses_local_host(&self.deepseek_base_url()))
     }
@@ -6185,7 +6185,8 @@ impl Config {
         }
 
         if !auth_mode_requires_api_key(auth_mode.as_deref())
-            && (provider.is_self_hosted() || base_url_uses_local_host(&self.deepseek_base_url()))
+            && (provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url())
+                || base_url_uses_local_host(&self.deepseek_base_url()))
         {
             return Ok(String::new());
         }
@@ -6279,7 +6280,20 @@ impl Config {
             }
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
-            ApiProvider::Sglang | ApiProvider::Vllm | ApiProvider::Ollama => Ok(String::new()),
+            ApiProvider::Sglang | ApiProvider::Vllm => Ok(String::new()),
+            ApiProvider::Ollama
+                if provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url()) =>
+            {
+                Ok(String::new())
+            }
+            ApiProvider::Ollama => {
+                let help = credential_help_for_provider_route(provider, &self.deepseek_base_url());
+                anyhow::bail!(
+                    "Ollama Cloud API key not found. Get a key: {}. Run 'codewhale auth set --provider ollama', set OLLAMA_API_KEY, or add [providers.ollama] api_key in ~/.codewhale/config.toml.",
+                    help.credential_url
+                        .unwrap_or(codewhale_config::provider::OLLAMA_CLOUD_API_KEY_URL)
+                )
+            }
             // Custom OpenAI-compatible endpoints (#1519): the key comes from the
             // env var named by `[providers.<name>] api_key_env`. If we reached
             // here it is unset/empty (and the endpoint is not loopback).
@@ -8830,6 +8844,20 @@ fn base_url_is_custom_for_provider(provider: ApiProvider, base_url: &str) -> boo
     codewhale_config::provider_preserves_custom_base_url_model(kind, base_url)
 }
 
+/// Whether this concrete route is a self-hosted endpoint whose credentials
+/// are optional by default.
+///
+/// Ollama is normally local, but its exact `https://ollama.com/v1` route is a
+/// hosted API and must resolve or request `OLLAMA_API_KEY`. Other remote
+/// Ollama URLs remain custom and are rejected before this helper can grant
+/// access to the provider's ambient or saved credentials.
+pub(crate) fn provider_route_is_keyless_self_hosted(provider: ApiProvider, base_url: &str) -> bool {
+    if provider == ApiProvider::Ollama {
+        return base_url_uses_local_host(base_url);
+    }
+    provider.is_self_hosted()
+}
+
 fn provider_preserves_custom_base_url_model(provider: ApiProvider, base_url: &str) -> bool {
     base_url_is_custom_for_provider(provider, base_url)
 }
@@ -10486,7 +10514,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
     }
 
     if !auth_mode_requires_api_key(auth_mode.as_deref())
-        && (provider.is_self_hosted()
+        && (provider_route_is_keyless_self_hosted(provider, &config.base_url_for_route(provider))
             || (provider == config.api_provider()
                 && base_url_uses_local_host(&config.deepseek_base_url())))
     {

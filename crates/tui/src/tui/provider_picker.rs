@@ -516,6 +516,7 @@ impl ProviderDashboardRow {
         let no_auth = crate::config::auth_mode_disables_api_key(auth_mode.as_deref());
         let api_key_required = crate::config::auth_mode_requires_api_key(auth_mode.as_deref());
         let official_endpoint = !config.provider_uses_custom_endpoint(provider);
+        let auth_base_url = config.base_url_for_route(provider);
         let xai_oauth_ready = provider == ApiProvider::Xai
             && official_endpoint
             && crate::xai_oauth::credentials_valid(config);
@@ -524,6 +525,7 @@ impl ProviderDashboardRow {
         } else {
             auth_status_for(
                 provider,
+                &auth_base_url,
                 has_key,
                 configured,
                 no_auth,
@@ -688,6 +690,11 @@ impl ProviderDashboardRow {
         let resolved_pricing =
             if matches!(auth_status, ProviderAuthStatus::ImportedTokenUnavailable) {
                 usage_meter
+            } else if provider == ApiProvider::Ollama
+                && !crate::config::provider_route_is_keyless_self_hosted(provider, &base_url)
+                && resolved_pricing == "cost: local"
+            {
+                "cost: unknown".to_string()
             } else {
                 resolved_pricing
             };
@@ -773,15 +780,17 @@ impl ProviderDashboardRow {
     fn compact_hint(&self) -> String {
         // Self-hosted providers carry a local/private posture; surface it next
         // to the base URL so the row reads correctly without a key (#3083).
-        let self_hosted = if self.provider.is_self_hosted()
-            || matches!(
-                self.auth_status,
-                ProviderAuthStatus::Local | ProviderAuthStatus::Optional
-            ) {
-            " (self-hosted)"
-        } else {
-            ""
-        };
+        let self_hosted =
+            if crate::config::provider_route_is_keyless_self_hosted(self.provider, &self.base_url)
+                || matches!(
+                    self.auth_status,
+                    ProviderAuthStatus::Local | ProviderAuthStatus::Optional
+                )
+            {
+                " (self-hosted)"
+            } else {
+                ""
+            };
         let request_concurrency = self
             .request_concurrency
             .label()
@@ -1161,6 +1170,7 @@ fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoni
 
 fn auth_status_for(
     provider: ApiProvider,
+    base_url: &str,
     has_key: bool,
     configured: Option<&crate::config::ProviderConfig>,
     no_auth: bool,
@@ -1171,7 +1181,7 @@ fn auth_status_for(
     if no_auth {
         return ProviderAuthStatus::NoAuth;
     }
-    if provider.is_self_hosted() {
+    if crate::config::provider_route_is_keyless_self_hosted(provider, base_url) {
         if api_key_required {
             return if has_key {
                 ProviderAuthStatus::Configured
@@ -4497,6 +4507,55 @@ mod tests {
         assert_eq!(row.usage_meter, "cost: local");
         assert!(row.base_url.contains("localhost:11434"));
         assert!(row.is_active);
+    }
+
+    #[test]
+    fn ollama_cloud_row_requires_credentials_and_is_not_labeled_local() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("isolated credential home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _ollama_key = EnvVarGuard::remove("OLLAMA_API_KEY");
+        let _cli_source = EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+
+        let mut config = Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                ollama: crate::config::ProviderConfig {
+                    base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let missing =
+            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        assert_eq!(missing.auth_status, ProviderAuthStatus::Missing);
+        assert_eq!(missing.readiness, ResolvedProviderReadiness::MissingKey);
+        assert_eq!(missing.usage_meter, "cost: unknown");
+        assert!(!missing.compact_hint().contains("(self-hosted)"));
+        assert!(
+            missing
+                .messages
+                .iter()
+                .any(|message| message.contains("OLLAMA_API_KEY")),
+            "missing Cloud key guidance: {:?}",
+            missing.messages
+        );
+
+        config.providers.as_mut().expect("providers").ollama.api_key =
+            Some("ollama-cloud-key".to_string());
+        let configured =
+            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        assert_eq!(configured.auth_status, ProviderAuthStatus::Configured);
+        assert_eq!(
+            configured.readiness,
+            ResolvedProviderReadiness::SavedUnchecked
+        );
+        assert!(!configured.compact_hint().contains("(self-hosted)"));
     }
 
     #[test]

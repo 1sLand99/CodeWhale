@@ -112,7 +112,7 @@ the listed provider env vars.
 | `moonshot` | `[providers.moonshot]` | OpenAI Chat Completions | `MOONSHOT_API_KEY`, `KIMI_API_KEY` |
 | `sglang` | `[providers.sglang]` | OpenAI Chat Completions | `SGLANG_API_KEY` |
 | `vllm` | `[providers.vllm]` | OpenAI Chat Completions | `VLLM_API_KEY` |
-| `ollama` | `[providers.ollama]` | Ollama-local OpenAI-compatible Chat Completions | `OLLAMA_API_KEY` |
+| `ollama` | `[providers.ollama]` | Local or Ollama Cloud OpenAI-compatible Chat Completions | `OLLAMA_API_KEY` (required only for Ollama Cloud or an explicitly authenticated local route) |
 | `huggingface` | `[providers.huggingface]` | OpenAI Chat Completions | `HUGGINGFACE_API_KEY`, `HF_TOKEN` |
 | `together` | `[providers.together]` | OpenAI Chat Completions | `TOGETHER_API_KEY` |
 | `qianfan` | `[providers.qianfan]` | OpenAI Chat Completions | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY` |
@@ -380,6 +380,24 @@ codewhale --provider ollama --model <model>
 Provider-hinted model names are sent as-is, so `--model qwen3:8b` works with
 any tag Ollama has pulled.
 
+For direct Ollama Cloud access, use the exact hosted OpenAI-compatible route
+and an [Ollama API key](https://ollama.com/settings/keys):
+
+```toml
+provider = "ollama"
+
+[providers.ollama]
+base_url = "https://ollama.com/v1"
+model = "<ollama-cloud-model-id>"
+```
+
+Replace the model placeholder with an ID available to your Ollama account.
+Save the key with `codewhale auth set --provider ollama` or set
+`OLLAMA_API_KEY`. The local default remains keyless. Only the exact
+`https://ollama.com/v1` route may use the provider's ambient or saved Ollama
+credential; any other remote URL is a custom endpoint and must bind its own
+credential explicitly.
+
 ### vLLM
 
 ```bash
@@ -446,7 +464,8 @@ configuration path instead of guessing a vendor page.
 | `anthropic` | [Anthropic API keys](https://console.anthropic.com/settings/keys) |
 | `openmodel` | [OpenModel console](https://console.openmodel.ai/) ([authentication guide](https://docs.openmodel.ai/en/docs/getting-started/authentication)) |
 | `openai-codex` | Run `codex login`, then explicitly grant Codewhale read-only access to that exact credential file; no Codewhale API key is stored. |
-| `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints are keyless by default; configure a key only when the server requires one. |
+| `sglang`, `vllm` | Local OpenAI-compatible endpoints are keyless by default; configure a key only when the server requires one. |
+| `ollama` | Local Ollama is keyless by default. Direct Ollama Cloud at exact `https://ollama.com/v1` requires an [Ollama API key](https://ollama.com/settings/keys) via saved provider credentials or `OLLAMA_API_KEY`. Other remote endpoints never inherit that credential. |
 | `sakana` | [Sakana AI API keys](https://console.sakana.ai/api-keys) ([get started](https://console.sakana.ai/get-started)) |
 | `longcat` | [Meituan LongCat platform](https://longcat.chat/platform) |
 | `opencode-go` | [OpenCode Go](https://opencode.ai/docs/go/) |
@@ -533,7 +552,7 @@ Kimi remains API-key-only; external consent for Kimi is rejected.
 | `minimax-anthropic` | `[providers.minimax_anthropic]` | `MINIMAX_API_KEY` | `MINIMAX_ANTHROPIC_BASE_URL`; default `https://api.minimax.io/anthropic`; China `https://api.minimaxi.com/anthropic` | `MiniMax-M3`, `MiniMax-M2.7` | MiniMax direct Anthropic-compatible Messages route. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`; the route uses `x-api-key`. M3 supports adaptive or disabled thinking. M2.7 always keeps thinking enabled. |
 | `sglang` | `[providers.sglang]` | Optional `SGLANG_API_KEY` | `SGLANG_BASE_URL`; default `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted OpenAI-compatible route. Localhost deployments commonly omit auth. `SGLANG_MODEL` is accepted. |
 | `vllm` | `[providers.vllm]` | Optional `VLLM_API_KEY` | `VLLM_BASE_URL`; default `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted vLLM OpenAI-compatible route. Localhost deployments commonly omit auth. `VLLM_MODEL` is accepted. |
-| `ollama` | `[providers.ollama]` | Optional `OLLAMA_API_KEY` | `OLLAMA_BASE_URL`; default `http://localhost:11434/v1` | `deepseek-coder:1.3b`; provider-hinted custom tags pass through | Self-hosted Ollama OpenAI-compatible route. Localhost deployments commonly omit auth. `OLLAMA_MODEL` is accepted. |
+| `ollama` | `[providers.ollama]` | Local optional; `OLLAMA_API_KEY` required for exact Ollama Cloud route | `OLLAMA_BASE_URL`; local default `http://localhost:11434/v1`; Cloud `https://ollama.com/v1` | `deepseek-coder:1.3b`; provider-hinted custom tags pass through | Local Ollama is keyless by default. The exact Ollama Cloud OpenAI-compatible route resolves saved or ambient Ollama credentials. Any other remote URL remains custom and does not inherit them. `OLLAMA_MODEL` is accepted. |
 | `huggingface` | `[providers.huggingface]` | `HUGGINGFACE_API_KEY`, `HF_TOKEN` | `HUGGINGFACE_BASE_URL`, `HF_BASE_URL`; default `https://router.huggingface.co/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Hugging Face Inference Providers OpenAI-compatible router route. Accepted aliases: `huggingface`, `hugging-face`, `hugging_face`, `hf`. Org-prefixed model IDs pass through. `HUGGINGFACE_MODEL` and `HF_MODEL` are accepted. Hub browsing/export are separate future features. |
 | `deepinfra` | `[providers.deepinfra]` | `DEEPINFRA_API_KEY`, `DEEPINFRA_TOKEN` | `DEEPINFRA_BASE_URL`; default `https://api.deepinfra.com/v1/openai` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | DeepInfra OpenAI-compatible route. Drop-in replacement for OpenAI SDK. |
 | `together` | `[providers.together]` | `TOGETHER_API_KEY` | `TOGETHER_BASE_URL`; default `https://api.together.xyz/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash`, `thinkingmachines/inkling` | Together AI OpenAI-compatible route. `TOGETHER_MODEL` is accepted. Model aliases `deepseek-v4-pro` and `deepseek-v4-flash` normalize to Together's org-prefixed IDs; `inkling` and `together-inkling` normalize to Together's published lowercase Inkling wire ID. Inkling uses the exact `none`/`minimal`/`low`/`medium`/`high`/`max` reasoning vocabulary from Thinking Machines' [official model repository](https://huggingface.co/thinkingmachines/Inkling). Together's [launch post](https://www.together.ai/blog/together-ai-brings-thinking-machines-labs-new-model-inkling-on-day-0) currently says Inkling is live with 1M context, while its [model detail page](https://www.together.ai/models/inkling) says coming soon with 256K context and publishes no price. Until Together's active `/models` endpoint and the Models.dev catalog resolve that conflict, Inkling is not seeded into Codewhale's offline picker and no route-specific context or cost is inferred. |

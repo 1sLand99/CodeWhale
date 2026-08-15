@@ -816,21 +816,24 @@ pub(crate) fn preflight_route(
     scoped.provider = Some(identity.key.clone());
     let base_url = scoped.deepseek_base_url();
 
-    // Locally decided. A self-hosted route is keyless by design, and that is a
-    // valid, first-class state — not a downgrade and not a missing credential.
-    let credential = if identity.provider.is_self_hosted() {
-        CredentialReadiness::KeylessLocal
-    } else if crate::config::has_api_key_for(&scoped, identity.provider) {
-        CredentialReadiness::Configured
-    } else {
-        // The discriminant only. `Missing { detail }` names the provider table
-        // key, which for a custom route is the customer's own string.
-        codewhale_telemetry::session_counters()
-            .bump_error(codewhale_telemetry::ErrorCounter::AuthPreflightFailed);
-        CredentialReadiness::Missing {
-            detail: format!("no credential configured for `{}`", identity.key),
-        }
-    };
+    // Locally decided. A concrete loopback/self-hosted route is keyless by
+    // design, and that is a valid, first-class state — not a downgrade and
+    // not a missing credential. Ollama Cloud is hosted and falls through to
+    // the ordinary credential checks.
+    let credential =
+        if crate::config::provider_route_is_keyless_self_hosted(identity.provider, &base_url) {
+            CredentialReadiness::KeylessLocal
+        } else if crate::config::has_api_key_for(&scoped, identity.provider) {
+            CredentialReadiness::Configured
+        } else {
+            // The discriminant only. `Missing { detail }` names the provider table
+            // key, which for a custom route is the customer's own string.
+            codewhale_telemetry::session_counters()
+                .bump_error(codewhale_telemetry::ErrorCounter::AuthPreflightFailed);
+            CredentialReadiness::Missing {
+                detail: format!("no credential configured for `{}`", identity.key),
+            }
+        };
 
     Ok(PreflightedRoute {
         member_id: member_id.to_string(),
@@ -2991,6 +2994,65 @@ permissions = "read_only"
         assert!(route.credential.is_ready());
         route.require_ready().expect("keyless local is valid");
         assert!(route.endpoint.local, "a local runtime is marked local");
+    }
+
+    #[test]
+    fn ollama_cloud_and_custom_remote_preflight_require_route_scoped_credentials() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().expect("isolated credential home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _ollama_key =
+            crate::test_support::EnvVarGuard::set("OLLAMA_API_KEY", "ambient-ollama-key");
+        let _cli_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+
+        let cloud = Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                ollama: crate::config::ProviderConfig {
+                    base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cloud_route = preflight_route(
+            "cloud-worker",
+            "ollama",
+            crate::config::DEFAULT_OLLAMA_MODEL,
+            &cloud,
+        )
+        .expect("official Cloud route");
+        assert_eq!(cloud_route.credential, CredentialReadiness::Configured);
+        assert!(!cloud_route.endpoint.local);
+        cloud_route.require_ready().expect("Cloud env key is ready");
+
+        let custom_remote = Config {
+            provider: Some("ollama".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                ollama: crate::config::ProviderConfig {
+                    base_url: Some("https://ollama-gateway.example.test/v1".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let custom_route = preflight_route(
+            "custom-worker",
+            "ollama",
+            crate::config::DEFAULT_OLLAMA_MODEL,
+            &custom_remote,
+        )
+        .expect("custom route still resolves structurally");
+        assert!(matches!(
+            custom_route.credential,
+            CredentialReadiness::Missing { .. }
+        ));
+        assert!(!custom_route.endpoint.local);
+        assert!(custom_route.require_ready().is_err());
     }
 
     /// A tier label is a selector concept; what a request may carry is a
