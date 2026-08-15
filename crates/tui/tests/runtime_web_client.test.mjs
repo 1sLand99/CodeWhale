@@ -124,7 +124,8 @@ test("embedded web client keeps the CWC stage, transcript, and receipt hierarchy
     cssDeclarations(styles, "\\.message\\.user \\.message-label"),
     /display:\s*none/,
   );
-  assert.match(html, /id="transcript" role="log"[^>]+aria-relevant="additions text"/);
+  assert.match(html, /id="transcript" role="log"[^>]+aria-relevant="additions"/);
+  assert.doesNotMatch(html, /id="transcript" role="log"[^>]+aria-relevant="[^"]*text/);
   assert.match(source, /card\.append\(element\("span", "receipt-dot"\)\)/);
 });
 
