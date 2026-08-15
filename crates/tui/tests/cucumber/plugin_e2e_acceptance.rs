@@ -20,6 +20,8 @@ use tempfile::TempDir;
 mod qa_harness;
 
 #[cfg(all(unix, feature = "long-running-tests"))]
+use qa_harness::frame::Frame;
+#[cfg(all(unix, feature = "long-running-tests"))]
 use qa_harness::harness::{Harness, make_sealed_workspace};
 #[cfg(all(unix, feature = "long-running-tests"))]
 use qa_harness::keys;
@@ -638,10 +640,24 @@ fn spawn_hermetic_model_server() -> (
 }
 
 #[cfg(all(unix, feature = "long-running-tests"))]
+fn composer_contains(frame: &Frame, text: &str) -> bool {
+    let (cursor_row, _) = frame.cursor();
+    if frame.row(cursor_row).contains(text) {
+        return true;
+    }
+    let rows = frame.rows();
+    let start = rows.saturating_sub(16);
+    (start..rows).any(|y| frame.row(y).contains(text))
+}
+
+#[cfg(all(unix, feature = "long-running-tests"))]
 fn submit_tui_command(tui: &mut Harness, text: &str) {
     tui.send(keys::key::text(text)).expect("type TUI command");
-    tui.wait_for_text(text, std::time::Duration::from_secs(3))
-        .expect("typed command visible");
+    tui.wait_for(
+        |frame| composer_contains(frame, text),
+        std::time::Duration::from_secs(3),
+    )
+    .expect("typed command visible in composer");
     std::thread::sleep(std::time::Duration::from_millis(180));
     tui.pump();
     tui.send(keys::key::enter()).expect("submit TUI command");
@@ -655,12 +671,14 @@ fn visible_review_confirmation(tui: &mut Harness) -> Option<String> {
 
 #[cfg(all(unix, feature = "long-running-tests"))]
 fn review_confirmation_in_text(text: &str) -> Option<String> {
-    text.lines().map(str::trim).find_map(|line| {
-        let token = line.strip_prefix("/plugin trust demo ")?;
-        (token.contains('.')
-            && token.len() >= 17
-            && token.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '.'))
-        .then(|| line.to_string())
+    const PREFIX: &str = "/plugin trust demo ";
+    text.lines().find_map(|line| {
+        let start = line.find(PREFIX)?;
+        let token: String = line[start + PREFIX.len()..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '.')
+            .collect();
+        (token.contains('.') && token.len() >= 17).then(|| format!("{PREFIX}{token}"))
     })
 }
 
@@ -728,6 +746,10 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
             .exists(),
         "show must remain read-only"
     );
+    tui.send(keys::key::esc())
+        .expect("dismiss plugin show transcript focus");
+    tui.wait_for_text("Write a task", BINARY_ACCEPTANCE_TIMEOUT)
+        .expect("composer after plugin show");
 
     submit_tui_command(&mut tui, "/plugin trust demo");
     tui.wait_for(
