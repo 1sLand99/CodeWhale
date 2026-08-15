@@ -813,7 +813,7 @@ pub(crate) fn preflight_route(
     })?;
 
     let mut scoped = config.clone();
-    scoped.provider = Some(identity.key.clone());
+    scoped.scope_to_provider_identity(&identity);
     let base_url = scoped.deepseek_base_url();
 
     // Locally decided. A concrete loopback/self-hosted route is keyless by
@@ -838,7 +838,11 @@ pub(crate) fn preflight_route(
     Ok(PreflightedRoute {
         member_id: member_id.to_string(),
         provider_id: identity.key.clone(),
-        provider_kind: format!("{:?}", identity.provider).to_ascii_lowercase(),
+        provider_kind: if identity.provider == ApiProvider::OllamaCloud {
+            identity.provider.as_str().to_string()
+        } else {
+            format!("{:?}", identity.provider).to_ascii_lowercase()
+        },
         declared_model: model.trim().to_string(),
         wire_model: wire_model.clone(),
         endpoint: EndpointIdentity::from_base_url(&base_url),
@@ -861,7 +865,8 @@ pub(crate) fn preflight_route(
 /// would create two objects that could drift apart.
 fn validate_route_client(route: &PreflightedRoute, config: &Config) -> Result<(), String> {
     let mut scoped = config.clone();
-    scoped.provider = Some(route.provider_id.clone());
+    let identity = config.resolve_provider_identity(&route.provider_id)?;
+    scoped.scope_to_provider_identity(&identity);
     crate::client::DeepSeekClient::new(&scoped)
         .map(|_| ())
         .map_err(|error| {
@@ -940,8 +945,6 @@ impl LiveFleetRouter {
             reason: error.to_string(),
         })?;
 
-        let mut scoped = config.clone();
-        scoped.provider = Some(route.provider_id.clone());
         let identity = config
             .resolve_provider_identity(route.provider_id.trim())
             .map_err(|detail| RouterBindError {
@@ -950,6 +953,8 @@ impl LiveFleetRouter {
                     route.provider_id
                 ),
             })?;
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&identity);
         let base_url = scoped.deepseek_base_url();
         let client =
             crate::client::DeepSeekClient::new(&scoped).map_err(|error| RouterBindError {
@@ -3002,13 +3007,16 @@ permissions = "read_only"
         let temp = tempfile::tempdir().expect("isolated credential home");
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
-        let _ollama_key =
-            crate::test_support::EnvVarGuard::set("OLLAMA_API_KEY", "ambient-ollama-key");
+        let _ollama_cloud_key = crate::test_support::EnvVarGuard::remove("OLLAMA_CLOUD_API_KEY");
+        let _ollama_key = crate::test_support::EnvVarGuard::remove("OLLAMA_API_KEY");
         let _cli_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+        codewhale_secrets::Secrets::auto_detect()
+            .set("ollama", "legacy-cloud-key")
+            .expect("seed released Ollama Cloud slot");
 
         let cloud = Config {
-            provider: Some("ollama".to_string()),
+            provider: Some("deepseek".to_string()),
             providers: Some(crate::config::ProvidersConfig {
                 ollama: crate::config::ProviderConfig {
                     base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
@@ -3025,6 +3033,8 @@ permissions = "read_only"
             &cloud,
         )
         .expect("official Cloud route");
+        assert_eq!(cloud_route.provider_id, "ollama-cloud");
+        assert_eq!(cloud_route.provider_kind, "ollama-cloud");
         assert_eq!(cloud_route.credential, CredentialReadiness::Configured);
         assert!(!cloud_route.endpoint.local);
         cloud_route.require_ready().expect("Cloud env key is ready");

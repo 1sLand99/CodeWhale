@@ -1868,11 +1868,17 @@ pub(crate) async fn run_event_loop(
                         recoverable: _,
                     } => {
                         let provider_before_error = app.api_provider;
-                        let identity_before_error = ProviderIdentity {
-                            provider: provider_before_error,
-                            key: app.provider_identity_for_persistence().to_string(),
-                            exact_id: app.provider_id_for_persistence().map(str::to_string),
-                        };
+                        let identity_before_error = config
+                            .resolve_persisted_provider_identity(
+                                Some(provider_before_error.as_str()),
+                                app.provider_id_for_persistence(),
+                            )
+                            .unwrap_or_else(|_| ProviderIdentity {
+                                provider: provider_before_error,
+                                key: app.provider_identity_for_persistence().to_string(),
+                                exact_id: app.provider_id_for_persistence().map(str::to_string),
+                                migrated_legacy_ollama_cloud_route: false,
+                            });
                         let fallback_chain_before_error = app.provider_chain.clone();
                         let (health_provider, health_model) =
                             error_health_route(app, provider_before_error);

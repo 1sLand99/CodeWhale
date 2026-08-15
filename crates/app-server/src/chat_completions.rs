@@ -224,6 +224,7 @@ fn endpoint_preserves_raw_model_ids(provider: ProviderKind, base_url: &str) -> b
         provider,
         ProviderKind::Custom
             | ProviderKind::Ollama
+            | ProviderKind::OllamaCloud
             | ProviderKind::Vllm
             | ProviderKind::Sglang
             | ProviderKind::OpencodeZen

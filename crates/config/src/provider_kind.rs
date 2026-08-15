@@ -61,6 +61,8 @@ pub enum ProviderKind {
     Sglang,
     Vllm,
     Ollama,
+    #[serde(alias = "ollama_cloud")]
+    OllamaCloud,
     #[serde(alias = "hugging-face", alias = "hugging_face", alias = "hf")]
     Huggingface,
     #[serde(alias = "together-ai", alias = "together_ai", alias = "togetherai")]
@@ -224,7 +226,7 @@ impl ProviderKind {
     /// stay on the enum for serde and `provider_for_kind`, but they are not
     /// first-class catalog rows. Plan is `mode` / base_url; dialect is
     /// `wire = openai|anthropic` on the primary provider config.
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -243,6 +245,7 @@ impl ProviderKind {
         Self::Sglang,
         Self::Vllm,
         Self::Ollama,
+        Self::OllamaCloud,
         Self::Huggingface,
         Self::Together,
         Self::Qianfan,

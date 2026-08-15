@@ -481,7 +481,7 @@ pub(crate) fn resolve_fleet_route_with_config(
                 .ok()?,
         };
         let mut scoped = config.clone();
-        scoped.provider = Some(identity.key.clone());
+        scoped.scope_to_provider_identity(&identity);
         let route = resolve_runtime_route(&scoped, identity.provider, model_selector)
             .ok()?
             .validate()

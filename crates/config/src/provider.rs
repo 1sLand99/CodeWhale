@@ -17,22 +17,22 @@ use super::{
     DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL,
     DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL, DEFAULT_NOVITA_BASE_URL,
     DEFAULT_NOVITA_MODEL, DEFAULT_NVIDIA_NIM_BASE_URL, DEFAULT_NVIDIA_NIM_MODEL,
-    DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OPENAI_BASE_URL,
-    DEFAULT_OPENAI_CODEX_BASE_URL, DEFAULT_OPENAI_CODEX_MODEL, DEFAULT_OPENAI_MODEL,
-    DEFAULT_OPENCODE_GO_BASE_URL, DEFAULT_OPENCODE_GO_MODEL, DEFAULT_OPENCODE_ZEN_BASE_URL,
-    DEFAULT_OPENCODE_ZEN_MODEL, DEFAULT_OPENMODEL_BASE_URL, DEFAULT_OPENMODEL_MODEL,
-    DEFAULT_OPENROUTER_BASE_URL, DEFAULT_OPENROUTER_MODEL, DEFAULT_ORCAROUTER_BASE_URL,
-    DEFAULT_ORCAROUTER_MODEL, DEFAULT_QIANFAN_BASE_URL, DEFAULT_QIANFAN_MODEL,
-    DEFAULT_SAKANA_BASE_URL, DEFAULT_SAKANA_MODEL, DEFAULT_SGLANG_BASE_URL, DEFAULT_SGLANG_MODEL,
-    DEFAULT_SILICONFLOW_BASE_URL, DEFAULT_SILICONFLOW_CN_BASE_URL, DEFAULT_SILICONFLOW_MODEL,
-    DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, DEFAULT_TELECOMJS_BASE_URL,
-    DEFAULT_TELECOMJS_MODEL, DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL,
-    DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL, DEFAULT_VOLCENGINE_BASE_URL,
-    DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL, DEFAULT_WANJIE_ARK_MODEL,
-    DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_XIAOMI_MIMO_BASE_URL,
-    DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL,
-    MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL, MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL,
-    ProviderKind,
+    DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_CLOUD_BASE_URL, DEFAULT_OLLAMA_CLOUD_MODEL,
+    DEFAULT_OLLAMA_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_CODEX_BASE_URL,
+    DEFAULT_OPENAI_CODEX_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENCODE_GO_BASE_URL,
+    DEFAULT_OPENCODE_GO_MODEL, DEFAULT_OPENCODE_ZEN_BASE_URL, DEFAULT_OPENCODE_ZEN_MODEL,
+    DEFAULT_OPENMODEL_BASE_URL, DEFAULT_OPENMODEL_MODEL, DEFAULT_OPENROUTER_BASE_URL,
+    DEFAULT_OPENROUTER_MODEL, DEFAULT_ORCAROUTER_BASE_URL, DEFAULT_ORCAROUTER_MODEL,
+    DEFAULT_QIANFAN_BASE_URL, DEFAULT_QIANFAN_MODEL, DEFAULT_SAKANA_BASE_URL, DEFAULT_SAKANA_MODEL,
+    DEFAULT_SGLANG_BASE_URL, DEFAULT_SGLANG_MODEL, DEFAULT_SILICONFLOW_BASE_URL,
+    DEFAULT_SILICONFLOW_CN_BASE_URL, DEFAULT_SILICONFLOW_MODEL, DEFAULT_STEPFUN_BASE_URL,
+    DEFAULT_STEPFUN_MODEL, DEFAULT_TELECOMJS_BASE_URL, DEFAULT_TELECOMJS_MODEL,
+    DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL,
+    DEFAULT_VOLCENGINE_BASE_URL, DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL,
+    DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL,
+    DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL,
+    DEFAULT_ZAI_MODEL, MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL,
+    MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL, ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -143,7 +143,7 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str = "https://www.kimi.com/co
 pub const OLLAMA_CLOUD_API_KEY_URL: &str = "https://ollama.com/settings/keys";
 
 /// Ollama Cloud's exact OpenAI-compatible API base URL.
-pub const OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
+pub const OLLAMA_CLOUD_BASE_URL: &str = DEFAULT_OLLAMA_CLOUD_BASE_URL;
 
 /// Static metadata for a built-in model provider.
 pub trait Provider: Send + Sync {
@@ -307,6 +307,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             credential_url: None,
             docs_url: Some("https://docs.ollama.com/api"),
             guidance: "Local Ollama is keyless by default; configure a key only if your server requires one.",
+        },
+        ProviderKind::OllamaCloud => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some(OLLAMA_CLOUD_API_KEY_URL),
+            docs_url: Some("https://docs.ollama.com/api/authentication"),
+            guidance: "Ollama Cloud requires an API key. Save it for the ollama-cloud provider, set OLLAMA_CLOUD_API_KEY for Pi compatibility, or set Ollama's official OLLAMA_API_KEY.",
         },
         ProviderKind::Huggingface => CredentialHelp {
             acquisition: ApiKey,
@@ -485,11 +491,22 @@ pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
 /// endpoint.
 ///
 /// Local Ollama remains keyless. Neighboring paths, HTTP downgrades, and
-/// lookalike hosts remain custom routes so they cannot inherit an
-/// `OLLAMA_API_KEY` or the durable `ollama` secret-store slot.
+/// lookalike hosts remain custom routes so they cannot inherit an Ollama Cloud
+/// credential or durable secret-store slot.
 #[must_use]
 pub fn is_exact_ollama_cloud_route(kind: ProviderKind, base_url: &str) -> bool {
-    kind == ProviderKind::Ollama && is_exact_https_route(base_url, "ollama.com", "v1")
+    matches!(kind, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+        && is_exact_https_route(base_url, "ollama.com", "v1")
+}
+
+/// In-memory compatibility classifier for the released route-sensitive shape.
+///
+/// Only the old `ollama` identity at the exact hosted endpoint migrates. This
+/// deliberately rejects neighboring paths, HTTP downgrades, and lookalike
+/// hosts so no local/custom route can consume Ollama Cloud credentials.
+#[must_use]
+pub fn migrates_legacy_ollama_cloud_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Ollama && is_exact_ollama_cloud_route(kind, base_url)
 }
 
 /// Whether a configured route is exactly Moonshot's direct API endpoint.
@@ -562,7 +579,7 @@ pub fn credential_help_for_route(kind: ProviderKind, base_url: &str) -> Credenti
             acquisition: CredentialAcquisition::ApiKey,
             credential_url: Some(OLLAMA_CLOUD_API_KEY_URL),
             docs_url: Some("https://docs.ollama.com/api/authentication"),
-            guidance: "Ollama Cloud requires an API key. Create one in Ollama account settings, then save it for the ollama provider or set OLLAMA_API_KEY.",
+            guidance: "Ollama Cloud requires an API key. Create one in Ollama account settings, then save it for the ollama-cloud provider, set OLLAMA_CLOUD_API_KEY for Pi compatibility, or set Ollama's official OLLAMA_API_KEY.",
         };
     }
 
@@ -941,6 +958,17 @@ provider!(
     ["OLLAMA_API_KEY"],
     "ollama",
     aliases: ["ollama-local"]
+);
+provider!(
+    OllamaCloud,
+    OllamaCloud,
+    "ollama-cloud",
+    "Ollama Cloud",
+    DEFAULT_OLLAMA_CLOUD_BASE_URL,
+    DEFAULT_OLLAMA_CLOUD_MODEL,
+    ["OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"],
+    "ollama_cloud",
+    aliases: ["ollama_cloud"]
 );
 provider!(
     Huggingface,
@@ -1616,6 +1644,7 @@ static MOONSHOT: Moonshot = Moonshot;
 static SGLANG: Sglang = Sglang;
 static VLLM: Vllm = Vllm;
 static OLLAMA: Ollama = Ollama;
+static OLLAMA_CLOUD: OllamaCloud = OllamaCloud;
 static HUGGINGFACE: Huggingface = Huggingface;
 static TOGETHER: Together = Together;
 static QIANFAN: Qianfan = Qianfan;
@@ -1644,7 +1673,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 45] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 46] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1664,6 +1693,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 45] = [
     &SGLANG,
     &VLLM,
     &OLLAMA,
+    &OLLAMA_CLOUD,
     &HUGGINGFACE,
     &TOGETHER,
     &QIANFAN,
@@ -1859,15 +1889,18 @@ mod tests {
             "https://ollama.com/v1/",
             "  HTTPS://OLLAMA.COM/v1/  ",
         ] {
-            assert!(is_exact_ollama_cloud_route(ProviderKind::Ollama, base_url));
-            let help = credential_help_for_route(ProviderKind::Ollama, base_url);
-            assert_eq!(help.acquisition, CredentialAcquisition::ApiKey);
-            assert_eq!(help.credential_url, Some(OLLAMA_CLOUD_API_KEY_URL));
-            assert_eq!(
-                help.docs_url,
-                Some("https://docs.ollama.com/api/authentication")
-            );
-            assert!(help.guidance.contains("OLLAMA_API_KEY"));
+            for provider in [ProviderKind::Ollama, ProviderKind::OllamaCloud] {
+                assert!(is_exact_ollama_cloud_route(provider, base_url));
+                let help = credential_help_for_route(provider, base_url);
+                assert_eq!(help.acquisition, CredentialAcquisition::ApiKey);
+                assert_eq!(help.credential_url, Some(OLLAMA_CLOUD_API_KEY_URL));
+                assert_eq!(
+                    help.docs_url,
+                    Some("https://docs.ollama.com/api/authentication")
+                );
+                assert!(help.guidance.contains("OLLAMA_CLOUD_API_KEY"));
+                assert!(help.guidance.contains("OLLAMA_API_KEY"));
+            }
         }
 
         for base_url in [
@@ -1880,6 +1913,10 @@ mod tests {
             "https://ollama.com/v1?tenant=other",
         ] {
             assert!(!is_exact_ollama_cloud_route(ProviderKind::Ollama, base_url));
+            assert!(!is_exact_ollama_cloud_route(
+                ProviderKind::OllamaCloud,
+                base_url
+            ));
         }
         assert!(!is_exact_ollama_cloud_route(
             ProviderKind::Openai,

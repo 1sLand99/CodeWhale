@@ -355,6 +355,11 @@ pub(crate) fn billing_surface_for_route(
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => {
             return Some(LOCAL_BILLING_SURFACE);
         }
+        // Ollama Cloud publishes plan/account terms, not a Codewhale-owned
+        // per-token rate. Hosted is not local/free, but it is also not proof
+        // of PAYG dollars: keep it in money coverage as unclassified until an
+        // authoritative billing surface is available.
+        ApiProvider::OllamaCloud => return Some(UNCLASSIFIED_BILLING_SURFACE),
         ApiProvider::OpenaiCodex | ApiProvider::OpencodeGo => {
             return Some(OAUTH_SUBSCRIPTION_BILLING_SURFACE);
         }
@@ -2070,6 +2075,11 @@ mod tests {
                 ApiProvider::Ollama,
                 LOCAL_BILLING_SURFACE,
                 EndpointMetering::LocalNoBill,
+            ),
+            (
+                ApiProvider::OllamaCloud,
+                UNCLASSIFIED_BILLING_SURFACE,
+                EndpointMetering::Unknown,
             ),
             (
                 ApiProvider::Vllm,

@@ -1155,6 +1155,7 @@ impl Secrets {
 /// | `sglang` | `SGLANG_API_KEY` |
 /// | `vllm` | `VLLM_API_KEY` |
 /// | `ollama` | `OLLAMA_API_KEY` |
+/// | `ollama-cloud` | `OLLAMA_CLOUD_API_KEY`, `OLLAMA_API_KEY` |
 /// | `openai` | `OPENAI_API_KEY` |
 /// | `atlascloud` / `atlas` | `ATLASCLOUD_API_KEY` |
 /// | `volcengine` / `ark` | `VOLCENGINE_API_KEY`, `VOLCENGINE_ARK_API_KEY`, `ARK_API_KEY` |
@@ -1190,6 +1191,7 @@ pub fn env_for(name: &str) -> Option<String> {
         "sglang" | "sg-lang" => &["SGLANG_API_KEY"],
         "vllm" | "v-llm" => &["VLLM_API_KEY"],
         "ollama" | "ollama-local" => &["OLLAMA_API_KEY"],
+        "ollama-cloud" | "ollama_cloud" => &["OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
         "anthropic" | "claude" => &["ANTHROPIC_API_KEY"],
         "atlascloud" | "atlas-cloud" | "atlas_cloud" | "atlas" => &["ATLASCLOUD_API_KEY"],
@@ -1274,6 +1276,7 @@ mod tests {
             "SGLANG_API_KEY",
             "VLLM_API_KEY",
             "OLLAMA_API_KEY",
+            "OLLAMA_CLOUD_API_KEY",
             "OPENAI_API_KEY",
             "ATLASCLOUD_API_KEY",
             "WANJIE_ARK_API_KEY",
@@ -2101,6 +2104,37 @@ mod tests {
         assert_eq!(env_for("ollama-local").as_deref(), Some("ollama-key"));
         // Safety: env mutation guarded by env_lock().
         unsafe { std::env::remove_var("OLLAMA_API_KEY") };
+    }
+
+    #[test]
+    fn ollama_cloud_env_prefers_pi_name_then_official_name() {
+        let _lock = env_lock();
+        clear_known_envs();
+        // Safety: env mutation guarded by env_lock().
+        unsafe {
+            std::env::set_var("OLLAMA_CLOUD_API_KEY", "cloud-specific-key");
+            std::env::set_var("OLLAMA_API_KEY", "official-fallback-key");
+        }
+
+        assert_eq!(
+            env_for("ollama-cloud").as_deref(),
+            Some("cloud-specific-key")
+        );
+        assert_eq!(
+            env_for("ollama_cloud").as_deref(),
+            Some("cloud-specific-key")
+        );
+        // The local identity stays on its original, keyless-provider env
+        // contract and never consumes the cloud-specific compatibility name.
+        assert_eq!(env_for("ollama").as_deref(), Some("official-fallback-key"));
+
+        // Safety: env mutation guarded by env_lock().
+        unsafe { std::env::remove_var("OLLAMA_CLOUD_API_KEY") };
+        assert_eq!(
+            env_for("ollama-cloud").as_deref(),
+            Some("official-fallback-key")
+        );
+        clear_known_envs();
     }
 
     #[cfg(unix)]

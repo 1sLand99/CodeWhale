@@ -1330,6 +1330,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("isolated credential home");
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _ollama_cloud_key = crate::test_support::EnvVarGuard::remove("OLLAMA_CLOUD_API_KEY");
         let _ollama_key = crate::test_support::EnvVarGuard::remove("OLLAMA_API_KEY");
         let _cli_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
@@ -1358,19 +1359,20 @@ mod tests {
             }),
             ..Default::default()
         };
+        assert_eq!(cloud.api_provider(), ApiProvider::OllamaCloud);
         assert_eq!(
-            credential_state_for_provider(&cloud, ApiProvider::Ollama),
+            credential_state_for_provider(&cloud, ApiProvider::OllamaCloud),
             CredentialState::MissingKey
         );
         assert_eq!(
-            auth_class_for_provider(&cloud, ApiProvider::Ollama),
+            auth_class_for_provider(&cloud, ApiProvider::OllamaCloud),
             ProviderAuthClass::ApiKey
         );
 
         cloud.providers.as_mut().expect("providers").ollama.api_key =
             Some("ollama-cloud-key".to_string());
         assert_eq!(
-            credential_state_for_provider(&cloud, ApiProvider::Ollama),
+            credential_state_for_provider(&cloud, ApiProvider::OllamaCloud),
             CredentialState::Saved
         );
     }

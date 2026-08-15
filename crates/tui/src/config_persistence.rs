@@ -299,6 +299,7 @@ fn provider_base_url_table_key(provider: ApiProvider) -> anyhow::Result<&'static
         ApiProvider::Sglang => Ok("sglang"),
         ApiProvider::Vllm => Ok("vllm"),
         ApiProvider::Ollama => Ok("ollama"),
+        ApiProvider::OllamaCloud => Ok("ollama_cloud"),
         ApiProvider::Together => Ok("together"),
         ApiProvider::Qianfan => Ok("qianfan"),
         ApiProvider::OpenaiCodex => Ok("openai_codex"),

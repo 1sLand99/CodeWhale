@@ -274,6 +274,12 @@ pub struct ProvidersToml {
     pub vllm: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub ollama: ProviderConfigToml,
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "ollama-cloud"
+    )]
+    pub ollama_cloud: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
     pub huggingface: ProviderConfigToml,
     #[serde(default, skip_serializing_if = "ProviderConfigToml::is_empty")]
@@ -642,6 +648,7 @@ impl ProvidersToml {
             ProviderKind::Sglang => &self.sglang,
             ProviderKind::Vllm => &self.vllm,
             ProviderKind::Ollama => &self.ollama,
+            ProviderKind::OllamaCloud => &self.ollama_cloud,
             ProviderKind::Huggingface => &self.huggingface,
             ProviderKind::Together => &self.together,
             ProviderKind::Qianfan => &self.qianfan,
@@ -692,6 +699,7 @@ impl ProvidersToml {
             ProviderKind::Sglang => &mut self.sglang,
             ProviderKind::Vllm => &mut self.vllm,
             ProviderKind::Ollama => &mut self.ollama,
+            ProviderKind::OllamaCloud => &mut self.ollama_cloud,
             ProviderKind::Huggingface => &mut self.huggingface,
             ProviderKind::Together => &mut self.together,
             ProviderKind::Qianfan => &mut self.qianfan,
@@ -3214,6 +3222,7 @@ impl ConfigToml {
                 ProviderKind::Sglang => DEFAULT_SGLANG_BASE_URL.to_string(),
                 ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL.to_string(),
                 ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL.to_string(),
+                ProviderKind::OllamaCloud => DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string(),
                 ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL.to_string(),
                 ProviderKind::Together => DEFAULT_TOGETHER_BASE_URL.to_string(),
                 ProviderKind::Qianfan => DEFAULT_QIANFAN_BASE_URL.to_string(),
@@ -3246,6 +3255,16 @@ impl ConfigToml {
                 // routes always supply a configured base_url before this point.
                 ProviderKind::Custom => provider.provider().default_base_url().to_string(),
             })
+        };
+        // Released builds represented Ollama Cloud as the local `ollama`
+        // identity plus one exact hosted base URL. Upgrade only that tuple in
+        // memory: the parsed config and secret store are never rewritten, and
+        // neighboring/custom routes retain the local/custom identity.
+        let legacy_ollama_cloud = provider::migrates_legacy_ollama_cloud_route(provider, &base_url);
+        let provider = if legacy_ollama_cloud {
+            ProviderKind::OllamaCloud
+        } else {
+            provider
         };
         // `auth_mode = "none"` is an endpoint contract, so it suppresses every
         // credential source (including explicit CLI/config values). Otherwise
@@ -3284,7 +3303,7 @@ impl ConfigToml {
                 None => (None, None),
             }
         } else {
-            match secrets.resolve_with_source(provider.secret_store_slot()) {
+            match stored_api_key_for_provider(secrets, provider, legacy_ollama_cloud) {
                 Some((value, source)) => {
                     let source = match source {
                         SecretSource::Keyring => RuntimeApiKeySource::Keyring,
@@ -3753,6 +3772,7 @@ fn provider_passes_model_through(provider: ProviderKind) -> bool {
             | ProviderKind::Qianfan
             | ProviderKind::Openmodel
             | ProviderKind::Ollama
+            | ProviderKind::OllamaCloud
             | ProviderKind::Huggingface
             | ProviderKind::Meta
             | ProviderKind::Xai
@@ -3897,6 +3917,7 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
             | ProviderKind::MinimaxAnthropic
             | ProviderKind::Qianfan
             | ProviderKind::Ollama
+            | ProviderKind::OllamaCloud
             | ProviderKind::Meta
             | ProviderKind::Xai
     ) {
@@ -4308,6 +4329,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Sglang => DEFAULT_SGLANG_MODEL,
         ProviderKind::Vllm => DEFAULT_VLLM_MODEL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_MODEL,
+        ProviderKind::OllamaCloud => DEFAULT_OLLAMA_CLOUD_MODEL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_MODEL,
         ProviderKind::Together => DEFAULT_TOGETHER_MODEL,
         ProviderKind::Qianfan => DEFAULT_QIANFAN_MODEL,
@@ -4358,6 +4380,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Sglang => DEFAULT_SGLANG_BASE_URL,
         ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL,
+        ProviderKind::OllamaCloud => DEFAULT_OLLAMA_CLOUD_BASE_URL,
         ProviderKind::Huggingface => DEFAULT_HUGGINGFACE_BASE_URL,
         ProviderKind::Together => DEFAULT_TOGETHER_BASE_URL,
         ProviderKind::Qianfan => DEFAULT_QIANFAN_BASE_URL,
@@ -4663,6 +4686,7 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             normalized == DEFAULT_OLLAMA_BASE_URL
                 || provider::is_exact_ollama_cloud_route(provider, base_url)
         }
+        ProviderKind::OllamaCloud => provider::is_exact_ollama_cloud_route(provider, base_url),
         // Custom routes have no Codewhale-owned official endpoint. The
         // descriptor URL is a schema placeholder, never a credential scope.
         ProviderKind::Custom => false,
@@ -4710,6 +4734,29 @@ fn should_skip_secret_store_for_provider(
         || (provider == ProviderKind::Ollama
             && !provider::is_exact_ollama_cloud_route(provider, base_url))
         || base_url_uses_local_host(base_url)
+}
+
+/// Read the durable provider slot without allowing environment fallback to
+/// jump ahead of the bounded legacy slot. The old `ollama` slot is consulted
+/// only for the exact route tuple migrated above; selecting `ollama-cloud`
+/// directly never consumes a local provider credential.
+fn stored_api_key_for_provider(
+    secrets: &Secrets,
+    provider: ProviderKind,
+    legacy_ollama_cloud: bool,
+) -> Option<(String, SecretSource)> {
+    let mut slots = vec![provider.secret_store_slot()];
+    if provider == ProviderKind::OllamaCloud && legacy_ollama_cloud {
+        slots.push(ProviderKind::Ollama.secret_store_slot());
+    }
+    slots.into_iter().find_map(|slot| {
+        secrets
+            .get(slot)
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (value, SecretSource::Keyring))
+    })
 }
 
 fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
@@ -6606,6 +6653,8 @@ struct EnvRuntimeOverrides {
     sglang_base_url: Option<String>,
     vllm_base_url: Option<String>,
     ollama_base_url: Option<String>,
+    ollama_cloud_base_url: Option<String>,
+    ollama_cloud_model: Option<String>,
     huggingface_base_url: Option<String>,
     huggingface_model: Option<String>,
     together_base_url: Option<String>,
@@ -6819,6 +6868,12 @@ impl EnvRuntimeOverrides {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            ollama_cloud_base_url: std::env::var("OLLAMA_CLOUD_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            ollama_cloud_model: std::env::var("OLLAMA_CLOUD_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             huggingface_base_url: std::env::var("HUGGINGFACE_BASE_URL")
@@ -7067,6 +7122,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Sglang => self.sglang_base_url.clone(),
             ProviderKind::Vllm => self.vllm_base_url.clone(),
             ProviderKind::Ollama => self.ollama_base_url.clone(),
+            ProviderKind::OllamaCloud => self.ollama_cloud_base_url.clone(),
             ProviderKind::Huggingface => self.huggingface_base_url.clone(),
             ProviderKind::Together => self.together_base_url.clone(),
             ProviderKind::Qianfan => self.qianfan_base_url.clone(),
@@ -7140,6 +7196,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::ModelstudioCodingPlan | ProviderKind::ModelstudioCodingPlanAnthropic => {
                 self.modelstudio_coding_plan_model.clone()
             }
+            ProviderKind::OllamaCloud => self.ollama_cloud_model.clone(),
             _ => None,
         }?;
 

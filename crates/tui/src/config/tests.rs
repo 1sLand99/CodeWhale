@@ -1471,6 +1471,9 @@ struct EnvGuard {
     vllm_api_key: Option<OsString>,
     vllm_base_url: Option<OsString>,
     vllm_model: Option<OsString>,
+    ollama_cloud_api_key: Option<OsString>,
+    ollama_cloud_base_url: Option<OsString>,
+    ollama_cloud_model: Option<OsString>,
     ollama_api_key: Option<OsString>,
     ollama_base_url: Option<OsString>,
     ollama_model: Option<OsString>,
@@ -1573,6 +1576,9 @@ impl EnvGuard {
         let vllm_api_key_prev = env::var_os("VLLM_API_KEY");
         let vllm_base_url_prev = env::var_os("VLLM_BASE_URL");
         let vllm_model_prev = env::var_os("VLLM_MODEL");
+        let ollama_cloud_api_key_prev = env::var_os("OLLAMA_CLOUD_API_KEY");
+        let ollama_cloud_base_url_prev = env::var_os("OLLAMA_CLOUD_BASE_URL");
+        let ollama_cloud_model_prev = env::var_os("OLLAMA_CLOUD_MODEL");
         let ollama_api_key_prev = env::var_os("OLLAMA_API_KEY");
         let ollama_base_url_prev = env::var_os("OLLAMA_BASE_URL");
         let ollama_model_prev = env::var_os("OLLAMA_MODEL");
@@ -1670,6 +1676,9 @@ impl EnvGuard {
             env::remove_var("VLLM_API_KEY");
             env::remove_var("VLLM_BASE_URL");
             env::remove_var("VLLM_MODEL");
+            env::remove_var("OLLAMA_CLOUD_API_KEY");
+            env::remove_var("OLLAMA_CLOUD_BASE_URL");
+            env::remove_var("OLLAMA_CLOUD_MODEL");
             env::remove_var("OLLAMA_API_KEY");
             env::remove_var("OLLAMA_BASE_URL");
             env::remove_var("OLLAMA_MODEL");
@@ -1767,6 +1776,9 @@ impl EnvGuard {
             vllm_api_key: vllm_api_key_prev,
             vllm_base_url: vllm_base_url_prev,
             vllm_model: vllm_model_prev,
+            ollama_cloud_api_key: ollama_cloud_api_key_prev,
+            ollama_cloud_base_url: ollama_cloud_base_url_prev,
+            ollama_cloud_model: ollama_cloud_model_prev,
             ollama_api_key: ollama_api_key_prev,
             ollama_base_url: ollama_base_url_prev,
             ollama_model: ollama_model_prev,
@@ -1888,6 +1900,9 @@ impl Drop for EnvGuard {
             Self::restore_var("VLLM_API_KEY", self.vllm_api_key.take());
             Self::restore_var("VLLM_BASE_URL", self.vllm_base_url.take());
             Self::restore_var("VLLM_MODEL", self.vllm_model.take());
+            Self::restore_var("OLLAMA_CLOUD_API_KEY", self.ollama_cloud_api_key.take());
+            Self::restore_var("OLLAMA_CLOUD_BASE_URL", self.ollama_cloud_base_url.take());
+            Self::restore_var("OLLAMA_CLOUD_MODEL", self.ollama_cloud_model.take());
             Self::restore_var("OLLAMA_API_KEY", self.ollama_api_key.take());
             Self::restore_var("OLLAMA_BASE_URL", self.ollama_base_url.take());
             Self::restore_var("OLLAMA_MODEL", self.ollama_model.take());
@@ -3200,6 +3215,7 @@ fn provider_api_key_config_failure_restores_secret_and_keeps_external_route() ->
             provider: ApiProvider::Xai,
             key: ApiProvider::Xai.as_str().to_string(),
             exact_id: Some(ApiProvider::Xai.as_str().to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         };
         let error = save_api_key_for_identity(&identity, &route_config, "new-xai-secret")
             .expect_err("config directory must reject metadata mutation");
@@ -3305,6 +3321,7 @@ fn provider_key_refuses_plaintext_config_when_secret_store_snapshot_fails() -> R
         provider: ApiProvider::Openrouter,
         key: ApiProvider::Openrouter.as_str().to_string(),
         exact_id: Some(ApiProvider::Openrouter.as_str().to_string()),
+        migrated_legacy_ollama_cloud_route: false,
     };
 
     let error = save_api_key_for_identity(&identity, &Config::default(), "provider-fallback-key")
@@ -5368,6 +5385,7 @@ fn save_then_load_uses_the_same_missing_absolute_env_config_path() -> Result<()>
         provider: ApiProvider::Openrouter,
         key: ApiProvider::Openrouter.as_str().to_string(),
         exact_id: Some(ApiProvider::Openrouter.as_str().to_string()),
+        migrated_legacy_ollama_cloud_route: false,
     };
 
     let written =
@@ -8040,12 +8058,13 @@ fn ollama_cloud_resolves_env_key_and_is_not_keyless() -> Result<()> {
         ..Config::default()
     };
 
+    assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
     assert!(!provider_route_is_keyless_self_hosted(
-        ApiProvider::Ollama,
+        ApiProvider::OllamaCloud,
         &config.deepseek_base_url()
     ));
     assert_eq!(config.deepseek_api_key()?, "ollama-cloud-env-key");
-    assert!(has_api_key_for(&config, ApiProvider::Ollama));
+    assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
     Ok(())
 }
 
@@ -8072,8 +8091,127 @@ fn ollama_cloud_resolves_saved_provider_key() -> Result<()> {
         ..Config::default()
     };
 
+    assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
     assert_eq!(config.deepseek_api_key()?, "ollama-cloud-saved-key");
-    assert!(has_api_key_for(&config, ApiProvider::Ollama));
+    assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
+    Ok(())
+}
+
+#[test]
+fn explicit_ollama_cloud_uses_new_secret_slot_without_local_fallback() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+
+    let secrets = codewhale_secrets::Secrets::auto_detect();
+    secrets.set("ollama", "must-not-be-consumed")?;
+    let config = Config {
+        provider: Some("ollama-cloud".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
+    let identity = config
+        .resolve_provider_identity("ollama-cloud")
+        .expect("explicit Cloud identity");
+    assert!(!identity.migrated_legacy_ollama_cloud_route);
+    assert!(!has_api_key_for(&config, ApiProvider::OllamaCloud));
+    assert!(config.deepseek_api_key().is_err());
+
+    secrets.set("ollama-cloud", "cloud-slot-key")?;
+    assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
+    assert_eq!(config.deepseek_api_key()?, "cloud-slot-key");
+    Ok(())
+}
+
+#[test]
+fn ollama_cloud_env_precedence_is_cloud_name_then_official_name() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    // Safety: test-only environment mutation guarded by a global mutex and
+    // restored by EnvGuard.
+    unsafe {
+        env::set_var("OLLAMA_CLOUD_API_KEY", "cloud-specific-key");
+        env::set_var("OLLAMA_API_KEY", "official-fallback-key");
+    }
+    let config = Config {
+        provider: Some("ollama-cloud".to_string()),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "cloud-specific-key");
+    // Safety: same serialized test and EnvGuard restore the prior value.
+    unsafe { env::remove_var("OLLAMA_CLOUD_API_KEY") };
+    assert_eq!(config.deepseek_api_key()?, "official-fallback-key");
+    Ok(())
+}
+
+#[test]
+fn migrated_ollama_cloud_scope_preserves_legacy_table_and_slot_read_only() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    codewhale_secrets::Secrets::auto_detect().set("ollama", "legacy-cloud-key")?;
+
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                model: Some("legacy-cloud-model".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let identity = config
+        .resolve_provider_identity("ollama")
+        .expect("legacy identity migrates");
+    assert_eq!(identity.provider, ApiProvider::OllamaCloud);
+    assert_eq!(identity.key, "ollama-cloud");
+    assert!(identity.migrated_legacy_ollama_cloud_route);
+
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(&identity);
+    assert_eq!(scoped.api_provider(), ApiProvider::OllamaCloud);
+    assert_eq!(
+        scoped.deepseek_base_url(),
+        codewhale_config::provider::OLLAMA_CLOUD_BASE_URL
+    );
+    assert_eq!(scoped.default_model(), "legacy-cloud-model");
+    assert_eq!(scoped.deepseek_api_key()?, "legacy-cloud-key");
+    assert!(
+        scoped
+            .providers
+            .as_ref()
+            .expect("providers")
+            .ollama_cloud
+            .api_key
+            .is_none(),
+        "migration must not copy secret material into the new config table"
+    );
+    assert_eq!(
+        codewhale_secrets::Secrets::auto_detect().get("ollama-cloud")?,
+        None,
+        "migration must not copy the legacy secret into the new slot"
+    );
     Ok(())
 }
 
@@ -8104,14 +8242,15 @@ fn ollama_cloud_without_key_fails_with_cloud_guidance() -> Result<()> {
         ..Config::default()
     };
 
-    assert!(!has_api_key_for(&config, ApiProvider::Ollama));
+    assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
+    assert!(!has_api_key_for(&config, ApiProvider::OllamaCloud));
     let error = config
         .deepseek_api_key()
         .expect_err("Ollama Cloud must require an API key");
     let message = error.to_string();
     assert!(message.contains("Ollama Cloud API key not found"));
     assert!(message.contains("https://ollama.com/settings/keys"));
-    assert!(message.contains("OLLAMA_API_KEY"));
+    assert!(message.contains("OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY"));
     Ok(())
 }
 
@@ -11099,6 +11238,7 @@ fn session_provider_identity_preserves_exact_named_custom_key() {
             provider: ApiProvider::Custom,
             key: "lm-studio".to_string(),
             exact_id: Some("lm-studio".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
     assert_eq!(
@@ -11109,6 +11249,7 @@ fn session_provider_identity_preserves_exact_named_custom_key() {
             provider: ApiProvider::Openrouter,
             key: "openrouter".to_string(),
             exact_id: Some("openrouter".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
     let migrated = config
@@ -11120,8 +11261,59 @@ fn session_provider_identity_preserves_exact_named_custom_key() {
             provider: ApiProvider::Custom,
             key: "lm-studio".to_string(),
             exact_id: Some("lm-studio".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
+}
+
+#[test]
+fn persisted_legacy_ollama_cloud_receipts_upgrade_only_on_exact_live_route() {
+    let exact = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    for provider_id in [None, Some("ollama")] {
+        let identity = exact
+            .resolve_persisted_provider_identity(Some("ollama"), provider_id)
+            .expect("exact released tuple migrates");
+        assert_eq!(identity.provider, ApiProvider::OllamaCloud);
+        assert_eq!(identity.key, "ollama-cloud");
+        assert_eq!(identity.exact_id.as_deref(), Some("ollama-cloud"));
+    }
+
+    let neighbor = Config {
+        provider: Some("ollama".to_string()),
+        providers: Some(ProvidersConfig {
+            ollama: ProviderConfig {
+                base_url: Some("https://ollama.com/v1/preview".to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let identity = neighbor
+        .resolve_persisted_provider_identity(Some("ollama"), Some("ollama"))
+        .expect("neighbor remains local/custom ollama identity");
+    assert_eq!(identity.provider, ApiProvider::Ollama);
+    assert_eq!(identity.key, "ollama");
+
+    let explicit = Config {
+        provider: Some("ollama-cloud".to_string()),
+        ..Config::default()
+    };
+    let identity = explicit
+        .resolve_persisted_provider_identity(Some("ollama-cloud"), Some("ollama-cloud"))
+        .expect("new receipt remains first-class cloud identity");
+    assert_eq!(identity.provider, ApiProvider::OllamaCloud);
+    assert_eq!(identity.key, "ollama-cloud");
 }
 
 #[test]
@@ -11254,6 +11446,7 @@ fn persisted_provider_pair_never_collapses_builtin_into_same_key_custom_route() 
             provider: ApiProvider::Custom,
             key: "openai".to_string(),
             exact_id: Some("openai".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
 
@@ -11322,6 +11515,7 @@ fn legacy_literal_custom_identity_requires_one_valid_root_route() {
             provider: ApiProvider::Custom,
             key: "custom".to_string(),
             exact_id: None,
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
     assert_eq!(legacy.deepseek_base_url(), "http://127.0.0.1:1234/v1");

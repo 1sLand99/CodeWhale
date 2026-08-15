@@ -60,6 +60,8 @@ enum ProviderArg {
     Sglang,
     Vllm,
     Ollama,
+    #[value(alias = "ollama_cloud")]
+    OllamaCloud,
     Huggingface,
     Together,
     OpenaiCodex,
@@ -133,6 +135,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Sglang => ProviderKind::Sglang,
             ProviderArg::Vllm => ProviderKind::Vllm,
             ProviderArg::Ollama => ProviderKind::Ollama,
+            ProviderArg::OllamaCloud => ProviderKind::OllamaCloud,
             ProviderArg::Huggingface => ProviderKind::Huggingface,
             ProviderArg::Together => ProviderKind::Together,
             ProviderArg::OpenaiCodex => ProviderKind::OpenaiCodex,
@@ -5438,6 +5441,13 @@ mod tests {
     }
 
     #[test]
+    fn ollama_cloud_provider_aliases_parse_as_builtin() {
+        for alias in ["ollama-cloud", "ollama_cloud"] {
+            assert_eq!(builtin_provider_arg(alias), Some(ProviderArg::OllamaCloud));
+        }
+    }
+
+    #[test]
     fn legacy_dual_wire_provider_flag_keeps_named_table_kind() {
         // The CLI flag must resolve legacy spellings to the table-owning
         // dialect kind (mirroring TOML serde), never to the collapsed catalog
@@ -7849,8 +7859,8 @@ mod tests {
             .map(|provider| provider.kind())
             .collect();
         // Full registry keeps legacy dialect/plan kinds; ALL is the catalog surface.
-        assert_eq!(registry_kinds.len(), 45);
-        assert_eq!(ProviderKind::ALL.len(), 40);
+        assert_eq!(registry_kinds.len(), 46);
+        assert_eq!(ProviderKind::ALL.len(), 41);
         for kind in ProviderKind::ALL {
             assert!(
                 registry_kinds.contains(&kind),

@@ -14616,21 +14616,25 @@ mod terminal_mode_tests {
             provider: crate::config::ApiProvider::Custom,
             key: "lm-studio".to_string(),
             exact_id: Some("lm-studio".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         };
         let literal = crate::config::ProviderIdentity {
             provider: crate::config::ApiProvider::Custom,
             key: "custom".to_string(),
             exact_id: Some("custom".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         };
         let root = crate::config::ProviderIdentity {
             provider: crate::config::ApiProvider::Custom,
             key: "custom".to_string(),
             exact_id: None,
+            migrated_legacy_ollama_cloud_route: false,
         };
         let built_in = crate::config::ProviderIdentity {
             provider: crate::config::ApiProvider::Deepseek,
             key: "deepseek".to_string(),
             exact_id: Some("deepseek".to_string()),
+            migrated_legacy_ollama_cloud_route: false,
         };
 
         assert_eq!(
@@ -16979,12 +16983,12 @@ mod doctor_live_probe_tests {
     fn ollama_cloud_probe_uses_hosted_opt_in_not_local_opt_in() {
         let cloud = codewhale_config::provider::OLLAMA_CLOUD_BASE_URL;
         assert!(!doctor_should_probe_api(
-            crate::config::ApiProvider::Ollama,
+            crate::config::ApiProvider::OllamaCloud,
             cloud,
             crate::doctor::DoctorProbeRequest::default(),
         ));
         assert!(doctor_should_probe_api(
-            crate::config::ApiProvider::Ollama,
+            crate::config::ApiProvider::OllamaCloud,
             cloud,
             crate::doctor::DoctorProbeRequest {
                 probe_api: true,
@@ -16992,7 +16996,7 @@ mod doctor_live_probe_tests {
             },
         ));
         assert!(!doctor_should_probe_api(
-            crate::config::ApiProvider::Ollama,
+            crate::config::ApiProvider::OllamaCloud,
             cloud,
             crate::doctor::DoctorProbeRequest {
                 probe_local: true,
@@ -17676,6 +17680,10 @@ mod setup_helper_tests {
         };
         let cloud = ollama_config(codewhale_config::provider::OLLAMA_CLOUD_BASE_URL);
         assert_eq!(
+            cloud.api_provider(),
+            crate::config::ApiProvider::OllamaCloud
+        );
+        assert_eq!(
             resolve_api_key_source(&cloud),
             ApiKeySource::SecretStoreUnprobed
         );
@@ -17683,6 +17691,10 @@ mod setup_helper_tests {
             resolve_credential_diagnostic(&cloud).availability,
             CredentialAvailability::NotProbed
         );
+        assert_eq!(doctor_auth_scheme(&cloud), "bearer");
+        let report = doctor_route_report(&cloud);
+        assert_eq!(report["provider"], "ollama-cloud");
+        assert_eq!(report["provider_config_table"], "ollama_cloud");
 
         let custom_remote = ollama_config("https://ollama-gateway.example.test/v1");
         assert_eq!(

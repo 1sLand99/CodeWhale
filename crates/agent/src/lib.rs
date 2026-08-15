@@ -750,6 +750,13 @@ impl Default for ModelRegistry {
                 supports_reasoning: true,
             },
             ModelInfo {
+                id: "gpt-oss:120b".to_string(),
+                provider: ProviderKind::OllamaCloud,
+                aliases: vec![],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
                 id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
                 provider: ProviderKind::Huggingface,
                 aliases: vec![
@@ -1340,12 +1347,15 @@ impl ModelRegistry {
 
         if let Some(name) = requested {
             fallback_chain.push(format!("requested:{name}"));
-            if provider_hint == Some(ProviderKind::Ollama) {
+            if matches!(
+                provider_hint,
+                Some(ProviderKind::Ollama | ProviderKind::OllamaCloud)
+            ) {
                 return ModelResolution {
                     requested: Some(name.to_string()),
                     resolved: ModelInfo {
                         id: name.trim().to_string(),
-                        provider: ProviderKind::Ollama,
+                        provider: provider_hint.expect("matched provider hint"),
                         aliases: Vec::new(),
                         supports_tools: true,
                         supports_reasoning: false,
@@ -2355,6 +2365,16 @@ mod tests {
 
         assert_eq!(resolved.resolved.provider, ProviderKind::Ollama);
         assert_eq!(resolved.resolved.id, "deepseek-v4-flash");
+        assert!(resolved.resolved.supports_reasoning);
+    }
+
+    #[test]
+    fn ollama_cloud_default_uses_the_hosted_catalog_model_id() {
+        let registry = ModelRegistry::default();
+        let resolved = registry.resolve(None, Some(ProviderKind::OllamaCloud));
+
+        assert_eq!(resolved.resolved.provider, ProviderKind::OllamaCloud);
+        assert_eq!(resolved.resolved.id, "gpt-oss:120b");
         assert!(resolved.resolved.supports_reasoning);
     }
 

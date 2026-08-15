@@ -2604,7 +2604,7 @@ impl SubAgentRuntime {
         // id. Overriding only `provider` makes `Config::api_provider`,
         // `deepseek_base_url`, and `deepseek_api_key` all re-resolve for the
         // pinned provider.
-        provider_config.provider = Some(identity.key.clone());
+        provider_config.scope_to_provider_identity(&identity);
         Ok((provider_config, identity))
     }
 

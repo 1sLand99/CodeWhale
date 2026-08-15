@@ -3232,6 +3232,12 @@ pub(super) fn apply_reasoning_effort(
                 // #3024: Ollama OpenAI-compat endpoint accepts think param.
                 body["think"] = json!(false);
             }
+            ApiProvider::OllamaCloud => {
+                // Ollama Cloud stays on the documented OpenAI-compatible
+                // `/v1/chat/completions` wire. Native `/api/chat` uses
+                // `think`; this wire uses `reasoning_effort`.
+                body["reasoning_effort"] = json!("none");
+            }
             ApiProvider::Anthropic
             | ApiProvider::DeepseekAnthropic
             | ApiProvider::MinimaxAnthropic
@@ -3336,6 +3342,14 @@ pub(super) fn apply_reasoning_effort(
                 // #3024: Ollama think param.
                 body["think"] = json!(true);
             }
+            ApiProvider::OllamaCloud => {
+                let value = match normalized.as_str() {
+                    "low" | "minimal" => "low",
+                    "medium" | "mid" => "medium",
+                    _ => "high",
+                };
+                body["reasoning_effort"] = json!(value);
+            }
             ApiProvider::Anthropic
             | ApiProvider::DeepseekAnthropic
             | ApiProvider::MinimaxAnthropic
@@ -3423,6 +3437,12 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Ollama => {
                 // #3024: Ollama think param.
                 body["think"] = json!(true);
+            }
+            ApiProvider::OllamaCloud => {
+                // Ollama's OpenAI-compatible chat wire documents only
+                // none/low/medium/high. Preserve Codewhale's strongest tier
+                // by clamping `max` to the strongest accepted value.
+                body["reasoning_effort"] = json!("high");
             }
             ApiProvider::Anthropic
             | ApiProvider::DeepseekAnthropic
@@ -3886,6 +3906,29 @@ mod tests {
         client
     }
 
+    fn ollama_cloud_request_boundary_client(transport_base_url: String) -> DeepSeekClient {
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("ollama-cloud".to_string()),
+            providers: Some(ProvidersConfig {
+                ollama_cloud: ProviderConfig {
+                    api_key: Some("ollama-cloud-request-boundary-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()),
+                    model: Some("gpt-oss:120b".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Ollama Cloud request-boundary client");
+        assert_eq!(
+            client.base_url,
+            crate::config::DEFAULT_OLLAMA_CLOUD_BASE_URL
+        );
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
+    }
+
     async fn capture_deepseek_chat_request(
         route_base_url: &str,
         strict: bool,
@@ -4027,6 +4070,74 @@ mod tests {
                 r#""parameters":{"zeta":{"type":"string"},"alpha":{"type":"number"},"type":"object"}"#
             ),
             "nested core-owned JSON order drifted: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_cloud_uses_authenticated_openai_compatible_v1_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header(
+                "authorization",
+                "Bearer ollama-cloud-request-boundary-key",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-ollama-cloud-request-boundary",
+                "object": "chat.completion",
+                "model": "gpt-oss:120b",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ollama_cloud_request_boundary_client(server.uri());
+        client
+            .create_message(MessageRequest {
+                model: "gpt-oss:120b".to_string(),
+                messages: vec![Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "Ollama Cloud request boundary".to_string(),
+                        cache_control: None,
+                    }],
+                }],
+                max_tokens: 64,
+                system: None,
+                tools: None,
+                tool_choice: None,
+                metadata: None,
+                thinking: None,
+                reasoning_effort: Some("medium".to_string()),
+                stream: Some(false),
+                temperature: None,
+                top_p: None,
+            })
+            .await
+            .expect("Ollama Cloud request succeeds");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
+        assert_eq!(body["model"], "gpt-oss:120b");
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert!(
+            body.get("think").is_none(),
+            "native Ollama field leaked: {body}"
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "foreign field leaked: {body}"
         );
     }
 
@@ -7790,6 +7901,25 @@ mod tests {
         let mut body = json!({});
         apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Ollama);
         assert_eq!(body, json!({ "think": false }));
+    }
+
+    #[test]
+    fn reasoning_effort_ollama_cloud_uses_openai_compatible_field() {
+        for (effort, expected) in [
+            ("off", "none"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "high"),
+        ] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(effort), ApiProvider::OllamaCloud);
+            assert_eq!(body, json!({ "reasoning_effort": expected }));
+        }
+
+        let mut local = json!({});
+        apply_reasoning_effort(&mut local, Some("high"), ApiProvider::Ollama);
+        assert_eq!(local, json!({ "think": true }));
     }
 
     #[test]

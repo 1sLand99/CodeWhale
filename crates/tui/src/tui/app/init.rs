@@ -161,6 +161,7 @@ impl App {
                     provider,
                     key,
                     exact_id,
+                    migrated_legacy_ollama_cloud_route: false,
                 }
             });
         if !explicit_launch_provider
@@ -170,10 +171,10 @@ impl App {
             provider = resolved.provider;
             provider_identity_record = resolved;
         }
+        let mut effective_auth_config = config.clone();
+        effective_auth_config.scope_to_provider_identity(&provider_identity_record);
         let provider_identity = provider_identity_record.key;
         let provider_exact_id = provider_identity_record.exact_id;
-        let mut effective_auth_config = config.clone();
-        effective_auth_config.provider = Some(provider_identity.clone());
 
         // #5032: a stale `[providers.xai] oauth_credential_generation` pointer
         // whose owned credential file is gone makes `credentials_valid` return

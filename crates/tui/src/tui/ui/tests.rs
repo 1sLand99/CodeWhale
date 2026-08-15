@@ -19079,6 +19079,7 @@ async fn failed_fallback_restores_exact_literal_custom_identity_without_root_cro
         provider: ApiProvider::Custom,
         key: "custom".to_string(),
         exact_id: Some("custom".to_string()),
+        migrated_legacy_ollama_cloud_route: false,
     };
     let mut app = create_test_app();
     app.set_provider_identity_record(previous_identity.clone());

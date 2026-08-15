@@ -855,6 +855,7 @@ pub(crate) fn mirror_saved_api_key_in_config(
         ApiProvider::Sglang => &mut providers.sglang,
         ApiProvider::Vllm => &mut providers.vllm,
         ApiProvider::Ollama => &mut providers.ollama,
+        ApiProvider::OllamaCloud => &mut providers.ollama_cloud,
         ApiProvider::Huggingface => &mut providers.huggingface,
         ApiProvider::Deepinfra => &mut providers.deepinfra,
         ApiProvider::Together => &mut providers.together,
@@ -913,7 +914,7 @@ pub(crate) fn restore_loaded_session_provider(
     identity: ProviderIdentity,
 ) {
     let provider = identity.provider;
-    config.provider = Some(identity.key.clone());
+    config.scope_to_provider_identity(&identity);
     app.set_provider_identity_record(identity);
     app.billing_presentation = crate::route_billing::for_route(config, provider);
     app.max_subagents = config

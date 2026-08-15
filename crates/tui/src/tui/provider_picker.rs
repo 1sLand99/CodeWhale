@@ -4515,6 +4515,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("isolated credential home");
         let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _ollama_cloud_key = EnvVarGuard::remove("OLLAMA_CLOUD_API_KEY");
         let _ollama_key = EnvVarGuard::remove("OLLAMA_API_KEY");
         let _cli_source = EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
@@ -4531,8 +4532,12 @@ mod tests {
             ..Default::default()
         };
 
-        let missing =
-            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
+        let missing = ProviderDashboardRow::from_config(
+            ApiProvider::OllamaCloud,
+            ApiProvider::OllamaCloud,
+            &config,
+        );
         assert_eq!(missing.auth_status, ProviderAuthStatus::Missing);
         assert_eq!(missing.readiness, ResolvedProviderReadiness::MissingKey);
         assert_eq!(missing.usage_meter, "cost: unknown");
@@ -4548,8 +4553,11 @@ mod tests {
 
         config.providers.as_mut().expect("providers").ollama.api_key =
             Some("ollama-cloud-key".to_string());
-        let configured =
-            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        let configured = ProviderDashboardRow::from_config(
+            ApiProvider::OllamaCloud,
+            ApiProvider::OllamaCloud,
+            &config,
+        );
         assert_eq!(configured.auth_status, ProviderAuthStatus::Configured);
         assert_eq!(
             configured.readiness,

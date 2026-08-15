@@ -538,6 +538,7 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
             provider: ApiProvider::Custom,
             key: "custom".to_string(),
             exact_id: None,
+            migrated_legacy_ollama_cloud_route: false,
         }
     );
     let repeated = manager.resolved_route_for_thread(&route.config, &restored)?;
@@ -3432,6 +3433,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 provider: ApiProvider::Deepseek,
                 key: "deepseek".to_string(),
                 exact_id: Some("deepseek".to_string()),
+                migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
             client_preflight_required: false,
@@ -3449,6 +3451,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 provider: ApiProvider::Deepseek,
                 key: "deepseek".to_string(),
                 exact_id: Some("deepseek".to_string()),
+                migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
             client_preflight_required: false,
