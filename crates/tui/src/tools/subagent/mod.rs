@@ -7310,7 +7310,7 @@ impl ToolSpec for AgentTool {
 
     fn description(&self) -> &'static str {
         concat!(
-            "Start one focused worker and return immediately with its agent_id; a prompt is enough for a read-only role. By default the child is owned by the active turn and is cancelled before that turn ends; set detached=true only for work that must remain independently observable after the turn. ",
+            "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (analysis-only), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (exactly allowed_tools). ",
             "profile runs the child as a named Fleet profile (roster member) — its role posture, model route, and instruction overlay — so pass a profile only when the task needs that member and never pass model alongside it. ",
@@ -7342,7 +7342,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "cancel"],
-                    "description": "start (default) launches a turn-owned worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
+                    "description": "start launches a turn-owned worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -7538,7 +7538,10 @@ impl ToolSpec for AgentTool {
                     ]
                 }
             },
-            "required": []
+            // Model-facing calls choose an action explicitly so the matching
+            // dependent schema is always active. The parser still defaults a
+            // missing action to start for stored and programmatic legacy calls.
+            "required": ["action"]
         })
     }
 

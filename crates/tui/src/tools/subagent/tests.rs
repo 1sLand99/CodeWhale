@@ -4755,6 +4755,13 @@ fn schema_property_description<'a>(schema: &'a Value, property: &str) -> &'a str
         .unwrap_or_else(|| panic!("missing description for schema property {property:?}"))
 }
 
+fn draft_2020_validator(schema: &Value) -> jsonschema::Validator {
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(schema)
+        .expect("valid Draft 2020-12 tool schema")
+}
+
 #[test]
 fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     let tmp = tempdir().expect("tempdir");
@@ -5007,6 +5014,71 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
         assert!(branch(action).get("required").is_none());
         assert!(branch(action).get("anyOf").is_none());
     }
+}
+
+#[test]
+fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
+    use crate::tools::schema_sanitize;
+
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
+    let mut forms = vec![("canonical", agent_schema.clone())];
+
+    let mut generic = agent_schema.clone();
+    schema_sanitize::sanitize(&mut generic);
+    forms.push(("generic", generic));
+
+    let mut responses = agent_schema.clone();
+    schema_sanitize::sanitize_for_responses(&mut responses);
+    forms.push(("responses", responses));
+
+    let mut kimi = agent_schema;
+    schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
+        .expect("agent schema must stay Kimi-compatible");
+    forms.push(("kimi", kimi));
+
+    let empty = json!({});
+    assert_eq!(
+        parse_agent_tool_action(&empty).expect("legacy action default"),
+        AgentToolAction::Start,
+        "runtime compatibility keeps a missing action mapped to start"
+    );
+    assert!(
+        matches!(
+            parse_spawn_request(&empty),
+            Err(ToolError::MissingField { field }) if field == "prompt"
+        ),
+        "the runtime rejects the resulting start because prompt is absent"
+    );
+    let mut permissive = Vec::new();
+    for (provider, schema) in forms {
+        let validator = draft_2020_validator(&schema);
+        assert_eq!(
+            schema["required"],
+            json!(["action"]),
+            "{provider} must keep the canonical model-facing action requirement"
+        );
+        if validator.is_valid(&empty) {
+            permissive.push(provider);
+        }
+        assert!(
+            !validator.is_valid(&json!({"prompt": "inspect this"})),
+            "{provider} must require models to choose an explicit action"
+        );
+        assert!(
+            validator.is_valid(&json!({"action": "status"})),
+            "{provider} agent schema must retain unscoped status"
+        );
+        assert!(
+            validator.is_valid(&json!({"action": "start", "prompt": "inspect this"})),
+            "{provider} agent schema must retain an ordinary explicit start"
+        );
+    }
+    assert!(
+        permissive.is_empty(),
+        "agent schema must reject empty input because runtime defaults it to start and then rejects the missing prompt; permissive forms: {permissive:?}"
+    );
 }
 
 #[tokio::test]

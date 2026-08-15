@@ -1071,6 +1071,7 @@ dependencies = [
  "htmd",
  "ignore",
  "image",
+ "jsonschema 0.49.9",
  "libc",
  "lru",
  "mimalloc",

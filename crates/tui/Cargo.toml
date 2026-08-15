@@ -111,6 +111,7 @@ codewhale-build-support = { path = "../build-support", version = "0.9.8" }
 
 [dev-dependencies]
 cucumber = "0.23.0"
+jsonschema.workspace = true
 wiremock = "0.6"
 tiny_http = "0.12"
 pretty_assertions = "1.4"
