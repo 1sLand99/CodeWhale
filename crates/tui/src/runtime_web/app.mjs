@@ -876,6 +876,9 @@ function startBrowserClient() {
         isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
       });
       if (!subscribed) return;
+      // A successful replacement snapshot closes the detected continuity
+      // gap. Keep the error state only while recovery is still pending.
+      app.streamGap = false;
       renderAll();
       showStatus("");
       setConnection("ready", "Local runtime connected");

@@ -317,6 +317,14 @@ test("gap recovery snapshot restores approval and user-input attention before re
   assert.equal(state.approvals.size, 1);
 });
 
+test("browser clears its surfaced gap only after a replacement snapshot subscribes", async () => {
+  const source = await readFile(new URL("../src/runtime_web/app.mjs", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /async function recoverProjection[\s\S]*?if \(!subscribed\) return;\s+(?:\/\/[^\n]*\n\s*){2}app\.streamGap = false;\s+renderAll\(\);/,
+  );
+});
+
 test("user-input answers stay bound to the selected live thread and pending request", () => {
   const state = createThreadState("thread-a");
   state.userInputs.set("input-1", {});
