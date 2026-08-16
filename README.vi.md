@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3a759de92f8b -->
+<!-- source: README.md sha256:3adc6177fbcf -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -130,4 +130,4 @@ trải nghiệm agent trên terminal.
 [MIT](LICENSE). Dự án cộng đồng độc lập; không trực thuộc bất kỳ nhà cung cấp
 model nào.
 
-[![Biểu đồ Star History](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+![Codewhale phân nhánh ba subagent scout chỉ đọc trong terminal](assets/fanout.gif)
