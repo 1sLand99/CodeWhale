@@ -2593,6 +2593,7 @@ pub(crate) use handlers::*;
 pub use event_loop::run_tui;
 
 mod dispatch;
+pub(crate) mod fatal_signal_guard;
 mod motion;
 mod release_check;
 mod terminal;

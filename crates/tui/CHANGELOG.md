@@ -13,6 +13,23 @@ Codewhale v0.9.8 ships the remaining assigned finish. Remaining web
 settings polish moves to v0.9.9. Prefab third-party templates that have
 a published OpenAI-compatible host ship here (#5350).
 
+### Fixed
+
+- `sudo` (and `su`/setuid helpers) work again for wheel-group administrators
+  who want Codewhale to be able to escalate: the Linux startup hardening's
+  irreversible `PR_SET_NO_NEW_PRIVS` flag — inherited by every child process —
+  is now skippable with `CODEWHALE_NO_NEW_PRIVS=0` (#5413). The flag stays on
+  by default; the no-ptrace and no-core-dump measures are never skipped.
+
+- Abort-class process deaths no longer poison the terminal (#5424). A
+  stack overflow, allocation failure, or double panic skips the panic hook
+  and every cleanup guard, which is how a v0.9.7 user's mid-turn exit left
+  mouse capture leaking SGR sequences into their shell. An
+  async-signal-safe handler now restores the terminal modes and appends a
+  one-line cause marker to `~/.codewhale/crashes/last-fatal-signal.log`
+  before re-raising, keeping the honest 128+signal wait status. A SIGKILL
+  (OOM killer) remains uninterceptable by design.
+
 ### Changed
 
 - Prompt-cache prefix is pinned for the session. The tool loop no longer

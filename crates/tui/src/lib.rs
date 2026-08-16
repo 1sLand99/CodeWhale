@@ -1566,6 +1566,14 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // See crates/tui/src/sandbox/process_hardening.rs for ordering rationale.
     crate::sandbox::process_hardening::apply_process_hardening();
 
+    // ── Fatal-signal terminal guard (#5424) ───────────────────────────────
+    // Abort-class deaths (stack overflow, allocation failure, double panic)
+    // skip the panic hook AND every Drop guard, leaving mouse capture and
+    // the kitty keyboard stack leaking into the user's shell. A classic
+    // sigaction handler restores the terminal and stamps a marker before
+    // re-raising. Also before any threads exist.
+    crate::tui::ui::fatal_signal_guard::install_fatal_signal_guard();
+
     // Set up process panic hook before anything else — writes crash dumps
     // to ~/.deepseek/crashes/ even if the panic happens before tokio is up,
     // and restores the terminal so a panicked TUI doesn't leave the user's
