@@ -349,4 +349,77 @@ mod tests {
         assert!(text.contains("require_approval_for_writes = off"), "{text}");
         assert!(text.contains("max_continuations = 25"), "{text}");
     }
+
+    #[test]
+    fn workflow_settings_and_tool_share_a_refreshed_session_table() {
+        use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolSpec};
+        use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager};
+        use crate::tools::workflow::WorkflowTool;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app();
+        app.workspace = dir.path().to_path_buf();
+
+        let mut table = app.workflow_config.clone();
+        table.automatic = false;
+        table.require_approval_for_writes = false;
+        table.auto_start_read_only = false;
+        crate::tools::workflow::set_session_workflow_config(&app.workspace, table.clone());
+        app.workflow_config = table;
+
+        let result = workflow(&mut app, Some("settings"));
+        assert!(result.action.is_none());
+        let text = result.message.unwrap();
+        assert!(text.contains("automatic = off"), "{text}");
+        assert!(text.contains("require_approval_for_writes = off"), "{text}");
+        assert!(text.contains("auto_start_read_only = off"), "{text}");
+
+        let ctx = ToolContext::new(dir.path().to_path_buf());
+        let manager = new_shared_subagent_manager(dir.path().to_path_buf(), 2);
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = crate::client::DeepSeekClient::new(&crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            ..crate::config::Config::default()
+        })
+        .expect("stub client");
+        let mut runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx,
+            true,
+            None,
+            manager.clone(),
+        );
+        // Stale snapshot: product defaults still require write approval.
+        runtime.api_config = Some(std::sync::Arc::new(crate::config::Config::default()));
+        let tool = WorkflowTool::new(manager, runtime);
+
+        let write_plan = json!({
+            "action": "start",
+            "plan": {
+                "goal": "write freely",
+                "risk": "writes",
+                "children": [{ "prompt": "edit", "type": "implementer" }]
+            }
+        });
+        let read_only = json!({
+            "action": "start",
+            "plan": {
+                "goal": "scout crates",
+                "risk": "read_only",
+                "children": [{ "prompt": "look", "type": "explore" }]
+            }
+        });
+        assert_eq!(
+            tool.approval_requirement_for(&write_plan),
+            ApprovalRequirement::Auto,
+            "refreshed require_approval_for_writes = false must win over the stale runtime snapshot"
+        );
+        assert_eq!(
+            tool.approval_requirement_for(&read_only),
+            ApprovalRequirement::Required,
+            "refreshed auto_start_read_only = false must still ask"
+        );
+    }
 }

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -1910,14 +1910,54 @@ fn render_run_report(record: &WorkflowRunRecord) -> String {
     out
 }
 
-/// The effective `[workflow]` table for this runtime: the session config when
-/// the runtime carries one, otherwise the product defaults.
+fn session_workflow_config_store()
+-> &'static Mutex<HashMap<PathBuf, codewhale_config::WorkflowConfigToml>> {
+    static STORE: OnceLock<Mutex<HashMap<PathBuf, codewhale_config::WorkflowConfigToml>>> =
+        OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn workflow_session_key(workspace: &Path) -> PathBuf {
+    workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+}
+
+/// Install the session `[workflow]` table after a config.toml reload (or a
+/// test mutation). `/workflow settings` and the workflow tool both read this
+/// so a refresh cannot leave the two surfaces disagreeing.
+pub(crate) fn set_session_workflow_config(
+    workspace: &Path,
+    config: codewhale_config::WorkflowConfigToml,
+) {
+    session_workflow_config_store()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(workflow_session_key(workspace), config);
+}
+
+/// The refreshed session `[workflow]` table, if a reload (or test) installed
+/// one for this workspace.
+pub(crate) fn session_workflow_config(
+    workspace: &Path,
+) -> Option<codewhale_config::WorkflowConfigToml> {
+    session_workflow_config_store()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&workflow_session_key(workspace))
+        .cloned()
+}
+
+/// The effective `[workflow]` table: the refreshed session table when one has
+/// been installed, otherwise the runtime snapshot, otherwise product defaults.
 fn workflow_config_for(runtime: &SubAgentRuntime) -> codewhale_config::WorkflowConfigToml {
-    runtime
-        .api_config
-        .as_deref()
-        .map(crate::config::Config::workflow_config)
-        .unwrap_or_default()
+    session_workflow_config(&runtime.context.workspace).unwrap_or_else(|| {
+        runtime
+            .api_config
+            .as_deref()
+            .map(crate::config::Config::workflow_config)
+            .unwrap_or_default()
+    })
 }
 
 fn workflow_result_for(

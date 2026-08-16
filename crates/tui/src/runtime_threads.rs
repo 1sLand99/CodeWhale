@@ -2329,10 +2329,12 @@ impl RuntimeThreadManager {
         let workshop_activation = crate::tools::large_output_router::WorkshopConfig::install_active(
             new_config.workshop.as_ref(),
         );
+        let workflow_table = new_config.workflow_config();
         {
             let mut guard = self.config.write();
             *guard = new_config;
         }
+        crate::tools::workflow::set_session_workflow_config(&self.workspace, workflow_table);
 
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let stream_chunk_timeout_secs = self.read_config().stream_chunk_timeout_secs();

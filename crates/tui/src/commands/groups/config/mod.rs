@@ -182,11 +182,13 @@ pub(in crate::commands) fn dispatch(
 }
 
 /// `/workflow settings` and `/config workflow`: the effective `[workflow]`
-/// and `[goal]` tables with what each value does, read from the session
-/// config (no model turn). Values come from `config.toml`; this surface
-/// explains, it does not edit.
+/// and `[goal]` tables with what each value does, read from the refreshed
+/// session table after a config.toml reload (no model turn). The workflow
+/// tool reads the same table, so the two surfaces cannot disagree. This
+/// surface explains, it does not edit.
 pub(in crate::commands) fn workflow_settings(app: &App) -> CommandResult {
-    let cfg = &app.workflow_config;
+    let refreshed = crate::tools::workflow::session_workflow_config(&app.workspace);
+    let cfg = refreshed.as_ref().unwrap_or(&app.workflow_config);
     let on = |value: bool| if value { "on" } else { "off" };
     let lines = [
         "[workflow] — config.toml".to_string(),

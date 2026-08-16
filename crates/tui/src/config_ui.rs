@@ -958,6 +958,10 @@ fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     app.skills_dir = reloaded.skills_dir();
     app.ui_locale = resolve_locale(&settings.locale);
     app.workflow_config = reloaded.workflow_config();
+    crate::tools::workflow::set_session_workflow_config(
+        &app.workspace,
+        app.workflow_config.clone(),
+    );
     app.goal_max_continuations = reloaded.goal_max_continuations();
     Ok(())
 }
