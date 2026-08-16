@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3a759de92f8b -->
+<!-- source: README.md sha256:3adc6177fbcf -->
 # Codewhale
 
 Открытый агент для программирования в вашем терминале — модель приносите с собой.
@@ -137,4 +137,4 @@ Work / Operate; если в поле есть текст, `Tab` дополняе
 [MIT](LICENSE). Независимый проект сообщества, не аффилированный ни с одним
 провайдером моделей.
 
-[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+![Codewhale запускает три read-only scout-субагента параллельно в терминале](assets/fanout.gif)

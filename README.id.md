@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3a759de92f8b -->
+<!-- source: README.md sha256:3adc6177fbcf -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -75,4 +75,4 @@ Terima kasih kepada [DeepSeek](https://github.com/deepseek-ai) untuk model dan d
 
 [MIT](LICENSE). Sebuah proyek komunitas independen, tidak terafiliasi dengan penyedia model mana pun.
 
-[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+![Codewhale memecah tiga subagent scout hanya-baca di terminal](assets/fanout.gif)

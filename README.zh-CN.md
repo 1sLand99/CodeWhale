@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3a759de92f8b -->
+<!-- source: README.md sha256:3adc6177fbcf -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -74,4 +74,4 @@ Issue、PR、复现步骤、日志和功能请求,在这里都算真实的项目
 
 [MIT](LICENSE)。独立的社区项目,与任何模型 provider 均无隶属关系。
 
-[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+![Codewhale 在终端中并行派出三个只读 scout 子代理](assets/fanout.gif)

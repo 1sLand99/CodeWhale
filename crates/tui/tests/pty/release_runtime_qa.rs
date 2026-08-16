@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::qa_harness::frame::Frame;
 use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
 use crate::qa_harness::keys;
 use anyhow::{Result, anyhow};
@@ -279,6 +280,26 @@ fn wait_for_counter(
     }
 }
 
+/// Screen text with transcript continuation rows (`▏` gutter) rejoined to
+/// the row they wrap from, so a receipt can be asserted regardless of where
+/// the terminal width breaks it.
+fn unwrapped_transcript(frame: &Frame) -> String {
+    let mut out = String::new();
+    for row in 0..frame.rows() {
+        let text = frame.row(row);
+        if let Some(rest) = text.strip_prefix('▏') {
+            out.push(' ');
+            out.push_str(rest.trim_start());
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text);
+        }
+    }
+    out
+}
+
 fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     harness.send(keys::key::text(text))?;
     // Rapid PTY writes intentionally exercise paste-burst detection. Wait
@@ -505,6 +526,52 @@ fn compaction_tui_builder(
         .env("DEEPSEEK_BASE_URL", server.uri())
         .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
         .env("NO_ANIMATIONS", "1")
+}
+
+/// The session metrics strip on the phase row after exactly one completed
+/// turn: `1 turn`, `Input 12` (the mock usage's prompt_tokens), and an
+/// `LLM` time — sourced from the engine's usage receipt and its own model-call
+/// timers, not from anything the transcript displays. The idle row is 150
+/// columns wide, so the strip shares it with the key hints and keeps at
+/// least the headline facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_session_metrics_strip_reports_one_turn_from_usage() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_text_model(&server, DEEPSEEK_TEST_MODEL, "metrics-probe-ok").await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    // Fresh session: nothing has happened, so the strip stays silent.
+    let before = tui.frame().text();
+    assert!(
+        !before.contains("turn") && !before.contains("Input "),
+        "metrics strip must not paint before any evidence: {before}"
+    );
+
+    type_and_submit(&mut tui, "metrics probe")?;
+    tui.wait_for_text("metrics-probe-ok", INTERACTION_TIMEOUT)?;
+
+    // One completed turn: `1 turn`, the provider-reported input count from
+    // the mock (`prompt_tokens: 12`), and a measured LLM time.
+    tui.wait_for(
+        |frame| {
+            let text = frame.text();
+            text.contains("1 turn") && text.contains("Input 12") && text.contains("LLM ")
+        },
+        INTERACTION_TIMEOUT,
+    )?;
+    let text = tui.frame().text();
+    // The mock never reports cache classes, so no cache cell may be invented.
+    assert!(!text.contains("Cache hit"), "{text}");
+    // Steps: one model call (usage receipt) and no tool calls.
+    assert!(
+        text.contains("1 turn · 1 step") || text.contains("1 turn │"),
+        "{text}"
+    );
+    Ok(())
 }
 
 /// Regression for the v0.9.6 `/compact` freeze, upgraded to the v0.9.7
@@ -2071,10 +2138,14 @@ base_url = "{base_url}"
     type_and_submit(&mut tui, "/model deepseek-v4-flash")?;
     tui.wait_for_text("session only", INTERACTION_TIMEOUT)?;
     type_and_submit(&mut tui, "/fleet save-as")?;
-    // The receipt wraps across lines at this width; assert on fragments that
-    // land on a single row.
+    // The receipt wraps across rows at this width and the wrap point moves
+    // with the temp-dir path length, so assert on the receipt with its
+    // transcript continuation rows rejoined rather than on any one row.
     tui.wait_for_text("as new Fleet", INTERACTION_TIMEOUT)?;
-    tui.wait_for_text("user-global default", INTERACTION_TIMEOUT)?;
+    tui.wait_for(
+        |frame| unwrapped_transcript(frame).contains("user-global default"),
+        INTERACTION_TIMEOUT,
+    )?;
     // The new Fleet is named after the route: `DeepSeek deepseek-v4-flash`.
     let second_file = ws
         .home()

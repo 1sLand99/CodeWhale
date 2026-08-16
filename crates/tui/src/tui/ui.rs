@@ -2065,11 +2065,17 @@ fn clear_paused_command_state(app: &mut App, engine_handle: &EngineHandle) {
 }
 
 fn app_scoped_runtime_config(app: &App, config: &Config) -> (ProviderIdentity, Config) {
-    let identity = ProviderIdentity {
-        provider: app.api_provider,
-        key: app.provider_identity_for_persistence().to_string(),
-        exact_id: app.provider_id_for_persistence().map(str::to_string),
-    };
+    let identity = config
+        .resolve_persisted_provider_identity(
+            Some(app.api_provider.as_str()),
+            app.provider_id_for_persistence(),
+        )
+        .unwrap_or_else(|_| ProviderIdentity {
+            provider: app.api_provider,
+            key: app.provider_identity_for_persistence().to_string(),
+            exact_id: app.provider_id_for_persistence().map(str::to_string),
+            migrated_legacy_ollama_cloud_route: false,
+        });
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
     (identity, scoped)
