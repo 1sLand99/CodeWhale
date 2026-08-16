@@ -10776,6 +10776,88 @@ fn status_items_deser_allows_missing_field() {
 }
 
 #[test]
+fn transcript_prose_measure_loads_and_resolves() -> Result<()> {
+    // #5436: absent = full width; 0 also means full width; a positive
+    // integer caps prose wrap at that many columns.
+    let absent: Config = toml::from_str("provider = \"openai\"\n")?;
+    absent.validate()?;
+    assert_eq!(absent.prose_measure(), None);
+
+    let zero: Config = toml::from_str(
+        "
+[transcript]
+prose_measure = 0
+",
+    )?;
+    zero.validate()?;
+    assert_eq!(zero.prose_measure(), None, "0 must mean full width");
+
+    let capped: Config = toml::from_str(
+        "
+[transcript]
+prose_measure = 120
+",
+    )?;
+    capped.validate()?;
+    assert_eq!(capped.prose_measure(), Some(120));
+    Ok(())
+}
+
+#[test]
+fn transcript_prose_measure_rejects_negative_with_clear_error() {
+    let config: Config = toml::from_str(
+        "
+[transcript]
+prose_measure = -5
+",
+    )
+    .expect("negative integers must parse so validate can name the key");
+
+    let error = config
+        .validate()
+        .expect_err("negative prose_measure should be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains("transcript.prose_measure"),
+        "error should name the key: {message}"
+    );
+    assert!(
+        message.contains("-5"),
+        "error should echo the value: {message}"
+    );
+    assert!(
+        message.contains("positive whole number"),
+        "error should say what is expected: {message}"
+    );
+}
+
+#[test]
+fn transcript_prose_measure_rejects_non_integers_with_clear_error() {
+    for raw in ["\"fill\"", "12.5", "true"] {
+        let config: Config = toml::from_str(&format!(
+            "
+[transcript]
+prose_measure = {raw}
+"
+        ))
+        .unwrap_or_else(|_| panic!("{raw} must parse so validate can name the key"));
+
+        let error = config
+            .validate()
+            .expect_err(&format!("{raw} should be rejected"));
+        let message = error.to_string();
+        assert!(
+            message.contains("transcript.prose_measure"),
+            "error should name the key for {raw}: {message}"
+        );
+        assert!(
+            message.contains("positive whole number"),
+            "error should say what is expected for {raw}: {message}"
+        );
+    }
+}
+
+#[test]
 fn huggingface_provider_aliases_parse() {
     for alias in ["huggingface", "hugging-face", "hugging_face", "hf"] {
         assert_eq!(ApiProvider::parse(alias), Some(ApiProvider::Huggingface));
