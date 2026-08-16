@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "không mạng",
   "AgentFocusPostureShellFull": "shell",
   "AgentFocusPostureShellReadOnly": "shell chỉ đọc",
-  "AgentFocusPostureShellNone": "không shell"
+  "AgentFocusPostureShellNone": "không shell",
+  "GoalReceiptSet": "Đã đặt mục tiêu: \"{objective}\" · /goal hiển thị tiến độ · /goal pause hoặc /goal clear để dừng",
+  "GoalStatusIdleHint": "hiện không chạy — gửi tin nhắn hoặc /goal resume để tiếp tục"
 }

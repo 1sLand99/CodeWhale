@@ -152,6 +152,61 @@ fn wait_for_native_telemetry_notice(h: &mut Harness, home: &Path) -> anyhow::Res
     Ok(())
 }
 
+/// `/goal` and `/workflow` control verbs are host answers: usage, status,
+/// settings, and cancel never spend a model turn. This drives the real binary
+/// against a refusing provider so any accidental model round-trip shows up as
+/// a provider error instead of the expected receipt.
+#[test]
+fn goal_and_workflow_control_verbs_answer_from_the_host() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (ws, mut h) = boot_minimal()?;
+
+    // No conversation yet: bare /goal is usage, not a model question.
+    h.send(keys::key::text("/goal"))?;
+    h.wait_for_text("/goal", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("/goal <objective>", KEY_TIMEOUT)?;
+    h.wait_for_text("/goal resume", KEY_TIMEOUT)?;
+
+    // Workflow status reads the workspace journal directly.
+    h.send(keys::key::text("/workflow status"))?;
+    h.wait_for_text("/workflow status", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("No workflow runs in this workspace yet", KEY_TIMEOUT)?;
+    assert!(
+        !ws.workspace()
+            .join(".codewhale/workflow-runs.jsonl")
+            .exists(),
+        "status must not create the run journal"
+    );
+
+    // Settings explain the effective [workflow] table without a model turn.
+    h.send(keys::key::text("/workflow settings"))?;
+    h.wait_for_text("/workflow settings", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("require_approval_for_writes", KEY_TIMEOUT)?;
+    h.wait_for_text("max_continuations", KEY_TIMEOUT)?;
+
+    // Cancel with nothing running is a plain answer.
+    h.send(keys::key::text("/workflow cancel"))?;
+    h.wait_for_text("/workflow cancel", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("No workflow is running.", KEY_TIMEOUT)?;
+
+    let frame = h.frame();
+    assert!(
+        !frame.contains("Model error"),
+        "no control verb may reach the provider:\n{}",
+        frame.debug_dump()
+    );
+    let _ = h.shutdown();
+    Ok(())
+}
+
 #[test]
 fn composer_newline_and_stash_chords_keep_stable_roles() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();

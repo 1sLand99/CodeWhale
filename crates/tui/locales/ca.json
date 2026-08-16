@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "sense xarxa",
   "AgentFocusPostureShellFull": "shell",
   "AgentFocusPostureShellReadOnly": "shell de només lectura",
-  "AgentFocusPostureShellNone": "sense shell"
+  "AgentFocusPostureShellNone": "sense shell",
+  "GoalReceiptSet": "Objectiu establert: \"{objective}\" · /goal mostra el progrés · /goal pause o /goal clear l'atura",
+  "GoalStatusIdleHint": "no s'està executant — envia un missatge o /goal resume per continuar"
 }

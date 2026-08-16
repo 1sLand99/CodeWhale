@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "tanpa jaringan",
   "AgentFocusPostureShellFull": "shell",
   "AgentFocusPostureShellReadOnly": "shell hanya-baca",
-  "AgentFocusPostureShellNone": "tanpa shell"
+  "AgentFocusPostureShellNone": "tanpa shell",
+  "GoalReceiptSet": "Tujuan ditetapkan: \"{objective}\" · /goal menampilkan progres · /goal pause atau /goal clear menghentikannya",
+  "GoalStatusIdleHint": "tidak sedang berjalan — kirim pesan atau /goal resume untuk melanjutkan"
 }

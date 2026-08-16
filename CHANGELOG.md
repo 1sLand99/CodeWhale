@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Read-only roles (`scout`, `reviewer`, `planner`, `verifier`,
   `consultant`) still never write the workspace. The focused worker's
   header states its effective posture from the runtime snapshot.
+- `/workflow status`, `/workflow cancel [run_id]`, `/workflow settings`, and
+  `/workflow help` are answered by Codewhale itself from the run journal and
+  live run state — no model turn — and `/workflow run <path>` launches a
+  checked-in workflow as-is. `/config workflow` and `/config goal` explain
+  the effective tables. The workflow tool now honors the session `[workflow]`
+  table (`automatic`, `auto_start_read_only`, `require_approval_for_writes`,
+  limits) instead of product defaults.
+- Goal mode enters as readily as DeepSeek Harness: the agent may create the
+  session goal when a direct request describes a verifiable multi-turn end
+  state, and Codewhale shows a one-line `Goal set` receipt with how to pause
+  or clear it. Bare `/goal` shows plain progress (and how to continue when no
+  turn is running), prints usage on an empty session instead of asking the
+  model, and `/goal help|status` are reserved words.
+
 - Whale Teams in the terminal: the six Signal Cut whale identities (Scout,
   Patch, Harbor, Echo, Keel, Lantern) appear as species badges on `/fleet`
   roster rows and worker rows, with an identity portrait in the roster detail

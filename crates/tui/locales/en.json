@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "no network",
   "AgentFocusPostureShellFull": "shell",
   "AgentFocusPostureShellReadOnly": "read-only shell",
-  "AgentFocusPostureShellNone": "no shell"
+  "AgentFocusPostureShellNone": "no shell",
+  "GoalReceiptSet": "Goal set: \"{objective}\" · /goal shows progress · /goal pause or /goal clear stops it",
+  "GoalStatusIdleHint": "not running now — send a message or /goal resume to continue"
 }

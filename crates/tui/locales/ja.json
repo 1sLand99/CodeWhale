@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "ネットワーク不可",
   "AgentFocusPostureShellFull": "シェル可",
   "AgentFocusPostureShellReadOnly": "読み取り専用シェル",
-  "AgentFocusPostureShellNone": "シェル不可"
+  "AgentFocusPostureShellNone": "シェル不可",
+  "GoalReceiptSet": "目標を設定: 「{objective}」 · /goal で進捗表示 · /goal pause または /goal clear で停止",
+  "GoalStatusIdleHint": "現在は実行中ではありません — メッセージを送るか /goal resume で続行"
 }

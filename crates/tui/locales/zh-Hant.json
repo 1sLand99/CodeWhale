@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "無網路",
   "AgentFocusPostureShellFull": "可用 shell",
   "AgentFocusPostureShellReadOnly": "唯讀 shell",
-  "AgentFocusPostureShellNone": "無 shell"
+  "AgentFocusPostureShellNone": "無 shell",
+  "GoalReceiptSet": "已設定目標：「{objective}」 · /goal 查看進度 · /goal pause 或 /goal clear 停止",
+  "GoalStatusIdleHint": "目前未執行 — 傳送訊息或 /goal resume 以繼續"
 }

@@ -1477,5 +1477,7 @@
   "AgentFocusPostureNoNetwork": "नेटवर्क नहीं",
   "AgentFocusPostureShellFull": "शेल",
   "AgentFocusPostureShellReadOnly": "केवल-पढ़ने शेल",
-  "AgentFocusPostureShellNone": "शेल नहीं"
+  "AgentFocusPostureShellNone": "शेल नहीं",
+  "GoalReceiptSet": "लक्ष्य सेट: \"{objective}\" · /goal प्रगति दिखाता है · /goal pause या /goal clear इसे रोकता है",
+  "GoalStatusIdleHint": "अभी नहीं चल रहा — जारी रखने के लिए संदेश भेजें या /goal resume"
 }
