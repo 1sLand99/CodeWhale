@@ -266,6 +266,16 @@ pub enum Event {
         usage: Usage,
         /// Wall-clock duration of this model call's stream.
         duration_ms: u64,
+        /// Wall-clock time from the moment the request was dispatched to the
+        /// provider until the first content-bearing stream event arrived
+        /// (time to first token). `None` when the call produced no content
+        /// or the emitting path does not measure dispatch (reviewer / REPL
+        /// consults), so the session metrics never invent a latency.
+        first_token_ms: Option<u64>,
+        /// Wall-clock time from request dispatch to the usage receipt for
+        /// this model call — the whole call including connection setup, not
+        /// only the stream. `None` where dispatch is not measured.
+        request_ms: Option<u64>,
     },
 
     /// Runtime goal state changed inside the engine, usually from model-visible
