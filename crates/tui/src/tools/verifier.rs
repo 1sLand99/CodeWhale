@@ -1490,18 +1490,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn run_verifiers_background_starts_shell_jobs_and_returns_task_ids() {
-        if !crate::dependencies::RustC::available() {
-            return;
-        }
-        // The spawned `rustc` is usually the rustup shim, which resolves its
-        // toolchain through $HOME. Hold the process-wide env mutex so tests
-        // that temporarily swap HOME cannot break the child process.
-        let _env_lock = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path());
         let tool = RunVerifiersTool;
+        let test_executable = std::env::current_exe().expect("test executable");
         let result = tool
             .execute(
                 json!({
@@ -1509,9 +1502,9 @@ mod tests {
                     "background": true,
                     "commands": [
                         {
-                            "name": "rustc-version",
-                            "program": crate::dependencies::RustC::resolve().expect("rustc"),
-                            "args": ["--version"]
+                            "name": "test-list",
+                            "program": test_executable,
+                            "args": ["--list"]
                         }
                     ]
                 }),
@@ -1572,8 +1565,8 @@ mod tests {
             output.stderr
         );
         assert!(
-            output.stdout.contains("rustc"),
-            "stdout should include rustc version: {:?}",
+            output.stdout.lines().any(|line| line.ends_with(": test")),
+            "stdout should include the test listing: {:?}",
             output.stdout
         );
     }
