@@ -9213,6 +9213,68 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
 }
 
 #[test]
+fn apply_goal_snapshot_prints_a_receipt_when_the_runtime_sets_a_new_goal() {
+    let mut app = create_test_app();
+    let snapshot = crate::tools::goal::GoalSnapshot {
+        objective: Some("make the tests pass".to_string()),
+        status: "active".to_string(),
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        continuation_count: 0,
+        elapsed_seconds: Some(0),
+        evidence: None,
+        blocker: None,
+        pause_reason: None,
+        completion_verification: None,
+        ..Default::default()
+    };
+    assert!(apply_goal_snapshot_to_app(&mut app, &snapshot));
+    let receipts: Vec<&str> = app
+        .history
+        .iter()
+        .filter_map(|cell| match cell {
+            HistoryCell::System { content } if content.contains("Goal set") => {
+                Some(content.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1, "{:?}", app.history);
+    assert!(
+        receipts[0].contains("make the tests pass"),
+        "{}",
+        receipts[0]
+    );
+    assert!(receipts[0].contains("/goal pause"), "{}", receipts[0]);
+
+    let mut usage = snapshot.clone();
+    usage.tokens_used = 12;
+    assert!(apply_goal_snapshot_to_app(&mut app, &usage));
+    let receipts = app
+        .history
+        .iter()
+        .filter(
+            |cell| matches!(cell, HistoryCell::System { content } if content.contains("Goal set")),
+        )
+        .count();
+    assert_eq!(
+        receipts, 1,
+        "the same objective must not reprint the receipt"
+    );
+
+    let mut declared = create_test_app();
+    declared.hunt.quarry = Some("make the tests pass".to_string());
+    apply_goal_snapshot_to_app(&mut declared, &snapshot);
+    assert!(
+        declared.history.iter().all(|cell| {
+            !matches!(cell, HistoryCell::System { content } if content.contains("Goal set"))
+        }),
+        "a user-declared goal must not repeat its own receipt"
+    );
+}
+
+#[test]
 fn canonical_goal_clear_wins_after_stale_active_snapshot() {
     let mut app = create_test_app();
     let stale_active = crate::tools::goal::GoalSnapshot {

@@ -311,6 +311,17 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         return false;
     }
 
+    // The runtime introduced a new active objective (the model called
+    // `create_goal`, or a restored session carried one): say so once, in one
+    // line, so the user knows a persistent goal is now driving turns and how
+    // to stop it. `/goal <objective>` sets `quarry` before this snapshot lands,
+    // so a user-declared goal does not repeat its own receipt.
+    if objective_changed && verdict == HuntVerdict::Hunting {
+        let content = app
+            .tr(crate::localization::MessageId::GoalReceiptSet)
+            .replace("{objective}", objective);
+        app.add_message(crate::tui::history::HistoryCell::System { content });
+    }
     app.hunt.quarry = Some(objective.to_string());
     app.hunt.token_budget = snapshot.token_budget;
     app.hunt.tokens_used = snapshot.tokens_used;
