@@ -116,6 +116,13 @@ the same process as another test (nextest gives every test its own
 process); if a test needs the rustls crypto provider, install it in that
 test as production does at startup.
 
+On a machine with less than 16 GB of RAM (or when cross-compiling, e.g.
+for OHOS), build one rustc at a time: `CARGO_BUILD_JOBS=1` (or `-j1`), one
+crate at a time, `--lib` for tests, never `--workspace`/`--all-targets`.
+The tui library needs ~6 GB for its own rustc and its unit-test build ~8 GB;
+`cargo test --workspace` runs both at once. Numbers and the full recipe:
+[`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md#low-memory-build-recipe-machines-with--16-gb-cross-builds).
+
 If you work in several worktrees, point them at one target directory so
 dependencies compile once (`export CARGO_TARGET_DIR=$HOME/.cache/codewhale-target`),
 and prefer `cargo clean -p codewhale-tui` over deleting the directory

@@ -129,6 +129,105 @@ opt-level = 1` (paired result above), `-Wl,-dead_strip`, and other
 `RUSTFLAGS` stay out of the repo (they would apply to shipped profiles);
 `split-debuginfo` is already `unpacked` on macOS.
 
+## Peak memory (why OHOS/Windows builds see two ~4 GB rustc processes)
+
+Sampled `ps -o rss` once a second for every rustc under this lane's target
+dir (`backups/compile-speed-evidence-20260815/rss-sample.sh`,
+`mem-incremental.log`, `mem-cold-cgu.log`); one rustc per row.
+
+| Unit | Mode | Peak RSS | Wall | Load |
+| --- | --- | --- | --- | --- |
+| `codewhale-tui` lib (dev) | incremental, cgu 256 | 3.3 GB | 12–14 s | 6.3 |
+| `codewhale-tui` lib test | incremental, cgu 256 | 6.0 GB | 21–28 s | 6.3 |
+| `codewhale-tui` lib (dev) | non-incremental (`CARGO_INCREMENTAL=0`), cgu 16 | **6.0 GB** | 78 s | 5.5 |
+| `codewhale-tui` lib test | non-incremental, cgu 16 | **8.0 GB** | 105 s | 5.5 |
+| `codewhale-tui` lib test | non-incremental, `codegen-units = 4` | 6.1 GB (−24 %) | 145 s (+38 %) | 5.5 |
+| `codewhale-tui` lib test | non-incremental, `codegen-units = 1` | 7.8 GB (−3 %) | 161 s (+53 %) | 5.5 |
+| next-largest units (codewhale-config, rmcp, tokio, schemaui, codewhale-workflow) | either | 0.4–0.7 GB | — | — |
+
+So a plain `cargo build -p codewhale-tui` needs ~6 GB for one rustc, the
+unit-test build ~8 GB, and `cargo test --workspace` (or `--all-targets`)
+schedules the lib and lib-test units of the tui crate concurrently with
+the CLI, which is exactly the "two rustc processes at ~4 GB each" a
+community member reported while cross-compiling for OHOS on Windows (RSS
+accounting differs by OS; the shape is the same). The inline test modules
+add ~2 GB (+33 %) to the crate's peak; generic bloat is the driver on both
+axes (8.1 M LLVM lines, `rust_i18n` closure 312 k, serde `Deserialize`
+expansions for the config structs). Fewer codegen units trade a little
+peak for a lot of wall time and are not adopted by default.
+
+### Low-memory build recipe (machines with < 16 GB, cross-builds)
+
+```bash
+# One rustc at a time: the tui lib and its unit-test build never overlap.
+export CARGO_BUILD_JOBS=1            # or: cargo build -j1 ...
+# Only the crate you are working on, only its library:
+cargo build -p codewhale-tui
+cargo test  -p codewhale-tui --lib -- <filter>
+# Do NOT use --workspace/--all-targets on a small machine; run crates one
+# at a time (scripts/dev-test.sh <area> picks the narrowest command).
+# Optional, if 8 GB for the unit-test build is still too much (slower):
+export CARGO_PROFILE_DEV_CODEGEN_UNITS=4   # ~6 GB peak, ~+40 % wall
+# Cross-builds (e.g. OHOS) inherit the same numbers: add -j1 to the
+# cargo/ohrs invocation and build the release profile, which peaks lower
+# than the unit-test build because it carries no test modules.
+```
+
+### B1 (megatest peel) — audited, not landable under the constraints
+
+The six largest inline test files (tui/ui/tests.rs 22.1 k lines / 643
+tests, tools/subagent/tests.rs 18.7 k / 448, core/engine/tests.rs 17.8 k /
+358, config/tests.rs 12.7 k / 393, runtime_threads/tests.rs 9.3 k / 141,
+runtime_api/tests.rs 9.1 k / 151) reference crate internals 826 / 226 /
+627 / 85 / 152 / 217 times respectively (`crate::llm_client::mock`,
+`crate::test_support::{EnvVarGuard, lock_test_env}`,
+`core::engine::mock_engine_handle`, `crate::tui::app::App`, …), and the
+codewhale-tui library exposes four `pub` items in total. Every one of them
+is white-box; none can move to `crates/tui/tests/` without making the
+module tree public, which this lane was told not to do. The lever this
+would have bought — the ~2 GB / ~35 s that the test modules add to the
+lib-test unit — needs a decision first: either a `#[doc(hidden)] pub mod
+test_api` (a deliberately public, unstable surface for the ~30 symbols the
+black-box subsets use) or accepting that the unit suite stays inside the
+crate. Recorded here rather than done.
+
+### B2 landed (leaf types out of codewhale-tui)
+
+| Move | Lines out of tui | Consumers changed |
+| --- | --- | --- |
+| `core/tool_parser.rs` → `codewhale_core::tool_parser` | 662 | 0 (re-export; integration harness imports instead of `#[path]`) |
+| `tls.rs` → `codewhale_release::tls` | 21 | 0 (`use codewhale_release::tls;` at the crate root) |
+| `AppMode` (+ pure impl) → `codewhale_config::AppMode`; localized picker strings stay as `AppModeUi` | ~150 | 3 files import the trait |
+| `ApprovalMode` (+ pure impl) → `codewhale_execpolicy::ApprovalMode` | ~60 | 0 (re-export) |
+
+Together ~0.9 k of the crate's 746 k lines: correct dependency direction
+established, no measurable change to the tui unit's time or RAM yet (the
+lib-test peak above, 8.0 GB, was sampled after these moves). Not moved,
+with the reason: `ReasoningEffort` — its impl takes the TUI-defined
+`ApiProvider` (`crates/tui/src/config.rs`) and calls
+`crate::config::is_exact_*_k3_route` / `crate::provider_lake`, so
+`ApiProvider` has to move first (B3, below); `approval/policy.rs` (risk
+classify) depends on `command_safety` and `auto_review`; `hashing.rs` is
+15 lines of sha2 wrappers with 53 call sites and no compile-time value on
+its own; the uncompiled `core/runtime_contract/{budget,context,ledger,
+manifest,profile,progress,retry,terminal,work}.rs` have zero consumers and
+zero build cost (`core/mod.rs` documents them as staged scaffolding,
+TUI-DOG-017) — left as they are.
+
+### B3 order (not started)
+
+1. `ApiProvider` + the exact-route helpers (`is_exact_*_route`) out of
+   `crates/tui/src/config.rs` into codewhale-config, unblocking
+   `ReasoningEffort`.
+2. `localization` + `locales/*.json` → `codewhale-i18n` (the 312 k-line
+   `rust_i18n` closure leaves the tui unit; locale-only edits stop
+   rebuilding the TUI).
+3. `palette` + `glyphs` → `codewhale-palette` (also fixes web/CWC token
+   drift).
+4. `client/` (provider wire adapters) → `codewhale-client`, then
+   `fleet/`, `tools/`, `core/engine` — each behind the crate boundary its
+   tests already respect, measured with the A0 table.
+
 ## What changed (this lane)
 
 1. **`cargo nextest` is supported and documented** (`.config/nextest.toml`).
