@@ -536,6 +536,16 @@ validated basename in config, and revokes any Grok-file grant. Superseded
 generations are cleaned only after the new config pointer commits.
 Kimi remains API-key-only; external consent for Kimi is rejected.
 
+The official DeepSeek Harness (`dsh`) is a third read-only credential owner:
+`codewhale auth external-consent --provider deepseek --mode read-only` grants
+exact-path read access to `DEEPSEEK_API_KEY` in `$DSH_HOME/.credentials.yaml`
+(or `~/.dsh/.credentials.yaml`), which Codewhale never writes, refreshes, or
+loads into the process environment. This is separate from the DSH *harness*
+integration (`codewhale integrations dsh …`, see
+[INTEGRATIONS_DSH.md](INTEGRATIONS_DSH.md)), which never touches credentials
+in either direction: it pins Codewhale's route identity into a `--patch`
+overlay and lets DSH resolve its own keys.
+
 ## Shipped Providers
 
 | Provider ID | TOML table | Auth env | Base URL env and default | Default or static models | Notes |
