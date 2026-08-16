@@ -5352,6 +5352,8 @@ pub(super) fn flush_gate_receipts_for(app: &mut App, tool_id: Option<&str>) -> b
         app.add_message(HistoryCell::System { content });
     }
     moved
+}
+
 /// Open the `/agents` register (the manage view: focus, stop, refresh) and ask
 /// the engine for a fresh listing.
 async fn open_agents_register(app: &mut App, engine_handle: &EngineHandle) {
