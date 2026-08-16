@@ -13790,6 +13790,24 @@ impl SubAgentToolRegistry {
                         && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest)
                 }
                 ApprovalRequirement::Required => {
+                    // #5426 acceptance point 1: the bounded read-only shell.
+                    // `allows_bounded_readonly_bash` admits canonical `bash`
+                    // to the inspection roles through the raw-shell deny
+                    // list; a call the agent read-only classifier proves
+                    // mutation-free is Auto-class evidence, not a held
+                    // mutation, so the gate must not demand `ShellPolicy::
+                    // Full` for it. Judged by the same predicate
+                    // `BashTool::execute` enforces under
+                    // `ShellPolicy::ReadOnly` (shell.rs), so this admission
+                    // can never widen past the execute-time refusal — the
+                    // first live dogfood against #5428 was denied all three
+                    // canonical inspection commands here because the gate
+                    // consulted only `Required` → `Full`.
+                    if self.allows_bounded_readonly_bash(name)
+                        && input.is_some_and(crate::tools::shell::agent_readonly_bash_input)
+                    {
+                        return true;
+                    }
                     matches!(self.runtime_profile.shell, ShellPolicy::Full)
                         && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
                 }

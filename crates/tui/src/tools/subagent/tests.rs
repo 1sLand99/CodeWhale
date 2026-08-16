@@ -6925,6 +6925,61 @@ fn seed_read_only_role_deny_list(runtime: &mut SubAgentRuntime) {
     }
 }
 
+/// #5426 acceptance point 1, gate-level: a live scout must be able to run
+/// the three canonical read-only inspection commands DIRECTLY through
+/// canonical `bash` — `git -C ... log`, `find ... | head`, `npm view` — with
+/// no child spawn. The first live dogfood against a #5428 binary denied all
+/// three at `posture_permits_tool`: the Required branch demanded
+/// `ShellPolicy::Full`, and #5428's relaxed agent classifier was unreachable
+/// from the gate (it only guards `BashTool::execute`, which the gate
+/// precedes). This test pins the gate↔classifier agreement the catalog
+/// carve-out always intended.
+#[test]
+fn scout_posture_gate_admits_agent_readonly_bash_commands() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.context.auto_approve = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    seed_read_only_role_deny_list(&mut runtime);
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+
+    // The exact command shapes the live dogfood was denied (issue #5426):
+    let admitted = [
+        "git -C /Volumes/VIXinSSD/CW/worktrees/demo log --oneline -3",
+        "find /Volumes/VIXinSSD/CW/worktrees/demo/crates -name offering.rs -maxdepth 4 | head -3",
+        "npm view @deepseek-ai/dsh version",
+    ];
+    for command in admitted {
+        let input = serde_json::json!({ "command": command });
+        assert!(
+            registry.posture_permits_tool("bash", Some(&input)),
+            "scout posture gate must admit agent-read-only bash directly: {command}"
+        );
+    }
+
+    // Mutation still refused at the gate, legacy `Bash` stays raw-shell-denied
+    // (exact-name match, per the carve-out contract), and a read-only planner
+    // keeps the same bounded admission.
+    let touch = serde_json::json!({ "command": "touch .dogfood-should-be-denied" });
+    assert!(
+        !registry.posture_permits_tool("bash", Some(&touch)),
+        "mutating command must stay denied for a scout"
+    );
+    let git_log = serde_json::json!({ "command": "git -C /repo log --oneline -3" });
+    assert!(
+        !registry.posture_permits_tool("Bash", Some(&git_log)),
+        "legacy `Bash` is the raw-shell alias; the carve-out is exact-name `bash` only"
+    );
+}
+
 #[test]
 fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
     let tmp = tempdir().expect("tempdir");
