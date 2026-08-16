@@ -433,20 +433,6 @@ impl Default for ModelRegistry {
                 supports_reasoning: true,
             },
             ModelInfo {
-                id: "GLM-5.2".to_string(),
-                provider: ProviderKind::Zai,
-                aliases: vec![
-                    "glm-5.2".to_string(),
-                    "glm-5-2".to_string(),
-                    "zai-glm-5.2".to_string(),
-                    "zai-glm-5-2".to_string(),
-                ],
-                supports_tools: true,
-                supports_reasoning: true,
-            },
-            // Listed after GLM-5.2 on purpose: the first Zai row is the
-            // provider default and GLM-5.2 keeps that seat.
-            ModelInfo {
                 id: "GLM-5.3".to_string(),
                 provider: ProviderKind::Zai,
                 aliases: vec![
@@ -454,6 +440,20 @@ impl Default for ModelRegistry {
                     "glm-5-3".to_string(),
                     "zai-glm-5.3".to_string(),
                     "zai-glm-5-3".to_string(),
+                ],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            // The first Z.ai row is the provider default. Keep this ordering
+            // aligned with `DEFAULT_ZAI_MODEL` in codewhale-config.
+            ModelInfo {
+                id: "GLM-5.2".to_string(),
+                provider: ProviderKind::Zai,
+                aliases: vec![
+                    "glm-5.2".to_string(),
+                    "glm-5-2".to_string(),
+                    "zai-glm-5.2".to_string(),
+                    "zai-glm-5-2".to_string(),
                 ],
                 supports_tools: true,
                 supports_reasoning: true,
@@ -2003,10 +2003,13 @@ mod tests {
     fn zai_direct_models_resolve_when_provider_hinted() {
         let registry = ModelRegistry::default();
 
-        // GLM-5.2 is now the default direct Z.AI model.
+        // Keep the agent registry fallback aligned with codewhale-config's
+        // DEFAULT_ZAI_MODEL.
         let default = registry.resolve(None, Some(ProviderKind::Zai));
         assert_eq!(default.resolved.provider, ProviderKind::Zai);
-        assert_eq!(default.resolved.id, "GLM-5.2");
+        assert_eq!(default.resolved.id, "GLM-5.3");
+        assert!(default.used_fallback);
+        assert_eq!(default.fallback_chain, ["provider_default:zai"]);
 
         for (alias, expected) in [
             ("GLM-5.1", "GLM-5.1"),

@@ -55,8 +55,8 @@ a published OpenAI-compatible host ship here (#5350).
   thread** cannot paint over the session fact chips. Chips wrap instead
   of sliding under the rail.
 
-- Z.ai `GLM-5.3` is a live Coding Plan picker option (`/model` after
-  `/provider zai`, or `model = "GLM-5.3"`). `GLM-5.2` stays the default.
+- Z.ai `GLM-5.3` is live on the Coding Plan and is now the default direct
+  Z.ai model. Explicit `GLM-5.2` selections keep their own id.
   Limits and reasoning options still inherit from `GLM-5.2` until Z.ai
   publishes distinct 5.3 numbers. No USD price is claimed. A live call
   can still 429 with entitlement code 1311 on accounts that are not
