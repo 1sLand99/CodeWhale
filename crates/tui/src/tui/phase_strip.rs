@@ -667,21 +667,6 @@ mod tests {
         assert!(!text.contains("cache"), "compact strip: {text}");
     }
 
-    fn strip_text(width: u16, app: &mut App) -> String {
-        let backend = TestBackend::new(width, 1);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| render(frame.area(), frame.buffer_mut(), app))
-            .expect("draw");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    }
-
     fn app_with_session_metrics() -> App {
         let mut app = test_app();
         app.status_items = vec![crate::config::StatusItem::SessionMetrics];
@@ -703,7 +688,7 @@ mod tests {
     #[test]
     fn session_metrics_strip_paints_every_group_when_the_row_has_room() {
         let mut app = app_with_session_metrics();
-        let text = strip_text(170, &mut app);
+        let text = strip_text(&mut app, 170);
         assert!(text.contains("4 turns · 3 steps"), "{text}");
         assert!(text.contains("LLM 3.5s · Tool call"), "{text}");
         assert!(text.contains("TTFT avg 400ms · 40 tok/s"), "{text}");
@@ -714,7 +699,7 @@ mod tests {
 
         // A 120-column idle row shares the line with the full key hints, so
         // every group keeps its headline fact and sheds its second cell.
-        let text = strip_text(120, &mut app);
+        let text = strip_text(&mut app, 120);
         assert!(
             text.contains("4 turns │ LLM 3.5s │ TTFT avg 400ms │ Cache hit 99% │ Input 9.3M"),
             "{text}"
@@ -725,13 +710,13 @@ mod tests {
     #[test]
     fn session_metrics_strip_sheds_groups_on_narrow_rows_and_never_truncates() {
         let mut app = app_with_session_metrics();
-        let normal = strip_text(80, &mut app);
+        let normal = strip_text(&mut app, 80);
         assert!(normal.contains("Input 9.3M"), "{normal}");
         assert!(normal.contains("Cache hit 99%"), "{normal}");
         assert!(!normal.contains("tok/s"), "{normal}");
         assert!(normal.contains("keys"), "{normal}");
 
-        let compact = strip_text(60, &mut app);
+        let compact = strip_text(&mut app, 60);
         // Whatever survives at 60 columns is whole cells, never a cut number.
         for cell in ["9.3M", "99%", "3.5s", "4 turns"] {
             if compact.contains(cell) {
@@ -752,7 +737,7 @@ mod tests {
     fn session_metrics_strip_is_hidden_when_the_status_item_is_off_or_nothing_happened() {
         let mut app = app_with_session_metrics();
         app.status_items = vec![crate::config::StatusItem::Cache];
-        let text = strip_text(120, &mut app);
+        let text = strip_text(&mut app, 120);
         assert!(!text.contains("turns"), "{text}");
         // The legacy standalone cache chip still serves users who turned
         // the strip off.
@@ -760,7 +745,7 @@ mod tests {
 
         let mut fresh = test_app();
         fresh.status_items = vec![crate::config::StatusItem::SessionMetrics];
-        let text = strip_text(120, &mut fresh);
+        let text = strip_text(&mut fresh, 120);
         assert!(!text.contains("turns"), "{text}");
         assert!(!text.contains("│"), "{text}");
     }
