@@ -582,9 +582,16 @@ impl Engine {
             // the idle handler starts a separate follow-up turn.
             self.drain_subagent_completion_events("queued").await;
 
-            // Ensure system prompt is up to date with latest session states
-            self.refresh_system_prompt();
-
+            // The pinned system + tools prefix is frozen for the session:
+            // recomposing it here from disk on every tool step is exactly what
+            // kills DeepSeek's KV prefix cache once the agent writes a file
+            // (the project pack listing changes -> the system hash changes ->
+            // the next same-turn request is a full miss). Header changes come
+            // only from explicit ops (`/model`, mode, goal, session sync),
+            // which refresh under a declared reason. Volatile facts the model
+            // must see mid-turn (LSP diagnostics, steer input, subagent
+            // completions) are appended to history above, never spliced into
+            // the frozen prefix.
             if turn.at_max_steps() {
                 // Exhausting the step budget while the model still owes work
                 // is a real failure. Exhausting it after a delivered answer,
@@ -669,6 +676,9 @@ impl Engine {
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             self.session.replace_messages(result.messages);
+                            if let Some(pm) = self.session.prefix_stability.as_mut() {
+                                pm.note_history_reset("compaction");
+                            }
                             self.commit_compaction_checkpoint(result.summary_prompt);
                             self.emit_session_updated().await;
                             let removed = auto_messages_before.saturating_sub(auto_messages_after);
@@ -774,52 +784,73 @@ impl Engine {
             // invalidate DeepSeek's KV prefix cache for this turn.
             // Sends an event on EVERY check so the TUI can maintain
             // its own counter for the stable-checks tally.
+            let declared_change = self.session.pending_prefix_change_reason.take();
             if let Some(pm) = self.session.prefix_stability.as_mut() {
                 let system_text =
                     crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
                 let tools_ref: Option<&[crate::models::Tool]> = active_tools.as_deref();
-                match pm.check_and_update(&system_text, tools_ref) {
-                    Err(change) => {
-                        let pinned_hash = pm
-                            .pinned_fingerprint()
-                            .map(|fp| fp.combined_sha256.clone())
-                            .unwrap_or_default();
+                let outcome = pm.check(&system_text, tools_ref, declared_change.as_deref());
+                let pinned_hash = pm
+                    .pinned_fingerprint()
+                    .map(|fp| fp.combined_sha256.clone())
+                    .unwrap_or_default();
+                let stability_pct = (pm.stability_ratio() * 100.0).round() as u32;
+                let pin_reason = pm.pin_reason().unwrap_or_default().to_string();
+                let last_miss_reason = pm.last_miss_reason().unwrap_or_default().to_string();
+                let event = match outcome {
+                    crate::prefix_cache::PrefixCheck::Stable => Event::PrefixCacheChange {
+                        description: String::new(),
+                        system_prompt_changed: false,
+                        tools_changed: false,
+                        stability_pct,
+                        changed: false,
+                        pinned_combined_hash: pinned_hash,
+                        pin_reason,
+                        last_miss_reason,
+                    },
+                    crate::prefix_cache::PrefixCheck::Repinned { reason, change } => {
+                        // A declared header change re-pins under a logged
+                        // reason: the miss is expected and attributable.
                         tracing::debug!(
                             target: "prefix_cache",
-                            "{}",
+                            reason = %reason,
+                            "prefix re-pinned: {}",
                             change.description()
                         );
-                        let _ = self
-                            .tx_event
-                            .send(Event::PrefixCacheChange {
-                                description: change.description(),
-                                system_prompt_changed: change.system_changed,
-                                tools_changed: change.tools_changed,
-                                stability_pct: (pm.stability_ratio() * 100.0).round() as u32,
-                                changed: true,
-                                pinned_combined_hash: pinned_hash,
-                            })
-                            .await;
+                        Event::PrefixCacheChange {
+                            description: format!("{reason} — {}", change.description()),
+                            system_prompt_changed: change.system_changed,
+                            tools_changed: change.tools_changed,
+                            stability_pct,
+                            changed: true,
+                            pinned_combined_hash: pinned_hash,
+                            pin_reason,
+                            last_miss_reason,
+                        }
                     }
-                    Ok(_) => {
-                        let pinned_hash = pm
-                            .pinned_fingerprint()
-                            .map(|fp| fp.combined_sha256.clone())
-                            .unwrap_or_default();
-                        // Stable check — keep the TUI counter in sync.
-                        let _ = self
-                            .tx_event
-                            .send(Event::PrefixCacheChange {
-                                description: String::new(),
-                                system_prompt_changed: false,
-                                tools_changed: false,
-                                stability_pct: (pm.stability_ratio() * 100.0).round() as u32,
-                                changed: false,
-                                pinned_combined_hash: pinned_hash,
-                            })
-                            .await;
+                    crate::prefix_cache::PrefixCheck::Drift { change } => {
+                        // Undeclared drift: the pin is kept so the same prefix
+                        // keeps counting as a miss until an explicit op moves
+                        // it. This should not happen after the mid-loop
+                        // refresh removal — if it does it is a real bug.
+                        tracing::warn!(
+                            target: "prefix_cache",
+                            "undeclared prefix drift (pin held): {}",
+                            change.description()
+                        );
+                        Event::PrefixCacheChange {
+                            description: format!("drift — {}", change.description()),
+                            system_prompt_changed: change.system_changed,
+                            tools_changed: change.tools_changed,
+                            stability_pct,
+                            changed: true,
+                            pinned_combined_hash: pinned_hash,
+                            pin_reason,
+                            last_miss_reason,
+                        }
                     }
-                }
+                };
+                let _ = self.tx_event.send(event).await;
             }
 
             // Three-zone prefix contract (#2264): freeze baseline on first
@@ -835,15 +866,17 @@ impl Engine {
             match &self.session.frozen_prefix {
                 Some(frozen) => {
                     if let Err(drift) = frozen.verify(&system_text, current_tools) {
+                        // Report drift; never replace the frozen baseline. The
+                        // original freeze is the byte prefix the provider cache
+                        // is keyed on — re-freezing here would make `/cache`
+                        // look stable while the provider cache is already dead.
+                        // A declared header change is re-pinned through the
+                        // PrefixStabilityManager path above under a logged
+                        // reason; the three-zone baseline stays put.
                         tracing::debug!(
                             target: "prefix_cache",
-                            "three-zone drift: {drift}"
+                            "three-zone drift (baseline held): {drift}"
                         );
-                        let pinned = PinnedPrefix::new(
-                            self.session.system_prompt.as_ref(),
-                            current_tools.to_vec(),
-                        );
-                        self.session.frozen_prefix = Some(pinned.freeze());
                     }
                 }
                 None => {
@@ -861,6 +894,8 @@ impl Engine {
                             stability_pct: 100,
                             changed: false,
                             pinned_combined_hash: frozen.hash().to_string(),
+                            pin_reason: "initial".to_string(),
+                            last_miss_reason: String::new(),
                         })
                         .await;
                     self.session.frozen_prefix = Some(frozen);

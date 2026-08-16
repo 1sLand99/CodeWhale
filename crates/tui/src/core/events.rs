@@ -516,6 +516,12 @@ pub enum Event {
         /// Carried so `/cache stats` can surface it without reaching
         /// into the engine's PrefixStabilityManager.
         pinned_combined_hash: String,
+        /// Why the current pin exists: `initial`, `resume`, or
+        /// `change:<what>`. Empty when unknown.
+        pin_reason: String,
+        /// Explanation of the most recent expected miss (declared header
+        /// change, history reset, or undeclared drift). Empty when none.
+        last_miss_reason: String,
     },
 }
 

@@ -1918,6 +1918,12 @@ pub struct App {
     /// Updated per-turn via PrefixCacheChange events; surfaced by
     /// `/cache stats` for cache-hit debugging.
     pub last_pinned_prefix_hash: Option<String>,
+    /// Why the current KV-cache prefix pin exists (`initial`/`resume`/`change:*`).
+    pub prefix_pin_reason: Option<String>,
+    /// Explanation of the most recent expected cache miss.
+    pub prefix_last_miss_reason: Option<String>,
+    /// Undeclared prefix drifts this session (should stay 0 after the fix).
+    pub prefix_drift_count: u64,
 
     // === Transcript filtering (#397) ===
     /// Transcript cells the user has collapsed (hidden from view).
@@ -2272,6 +2278,9 @@ impl App {
         self.last_effective_provider_identity = None;
         self.last_auto_route_receipt = None;
         self.last_pinned_prefix_hash = None;
+        self.prefix_pin_reason = None;
+        self.prefix_last_miss_reason = None;
+        self.prefix_drift_count = 0;
     }
 
     /// Invalidate facts that were accepted under the previous reasoning

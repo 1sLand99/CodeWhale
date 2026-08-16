@@ -14877,6 +14877,67 @@ fn turn_metadata_skips_when_only_tool_results_trail() {
 }
 
 #[test]
+fn declared_refresh_sets_pending_prefix_change_reason() {
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    // Construction pins the initial prompt; clear any construction-time flag.
+    engine.session.pending_prefix_change_reason = None;
+
+    // A no-op refresh (unchanged bytes) declares nothing.
+    engine.refresh_system_prompt_with_reason("system");
+    assert_eq!(engine.session.pending_prefix_change_reason, None);
+
+    // A refresh that actually changes the bytes records the declared reason.
+    engine.config.goal_objective = Some("ship the release".to_string());
+    engine.config.goal_status = crate::tools::goal::GoalStatus::Active;
+    engine.refresh_system_prompt_with_reason("goal");
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("goal")
+    );
+}
+
+#[test]
+fn workspace_file_change_never_moves_the_frozen_prefix() {
+    // The old bug: the tool loop recomposed the system prompt from disk on
+    // every step, so an agent writing a file changed the project pack and
+    // busted DeepSeek's KV prefix cache mid-turn. The header is now frozen
+    // for the session: only an explicit refresh (a declared header change)
+    // recomposes it, and the tool loop no longer calls one.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        project_context_pack_enabled: true,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let frozen_prompt = engine.session.system_prompt.clone();
+    engine.session.pending_prefix_change_reason = None;
+
+    // Simulate the agent writing a file into the workspace mid-turn.
+    fs::write(tmp.path().join("NEWFILE.md"), "brand new content").expect("write");
+
+    // What a fresh compose WOULD produce now differs — the bug precondition.
+    let recomposed =
+        engine.compose_stable_system_prompt(&engine.installed_next_turn_prompt_context());
+    assert_ne!(
+        recomposed, frozen_prompt,
+        "a workspace file change must change what a fresh compose would produce"
+    );
+
+    // But the session's pinned prompt is untouched and nothing was declared,
+    // because the tool loop performs no mid-loop refresh.
+    assert_eq!(engine.session.system_prompt, frozen_prompt);
+    assert_eq!(engine.session.pending_prefix_change_reason, None);
+}
+
+#[test]
 fn refresh_system_prompt_is_noop_when_unchanged() {
     // The composed prompt reads ambient process state, so a concurrent test
     // mutating the environment between the two refreshes changes the hash and

@@ -1678,7 +1678,7 @@ impl Engine {
         let mode_changed = self.current_mode != authority.mode;
         self.current_mode = authority.mode;
         if mode_changed {
-            self.refresh_system_prompt();
+            self.refresh_system_prompt_with_reason("mode");
         }
         self.session.allow_shell = authority.allow_shell;
         self.config.allow_shell = authority.allow_shell;
@@ -2244,7 +2244,7 @@ impl Engine {
                         // facts must not bleed into the new model.
                         self.active_route_capabilities =
                             codewhale_config::route::RouteCapabilities::default();
-                        self.refresh_system_prompt();
+                        self.refresh_system_prompt_with_reason("model");
                         self.emit_session_updated().await;
                         let _ = self
                             .tx_event
@@ -2393,6 +2393,11 @@ impl Engine {
                             crate::compaction::strip_compaction_summaries(system_prompt.as_ref());
                         self.session.last_system_prompt_hash =
                             Some(system_prompt_hash(self.session.system_prompt.as_ref()));
+                        // A session sync installs a new (or restored) prefix.
+                        // Declare it so the next request re-pins the KV-cache
+                        // prefix under a logged `resume` reason instead of
+                        // reporting undeclared drift.
+                        self.session.pending_prefix_change_reason = Some("resume".to_string());
                         // Host-supplied prompts are persisted prefixes. Keep them
                         // byte-stable; mode/runtime state is projected per request.
                         self.session.system_prompt_override =
@@ -2477,6 +2482,9 @@ impl Engine {
                         }
                     }
                     Op::PurgeContext => {
+                        if let Some(pm) = self.session.prefix_stability.as_mut() {
+                            pm.note_history_reset("clear");
+                        }
                         self.handle_purge().await;
                     }
                     Op::EditLastTurn { new_message } => {
@@ -3316,7 +3324,7 @@ impl Engine {
         self.config.goal_objective.clone_from(&snapshot.objective);
         self.config.goal_token_budget = snapshot.token_budget;
         self.config.goal_status = GoalStatus::Blocked;
-        self.refresh_system_prompt();
+        self.refresh_system_prompt_with_reason("goal");
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
@@ -3345,7 +3353,7 @@ impl Engine {
         self.config.goal_objective.clone_from(&snapshot.objective);
         self.config.goal_token_budget = snapshot.token_budget;
         self.config.goal_status = GoalStatus::Paused;
-        self.refresh_system_prompt();
+        self.refresh_system_prompt_with_reason("goal");
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
@@ -3388,7 +3396,7 @@ impl Engine {
         } else {
             GoalStatus::Active
         };
-        self.refresh_system_prompt();
+        self.refresh_system_prompt_with_reason("goal");
         self.emit_session_updated().await;
         // Unlike routine end-of-turn updates, an explicit clear must publish
         // the canonical empty snapshot. Keeping this scoped to the control op
@@ -4376,6 +4384,9 @@ impl Engine {
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     self.session.replace_messages(result.messages);
+                    if let Some(pm) = self.session.prefix_stability.as_mut() {
+                        pm.note_history_reset("compaction");
+                    }
                     self.commit_compaction_checkpoint(result.summary_prompt);
                     self.emit_session_updated().await;
                     let removed = messages_before.saturating_sub(messages_after);
@@ -5037,12 +5048,32 @@ impl Engine {
     /// Handle a turn using the DeepSeek API.
     #[allow(clippy::too_many_lines)]
     /// Refresh the stable system prompt based on current non-mode context.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn refresh_system_prompt(&mut self) {
+        self.refresh_system_prompt_with_reason("system");
+    }
+
+    fn refresh_system_prompt_with_reason(&mut self, reason: &str) {
         let context = self.installed_next_turn_prompt_context();
-        self.refresh_system_prompt_from_context(&context);
+        self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
     fn refresh_system_prompt_from_context(&mut self, context: &NextTurnPromptContext) {
+        self.refresh_system_prompt_from_context_with_reason(context, "system");
+    }
+
+    /// Recompose the stable system prompt from current context. When the bytes
+    /// actually change (hash differs), record `reason` as the declared cause
+    /// so the turn loop's prefix check re-pins the KV-cache prefix under a
+    /// logged reason instead of reporting undeclared drift. This is only ever
+    /// called from explicit header-change edges (session construction, submit
+    /// turn boundary, `/model`, mode change, goal edits) — never mid-tool-loop,
+    /// so an agent writing a file cannot silently move the pinned prefix.
+    fn refresh_system_prompt_from_context_with_reason(
+        &mut self,
+        context: &NextTurnPromptContext,
+        reason: &str,
+    ) {
         let stable_prompt = self.compose_stable_system_prompt(context);
 
         let stable_hash = system_prompt_hash(stable_prompt.as_ref());
@@ -5052,6 +5083,7 @@ impl Engine {
         if self.session.last_system_prompt_hash != Some(stable_hash) {
             self.session.system_prompt = stable_prompt;
             self.session.last_system_prompt_hash = Some(stable_hash);
+            self.session.pending_prefix_change_reason = Some(reason.to_string());
         }
     }
 

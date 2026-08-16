@@ -9,11 +9,17 @@
 //!
 //! 1. **Fingerprints** the immutable prefix (system prompt + tool specs)
 //!    at session start, using SHA-256 for strong collision resistance.
-//! 2. **Detects drift** by comparing the current prefix against the
-//!    pinned fingerprint before every request.
-//! 3. **Diagnoses** the cause of drift — did the system prompt change?
-//!    Did the tool set change? Both?
+//! 2. **Verifies** the current prefix against the pinned fingerprint before
+//!    every request.
+//! 3. **Attributes** every change: a header change the engine declared
+//!    (`/model`, `/mode`, goal edits, MCP or deferred-tool activation,
+//!    session sync) re-pins under a logged reason; an undeclared change is
+//!    *drift* — it is recorded and reported, and the original pin stays so
+//!    later checks keep counting the miss instead of quietly adopting it.
 //! 4. **Emits events** so the TUI can surface stability to the user.
+//!
+//! The invariant this guards: after session start, system and tools are
+//! frozen bytes; history only grows; a miss is allowed only when we log why.
 //!
 //! ## Three-region model (from Reasonix)
 //!
@@ -178,11 +184,50 @@ pub struct PrefixStabilityManager {
     change_count: u64,
     /// Total number of stability checks performed.
     check_count: u64,
+    /// Why the current pin exists: `initial`, `resume`, or `change:<what>`.
+    pin_reason: Option<String>,
+    /// Bounded log of every attributed change and every undeclared drift.
+    history: VecDeque<PrefixHistoryEntry>,
+    /// Explanation of the most recent expected cache miss (a declared header
+    /// change, a history reset such as compaction, or undeclared drift).
+    last_miss_reason: Option<String>,
     /// Process-local cache for the tool-catalog JSON serialization. Avoids
     /// re-running `tool_to_api_json` + sort + join on every `check_and_update`
     /// when the tool set is unchanged (the common case once tools are
     /// registered at session start).
     tool_catalog_cache: ToolCatalogCache,
+}
+
+/// Maximum retained [`PrefixHistoryEntry`] records per session.
+const PREFIX_HISTORY_CAP: usize = 32;
+
+/// One attributed prefix event: a declared header change (re-pinned) or an
+/// undeclared drift (pin kept).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrefixHistoryEntry {
+    /// `change:<what>` for declared header changes, `drift:<component>` for
+    /// undeclared changes, `reset:<what>` for history resets.
+    pub reason: String,
+    /// Whether the pin was replaced by this event.
+    pub repinned: bool,
+    /// Combined SHA-256 before the event.
+    pub from_sha256: String,
+    /// Combined SHA-256 the request actually carried.
+    pub to_sha256: String,
+}
+
+/// Outcome of [`PrefixStabilityManager::check`].
+#[derive(Debug, Clone)]
+pub enum PrefixCheck {
+    /// The request prefix matches the pin byte-for-byte.
+    Stable,
+    /// The prefix changed and the engine declared why; the pin moved.
+    Repinned {
+        reason: String,
+        change: PrefixChange,
+    },
+    /// The prefix changed with no declared reason. The pin did NOT move.
+    Drift { change: PrefixChange },
 }
 
 /// Default capacity for the tool-catalog serialization cache. Sized for
@@ -381,6 +426,9 @@ impl PrefixStabilityManager {
             last_change: None,
             change_count: 0,
             check_count: 0,
+            pin_reason: Some("initial".to_string()),
+            history: VecDeque::new(),
+            last_miss_reason: None,
             tool_catalog_cache: cache,
         }
     }
@@ -394,6 +442,9 @@ impl PrefixStabilityManager {
             last_change: None,
             change_count: 0,
             check_count: 0,
+            pin_reason: None,
+            history: VecDeque::new(),
+            last_miss_reason: None,
             tool_catalog_cache: ToolCatalogCache::new(),
         }
     }
@@ -403,6 +454,16 @@ impl PrefixStabilityManager {
     /// Note: does NOT increment `check_count` — that counter is reserved
     /// for `check_and_update` calls so `stability_ratio()` stays accurate.
     pub fn pin(&mut self, system_text: &str, tools: Option<&[Tool]>) -> bool {
+        self.pin_with_reason(system_text, tools, "initial")
+    }
+
+    /// Pin under an explicit reason (`initial`, `resume`, `change:<what>`).
+    pub fn pin_with_reason(
+        &mut self,
+        system_text: &str,
+        tools: Option<&[Tool]>,
+        reason: &str,
+    ) -> bool {
         let fp = PrefixFingerprint::compute_with_tool_cache(
             system_text,
             tools,
@@ -411,26 +472,50 @@ impl PrefixStabilityManager {
         let was_unpinned = self.pinned.is_none();
         self.pinned = Some(fp.clone());
         self.current = Some(fp);
+        self.pin_reason = Some(reason.to_string());
         was_unpinned
     }
 
-    /// Check whether the current prefix matches the pinned fingerprint.
-    /// Updates internal state and returns:
-    /// - `Ok(true)` if the prefix is stable (fingerprint matches pinned).
-    /// - `Ok(false)` if the prefix changed but was automatically re-pinned.
-    /// - `Err(change)` if the prefix changed; caller should surface this.
+    /// Record an expected miss that is not a header change (compaction,
+    /// `/clear`, an edited turn). The pin is untouched; the reason is kept so
+    /// `/cache stats` can explain the next low hit-rate turn.
+    pub fn note_history_reset(&mut self, what: &str) {
+        let hash = self
+            .pinned
+            .as_ref()
+            .map(|fp| fp.combined_sha256.clone())
+            .unwrap_or_default();
+        self.push_history(PrefixHistoryEntry {
+            reason: format!("reset:{what}"),
+            repinned: false,
+            from_sha256: hash.clone(),
+            to_sha256: hash,
+        });
+        self.last_miss_reason = Some(format!("reset:{what}"));
+    }
+
+    fn push_history(&mut self, entry: PrefixHistoryEntry) {
+        if self.history.len() >= PREFIX_HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history.push_back(entry);
+    }
+
+    /// Verify the request prefix against the pin, attributing any change.
     ///
-    /// After calling this, `last_change()` returns the detected change.
-    pub fn check_and_update(
+    /// `declared_change` names a header change the engine performed on
+    /// purpose (`model`, `mode`, `goal`, `tools:+web_fetch`, `mcp`, …). When
+    /// the prefix changed and a reason is declared, the pin moves and the
+    /// change is logged as `change:<reason>`. When it changed with no
+    /// declared reason, that is drift: it is logged as `drift:<component>`
+    /// and the pin stays put, so the same undeclared prefix keeps counting as
+    /// a miss instead of becoming the new baseline.
+    pub fn check(
         &mut self,
         system_text: &str,
         tools: Option<&[Tool]>,
-    ) -> Result<bool, Box<PrefixChange>> {
-        // Use the cached tool-catalog fingerprint path so a stable tool set
-        // (the common case after the first turn) does not re-serialize the
-        // full tool list. The system-prompt side is hashed on every call
-        // because the system prompt changes more often (mode flips,
-        // project-context refreshes, canonical state overlays).
+        declared_change: Option<&str>,
+    ) -> PrefixCheck {
         let fp = PrefixFingerprint::compute_with_tool_cache(
             system_text,
             tools,
@@ -440,40 +525,91 @@ impl PrefixStabilityManager {
         self.check_count += 1;
 
         let pinned = match &self.pinned {
-            Some(p) => p,
+            Some(p) => p.clone(),
             None => {
-                // First check: pin now.
                 self.pinned = Some(fp);
+                self.pin_reason = Some(declared_change.unwrap_or("initial").to_string());
                 self.last_change = None;
-                return Ok(true);
+                return PrefixCheck::Stable;
             }
         };
 
         if fp.combined_sha256 == pinned.combined_sha256 {
-            // Stable — no change.
-            Ok(true)
-        } else {
-            // Change detected.
-            let old = old_fp.unwrap_or_else(|| pinned.clone());
-            let system_changed = fp.system_sha256 != pinned.system_sha256;
-            let tools_changed = fp.tools_sha256 != pinned.tools_sha256;
+            return PrefixCheck::Stable;
+        }
 
-            let change = PrefixChange {
-                old,
-                new: fp.clone(),
-                system_changed,
-                tools_changed,
-            };
+        let old = old_fp.unwrap_or_else(|| pinned.clone());
+        let system_changed = fp.system_sha256 != pinned.system_sha256;
+        let tools_changed = fp.tools_sha256 != pinned.tools_sha256;
+        let change = PrefixChange {
+            old,
+            new: fp.clone(),
+            system_changed,
+            tools_changed,
+        };
+        self.last_change = Some(change.clone());
+        self.change_count += 1;
 
-            self.last_change = Some(change.clone());
-            self.change_count += 1;
+        match declared_change {
+            Some(reason) => {
+                let reason = format!("change:{reason}");
+                self.push_history(PrefixHistoryEntry {
+                    reason: reason.clone(),
+                    repinned: true,
+                    from_sha256: pinned.combined_sha256.clone(),
+                    to_sha256: fp.combined_sha256.clone(),
+                });
+                self.last_miss_reason = Some(reason.clone());
+                self.pinned = Some(fp);
+                self.pin_reason = Some(reason.clone());
+                PrefixCheck::Repinned { reason, change }
+            }
+            None => {
+                let reason = format!("drift:{}", change.label());
+                self.push_history(PrefixHistoryEntry {
+                    reason: reason.clone(),
+                    repinned: false,
+                    from_sha256: pinned.combined_sha256.clone(),
+                    to_sha256: fp.combined_sha256.clone(),
+                });
+                self.last_miss_reason = Some(reason);
+                PrefixCheck::Drift { change }
+            }
+        }
+    }
 
-            // Re-pin to the new prefix so subsequent checks are
-            // against the latest baseline. Use the original fp
-            // (avoid recomputing the hash — clone was for the change record).
-            self.pinned = Some(fp);
+    /// Why the current pin exists.
+    pub fn pin_reason(&self) -> Option<&str> {
+        self.pin_reason.as_deref()
+    }
 
-            Err(Box::new(change))
+    /// Attributed change/drift/reset history, oldest first.
+    pub fn history(&self) -> impl Iterator<Item = &PrefixHistoryEntry> {
+        self.history.iter()
+    }
+
+    /// Explanation of the most recent expected miss, if any.
+    pub fn last_miss_reason(&self) -> Option<&str> {
+        self.last_miss_reason.as_deref()
+    }
+
+    /// Check whether the current prefix matches the pinned fingerprint
+    /// without a declared header change.
+    ///
+    /// - `Ok(true)` when the prefix is stable (or this was the first pin).
+    /// - `Err(change)` when the prefix drifted. The pin is **kept**: an
+    ///   undeclared change never becomes the new baseline. Use [`Self::check`]
+    ///   with a declared reason to move the pin on purpose.
+    pub fn check_and_update(
+        &mut self,
+        system_text: &str,
+        tools: Option<&[Tool]>,
+    ) -> Result<bool, Box<PrefixChange>> {
+        match self.check(system_text, tools, None) {
+            PrefixCheck::Stable => Ok(true),
+            PrefixCheck::Repinned { change, .. } | PrefixCheck::Drift { change } => {
+                Err(Box::new(change))
+            }
         }
     }
 
@@ -665,12 +801,60 @@ mod tests {
     }
 
     #[test]
-    fn manager_re_pins_after_change() {
+    fn undeclared_drift_never_moves_the_pin() {
         let mut mgr = PrefixStabilityManager::new("old", None);
-        let _ = mgr.check_and_update("new", None);
-        // After re-pin, the new "new" should be stable.
-        assert!(mgr.check_and_update("new", None).unwrap());
-        assert_eq!(mgr.change_count(), 1);
+        assert_eq!(mgr.pin_reason(), Some("initial"));
+        assert!(mgr.check_and_update("new", None).is_err());
+        // The pin stays on "old": the same undeclared prefix is still a miss.
+        assert!(mgr.check_and_update("new", None).is_err());
+        assert!(mgr.check_and_update("old", None).unwrap());
+        assert_eq!(mgr.change_count(), 2);
+        assert_eq!(mgr.last_miss_reason(), Some("drift:sys"));
+        let history: Vec<_> = mgr.history().collect();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|entry| !entry.repinned));
+        assert_eq!(mgr.pin_reason(), Some("initial"));
+    }
+
+    #[test]
+    fn declared_header_change_repins_under_a_logged_reason() {
+        let mut mgr = PrefixStabilityManager::new("old", None);
+        match mgr.check("new", None, Some("model")) {
+            PrefixCheck::Repinned { reason, change } => {
+                assert_eq!(reason, "change:model");
+                assert!(change.system_changed);
+            }
+            other => panic!("expected repin, got {other:?}"),
+        }
+        assert_eq!(mgr.pin_reason(), Some("change:model"));
+        assert!(matches!(mgr.check("new", None, None), PrefixCheck::Stable));
+        assert!(matches!(
+            mgr.check("newer", None, None),
+            PrefixCheck::Drift { .. }
+        ));
+        assert_eq!(mgr.pin_reason(), Some("change:model"));
+        let reasons: Vec<&str> = mgr.history().map(|e| e.reason.as_str()).collect();
+        assert_eq!(reasons, vec!["change:model", "drift:sys"]);
+    }
+
+    #[test]
+    fn declared_reason_on_a_stable_prefix_is_a_noop() {
+        let mut mgr = PrefixStabilityManager::new("same", None);
+        assert!(matches!(
+            mgr.check("same", None, Some("mode")),
+            PrefixCheck::Stable
+        ));
+        assert_eq!(mgr.change_count(), 0);
+        assert_eq!(mgr.pin_reason(), Some("initial"));
+    }
+
+    #[test]
+    fn history_reset_is_logged_without_moving_the_pin() {
+        let mut mgr = PrefixStabilityManager::new("sys", None);
+        mgr.note_history_reset("compaction");
+        assert_eq!(mgr.last_miss_reason(), Some("reset:compaction"));
+        assert!(matches!(mgr.check("sys", None, None), PrefixCheck::Stable));
+        assert_eq!(mgr.history().count(), 1);
     }
 
     #[test]
@@ -687,7 +871,7 @@ mod tests {
     fn stability_ratio_reflects_change_rate() {
         let mut mgr = PrefixStabilityManager::new("hello", None);
         mgr.check_and_update("hello", None).unwrap(); // check 1: stable
-        let _ = mgr.check_and_update("world", None); // check 2: changed
+        let _ = mgr.check("world", None, Some("model")); // check 2: declared change
         mgr.check_and_update("world", None).unwrap(); // check 3: stable
         // 2 stable out of 3 checks = 0.666...
         // (check_count=0 at start, so 3 checks: 3 checks - 1 change = 2 stable)
