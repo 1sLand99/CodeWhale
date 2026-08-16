@@ -39,6 +39,96 @@ Structural facts behind those numbers:
 - `target/debug` grows past 50 GB only through accumulation across
   feature sets and worktrees; a fresh test build is ~7 GB.
 
+## A0 receipts (commit 533c530b + hermeticity fixes; empty target dir)
+
+`CARGO_TARGET_DIR=/Volumes/VIXinSSD/CW/.tmp/compile-speed-baseline`, HTML
+timing reports archived under
+`backups/compile-speed-evidence-20260815/` (a0-cold-lib-test-timing.html,
+a0-incremental-lib-test-timing.html, a0-llvm-lines-top40.txt).
+
+| Receipt | Wall | Load (1 min) |
+| --- | --- | --- |
+| Cold `cargo test -p codewhale-tui --lib --locked --no-run --timings` | 127 s (user 329 s) | 8.9 |
+| `touch crates/tui/src/elapsed.rs` + same command | 21 s | 12.3 |
+| `touch` + `cargo test -p codewhale-tui --lib --locked elapsed::` (the everyday loop) | 20 s (4 tests run) | 11.2 |
+| Lib-test binary size | 357 MB (`codewhale_tui-<hash>`); links with the `__eh_frame section too large (max 16MB)` compact-unwind warning | — |
+| `cargo check -p codewhale-tui --lib --tests` incremental after `touch` (frontend only) | 14 s | 6.2 |
+| Incremental full lib-test build after `touch`, same conditions | 28 s | 6.2 |
+
+Cold timing report, top units (605 units): `codewhale-tui` lib test
+**106.0 s**, `codewhale-config` 7.9 s, `jsonschema` 5.8 s, `moxcms` 4.7 s,
+`codewhale-protocol` 4.2 s, `tokio` 4.0 s, `rustls` 3.8 s, `schemaui`
+3.4 s, `rmcp` 3.4 s, `h2` 3.3 s, `jsonschema` (second copy) 3.2 s,
+`codewhale-workflow` 3.2 s, `syn` 3.1 s, `rio-vt` 3.1 s, `regex-automata`
+3.0 s. The incremental report has exactly one non-zero unit: `codewhale-tui`
+lib test 20.8 s. So the everyday tax is the tui crate itself, split
+roughly half frontend (check --tests 14 s) and half codegen + link (28 s
+total); dependencies and the linker are not where the time is.
+
+`cargo llvm-lines -p codewhale-tui --lib`: **8,138,810 lines in 223,052
+copies**. Largest single function is the `rust_i18n` backend closure
+(`_RUST_I18N_BACKEND::{closure#0}`, 311,782 lines, 3.8 % of the crate on
+its own — the 15 locale packs are compiled into a match by the `i18n!`
+macro), then `run_event_loop` 27 k, `Engine::handle_deepseek_turn` 26 k,
+`RuntimeThreadManager::monitor_turn` 16 k, then serde `Deserialize`
+expansions for `Config`/`ProvidersConfig`/`Settings` (5–6 k each, several
+copies per toml deserializer).
+
+### A0.1 dependency ratchet
+
+`cargo metadata --locked` counted **690** packages and `cargo deny check
+bans` warned on duplicate `fancy-regex`, `jsonschema`, `jsonschema-regex`,
+`referencing` plus stale `jni`/`jni-sys`/`redox_syscall` skips. Cause: the
+workspace `jsonschema` pin had been bumped to 0.49 while `schemaui` 0.12
+(latest 0.12.4 included) still requires `^0.46`. Pinning the workspace
+back to the 0.46 line removes the second jsonschema stack (**685**
+packages; deny bans and advisories clean; `--locked` resolves;
+codewhale-workflow-js 61 tests and the tui schema tests pass). Cold saving
+is the two duplicated units (~9 s of unit time, ~3 s of wall).
+
+### A1 cache topology (desk-local, not committed)
+
+New-worktree cold `cargo test -p codewhale-tui --lib --locked --no-run`,
+same machine, back to back:
+
+| Topology | Wall | CPU (user) | Notes |
+| --- | --- | --- | --- |
+| Per-worktree fresh target (control) | 127 s | 329 s | A0 |
+| One shared `CARGO_TARGET_DIR` (warm from another worktree) | 121 s | 188 s | deps reused; every workspace crate recompiles (path-keyed); no lock waits observed; target 14 GB |
+| `build.build-dir = ".../{workspace-path-hash}"` per workspace + warm shared `sccache` (`CARGO_INCREMENTAL=0`) | 107 s | 161 s | 73.6 % sccache hit rate (all 337 Rust dep units hit; the 125 misses are workspace crates); 2.7 GB build dir per workspace + 483 MB cache; the same command that *populated* the cache took 108 s / 157 s CPU |
+
+Wall time is the tui crate in every topology; the topologies buy CPU
+(~50 %), which is what matters when several checkouts build at once.
+Recommended user-level `~/.cargo/config.toml` (adjust the two roots):
+
+```toml
+[build]
+# One build root for every checkout; each workspace gets its own subdir,
+# so worktrees never wait on each other's target lock.
+build-dir = "/path/to/cache/codewhale/build/{workspace-path-hash}"
+# Optional: reuse dependency compilation across checkouts.
+# rustc-wrapper = "sccache"
+```
+
+`sccache` was installed with `brew install sccache` on this machine for the
+measurement.
+
+### A2 nextest in CI
+
+`cargo test --workspace --all-features --locked --doc` inventories
+**3 passing / 8 ignored doctests across 21 crates**; CI keeps them as a
+separate step next to `cargo nextest run --workspace --all-features
+--locked --profile ci`.
+
+### A3/A4 (not adopted, measured)
+
+Frontend and codegen split the tui unit roughly evenly (14 s / 14 s
+incremental); the linker is a small part of that and dependencies are
+already warm after the first build, so `[profile.dev.package."*"]
+opt-level = 1` (paired result above), `-Wl,-dead_strip`, and other
+`RUSTFLAGS` stay out of the repo (they would apply to shipped profiles);
+`split-debuginfo` is already `unpacked` on macOS.
+
 ## What changed (this lane)
 
 1. **`cargo nextest` is supported and documented** (`.config/nextest.toml`).
