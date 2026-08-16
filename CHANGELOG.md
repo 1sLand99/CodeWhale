@@ -99,9 +99,11 @@ a published OpenAI-compatible host ship here (#5350).
   the live state (`Codewhale`, `reasoning…`, `using tool…`, `done`), so parallel
   sessions are identifiable at a glance without a second title setting.
   `/title <name>` is a discoverable alias for `/rename`; both update the one
-  session name shown in the picker, composer, and terminal tab. Control and
-  bidi-format characters are stripped before any name reaches OSC 0
-  (#5419, Sh1Zuku).
+  session name shown in the picker, composer, and terminal tab. Control,
+  bidi, and zero-width format characters are stripped from the saved name
+  itself, so `/title`, `/rename`, the picker, the Runtime API,
+  `codewhale sessions`, and the OSC 0 tab title all carry the same
+  escape-free text (#5419, Sh1Zuku).
 - Eden AI is a named OpenAI-compatible Chat Completions provider (`edenai`,
   aliases `eden-ai` / `eden_ai`) with `EDENAI_API_KEY`, global and EU base-URL
   overrides, a live provider-scoped model catalog, and
