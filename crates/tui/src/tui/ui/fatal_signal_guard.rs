@@ -191,7 +191,7 @@ unsafe fn install_handler(signal: libc::c_int) {
         // Linux sa_restorer) are exactly what a zeroed default means, and
         // the wrapper `sigaction` fills in what it owns.
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = fatal_signal_handler as libc::sighandler_t;
+        action.sa_sigaction = fatal_signal_handler as *const () as libc::sighandler_t;
         action.sa_flags = libc::SA_RESTART;
         if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
             tracing::warn!(signal, "fatal-signal guard install failed");
