@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "комунікації",
   "WhaleJobKeel": "експлуатація",
   "WhaleJobLantern": "рев'ю",
-  "WhaleJobPlain": "загальна робота"
+  "WhaleJobPlain": "загальна робота",
+  "SessionMetricsTurn": "хід",
+  "SessionMetricsTurns": "ходів",
+  "SessionMetricsStep": "крок",
+  "SessionMetricsSteps": "кроків",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Інстр.",
+  "SessionMetricsTtft": "TTFT сер.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Кеш",
+  "SessionMetricsInput": "Ввід",
+  "SessionMetricsStatusLine": "Метрики сесії: {metrics}"
 }

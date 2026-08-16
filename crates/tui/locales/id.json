@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "komunikasi",
   "WhaleJobKeel": "operasi",
   "WhaleJobLantern": "tinjauan",
-  "WhaleJobPlain": "pekerjaan umum"
+  "WhaleJobPlain": "pekerjaan umum",
+  "SessionMetricsTurn": "giliran",
+  "SessionMetricsTurns": "giliran",
+  "SessionMetricsStep": "langkah",
+  "SessionMetricsSteps": "langkah",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Alat",
+  "SessionMetricsTtft": "TTFT rerata",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Masukan",
+  "SessionMetricsStatusLine": "Metrik sesi: {metrics}"
 }

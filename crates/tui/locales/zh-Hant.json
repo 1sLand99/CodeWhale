@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "溝通",
   "WhaleJobKeel": "營運",
   "WhaleJobLantern": "審查",
-  "WhaleJobPlain": "一般工作"
+  "WhaleJobPlain": "一般工作",
+  "SessionMetricsTurn": "輪",
+  "SessionMetricsTurns": "輪",
+  "SessionMetricsStep": "步",
+  "SessionMetricsSteps": "步",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "工具呼叫",
+  "SessionMetricsTtft": "TTFT 平均",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "快取命中",
+  "SessionMetricsInput": "輸入",
+  "SessionMetricsStatusLine": "工作階段指標：{metrics}"
 }

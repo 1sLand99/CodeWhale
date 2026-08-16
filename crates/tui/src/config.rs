@@ -2093,6 +2093,9 @@ pub enum StatusItem {
     Tokens,
     /// DeepSeek account balance, refreshed once per turn completion.
     Balance,
+    /// Session metrics strip: turns · steps │ LLM · tools │ TTFT · tok/s │
+    /// cache │ in — sourced from engine timings and provider usage.
+    SessionMetrics,
 }
 
 impl StatusItem {
@@ -2112,6 +2115,7 @@ impl StatusItem {
             StatusItem::Cache,
             StatusItem::GitBranch,
             StatusItem::Tokens,
+            StatusItem::SessionMetrics,
         ]
     }
 
@@ -2133,6 +2137,7 @@ impl StatusItem {
             StatusItem::RateLimit => "rate_limit",
             StatusItem::Tokens => "tokens",
             StatusItem::Balance => "balance",
+            StatusItem::SessionMetrics => "session_metrics",
         }
     }
 
@@ -2156,6 +2161,7 @@ impl StatusItem {
             "rate_limit" => Some(Self::RateLimit),
             "tokens" => Some(Self::Tokens),
             "balance" => Some(Self::Balance),
+            "session_metrics" => Some(Self::SessionMetrics),
             _ => None,
         }
     }
@@ -2178,6 +2184,7 @@ impl StatusItem {
             StatusItem::RateLimit => "Rate-limit remaining",
             StatusItem::Tokens => "Session tokens",
             StatusItem::Balance => "Account balance",
+            StatusItem::SessionMetrics => "Session metrics",
         }
     }
 
@@ -2200,6 +2207,7 @@ impl StatusItem {
             StatusItem::RateLimit => "remaining requests in the budget (reserved)",
             StatusItem::Tokens => "input / cache-hit / output token totals",
             StatusItem::Balance => "topped-up + granted balance from DeepSeek",
+            StatusItem::SessionMetrics => "turns · steps · LLM/tool time · TTFT · tok/s · input",
         }
     }
 
@@ -2221,6 +2229,7 @@ impl StatusItem {
             StatusItem::LastToolElapsed,
             StatusItem::RateLimit,
             StatusItem::Tokens,
+            StatusItem::SessionMetrics,
         ]
     }
 

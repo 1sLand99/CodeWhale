@@ -1204,6 +1204,7 @@ pub(crate) async fn run_event_loop(
                         stream_display_clock.reset();
                     }
                     EngineEvent::ToolCallStarted { id, name, input } => {
+                        app.session_metrics.record_tool_started(&id);
                         app.pending_tool_uses
                             .push((id.clone(), name.clone(), input.clone()));
                         // Note this dispatch so the next sub-agent `Started`
@@ -1233,6 +1234,7 @@ pub(crate) async fn run_event_loop(
                             tracing::debug!(tool_id = %id, tool_name = %name, "ignored foreign or replayed evidence completion");
                             continue;
                         }
+                        app.session_metrics.record_tool_completed(&id);
                         if is_model_visible_tool_call(&id) {
                             let tool_content = match &result {
                                 Ok(output) => sanitize_stream_chunk(
@@ -1437,6 +1439,9 @@ pub(crate) async fn run_event_loop(
                         // uptime since launch.
                         app.cumulative_turn_duration =
                             app.cumulative_turn_duration.saturating_add(turn_elapsed);
+                        // A turn that ended with tools still open (interrupt,
+                        // failure) must not carry their timers forward.
+                        app.session_metrics.clear_in_flight();
                         // Stream lock applies per-turn; clear it so the next
                         // turn's chunks pull the view down again until the
                         // user opts out by scrolling up.
@@ -2621,11 +2626,22 @@ pub(crate) async fn run_event_loop(
                                 Some(format!("Sandbox blocked {tool_name}: {denial_reason}"));
                         }
                     }
-                    EngineEvent::TurnUsage { .. } => {
-                        // Per-step usage receipt for stream consumers (exec
-                        // stream-json). The TUI's token surfaces are driven
-                        // by the cumulative `TurnComplete` usage, so there is
-                        // nothing to render per step here.
+                    EngineEvent::TurnUsage {
+                        usage,
+                        duration_ms,
+                        first_token_ms,
+                        request_ms,
+                    } => {
+                        // Per-step usage receipt. The TUI's token surfaces
+                        // are driven by the cumulative `TurnComplete` usage;
+                        // the session metrics strip folds each model call's
+                        // timing (stream time, TTFT, whole-call time) here.
+                        app.session_metrics.record_model_call(
+                            usage.output_tokens,
+                            duration_ms,
+                            first_token_ms,
+                            request_ms,
+                        );
                     }
                     EngineEvent::AdvisoryNote { note, .. } => {
                         // Advisor background watcher note. Display as a

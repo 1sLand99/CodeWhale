@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "коммуникации",
   "WhaleJobKeel": "эксплуатация",
   "WhaleJobLantern": "ревью",
-  "WhaleJobPlain": "общая работа"
+  "WhaleJobPlain": "общая работа",
+  "SessionMetricsTurn": "ход",
+  "SessionMetricsTurns": "ходов",
+  "SessionMetricsStep": "шаг",
+  "SessionMetricsSteps": "шагов",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Инстр.",
+  "SessionMetricsTtft": "TTFT ср.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Кэш",
+  "SessionMetricsInput": "Ввод",
+  "SessionMetricsStatusLine": "Метрики сессии: {metrics}"
 }

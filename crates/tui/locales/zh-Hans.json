@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "沟通",
   "WhaleJobKeel": "运维",
   "WhaleJobLantern": "评审",
-  "WhaleJobPlain": "通用工作"
+  "WhaleJobPlain": "通用工作",
+  "SessionMetricsTurn": "轮",
+  "SessionMetricsTurns": "轮",
+  "SessionMetricsStep": "步",
+  "SessionMetricsSteps": "步",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "工具调用",
+  "SessionMetricsTtft": "TTFT 平均",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "缓存命中",
+  "SessionMetricsInput": "输入",
+  "SessionMetricsStatusLine": "会话指标：{metrics}"
 }

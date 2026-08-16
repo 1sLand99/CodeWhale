@@ -459,6 +459,8 @@ impl Engine {
                         usage: usage.clone(),
                         duration_ms: u64::try_from(started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
+                        first_token_ms: None,
+                        request_ms: None,
                     })
                     .await;
             }
@@ -934,6 +936,10 @@ impl Engine {
                     })
                     .await;
             }
+            // Session metrics: the model call is measured from this dispatch
+            // instant (connection setup included), and time-to-first-token is
+            // the gap to the first content-bearing stream event.
+            let mut request_dispatched_at = Instant::now();
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -1032,6 +1038,8 @@ impl Engine {
             // `stream_start` is reset on a transparent retry so the wall-clock
             // budget restarts with the fresh stream.
             let mut stream_start = Instant::now();
+            // First content-bearing event of this model call, for TTFT.
+            let mut first_token_at: Option<Instant> = None;
             // #2990 sleep-resume bookkeeping: monotonic and wall-clock stamps
             // of the last stream progress. `Instant` pauses across a host
             // suspend while `SystemTime` does not, so a large divergence on
@@ -1137,6 +1145,7 @@ impl Engine {
                         // billed us / user has seen output" (must surface).
                         if !any_content_received && !matches!(e, StreamEvent::MessageStart { .. }) {
                             any_content_received = true;
+                            first_token_at.get_or_insert_with(Instant::now);
                         }
                         e
                     }
@@ -1182,6 +1191,7 @@ impl Engine {
                             // Drop the failed stream before issuing the new
                             // request to release the underlying connection.
                             drop(stream);
+                            request_dispatched_at = Instant::now();
                             let retry_stream_result = tokio::select! {
                                 biased;
                                 () = self.cancel_token.cancelled() => break,
@@ -1576,6 +1586,17 @@ impl Engine {
                         usage: usage.clone(),
                         duration_ms: u64::try_from(stream_start.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
+                        first_token_ms: first_token_at.map(|at| {
+                            u64::try_from(
+                                at.saturating_duration_since(request_dispatched_at)
+                                    .as_millis(),
+                            )
+                            .unwrap_or(u64::MAX)
+                        }),
+                        request_ms: Some(
+                            u64::try_from(request_dispatched_at.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        ),
                     })
                     .await;
             }
@@ -2161,6 +2182,8 @@ impl Engine {
                                     usage: child_usage,
                                     duration_ms: u64::try_from(repl_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX),
+                                    first_token_ms: None,
+                                    request_ms: None,
                                 })
                                 .await;
                         }

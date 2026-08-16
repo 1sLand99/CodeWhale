@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "comunicacions",
   "WhaleJobKeel": "operacions",
   "WhaleJobLantern": "revisió",
-  "WhaleJobPlain": "feina general"
+  "WhaleJobPlain": "feina general",
+  "SessionMetricsTurn": "torn",
+  "SessionMetricsTurns": "torns",
+  "SessionMetricsStep": "pas",
+  "SessionMetricsSteps": "passos",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Eines",
+  "SessionMetricsTtft": "TTFT mitj.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Entrada",
+  "SessionMetricsStatusLine": "Mètriques de la sessió: {metrics}"
 }

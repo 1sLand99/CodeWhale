@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "소통",
   "WhaleJobKeel": "운영",
   "WhaleJobLantern": "리뷰",
-  "WhaleJobPlain": "일반 작업"
+  "WhaleJobPlain": "일반 작업",
+  "SessionMetricsTurn": "턴",
+  "SessionMetricsTurns": "턴",
+  "SessionMetricsStep": "단계",
+  "SessionMetricsSteps": "단계",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "도구 호출",
+  "SessionMetricsTtft": "TTFT 평균",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "캐시 적중",
+  "SessionMetricsInput": "입력",
+  "SessionMetricsStatusLine": "세션 지표: {metrics}"
 }

@@ -528,6 +528,52 @@ fn compaction_tui_builder(
         .env("NO_ANIMATIONS", "1")
 }
 
+/// The session metrics strip on the phase row after exactly one completed
+/// turn: `1 turn`, `Input 12` (the mock usage's prompt_tokens), and an
+/// `LLM` time — sourced from the engine's usage receipt and its own model-call
+/// timers, not from anything the transcript displays. The idle row is 150
+/// columns wide, so the strip shares it with the key hints and keeps at
+/// least the headline facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_session_metrics_strip_reports_one_turn_from_usage() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_text_model(&server, DEEPSEEK_TEST_MODEL, "metrics-probe-ok").await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = compaction_tui_builder(&ws, &server).spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    // Fresh session: nothing has happened, so the strip stays silent.
+    let before = tui.frame().text();
+    assert!(
+        !before.contains("turn") && !before.contains("Input "),
+        "metrics strip must not paint before any evidence: {before}"
+    );
+
+    type_and_submit(&mut tui, "metrics probe")?;
+    tui.wait_for_text("metrics-probe-ok", INTERACTION_TIMEOUT)?;
+
+    // One completed turn: `1 turn`, the provider-reported input count from
+    // the mock (`prompt_tokens: 12`), and a measured LLM time.
+    tui.wait_for(
+        |frame| {
+            let text = frame.text();
+            text.contains("1 turn") && text.contains("Input 12") && text.contains("LLM ")
+        },
+        INTERACTION_TIMEOUT,
+    )?;
+    let text = tui.frame().text();
+    // The mock never reports cache classes, so no cache cell may be invented.
+    assert!(!text.contains("Cache hit"), "{text}");
+    // Steps: one model call (usage receipt) and no tool calls.
+    assert!(
+        text.contains("1 turn · 1 step") || text.contains("1 turn │"),
+        "{text}"
+    );
+    Ok(())
+}
+
 /// Regression for the v0.9.6 `/compact` freeze, upgraded to the v0.9.7
 /// queue-behind-pressure contract: a live turn stops draining the bounded
 /// engine op channel and `/subagents` refresh fills all 32 slots. The manual

@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "comunicação",
   "WhaleJobKeel": "operações",
   "WhaleJobLantern": "revisão",
-  "WhaleJobPlain": "trabalho geral"
+  "WhaleJobPlain": "trabalho geral",
+  "SessionMetricsTurn": "turno",
+  "SessionMetricsTurns": "turnos",
+  "SessionMetricsStep": "passo",
+  "SessionMetricsSteps": "passos",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Ferramentas",
+  "SessionMetricsTtft": "TTFT méd.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Entrada",
+  "SessionMetricsStatusLine": "Métricas da sessão: {metrics}"
 }

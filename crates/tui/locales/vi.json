@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "liên lạc",
   "WhaleJobKeel": "vận hành",
   "WhaleJobLantern": "đánh giá",
-  "WhaleJobPlain": "việc chung"
+  "WhaleJobPlain": "việc chung",
+  "SessionMetricsTurn": "lượt",
+  "SessionMetricsTurns": "lượt",
+  "SessionMetricsStep": "bước",
+  "SessionMetricsSteps": "bước",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Công cụ",
+  "SessionMetricsTtft": "TTFT TB",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Đầu vào",
+  "SessionMetricsStatusLine": "Số liệu phiên: {metrics}"
 }

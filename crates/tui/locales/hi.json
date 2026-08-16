@@ -1401,5 +1401,16 @@
   "WhaleJobEcho": "संचार",
   "WhaleJobKeel": "संचालन",
   "WhaleJobLantern": "समीक्षा",
-  "WhaleJobPlain": "सामान्य कार्य"
+  "WhaleJobPlain": "सामान्य कार्य",
+  "SessionMetricsTurn": "टर्न",
+  "SessionMetricsTurns": "टर्न",
+  "SessionMetricsStep": "चरण",
+  "SessionMetricsSteps": "चरण",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "टूल कॉल",
+  "SessionMetricsTtft": "TTFT औसत",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "कैश हिट",
+  "SessionMetricsInput": "इनपुट",
+  "SessionMetricsStatusLine": "सत्र मेट्रिक्स: {metrics}"
 }

@@ -925,6 +925,7 @@ impl App {
             turn_started_at: None,
             turn_last_activity_at: None,
             cumulative_turn_duration: std::time::Duration::ZERO,
+            session_metrics: crate::tui::session_metrics::SessionMetrics::default(),
             balance_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             draft_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
