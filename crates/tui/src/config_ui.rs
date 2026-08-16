@@ -957,6 +957,8 @@ fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     app.mcp_config_path = reloaded.mcp_config_path();
     app.skills_dir = reloaded.skills_dir();
     app.ui_locale = resolve_locale(&settings.locale);
+    app.workflow_config = reloaded.workflow_config();
+    app.goal_max_continuations = reloaded.goal_max_continuations();
     Ok(())
 }
 

@@ -775,7 +775,8 @@ impl ToolSpec for WorkflowTool {
             "Start, run, inspect, or cancel a Workflow. Workflows execute deterministic JS with args, phase/log progress, and task(...) calls that dispatch real sub-agents through Fleet/sub-agent scheduling. ",
             "For parallel fan-out, pass an array of zero-argument thunks exactly like `await parallel([() => task({...}), () => task({...})])`; do not pass task promises as variadic arguments. ",
             "Provide exactly one of script, source_path, or plan (structured planner JSON). ",
-            "Use action=start for detached orchestration and action=status with run_id to inspect progress. Use action=run when the model needs the final result before continuing."
+            "Use action=start for detached orchestration and action=status with run_id to inspect progress. Use action=run when the model needs the final result before continuing. ",
+            "Start a workflow on your own only for broad or staged work (the session [workflow].automatic table, default on). An explicit /workflow invocation is authorization. Do not start a workflow for one-file edits or simple questions."
         )
     }
 
@@ -857,9 +858,10 @@ impl ToolSpec for WorkflowTool {
     }
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
-        // Product defaults for [workflow] when the tool has no live Config
-        // handle. YOLO/bypass still short-circuit upstream of this check.
-        let config = codewhale_config::WorkflowConfigToml::default();
+        // The session's `[workflow]` table decides read-only auto-start and
+        // write approval; product defaults apply only when the runtime never
+        // threaded a config. YOLO/bypass still short-circuit upstream.
+        let config = workflow_config_for(&self.runtime);
         workflow_approval_requirement_for(input, &config)
     }
 
@@ -997,7 +999,7 @@ async fn start_workflow(
 
     // Capture the approved plan envelope for audit/receipt (#4126). Reaching
     // execute means the approval gate already passed (or YOLO/auto-start).
-    let workflow_cfg = codewhale_config::WorkflowConfigToml::default();
+    let workflow_cfg = workflow_config_for(&runtime);
     let summary = source
         .spec
         .as_ref()
@@ -1197,6 +1199,17 @@ async fn cancel_workflow(
 ) -> Result<ToolResult, ToolError> {
     let run_id =
         optional_str(&input, "run_id")?.ok_or_else(|| ToolError::missing_field("run_id"))?;
+    cancel_workflow_run(run_id, state)
+}
+
+/// Synchronous cancellation core shared by the model-facing tool action and
+/// the host `/workflow cancel` command. Cancellation only signals the VM,
+/// aborts the run task, journals the terminal snapshot, and streams the
+/// cancelled event; nothing here waits on the network.
+fn cancel_workflow_run(
+    run_id: &str,
+    state: Arc<WorkflowWorkspaceState>,
+) -> Result<ToolResult, ToolError> {
     let controller = {
         let mut controllers_guard = lock_mutex(&state.controllers)?;
         controllers_guard.remove(run_id)
@@ -1886,6 +1899,16 @@ fn render_run_report(record: &WorkflowRunRecord) -> String {
         out.push_str("\n```\n");
     }
     out
+}
+
+/// The effective `[workflow]` table for this runtime: the session config when
+/// the runtime carries one, otherwise the product defaults.
+fn workflow_config_for(runtime: &SubAgentRuntime) -> codewhale_config::WorkflowConfigToml {
+    runtime
+        .api_config
+        .as_deref()
+        .map(crate::config::Config::workflow_config)
+        .unwrap_or_default()
 }
 
 fn workflow_result_for(
@@ -4572,8 +4595,8 @@ mod journal {
     use std::sync::{Arc, Mutex, OnceLock};
     use tracing::warn;
 
-    const CODEWHALE_DIR: &str = ".codewhale";
-    const WORKFLOW_RUNS_FILE: &str = "workflow-runs.jsonl";
+    pub(super) const CODEWHALE_DIR: &str = ".codewhale";
+    pub(super) const WORKFLOW_RUNS_FILE: &str = "workflow-runs.jsonl";
 
     /// Per-workspace workflow state shared across tool-registry rebuilds.
     pub(super) struct WorkflowWorkspaceState {
@@ -5047,6 +5070,26 @@ mod journal {
                 "reopening must replay the recovery snapshot without another transition"
             );
         }
+
+        #[test]
+        fn host_cancel_hydrates_a_journal_without_live_process_state() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let state = WorkflowWorkspaceState::open(tmp.path());
+            let mut record = sample_record("workflow_prior", WorkflowRunStatus::Completed);
+            record.completed_at_ms = Some(99);
+            state.record_snapshot(&record);
+            drop(state);
+
+            assert!(
+                peek_shared_workflow_state(tmp.path()).is_none(),
+                "writing the journal must not insert process-wide live state"
+            );
+
+            let line = super::super::host_cancel_workflow(tmp.path(), "workflow_prior")
+                .expect("a journaled run must be visible to host cancel after restart");
+            assert_eq!(line.run_id, "workflow_prior");
+            assert_eq!(line.status, "completed");
+        }
     }
 }
 
@@ -5090,6 +5133,112 @@ pub(crate) fn structcopy_run_projection(workspace: &Path, run_id: &str) -> Optio
         }
     }
     Some(value)
+}
+
+/// One workflow run as the human-facing `/workflow` command reads it: a
+/// bounded projection of the run record with no raw event payloads and no
+/// filesystem paths beyond the source file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostWorkflowRunLine {
+    pub run_id: String,
+    /// Machine token: running | completed | degraded | failed | cancelled.
+    pub status: &'static str,
+    /// The run's goal, its workflow id, or the source file name.
+    pub label: String,
+    pub started_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+    pub child_count: usize,
+    pub last_progress: Option<String>,
+    pub error: Option<String>,
+}
+
+fn host_run_line(record: &WorkflowRunRecord) -> HostWorkflowRunLine {
+    let summary = record.summary();
+    let label = summary
+        .workflow_goal
+        .clone()
+        .or_else(|| summary.workflow_id.clone())
+        .or_else(|| {
+            summary
+                .source_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "workflow".to_string());
+    HostWorkflowRunLine {
+        run_id: summary.run_id,
+        status: match summary.status {
+            WorkflowRunStatus::Running => "running",
+            WorkflowRunStatus::Completed => "completed",
+            WorkflowRunStatus::Degraded => "degraded",
+            WorkflowRunStatus::Failed => "failed",
+            WorkflowRunStatus::Cancelled => "cancelled",
+        },
+        label,
+        started_at_ms: summary.started_at_ms,
+        completed_at_ms: summary.completed_at_ms,
+        child_count: summary.child_count,
+        last_progress: summary.last_progress,
+        error: summary.error,
+    }
+}
+
+/// Live workspace state if this process already has it, otherwise the
+/// existing run journal. Never creates `.codewhale/` or the ledger.
+fn host_workflow_state(workspace: &Path) -> Option<Arc<WorkflowWorkspaceState>> {
+    if let Some(state) = peek_shared_workflow_state(workspace) {
+        return Some(state);
+    }
+    // No live state yet: hydrate only if a journal already exists so
+    // status/cancel can see runs from a previous process without creating
+    // files in a workspace that never ran a workflow.
+    let ledger = workspace
+        .join(journal::CODEWHALE_DIR)
+        .join(journal::WORKFLOW_RUNS_FILE);
+    ledger.is_file().then(|| shared_workflow_state(workspace))
+}
+
+/// Every workflow run this workspace knows about (live and journaled),
+/// oldest first. Read-only: never creates the journal or workspace state.
+/// The `/workflow status` command reads this directly so status never costs
+/// a model turn.
+pub(crate) fn host_workflow_runs(workspace: &Path) -> Vec<HostWorkflowRunLine> {
+    let Some(state) = host_workflow_state(workspace) else {
+        return Vec::new();
+    };
+    let runs = state
+        .runs
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut lines: Vec<HostWorkflowRunLine> = runs.values().map(host_run_line).collect();
+    lines.sort_by_key(|line| line.started_at_ms);
+    lines
+}
+
+/// Cancel a running workflow directly from the host (the `/workflow cancel`
+/// command and the panel's cancel control), without a model turn. Returns
+/// the run's projection after cancellation, or a plain reason when the run
+/// is unknown. A run that already finished is reported as it is.
+pub(crate) fn host_cancel_workflow(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<HostWorkflowRunLine, String> {
+    let Some(state) = host_workflow_state(workspace) else {
+        return Err(format!("Unknown workflow run '{run_id}'."));
+    };
+    match cancel_workflow_run(run_id, state.clone()) {
+        Ok(_) => {
+            let runs = state
+                .runs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            runs.get(run_id)
+                .map(host_run_line)
+                .ok_or_else(|| format!("Unknown workflow run '{run_id}'."))
+        }
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Seed a minimal run record so `/structcopy` tests can exercise the
@@ -5625,6 +5774,71 @@ permissions = "read_only"
         assert_eq!(auditor.thinking.as_deref(), Some("high"));
         assert_eq!(auditor.role.as_deref(), Some("reviewer"));
         assert_eq!(auditor.profile.as_deref(), Some("auditor"));
+    }
+
+    /// The session's `[workflow]` table must decide the approval requirement;
+    /// before this the tool consulted product defaults only, so a user who
+    /// set `require_approval_for_writes = false` (documented in
+    /// docs/AUTOMATIC_WORKFLOWS.md) still got the approval card.
+    #[test]
+    fn workflow_tool_honors_the_session_workflow_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let mut runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx,
+            true,
+            None,
+            manager.clone(),
+        );
+        let input = json!({
+            "action": "start",
+            "plan": {
+                "goal": "write freely",
+                "risk": "writes",
+                "children": [{ "prompt": "edit", "type": "implementer" }]
+            }
+        });
+        let tool = WorkflowTool::new(Arc::clone(&manager), runtime.clone());
+        assert_eq!(
+            tool.approval_requirement_for(&input),
+            ApprovalRequirement::Required,
+            "product default: writes need approval"
+        );
+
+        let mut config = crate::config::Config::default();
+        let mut workflow = codewhale_config::WorkflowConfigToml::default();
+        workflow.require_approval_for_writes = false;
+        config.workflow = Some(workflow);
+        runtime.api_config = Some(Arc::new(config));
+        let tool = WorkflowTool::new(Arc::clone(&manager), runtime.clone());
+        assert_eq!(
+            tool.approval_requirement_for(&input),
+            ApprovalRequirement::Auto,
+            "the session config must win"
+        );
+
+        let read_only = json!({
+            "action": "start",
+            "plan": {
+                "goal": "scout crates",
+                "risk": "read_only",
+                "children": [{ "prompt": "look", "type": "explore" }]
+            }
+        });
+        let mut workflow = codewhale_config::WorkflowConfigToml::default();
+        workflow.auto_start_read_only = false;
+        let mut config = crate::config::Config::default();
+        config.workflow = Some(workflow);
+        runtime.api_config = Some(Arc::new(config));
+        let tool = WorkflowTool::new(manager, runtime);
+        assert_eq!(
+            tool.approval_requirement_for(&read_only),
+            ApprovalRequirement::Required,
+            "auto_start_read_only = false must still ask"
+        );
     }
 
     /// The gate machinery keys on the **semantic role**. It must still fire
