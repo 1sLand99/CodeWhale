@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Auto-Review decisions nobody was prompted for are now visible in the
+  transcript as one-line notes: model-guardian allow/deny verdicts with
+  their risk tier and stated reason, guardian failures (denied, fail
+  closed), deterministic policy blocks, and holds Auto-Review denied
+  without pausing. The audit log keeps the full record. `/permissions`
+  ends with the active posture, what it decides on its own versus never,
+  and the audit-log path. The footer's `Esc to interrupt` hint is
+  localized. See `docs/design/AUTO_MODE_PARITY.md` for the Claude Code /
+  Kimi Code parity ledger and follow-ups.
+
 ### Fixed
 
 - Wide terminals and tmux panes fill the full available width again for the
