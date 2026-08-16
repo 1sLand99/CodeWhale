@@ -1,3 +1,4 @@
+pub mod app_mode;
 pub mod auth_source;
 pub mod auto_model;
 pub mod catalog;
@@ -57,6 +58,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
+pub use app_mode::AppMode;
 pub use auth_source::{AuthSourceKind, ProviderAuthSourceToml};
 pub use codewhale_execpolicy::ToolAskRule;
 use codewhale_execpolicy::{ExecPolicyEngine, PermissionAction, Ruleset};

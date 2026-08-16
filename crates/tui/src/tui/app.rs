@@ -64,7 +64,7 @@ pub(crate) use composer::{
 };
 pub use status::{StatusToast, StatusToastLevel};
 pub use types::{
-    AppAction, AppMode, AutomationAction, ComposerDensity, ComposerSubmitAction,
+    AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
     ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort,
     SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,

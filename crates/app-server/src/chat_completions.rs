@@ -486,17 +486,13 @@ mod tests {
     use axum::http::{Method, Request};
     use codewhale_config::provider::WireFormat;
     use std::fs;
-    use std::sync::OnceLock;
     use tokio::sync::mpsc;
     use tower::ServiceExt;
 
     use super::super::{app_router, build_state};
 
     fn install_crypto_provider() {
-        static INIT: OnceLock<()> = OnceLock::new();
-        INIT.get_or_init(|| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        });
+        crate::install_test_crypto_provider();
     }
 
     /// Start a minimal upstream mock server that echoes back what it received.
