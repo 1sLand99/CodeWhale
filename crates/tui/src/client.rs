@@ -3181,6 +3181,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {}
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
+            | ApiProvider::Edenai
             | ApiProvider::XiaomiMimo
             | ApiProvider::Novita
             | ApiProvider::Siliconflow
@@ -3306,6 +3307,7 @@ pub(super) fn apply_reasoning_effort(
             // accept those directly.
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
+            | ApiProvider::Edenai
             | ApiProvider::Novita
             | ApiProvider::Together => {
                 let value = match normalized.as_str() {
@@ -3418,6 +3420,7 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::ModelstudioCodingPlanAnthropic => {}
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
+            | ApiProvider::Edenai
             | ApiProvider::Novita
             | ApiProvider::Together => {
                 body["reasoning_effort"] = json!("xhigh");

@@ -115,6 +115,8 @@ enum ProviderArg {
     /// Google Antigravity (`agy`) — consent-gated OAuth import.
     #[value(alias = "agy")]
     Antigravity,
+    #[value(alias = "eden-ai", alias = "eden_ai")]
+    Edenai,
 }
 
 impl From<ProviderArg> for ProviderKind {
@@ -158,6 +160,7 @@ impl From<ProviderArg> for ProviderKind {
             ProviderArg::Mistral => ProviderKind::Mistral,
             ProviderArg::Google => ProviderKind::Google,
             ProviderArg::Antigravity => ProviderKind::Antigravity,
+            ProviderArg::Edenai => ProviderKind::Edenai,
         }
     }
 }

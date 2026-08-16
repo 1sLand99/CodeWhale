@@ -100,6 +100,8 @@ pub enum ApiProvider {
     Antigravity,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
     Telecomjs,
+    /// Eden AI — OpenAI-compatible AI gateway (aggregator).
+    Edenai,
     /// Alibaba Cloud Model Studio — Token Plan (OpenAI-compatible Chat Completions).
     ModelstudioTokenPlan,
     /// Alibaba Cloud Model Studio — Token Plan Anthropic-compatible endpoint.
@@ -375,6 +377,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Google),
         Some(codewhale_config::ProviderKind::Antigravity),
         Some(codewhale_config::ProviderKind::Telecomjs),
+        Some(codewhale_config::ProviderKind::Edenai),
         Some(codewhale_config::ProviderKind::ModelstudioTokenPlan),
         Some(codewhale_config::ProviderKind::ModelstudioTokenPlanAnthropic),
         Some(codewhale_config::ProviderKind::ModelstudioCodingPlan),
@@ -429,6 +432,7 @@ impl ApiProvider {
         Self::ModelstudioCodingPlanAnthropic,
         Self::Antigravity,
         Self::Google,
+        Self::Edenai,
         Self::Custom,
     ];
 
@@ -496,6 +500,7 @@ fn subagent_provider_key_matches(key: &str, provider: ApiProvider) -> bool {
         ),
         ApiProvider::Openrouter => matches!(normalized.as_str(), "openrouter" | "open_router"),
         ApiProvider::Orcarouter => matches!(normalized.as_str(), "orcarouter" | "orca_router"),
+        ApiProvider::Edenai => matches!(normalized.as_str(), "edenai" | "eden_ai"),
         ApiProvider::OpenaiCodex => matches!(
             normalized.as_str(),
             "openai_codex" | "codex" | "chatgpt" | "openai_chatgpt"
@@ -1582,6 +1587,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         // The cloud-code wire protocol is not implemented; no model is
         // advertised for the credential-import-only route.
         ApiProvider::Antigravity => Vec::new(),
+        ApiProvider::Edenai => vec![DEFAULT_EDENAI_MODEL],
         // Custom endpoints expose no built-in completion names; the user
         // supplies their own model id (#1519).
         ApiProvider::Custom => Vec::new(),
@@ -3512,6 +3518,9 @@ pub struct ProvidersConfig {
         alias = "tokenhub"
     )]
     pub telecomjs: ProviderConfig,
+    /// Eden AI — OpenAI-compatible AI gateway (aggregator).
+    #[serde(default, alias = "eden-ai", alias = "eden_ai")]
+    pub edenai: ProviderConfig,
     /// Alibaba Cloud Model Studio — Token Plan (OpenAI-compatible Chat Completions).
     #[serde(default, alias = "modelstudio-token-plan")]
     pub modelstudio_token_plan: ProviderConfig,
@@ -5063,6 +5072,7 @@ impl Config {
             ApiProvider::Google => &providers.google,
             ApiProvider::Antigravity => &providers.antigravity,
             ApiProvider::Telecomjs => &providers.telecomjs,
+            ApiProvider::Edenai => &providers.edenai,
             ApiProvider::ModelstudioTokenPlan => &providers.modelstudio_token_plan,
             ApiProvider::ModelstudioTokenPlanAnthropic => {
                 &providers.modelstudio_token_plan_anthropic
@@ -5145,6 +5155,7 @@ impl Config {
             ApiProvider::Google => &mut providers.google,
             ApiProvider::Antigravity => &mut providers.antigravity,
             ApiProvider::Telecomjs => &mut providers.telecomjs,
+            ApiProvider::Edenai => &mut providers.edenai,
             ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
             ApiProvider::ModelstudioTokenPlanAnthropic => {
                 &mut providers.modelstudio_token_plan_anthropic
@@ -5510,6 +5521,7 @@ impl Config {
             ApiProvider::Google => DEFAULT_GOOGLE_MODEL,
             ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
             ApiProvider::Telecomjs => DEFAULT_TELECOMJS_MODEL,
+            ApiProvider::Edenai => DEFAULT_EDENAI_MODEL,
             ApiProvider::ModelstudioTokenPlan
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlan
@@ -5632,6 +5644,7 @@ impl Config {
             | ApiProvider::Google
             | ApiProvider::Antigravity
             | ApiProvider::Telecomjs
+            | ApiProvider::Edenai
             | ApiProvider::ModelstudioTokenPlan
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlan
@@ -5741,6 +5754,7 @@ impl Config {
                         ApiProvider::Google => DEFAULT_GOOGLE_BASE_URL,
                         ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
                         ApiProvider::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
+                        ApiProvider::Edenai => DEFAULT_EDENAI_BASE_URL,
                         ApiProvider::ModelstudioTokenPlan
                         | ApiProvider::ModelstudioTokenPlanAnthropic
                         | ApiProvider::ModelstudioCodingPlan
@@ -7363,6 +7377,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Google => &["GOOGLE_BASE_URL", "GEMINI_BASE_URL"],
         ApiProvider::Antigravity => &["ANTIGRAVITY_BASE_URL"],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
+        ApiProvider::Edenai => &["EDENAI_BASE_URL"],
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioTokenPlanAnthropic => {
             &["MODELSTUDIO_TOKEN_PLAN_BASE_URL"]
         }
@@ -7736,6 +7751,13 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .telecomjs
                     .base_url = Some(value);
             }
+            ApiProvider::Edenai => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .edenai
+                    .base_url = Some(value);
+            }
             ApiProvider::ModelstudioTokenPlan => {
                 config
                     .providers
@@ -7983,6 +8005,16 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .telecomjs
             .base_url = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Edenai)
+        && let Ok(value) = std::env::var("EDENAI_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .edenai
+            .base_url = Some(value);
+    }
     if matches!(
         config.api_provider(),
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -8094,6 +8126,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Google => &mut providers.google,
                 ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
+                ApiProvider::Edenai => &mut providers.edenai,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
                 ApiProvider::ModelstudioTokenPlanAnthropic => {
                     &mut providers.modelstudio_token_plan_anthropic
@@ -8324,6 +8357,16 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .telecomjs
             .model = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Edenai)
+        && let Ok(value) = std::env::var("EDENAI_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .edenai
+            .model = Some(value);
+    }
     if matches!(
         config.api_provider(),
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -8460,6 +8503,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Google => &mut providers.google,
                 ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
+                ApiProvider::Edenai => &mut providers.edenai,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
                 ApiProvider::ModelstudioTokenPlanAnthropic => {
                     &mut providers.modelstudio_token_plan_anthropic
@@ -9878,6 +9922,7 @@ fn merge_providers(
             google: merge_provider_config(base.google, override_cfg.google),
             antigravity: merge_provider_config(base.antigravity, override_cfg.antigravity),
             telecomjs: merge_provider_config(base.telecomjs, override_cfg.telecomjs),
+            edenai: merge_provider_config(base.edenai, override_cfg.edenai),
             modelstudio_token_plan: merge_provider_config(
                 base.modelstudio_token_plan,
                 override_cfg.modelstudio_token_plan,
