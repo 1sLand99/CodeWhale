@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-08-16T06:47:31.931Z",
+  "generatedAt": "2026-08-16T06:49:12.949Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.8",
@@ -258,6 +258,11 @@ export const FACTS: RepoFacts = {
       "id": "telecomjs",
       "label": "TelecomJS TokenHub",
       "env": "TELECOMJS_API_KEY"
+    },
+    {
+      "id": "edenai",
+      "label": "Eden AI",
+      "env": "EDENAI_API_KEY"
     },
     {
       "id": "modelstudio-token-plan",
