@@ -1266,6 +1266,8 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 }
 
 .settings-rail-item-active > span:last-child {
+  flex-shrink: 0;
+  white-space: nowrap;
   color: var(--settings-state-muted);
   font-family: var(--font-mono), "JetBrains Mono", monospace;
   font-size: 0.5625rem;
