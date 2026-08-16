@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:1569156eb887 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -46,6 +46,21 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 - **Harness yang Anda tulis sendiri.** Peran adalah berkas yang bisa Anda baca dan sunting — satu model, satu sikap perkakas, dan instruksi tetap untuk tiap peran — disimpan di dalam proyek agar tim berbagi, atau di samping pengaturan pribadi Anda agar ikut berpindah antar repo. Constitution mencatat bagaimana Anda ingin agen berperilaku di setiap sesi, sehingga harness mengikuti cara kerja Anda, bukan cara kami.
 - **Read-only sampai Anda memberi izin lebih.** Mode Plan tidak dapat mengubah berkas, dan gerbang persetujuan memproteksi perintah berisiko. Ketika sandbox OS membungkus perintah, Codewhale akan menginformasikannya: Seatbelt pada macOS (jika tersedia), serta opsi bubblewrap di Linux. Berkas `constitution.json` repositori dikompilasi menjadi pembatas penulisan yang bahkan tidak dapat dilewati oleh mode Full Access.
 - **Pekerjaan yang dapat dilanjutkan.** Fleet mencatat setiap langkah ke ledger bertipe append-only, sehingga `fleet resume` dapat melanjutkan pekerjaan tepat di mana Anda meninggalkannya.
+
+## Integrasi
+
+- **DeepSeek Harness (dsh) — terhubung melalui Codewhale.**
+  `codewhale integrations dsh connect` menghubungkan instalasi
+  `@deepseek-ai/dsh` yang sudah ada ke rute provider, izin, dan ruang kerja
+  Codewhale Anda; `integrations dsh install-bundle` menambahkan bundel plugin
+  DSH opsional sehingga `dsh --profile codewhale` membawa identitas itu secara
+  mandiri. Codewhale memegang izin dan otoritas siklus hidup; dsh tetap
+  mempertahankan sesi, profil, dan kredensialnya sendiri tanpa tersentuh.
+  Lihat [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
+- **VS Code.** Kerangka ekstensi resmi (`extensions/vscode`) membuka
+  Codewhale di terminal terintegrasi dan menyajikan Agent View hanya-baca
+  melalui runtime lokal. Ini adalah pratinjau pengembangan lokal, bukan rilis
+  marketplace.
 
 ## Pelajari Lebih Lanjut
 

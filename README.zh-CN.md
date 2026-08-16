@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:1569156eb887 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -46,6 +46,19 @@ codewhale web                            # local browser client on 127.0.0.1
 - **由你亲手写就的 harness。** 角色就是你能读、能改的文件——每个角色一个模型、一套工具姿态和一份常驻指令——放在项目里让团队共享,或放在你的个人设置旁边,跟着你在不同仓库之间走。constitution 记录你希望 agent 在每一次会话中如何行事,让这套 harness 贴合你的做法,而不是我们的。
 - **默认只读,放开权限才更进一步。** Plan 模式不改动文件,审批把关每一次高风险命令。只有当命令确实被 OS 沙箱包装时,Codewhale 才会如实标明:macOS 上是可用时启用的 Seatbelt,Linux 上是需显式启用的 bubblewrap。仓库的 `constitution.json` 会编译成写入拦截,连 Full Access 也无法跳过。
 - **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。
+
+## 集成
+
+- **DeepSeek Harness（dsh）——通过 Codewhale 连接。**
+  `codewhale integrations dsh connect` 可将现有的 `@deepseek-ai/dsh` 安装
+  连接到你的 Codewhale 提供商路由、权限和工作区；`integrations dsh
+  install-bundle` 会添加可选的 DSH 插件包，让 `dsh --profile codewhale`
+  独立携带同一身份。Codewhale 负责权限与生命周期；dsh 保留自己的会话、
+  配置文件和凭据，不会被改动。详见
+  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md)。
+- **VS Code。** 官方扩展脚手架（`extensions/vscode`）可在集成终端中打开
+  Codewhale，并通过本地运行时提供只读的 Agent View。目前仍是本地开发
+  预览版，尚未发布到插件市场。
 
 ## 了解更多
 

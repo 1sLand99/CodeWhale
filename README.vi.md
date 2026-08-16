@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:1569156eb887 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -82,6 +82,20 @@ shell qua đường phê duyệt bình thường.
   chốt chặn ghi mà ngay cả Full Access cũng không thể bỏ qua.
 - **Công việc bạn có thể tiếp tục.** Fleet ghi lại từng bước vào sổ cái chỉ ghi
   thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng.
+
+## Tích hợp
+
+- **DeepSeek Harness (dsh) — kết nối qua Codewhale.**
+  `codewhale integrations dsh connect` liên kết bản cài `@deepseek-ai/dsh`
+  hiện có với tuyến provider, quyền và workspace Codewhale của bạn;
+  `integrations dsh install-bundle` thêm gói plugin DSH tùy chọn để
+  `dsh --profile codewhale` tự mang danh tính đó. Codewhale nắm quyền và
+  vòng đời; dsh giữ nguyên phiên, profile và thông tin xác thực của riêng nó.
+  Xem [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
+- **VS Code.** Bộ khung extension chính thức (`extensions/vscode`) mở
+  Codewhale trong terminal tích hợp và cung cấp Agent View chỉ đọc qua
+  runtime cục bộ. Đây là bản xem trước phát triển cục bộ, chưa phải bản phát
+  hành marketplace.
 
 ## Tìm hiểu thêm
 
