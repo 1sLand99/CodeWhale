@@ -2047,11 +2047,13 @@ pub(crate) fn strip_thinking_tags(text: &str) -> String {
 
 /// Truncate a string to create a title (character-safe for UTF-8)
 fn truncate_title(s: &str, max_len: usize) -> String {
-    // Older sessions may carry a title saved before sanitization existed;
-    // never echo raw controls into stdout or the picker.
-    let s = sanitize_session_title(s.trim());
     let s = s.trim();
-    let first_line = s.lines().next().unwrap_or(s);
+    // Older sessions may carry a title saved before sanitization existed;
+    // never echo raw controls into stdout or the picker. Take the first
+    // line before sanitizing so a legacy multi-line title still shows only
+    // its first line.
+    let first_line = sanitize_session_title(s.lines().next().unwrap_or(s));
+    let first_line = first_line.trim();
 
     let char_count = first_line.chars().count();
     if char_count <= max_len {
