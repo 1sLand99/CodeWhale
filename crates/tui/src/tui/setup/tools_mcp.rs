@@ -190,7 +190,13 @@ fn dsh_integration_result(config: &Config, workspace: &Path) -> String {
     };
     let detection = dsh::detect::detect(&dsh::DetectEnv::from_process(), &dsh::ProcessRunner);
     let identity = dsh::codewhale_route_identity(config, workspace);
-    match dsh::compute_status(&paths, detection, identity, false) {
+    match dsh::compute_status(
+        &paths,
+        detection,
+        identity,
+        false,
+        dsh::bundle_availability_now(),
+    ) {
         Ok(report) => dsh::status_line(&report),
         Err(error) => format!("unavailable — {error}"),
     }

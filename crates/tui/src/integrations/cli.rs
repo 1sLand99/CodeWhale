@@ -31,7 +31,13 @@ fn status_report(
     let paths = DshPaths::from_process()?;
     let detection = detect_now();
     let identity = dsh::codewhale_route_identity(config, workspace);
-    let report = dsh::compute_status(&paths, detection, identity, allow_full_access)?;
+    let report = dsh::compute_status(
+        &paths,
+        detection,
+        identity,
+        allow_full_access,
+        dsh::bundle_availability_now(),
+    )?;
     Ok((paths, report))
 }
 
@@ -104,6 +110,10 @@ fn print_status(report: &DshStatusReport) {
             report.shadowing_namespaces.join(", ")
         );
     }
+    println!(
+        "  dsh plugin path (bundle): {}",
+        report.bundle_availability.label()
+    );
     println!("  Codewhale-owned files: {}", report.paths_root.display());
     println!(
         "  overlay: {}{}",
@@ -125,6 +135,26 @@ fn print_status(report: &DshStatusReport) {
             record.identity.permission_mode.as_str(),
             if record.disabled { " · DISABLED" } else { "" }
         );
+        match record.bundle.as_ref() {
+            Some(bundle) => println!(
+                "  bundle: installed in DSH profile `{}` ({}) · {} {} · app {} · patch sha256 {}{}",
+                bundle.profile,
+                bundle.profile_dir.display(),
+                bundle.package_name,
+                bundle.package_version,
+                bundle.app_bundle.package_name(),
+                bundle.patch_sha256,
+                report
+                    .bundle_profile_bundles
+                    .as_ref()
+                    .map(|list| format!(" · profile bundles [{}]", list.join(", ")))
+                    .unwrap_or_else(|| " · profile manifest unreadable".to_string())
+            ),
+            None => println!(
+                "  bundle: not installed · plugin path {} · `{CLI_COMMAND} install-bundle`",
+                report.bundle_availability.label()
+            ),
+        }
         if record.skin_enabled {
             println!(
                 "  skin export: {} (unsupported overlay; not injected)",
@@ -154,7 +184,9 @@ fn print_status(report: &DshStatusReport) {
         DshIntegrationState::StaleConfig { .. } => println!("  next: `{CLI_COMMAND} update`"),
         DshIntegrationState::Disabled { .. } => println!("  next: `{CLI_COMMAND} enable`"),
         DshIntegrationState::Connected { .. } | DshIntegrationState::StaleVersion { .. } => {
-            println!("  next: `{CLI_COMMAND} launch [--profile web|headless] [dsh app args]`")
+            println!(
+                "  next: `{CLI_COMMAND} launch [--profile web|headless|codewhale] [dsh app args]`"
+            )
         }
         _ => {}
     }
@@ -344,6 +376,109 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
             let paths = DshPaths::from_process()?;
             let record = dsh::set_disabled(&paths, false)?;
             println!("enabled: {}", record.overlay_path.display());
+            Ok(())
+        }
+        DshIntegrationCommand::InstallBundle { app, yes } => {
+            let app = dsh::DshAppBundle::parse(&app)
+                .ok_or_else(|| anyhow::anyhow!("--app must be `web` or `headless`, got `{app}`"))?;
+            let (paths, report) = status_report(config, workspace, false)?;
+            ensure_launchable_dsh(&report)?;
+            let record = report.record.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("DSH is not connected; run `{CLI_COMMAND} connect` first")
+            })?;
+            if let dsh::BundleAvailability::NotAvailable { reason } = &report.bundle_availability {
+                anyhow::bail!("DSH plugin path not available: {reason}");
+            }
+            if matches!(report.state, DshIntegrationState::StaleConfig { .. }) {
+                anyhow::bail!("overlay is stale; run `{CLI_COMMAND} update` before install-bundle");
+            }
+            let app_source = dsh::bundle::app_bundle_source(
+                report
+                    .detection
+                    .binary
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("dsh binary path is unknown"))?,
+                app,
+            )?;
+            let profile_dir = report
+                .detection
+                .dsh_home
+                .join("profiles")
+                .join(dsh::bundle::BUNDLE_PROFILE);
+            println!("{RELATIONSHIP_LABEL} — install-bundle plan (nothing written yet)");
+            println!(
+                "  will write (Codewhale-owned): {}/{{package.json,cordis.patch.yml,README.md,NOTICE.md}}",
+                paths.bundle_dir.display()
+            );
+            println!(
+                "  cordis.patch.yml = the current overlay rows (sha256 {})",
+                record.overlay_sha256
+            );
+            println!(
+                "  will run: dsh plugin --profile {} add {}",
+                dsh::bundle::BUNDLE_PROFILE,
+                app_source.display()
+            );
+            println!(
+                "  will run: dsh plugin --profile {} add {}",
+                dsh::bundle::BUNDLE_PROFILE,
+                paths.bundle_dir.display()
+            );
+            println!(
+                "  dsh will create/modify only its dedicated profile {} (package.json, pnpm-lock.yaml, node_modules links); `web`/`headless` are untouched",
+                profile_dir.display()
+            );
+            println!("  plugin path: {}", report.bundle_availability.label());
+            println!("  no network: both adds are local `link:` paths");
+            confirm(
+                yes,
+                "Install the Codewhale bundle into DSH profile `codewhale`?",
+            )?;
+            let bundle = dsh::install_bundle(
+                &paths,
+                &report.detection,
+                &dsh::ProcessRunner,
+                &report.bundle_availability,
+                app,
+            )?;
+            println!(
+                "installed: {} {} into {} (patch sha256 {})",
+                bundle.package_name,
+                bundle.package_version,
+                bundle.profile_dir.display(),
+                bundle.patch_sha256
+            );
+            println!(
+                "launch without --patch: dsh --profile {}  (or `{CLI_COMMAND} launch`)",
+                dsh::bundle::BUNDLE_PROFILE
+            );
+            Ok(())
+        }
+        DshIntegrationCommand::RemoveBundle { yes } => {
+            let (paths, report) = status_report(config, workspace, false)?;
+            let bundle = report
+                .record
+                .as_ref()
+                .and_then(|r| r.bundle.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("no bundle is installed"))?;
+            println!(
+                "remove-bundle will run: dsh plugin --profile {} remove {}",
+                bundle.profile, bundle.package_name
+            );
+            println!("  then delete only {}", paths.bundle_dir.display());
+            println!(
+                "  the DSH profile dir {} and its app bundle link stay in place (DSH-owned)",
+                bundle.profile_dir.display()
+            );
+            confirm(
+                yes,
+                "Remove the Codewhale bundle from DSH profile `codewhale`?",
+            )?;
+            let removed = dsh::remove_bundle(&paths, &report.detection, &dsh::ProcessRunner)?;
+            println!(
+                "removed bundle; deleted {} Codewhale-owned file(s)",
+                removed.len()
+            );
             Ok(())
         }
         DshIntegrationCommand::Remove { yes } => {

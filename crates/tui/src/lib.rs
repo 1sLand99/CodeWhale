@@ -1461,6 +1461,19 @@ pub(crate) enum DshIntegrationCommand {
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
+    /// Documented DSH plugin path: install the Codewhale bundle into a dedicated `codewhale` DSH profile via `dsh plugin add` (pnpm required)
+    InstallBundle {
+        /// Which shipped DSH app the dedicated profile boots (`web` or `headless`)
+        #[arg(long, default_value = "web")]
+        app: String,
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// `dsh plugin --profile codewhale remove codewhale-dsh-bundle`, then delete only Codewhale-owned bundle files
+    RemoveBundle {
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -6105,7 +6118,13 @@ fn doctor_dsh_integration_report(
     let paths = dsh::DshPaths::from_process()?;
     let detection = dsh::detect::detect(&dsh::DetectEnv::from_process(), &dsh::ProcessRunner);
     let identity = dsh::codewhale_route_identity(config, workspace);
-    dsh::compute_status(&paths, detection, identity, false)
+    dsh::compute_status(
+        &paths,
+        detection,
+        identity,
+        false,
+        dsh::bundle_availability_now(),
+    )
 }
 
 fn doctor_dsh_integration_lines(config: &Config, workspace: &Path) -> Vec<String> {

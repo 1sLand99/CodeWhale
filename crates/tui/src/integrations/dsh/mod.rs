@@ -16,6 +16,7 @@
 //! permissions. DSH is an integrated harness surface, not a second Fleet
 //! scheduler.
 
+pub(crate) mod bundle;
 pub(crate) mod detect;
 pub(crate) mod identity;
 pub(crate) mod receipt;
@@ -29,7 +30,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use detect::{DetectEnv, DshCompatibility, DshDetection, ProcessRunner};
+pub(crate) use bundle::{BundleAvailability, DshAppBundle, DshBundleRecord};
+pub(crate) use detect::{DetectEnv, DshCompatibility, DshDetection, DshRunner, ProcessRunner};
 pub(crate) use identity::{
     CodewhaleRouteIdentity, DshAdapter, MappedIdentity, WireProtocol, map_identity, render_overlay,
     sha256_hex,
@@ -55,6 +57,8 @@ pub(crate) struct DshPaths {
     pub(crate) receipt: PathBuf,
     pub(crate) skin: PathBuf,
     pub(crate) skin_preview: PathBuf,
+    /// Codewhale-owned bundle package directory (documented DSH plugin path).
+    pub(crate) bundle_dir: PathBuf,
 }
 
 impl DshPaths {
@@ -65,6 +69,7 @@ impl DshPaths {
             receipt: root.join(RECEIPT_FILE),
             skin: root.join(SKIN_FILE),
             skin_preview: root.join(SKIN_PREVIEW_FILE),
+            bundle_dir: root.join(bundle::BUNDLE_DIR),
             root,
         }
     }
@@ -132,6 +137,12 @@ pub(crate) struct DshStatusReport {
     pub(crate) current_identity_error: Option<String>,
     /// DSH `settings.yaml` namespaces that shadow overlay rows per field.
     pub(crate) shadowing_namespaces: Vec<String>,
+    /// Whether the documented plugin path (pnpm) is usable here.
+    pub(crate) bundle_availability: BundleAvailability,
+    /// The dedicated profile's `dsh.profile.bundles` when the bundle is
+    /// installed (read from DSH's manifest, read-only).
+    pub(crate) bundle_profile_bundles: Option<Vec<String>>,
+    pub(crate) bundle_patch_present: bool,
     pub(crate) paths_root: PathBuf,
     pub(crate) overlay_path: PathBuf,
     pub(crate) receipt_path: PathBuf,
@@ -153,12 +164,20 @@ pub(crate) fn compute_status(
     detection: DshDetection,
     current_identity: Result<CodewhaleRouteIdentity, String>,
     allow_full_access: bool,
+    bundle_availability: BundleAvailability,
 ) -> Result<DshStatusReport> {
     let doc = DshReceiptDocument::load(&paths.receipt)?;
     let record = doc.current;
     let overlay_bytes = std::fs::read(&paths.overlay).ok();
     let overlay_present = overlay_bytes.is_some();
     let overlay_sha256_on_disk = overlay_bytes.as_deref().map(sha256_hex);
+    let bundle_patch_bytes = std::fs::read(paths.bundle_dir.join(bundle::BUNDLE_PATCH_FILE)).ok();
+    let bundle_patch_present = bundle_patch_bytes.is_some();
+    let bundle_patch_sha256 = bundle_patch_bytes.as_deref().map(sha256_hex);
+    let bundle_profile_bundles = record
+        .as_ref()
+        .and_then(|r| r.bundle.as_ref())
+        .and_then(|b| bundle::profile_bundles(&b.profile_dir));
     let (current_identity, current_identity_error) = match current_identity {
         Ok(identity) => (Some(map_identity(&identity, allow_full_access)), None),
         Err(error) => (None, Some(error)),
@@ -187,6 +206,26 @@ pub(crate) fn compute_status(
                         version: Some(version),
                     },
                     Some(record) => {
+                        let bundle_stale = record.bundle.as_ref().and_then(|b| {
+                            if !bundle_patch_present {
+                                Some("bundle cordis.patch.yml is missing; run `update`".to_string())
+                            } else if bundle_patch_sha256.as_deref() != Some(b.patch_sha256.as_str()) {
+                                Some("bundle cordis.patch.yml was modified outside Codewhale; run `update`".to_string())
+                            } else if b.patch_sha256 != record.overlay_sha256 {
+                                Some("bundle and overlay identities differ; run `update`".to_string())
+                            } else if !bundle_profile_bundles
+                                .as_ref()
+                                .is_some_and(|list| list.iter().any(|n| n == bundle::BUNDLE_PACKAGE_NAME))
+                            {
+                                Some(format!(
+                                    "DSH profile `{}` no longer lists {}; run `remove-bundle` then `install-bundle`",
+                                    bundle::BUNDLE_PROFILE,
+                                    bundle::BUNDLE_PACKAGE_NAME
+                                ))
+                            } else {
+                                None
+                            }
+                        });
                         let stale_reason = if !overlay_present {
                             Some("overlay file is missing; run `update`".to_string())
                         } else if overlay_sha256_on_disk.as_deref()
@@ -196,6 +235,8 @@ pub(crate) fn compute_status(
                                 "overlay file was modified outside Codewhale; run `update`"
                                     .to_string(),
                             )
+                        } else if let Some(reason) = bundle_stale {
+                            Some(reason)
                         } else {
                             match current_identity.as_ref() {
                                 Some(now) if !now.mappable() => Some(
@@ -249,6 +290,9 @@ pub(crate) fn compute_status(
         current_identity,
         current_identity_error,
         shadowing_namespaces: shadowing,
+        bundle_availability,
+        bundle_profile_bundles,
+        bundle_patch_present,
         paths_root: paths.root.clone(),
         overlay_path: paths.overlay.clone(),
         receipt_path: paths.receipt.clone(),
@@ -375,6 +419,19 @@ pub(crate) fn apply_plan(
         .map(|r| r.connected_at.clone())
         .filter(|_| event == DshReceiptEvent::Update)
         .unwrap_or_else(|| now.clone());
+    // An installed bundle is a `link:` to our directory: rewriting its patch
+    // is the whole update, no pnpm needed.
+    let bundle_record = match doc.current.as_ref().and_then(|r| r.bundle.clone()) {
+        Some(mut b) if event == DshReceiptEvent::Update => {
+            let sha =
+                bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &plan.overlay_text)?;
+            b.patch_sha256 = sha.clone();
+            b.package_version = bundle::bundle_version(&codewhale_version(), &sha);
+            b.updated_at = now.clone();
+            Some(b)
+        }
+        _ => None,
+    };
     let record = DshConnectionRecord {
         connected_at,
         updated_at: now.clone(),
@@ -388,6 +445,7 @@ pub(crate) fn apply_plan(
         skin_path,
         skin_sha256: skin_sha256.clone(),
         disabled: false,
+        bundle: bundle_record,
         identity: plan.mapped.clone(),
     };
     doc.push(DshReceiptEntry {
@@ -457,6 +515,12 @@ pub(crate) fn set_disabled(paths: &DshPaths, disabled: bool) -> Result<DshConnec
 /// terminal `remove` entry. Never touches `$DSH_HOME`.
 pub(crate) fn remove(paths: &DshPaths) -> Result<Vec<PathBuf>> {
     let mut doc = DshReceiptDocument::load(&paths.receipt)?;
+    if doc.current.as_ref().is_some_and(|r| r.bundle.is_some()) {
+        anyhow::bail!(
+            "the Codewhale bundle is still installed in DSH profile `{}`; run `{CLI_COMMAND} remove-bundle` first",
+            bundle::BUNDLE_PROFILE
+        );
+    }
     let mut removed = Vec::new();
     for path in [&paths.overlay, &paths.skin, &paths.skin_preview] {
         match std::fs::remove_file(path) {
@@ -583,16 +647,31 @@ pub(crate) fn launch_spec(
         .binary
         .clone()
         .ok_or_else(|| anyhow::anyhow!("dsh binary path is unknown"))?;
-    let profile = profile_override.unwrap_or(record.profile.as_str());
-    if !matches!(profile, "web" | "headless") {
-        anyhow::bail!("DSH profile must be `web` or `headless`, got `{profile}`");
+    let bundle_installed = record.bundle.is_some();
+    let profile = profile_override.unwrap_or(if bundle_installed {
+        bundle::BUNDLE_PROFILE
+    } else {
+        record.profile.as_str()
+    });
+    if !matches!(profile, "web" | "headless") && profile != bundle::BUNDLE_PROFILE {
+        anyhow::bail!(
+            "DSH profile must be `web`, `headless`, or `{}` (bundle), got `{profile}`",
+            bundle::BUNDLE_PROFILE
+        );
     }
-    let mut args = vec![
-        "--profile".to_string(),
-        profile.to_string(),
-        "--patch".to_string(),
-        report.overlay_path.display().to_string(),
-    ];
+    if profile == bundle::BUNDLE_PROFILE && !bundle_installed {
+        anyhow::bail!(
+            "the `{}` profile carries identity only after `{CLI_COMMAND} install-bundle`",
+            bundle::BUNDLE_PROFILE
+        );
+    }
+    let mut args = vec!["--profile".to_string(), profile.to_string()];
+    if profile != bundle::BUNDLE_PROFILE {
+        // The dedicated bundle profile carries the identity itself; the
+        // shipped profiles get it through the overlay.
+        args.push("--patch".to_string());
+        args.push(report.overlay_path.display().to_string());
+    }
     args.extend(extra_args.iter().cloned());
     let provider_env_vars: Vec<String> =
         record.identity.source.api_key_env.iter().cloned().collect();
@@ -625,6 +704,152 @@ pub(crate) fn spawn_launch(spec: &LaunchSpec) -> Result<i32> {
         .status()
         .with_context(|| format!("launch {}", spec.binary.display()))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Install the Codewhale bundle into the dedicated `codewhale` DSH profile via
+/// the documented `dsh plugin --profile codewhale add <path>` (pnpm).
+pub(crate) fn install_bundle(
+    paths: &DshPaths,
+    detection: &DshDetection,
+    runner: &dyn DshRunner,
+    availability: &BundleAvailability,
+    app: DshAppBundle,
+) -> Result<DshBundleRecord> {
+    let pnpm_version = match availability {
+        BundleAvailability::Available { pnpm_version } => pnpm_version.clone(),
+        BundleAvailability::NotAvailable { reason } => {
+            anyhow::bail!("DSH plugin path not available: {reason}")
+        }
+    };
+    let mut doc = DshReceiptDocument::load(&paths.receipt)?;
+    let Some(mut record) = doc.current.take() else {
+        anyhow::bail!("DSH is not connected; run `{CLI_COMMAND} connect` first");
+    };
+    if record.bundle.is_some() {
+        anyhow::bail!("bundle already installed; use `{CLI_COMMAND} update` or `remove-bundle`");
+    }
+    let overlay_text = std::fs::read_to_string(&paths.overlay)
+        .with_context(|| format!("read {}", paths.overlay.display()))?;
+    if sha256_hex(overlay_text.as_bytes()) != record.overlay_sha256 {
+        anyhow::bail!("overlay is stale; run `{CLI_COMMAND} update` before install-bundle");
+    }
+    let patch_sha = bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &overlay_text)?;
+    let (app_source, outcomes) =
+        match bundle::install_into_profile(runner, detection, app, &paths.bundle_dir) {
+            Ok(ok) => ok,
+            Err(error) => {
+                // Leave DSH state as dsh left it; drop our half-written package.
+                let _ = bundle::remove_bundle_files(&paths.bundle_dir);
+                return Err(error);
+            }
+        };
+    let now = now_rfc3339();
+    let mut digest_input = String::new();
+    for outcome in &outcomes {
+        digest_input.push_str(&outcome.output_sha256);
+        digest_input.push('\n');
+    }
+    let bundle_record = DshBundleRecord {
+        installed_at: now.clone(),
+        updated_at: now.clone(),
+        profile: bundle::BUNDLE_PROFILE.to_string(),
+        profile_dir: detection
+            .dsh_home
+            .join("profiles")
+            .join(bundle::BUNDLE_PROFILE),
+        bundle_dir: paths.bundle_dir.clone(),
+        package_name: bundle::BUNDLE_PACKAGE_NAME.to_string(),
+        package_version: bundle::bundle_version(&codewhale_version(), &patch_sha),
+        patch_sha256: patch_sha.clone(),
+        app_bundle: app,
+        app_bundle_source: app_source,
+        pnpm_version,
+        pnpm_output_sha256: sha256_hex(digest_input.as_bytes()),
+    };
+    record.bundle = Some(bundle_record.clone());
+    record.updated_at = now.clone();
+    doc.push(DshReceiptEntry {
+        event: DshReceiptEvent::InstallBundle,
+        at: now,
+        codewhale_version: codewhale_version(),
+        dsh_version: detection.version.clone(),
+        dsh_home: detection.dsh_home.clone(),
+        overlay_sha256: Some(record.overlay_sha256.clone()),
+        skin_sha256: record.skin_sha256.clone(),
+        identity_summary: Some(identity_summary(&record.identity)),
+        permission_mode: Some(record.identity.permission_mode.as_str().to_string()),
+        note: Some(format!(
+            "dsh plugin --profile {} add {} + {}; pnpm {}; output sha256 {}",
+            bundle::BUNDLE_PROFILE,
+            app.package_name(),
+            bundle::BUNDLE_PACKAGE_NAME,
+            bundle_record.pnpm_version,
+            bundle_record.pnpm_output_sha256
+        )),
+    });
+    doc.current = Some(record);
+    doc.save(&paths.receipt)?;
+    crate::audit::log_sensitive_event(
+        "integration.dsh.install_bundle",
+        serde_json::json!({
+            "profile_dir": bundle_record.profile_dir.display().to_string(),
+            "bundle_dir": paths.bundle_dir.display().to_string(),
+            "patch_sha256": bundle_record.patch_sha256,
+            "app_bundle": app.package_name(),
+        }),
+    );
+    Ok(bundle_record)
+}
+
+/// `dsh plugin --profile codewhale remove codewhale-dsh-bundle`, then delete
+/// only the Codewhale-owned bundle files. The DSH profile directory (and the
+/// app bundle link dsh recorded there) is DSH-owned and is left in place.
+pub(crate) fn remove_bundle(
+    paths: &DshPaths,
+    detection: &DshDetection,
+    runner: &dyn DshRunner,
+) -> Result<Vec<PathBuf>> {
+    let mut doc = DshReceiptDocument::load(&paths.receipt)?;
+    let Some(mut record) = doc.current.take() else {
+        anyhow::bail!("DSH is not connected; nothing to remove");
+    };
+    let Some(bundle_record) = record.bundle.take() else {
+        anyhow::bail!("no bundle is installed");
+    };
+    let outcome = bundle::remove_from_profile(runner, detection)?;
+    let removed = bundle::remove_bundle_files(&paths.bundle_dir)?;
+    let now = now_rfc3339();
+    record.updated_at = now.clone();
+    doc.push(DshReceiptEntry {
+        event: DshReceiptEvent::RemoveBundle,
+        at: now,
+        codewhale_version: codewhale_version(),
+        dsh_version: detection.version.clone(),
+        dsh_home: detection.dsh_home.clone(),
+        overlay_sha256: Some(record.overlay_sha256.clone()),
+        skin_sha256: record.skin_sha256.clone(),
+        identity_summary: Some(identity_summary(&record.identity)),
+        permission_mode: Some(record.identity.permission_mode.as_str().to_string()),
+        note: Some(format!(
+            "dsh plugin --profile {} remove {} (output sha256 {}); removed {} owned file(s); profile dir {} left in place (DSH-owned)",
+            bundle::BUNDLE_PROFILE,
+            bundle::BUNDLE_PACKAGE_NAME,
+            outcome.output_sha256,
+            removed.len(),
+            bundle_record.profile_dir.display()
+        )),
+    });
+    doc.current = Some(record);
+    doc.save(&paths.receipt)?;
+    crate::audit::log_sensitive_event(
+        "integration.dsh.remove_bundle",
+        serde_json::json!({ "removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>() }),
+    );
+    Ok(removed)
+}
+/// Probe the documented plugin path (pnpm on `PATH`) with the real runner.
+pub(crate) fn bundle_availability_now() -> BundleAvailability {
+    bundle::bundle_availability(std::env::var_os("PATH").as_ref(), &ProcessRunner)
 }
 
 /// Derive the non-secret route identity from a loaded Codewhale config.
@@ -683,7 +908,13 @@ pub(crate) fn status_line(report: &DshStatusReport) -> String {
                 .as_ref()
                 .map(|r| identity_summary(&r.identity))
                 .unwrap_or_default();
-            format!("connected — dsh {version}, {identity} ({RELATIONSHIP_LABEL})")
+            let bundle = report
+                .record
+                .as_ref()
+                .and_then(|r| r.bundle.as_ref())
+                .map(|b| format!(", bundle in profile `{}`", b.profile))
+                .unwrap_or_default();
+            format!("connected — dsh {version}, {identity}{bundle} ({RELATIONSHIP_LABEL})")
         }
         DshIntegrationState::StaleConfig { reason, .. } => {
             format!("stale-config — dsh {version}: {reason}")
