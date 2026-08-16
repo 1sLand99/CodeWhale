@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Запуск автоматизации {id} поставлен в очередь: {status} (задача {task})",
   "AutomationDeletePreview": "Удаление ещё не подтверждено. Ничего не удалено.\nАвтоматизация: {id} ({name})\nЗаписанных запусков: {run_count}\nЧтобы удалить определение и историю запусков, выполните:\n{command}",
   "AutomationDeleteConfirmationStale": "Подтверждение удаления больше не соответствует автоматизации {id}; ничего не удалено. Проверьте текущее состояние с помощью {command}.",
-  "AutomationDeleted": "Автоматизация {id} ({name}) удалена. Удалено записанных запусков: {run_count}."
+  "AutomationDeleted": "Автоматизация {id} ({name}) удалена. Удалено записанных запусков: {run_count}.",
+  "SessionMetricsTurn": "ход",
+  "SessionMetricsTurns": "ходов",
+  "SessionMetricsStep": "шаг",
+  "SessionMetricsSteps": "шагов",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Инстр.",
+  "SessionMetricsTtft": "TTFT ср.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Кэш",
+  "SessionMetricsInput": "Ввод",
+  "SessionMetricsStatusLine": "Метрики сессии: {metrics}"
 }

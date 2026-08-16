@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Execução da automação {id} adicionada à fila: {status} (tarefa {task})",
   "AutomationDeletePreview": "A exclusão ainda não foi confirmada. Nada foi excluído.\nAutomação: {id} ({name})\nExecuções registradas: {run_count}\nPara excluir a definição e o histórico de execuções, execute:\n{command}",
   "AutomationDeleteConfirmationStale": "A confirmação de exclusão não corresponde mais à automação {id}; nada foi excluído. Revise o estado atual com {command}.",
-  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}."
+  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}.",
+  "SessionMetricsTurn": "turno",
+  "SessionMetricsTurns": "turnos",
+  "SessionMetricsStep": "passo",
+  "SessionMetricsSteps": "passos",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Ferramentas",
+  "SessionMetricsTtft": "TTFT méd.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Entrada",
+  "SessionMetricsStatusLine": "Métricas da sessão: {metrics}"
 }

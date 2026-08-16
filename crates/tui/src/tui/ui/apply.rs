@@ -2517,6 +2517,9 @@ pub(crate) fn apply_loaded_session(
     app.session.last_reasoning_replay_tokens = None;
     // Accumulated token breakdown is per-runtime-session; reset on load.
     app.session.reset_token_breakdown();
+    // The metrics strip shares that scope: it describes this runtime
+    // session's calls, not the restored transcript's.
+    app.session_metrics = crate::tui::session_metrics::SessionMetrics::default();
     app.session.turn_cache_history.clear();
     // Restore cumulative turn duration so the footer "worked" chip
     // persists across session restarts (#2038).

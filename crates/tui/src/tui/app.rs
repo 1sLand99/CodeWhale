@@ -1776,6 +1776,10 @@ pub struct App {
     /// Incremented on `TurnComplete` from the elapsed time of the
     /// just-finished turn. Resets per launch.
     pub cumulative_turn_duration: std::time::Duration,
+    /// Session metrics strip accumulators (model-call/tool timings, TTFT,
+    /// throughput). Sourced only from engine events; see
+    /// [`crate::tui::session_metrics`].
+    pub session_metrics: crate::tui::session_metrics::SessionMetrics,
     /// DeepSeek account balance, refreshed once per turn completion.
     /// Shared cell updated by background fetch tasks; read lock in the UI thread.
     pub balance_cell: std::sync::Arc<std::sync::Mutex<Option<crate::pricing::BalanceInfo>>>,

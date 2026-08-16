@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Automation {id} run enqueued: {status} (task {task})",
   "AutomationDeletePreview": "Deletion is not armed. Nothing was deleted.\nAutomation: {id} ({name})\nRecorded runs: {run_count}\nTo delete the definition and run history, run:\n{command}",
   "AutomationDeleteConfirmationStale": "Deletion confirmation no longer matches automation {id}; nothing was deleted. Review the current state with {command}.",
-  "AutomationDeleted": "Deleted automation {id} ({name}). Recorded runs deleted: {run_count}."
+  "AutomationDeleted": "Deleted automation {id} ({name}). Recorded runs deleted: {run_count}.",
+  "SessionMetricsTurn": "turn",
+  "SessionMetricsTurns": "turns",
+  "SessionMetricsStep": "step",
+  "SessionMetricsSteps": "steps",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Tool call",
+  "SessionMetricsTtft": "TTFT avg",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache hit",
+  "SessionMetricsInput": "Input",
+  "SessionMetricsStatusLine": "Session metrics: {metrics}"
 }

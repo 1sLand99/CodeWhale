@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Exécution de l’automatisation {id} mise en attente : {status} (tâche {task})",
   "AutomationDeletePreview": "La suppression n’est pas encore confirmée. Rien n’a été supprimé.\nAutomatisation : {id} ({name})\nExécutions enregistrées : {run_count}\nPour supprimer la définition et l’historique des exécutions, lancez :\n{command}",
   "AutomationDeleteConfirmationStale": "La confirmation de suppression ne correspond plus à l’automatisation {id} ; rien n’a été supprimé. Vérifiez l’état actuel avec {command}.",
-  "AutomationDeleted": "Automatisation {id} ({name}) supprimée. Exécutions enregistrées supprimées : {run_count}."
+  "AutomationDeleted": "Automatisation {id} ({name}) supprimée. Exécutions enregistrées supprimées : {run_count}.",
+  "SessionMetricsTurn": "tour",
+  "SessionMetricsTurns": "tours",
+  "SessionMetricsStep": "étape",
+  "SessionMetricsSteps": "étapes",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Outils",
+  "SessionMetricsTtft": "TTFT moy.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache",
+  "SessionMetricsInput": "Entrée",
+  "SessionMetricsStatusLine": "Métriques de session : {metrics}"
 }

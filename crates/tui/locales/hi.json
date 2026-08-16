@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "स्वचालन {id} का निष्पादन कतार में जोड़ा गया: {status} (कार्य {task})",
   "AutomationDeletePreview": "हटाना अभी पक्का नहीं किया गया है। कुछ भी नहीं हटाया गया।\nस्वचालन: {id} ({name})\nदर्ज निष्पादन: {run_count}\nपरिभाषा और निष्पादन इतिहास हटाने के लिए यह चलाएँ:\n{command}",
   "AutomationDeleteConfirmationStale": "हटाने की पुष्टि अब स्वचालन {id} की वर्तमान स्थिति से मेल नहीं खाती; कुछ भी नहीं हटाया गया। {command} से वर्तमान स्थिति फिर देखें।",
-  "AutomationDeleted": "स्वचालन {id} ({name}) हटा दिया गया। हटाए गए दर्ज निष्पादन: {run_count}।"
+  "AutomationDeleted": "स्वचालन {id} ({name}) हटा दिया गया। हटाए गए दर्ज निष्पादन: {run_count}।",
+  "SessionMetricsTurn": "टर्न",
+  "SessionMetricsTurns": "टर्न",
+  "SessionMetricsStep": "चरण",
+  "SessionMetricsSteps": "चरण",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "टूल कॉल",
+  "SessionMetricsTtft": "TTFT औसत",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "कैश हिट",
+  "SessionMetricsInput": "इनपुट",
+  "SessionMetricsStatusLine": "सत्र मेट्रिक्स: {metrics}"
 }

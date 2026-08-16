@@ -80,6 +80,7 @@ pub mod prompt_suggestion;
 pub mod provider_picker;
 pub mod scrolling;
 pub mod selection;
+pub mod session_metrics;
 pub mod session_picker;
 pub mod settings_picker;
 pub mod setup;

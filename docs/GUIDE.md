@@ -213,8 +213,20 @@ control both selection and order. Supported keys currently include `mode`,
 `model`, `cost`, `balance` (DeepSeek / DeepSeekCN only), `status`, `agents`,
 `reasoning_replay`, `prefix_stability`, `cache`, `context_percent`,
 `git_branch`, `last_tool_elapsed` (reserved), `rate_limit` (reserved),
-and `tokens`. Omit `status_items` to keep the built-in default order; set it to
-`[]` to hide configurable chips.
+`tokens`, and `session_metrics`. Omit `status_items` to keep the built-in
+default order; set it to `[]` to hide configurable chips.
+
+`session_metrics` (on by default) paints the session metrics strip on the
+phase row: `4 turns · 108 steps │ LLM 11m46s · Tool call 1m52s │ TTFT avg
+1.5s · 120 tok/s │ Cache hit 99% │ Input 9.3M`. Turns are user turns; steps
+are model calls plus tool calls; `LLM` is the summed wall time of model
+calls and `Tool call` the summed wall time of tools; `TTFT avg` is the mean
+time to first streamed token; `tok/s` is provider-reported output tokens over
+streamed seconds; `Cache hit` and `Input` are provider-reported token
+classes. A cell whose provider or runtime evidence has not arrived is
+omitted rather than estimated, and on narrow rows the strip drops its
+lowest-value groups (steps and tool time first, then latency, turns, LLM
+time) instead of truncating a number. `/status` prints the untrimmed line.
 
 The transcript is the audit trail. When Codewhale reads files, runs commands,
 or edits code, the action appears there. If a command fails, use the visible

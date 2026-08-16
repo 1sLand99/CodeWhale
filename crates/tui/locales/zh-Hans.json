@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "自动化 {id} 的运行已入队: {status}（任务 {task}）",
   "AutomationDeletePreview": "删除尚未确认，未删除任何内容。\n自动化: {id}（{name}）\n运行记录: {run_count}\n要删除定义和运行历史，请运行:\n{command}",
   "AutomationDeleteConfirmationStale": "删除确认与自动化 {id} 的当前状态不再匹配，未删除任何内容。请用 {command} 查看当前状态。",
-  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。"
+  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。",
+  "SessionMetricsTurn": "轮",
+  "SessionMetricsTurns": "轮",
+  "SessionMetricsStep": "步",
+  "SessionMetricsSteps": "步",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "工具调用",
+  "SessionMetricsTtft": "TTFT 平均",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "缓存命中",
+  "SessionMetricsInput": "输入",
+  "SessionMetricsStatusLine": "会话指标：{metrics}"
 }

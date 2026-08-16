@@ -1381,5 +1381,16 @@
   "XaiAuthChoiceApiKeyOption": "xAI API 金鑰 — 輸入或粘貼，然後儲存到 xAI 提供商槽位",
   "XaiAuthChoiceDeviceOAuthOption": "原生設備 OAuth — 通過瀏覽器/設備程式碼登入，並使用 Codewhale 自有儲存",
   "XaiAuthChoiceIntro": "請選擇一個明確的憑據來源。金鑰文本絕不會被當作 OAuth 令牌。",
-  "XaiAuthChoiceTitle": " xAI 身份驗證 "
+  "XaiAuthChoiceTitle": " xAI 身份驗證 ",
+  "SessionMetricsTurn": "輪",
+  "SessionMetricsTurns": "輪",
+  "SessionMetricsStep": "步",
+  "SessionMetricsSteps": "步",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "工具呼叫",
+  "SessionMetricsTtft": "TTFT 平均",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "快取命中",
+  "SessionMetricsInput": "輸入",
+  "SessionMetricsStatusLine": "工作階段指標：{metrics}"
 }

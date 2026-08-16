@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Ejecución de la automatización {id} puesta en cola: {status} (tarea {task})",
   "AutomationDeletePreview": "La eliminación aún no está confirmada. No se eliminó nada.\nAutomatización: {id} ({name})\nEjecuciones registradas: {run_count}\nPara eliminar la definición y el historial de ejecuciones, ejecuta:\n{command}",
   "AutomationDeleteConfirmationStale": "La confirmación de eliminación ya no coincide con la automatización {id}; no se eliminó nada. Revisa el estado actual con {command}.",
-  "AutomationDeleted": "Se eliminó la automatización {id} ({name}). Ejecuciones registradas eliminadas: {run_count}."
+  "AutomationDeleted": "Se eliminó la automatización {id} ({name}). Ejecuciones registradas eliminadas: {run_count}.",
+  "SessionMetricsTurn": "turno",
+  "SessionMetricsTurns": "turnos",
+  "SessionMetricsStep": "paso",
+  "SessionMetricsSteps": "pasos",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Herram.",
+  "SessionMetricsTtft": "TTFT prom.",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Caché",
+  "SessionMetricsInput": "Entrada",
+  "SessionMetricsStatusLine": "Métricas de la sesión: {metrics}"
 }

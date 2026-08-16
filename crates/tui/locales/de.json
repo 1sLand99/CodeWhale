@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "Ausführung der Automatisierung {id} eingereiht: {status} (Aufgabe {task})",
   "AutomationDeletePreview": "Das Löschen ist noch nicht bestätigt. Nichts wurde gelöscht.\nAutomatisierung: {id} ({name})\nAufgezeichnete Ausführungen: {run_count}\nZum Löschen der Definition und des Ausführungsverlaufs ausführen:\n{command}",
   "AutomationDeleteConfirmationStale": "Die Löschbestätigung passt nicht mehr zur Automatisierung {id}; nichts wurde gelöscht. Den aktuellen Stand mit {command} prüfen.",
-  "AutomationDeleted": "Automatisierung {id} ({name}) gelöscht. Gelöschte aufgezeichnete Ausführungen: {run_count}."
+  "AutomationDeleted": "Automatisierung {id} ({name}) gelöscht. Gelöschte aufgezeichnete Ausführungen: {run_count}.",
+  "SessionMetricsTurn": "Runde",
+  "SessionMetricsTurns": "Runden",
+  "SessionMetricsStep": "Schritt",
+  "SessionMetricsSteps": "Schritte",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "Toolaufruf",
+  "SessionMetricsTtft": "TTFT Ø",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "Cache-Hit",
+  "SessionMetricsInput": "Eingabe",
+  "SessionMetricsStatusLine": "Sitzungsmetriken: {metrics}"
 }

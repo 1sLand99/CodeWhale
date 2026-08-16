@@ -1381,5 +1381,16 @@
   "AutomationRunEnqueued": "自動化 {id} の実行をキューに追加しました: {status}（タスク {task}）",
   "AutomationDeletePreview": "削除はまだ確定していません。何も削除されていません。\n自動化: {id}（{name}）\n実行記録: {run_count}\n定義と実行履歴を削除するには、次を実行してください:\n{command}",
   "AutomationDeleteConfirmationStale": "削除確認が自動化 {id} の現在の状態と一致しないため、何も削除されていません。{command} で現在の状態を確認してください。",
-  "AutomationDeleted": "自動化 {id}（{name}）を削除しました。削除した実行記録: {run_count}。"
+  "AutomationDeleted": "自動化 {id}（{name}）を削除しました。削除した実行記録: {run_count}。",
+  "SessionMetricsTurn": "ターン",
+  "SessionMetricsTurns": "ターン",
+  "SessionMetricsStep": "ステップ",
+  "SessionMetricsSteps": "ステップ",
+  "SessionMetricsLlm": "LLM",
+  "SessionMetricsTools": "ツール呼出",
+  "SessionMetricsTtft": "TTFT平均",
+  "SessionMetricsTokensPerSecond": "tok/s",
+  "SessionMetricsCache": "キャッシュ命中",
+  "SessionMetricsInput": "入力",
+  "SessionMetricsStatusLine": "セッション指標: {metrics}"
 }
