@@ -791,13 +791,12 @@ impl FleetSetupView {
                     view.model_idx = idx;
                 }
             }
-            if let Some(effort) = saved.reasoning_effort.as_deref() {
-                if let Some(idx) = THINKING_CHOICES
+            if let Some(effort) = saved.reasoning_effort.as_deref()
+                && let Some(idx) = THINKING_CHOICES
                     .iter()
                     .position(|choice| choice.label.eq_ignore_ascii_case(effort))
-                {
-                    view.thinking_idx = idx;
-                }
+            {
+                view.thinking_idx = idx;
             }
         }
         view

@@ -5808,10 +5808,13 @@ permissions = "read_only"
             "product default: writes need approval"
         );
 
-        let mut config = crate::config::Config::default();
-        let mut workflow = codewhale_config::WorkflowConfigToml::default();
-        workflow.require_approval_for_writes = false;
-        config.workflow = Some(workflow);
+        let config = crate::config::Config {
+            workflow: Some(codewhale_config::WorkflowConfigToml {
+                require_approval_for_writes: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         runtime.api_config = Some(Arc::new(config));
         let tool = WorkflowTool::new(Arc::clone(&manager), runtime.clone());
         assert_eq!(
@@ -5828,10 +5831,13 @@ permissions = "read_only"
                 "children": [{ "prompt": "look", "type": "explore" }]
             }
         });
-        let mut workflow = codewhale_config::WorkflowConfigToml::default();
-        workflow.auto_start_read_only = false;
-        let mut config = crate::config::Config::default();
-        config.workflow = Some(workflow);
+        let config = crate::config::Config {
+            workflow: Some(codewhale_config::WorkflowConfigToml {
+                auto_start_read_only: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         runtime.api_config = Some(Arc::new(config));
         let tool = WorkflowTool::new(manager, runtime);
         assert_eq!(

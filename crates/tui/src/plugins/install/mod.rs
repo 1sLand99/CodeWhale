@@ -348,6 +348,7 @@ fn verify_expected_content_hash(
 /// Stage and finalize an already-downloaded remote tarball. Kept separate
 /// from [`install`] so [`update`] can compare the checksum of the bytes it
 /// already fetched instead of downloading twice.
+#[allow(clippy::too_many_arguments)]
 fn install_remote_bytes(
     remote: &InstallSource,
     bytes: &[u8],

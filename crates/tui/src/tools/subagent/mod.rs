@@ -13416,6 +13416,7 @@ impl SubAgentToolRegistry {
 
     /// Emit a transcript-visible receipt for a decision made on this child's
     /// call without a person seeing a prompt (the audit log has the record).
+    #[allow(clippy::too_many_arguments)]
     async fn emit_child_gate_receipt(
         &self,
         agent_id: &str,

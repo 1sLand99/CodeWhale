@@ -1143,6 +1143,7 @@ mod tests {
     /// Rendered gallery — kept as a test so the whole set can be eyeballed
     /// with `--nocapture` without adding a slash command.
     #[test]
+    #[allow(clippy::print_stdout)]
     fn gallery_renders_every_species_in_every_state() {
         for species in WhaleSpecies::ALL {
             println!("== {} ({}) ==", species.name(), badge_ascii(species));

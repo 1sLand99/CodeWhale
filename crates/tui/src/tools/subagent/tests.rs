@@ -18960,20 +18960,19 @@ mod child_permission_gate {
                 // does when the person decides in the parent's UI.
                 let mut approval_id = None;
                 for _ in 0..200 {
-                    if let Ok(event) = rx.try_recv() {
-                        if let Event::ApprovalRequired {
+                    if let Ok(event) = rx.try_recv()
+                        && let Event::ApprovalRequired {
                             id,
                             tool_name,
                             description,
                             ..
                         } = event
-                        {
-                            assert_eq!(tool_name, "bash");
-                            assert!(description.contains("wants to run 'bash'"), "{description}");
-                            assert!(SubAgentManager::is_child_approval_id(&id));
-                            approval_id = Some(id);
-                            break;
-                        }
+                    {
+                        assert_eq!(tool_name, "bash");
+                        assert!(description.contains("wants to run 'bash'"), "{description}");
+                        assert!(SubAgentManager::is_child_approval_id(&id));
+                        approval_id = Some(id);
+                        break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }

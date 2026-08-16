@@ -349,10 +349,10 @@ pub(crate) fn render_overlay(mapped: &MappedIdentity) -> Option<String> {
                 "        displayName: {}\n",
                 yaml_str(&format!("{} (via Codewhale)", src.provider_label))
             ));
-            if !src.keyless_local {
-                if let Some(env) = src.api_key_env.as_deref() {
-                    out.push_str(&format!("        apiKeyEnv: {}\n", yaml_str(env)));
-                }
+            if !src.keyless_local
+                && let Some(env) = src.api_key_env.as_deref()
+            {
+                out.push_str(&format!("        apiKeyEnv: {}\n", yaml_str(env)));
             }
             out.push_str("        api: openai-completions\n");
             out.push_str(&format!("        baseURL: {}\n", yaml_str(&src.base_url)));
