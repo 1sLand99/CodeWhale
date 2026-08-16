@@ -593,6 +593,9 @@ pub struct Engine {
     /// state stays alive across model turns.
     repl_kernel: Option<crate::repl::PythonRuntime>,
     subagent_manager: SharedSubAgentManager,
+    /// The deterministic Auto-Review policy shared with every child runtime
+    /// so children are gated by the same rules as the parent turn.
+    shared_auto_review_policy: Arc<crate::tui::auto_review::AutoReviewPolicy>,
     shell_manager: SharedShellManager,
     /// Read-before-edit snapshots live for the session, not for one turn's
     /// transient `ToolContext` (#4475).
@@ -1297,6 +1300,7 @@ impl Engine {
             .map(std::sync::Arc::from);
 
         let active_route_limits = config.active_route_limits;
+        let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1309,6 +1313,7 @@ impl Engine {
             session,
             repl_kernel: None,
             subagent_manager,
+            shared_auto_review_policy,
             shell_manager,
             file_read_tracker,
             mcp_pool: None,
@@ -1862,6 +1867,14 @@ impl Engine {
                     completion = self.rx_subagent_completion.recv(), if !host_managed_turns => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
                     }
+                    // A background child may be waiting on a person's answer
+                    // while the parent turn is idle: route it. Any other
+                    // decision has no waiter and is dropped, as before.
+                    decision = self.rx_approval.recv() => {
+                        if let Some(decision) = decision {
+                            self.route_child_approval_decision(decision).await;
+                        }
+                    }
                     // Background shells have no completion channel, so an
                     // idle engine polls only while a goal is active and a
                     // background job is outstanding; the arm disarms itself
@@ -1874,6 +1887,32 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Deliver an approval decision to a child waiting on it. Returns whether
+    /// a child took it; the parent's own awaiting call keeps every other id.
+    async fn route_child_approval_decision(
+        &self,
+        decision: super::engine::approval::ApprovalDecision,
+    ) -> bool {
+        use crate::tools::subagent::{ChildApprovalOutcome, SubAgentManager};
+        let (id, outcome) = match &decision {
+            super::engine::approval::ApprovalDecision::Approved { id } => {
+                (id.clone(), ChildApprovalOutcome::Approved)
+            }
+            super::engine::approval::ApprovalDecision::Denied { id } => {
+                (id.clone(), ChildApprovalOutcome::Denied)
+            }
+            // A sandbox retry only exists for the parent's own tool call.
+            super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
+        };
+        if !SubAgentManager::is_child_approval_id(&id) {
+            return false;
+        }
+        self.subagent_manager
+            .write()
+            .await
+            .resolve_child_approval(&id, outcome)
     }
 
     /// Whether the idle loop should poll for background shell completion: a
@@ -3625,7 +3664,12 @@ impl Engine {
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
                 .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
-                .with_parent_mode(input_policy.mode);
+                .with_parent_mode(input_policy.mode)
+                .with_permission_posture(
+                    self.session.approval_mode,
+                    Arc::clone(&self.shared_auto_review_policy),
+                    self.config.terminal_chrome_enabled,
+                );
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
                 }
@@ -4802,7 +4846,12 @@ impl Engine {
         .with_todos(self.config.todos.clone())
         .with_parent_completion_tx(self.tx_subagent_completion.clone())
         .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
-        .with_parent_mode(mode);
+        .with_parent_mode(mode)
+        .with_permission_posture(
+            self.session.approval_mode,
+            Arc::clone(&self.shared_auto_review_policy),
+            self.config.terminal_chrome_enabled,
+        );
         if matches!(mode, AppMode::Plan) {
             rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
         }
@@ -6137,7 +6186,7 @@ use context::{
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
 mod dispatch;
 mod lsp_hooks;
-mod reviewer;
+pub(crate) mod reviewer;
 mod streaming;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;
@@ -6192,7 +6241,7 @@ use self::tool_catalog::{
     execute_tool_search, initial_active_tools, preflight_requested_deferred_tool,
     should_default_defer_tool, tool_allowed, tool_catalog_consistency_issues, tool_denied,
 };
-use self::tool_execution::emit_tool_audit;
+pub(crate) use self::tool_execution::emit_tool_audit;
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
 use crate::tools::js_execution::execute_js_execution_tool;
 

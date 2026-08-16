@@ -1469,5 +1469,13 @@
   "AgentFocusFollowUpFailed": "Не вдалося доставити {agent}: {reason}",
   "FooterHintForAgents": "агенти",
   "FooterHintToManage": "керування",
-  "AgentRailQueuedCount": "{count} у черзі"
+  "AgentRailQueuedCount": "{count} у черзі",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "пише",
+  "AgentFocusPostureReadOnly": "лише читання",
+  "AgentFocusPostureNetwork": "мережа",
+  "AgentFocusPostureNoNetwork": "без мережі",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell лише читання",
+  "AgentFocusPostureShellNone": "без shell"
 }

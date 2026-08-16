@@ -1469,5 +1469,13 @@
   "AgentFocusFollowUpFailed": "Impossible de transmettre à {agent} : {reason}",
   "FooterHintForAgents": "agents",
   "FooterHintToManage": "gérer",
-  "AgentRailQueuedCount": "{count} en file"
+  "AgentRailQueuedCount": "{count} en file",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "écrit",
+  "AgentFocusPostureReadOnly": "lecture seule",
+  "AgentFocusPostureNetwork": "réseau",
+  "AgentFocusPostureNoNetwork": "sans réseau",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell en lecture seule",
+  "AgentFocusPostureShellNone": "sans shell"
 }

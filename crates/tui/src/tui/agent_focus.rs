@@ -58,6 +58,9 @@ pub struct AgentFocus {
     pub last_visible: usize,
     /// Last total line count after wrapping (for scrollbar/clamping).
     pub last_total: usize,
+    /// Number of permission receipts folded into `cells`, so a new receipt
+    /// on an unchanged message count still triggers a rebuild.
+    receipt_count: usize,
     last_refresh: Instant,
 }
 
@@ -73,6 +76,7 @@ impl AgentFocus {
             scroll_top: None,
             last_visible: 0,
             last_total: 0,
+            receipt_count: 0,
             last_refresh: Instant::now() - REFRESH_INTERVAL,
         }
     }
@@ -143,11 +147,48 @@ pub(crate) fn agent_display_label(app: &App, agent_id: &str) -> String {
         .unwrap_or_else(|| crate::tui::agent_details::safe_agent_display_name(app, agent_id))
 }
 
-fn cells_for_messages(messages: &[Message]) -> Vec<HistoryCell> {
-    messages
-        .iter()
-        .flat_map(history_cells_from_message)
-        .collect()
+/// Render a child's messages as history cells, folding in the permission
+/// receipts recorded for that child: each receipt lands right after the
+/// message that carries the tool's result (or, while the call is still
+/// running, after the tool-use block itself), so a decision reads in place.
+fn cells_for_messages(messages: &[Message], receipts: &[(String, String)]) -> Vec<HistoryCell> {
+    use crate::models::ContentBlock;
+    let mut resulted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for message in messages {
+        for block in &message.content {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                resulted.insert(tool_use_id.as_str());
+            }
+        }
+    }
+    let mut cells = Vec::new();
+    for message in messages {
+        cells.extend(history_cells_from_message(message));
+        for block in &message.content {
+            let anchor = match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                ContentBlock::ToolUse { id, .. } if !resulted.contains(id.as_str()) => {
+                    Some(id.as_str())
+                }
+                _ => None,
+            };
+            let Some(anchor) = anchor else { continue };
+            for (tool_id, text) in receipts {
+                if tool_id == anchor {
+                    cells.push(HistoryCell::System {
+                        content: text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn child_receipts<'a>(app: &'a App, agent_id: &str) -> &'a [(String, String)] {
+    app.child_gate_receipts
+        .get(agent_id)
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Focus a child: its full transcript owns the main area and the composer
@@ -165,7 +206,9 @@ pub(crate) fn focus_agent(app: &mut App, agent_id: &str) {
     let label = agent_display_label(app, agent_id);
     let mut focus = AgentFocus::new(agent_id.to_string(), label.clone());
     let (messages, omitted) = resolve_agent_transcript_messages(app, agent_id);
-    focus.cells = cells_for_messages(&messages);
+    let receipts = child_receipts(app, agent_id);
+    focus.cells = cells_for_messages(&messages, receipts);
+    focus.receipt_count = receipts.len();
     focus.source_message_count = messages.len();
     focus.omitted_messages = omitted;
     focus.last_refresh = Instant::now();
@@ -208,15 +251,20 @@ pub(crate) fn refresh_focus(app: &mut App) {
     }
     let agent_id = focus.agent_id.clone();
     let (messages, omitted) = resolve_agent_transcript_messages(app, &agent_id);
+    let receipts = child_receipts(app, &agent_id).to_vec();
     let Some(focus) = app.agent_focus.as_mut() else {
         return;
     };
     focus.last_refresh = Instant::now();
-    if messages.len() == focus.source_message_count && omitted == focus.omitted_messages {
+    if messages.len() == focus.source_message_count
+        && omitted == focus.omitted_messages
+        && receipts.len() == focus.receipt_count
+    {
         return;
     }
     let previous_count = focus.source_message_count;
-    focus.cells = cells_for_messages(&messages);
+    focus.cells = cells_for_messages(&messages, &receipts);
+    focus.receipt_count = receipts.len();
     focus.source_message_count = messages.len();
     focus.omitted_messages = omitted;
     // Drop local user echoes that the transcript now carries itself.
@@ -337,6 +385,40 @@ pub(crate) fn focused_status(app: &App) -> Option<(char, String)> {
     })
 }
 
+/// One short line naming the focused worker's effective posture: its role,
+/// whether it may write the workspace, reach the network, and run shell —
+/// from the runtime's persisted permission snapshot, never guessed.
+pub(crate) fn focused_posture(app: &App) -> Option<String> {
+    let focus = app.agent_focus.as_ref()?;
+    let agent = app
+        .subagent_cache
+        .iter()
+        .find(|agent| agent.agent_id == focus.agent_id)?;
+    let permissions = agent.runtime_permissions.as_ref()?;
+    let write = app.tr(if permissions.write {
+        MessageId::AgentFocusPostureWrites
+    } else {
+        MessageId::AgentFocusPostureReadOnly
+    });
+    let network = app.tr(if permissions.network {
+        MessageId::AgentFocusPostureNetwork
+    } else {
+        MessageId::AgentFocusPostureNoNetwork
+    });
+    let shell = app.tr(match permissions.shell.as_str() {
+        "full" => MessageId::AgentFocusPostureShellFull,
+        "read_only" => MessageId::AgentFocusPostureShellReadOnly,
+        _ => MessageId::AgentFocusPostureShellNone,
+    });
+    Some(
+        app.tr(MessageId::AgentFocusPosture)
+            .replace("{role}", agent.agent_type.as_str())
+            .replace("{write}", &write)
+            .replace("{network}", &network)
+            .replace("{shell}", &shell),
+    )
+}
+
 /// Whether any worker exists to list, focus, or manage this session.
 pub(crate) fn agents_exist(app: &App) -> bool {
     !app.subagent_cache.is_empty() || !app.agent_progress.is_empty()
@@ -406,7 +488,7 @@ pub(crate) fn render_focus(app: &mut App, area: Rect, buf: &mut Buffer) {
         .tr(MessageId::AgentFocusBanner)
         .replace("{agent}", &focus.label)
         .replace("{status}", &status_word);
-    let banner_line = Line::from(vec![
+    let mut banner_spans = vec![
         Span::styled(
             format!("{status_glyph} "),
             Style::default().fg(theme.accent_action),
@@ -417,7 +499,16 @@ pub(crate) fn render_focus(app: &mut App, area: Rect, buf: &mut Buffer) {
                 .fg(theme.accent_action)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]);
+    ];
+    // The worker's effective posture, in the same dot chain: what it may do
+    // is stated where its conversation is read, not hidden in a role name.
+    if let Some(posture) = focused_posture(app) {
+        banner_spans.push(Span::styled(
+            format!(" · {posture}"),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+    let banner_line = Line::from(banner_spans);
     let width = area.width.max(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if focus.omitted_messages > 0 {
@@ -560,6 +651,68 @@ mod tests {
         assert!(app.agent_focus.is_none());
         assert!(composer_chip_text(&app).is_none());
         assert!(!exit_focus(&mut app));
+    }
+
+    #[test]
+    fn focus_banner_states_the_workers_effective_posture_from_the_runtime_snapshot() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        seed_resident_transcript(
+            &mut app,
+            "agent_scout",
+            json!([{"role": "user", "content": [{"type": "text", "text": "look around", "cache_control": null}]}]),
+        );
+        app.subagent_cache
+            .push(crate::tools::subagent::SubAgentResult {
+                name: "agent_scout".to_string(),
+                agent_id: "agent_scout".to_string(),
+                context_mode: "fresh".to_string(),
+                fork_context: false,
+                workspace: None,
+                git_branch: None,
+                agent_type: crate::tools::subagent::FleetRole::Scout,
+                assignment: crate::tools::subagent::SubAgentAssignment {
+                    objective: "look around".to_string(),
+                    role: Some("scout".to_string()),
+                },
+                model: "deepseek-v4-flash".to_string(),
+                nickname: None,
+                status: SubAgentStatus::Running,
+                worker_status: None,
+                runtime_permissions: Some(codewhale_protocol::fleet::FleetEffectivePermissions {
+                    write: false,
+                    network: true,
+                    shell: "read_only".to_string(),
+                    tool_scope: "inherit".to_string(),
+                    tools: Vec::new(),
+                    background: true,
+                    max_spawn_depth: 1,
+                    profile_id: None,
+                    profile_origin: None,
+                    source: "built_in".to_string(),
+                }),
+                parent_run_id: None,
+                spawn_depth: 1,
+                child_route: None,
+                result: None,
+                steps_taken: 0,
+                checkpoint: None,
+                needs_input: None,
+                duration_ms: 0,
+                started_at: None,
+                from_prior_session: false,
+            });
+        focus_agent(&mut app, "agent_scout");
+        let posture = focused_posture(&app).expect("posture line from the snapshot");
+        assert_eq!(posture, "scout · read-only · network · read-only shell");
+        let screen = render(&mut app, 100, 8);
+        assert!(
+            screen.contains("read-only · network · read-only shell"),
+            "{screen}"
+        );
+        // No snapshot, no guess.
+        app.subagent_cache[0].runtime_permissions = None;
+        assert!(focused_posture(&app).is_none());
     }
 
     fn focus_label(app: &App) -> String {

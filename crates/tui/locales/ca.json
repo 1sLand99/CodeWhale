@@ -1469,5 +1469,13 @@
   "AgentFocusFollowUpFailed": "No s'ha pogut lliurar a {agent}: {reason}",
   "FooterHintForAgents": "agents",
   "FooterHintToManage": "gestionar",
-  "AgentRailQueuedCount": "{count} a la cua"
+  "AgentRailQueuedCount": "{count} a la cua",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "escriu",
+  "AgentFocusPostureReadOnly": "només lectura",
+  "AgentFocusPostureNetwork": "xarxa",
+  "AgentFocusPostureNoNetwork": "sense xarxa",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell de només lectura",
+  "AgentFocusPostureShellNone": "sense shell"
 }

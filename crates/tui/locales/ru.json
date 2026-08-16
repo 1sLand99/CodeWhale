@@ -1469,5 +1469,13 @@
   "AgentFocusFollowUpFailed": "Не удалось доставить {agent}: {reason}",
   "FooterHintForAgents": "агенты",
   "FooterHintToManage": "управление",
-  "AgentRailQueuedCount": "{count} в очереди"
+  "AgentRailQueuedCount": "{count} в очереди",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "пишет",
+  "AgentFocusPostureReadOnly": "только чтение",
+  "AgentFocusPostureNetwork": "сеть",
+  "AgentFocusPostureNoNetwork": "без сети",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell только чтение",
+  "AgentFocusPostureShellNone": "без shell"
 }

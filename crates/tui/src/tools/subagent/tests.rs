@@ -551,10 +551,13 @@ fn declared_read_only_write_roles_derive_without_mutating_shell() {
 }
 
 #[test]
-fn custom_runtime_opens_only_for_explicit_bounded_write_authority() {
+fn custom_runtime_inherits_the_parent_posture_and_explicit_authority_is_a_no_op_superset() {
     let runtime = stub_runtime().background_runtime();
     let tools = AgentWorkerToolProfile::Explicit(vec!["write_file".to_string()]);
-    let locked = worker_profile_for_spawn(
+    // A custom worker is narrowed by its explicit tool list and by the
+    // spawning call, not by a silent locked-down default: it inherits the
+    // parent's effective posture (write, network, shell) as its ceiling.
+    let inherited = worker_profile_for_spawn(
         &runtime,
         &FleetRole::Custom,
         &tools,
@@ -562,8 +565,9 @@ fn custom_runtime_opens_only_for_explicit_bounded_write_authority() {
         None,
         false,
     );
-    assert!(!locked.permissions.write);
-    assert_eq!(locked.shell, ShellPolicy::None);
+    assert!(inherited.permissions.write);
+    assert!(inherited.permissions.network);
+    assert_eq!(inherited.shell, ShellPolicy::Full);
 
     let opened = worker_profile_for_spawn(
         &runtime,
@@ -5777,7 +5781,8 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
     // Only Full-shell roles may run shell (Required) tools. Scout/reviewer
     // now carry the read-only inspection posture (full shell authority, bounded verification
     // surface; raw shell still requires write and stays denied by the clamp),
-    // so they join verifier/builder/worker. Planner stays shell-less.
+    // so they join verifier/builder/worker. Planner's declared posture is
+    // read-only probes (Auto-classified bash), not Required/raw shell.
     for role in [
         FleetRole::Verifier,
         FleetRole::Builder,
@@ -5792,7 +5797,7 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
     }
     assert!(
         !role_posture_permits(&FleetRole::Planner, ApprovalRequirement::Required),
-        "Planner must not run shell tools"
+        "Planner must not run raw/Required shell; read-only probes are Auto"
     );
 
     // Custom passes the role-only check; its explicit allowlist, bounded write
@@ -6303,6 +6308,9 @@ fn every_named_role_has_one_complete_capability_based_surface() {
             expected.insert("pandoc_convert".to_string());
         }
 
+        if role == FleetRole::Planner {
+            expected.insert("bash".to_string());
+        }
         assert_eq!(names, expected, "{role:?} visible surface drifted");
     }
 }
@@ -6520,7 +6528,7 @@ async fn execute_surface_tool(
 ) -> Result<String> {
     let request_active = surface.active_names.clone();
     registry
-        .execute_from_surface("agent_test", surface, &request_active, name, input)
+        .execute_from_surface("agent_test", "", surface, &request_active, name, input)
         .await
         .map(|result| result.result.content)
 }
@@ -6576,6 +6584,7 @@ async fn small_surface_read_only_child_discovers_web_deferred() {
     let result = registry
         .execute_from_surface(
             "agent_scout",
+            "",
             &mut surface,
             &request_active,
             TOOL_SEARCH_NAME,
@@ -6587,6 +6596,7 @@ async fn small_surface_read_only_child_discovers_web_deferred() {
     let same_batch = registry
         .execute_from_surface(
             "agent_scout",
+            "",
             &mut surface,
             &request_active,
             "Web",
@@ -7183,6 +7193,60 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
 }
 
 #[tokio::test]
+async fn planner_exposes_and_dispatches_read_only_bash_probes() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
+    seed_read_only_role_deny_list(&mut runtime);
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Planner,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    let names = tool_names(registry.tools_for_model(&FleetRole::Planner));
+    assert!(
+        names.contains("bash"),
+        "planner keeps read-only bash probes"
+    );
+    assert!(names.contains("Git"), "planner keeps the Git family");
+    assert!(
+        !names.contains("Run"),
+        "planner must not gain the verification surface"
+    );
+    for command in ["pwd", "git status --short", "rg needle crates"] {
+        assert!(
+            registry
+                .envelope_refusal("bash", &json!({"command": command}))
+                .is_none(),
+            "planner should admit {command}"
+        );
+    }
+    for command in ["rm -rf crates", "git push origin main", "bash -lc 'id'"] {
+        assert!(
+            registry
+                .envelope_refusal("bash", &json!({"command": command}))
+                .is_some(),
+            "planner must refuse {command}"
+        );
+    }
+    let sentinel = "PLANNER_PROBE_SENTINEL";
+    std::fs::write(tmp.path().join("sentinel.txt"), sentinel).expect("sentinel");
+    let output = registry
+        .execute(
+            "agent_planner",
+            "bash",
+            json!({"command": "cat sentinel.txt"}),
+        )
+        .await
+        .expect("planner must dispatch a bounded read");
+    assert_eq!(output, sentinel);
+}
+
+#[tokio::test]
 async fn scout_shell_respects_parent_shell_and_network_ceilings() {
     let tmp = tempdir().expect("tempdir");
     let mut shell_off =
@@ -7232,11 +7296,7 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
         .to_string();
     assert!(error.contains("no network capability"), "{error}");
 
-    for role in [
-        FleetRole::Planner,
-        FleetRole::Consultant,
-        FleetRole::Verifier,
-    ] {
+    for role in [FleetRole::Consultant, FleetRole::Verifier] {
         let mut runtime =
             stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
         runtime.context = ToolContext::new(tmp.path().to_path_buf());
@@ -7250,7 +7310,7 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
         );
         assert!(
             !tool_names(registry.tools_for_model(&role)).contains("bash"),
-            "{role:?} must not inherit the Scout-only bash catalog exception"
+            "{role:?} must not inherit the read-only inspection bash catalog"
         );
         if role == FleetRole::Verifier {
             assert!(
@@ -7383,10 +7443,13 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
                     "read-only role {role:?} keeps load_skill without gaining {denied}"
                 );
             }
-            // Scout/reviewer expose only canonical lowercase bash, whose
-            // concrete calls are reclassified. Planner is shell-less; verifier
-            // keeps its bounded Run surface but not raw bash.
-            if matches!(&role, FleetRole::Scout | FleetRole::Reviewer) {
+            // Scout/reviewer/planner expose only canonical lowercase bash,
+            // whose concrete calls are reclassified. Verifier keeps its
+            // bounded Run surface but not raw bash.
+            if matches!(
+                &role,
+                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+            ) {
                 assert!(names.contains("bash"), "{role:?} keeps read-only bash");
                 for denied in ["exec_shell", "task_shell_start"] {
                     assert!(
@@ -10773,7 +10836,7 @@ async fn subagent_blocks_mcp_action_without_parent_auto_approve() {
 
     assert!(
         err.to_string().contains(
-            "requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
+            "requires approval and cannot run inside this sub-agent without a session decision"
         ),
         "unexpected MCP approval error: {err}"
     );
@@ -11032,9 +11095,8 @@ async fn delegated_write_role_still_blocks_required_tools() {
         .await
         .expect_err("Required-level shell must still need parent auto-approve");
     assert!(
-        err.to_string().contains(
-            "cannot run inside this sub-agent unless the parent session is auto-approved"
-        ),
+        err.to_string()
+            .contains("cannot run inside this sub-agent without a session decision"),
         "expected Required-level approval message, got: {err}"
     );
 }
@@ -11236,9 +11298,9 @@ async fn builder_child_runs_bounded_verification_but_not_shell_without_parent_au
         .await
         .expect_err("arbitrary shell stays gated for children of non-auto parents");
     assert!(
-        shell_err.to_string().contains(
-            "cannot run inside this sub-agent unless the parent session is auto-approved"
-        ),
+        shell_err
+            .to_string()
+            .contains("cannot run inside this sub-agent without a session decision"),
         "unexpected error: {shell_err}"
     );
 
@@ -11752,6 +11814,11 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         parent_completion_tx: None,
         fork_context: None,
         parent_mode: crate::tui::app::AppMode::Agent,
+        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        auto_review_policy: std::sync::Arc::new(
+            crate::tui::auto_review::AutoReviewPolicy::default(),
+        ),
+        parent_can_prompt: false,
         mcp_pool: None,
         step_api_timeout: DEFAULT_STEP_API_TIMEOUT,
         api_timeout_retry_base_backoff: SUBAGENT_API_TIMEOUT_INITIAL_BACKOFF,
@@ -18749,4 +18816,320 @@ fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
         .continue_child_from_user(handle, None, &agent_id, "one more")
         .expect_err("no runtime, no resume");
     assert!(err.to_string().contains("no runtime"), "{err}");
+}
+
+// === child permission gate: the session posture applied to a worker's calls ===
+
+mod child_permission_gate {
+    use super::*;
+    use crate::core::events::{Event, ToolGate, ToolGateVerdict};
+    use crate::tui::approval::ApprovalMode;
+
+    /// A Worker registry with `bash` available, the given posture installed,
+    /// and an event channel so gate receipts and prompts can be observed.
+    fn worker_registry(
+        approval_mode: ApprovalMode,
+        auto_approve: bool,
+        parent_can_prompt: bool,
+        client: Option<DeepSeekClient>,
+    ) -> (
+        SubAgentToolRegistry,
+        tokio::sync::mpsc::Receiver<Event>,
+        SharedSubAgentManager,
+    ) {
+        let tmp = tempdir().expect("tempdir");
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let mut runtime = stub_runtime();
+        if let Some(client) = client {
+            runtime.client = client;
+        }
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.context.auto_approve = auto_approve;
+        runtime.allow_shell = true;
+        runtime.event_tx = Some(tx);
+        runtime = runtime.with_permission_posture(
+            approval_mode,
+            std::sync::Arc::new(crate::tui::auto_review::AutoReviewPolicy::default()),
+            parent_can_prompt,
+        );
+        let manager = Arc::clone(&runtime.manager);
+        // Keep the tempdir alive for the registry's lifetime by leaking it
+        // into the workspace path (tests are short-lived).
+        std::mem::forget(tmp);
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            FleetRole::Worker,
+            None,
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        );
+        (registry, rx, manager)
+    }
+
+    fn drain_gate_receipts(
+        rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    ) -> Vec<(ToolGate, ToolGateVerdict, Option<String>, String)> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::ToolGateDecision {
+                agent_id,
+                gate,
+                decision,
+                risk,
+                reason,
+                ..
+            } = event
+            {
+                assert_eq!(agent_id.as_deref(), Some("agent_gate"));
+                out.push((gate, decision, risk, reason));
+            }
+        }
+        out
+    }
+
+    /// A chat-completions mock that answers every request with `content`.
+    async fn guardian_mock(content: &str) -> (wiremock::MockServer, DeepSeekClient) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-guardian",
+                "object": "chat.completion",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}
+            })))
+            .mount(&server)
+            .await;
+        let config = crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            base_url: Some(server.uri()),
+            ..crate::config::Config::default()
+        };
+        let client = DeepSeekClient::new(&config).expect("mock-backed client");
+        (server, client)
+    }
+
+    fn unreachable_client() -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            base_url: Some("http://127.0.0.1:1".to_string()),
+            ..crate::config::Config::default()
+        };
+        DeepSeekClient::new(&config).expect("unreachable client")
+    }
+
+    #[tokio::test]
+    async fn ask_on_a_host_that_cannot_prompt_denies_with_the_reason_and_no_receipt() {
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Suggest, false, false, None);
+        let err = registry
+            .execute(
+                "agent_gate",
+                "bash",
+                json!({"command": "cargo build --release"}),
+            )
+            .await
+            .expect_err("arbitrary shell needs a session decision under Ask");
+        assert!(
+            err.to_string().contains("without a session decision"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("cannot raise a prompt"), "{err}");
+        // A refusal the child model sees is not a silent decision; no receipt.
+        assert!(drain_gate_receipts(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_with_a_prompting_host_raises_the_prompt_and_honours_the_answer() {
+        for (answer, expect_ok) in [
+            (ChildApprovalOutcome::Approved, true),
+            (ChildApprovalOutcome::Denied, false),
+        ] {
+            let (registry, mut rx, manager) =
+                worker_registry(ApprovalMode::Suggest, false, true, None);
+            let manager_for_answer = Arc::clone(&manager);
+            let answerer = tokio::spawn(async move {
+                // Wait for the prompt, then answer it exactly like the engine
+                // does when the person decides in the parent's UI.
+                let mut approval_id = None;
+                for _ in 0..200 {
+                    if let Ok(event) = rx.try_recv() {
+                        if let Event::ApprovalRequired {
+                            id,
+                            tool_name,
+                            description,
+                            ..
+                        } = event
+                        {
+                            assert_eq!(tool_name, "bash");
+                            assert!(description.contains("wants to run 'bash'"), "{description}");
+                            assert!(SubAgentManager::is_child_approval_id(&id));
+                            approval_id = Some(id);
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let approval_id = approval_id.expect("child prompt must reach the host");
+                assert_eq!(manager_for_answer.read().await.pending_child_approvals(), 1);
+                assert!(
+                    manager_for_answer
+                        .write()
+                        .await
+                        .resolve_child_approval(&approval_id, answer)
+                );
+                // Answering twice finds no waiter.
+                assert!(
+                    !manager_for_answer
+                        .write()
+                        .await
+                        .resolve_child_approval(&approval_id, answer)
+                );
+            });
+            let result = registry
+                .execute("agent_gate", "bash", json!({"command": "echo gated"}))
+                .await;
+            answerer.await.expect("answerer task");
+            match (expect_ok, result) {
+                (true, Ok(output)) => assert!(output.contains("gated"), "{output}"),
+                (false, Err(err)) => {
+                    assert!(err.to_string().contains("denied by the user"), "{err}");
+                }
+                (true, Err(err)) => panic!("approved call must run: {err}"),
+                (false, Ok(output)) => panic!("denied call must not run: {output}"),
+            }
+            assert_eq!(manager.read().await.pending_child_approvals(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_review_lets_the_deterministic_floor_allow_routine_shell_without_a_prompt() {
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Auto, false, true, None);
+        let output = registry
+            .execute("agent_gate", "bash", json!({"command": "echo routine"}))
+            .await
+            .expect("proven-safe shell runs under Auto-Review");
+        assert!(output.contains("routine"), "{output}");
+        // No prompt was raised and a proven-safe allow is silent.
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, Event::ApprovalRequired { .. }),
+                "no prompt under Auto-Review"
+            );
+            assert!(
+                !matches!(event, Event::ToolGateDecision { .. }),
+                "silent deterministic allow"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_review_blocks_publish_like_shell_with_a_deterministic_receipt() {
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Auto, false, true, None);
+        let err = registry
+            .execute(
+                "agent_gate",
+                "bash",
+                json!({"command": "git push origin main"}),
+            )
+            .await
+            .expect_err("publish-like shell is a hard block");
+        assert!(err.to_string().to_lowercase().contains("publish"), "{err}");
+        let receipts = drain_gate_receipts(&mut rx);
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0].0, ToolGate::AutoReviewDeterministic);
+        assert_eq!(receipts[0].1, ToolGateVerdict::Denied);
+    }
+
+    #[tokio::test]
+    async fn auto_review_consults_the_guardian_and_runs_an_allowed_call_with_a_receipt() {
+        let (_server, client) = guardian_mock(
+            r#"{"risk_level":"low","decision":"allow","reason":"builds inside the workspace"}"#,
+        )
+        .await;
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Auto, false, true, Some(client));
+        let output = registry
+            // A pipeline is never "routine" for the deterministic floor, so it
+            // reaches the guardian; the command itself is harmless.
+            .execute("agent_gate", "bash", json!({"command": "echo built | cat"}))
+            .await
+            .expect("guardian-approved call runs");
+        assert!(output.contains("built"), "{output}");
+        let receipts = drain_gate_receipts(&mut rx);
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0].0, ToolGate::AutoReviewGuardian);
+        assert_eq!(receipts[0].1, ToolGateVerdict::Allowed);
+        assert_eq!(receipts[0].2.as_deref(), Some("low"));
+        assert!(receipts[0].3.contains("builds inside the workspace"));
+    }
+
+    #[tokio::test]
+    async fn auto_review_guardian_denial_refuses_the_call_with_a_receipt() {
+        let (_server, client) = guardian_mock(
+            r#"{"risk_level":"high","decision":"deny","reason":"would rewrite shared history"}"#,
+        )
+        .await;
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Auto, false, true, Some(client));
+        let err = registry
+            .execute("agent_gate", "bash", json!({"command": "echo built | cat"}))
+            .await
+            .expect_err("guardian denial refuses the call");
+        assert!(
+            err.to_string().contains("would rewrite shared history"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("Do not work around"), "{err}");
+        let receipts = drain_gate_receipts(&mut rx);
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0].1, ToolGateVerdict::Denied);
+        assert_eq!(receipts[0].2.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn auto_review_with_an_unreachable_guardian_fails_closed_with_a_receipt() {
+        let (registry, mut rx, _) =
+            worker_registry(ApprovalMode::Auto, false, true, Some(unreachable_client()));
+        let err = registry
+            .execute("agent_gate", "bash", json!({"command": "echo built | cat"}))
+            .await
+            .expect_err("an unavailable guardian denies");
+        assert!(err.to_string().contains("fail closed"), "{err}");
+        let receipts = drain_gate_receipts(&mut rx);
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0].0, ToolGate::AutoReviewGuardian);
+        assert_eq!(receipts[0].1, ToolGateVerdict::Unavailable);
+        assert!(receipts[0].2.is_none());
+    }
+
+    #[tokio::test]
+    async fn full_access_runs_ordinary_shell_but_still_hard_blocks_the_safety_floor() {
+        let (registry, mut rx, _) = worker_registry(ApprovalMode::Bypass, true, true, None);
+        let output = registry
+            .execute("agent_gate", "bash", json!({"command": "echo full-access"}))
+            .await
+            .expect("Full Access runs ordinary shell without a prompt");
+        assert!(output.contains("full-access"), "{output}");
+        assert!(drain_gate_receipts(&mut rx).is_empty());
+        // Destructive detached work holds in every posture (children are
+        // background workers), so Full Access still fails closed here.
+        let err = registry
+            .execute("agent_gate", "bash", json!({"command": "rm -rf /usr"}))
+            .await
+            .expect_err("destructive background shell stays blocked in Full Access");
+        assert!(
+            err.to_string().to_lowercase().contains("destructive")
+                || err.to_string().to_lowercase().contains("safety"),
+            "{err}"
+        );
+        let receipts = drain_gate_receipts(&mut rx);
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(receipts[0].1, ToolGateVerdict::Denied);
+    }
 }

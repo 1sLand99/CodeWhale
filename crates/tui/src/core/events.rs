@@ -514,6 +514,10 @@ pub enum Event {
     /// deterministic allows stay silent, like rule-based auto-approvals in
     /// other harnesses, so a routine read does not spam the transcript.
     ToolGateDecision {
+        /// The child (sub-agent / Fleet worker) whose call was gated, or
+        /// `None` for the parent turn. Hosts route a child's receipt into that
+        /// child's transcript.
+        agent_id: Option<String>,
         /// Tool-call id the decision applies to.
         tool_id: String,
         /// Tool name as the model called it.

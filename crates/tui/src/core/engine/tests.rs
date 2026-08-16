@@ -18116,3 +18116,49 @@ async fn user_prompt_reaches_the_model_exactly_once_per_request() {
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }
+
+/// A person's answer to a prompt raised for a child (`agent:…:approval:n`)
+/// reaches the waiting child while the parent turn is idle; the parent's
+/// own approval path is untouched by ids it does not own.
+#[tokio::test]
+async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
+    use crate::tools::subagent::ChildApprovalOutcome;
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+    let manager = engine.subagent_manager.clone();
+    let run = tokio::spawn(engine.run());
+
+    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    handle
+        .approve_tool_call(approval_id.clone())
+        .await
+        .expect("approval decision accepted");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), receiver)
+        .await
+        .expect("child must be answered while the engine idles")
+        .expect("child prompt resolved, not dropped");
+    assert_eq!(outcome, ChildApprovalOutcome::Approved);
+    assert_eq!(manager.read().await.pending_child_approvals(), 0);
+
+    // A denial for a second prompt routes the same way.
+    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    handle
+        .deny_tool_call(approval_id)
+        .await
+        .expect("denial accepted");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), receiver)
+        .await
+        .expect("child must be answered")
+        .expect("child prompt resolved");
+    assert_eq!(outcome, ChildApprovalOutcome::Denied);
+
+    // A decision for a parent-shaped id has no child waiter and is not routed.
+    assert!(!crate::tools::subagent::SubAgentManager::is_child_approval_id("call_123"));
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
