@@ -1375,6 +1375,20 @@ pub(crate) async fn handle_view_events(
                 app.needs_redraw = true;
             }
             ViewEvent::FleetProfileDraftCommitRequested { draft, scope } => {
+                // A project-scope save is refused (never silently redirected)
+                // when project profiles are disabled for this launch: the file
+                // would be written where nothing loads it.
+                if scope == crate::fleet::profile::FleetProfileScope::Project
+                    && !crate::fleet::roster::project_agent_profiles_enabled()
+                {
+                    app.set_sticky_status(
+                        tr(app.ui_locale, MessageId::FleetDestProjectDisabledSave).into_owned(),
+                        StatusToastLevel::Error,
+                        None,
+                    );
+                    app.needs_redraw = true;
+                    continue;
+                }
                 // The TOML is rendered deterministically from the validated
                 // draft and written atomically; the target path is derived
                 // from the sanitized id, never model-chosen.
