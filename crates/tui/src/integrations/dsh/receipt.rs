@@ -23,6 +23,8 @@ pub(crate) enum DshReceiptEvent {
     Disable,
     Enable,
     Remove,
+    InstallBundle,
+    RemoveBundle,
 }
 
 impl DshReceiptEvent {
@@ -33,6 +35,8 @@ impl DshReceiptEvent {
             Self::Disable => "disable",
             Self::Enable => "enable",
             Self::Remove => "remove",
+            Self::InstallBundle => "install_bundle",
+            Self::RemoveBundle => "remove_bundle",
         }
     }
 }
@@ -53,6 +57,9 @@ pub(crate) struct DshConnectionRecord {
     pub(crate) skin_path: Option<PathBuf>,
     pub(crate) skin_sha256: Option<String>,
     pub(crate) disabled: bool,
+    /// Documented plugin path, when installed into the dedicated profile.
+    #[serde(default)]
+    pub(crate) bundle: Option<super::bundle::DshBundleRecord>,
     pub(crate) identity: MappedIdentity,
 }
 

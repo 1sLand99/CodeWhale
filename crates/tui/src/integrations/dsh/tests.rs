@@ -366,6 +366,12 @@ fn overlay_hash_is_deterministic_and_yaml_quotes_apostrophes() {
     assert!(a.contains("O''Brien"));
 }
 
+fn avail() -> BundleAvailability {
+    BundleAvailability::Available {
+        pnpm_version: "10.23.0".to_string(),
+    }
+}
+
 fn lab_paths() -> (tempfile::TempDir, DshPaths) {
     let dir = tempfile::tempdir().unwrap();
     let paths = DshPaths::under(&dir.path().join("codewhale-home"));
@@ -391,7 +397,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     );
 
     // Not connected yet.
-    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false).unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
     assert!(matches!(report.state, DshIntegrationState::Detected { .. }));
     assert!(launch_spec(&report, None, &[], std::path::Path::new("/ws")).is_err());
 
@@ -403,7 +409,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     assert!(paths.receipt.is_file());
     assert_eq!(record.overlay_sha256, plan.overlay_sha256);
 
-    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false).unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
     assert!(
         matches!(report.state, DshIntegrationState::Connected { .. }),
         "{:?}",
@@ -432,7 +438,8 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     // Route drift → stale-config, launch refused.
     let mut moved = id.clone();
     moved.model = "deepseek-v4-pro".to_string();
-    let report = compute_status(&paths, detection.clone(), Ok(moved.clone()), false).unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
     assert!(
         matches!(report.state, DshIntegrationState::StaleConfig { .. }),
         "{:?}",
@@ -446,7 +453,8 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     // Update re-derives.
     let plan2 = super::plan(&paths, &detection, &moved, "web", false, false).unwrap();
     apply_plan(&paths, &detection, &plan2, DshReceiptEvent::Update).unwrap();
-    let report = compute_status(&paths, detection.clone(), Ok(moved.clone()), false).unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
     assert!(matches!(
         report.state,
         DshIntegrationState::Connected { .. }
@@ -454,7 +462,8 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
 
     // Tampered overlay → stale.
     std::fs::write(&paths.overlay, "- id: x\n").unwrap();
-    let report = compute_status(&paths, detection.clone(), Ok(moved.clone()), false).unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
     assert!(matches!(
         report.state,
         DshIntegrationState::StaleConfig { .. }
@@ -463,11 +472,13 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
 
     // Disable / enable.
     set_disabled(&paths, true).unwrap();
-    let report = compute_status(&paths, detection.clone(), Ok(moved.clone()), false).unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
     assert!(matches!(report.state, DshIntegrationState::Disabled { .. }));
     assert!(launch_spec(&report, None, &[], std::path::Path::new("/ws")).is_err());
     set_disabled(&paths, false).unwrap();
-    let report = compute_status(&paths, detection.clone(), Ok(moved.clone()), false).unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
     assert!(matches!(
         report.state,
         DshIntegrationState::Connected { .. }
@@ -485,7 +496,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
         events,
         ["connect", "update", "update", "disable", "enable", "remove"]
     );
-    let report = compute_status(&paths, detection, Ok(moved), false).unwrap();
+    let report = compute_status(&paths, detection, Ok(moved), false, avail()).unwrap();
     assert!(matches!(report.state, DshIntegrationState::Detected { .. }));
     // Every write stayed under the integration root.
     for entry in walk(&paths.root.parent().unwrap().parent().unwrap().to_path_buf()) {
@@ -526,7 +537,7 @@ fn newer_dsh_reports_stale_version_but_stays_launchable() {
     apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     detection.version = Some("0.1.0-rc.9".to_string());
     detection.compatibility = classify_version("0.1.0-rc.9", true);
-    let report = compute_status(&paths, detection, Ok(id), false).unwrap();
+    let report = compute_status(&paths, detection, Ok(id), false, avail()).unwrap();
     assert!(matches!(
         report.state,
         DshIntegrationState::StaleVersion { .. }
@@ -548,14 +559,14 @@ fn incompatible_and_missing_dsh_states_are_honest() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false).unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
     assert!(matches!(
         report.state,
         DshIntegrationState::Incompatible { .. }
     ));
     assert!(status_line(&report).starts_with("incompatible"));
     detection.binary = None;
-    let report = compute_status(&paths, detection, Ok(id), false).unwrap();
+    let report = compute_status(&paths, detection, Ok(id), false, avail()).unwrap();
     assert_eq!(report.state, DshIntegrationState::NotInstalled);
     assert!(status_line(&report).contains("not installed"));
 }
@@ -612,4 +623,321 @@ fn launch_strips_only_codewhale_injected_credentials() {
         !env.contains(&"DEEPSEEK_API_KEY".to_string()),
         "a user's own env key is left alone"
     );
+}
+
+/// Stub that records `dsh plugin` invocations and simulates DSH writing the
+/// dedicated profile manifest.
+struct PluginRunner {
+    profile_dir: PathBuf,
+    calls: std::cell::RefCell<Vec<Vec<String>>>,
+    fail_add: bool,
+}
+
+impl DshRunner for PluginRunner {
+    fn run(&self, _binary: &std::path::Path, args: &[&str]) -> std::io::Result<(bool, String)> {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        self.calls.borrow_mut().push(owned.clone());
+        match args {
+            ["--version"] => Ok((true, "0.1.0-rc.6\n".to_string())),
+            ["--help"] => Ok((true, "--patch\n".to_string())),
+            ["plugin", "--profile", "codewhale", "add", spec] => {
+                if self.fail_add {
+                    return Ok((false, "ERR_PNPM_NO_MATCHING_VERSION\n".to_string()));
+                }
+                std::fs::create_dir_all(&self.profile_dir).unwrap();
+                let manifest = self.profile_dir.join("package.json");
+                let mut bundles: Vec<String> = bundle::profile_bundles(&self.profile_dir)
+                    .unwrap_or_else(|| vec!["@deepseek-ai/dsh-base".to_string()]);
+                let name = if spec.ends_with("dsh-web-app") {
+                    "@deepseek-ai/dsh-web-app".to_string()
+                } else {
+                    bundle::BUNDLE_PACKAGE_NAME.to_string()
+                };
+                if !bundles.contains(&name) {
+                    bundles.push(name);
+                }
+                let json = serde_json::json!({"name": "dsh-profile-codewhale", "private": true, "dsh": {"profile": {"bundles": bundles}}});
+                std::fs::write(manifest, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+                Ok((
+                    true,
+                    format!("+ {spec} link:\nDone in 100ms using pnpm v10.23.0\n"),
+                ))
+            }
+            ["plugin", "--profile", "codewhale", "remove", name] => {
+                let mut bundles = bundle::profile_bundles(&self.profile_dir).unwrap_or_default();
+                bundles.retain(|b| b != name);
+                let json = serde_json::json!({"name": "dsh-profile-codewhale", "private": true, "dsh": {"profile": {"bundles": bundles}}});
+                std::fs::write(
+                    self.profile_dir.join("package.json"),
+                    serde_json::to_string_pretty(&json).unwrap(),
+                )
+                .unwrap();
+                Ok((true, "- codewhale-dsh-bundle\n".to_string()))
+            }
+            _ => Ok((false, String::new())),
+        }
+    }
+}
+
+/// A fake installed launcher tree so `app_bundle_source` resolves.
+fn fake_launcher(dir: &std::path::Path) -> PathBuf {
+    let root = dir.join("npm/lib/node_modules/@deepseek-ai/dsh");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"@deepseek-ai/dsh\",\"version\":\"0.1.0-rc.6\"}",
+    )
+    .unwrap();
+    std::fs::write(root.join("lib/bin.js"), "// launcher").unwrap();
+    let app = root.join("node_modules/@deepseek-ai/dsh-web-app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("package.json"), "{\"name\":\"@deepseek-ai/dsh-web-app\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}}}").unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("lib/bin.js"), bin.join("dsh")).unwrap();
+    #[cfg(not(unix))]
+    std::fs::copy(root.join("lib/bin.js"), bin.join("dsh")).unwrap();
+    bin.join("dsh")
+}
+
+#[test]
+fn bundle_availability_reports_pnpm_truthfully() {
+    let (_dir, env) = lab_env(true);
+    let no_pnpm = bundle::bundle_availability(env.path.as_ref(), &verified_runner());
+    assert!(
+        matches!(no_pnpm, BundleAvailability::NotAvailable { ref reason } if reason.contains("pnpm missing"))
+    );
+    let bin = PathBuf::from(env.path.clone().unwrap());
+    std::fs::write(bin.join("pnpm"), "#!/bin/sh\necho 10.23.0\n").unwrap();
+    struct Pnpm;
+    impl DshRunner for Pnpm {
+        fn run(&self, _b: &std::path::Path, args: &[&str]) -> std::io::Result<(bool, String)> {
+            assert_eq!(args, ["--version"]);
+            Ok((true, "10.23.0\n".to_string()))
+        }
+    }
+    assert_eq!(
+        bundle::bundle_availability(env.path.as_ref(), &Pnpm),
+        BundleAvailability::Available {
+            pnpm_version: "10.23.0".to_string()
+        }
+    );
+}
+
+#[test]
+fn bundle_files_are_npm_shaped_and_carry_the_overlay_rows() {
+    let files = bundle::render_bundle_files("0.9.8", "- id: agent-default-model\n");
+    let names: Vec<_> = files.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        names,
+        ["package.json", "cordis.patch.yml", "README.md", "NOTICE.md"]
+    );
+    let pkg: serde_json::Value = serde_json::from_str(&files[0].1).unwrap();
+    assert_eq!(pkg["name"], "codewhale-dsh-bundle");
+    assert_eq!(pkg["private"], true);
+    assert_eq!(pkg["license"], "MIT");
+    assert_eq!(pkg["dsh"]["bundle"]["patch"], "./cordis.patch.yml");
+    assert!(pkg["version"].as_str().unwrap().starts_with("0.9.8+dsh."));
+    assert_eq!(files[1].1, "- id: agent-default-model\n");
+    assert!(files[3].1.contains("Copyright (c) 2026 DeepSeek"));
+}
+
+#[test]
+fn install_update_remove_bundle_lifecycle_uses_documented_plugin_commands() {
+    let (dir, paths) = lab_paths();
+    let dsh_bin = fake_launcher(dir.path());
+    let mut detection = detection_ok();
+    detection.binary = Some(dsh_bin);
+    detection.dsh_home = dir.path().join("dsh-home");
+    let profile_dir = detection.dsh_home.join("profiles").join("codewhale");
+    let runner = PluginRunner {
+        profile_dir: profile_dir.clone(),
+        calls: Default::default(),
+        fail_add: false,
+    };
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+
+    // Not connected → refused.
+    assert!(install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).is_err());
+    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
+
+    // pnpm missing → truthful refusal, nothing written.
+    let err = install_bundle(
+        &paths,
+        &detection,
+        &runner,
+        &BundleAvailability::NotAvailable {
+            reason: "pnpm missing from PATH".into(),
+        },
+        DshAppBundle::Web,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("pnpm missing"));
+    assert!(!paths.bundle_dir.exists());
+
+    let record = install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).unwrap();
+    assert_eq!(record.profile, "codewhale");
+    assert_eq!(record.patch_sha256, plan.overlay_sha256);
+    assert!(paths.bundle_dir.join("cordis.patch.yml").is_file());
+    assert_eq!(
+        std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml")).unwrap(),
+        plan.overlay_text
+    );
+    let calls = runner.calls.borrow().clone();
+    let plugin_calls: Vec<_> = calls.iter().filter(|c| c[0] == "plugin").collect();
+    assert_eq!(plugin_calls.len(), 2);
+    assert!(
+        plugin_calls[0][4].ends_with("dsh-web-app"),
+        "app bundle first: {plugin_calls:?}"
+    );
+    assert_eq!(plugin_calls[1][4], paths.bundle_dir.display().to_string());
+    assert_eq!(
+        bundle::profile_bundles(&profile_dir).unwrap(),
+        [
+            "@deepseek-ai/dsh-base",
+            "@deepseek-ai/dsh-web-app",
+            "codewhale-dsh-bundle"
+        ]
+    );
+
+    // Connected + launch prefers the bundle profile without --patch.
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+    let spec = launch_spec(&report, None, &[], std::path::Path::new("/ws")).unwrap();
+    assert_eq!(spec.args, ["--profile", "codewhale"]);
+    let spec = launch_spec(&report, Some("web"), &[], std::path::Path::new("/ws")).unwrap();
+    assert_eq!(spec.args[0..3], ["--profile", "web", "--patch"]);
+    assert!(status_line(&report).contains("bundle in profile `codewhale`"));
+
+    // Route drift → stale (covers the bundle), update rewrites the bundle patch.
+    let mut moved = id.clone();
+    moved.model = "deepseek-v4-pro".to_string();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
+    assert!(matches!(
+        report.state,
+        DshIntegrationState::StaleConfig { .. }
+    ));
+    let plan2 = super::plan(&paths, &detection, &moved, "web", false, false).unwrap();
+    apply_plan(&paths, &detection, &plan2, DshReceiptEvent::Update).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml")).unwrap(),
+        plan2.overlay_text
+    );
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+    assert_eq!(
+        report
+            .record
+            .as_ref()
+            .unwrap()
+            .bundle
+            .as_ref()
+            .unwrap()
+            .patch_sha256,
+        plan2.overlay_sha256
+    );
+
+    // Tampered bundle patch → stale.
+    std::fs::write(paths.bundle_dir.join("cordis.patch.yml"), "- id: x\n").unwrap();
+    let report =
+        compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::StaleConfig { ref reason, .. } if reason.contains("bundle"))
+    );
+    apply_plan(&paths, &detection, &plan2, DshReceiptEvent::Update).unwrap();
+
+    // `remove` refuses while the bundle is installed.
+    assert!(
+        remove(&paths)
+            .unwrap_err()
+            .to_string()
+            .contains("remove-bundle")
+    );
+
+    // remove-bundle: documented remove, owned files gone, profile dir left.
+    let removed = remove_bundle(&paths, &detection, &runner).unwrap();
+    assert!(!removed.is_empty());
+    assert!(!paths.bundle_dir.join("cordis.patch.yml").exists());
+    assert!(profile_dir.is_dir(), "DSH profile dir is left in place");
+    assert_eq!(
+        bundle::profile_bundles(&profile_dir).unwrap(),
+        ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+    );
+    let last = runner.calls.borrow().last().cloned().unwrap();
+    assert_eq!(
+        last,
+        [
+            "plugin",
+            "--profile",
+            "codewhale",
+            "remove",
+            "codewhale-dsh-bundle"
+        ]
+    );
+    let doc = DshReceiptDocument::load(&paths.receipt).unwrap();
+    assert!(doc.current.as_ref().unwrap().bundle.is_none());
+    let events: Vec<_> = doc.history.iter().map(|e| e.event.as_str()).collect();
+    assert_eq!(
+        events,
+        [
+            "connect",
+            "install_bundle",
+            "update",
+            "update",
+            "remove_bundle"
+        ]
+    );
+    // Launch falls back to the overlay path.
+    let report = compute_status(&paths, detection.clone(), Ok(moved), false, avail()).unwrap();
+    let spec = launch_spec(&report, None, &[], std::path::Path::new("/ws")).unwrap();
+    assert_eq!(spec.args[0..3], ["--profile", "web", "--patch"]);
+    // Now plain remove works.
+    remove(&paths).unwrap();
+}
+
+#[test]
+fn failed_plugin_add_leaves_no_bundle_record_or_files() {
+    let (dir, paths) = lab_paths();
+    let dsh_bin = fake_launcher(dir.path());
+    let mut detection = detection_ok();
+    detection.binary = Some(dsh_bin);
+    detection.dsh_home = dir.path().join("dsh-home");
+    let runner = PluginRunner {
+        profile_dir: detection.dsh_home.join("profiles/codewhale"),
+        calls: Default::default(),
+        fail_add: true,
+    };
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
+    let err = install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("failed"), "{err}");
+    assert!(!paths.bundle_dir.join("package.json").exists());
+    let doc = DshReceiptDocument::load(&paths.receipt).unwrap();
+    assert!(doc.current.as_ref().unwrap().bundle.is_none());
 }

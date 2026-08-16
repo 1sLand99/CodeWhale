@@ -48,7 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing Codewhale full-access posture), and reports not-installed /
   offline / incompatible / detected / connected / stale-config /
   stale-version / disabled honestly. Anthropic Messages and OpenAI Responses
-  routes are refused as not carriable. `/setup tools` and `codewhale doctor`
+  routes are refused as not carriable. The documented DSH plugin path is an
+  explicit opt-in: `install-bundle` materializes a Codewhale bundle package
+  (`codewhale-dsh-bundle`, MIT notice retained) and installs it with
+  `dsh plugin --profile codewhale add <path>` into a dedicated `codewhale`
+  profile (pnpm required, reported truthfully when missing; `web`/`headless`
+  untouched), so `dsh --profile codewhale` alone carries the identity;
+  `update` regenerates the bundle patch and `remove-bundle` reverses it,
+  leaving the DSH-owned profile directory in place. `/setup tools` and `codewhale doctor`
   show the read-only detection state; `doctor` also lists the DSH read-only
   credential consent alongside Codex and Grok. The optional `--skin` export
   writes a Codewhale token stylesheet generated from the TUI palette
