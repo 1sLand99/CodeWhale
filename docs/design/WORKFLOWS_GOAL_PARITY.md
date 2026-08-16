@@ -117,7 +117,7 @@ Arena Mode) — official docs at x.ai/cli returned 404 for the deep pages.
 | Triggering | manual `/workflow`, `/workflow resume` | model tool; `dsh-schedule` reminders | manual `/workflow`, soft-auto launch, `codewhale workflow run`, automations (`~/.codewhale/automations`) | parity; scheduled workflow runs deliberately not added here |
 | Goal definition | `/goal`, planner phase | `/goal`, model-inferred `create_goal` | `/goal`, model `create_goal` — now inferable (this lane) | parity |
 | Checkpoints / resume | journal replay of completed calls; run manifests; `/workflow resume` | none (documented limitation) | per-event journal + restart reconciliation; no replay-resume | partial (Codewhale ≥ DSH, < Grok Build) — follow-up |
-| Approvals inside runs | plan-approve loop | tool approvals per child | plan-approval card, per-child tool/approval policy, `[workflow]` knobs (now honored) | parity |
+| Approvals inside runs | plan-approve loop | tool approvals per child | plan-approval card gated by `[workflow]` (`require_approval_for_writes` / `auto_start_read_only`); session auto-approve still bypasses the card; writes inside a running VM step follow the VM runtime contract | parity |
 | Progress / state visibility | `/workflows`, `/goal status`, tasks pane | web plan strip, `/goal` | workflow panel, work bar, `/workflow status` (now native), `/goal` (now plain, idle hint) | parity |
 | Receipts / history | run manifests | session log | `.codewhale/workflow-runs.jsonl`, `/workflow status` lists journaled runs, trophy cards | parity |
 | Failure handling / retry | pause kinds; strategist restructure | model judgment; ralph rounds | verifier gates, no-progress pause, blocked, `[goal] max_continuations` | parity; auto-restructure (strategist) deliberately absent |
@@ -135,7 +135,9 @@ Arena Mode) — official docs at x.ai/cli returned 404 for the deep pages.
   host_cancel_workflow}`); `/workflow run <path>` launches a checked-in file
   as-is; `/config workflow` / `/config goal` explain the effective tables.
 - The workflow tool reads the session `[workflow]` table for approval and
-  admission decisions (`workflow_config_for`).
+  admission decisions (`workflow_config_for`). `require_approval_for_writes`
+  gates the start card only: YOLO / session auto-approve still bypasses it,
+  and writes inside a running VM step stay on the VM runtime contract.
 - `/goal help|?|status`, bare `/goal` prints usage on an empty session, plain
   status wording (`Goal active: … · elapsed … · continuations N · not running
   now — send a message or /goal resume to continue`).
