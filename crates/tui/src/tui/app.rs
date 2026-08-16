@@ -4490,7 +4490,13 @@ impl App {
     pub(crate) fn window_title_prefix(&self) -> Option<&str> {
         self.session_title
             .as_deref()
-            .filter(|title| !title.trim().is_empty())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            // The "New Session" placeholder is not an identity worth
+            // advertising in the tab; wait for a real or derived name.
+            .filter(|title| {
+                !title.eq_ignore_ascii_case(crate::session_manager::DEFAULT_SESSION_TITLE)
+            })
     }
 
     /// Bridge the centralized policy into transcript renderers that still

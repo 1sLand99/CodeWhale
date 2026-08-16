@@ -457,16 +457,28 @@ const MAX_TERMINAL_TITLE_CHARS: usize = 160;
 fn terminal_title_sequence(title: &str) -> String {
     let safe: String = title
         .chars()
-        .filter(|ch| {
-            !ch.is_control()
-                && !matches!(
-                    *ch,
-                    '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-                )
-        })
+        .filter(|ch| !ch.is_control() && !is_title_format_char(*ch))
         .take(MAX_TERMINAL_TITLE_CHARS)
         .collect();
     format!("\x1b]0;{safe}\x07")
+}
+
+/// Unicode format characters that are dropped from window titles: bidi
+/// embeddings/overrides/isolates and marks, zero-width joiners/spaces, the
+/// soft hyphen, BOM, and line/paragraph separators. None of them can escape
+/// the OSC sequence (that needs ESC/BEL/C1, which `is_control` removes), but
+/// they can reorder or hide what the tab shows for a session name.
+fn is_title_format_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
 }
 
 /// Whether raw terminal control sequences may be written to stdout.
@@ -545,7 +557,10 @@ pub fn set_title_prefix(prefix: Option<&str>) {
     // re-locks [`title_prefix_slot`] through `decorate_title`, and a `Mutex`
     // is not reentrant — drawing while holding it would deadlock the
     // render loop on the first `/title` during an active turn.
-    if changed && TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
+    if !changed {
+        return;
+    }
+    if TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
         let base = title_animation_base()
             .lock()
             .map_or_else(|_| "Codewhale".to_string(), |base| base.clone());
@@ -556,6 +571,22 @@ pub fn set_title_prefix(prefix: Option<&str>) {
             TERMINAL_FOCUSED.load(Ordering::SeqCst),
             motion,
         ));
+    } else {
+        // At rest nothing else repaints OSC 0 until the next turn starts, so
+        // `/title` or `/rename` between turns must redraw the resting title
+        // itself — otherwise the tab keeps the old name while the command
+        // already reported success.
+        set_terminal_title(&decorate_title(resting_title_body()));
+    }
+}
+
+/// The undecorated title body shown between turns: the completion marker
+/// while it is still on display, otherwise the plain product name.
+fn resting_title_body() -> &'static str {
+    if COMPLETION_MARKER_SHOWN.load(Ordering::SeqCst) {
+        "✓ done"
+    } else {
+        "Codewhale"
     }
 }
 
@@ -1558,6 +1589,39 @@ mod tests {
             terminal_title_sequence(&oversized),
             format!("\x1b]0;{}\x07", "x".repeat(MAX_TERMINAL_TITLE_CHARS))
         );
+    }
+
+    #[test]
+    fn terminal_title_sequence_strips_zero_width_and_bidi_marks_but_keeps_cjk() {
+        // C1 controls (0x9C ST, 0x9D OSC), zero-width joiners/spaces, bidi
+        // marks and isolates, BOM, soft hyphen, and line separators are all
+        // dropped; CJK, emoji, and ordinary punctuation survive untouched.
+        assert_eq!(
+            terminal_title_sequence(
+                "会\u{9d}0;議\u{9c}\u{200b}A\u{200f}B\u{061c}C\u{2066}D\u{2069}\u{feff}E\u{00ad}F\u{2028}G 🐳!"
+            ),
+            "\x1b]0;会0;議ABCDEFG 🐳!\x07"
+        );
+        // Length is bounded by chars, so a CJK title keeps whole characters.
+        let cjk = "漢".repeat(MAX_TERMINAL_TITLE_CHARS + 5);
+        assert_eq!(
+            terminal_title_sequence(&cjk),
+            format!("\x1b]0;{}\x07", "漢".repeat(MAX_TERMINAL_TITLE_CHARS))
+        );
+    }
+
+    #[test]
+    fn title_prefix_change_at_rest_repaints_the_resting_title() {
+        let _guard = prefix_lock();
+        TITLE_ANIMATION_RUNNING.store(false, Ordering::SeqCst);
+        COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
+        set_title_prefix(Some("Alpha"));
+        assert_eq!(decorate_title(resting_title_body()), "[Alpha] Codewhale");
+        COMPLETION_MARKER_SHOWN.store(true, Ordering::SeqCst);
+        assert_eq!(decorate_title(resting_title_body()), "[Alpha] ✓ done");
+        COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
+        set_title_prefix(None);
+        assert_eq!(decorate_title(resting_title_body()), "Codewhale");
     }
 
     #[test]

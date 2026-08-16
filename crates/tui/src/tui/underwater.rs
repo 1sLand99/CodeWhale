@@ -1737,6 +1737,14 @@ mod tests {
 
         app.session_title = Some("   ".to_string());
         assert_eq!(app.window_title_prefix(), None);
+
+        // The unnamed-session placeholder is not a tab identity.
+        app.session_title = Some(crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
+        assert_eq!(app.window_title_prefix(), None);
+        app.session_title = Some("new session".to_string());
+        assert_eq!(app.window_title_prefix(), None);
+        app.session_title = Some("  Beta  ".to_string());
+        assert_eq!(app.window_title_prefix(), Some("Beta"));
     }
 
     #[test]
