@@ -27,6 +27,10 @@ instructions or memory. The nearest scoped `AGENTS.md` adds path-specific rules.
   `agent_open`/`agent_eval`/`agent_close`/`delegate_to_agent` surfaces or parallel
   lifecycle/tag systems.
 - `BASE_PROMPT` in `crates/tui/src/prompts/text.rs` is the sole base prompt.
+- The system prompt + tool catalog are a session-pinned KV-cache prefix
+  (`docs/CACHE.md`). Any new session-context contributor must state its
+  KV-cache effect: frozen prefix vs. append-only history. Never splice a
+  volatile fact into the prefix; append it as a user-role message.
 - These active modules are repeatedly misidentified as dead; verify consumers
   before removal: `tui/src/context_budget.rs`, `tui/src/model_registry.rs`,
   `tui/src/prompt_zones.rs`, `tui/src/tools/remember.rs`, and

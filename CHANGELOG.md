@@ -71,6 +71,19 @@ a published OpenAI-compatible host ship here (#5350).
 
 ### Changed
 
+- Prompt-cache prefix is pinned for the session. The tool loop no longer
+  recomposes the system prompt from disk on every model step, so an agent
+  writing a file no longer busts the provider KV prefix cache mid-turn. The
+  system prompt and tool catalog are re-composed only on a declared header
+  change (`/model`, mode, goal, session resume), which re-pins under a logged
+  reason; an undeclared change is reported as drift and the original pin is
+  kept instead of silently becoming the new baseline. Workspace, AGENTS.md,
+  skills, memory, and goal drift now reaches the model as one bounded
+  `<context_update>` user message at the next user turn — a history append,
+  not a header rewrite. `/cache stats` shows the pin reason, the last-miss
+  reason, the undeclared-drift count, and the context-update count. See
+  [docs/CACHE.md](docs/CACHE.md).
+
 - Plugin compatibility is now per-component. A reviewed, trusted, enabled
   bundle that mixes Skills or MCP with unsupported commands, agents, hooks,
   LSP, native, filesystem-roots, or lifecycle-mutation declarations keeps the
