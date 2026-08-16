@@ -22,6 +22,8 @@
 export const RELEASE_CONTRIBUTORS: string[] = [
   "@EvanProgramming",
   "@Lstarsky0",
+  "@mvanhorn",
+  "@buiducnhat",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */

@@ -42,6 +42,10 @@ notes, and relevant issue/PR comments.
   canonicalization (#5392); website zh-Hans 宪章 terminology (#5397);
   regenerated website facts harvested and corrected so Google and Ollama
   Cloud are listed and Antigravity is not advertised as a route (#5398)
+- **[mvanhorn](https://github.com/mvanhorn)** — read-only, repository-fact
+  driven settings preview on the website models page (#5411, fixes #5370)
+- **[buiducnhat](https://github.com/buiducnhat)** — canonical `ultra`
+  reasoning effort mapped to every provider's maximum tier (#5409)
 
 </details>
 

@@ -175,6 +175,14 @@ a published OpenAI-compatible host ship here (#5350).
   (44 runnable routes). Antigravity stays credential-plane-only.
   Harvested from #5398 (Lstarsky0) with that correction.
 
+- The website models page carries a truthful read-only settings preview
+  built from repository facts; it never implies the site can change local
+  configuration (#5370, #5411, mvanhorn).
+
+- The canonical `ultra` reasoning effort now maps to each provider's
+  maximum tier alongside the legacy `ultracode` alias, instead of being
+  silently dropped (#5303, #5409, buiducnhat).
+
 ### Removed
 
 - The source-structure budget ratchet (CI step, checker, baseline JSON).
@@ -211,6 +219,10 @@ a published OpenAI-compatible host ship here (#5350).
   (#5383/#5384); macOS agy fixture canonicalization (#5392); zh-Hans 宪章
   terminology (#5397); regenerated website facts harvested and corrected
   from #5398.
+- Matt Van Horn (@mvanhorn) — read-only models settings preview on the
+  website (#5411, fixes #5370).
+- Nhat Bui (@buiducnhat) — canonical `ultra` reasoning effort mapped across
+  provider effort tables (#5409).
 
 ## [0.9.7] - 2026-08-12
 
