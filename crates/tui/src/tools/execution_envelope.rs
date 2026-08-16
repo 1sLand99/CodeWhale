@@ -351,7 +351,47 @@ pub(crate) fn enforce_execution_envelope(
     spec: &dyn ToolSpec,
     envelope: ExecutionEnvelope,
 ) -> Result<(), String> {
+    enforce_execution_envelope_inner(name, input, spec, envelope, false)
+}
+
+/// #5426/#5438: enforcement with a caller-proven read-only call.
+///
+/// `proven_read_only` carries the bounded read-only shell evidence — the
+/// exact `agent_readonly_bash_input` predicate `BashTool::execute` enforces
+/// under `ShellPolicy::ReadOnly` — so the call classifies as
+/// [`CallClass::Bounded`]: the same class `classify_call` assigns when the
+/// spec itself reports the input read-only. Two invariants:
+///
+/// - the admission can never outrun the execute-time refusal (same
+///   predicate both sides), and
+/// - the parent's parallel auto-approve classifier is untouched: it stays on
+///   the deliberately tighter `is_parallel_readonly_command`, which
+///   `spec.is_read_only_for` still answers for every other consumer.
+pub(crate) fn enforce_execution_envelope_with_proven_readonly(
+    name: &str,
+    input: &Value,
+    spec: &dyn ToolSpec,
+    envelope: ExecutionEnvelope,
+    proven_read_only: bool,
+) -> Result<(), String> {
+    enforce_execution_envelope_inner(name, input, spec, envelope, proven_read_only)
+}
+
+fn enforce_execution_envelope_inner(
+    name: &str,
+    input: &Value,
+    spec: &dyn ToolSpec,
+    envelope: ExecutionEnvelope,
+    proven_read_only: bool,
+) -> Result<(), String> {
     if envelope.is_unrestricted() {
+        return Ok(());
+    }
+    if proven_read_only {
+        // Classified Bounded: no capability the call can exercise escapes
+        // the envelope. Network-reaching shape is still rejected separately
+        // by the child's network gate, and the execute path re-verifies the
+        // same predicate before running anything.
         return Ok(());
     }
     match classify_call(name, input, spec) {

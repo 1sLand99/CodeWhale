@@ -6978,6 +6978,32 @@ fn scout_posture_gate_admits_agent_readonly_bash_commands() {
         !registry.posture_permits_tool("Bash", Some(&git_log)),
         "legacy `Bash` is the raw-shell alias; the carve-out is exact-name `bash` only"
     );
+
+    // The execution envelope must agree with the gate (#5438 follow-up):
+    // `classify_call` consults `spec.is_read_only_for`, which for bash is the
+    // deliberately tighter *parallel* classifier — without the proven-read-only
+    // evidence, every command above is classified `Executes` and refused by the
+    // read-only envelope (`write: false`) even though the gate admitted it and
+    // `BashTool::execute` would run it. Gate, envelope, execute: one predicate.
+    for command in admitted {
+        let input = serde_json::json!({ "command": command });
+        assert!(
+            registry.envelope_permits("bash", &input),
+            "scout execution envelope must admit agent-read-only bash: {command}"
+        );
+        assert!(
+            registry.envelope_refusal("bash", &input).is_none(),
+            "envelope refusal must not fire for agent-read-only bash: {command}"
+        );
+    }
+    assert!(
+        !registry.envelope_permits("bash", &touch),
+        "mutating command must stay refused by the scout envelope"
+    );
+    assert!(
+        !registry.envelope_permits("Bash", &git_log),
+        "legacy `Bash` is not the carve-out name; the envelope must keep refusing it"
+    );
 }
 
 #[test]
