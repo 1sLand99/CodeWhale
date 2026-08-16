@@ -19,6 +19,8 @@ slow-timeout = { period = "30s" }
 retries = 0
 fail-fast = false
 final-status-level = "slow"
+# RUST_MIN_STACK is not a nextest.toml key. CI and scripts/dev-test.sh
+# export 16 MiB so local nextest matches the product thread stack.
 
 [test-groups]
 pty = { max-threads = 1 }
