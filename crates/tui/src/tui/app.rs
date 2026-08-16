@@ -1747,6 +1747,10 @@ pub struct App {
     pub last_reasoning: Option<String>,
     /// Tool calls captured for the pending assistant message
     pub pending_tool_uses: Vec<(String, String, Value)>,
+    /// One-line permission receipts (`tool_id`, text) for decisions nobody
+    /// was prompted for, held until that tool's card completes so the note
+    /// lands directly under the card instead of splitting a running tool run.
+    pub pending_gate_receipts: Vec<(String, String)>,
     /// User messages queued while a turn is running
     pub queued_messages: VecDeque<QueuedMessage>,
     /// Draft queued message being edited

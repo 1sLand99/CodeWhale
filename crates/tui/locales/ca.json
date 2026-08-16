@@ -1381,5 +1381,17 @@
   "AutomationRunEnqueued": "Execució de l’automatització {id} afegida a la cua: {status} (tasca {task})",
   "AutomationDeletePreview": "La supressió encara no està confirmada. No s’ha suprimit res.\nAutomatització: {id} ({name})\nExecucions registrades: {run_count}\nPer suprimir la definició i l’historial d’execucions, executa:\n{command}",
   "AutomationDeleteConfirmationStale": "La confirmació de supressió ja no coincideix amb l’automatització {id}; no s’ha suprimit res. Revisa l’estat actual amb {command}.",
-  "AutomationDeleted": "S’ha suprimit l’automatització {id} ({name}). Execucions registrades suprimides: {run_count}."
+  "AutomationDeleted": "S’ha suprimit l’automatització {id} ({name}). Execucions registrades suprimides: {run_count}.",
+  "AutoReviewReceiptGuardianAllowed": "L'Auto-Review ha permès '{tool}' (risc {risk}, guardià del model): {reason}",
+  "AutoReviewReceiptGuardianDenied": "L'Auto-Review ha denegat '{tool}' (risc {risk}, guardià del model): {reason}",
+  "AutoReviewReceiptGuardianUnavailable": "L'Auto-Review no ha pogut revisar '{tool}' ({reason}); denegat, fail closed",
+  "AutoReviewReceiptDeterministicBlocked": "L'Auto-Review ha bloquejat '{tool}' (política determinista): {reason}",
+  "AutoReviewReceiptHeld": "L'Auto-Review ha retingut '{tool}' sense aturar-se; denegat (cal una persona — canvia a Ask)",
+  "FooterHintEscInterrupt": "Esc per interrompre",
+  "PermissionsPostureHeader": "Postura de permisos actual: {posture}",
+  "PermissionsPostureAsk": "Ask: les crides a tool que canvien autoritat, cost, abast o resultat obren un avís; les crides de només lectura provadament segures s'executen sense. Les regles ask de dalt sempre forcen un avís.",
+  "PermissionsPostureAuto": "Auto-Review: mai obre un avís. Una política determinista permet crides provadament segures i bloqueja de manera estricta feina de publicació o destructiva en segon pla; les crides que no pot provar segures van a un guardià del model d'una sola passada, que permet o denega amb un motiu declarat (el risc alt o crític mai s'executa automàticament; una revisió fallida denega, fail closed). Les retencions que requereixen una persona es deneguen, no s'amaguen. Cada decisió d'aquestes s'escriu a la transcripció com a nota i al registre d'auditoria.",
+  "PermissionsPostureBypass": "Full Access: les crides a tool ordinàries s'executen sense avisos. Les retencions no evitables de seguretat, llei del repositori i política gestionada fan fail closed com a bloquejos estrictes en lloc de preguntar.",
+  "PermissionsPostureNever": "never: només s'executen les tools considerades segures/de només lectura; tota la resta es bloqueja sense avís.",
+  "PermissionsReceiptsNote": "Les decisions preses sense avís (veredictes del guardià de l'Auto-Review, bloquejos i retencions) apareixen com a notes a la transcripció i al registre d'auditoria a {audit_path}. Full Access es tria deliberadament amb Shift+Tab o /config, mai per una regla."
 }

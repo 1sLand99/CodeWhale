@@ -1381,5 +1381,17 @@
   "AutomationRunEnqueued": "自动化 {id} 的运行已入队: {status}（任务 {task}）",
   "AutomationDeletePreview": "删除尚未确认，未删除任何内容。\n自动化: {id}（{name}）\n运行记录: {run_count}\n要删除定义和运行历史，请运行:\n{command}",
   "AutomationDeleteConfirmationStale": "删除确认与自动化 {id} 的当前状态不再匹配，未删除任何内容。请用 {command} 查看当前状态。",
-  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。"
+  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。",
+  "AutoReviewReceiptGuardianAllowed": "Auto-Review 已允许 '{tool}'（风险 {risk}，模型守护者）：{reason}",
+  "AutoReviewReceiptGuardianDenied": "Auto-Review 已拒绝 '{tool}'（风险 {risk}，模型守护者）：{reason}",
+  "AutoReviewReceiptGuardianUnavailable": "Auto-Review 无法审查 '{tool}'（{reason}）；已拒绝，故障关闭",
+  "AutoReviewReceiptDeterministicBlocked": "Auto-Review 已阻止 '{tool}'（确定性策略）：{reason}",
+  "AutoReviewReceiptHeld": "Auto-Review 未暂停即搁置了 '{tool}'；已拒绝（需要人工决定 — 切换到 Ask）",
+  "FooterHintEscInterrupt": "Esc 中断",
+  "PermissionsPostureHeader": "当前权限姿态：{posture}",
+  "PermissionsPostureAsk": "Ask：会改变权限、成本、范围或结果的 tool 调用会弹出提示；已证明安全的只读调用无需提示即可运行。上面的 ask 规则始终强制提示。",
+  "PermissionsPostureAuto": "Auto-Review：从不弹出提示。确定性策略允许已证明安全的调用，并硬性阻止类似发布或破坏性的后台工作；无法证明安全的调用交给一次性模型守护者，其给出理由后允许或拒绝（高或严重风险绝不自动运行；审查失败即拒绝，故障关闭）。需要人工决定的搁置会被拒绝而非隐藏。每个此类决定都会作为备注写入对话记录和审计日志。",
+  "PermissionsPostureBypass": "Full Access：普通 tool 调用无需提示即可运行。不可绕过的安全、仓库规则和托管策略搁置会作为硬性阻止故障关闭，而不是弹出提示。",
+  "PermissionsPostureNever": "never：仅运行被视为安全/只读的 tool；其他一切均在不提示的情况下被阻止。",
+  "PermissionsReceiptsNote": "未经提示做出的决定（Auto-Review 守护者裁定、阻止和搁置）会作为对话记录备注显示，并写入 {audit_path} 的审计日志。Full Access 只能通过 Shift+Tab 或 /config 有意选择，绝不会由规则选择。"
 }

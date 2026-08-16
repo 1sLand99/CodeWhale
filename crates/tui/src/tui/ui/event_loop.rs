@@ -1255,6 +1255,9 @@ pub(crate) async fn run_event_loop(
                                 .retain(|(tool_id, _, _)| tool_id != &id);
                         }
                         handle_tool_call_complete(app, &id, &name, &result);
+                        if flush_gate_receipts_for(app, Some(&id)) {
+                            transcript_batch_updated = true;
+                        }
                         if crate::mcp::McpPool::is_mcp_tool(&name)
                             && match &result {
                                 Ok(output) => !output.success,
@@ -1376,6 +1379,11 @@ pub(crate) async fn run_event_loop(
                         tool_catalog,
                         base_url,
                     } => {
+                        // A decision whose tool never reported completion
+                        // still gets its receipt before the turn closes.
+                        if flush_gate_receipts_for(app, None) {
+                            transcript_batch_updated = true;
+                        }
                         let completed_turn = app.active_turn.take();
                         app.session.last_tool_catalog = tool_catalog;
                         // The endpoint this turn's client actually used. Kept
@@ -2425,9 +2433,14 @@ pub(crate) async fn run_event_loop(
                                     }),
                                 );
                                 let _ = engine_handle.deny_tool_call(id.clone()).await;
-                                app.status_message = Some(format!(
-                                    "Auto-Review held tool '{tool_name}' without pausing"
-                                ));
+                                let held = crate::tui::gate_receipts::auto_review_held_receipt(
+                                    app.ui_locale,
+                                    &tool_name,
+                                );
+                                app.add_message(HistoryCell::System {
+                                    content: held.clone(),
+                                });
+                                app.status_message = Some(held);
                             }
                             ApprovalRequestDisposition::AutoDenyNeverPosture => {
                                 log_sensitive_event(
@@ -2636,6 +2649,30 @@ pub(crate) async fn run_event_loop(
                                 content: format!("⚑ Advisor: {note}"),
                             });
                         }
+                    }
+                    EngineEvent::ToolGateDecision {
+                        tool_id,
+                        tool_name,
+                        gate,
+                        decision,
+                        risk,
+                        reason,
+                    } => {
+                        // A permission decision nobody was prompted for. The
+                        // audit log already has the full record; the
+                        // transcript gets a one-line receipt so the person
+                        // can see who decided and why, without a modal. It is
+                        // held until the tool card completes so it lands
+                        // under that card rather than inside a running run.
+                        let receipt = crate::tui::gate_receipts::tool_gate_receipt(
+                            app.ui_locale,
+                            &tool_name,
+                            gate,
+                            decision,
+                            risk.as_deref(),
+                            &reason,
+                        );
+                        app.pending_gate_receipts.push((tool_id, receipt));
                     }
                 }
                 events_drained = events_drained.saturating_add(1);
@@ -5231,4 +5268,18 @@ pub(crate) async fn run_xai_device_login_from_tui(
     };
     app.needs_redraw = true;
     Ok(switched)
+}
+
+/// Move held permission receipts into the transcript: those for `tool_id`
+/// when given, otherwise every remaining one. Returns whether anything moved.
+pub(super) fn flush_gate_receipts_for(app: &mut App, tool_id: Option<&str>) -> bool {
+    let (ready, held): (Vec<_>, Vec<_>) = std::mem::take(&mut app.pending_gate_receipts)
+        .into_iter()
+        .partition(|(id, _)| tool_id.is_none_or(|wanted| id == wanted));
+    app.pending_gate_receipts = held;
+    let moved = !ready.is_empty();
+    for (_, content) in ready {
+        app.add_message(HistoryCell::System { content });
+    }
+    moved
 }

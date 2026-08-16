@@ -1381,5 +1381,17 @@
   "AutomationRunEnqueued": "Execução da automação {id} adicionada à fila: {status} (tarefa {task})",
   "AutomationDeletePreview": "A exclusão ainda não foi confirmada. Nada foi excluído.\nAutomação: {id} ({name})\nExecuções registradas: {run_count}\nPara excluir a definição e o histórico de execuções, execute:\n{command}",
   "AutomationDeleteConfirmationStale": "A confirmação de exclusão não corresponde mais à automação {id}; nada foi excluído. Revise o estado atual com {command}.",
-  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}."
+  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}.",
+  "AutoReviewReceiptGuardianAllowed": "O Auto-Review permitiu '{tool}' (risco {risk}, guardião do modelo): {reason}",
+  "AutoReviewReceiptGuardianDenied": "O Auto-Review negou '{tool}' (risco {risk}, guardião do modelo): {reason}",
+  "AutoReviewReceiptGuardianUnavailable": "O Auto-Review não conseguiu revisar '{tool}' ({reason}); negado, fail closed",
+  "AutoReviewReceiptDeterministicBlocked": "O Auto-Review bloqueou '{tool}' (política determinística): {reason}",
+  "AutoReviewReceiptHeld": "O Auto-Review reteve '{tool}' sem pausar; negado (precisa de uma pessoa — mude para Ask)",
+  "FooterHintEscInterrupt": "Esc para interromper",
+  "PermissionsPostureHeader": "Postura de permissão atual: {posture}",
+  "PermissionsPostureAsk": "Ask: chamadas de tool que alteram autoridade, custo, escopo ou resultado abrem um prompt; chamadas somente leitura comprovadamente seguras rodam sem ele. As regras ask acima sempre forçam um prompt.",
+  "PermissionsPostureAuto": "Auto-Review: nunca abre um prompt. Uma política determinística permite chamadas comprovadamente seguras e bloqueia de forma rígida trabalho de publicação ou destrutivo em segundo plano; chamadas que não consegue provar seguras vão a um guardião de modelo de uma única rodada, que permite ou nega com um motivo declarado (risco alto ou crítico nunca roda automaticamente; uma revisão falha nega, fail closed). Retenções que exigem uma pessoa são negadas, não ocultadas. Cada decisão dessas é escrita na transcrição como nota e no log de auditoria.",
+  "PermissionsPostureBypass": "Full Access: chamadas de tool comuns rodam sem prompts. Retenções não contornáveis de segurança, lei do repositório e política gerenciada fazem fail closed como bloqueios rígidos em vez de perguntar.",
+  "PermissionsPostureNever": "never: só rodam tools consideradas seguras/somente leitura; todo o resto é bloqueado sem prompt.",
+  "PermissionsReceiptsNote": "Decisões tomadas sem prompt (veredictos do guardião do Auto-Review, bloqueios e retenções) aparecem como notas na transcrição e no log de auditoria em {audit_path}. Full Access é escolhido deliberadamente com Shift+Tab ou /config, nunca por uma regra."
 }

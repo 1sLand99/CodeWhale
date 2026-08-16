@@ -1381,5 +1381,17 @@
   "AutomationRunEnqueued": "Lần chạy tự động hóa {id} đã được đưa vào hàng đợi: {status} (tác vụ {task})",
   "AutomationDeletePreview": "Thao tác xóa chưa được xác nhận. Chưa có gì bị xóa.\nTự động hóa: {id} ({name})\nLần chạy đã ghi: {run_count}\nĐể xóa định nghĩa và lịch sử chạy, hãy chạy:\n{command}",
   "AutomationDeleteConfirmationStale": "Xác nhận xóa không còn khớp với tự động hóa {id}; chưa có gì bị xóa. Xem lại trạng thái hiện tại bằng {command}.",
-  "AutomationDeleted": "Đã xóa tự động hóa {id} ({name}). Số lần chạy đã ghi bị xóa: {run_count}."
+  "AutomationDeleted": "Đã xóa tự động hóa {id} ({name}). Số lần chạy đã ghi bị xóa: {run_count}.",
+  "AutoReviewReceiptGuardianAllowed": "Auto-Review đã cho phép '{tool}' (rủi ro {risk}, bộ giám hộ mô hình): {reason}",
+  "AutoReviewReceiptGuardianDenied": "Auto-Review đã từ chối '{tool}' (rủi ro {risk}, bộ giám hộ mô hình): {reason}",
+  "AutoReviewReceiptGuardianUnavailable": "Auto-Review không thể xem xét '{tool}' ({reason}); đã từ chối, fail closed",
+  "AutoReviewReceiptDeterministicBlocked": "Auto-Review đã chặn '{tool}' (chính sách tất định): {reason}",
+  "AutoReviewReceiptHeld": "Auto-Review đã giữ lại '{tool}' mà không tạm dừng; đã từ chối (cần con người — chuyển sang Ask)",
+  "FooterHintEscInterrupt": "Esc để ngắt",
+  "PermissionsPostureHeader": "Tư thế quyền hiện tại: {posture}",
+  "PermissionsPostureAsk": "Ask: các lệnh gọi tool làm thay đổi thẩm quyền, chi phí, phạm vi hoặc kết quả sẽ mở lời nhắc; các lệnh chỉ đọc đã được chứng minh an toàn chạy mà không cần lời nhắc. Các quy tắc ask ở trên luôn buộc phải nhắc.",
+  "PermissionsPostureAuto": "Auto-Review: không bao giờ mở lời nhắc. Chính sách tất định cho phép các lệnh đã được chứng minh an toàn và chặn cứng công việc nền mang tính xuất bản hoặc phá hủy; các lệnh không thể chứng minh an toàn được chuyển đến bộ giám hộ mô hình một lần, cho phép hoặc từ chối kèm lý do (rủi ro cao hoặc nghiêm trọng không bao giờ tự chạy; xem xét thất bại sẽ từ chối, fail closed). Các lệnh cần người quyết định bị từ chối chứ không bị ẩn. Mỗi quyết định như vậy được ghi vào bản ghi dưới dạng ghi chú và vào nhật ký kiểm toán.",
+  "PermissionsPostureBypass": "Full Access: các lệnh gọi tool thông thường chạy không cần lời nhắc. Các lệnh giữ không thể bỏ qua về an toàn, luật kho lưu trữ và chính sách quản lý sẽ fail closed dưới dạng chặn cứng thay vì hỏi.",
+  "PermissionsPostureNever": "never: chỉ các tool được coi là an toàn/chỉ đọc mới chạy; mọi thứ khác bị chặn mà không nhắc.",
+  "PermissionsReceiptsNote": "Các quyết định không qua lời nhắc (phán quyết của bộ giám hộ Auto-Review, chặn và giữ) xuất hiện dưới dạng ghi chú trong bản ghi và trong nhật ký kiểm toán tại {audit_path}. Full Access được chọn có chủ ý bằng Shift+Tab hoặc /config, không bao giờ do quy tắc."
 }
