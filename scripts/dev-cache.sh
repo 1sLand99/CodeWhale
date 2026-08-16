@@ -16,12 +16,11 @@
 # Environment:
 #   CODEWHALE_CACHE_ROOT        cache root (default:
 #                               ${XDG_CACHE_HOME:-$HOME/.cache}/codewhale)
-#   CODEWHALE_DEV_CACHE         auto|1|force|0   (default auto)
-#                               auto  = isolated build-dir only when ./target
-#                                       is absent (new worktree)
-#                               1/force = always isolated (still respects an
-#                                       already-set CARGO_TARGET_DIR /
-#                                       CARGO_BUILD_BUILD_DIR)
+#   CODEWHALE_DEV_CACHE         auto|1|force|local|0   (default auto)
+#                               auto/1/force = isolated build-dir (still
+#                                       respects an already-set
+#                                       CARGO_TARGET_DIR / CARGO_BUILD_BUILD_DIR)
+#                               local = keep compiling into ./target
 #                               0     = do nothing
 #   CODEWHALE_SCCACHE           auto|1|0         (default auto)
 #                               auto  = wrap rustc only when incremental is
@@ -119,11 +118,6 @@ codewhale_dev_cache_path_fingerprint() {
   fi
 }
 
-codewhale_dev_cache_has_local_target() {
-  _cw_repo=$(codewhale_dev_cache_repo_root)
-  [ -d "$_cw_repo/target" ]
-}
-
 codewhale_dev_cache_incremental_off() {
   case ${CARGO_INCREMENTAL:-} in
     0|false|no|off) return 0 ;;
@@ -181,9 +175,12 @@ codewhale_dev_cache_apply() {
     CODEWHALE_DEV_CACHE_MODE=inherited-target-dir
   elif [ -n "${CARGO_BUILD_BUILD_DIR:-}" ]; then
     CODEWHALE_DEV_CACHE_MODE=inherited-build-dir
-  elif codewhale_dev_cache_truthy "$_cw_want"; then
-    CODEWHALE_DEV_CACHE_MODE=force-isolated
-  elif codewhale_dev_cache_has_local_target; then
+  elif [ "$_cw_want" = local ]; then
+    # Explicit stay-in-./target. A stub target/ created by a previous
+    # isolated build-dir run is not a reason to abandon isolation: Cargo
+    # still writes CACHEDIR.TAG (and sometimes finals) under ./target
+    # when build-dir is split, and treating that as "warm" made the
+    # second command recompile everything into a second tree.
     CODEWHALE_DEV_CACHE_MODE=existing-target
   else
     CODEWHALE_DEV_CACHE_MODE=isolated-build-dir
@@ -260,7 +257,7 @@ codewhale_dev_cache_apply() {
       _cw_line="${_cw_line} CARGO_BUILD_BUILD_DIR=${CARGO_BUILD_BUILD_DIR}"
       ;;
     existing-target)
-      _cw_line="${_cw_line} using ./target (set CODEWHALE_DEV_CACHE=1 to isolate)"
+      _cw_line="${_cw_line} using ./target (CODEWHALE_DEV_CACHE=local)"
       ;;
   esac
   if [ "${CODEWHALE_DEV_CACHE_SCCACHE}" = enabled ]; then

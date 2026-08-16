@@ -130,6 +130,7 @@ by default: two cargos on the same target flock and serialize. Use
 `scripts/dev-cargo.sh` / `scripts/dev-test.sh`, which give each workspace
 its own Cargo `build-dir` (`{workspace-path-hash}` under
 `${CODEWHALE_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codewhale}`).
+`CODEWHALE_DEV_CACHE=local` keeps `./target` if you want that.
 `sccache` wraps rustc only when incremental compilation is already off
 (`CARGO_INCREMENTAL=0` or `CODEWHALE_SCCACHE=1`) and `sccache` is on
 `PATH`; a missing binary is a printed fallback, not an error. Override

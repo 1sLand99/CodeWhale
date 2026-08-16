@@ -123,27 +123,28 @@ else
   bad "sccache stays off while incremental is on" "$out"
 fi
 
-# 5. Existing ./target is left alone under auto.
+# 5. A stub or leftover ./target does not abandon isolation (Cargo still
+# writes CACHEDIR.TAG under ./target when build-dir is split).
 out=$(run_apply \
+  CODEWHALE_DEV_CACHE_REPO_ROOT="$OLD_WT" \
+  CODEWHALE_CACHE_ROOT="$work/cache")
+if contains "$out" "mode=isolated-build-dir" \
+  && contains "$out" "CARGO_BUILD_BUILD_DIR=$work/cache/build/{workspace-path-hash}"; then
+  ok "existing ./target does not abandon isolated build-dir"
+else
+  bad "existing ./target does not abandon isolated build-dir" "$out"
+fi
+
+# 6. CODEWHALE_DEV_CACHE=local keeps ./target.
+out=$(run_apply \
+  CODEWHALE_DEV_CACHE=local \
   CODEWHALE_DEV_CACHE_REPO_ROOT="$OLD_WT" \
   CODEWHALE_CACHE_ROOT="$work/cache")
 if contains "$out" "mode=existing-target" \
   && contains "$out" "CARGO_BUILD_BUILD_DIR=<unset>"; then
-  ok "existing ./target is not moved under auto"
+  ok "CODEWHALE_DEV_CACHE=local keeps ./target"
 else
-  bad "existing ./target is not moved under auto" "$out"
-fi
-
-# 6. CODEWHALE_DEV_CACHE=1 isolates even when ./target exists.
-out=$(run_apply \
-  CODEWHALE_DEV_CACHE=1 \
-  CODEWHALE_DEV_CACHE_REPO_ROOT="$OLD_WT" \
-  CODEWHALE_CACHE_ROOT="$work/cache")
-if contains "$out" "mode=force-isolated" \
-  && contains "$out" "CARGO_BUILD_BUILD_DIR=$work/cache/build/{workspace-path-hash}"; then
-  ok "CODEWHALE_DEV_CACHE=1 isolates an existing worktree"
-else
-  bad "CODEWHALE_DEV_CACHE=1 isolates an existing worktree" "$out"
+  bad "CODEWHALE_DEV_CACHE=local keeps ./target" "$out"
 fi
 
 # 7. Already-set CARGO_TARGET_DIR / CARGO_BUILD_BUILD_DIR are respected.
