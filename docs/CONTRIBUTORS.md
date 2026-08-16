@@ -45,7 +45,19 @@ notes, and relevant issue/PR comments.
 - **[mvanhorn](https://github.com/mvanhorn)** — read-only, repository-fact
   driven settings preview on the website models page (#5411, fixes #5370)
 - **[buiducnhat](https://github.com/buiducnhat)** — canonical `ultra`
-  reasoning effort mapped to every provider's maximum tier (#5409)
+  reasoning effort mapped to every provider's maximum tier (#5409); session
+  titles truncated by character count instead of byte offset so CJK and
+  emoji names cut at the intended width (#5415)
+- **[SparkofSpike](https://github.com/SparkofSpike)** — `/title` and the
+  saved session name in the terminal tab/window title, plus the fix for the
+  deadlock when the title changed during an active turn; landed as a
+  discoverable alias of `/rename` on the one persisted session name (#5419)
+- **[redstar](https://github.com/redstar)** — Eden AI registered as a named
+  OpenAI-compatible provider with `EDENAI_API_KEY`, `eden-ai`/`eden_ai`
+  aliases, and the global and EU endpoints (#5422)
+- **[wuisabel-gif](https://github.com/wuisabel-gif)** — background verifier
+  test isolated from the rustup `rustc` shim and `$HOME`, one narrow
+  reliability slice of #5056 (#5423)
 
 </details>
 
