@@ -1034,6 +1034,8 @@
   "SetupToolsMcpNeedsActionSaved": "도구/MCP에 아직 조치가 필요합니다. 설정 리포트에 기록했습니다 (최초 실행을 막지는 않음).",
   "SetupToolsMcpPreviewTitle": "도구 / MCP 안전 온램프",
   "SetupToolsMcpOnRampText": "도구, MCP, 스킬 및 플러그인 — 안전한 온램프\n\n/setup은 로컬 인벤토리만 읽습니다. MCP 서버를 시작하거나, 스킬을 설치하거나, 플러그인을 실행하거나, 신뢰할 수 없는 명령을 실행하는 일은 절대 없습니다.\n\n현재 인벤토리:\n- MCP: {mcp_result}\n- 스킬: {skills_result}\n- 도구 디렉터리: {tools_result}\n- 플러그인: {plugins_result}\n- 핫바 (공유 어댑터): {hotbar_result}\n\n경로 (홈 디렉터리 가림):\n- MCP 설정: {mcp_path}\n- 스킬: {skills_path}\n- 플러그인: {plugins_path}\n\n안전한 부트스트랩 (일반 터미널이나 TUI 명령에서 직접 실행하세요):\n- MCP: /mcp  ·  codewhale mcp init  ·  codewhale doctor\n- 스킬: /skills  ·  codewhale setup --skills  ·  /skills install <spec>\n- 플러그인: /plugin  ·  codewhale setup --plugins\n- 도구 디렉터리: codewhale setup --tools\n\n부작용이 있는 동작은 항상 명시적 확인이 필요합니다. 플러그인 명령어는 슬래시 명령어와는 별개이며, 핫바 플러그인 소스는 승인 게이트가 도입될 때까지 보류됩니다.\n\n아직 수동으로 외부 설정이 필요한 항목은 docs/MCP.md와 docs/skills/README.md를 참고하세요.",
+  "SetupToolsMcpDshLabel": "DeepSeek Harness (dsh):",
+  "SetupToolsMcpDshRow": "DeepSeek Harness (dsh) — Codewhale를 통해 연결되며 두 번째 스케줄러가 아닙니다:\n- 상태: {dsh_result}\n- 읽기 전용 감지; 연결/계획/실행/제거: codewhale integrations dsh status · plan · connect · launch · remove\n- Codewhale는 $CODEWHALE_HOME/integrations/dsh 에만 기록하며 API 키를 복사하거나 DSH 파일을 수정하지 않습니다.",
   "HotbarActionModeOperateName": "운영 모드",
   "HotbarActionModeOperateDescription": "Fleet를 병렬로 작업에 투입합니다.",
   "HomeOperateModeTip": "Operate — Fleet를 병렬로 작업에 투입",

@@ -1032,6 +1032,8 @@
   "SetupToolsMcpNeedsActionSaved": "Tools/MCP aún necesita acción; se registró en el informe (no bloquea el primer uso).",
   "SetupToolsMcpPreviewTitle": "On-ramps seguros de Tools / MCP",
   "SetupToolsMcpOnRampText": "Tools, MCP, Skills y Plugins — On-ramps seguros\n\n/setup solo lee el inventario local. No inicia servidores MCP, no instala skills, no ejecuta plugins ni comandos no confiables.\n\nInventario actual:\n- MCP: {mcp_result}\n- Skills: {skills_result}\n- Tools: {tools_result}\n- Plugins: {plugins_result}\n- Hotbar (adaptadores compartidos): {hotbar_result}\n\nRutas:\n- MCP: {mcp_path}\n- Skills: {skills_path}\n- Plugins: {plugins_path}\n\nBootstrap seguro (ejecútalo tú):\n- MCP: /mcp · codewhale mcp init · codewhale doctor\n- Skills: /skills · codewhale setup --skills\n- Plugins: /plugin · codewhale setup --plugins\n- Tools: codewhale setup --tools\n\nLas acciones con efectos secundarios siempre requieren confirmación explícita. Ver docs/MCP.md.",
+  "SetupToolsMcpDshLabel": "DeepSeek Harness (dsh):",
+  "SetupToolsMcpDshRow": "DeepSeek Harness (dsh) — conectado a través de Codewhale, nunca un segundo planificador:\n- Estado: {dsh_result}\n- Detección de solo lectura; conectar/planear/iniciar/quitar: codewhale integrations dsh status · plan · connect · launch · remove\n- Codewhale solo escribe en $CODEWHALE_HOME/integrations/dsh; nunca copia claves de API ni edita archivos de DSH.",
   "HotbarActionModeOperateName": "Modo Operate",
   "HotbarActionModeOperateDescription": "Pon tu Fleet a trabajar en paralelo.",
   "HomeOperateModeTip": "Operate — pon tu Fleet a trabajar en paralelo",

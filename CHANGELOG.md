@@ -35,6 +35,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the audit-log path. The footer's `Esc to interrupt` hint is
   localized. See `docs/design/AUTO_MODE_PARITY.md` for the Claude Code /
   Kimi Code parity ledger and follow-ups.
+- `codewhale integrations dsh status|plan|connect|update|launch|disable|enable|remove`
+  connects an existing official DeepSeek Harness (`dsh` 0.1.0-rc.6, verified)
+  through Codewhale using only its documented seams: a `--patch` overlay that
+  pins the exact Codewhale provider/model/endpoint identity (native
+  `deepseek-official` route, or a hand-declared `openai-completions` route
+  named `codewhale-<provider>` for OpenAI-compatible providers), the
+  Codewhale permission posture exported as `DSH_PERMISSION_MODE`, and an
+  append-only receipt. Codewhale writes only under
+  `$CODEWHALE_HOME/integrations/dsh/`, never copies API keys or edits DSH
+  files, never broadens permissions (`--allow-full-access` only mirrors an
+  existing Codewhale full-access posture), and reports not-installed /
+  offline / incompatible / detected / connected / stale-config /
+  stale-version / disabled honestly. Anthropic Messages and OpenAI Responses
+  routes are refused as not carriable. `/setup tools` and `codewhale doctor`
+  show the read-only detection state; `doctor` also lists the DSH read-only
+  credential consent alongside Codex and Grok. The optional `--skin` export
+  writes a Codewhale token stylesheet generated from the TUI palette
+  (Blue Stage dark/light, ombre water column, mode/permission/state colors,
+  reduced-motion fallbacks); DSH exposes no custom-theme API, so the sheet is
+  labeled an unsupported overlay and is never injected. See
+  `docs/INTEGRATIONS_DSH.md`.
 
 ### Fixed
 

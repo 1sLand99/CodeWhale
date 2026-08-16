@@ -1032,6 +1032,8 @@
   "SetupToolsMcpNeedsActionSaved": "工具/MCP 仍需处理；已记录到设置报告（不阻塞首次运行）。",
   "SetupToolsMcpPreviewTitle": "工具 / MCP 安全引导",
   "SetupToolsMcpOnRampText": "工具、MCP、技能与插件 — 安全引导\n\n/setup 只读取本地清单。不会启动 MCP 服务器、安装技能、运行插件或自动执行不受信任的命令。\n\n当前清单：\n- MCP：{mcp_result}\n- 技能：{skills_result}\n- 工具目录：{tools_result}\n- 插件：{plugins_result}\n- 快捷栏（共享适配器）：{hotbar_result}\n\n路径：\n- MCP：{mcp_path}\n- 技能：{skills_path}\n- 插件：{plugins_path}\n\n安全引导（请自行在终端或 TUI 中执行）：\n- MCP：/mcp · codewhale mcp init · codewhale doctor\n- 技能：/skills · codewhale setup --skills\n- 插件：/plugin · codewhale setup --plugins\n- 工具：codewhale setup --tools\n\n有副作用的操作始终需要明确确认。详见 docs/MCP.md。",
+  "SetupToolsMcpDshLabel": "DeepSeek Harness (dsh)：",
+  "SetupToolsMcpDshRow": "DeepSeek Harness (dsh) — 通过 Codewhale 连接，绝不是第二个调度器：\n- 状态：{dsh_result}\n- 只读检测；连接/计划/启动/移除：codewhale integrations dsh status · plan · connect · launch · remove\n- Codewhale 只写入 $CODEWHALE_HOME/integrations/dsh，绝不复制 API 密钥或修改 DSH 文件。",
   "HotbarActionModeOperateName": "Operate 模式",
   "HotbarActionModeOperateDescription": "让 Fleet 并行开展工作。",
   "HomeOperateModeTip": "Operate — 让 Fleet 并行开展工作",
