@@ -84,6 +84,44 @@ cargo clippy --workspace --all-targets --all-features --locked -- \
   -A clippy::assertions_on_constants
 ```
 
+#### Fast local loop
+
+The full gate above is what CI enforces, but you do not need it for every
+edit. `crates/tui` is a ~750k-line crate, so the loop that stays fast is
+the one that avoids rebuilding it more than necessary (numbers and the
+reasoning are in [`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md)):
+
+```bash
+# 1. Type-check first (seconds after the first build; no codegen, no link).
+cargo check -p codewhale-tui
+
+# 2. Run only the tests near your change (one crate, one filter).
+cargo test -p codewhale-tui --lib --locked -- fleet_setup
+
+# 3. Run a whole crate's unit suite with nextest: one process per test,
+#    all cores busy, slow tests named. ~100 s here vs ~270 s with libtest.
+cargo install cargo-nextest --locked      # once
+cargo nextest run -p codewhale-tui --lib --locked
+cargo nextest run --workspace --all-features --locked   # whole tree, ~6 min here
+
+# 4. Before pushing, run the authoritative gate exactly as CI does:
+cargo test --workspace --all-features --locked
+```
+
+`.config/nextest.toml` already serializes the PTY suite and bounds the
+integration tests that spawn the real binary, so `cargo nextest run` is
+safe to use on the whole workspace (nextest does not run doctests; the
+authoritative `cargo test` gate does). Tests must not depend on running in
+the same process as another test (nextest gives every test its own
+process); if a test needs the rustls crypto provider, install it in that
+test as production does at startup.
+
+If you work in several worktrees, point them at one target directory so
+dependencies compile once (`export CARGO_TARGET_DIR=$HOME/.cache/codewhale-target`),
+and prefer `cargo clean -p codewhale-tui` over deleting the directory
+when it grows. `sccache` as `RUSTC_WRAPPER` is optional and matches what
+CI uses.
+
 Some suites are slow, platform-bound, or intentionally excluded from the
 default run; treat them as documented isolation cases rather than
 failures of the normal gate:
