@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Ausführung der Automatisierung {id} eingereiht: {status} (Aufgabe {task})",
   "AutomationDeletePreview": "Das Löschen ist noch nicht bestätigt. Nichts wurde gelöscht.\nAutomatisierung: {id} ({name})\nAufgezeichnete Ausführungen: {run_count}\nZum Löschen der Definition und des Ausführungsverlaufs ausführen:\n{command}",
   "AutomationDeleteConfirmationStale": "Die Löschbestätigung passt nicht mehr zur Automatisierung {id}; nichts wurde gelöscht. Den aktuellen Stand mit {command} prüfen.",
-  "AutomationDeleted": "Automatisierung {id} ({name}) gelöscht. Gelöschte aufgezeichnete Ausführungen: {run_count}."
+  "AutomationDeleted": "Automatisierung {id} ({name}) gelöscht. Gelöschte aufgezeichnete Ausführungen: {run_count}.",
+  "AgentFocusOpened": "Fokus auf {agent}. Deine Nachrichten gehen jetzt an diesen Worker; Esc kehrt zur Hauptunterhaltung zurück.",
+  "AgentFocusClosed": "Zurück in der Hauptunterhaltung.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Nachricht an {agent} · Esc zurück zur Hauptunterhaltung",
+  "AgentFocusNoTranscript": "Für {agent} liegt noch kein Transkript vor. Nachrichten erscheinen hier, sobald der Worker sie austauscht.",
+  "AgentFocusOmitted": "Frühere Nachrichten ({count}) fehlen im Transkript im Arbeitsspeicher.",
+  "AgentFocusFollowUpDelivered": "Für {agent} eingereiht: er liest die Nachricht in seiner nächsten Runde.",
+  "AgentFocusFollowUpQueued": "Für {agent} eingereiht",
+  "AgentFocusFollowUpContinued": "{agent} war bereits fertig; auf einem neuen Fork ({target}) fortgesetzt. Diese Ansicht folgt jetzt dem Fork.",
+  "AgentFocusFollowUpFailed": "Zustellung an {agent} nicht möglich: {reason}",
+  "FooterHintForAgents": "Agenten",
+  "FooterHintToManage": "verwalten",
+  "AgentRailQueuedCount": "{count} eingereiht"
 }

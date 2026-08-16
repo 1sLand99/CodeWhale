@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "स्वचालन {id} का निष्पादन कतार में जोड़ा गया: {status} (कार्य {task})",
   "AutomationDeletePreview": "हटाना अभी पक्का नहीं किया गया है। कुछ भी नहीं हटाया गया।\nस्वचालन: {id} ({name})\nदर्ज निष्पादन: {run_count}\nपरिभाषा और निष्पादन इतिहास हटाने के लिए यह चलाएँ:\n{command}",
   "AutomationDeleteConfirmationStale": "हटाने की पुष्टि अब स्वचालन {id} की वर्तमान स्थिति से मेल नहीं खाती; कुछ भी नहीं हटाया गया। {command} से वर्तमान स्थिति फिर देखें।",
-  "AutomationDeleted": "स्वचालन {id} ({name}) हटा दिया गया। हटाए गए दर्ज निष्पादन: {run_count}।"
+  "AutomationDeleted": "स्वचालन {id} ({name}) हटा दिया गया। हटाए गए दर्ज निष्पादन: {run_count}।",
+  "AgentFocusOpened": "{agent} पर फ़ोकस है। अब आपके संदेश इसी वर्कर को जाएँगे; Esc से मुख्य बातचीत पर लौटें।",
+  "AgentFocusClosed": "मुख्य बातचीत पर वापस।",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "{agent} को संदेश · Esc से मुख्य पर लौटें",
+  "AgentFocusNoTranscript": "{agent} का अभी कोई ट्रांसक्रिप्ट नहीं है। वर्कर के संदेश आदान-प्रदान करते ही यहाँ दिखेंगे।",
+  "AgentFocusOmitted": "पहले के संदेश ({count}) इन-मेमोरी ट्रांसक्रिप्ट से छोड़ दिए गए हैं।",
+  "AgentFocusFollowUpDelivered": "{agent} के लिए कतार में: यह अगले राउंड में संदेश पढ़ेगा।",
+  "AgentFocusFollowUpQueued": "{agent} के लिए कतार में",
+  "AgentFocusFollowUpContinued": "{agent} पूरा हो चुका था; नए फ़ोर्क ({target}) पर जारी रखा गया। यह दृश्य अब उस फ़ोर्क का अनुसरण करता है।",
+  "AgentFocusFollowUpFailed": "{agent} तक नहीं पहुँचाया जा सका: {reason}",
+  "FooterHintForAgents": "एजेंट",
+  "FooterHintToManage": "प्रबंधन",
+  "AgentRailQueuedCount": "{count} कतार में"
 }

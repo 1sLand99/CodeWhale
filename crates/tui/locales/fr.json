@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Exécution de l’automatisation {id} mise en attente : {status} (tâche {task})",
   "AutomationDeletePreview": "La suppression n’est pas encore confirmée. Rien n’a été supprimé.\nAutomatisation : {id} ({name})\nExécutions enregistrées : {run_count}\nPour supprimer la définition et l’historique des exécutions, lancez :\n{command}",
   "AutomationDeleteConfirmationStale": "La confirmation de suppression ne correspond plus à l’automatisation {id} ; rien n’a été supprimé. Vérifiez l’état actuel avec {command}.",
-  "AutomationDeleted": "Automatisation {id} ({name}) supprimée. Exécutions enregistrées supprimées : {run_count}."
+  "AutomationDeleted": "Automatisation {id} ({name}) supprimée. Exécutions enregistrées supprimées : {run_count}.",
+  "AgentFocusOpened": "Focus sur {agent}. Vos messages vont maintenant à ce worker ; Échap revient à la conversation principale.",
+  "AgentFocusClosed": "Retour à la conversation principale.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Message pour {agent} · Échap revient au principal",
+  "AgentFocusNoTranscript": "Aucune transcription pour {agent} pour l'instant. Les messages apparaissent ici au fil des échanges du worker.",
+  "AgentFocusOmitted": "Les messages précédents ({count}) sont omis de la transcription en mémoire.",
+  "AgentFocusFollowUpDelivered": "En file pour {agent} : il lira le message à son prochain tour.",
+  "AgentFocusFollowUpQueued": "En file pour {agent}",
+  "AgentFocusFollowUpContinued": "{agent} avait terminé ; poursuivi sur un nouveau fork ({target}). Cette vue suit désormais le fork.",
+  "AgentFocusFollowUpFailed": "Impossible de transmettre à {agent} : {reason}",
+  "FooterHintForAgents": "agents",
+  "FooterHintToManage": "gérer",
+  "AgentRailQueuedCount": "{count} en file"
 }

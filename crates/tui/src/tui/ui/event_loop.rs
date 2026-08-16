@@ -2250,10 +2250,15 @@ pub(crate) async fn run_event_loop(
                         }
                         subagent_list_refresh_requested = true;
                     }
+                    EngineEvent::SubAgentFollowUp { agent_id, outcome } => {
+                        crate::tui::agent_focus::apply_follow_up_receipt(app, &agent_id, &outcome);
+                    }
                     EngineEvent::AgentList {
                         agents,
                         coordination,
+                        queued_follow_ups,
                     } => {
+                        app.agent_queued_follow_ups = queued_follow_ups;
                         let mut sorted = agents.clone();
                         sort_subagents_in_place(&mut sorted);
                         sorted.retain(|a| !a.from_prior_session);
@@ -4071,6 +4076,15 @@ pub(crate) async fn run_event_loop(
             // Tool details: Alt+V / Option+V only. Bare `v` always types `v`
             // in every focus state (TUI-DOG-002).
             if crate::tui::shell_key_routing::is_tool_details_shortcut(&key) {
+                // While a worker is focused the details chord is that
+                // worker's bounded Agent Details projection.
+                if let Some(agent_id) = app.agent_focus.as_ref().map(|f| f.agent_id.clone()) {
+                    if !crate::tui::agent_details::open_agent_details(app, &agent_id) {
+                        app.status_message = Some("Agent details are unavailable".to_string());
+                    }
+                    app.needs_redraw = true;
+                    continue;
+                }
                 open_tool_details_pager(app);
                 continue;
             }
@@ -4328,6 +4342,46 @@ pub(crate) async fn run_event_loop(
                 {
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
+                }
+                // Agent focus: Esc on an empty composer returns to the main
+                // conversation before any other Esc meaning applies.
+                KeyCode::Esc
+                    if app.agent_focus.is_some()
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open =>
+                {
+                    crate::tui::agent_focus::exit_focus(app);
+                    continue;
+                }
+                // `← for agents`: with an empty composer, Left enters the agent
+                // list (rail Agents panel, or the /agents register when the rail
+                // is off) so a worker can be selected and focused.
+                KeyCode::Left
+                    if key.modifiers.is_empty()
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open
+                        && crate::tui::agent_focus::agents_exist(app) =>
+                {
+                    if !crate::tui::work_surface::enter_agents(app) {
+                        open_agents_register(app, &engine_handle).await;
+                    }
+                    continue;
+                }
+                // `↓ to manage`: with an empty composer, Down opens the agents
+                // register (focus, stop, refresh) instead of moving a cursor
+                // that has nowhere to go.
+                KeyCode::Down
+                    if key.modifiers.is_empty()
+                        && app.input.is_empty()
+                        && !slash_menu_open
+                        && !mention_menu_open
+                        && app.selected_composer_attachment_index().is_none()
+                        && crate::tui::agent_focus::agents_exist(app) =>
+                {
+                    open_agents_register(app, &engine_handle).await;
+                    continue;
                 }
                 // Vim composer mode: Esc from Insert/Visual → Normal.
                 // This arm runs before the generic Esc handler so Insert mode
@@ -5231,4 +5285,16 @@ pub(crate) async fn run_xai_device_login_from_tui(
     };
     app.needs_redraw = true;
     Ok(switched)
+}
+
+/// Open the `/agents` register (the manage view: focus, stop, refresh) and ask
+/// the engine for a fresh listing.
+async fn open_agents_register(app: &mut App, engine_handle: &EngineHandle) {
+    if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
+        let agents = subagent_view_agents(app, &app.subagent_cache);
+        app.view_stack
+            .push(crate::tui::views::SubAgentsView::new(agents));
+    }
+    let _ = engine_handle.send(Op::ListSubAgents).await;
+    app.needs_redraw = true;
 }

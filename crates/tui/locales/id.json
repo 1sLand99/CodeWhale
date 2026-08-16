@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Eksekusi otomatisasi {id} dimasukkan ke antrean: {status} (tugas {task})",
   "AutomationDeletePreview": "Penghapusan belum dikonfirmasi. Tidak ada yang dihapus.\nOtomatisasi: {id} ({name})\nEksekusi tercatat: {run_count}\nUntuk menghapus definisi dan riwayat eksekusi, jalankan:\n{command}",
   "AutomationDeleteConfirmationStale": "Konfirmasi penghapusan tidak lagi cocok dengan otomatisasi {id}; tidak ada yang dihapus. Tinjau keadaan saat ini dengan {command}.",
-  "AutomationDeleted": "Otomatisasi {id} ({name}) dihapus. Eksekusi tercatat yang dihapus: {run_count}."
+  "AutomationDeleted": "Otomatisasi {id} ({name}) dihapus. Eksekusi tercatat yang dihapus: {run_count}.",
+  "AgentFocusOpened": "Fokus pada {agent}. Pesan Anda kini menuju worker ini; Esc kembali ke percakapan utama.",
+  "AgentFocusClosed": "Kembali ke percakapan utama.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Pesan untuk {agent} · Esc kembali ke utama",
+  "AgentFocusNoTranscript": "Belum ada transkrip untuk {agent}. Pesan muncul di sini saat worker bertukar pesan.",
+  "AgentFocusOmitted": "Pesan sebelumnya ({count}) dihilangkan dari transkrip dalam memori.",
+  "AgentFocusFollowUpDelivered": "Diantrekan untuk {agent}: pesan dibaca pada putaran berikutnya.",
+  "AgentFocusFollowUpQueued": "Diantrekan untuk {agent}",
+  "AgentFocusFollowUpContinued": "{agent} sudah selesai; dilanjutkan pada fork baru ({target}). Tampilan ini kini mengikuti fork tersebut.",
+  "AgentFocusFollowUpFailed": "Tidak dapat mengirim ke {agent}: {reason}",
+  "FooterHintForAgents": "agen",
+  "FooterHintToManage": "kelola",
+  "AgentRailQueuedCount": "{count} antre"
 }

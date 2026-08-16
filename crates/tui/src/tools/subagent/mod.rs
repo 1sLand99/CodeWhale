@@ -1697,6 +1697,24 @@ pub(crate) fn subagent_thinking_label(thinking: SubAgentThinking) -> &'static st
 struct SubAgentInput {
     text: String,
     interrupt: bool,
+    /// Live "queued for the next round" counter shared with the manager.
+    /// Decremented when the child loop takes the input off its channel, so
+    /// the rail's `· N queued` count is the truthful number of follow-ups the
+    /// child has not yet folded into its next model round.
+    pending: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl SubAgentInput {
+    /// Mark this input as consumed by the child loop.
+    fn mark_taken(&self) {
+        if let Some(pending) = self.pending.as_ref() {
+            let _ = pending.fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| Some(value.saturating_sub(1)),
+            );
+        }
+    }
 }
 
 fn append_subagent_inputs_as_user_messages(
@@ -1828,6 +1846,43 @@ struct AgentUsageBudgetScope {
     limit: u64,
     spent: u64,
     remaining: u64,
+}
+
+/// Which terminal states `resume_from_checkpoint_with_policy` may re-dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumePolicy {
+    /// The model-facing `agents/followup` contract: interrupted children only.
+    InterruptedOnly,
+    /// The operator-facing continue-a-fork contract: interrupted or completed
+    /// children whose last checkpoint is continuable.
+    InterruptedOrCompleted,
+}
+
+impl ResumePolicy {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::InterruptedOnly => "only interrupted children are resumable",
+            Self::InterruptedOrCompleted => {
+                "only interrupted or completed children can be continued"
+            }
+        }
+    }
+}
+
+/// Receipt for a user-originated follow-up to a child agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserFollowUpOutcome {
+    /// The child the user addressed.
+    pub agent_id: String,
+    /// The child that now carries the conversation: the same id when the
+    /// message was delivered live, or the resumed fork's new id.
+    pub target_agent_id: String,
+    /// Whether the text actually reached a live loop.
+    pub delivered: bool,
+    /// Whether a new agent loop was re-dispatched from the checkpoint.
+    pub resumed: bool,
+    /// Human-readable delivery note (never a secret).
+    pub note: String,
 }
 
 /// Durable recovery point for an interrupted sub-agent session.
@@ -3127,6 +3182,9 @@ pub struct SubAgentManager {
     /// Parent mail queued by `agents/message` without waking the child.
     /// `agents/followup` drains into `input_tx` when a live wake is possible.
     queued_mail: HashMap<String, VecDeque<QueuedParentMessage>>,
+    /// Follow-ups handed to a running child's live input channel that the
+    /// child has not yet taken at a round boundary. Read by the rail rows.
+    pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
     /// Agent ids whose handle-store entries should be evicted on the next async
@@ -3180,6 +3238,7 @@ impl SubAgentManager {
             persist_pending: false,
             last_cleanup_at: None,
             queued_mail: HashMap::new(),
+            pending_follow_ups: HashMap::new(),
             woken_agents: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
@@ -4971,16 +5030,21 @@ impl SubAgentManager {
                 let mut undelivered = VecDeque::new();
                 let mut delivered = 0_usize;
                 if let Some(tx) = input_tx {
+                    let counter =
+                        Arc::clone(self.pending_follow_ups.entry(agent_id.clone()).or_default());
                     while let Some(mail) = pending.next() {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         if tx
                             .send(SubAgentInput {
                                 text: mail.text.clone(),
                                 interrupt: false,
+                                pending: Some(Arc::clone(&counter)),
                             })
                             .is_ok()
                         {
                             delivered = delivered.saturating_add(1);
                         } else {
+                            counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                             undelivered.push_back(mail);
                             undelivered.extend(pending);
                             break;
@@ -5087,6 +5151,84 @@ impl SubAgentManager {
         agent_ref: &str,
         followup_text: &str,
     ) -> Result<SubAgentResult> {
+        self.resume_from_checkpoint_with_policy(
+            manager_handle,
+            runtime,
+            agent_ref,
+            followup_text,
+            ResumePolicy::InterruptedOnly,
+        )
+    }
+
+    /// Continue a child on its own fork from the user's side of the shell.
+    ///
+    /// This is the operator-facing twin of `agents/followup`: a running child
+    /// receives the text on its live input channel; an interrupted *or
+    /// completed* child whose last checkpoint is continuable is re-dispatched
+    /// from that checkpoint under a new agent id (the terminal record stays an
+    /// immutable receipt and `resume_targets` links the fork). Failed,
+    /// cancelled, and budget-exhausted children cannot be continued.
+    pub(crate) fn continue_child_from_user(
+        &mut self,
+        manager_handle: SharedSubAgentManager,
+        runtime: Option<SubAgentRuntime>,
+        agent_ref: &str,
+        text: &str,
+    ) -> Result<UserFollowUpOutcome> {
+        let agent_id = self.resolve_agent_ref(agent_ref)?;
+        let status = self
+            .agents
+            .get(&agent_id)
+            .map(|agent| agent.status.clone())
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+        match status {
+            SubAgentStatus::Running => {
+                let receipt = self.followup_child(&agent_id, text.to_string())?;
+                Ok(UserFollowUpOutcome {
+                    agent_id: agent_id.clone(),
+                    target_agent_id: agent_id,
+                    delivered: receipt.woke,
+                    resumed: false,
+                    note: receipt.note,
+                })
+            }
+            SubAgentStatus::Interrupted(_) | SubAgentStatus::Completed => {
+                let Some(runtime) = runtime else {
+                    return Err(anyhow!(
+                        "Cannot continue agent {agent_id}: no runtime is available to resume it"
+                    ));
+                };
+                let resumed = self.resume_from_checkpoint_with_policy(
+                    manager_handle,
+                    runtime,
+                    &agent_id,
+                    text,
+                    ResumePolicy::InterruptedOrCompleted,
+                )?;
+                let target = resumed.agent_id.clone();
+                Ok(UserFollowUpOutcome {
+                    agent_id,
+                    delivered: true,
+                    resumed: true,
+                    note: format!("continued from checkpoint as {target}"),
+                    target_agent_id: target,
+                })
+            }
+            other => Err(anyhow!(
+                "Cannot continue agent {agent_id}: status is {} and the child cannot resume",
+                subagent_status_name(&other)
+            )),
+        }
+    }
+
+    fn resume_from_checkpoint_with_policy(
+        &mut self,
+        manager_handle: SharedSubAgentManager,
+        runtime: SubAgentRuntime,
+        agent_ref: &str,
+        followup_text: &str,
+        policy: ResumePolicy,
+    ) -> Result<SubAgentResult> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
         // Idempotency: a second resume on the same interrupted id returns the
         // already-resumed target instead of spawning a duplicate agent loop
@@ -5114,10 +5256,20 @@ impl SubAgentManager {
                 .agents
                 .get(&agent_id)
                 .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
-            if !matches!(agent.status, SubAgentStatus::Interrupted(_)) {
+            let resumable = match policy {
+                ResumePolicy::InterruptedOnly => {
+                    matches!(agent.status, SubAgentStatus::Interrupted(_))
+                }
+                ResumePolicy::InterruptedOrCompleted => matches!(
+                    agent.status,
+                    SubAgentStatus::Interrupted(_) | SubAgentStatus::Completed
+                ),
+            };
+            if !resumable {
                 return Err(anyhow!(
-                    "Cannot resume agent {agent_id}: status is {} (only interrupted children are resumable)",
-                    subagent_status_name(&agent.status)
+                    "Cannot resume agent {agent_id}: status is {} ({})",
+                    subagent_status_name(&agent.status),
+                    policy.describe()
                 ));
             }
             let checkpoint = agent
@@ -5264,6 +5416,18 @@ impl SubAgentManager {
         }
         let snapshot = self.get_result(&agent_id)?;
         Ok((prior, snapshot))
+    }
+
+    /// Follow-ups per running child that were handed to its live input
+    /// channel but not yet taken at a round boundary. Only non-zero entries.
+    pub fn queued_follow_up_counts(&self) -> HashMap<String, usize> {
+        self.pending_follow_ups
+            .iter()
+            .filter_map(|(agent_id, counter)| {
+                let count = counter.load(std::sync::atomic::Ordering::Acquire);
+                (count > 0).then(|| (agent_id.clone(), count))
+            })
+            .collect()
     }
 
     /// Bounded coordination summaries for `agents/list`.
@@ -10319,6 +10483,7 @@ async fn run_subagent(
         );
 
         while let Ok(input) = input_rx.try_recv() {
+            input.mark_taken();
             if input.interrupt {
                 pending_inputs.clear();
             }
@@ -10843,6 +11008,7 @@ async fn run_subagent(
                 continue;
             }
             while let Ok(input) = input_rx.try_recv() {
+                input.mark_taken();
                 if input.interrupt {
                     pending_inputs.clear();
                 }

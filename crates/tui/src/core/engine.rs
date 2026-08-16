@@ -103,6 +103,7 @@ fn agent_list_event(manager: &SubAgentManager) -> Event {
     Event::AgentList {
         agents: manager.list(),
         coordination: manager.coordination_detail_projection(None, 24),
+        queued_follow_ups: manager.queued_follow_up_counts(),
     }
 }
 
@@ -2220,6 +2221,26 @@ impl Engine {
                                             "Failed to cancel sub-agent {agent_id}: {err}"
                                         ))));
                             }
+                        }
+                    }
+                    Op::FollowUpSubAgent { agent_id, text } => {
+                        let runtime = self.off_turn_subagent_runtime();
+                        let manager_handle = Arc::clone(&self.subagent_manager);
+                        let (outcome, refresh) = {
+                            let mut manager = self.subagent_manager.write().await;
+                            let outcome = manager
+                                .continue_child_from_user(manager_handle, runtime, &agent_id, &text)
+                                .map_err(|err| err.to_string());
+                            (outcome, agent_list_event(&manager))
+                        };
+                        let _ = self
+                            .tx_event
+                            .send(Event::SubAgentFollowUp { agent_id, outcome })
+                            .await;
+                        if let Err(_e) = self.tx_event.try_send(refresh) {
+                            tracing::debug!(
+                                "Event channel full; dropping FollowUpSubAgent refresh"
+                            );
                         }
                     }
                     Op::ChangeMode { .. } => {
@@ -4721,6 +4742,50 @@ impl Engine {
             reasoning_effort_auto: self.session.reasoning_effort_auto,
         };
         self.build_tool_context_for_turn(&authority, &route)
+    }
+
+    /// Build a child runtime from the installed session route, outside any
+    /// turn, for operator follow-ups that continue a child from its checkpoint
+    /// (`Op::FollowUpSubAgent`). Mirrors the per-turn runtime the `agent` tool
+    /// receives, minus the turn-scoped fork context and mailbox barrier: a
+    /// continued fork is a background child of the session, not of a turn.
+    fn off_turn_subagent_runtime(&self) -> Option<SubAgentRuntime> {
+        let client = self.deepseek_client.clone()?;
+        let mode = self.current_mode;
+        let allow_shell = self.session.allow_shell && !matches!(mode, AppMode::Plan);
+        let shell_policy = shell_policy_for_mode(mode, allow_shell);
+        let tool_context = self.build_tool_context(mode, self.session.auto_approve);
+        let mut rt = SubAgentRuntime::new(
+            client,
+            self.session.model.clone(),
+            tool_context,
+            allow_shell,
+            Some(self.tx_event.clone()),
+            Arc::clone(&self.subagent_manager),
+        )
+        .with_locale_tag(self.config.locale_tag.clone())
+        .with_role_models(self.subagent_role_models())
+        .with_api_config(self.api_config.clone())
+        .with_fleet_roster(self.config.fleet_roster.clone())
+        .with_auto_model(self.session.auto_model)
+        .with_reasoning_effort(
+            self.session.reasoning_effort.clone(),
+            self.session.reasoning_effort_auto,
+        )
+        .with_agent_tool_surface_options(self.agent_tool_surface_options(shell_policy))
+        .with_max_spawn_depth(self.config.max_spawn_depth)
+        .with_step_api_timeout(self.config.subagent_api_timeout)
+        .with_speech_output_dir(self.config.speech_output_dir.clone())
+        .with_mcp_pool(self.mcp_pool.clone())
+        .with_todos(self.config.todos.clone())
+        .with_parent_completion_tx(self.tx_subagent_completion.clone())
+        .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+        .with_parent_mode(mode);
+        if matches!(mode, AppMode::Plan) {
+            rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
+        }
+        rt.worker_profile.denied_tools = self.config.disallowed_tools.clone().unwrap_or_default();
+        Some(rt)
     }
 
     /// Project the current engine authority onto an already-built registry.

@@ -957,10 +957,22 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             };
         app.sidebar_hover_tooltip = None;
 
-        let chat_widget = ChatWidget::new(app, chat_area).with_ocean_viewport(size);
-        shell_ocean = chat_widget.ocean_column();
-        let buf = f.buffer_mut();
-        chat_widget.render(chat_area, buf);
+        if app.agent_focus.is_some() {
+            // A focused worker's full transcript owns the conversation area;
+            // the ocean column and every other shell surface stay as they are.
+            {
+                let chat_widget = ChatWidget::new(app, chat_area).with_ocean_viewport(size);
+                shell_ocean = chat_widget.ocean_column();
+            }
+            crate::tui::agent_focus::refresh_focus(app);
+            let buf = f.buffer_mut();
+            crate::tui::agent_focus::render_focus(app, chat_area, buf);
+        } else {
+            let chat_widget = ChatWidget::new(app, chat_area).with_ocean_viewport(size);
+            shell_ocean = chat_widget.ocean_column();
+            let buf = f.buffer_mut();
+            chat_widget.render(chat_area, buf);
+        }
     }
 
     // Workflow panel between chat and pending-input preview (#4121).

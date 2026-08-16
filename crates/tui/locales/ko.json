@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "자동화 {id} 실행이 대기열에 추가됨: {status} (작업 {task})",
   "AutomationDeletePreview": "삭제가 아직 확인되지 않았습니다. 삭제된 항목이 없습니다.\n자동화: {id} ({name})\n기록된 실행: {run_count}\n정의와 실행 기록을 삭제하려면 다음을 실행하세요:\n{command}",
   "AutomationDeleteConfirmationStale": "삭제 확인이 자동화 {id}의 현재 상태와 더 이상 일치하지 않습니다. 삭제된 항목이 없습니다. {command}로 현재 상태를 검토하세요.",
-  "AutomationDeleted": "자동화 {id} ({name})을(를) 삭제했습니다. 삭제된 실행 기록: {run_count}."
+  "AutomationDeleted": "자동화 {id} ({name})을(를) 삭제했습니다. 삭제된 실행 기록: {run_count}.",
+  "AgentFocusOpened": "{agent}에 포커스했습니다. 이제 메시지가 이 워커에게 전달됩니다. Esc로 메인 대화로 돌아갑니다.",
+  "AgentFocusClosed": "메인 대화로 돌아왔습니다.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "{agent}에게 메시지 · Esc로 메인으로",
+  "AgentFocusNoTranscript": "{agent}의 대화 기록이 아직 없습니다. 워커가 메시지를 주고받으면 여기에 표시됩니다.",
+  "AgentFocusOmitted": "이전 메시지 {count}개가 메모리 내 기록에서 생략되었습니다.",
+  "AgentFocusFollowUpDelivered": "{agent}에게 대기열에 넣었습니다. 다음 라운드에서 읽습니다.",
+  "AgentFocusFollowUpQueued": "{agent} 대기열",
+  "AgentFocusFollowUpContinued": "{agent}은(는) 이미 완료되어 새 포크({target})에서 계속합니다. 이 화면은 이제 그 포크를 따라갑니다.",
+  "AgentFocusFollowUpFailed": "{agent}에게 전달할 수 없습니다: {reason}",
+  "FooterHintForAgents": "에이전트",
+  "FooterHintToManage": "관리",
+  "AgentRailQueuedCount": "{count}개 대기"
 }

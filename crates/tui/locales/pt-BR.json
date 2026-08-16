@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Execução da automação {id} adicionada à fila: {status} (tarefa {task})",
   "AutomationDeletePreview": "A exclusão ainda não foi confirmada. Nada foi excluído.\nAutomação: {id} ({name})\nExecuções registradas: {run_count}\nPara excluir a definição e o histórico de execuções, execute:\n{command}",
   "AutomationDeleteConfirmationStale": "A confirmação de exclusão não corresponde mais à automação {id}; nada foi excluído. Revise o estado atual com {command}.",
-  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}."
+  "AutomationDeleted": "A automação {id} ({name}) foi excluída. Execuções registradas excluídas: {run_count}.",
+  "AgentFocusOpened": "Foco em {agent}. Suas mensagens agora vão para este worker; Esc volta à conversa principal.",
+  "AgentFocusClosed": "De volta à conversa principal.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Mensagem para {agent} · Esc volta ao principal",
+  "AgentFocusNoTranscript": "Ainda não há transcrição de {agent}. As mensagens aparecem aqui conforme o worker as troca.",
+  "AgentFocusOmitted": "Mensagens anteriores ({count}) foram omitidas da transcrição em memória.",
+  "AgentFocusFollowUpDelivered": "Na fila para {agent}: ele lê a mensagem na próxima rodada.",
+  "AgentFocusFollowUpQueued": "Na fila para {agent}",
+  "AgentFocusFollowUpContinued": "{agent} já havia terminado; continuou em um novo fork ({target}). Esta visão agora segue o fork.",
+  "AgentFocusFollowUpFailed": "Não foi possível entregar a {agent}: {reason}",
+  "FooterHintForAgents": "agentes",
+  "FooterHintToManage": "gerenciar",
+  "AgentRailQueuedCount": "{count} na fila"
 }

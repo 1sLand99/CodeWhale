@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Запуск автоматизації {id} поставлено в чергу: {status} (завдання {task})",
   "AutomationDeletePreview": "Видалення ще не підтверджено. Нічого не видалено.\nАвтоматизація: {id} ({name})\nЗаписаних запусків: {run_count}\nЩоб видалити визначення та історію запусків, виконайте:\n{command}",
   "AutomationDeleteConfirmationStale": "Підтвердження видалення більше не відповідає автоматизації {id}; нічого не видалено. Перевірте поточний стан за допомогою {command}.",
-  "AutomationDeleted": "Автоматизацію {id} ({name}) видалено. Видалено записаних запусків: {run_count}."
+  "AutomationDeleted": "Автоматизацію {id} ({name}) видалено. Видалено записаних запусків: {run_count}.",
+  "AgentFocusOpened": "Фокус на {agent}. Тепер ваші повідомлення надходять цьому воркеру; Esc повертає до основної розмови.",
+  "AgentFocusClosed": "Знову в основній розмові.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Повідомлення для {agent} · Esc — до основної розмови",
+  "AgentFocusNoTranscript": "Для {agent} ще немає запису розмови. Повідомлення з'являться тут, щойно воркер почне ними обмінюватися.",
+  "AgentFocusOmitted": "Попередні повідомлення ({count}) не увійшли до запису розмови в пам'яті.",
+  "AgentFocusFollowUpDelivered": "У черзі для {agent}: він прочитає повідомлення на наступному раунді.",
+  "AgentFocusFollowUpQueued": "У черзі для {agent}",
+  "AgentFocusFollowUpContinued": "{agent} уже завершився; продовжено в новому форку ({target}). Це подання тепер стежить за форком.",
+  "AgentFocusFollowUpFailed": "Не вдалося доставити {agent}: {reason}",
+  "FooterHintForAgents": "агенти",
+  "FooterHintToManage": "керування",
+  "AgentRailQueuedCount": "{count} у черзі"
 }

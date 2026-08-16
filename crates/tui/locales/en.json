@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Automation {id} run enqueued: {status} (task {task})",
   "AutomationDeletePreview": "Deletion is not armed. Nothing was deleted.\nAutomation: {id} ({name})\nRecorded runs: {run_count}\nTo delete the definition and run history, run:\n{command}",
   "AutomationDeleteConfirmationStale": "Deletion confirmation no longer matches automation {id}; nothing was deleted. Review the current state with {command}.",
-  "AutomationDeleted": "Deleted automation {id} ({name}). Recorded runs deleted: {run_count}."
+  "AutomationDeleted": "Deleted automation {id} ({name}). Recorded runs deleted: {run_count}.",
+  "AgentFocusOpened": "Focused on {agent}. Your messages now go to this worker; Esc returns to the main conversation.",
+  "AgentFocusClosed": "Back to the main conversation.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Message {agent} · Esc returns to main",
+  "AgentFocusNoTranscript": "No transcript captured yet for {agent}. Messages appear here as the worker exchanges them.",
+  "AgentFocusOmitted": "Earlier messages ({count}) are omitted from the in-memory transcript.",
+  "AgentFocusFollowUpDelivered": "Queued for {agent}: it reads the message at its next round.",
+  "AgentFocusFollowUpQueued": "Queued for {agent}",
+  "AgentFocusFollowUpContinued": "{agent} had finished; continued on a new fork ({target}). This view now follows the fork.",
+  "AgentFocusFollowUpFailed": "Could not deliver to {agent}: {reason}",
+  "FooterHintForAgents": "for agents",
+  "FooterHintToManage": "to manage",
+  "AgentRailQueuedCount": "{count} queued"
 }

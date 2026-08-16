@@ -13,7 +13,7 @@
 
 pub mod active_cell;
 pub(crate) mod agent_details;
-pub(crate) mod agent_transcript;
+pub(crate) mod agent_focus;
 pub mod ambient_life;
 pub mod app;
 pub mod approval;

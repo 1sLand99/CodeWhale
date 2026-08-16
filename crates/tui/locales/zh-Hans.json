@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "自动化 {id} 的运行已入队: {status}（任务 {task}）",
   "AutomationDeletePreview": "删除尚未确认，未删除任何内容。\n自动化: {id}（{name}）\n运行记录: {run_count}\n要删除定义和运行历史，请运行:\n{command}",
   "AutomationDeleteConfirmationStale": "删除确认与自动化 {id} 的当前状态不再匹配，未删除任何内容。请用 {command} 查看当前状态。",
-  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。"
+  "AutomationDeleted": "已删除自动化 {id}（{name}）。已删除的运行记录: {run_count}。",
+  "AgentFocusOpened": "已聚焦 {agent}。之后的消息将发送给该工作者；按 Esc 返回主对话。",
+  "AgentFocusClosed": "已返回主对话。",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "给 {agent} 发消息 · Esc 返回主对话",
+  "AgentFocusNoTranscript": "{agent} 尚无对话记录。工作者开始交流后会在此显示。",
+  "AgentFocusOmitted": "内存中的对话记录省略了较早的 {count} 条消息。",
+  "AgentFocusFollowUpDelivered": "已为 {agent} 排队：它会在下一轮读取该消息。",
+  "AgentFocusFollowUpQueued": "已为 {agent} 排队",
+  "AgentFocusFollowUpContinued": "{agent} 已完成；已在新分支（{target}）上继续。此视图现在跟随该分支。",
+  "AgentFocusFollowUpFailed": "无法发送给 {agent}：{reason}",
+  "FooterHintForAgents": "智能体",
+  "FooterHintToManage": "管理",
+  "AgentRailQueuedCount": "{count} 条排队"
 }

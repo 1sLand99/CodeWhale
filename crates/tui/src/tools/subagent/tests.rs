@@ -18666,3 +18666,87 @@ async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
         "{err}"
     );
 }
+
+#[test]
+fn user_follow_up_to_running_child_counts_queued_until_the_loop_takes_it() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let (agent_id, mut input_rx) =
+        manager.insert_test_running_agent_with_input("focus_target", tmp.path());
+    let handle = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+
+    let outcome = manager
+        .continue_child_from_user(handle.clone(), None, &agent_id, "one more thing")
+        .expect("running child accepts a user follow-up");
+    assert_eq!(outcome.agent_id, agent_id);
+    assert_eq!(outcome.target_agent_id, agent_id);
+    assert!(outcome.delivered);
+    assert!(!outcome.resumed);
+
+    // The rail sees exactly one queued follow-up until the child loop takes
+    // the input at its next round boundary.
+    assert_eq!(
+        manager.queued_follow_up_counts().get(&agent_id).copied(),
+        Some(1)
+    );
+    let _ = manager
+        .continue_child_from_user(handle, None, &agent_id, "and another")
+        .expect("second follow-up");
+    assert_eq!(
+        manager.queued_follow_up_counts().get(&agent_id).copied(),
+        Some(2)
+    );
+    let taken = input_rx.try_recv().expect("delivered live");
+    assert_eq!(taken.text, "one more thing");
+    taken.mark_taken();
+    assert_eq!(
+        manager.queued_follow_up_counts().get(&agent_id).copied(),
+        Some(1)
+    );
+    let taken = input_rx.try_recv().expect("delivered live");
+    taken.mark_taken();
+    assert!(
+        manager.queued_follow_up_counts().is_empty(),
+        "nothing queued once the loop took both"
+    );
+}
+
+#[test]
+fn user_follow_up_to_cancelled_child_fails_closed_with_the_reason() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = manager.insert_test_running_agent("done_target", tmp.path());
+    let handle = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    manager.cancel_agent(&agent_id).expect("cancel");
+    let err = manager
+        .continue_child_from_user(handle, None, &agent_id, "hello?")
+        .expect_err("cancelled children cannot be continued");
+    assert!(err.to_string().contains("cancelled"), "{err}");
+    assert!(manager.queued_follow_up_counts().is_empty());
+}
+
+#[test]
+fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = manager.insert_test_running_agent("finished_target", tmp.path());
+    let handle = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    // Drive the record to Completed through the terminal path.
+    let mut terminal = manager.get_result(&agent_id).expect("snapshot");
+    terminal.status = SubAgentStatus::Completed;
+    terminal.result = Some("done".to_string());
+    assert!(manager.finish_terminal_result(&agent_id, terminal, true, false));
+    let err = manager
+        .continue_child_from_user(handle, None, &agent_id, "one more")
+        .expect_err("no runtime, no resume");
+    assert!(err.to_string().contains("no runtime"), "{err}");
+}

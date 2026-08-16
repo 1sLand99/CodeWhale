@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "Execució de l’automatització {id} afegida a la cua: {status} (tasca {task})",
   "AutomationDeletePreview": "La supressió encara no està confirmada. No s’ha suprimit res.\nAutomatització: {id} ({name})\nExecucions registrades: {run_count}\nPer suprimir la definició i l’historial d’execucions, executa:\n{command}",
   "AutomationDeleteConfirmationStale": "La confirmació de supressió ja no coincideix amb l’automatització {id}; no s’ha suprimit res. Revisa l’estat actual amb {command}.",
-  "AutomationDeleted": "S’ha suprimit l’automatització {id} ({name}). Execucions registrades suprimides: {run_count}."
+  "AutomationDeleted": "S’ha suprimit l’automatització {id} ({name}). Execucions registrades suprimides: {run_count}.",
+  "AgentFocusOpened": "Enfocat en {agent}. Els teus missatges ara van a aquest worker; Esc torna a la conversa principal.",
+  "AgentFocusClosed": "De tornada a la conversa principal.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Missatge per a {agent} · Esc torna al principal",
+  "AgentFocusNoTranscript": "Encara no hi ha transcripció de {agent}. Els missatges apareixen aquí a mesura que el worker els intercanvia.",
+  "AgentFocusOmitted": "Els missatges anteriors ({count}) s'han omès de la transcripció en memòria.",
+  "AgentFocusFollowUpDelivered": "A la cua per a {agent}: llegirà el missatge a la propera ronda.",
+  "AgentFocusFollowUpQueued": "A la cua per a {agent}",
+  "AgentFocusFollowUpContinued": "{agent} ja havia acabat; ha continuat en un fork nou ({target}). Aquesta vista ara segueix el fork.",
+  "AgentFocusFollowUpFailed": "No s'ha pogut lliurar a {agent}: {reason}",
+  "FooterHintForAgents": "agents",
+  "FooterHintToManage": "gestionar",
+  "AgentRailQueuedCount": "{count} a la cua"
 }

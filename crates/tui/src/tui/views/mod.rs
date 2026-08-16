@@ -687,24 +687,15 @@ pub enum ViewEvent {
         agent_id: String,
     },
     /// An agent row activation (Work strip, sidebar dossier, `/agents`) or
-    /// Alt+V from Agent Details requests the agent's transcript — the primary
-    /// destination since the v0.9.7 "one agent, one destination" inversion.
+    /// Alt+V from Agent Details, Enter/click on any agent row, and Enter in the
+    /// `/agents` register all request the agent's transcript — since v0.9.7's
+    /// "one agent, one destination" inversion that is the in-place focus.
     OpenAgentTranscript {
-        agent_id: String,
-    },
-    /// The transcript surface requests the bounded Agent Details projection —
-    /// the secondary action behind the same Alt+V chord.
-    OpenAgentDetails {
         agent_id: String,
     },
     /// Agent Details was popped with Esc/q/Left. The Work surface uses this
     /// to release only its detail-open owner while retaining selection.
     AgentDetailsClosed {
-        agent_id: String,
-    },
-    /// The agent transcript surface was popped with Esc/q/Left. Releases the
-    /// same Work-surface detail-open owner as `AgentDetailsClosed`.
-    AgentTranscriptClosed {
         agent_id: String,
     },
     /// Emitted by the file picker (`Ctrl+P`) when the user presses Enter on a
@@ -4275,6 +4266,14 @@ impl ModalView for SubAgentsView {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 ViewAction::Emit(ViewEvent::SubAgentsRefresh)
             }
+            // Manage: stop the selected worker. Terminal workers ignore the
+            // key; the cancel receipt names what happened either way.
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                match self.ordered_agent_ids().get(self.selected).cloned() {
+                    Some(agent_id) => ViewAction::Emit(ViewEvent::SidebarAgentCancel { agent_id }),
+                    None => ViewAction::None,
+                }
+            }
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 ViewAction::Emit(ViewEvent::CommandPaletteSelected {
                     action: CommandPaletteAction::ExecuteCommand {
@@ -4442,7 +4441,8 @@ impl ModalView for SubAgentsView {
             &[
                 ActionHint::new("Esc", "close"),
                 ActionHint::new("↑/↓", "select"),
-                ActionHint::new("Enter", "transcript"),
+                ActionHint::new("Enter", "focus"),
+                ActionHint::new("X", "stop"),
                 ActionHint::new("R", "refresh"),
                 ActionHint::new("F", "roster/setup"),
             ],

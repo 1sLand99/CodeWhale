@@ -16975,6 +16975,7 @@ fn agent_list_event_carries_the_typed_coordination_projection() {
     let Event::AgentList {
         agents,
         coordination,
+        ..
     } = agent_list_event(&manager)
     else {
         panic!("expected AgentList event");
@@ -17179,6 +17180,7 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
         agents,
         coordination: crate::tools::subagent::SubAgentManager::new(PathBuf::from("."), 1)
             .coordination_detail_projection(None, 24),
+        queued_follow_ups: std::collections::HashMap::new(),
     });
     assert!(
         result.is_err(),

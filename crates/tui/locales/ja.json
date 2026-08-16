@@ -1381,5 +1381,19 @@
   "AutomationRunEnqueued": "自動化 {id} の実行をキューに追加しました: {status}（タスク {task}）",
   "AutomationDeletePreview": "削除はまだ確定していません。何も削除されていません。\n自動化: {id}（{name}）\n実行記録: {run_count}\n定義と実行履歴を削除するには、次を実行してください:\n{command}",
   "AutomationDeleteConfirmationStale": "削除確認が自動化 {id} の現在の状態と一致しないため、何も削除されていません。{command} で現在の状態を確認してください。",
-  "AutomationDeleted": "自動化 {id}（{name}）を削除しました。削除した実行記録: {run_count}。"
+  "AutomationDeleted": "自動化 {id}（{name}）を削除しました。削除した実行記録: {run_count}。",
+  "AgentFocusOpened": "{agent} にフォーカスしました。以後のメッセージはこのワーカーに届きます。Esc でメイン会話に戻ります。",
+  "AgentFocusClosed": "メイン会話に戻りました。",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "{agent} にメッセージ · Esc でメインに戻る",
+  "AgentFocusNoTranscript": "{agent} のトランスクリプトはまだありません。ワーカーがやり取りを始めるとここに表示されます。",
+  "AgentFocusOmitted": "以前のメッセージ（{count} 件）はメモリ内トランスクリプトから省略されています。",
+  "AgentFocusFollowUpDelivered": "{agent} 宛にキューしました。次のラウンドで読み取られます。",
+  "AgentFocusFollowUpQueued": "{agent} 宛にキュー済み",
+  "AgentFocusFollowUpContinued": "{agent} は完了済みだったため、新しいフォーク（{target}）で続行しました。この画面はフォークを追跡します。",
+  "AgentFocusFollowUpFailed": "{agent} に届けられませんでした: {reason}",
+  "FooterHintForAgents": "エージェント",
+  "FooterHintToManage": "管理",
+  "AgentRailQueuedCount": "{count} 件キュー"
 }
