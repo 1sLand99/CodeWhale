@@ -482,6 +482,31 @@ pub enum Event {
 
     /// Advisory note emitted by the background advisor watcher (#3982).
     ///
+    /// A permission decision the runtime made for one proposed tool call
+    /// without a user prompt, so the transcript can carry a visible receipt
+    /// of who decided and why (the audit log keeps the full record).
+    ///
+    /// Only decisions a person would otherwise never see are emitted:
+    /// Auto-Review guardian verdicts, guardian failures (which deny, fail
+    /// closed), and deterministic Auto-Review blocks. Proven-safe
+    /// deterministic allows stay silent, like rule-based auto-approvals in
+    /// other harnesses, so a routine read does not spam the transcript.
+    ToolGateDecision {
+        /// Tool-call id the decision applies to.
+        tool_id: String,
+        /// Tool name as the model called it.
+        tool_name: String,
+        /// Which gate decided.
+        gate: ToolGate,
+        /// What it decided.
+        decision: ToolGateVerdict,
+        /// Reviewer risk tier when a guardian answered (`low`, `medium`,
+        /// `high`, `critical`); `None` for deterministic gates and failures.
+        risk: Option<String>,
+        /// Bounded, control-stripped rationale safe to render as one line.
+        reason: String,
+    },
+
     /// Fired fire-and-forget after `TurnComplete` when the advisor is enabled
     /// and the completed turn contained at least one tool call. The note is
     /// a concise LLM-generated summary of concerns observed in the bounded
@@ -536,4 +561,73 @@ impl Event {
             message: message.into(),
         }
     }
+}
+
+/// Which permission gate produced a [`Event::ToolGateDecision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGate {
+    /// The deterministic Auto-Review policy engine (configured rules plus
+    /// the built-in safety floor); never model-reviewed.
+    AutoReviewDeterministic,
+    /// The one-shot Auto-Review model guardian consulted for a fallback hold.
+    AutoReviewGuardian,
+}
+
+impl ToolGate {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoReviewDeterministic => "auto_review_deterministic",
+            Self::AutoReviewGuardian => "auto_review_guardian",
+        }
+    }
+}
+
+/// What a permission gate decided for one proposed tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGateVerdict {
+    /// The call may run without a user prompt.
+    Allowed,
+    /// The call was refused with a stated rationale.
+    Denied,
+    /// The gate could not produce a verdict (timeout, transport error,
+    /// unparseable answer) and the call was denied, fail closed.
+    Unavailable,
+}
+
+impl ToolGateVerdict {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Bound a gate rationale to one safe transcript line: control and bidi
+/// format characters are dropped, whitespace is collapsed, and the text is
+/// capped so a verbose reviewer cannot flood the transcript.
+#[must_use]
+pub fn bounded_gate_reason(reason: &str) -> String {
+    const MAX_CHARS: usize = 220;
+    let cleaned: String = reason
+        .chars()
+        .filter(|c| !c.is_control() && !is_bidi_format_control(*c))
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_CHARS {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
+fn is_bidi_format_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }

@@ -465,6 +465,22 @@ impl Engine {
         }
         let decision = review.outcome.audit_decision();
         let risk = review.outcome.audit_risk();
+        // The transcript receipt names the verdict a person never saw a
+        // prompt for. Cancellation is not a decision and gets no receipt.
+        let receipt = match &review.outcome {
+            super::reviewer::ReviewerOutcome::Allow { reason, .. } => Some((
+                crate::core::events::ToolGateVerdict::Allowed,
+                reason.clone(),
+            )),
+            super::reviewer::ReviewerOutcome::Deny { reason, .. } => {
+                Some((crate::core::events::ToolGateVerdict::Denied, reason.clone()))
+            }
+            super::reviewer::ReviewerOutcome::Unavailable { reason } => Some((
+                crate::core::events::ToolGateVerdict::Unavailable,
+                reason.clone(),
+            )),
+            super::reviewer::ReviewerOutcome::Cancelled => None,
+        };
         let result = review.outcome.into_tool_result(context.tool_name);
         emit_tool_audit(json!({
             "event": "tool.auto_review",
@@ -474,6 +490,19 @@ impl Engine {
             "risk": risk,
             "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
         }));
+        if let Some((verdict, reason)) = receipt {
+            let _ = self
+                .tx_event
+                .send(Event::ToolGateDecision {
+                    tool_id: tool_id.to_string(),
+                    tool_name: context.tool_name.to_string(),
+                    gate: crate::core::events::ToolGate::AutoReviewGuardian,
+                    decision: verdict,
+                    risk: risk.map(str::to_string),
+                    reason: crate::core::events::bounded_gate_reason(&reason),
+                })
+                .await;
+        }
         result.map(|_| ())
     }
 
@@ -2706,6 +2735,17 @@ impl Engine {
                         AutoReviewPlanDecision::Block(reason) => {
                             approval_required = false;
                             approval_force_prompt = false;
+                            let _ = self
+                                .tx_event
+                                .send(Event::ToolGateDecision {
+                                    tool_id: tool_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    gate: crate::core::events::ToolGate::AutoReviewDeterministic,
+                                    decision: crate::core::events::ToolGateVerdict::Denied,
+                                    risk: None,
+                                    reason: crate::core::events::bounded_gate_reason(&reason),
+                                })
+                                .await;
                             blocked_error = Some(auto_review_block_tool_error(&reason));
                         }
                         AutoReviewPlanDecision::ConsultReviewer(held_reason) => {
