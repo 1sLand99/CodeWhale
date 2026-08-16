@@ -2031,6 +2031,73 @@ mod shell_ceiling_tests {
         );
     }
 
+    /// #5426 acceptance 2, made mechanical: delegation moves work, never
+    /// authority. A read-only scout's own runtime posture is the "session"
+    /// its children clamp against, so a `builder` member dispatched from a
+    /// read-only parent lands read-only — raw shell gone, ceiling-derived
+    /// posture, mutating tools denied — while the delegation itself stays
+    /// available (the depth budget is the parent's, not zero). The escape
+    /// hatch is work capacity, never a wider envelope.
+    #[test]
+    fn a_read_only_parents_delegation_never_widens_authority() {
+        // The scout's live runtime posture, expressed as the session ceiling
+        // a child clamps against: no writes, read-only shell, network kept,
+        // one level of delegation budget left.
+        let scout_runtime = PermissionCeiling {
+            write: false,
+            network_tool: true,
+            shell: ShellCeiling::ReadOnly,
+            delegation_depth: 1,
+            tools: true,
+        };
+        let builder_member = PermissionCeiling {
+            write: true,
+            network_tool: true,
+            shell: ShellCeiling::Full,
+            delegation_depth: 1,
+            tools: true,
+        };
+        assert!(builder_member.write && builder_member.shell == ShellCeiling::Full);
+
+        let authority = ChildAuthority::clamp_for_role("builder", builder_member, scout_runtime);
+
+        // Authority does not widen through delegation: the child is read-only.
+        assert!(!authority.ceiling.write);
+        assert_eq!(authority.ceiling.shell, ShellCeiling::ReadOnly);
+        assert_eq!(authority.write_authority, "read_only");
+        assert_eq!(
+            authority.posture_role, "scout",
+            "a write-capable role name must not smuggle write through delegation"
+        );
+        assert!(denies_raw_shell(&authority));
+        for mutating in ["write_file", "apply_patch"] {
+            assert!(
+                authority
+                    .disallowed_tools
+                    .iter()
+                    .any(|rule| rule == mutating),
+                "{mutating} must stay denied for a scout-delegated builder: {:?}",
+                authority.disallowed_tools
+            );
+        }
+
+        // The escape hatch itself stays open: delegation is still possible
+        // (the parent's budget is intact). But it is useless for shell:
+        // canonical Bash is denied to a delegated child (it is not a bounded
+        // inspection role), so a scout can never obtain bash by spawning —
+        // the scout's own bounded read-only Bash from #5428 is the only shell
+        // path a read-only parent has.
+        assert_eq!(authority.max_depth, 1);
+        assert!(
+            authority
+                .disallowed_tools
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Bash")),
+            "a scout-delegated child must not gain canonical Bash: {:?}",
+            authority.disallowed_tools
+        );
+    }
+
     /// The deny list feeds the fingerprint, so a ceiling that now denies more
     /// must fingerprint differently from one that does not. Two postures that
     /// install different surfaces may never share a fingerprint.
