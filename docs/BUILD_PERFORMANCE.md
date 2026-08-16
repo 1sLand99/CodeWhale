@@ -145,6 +145,45 @@ CARGO_INCREMENTAL=0 scripts/dev-cargo.sh test -p codewhale-config --lib --locked
 Hermetic script tests (no rustc compile): `sh scripts/dev-cache.test.sh` and
 `sh scripts/dev-test.test.sh`.
 
+### Helper verification (2026-08-15, this worktree)
+
+Recorded after other lanes released the machine (load 3.2–5.6). rustc
+1.97.0, cargo 1.97.0, sccache 0.17.0. `CODEWHALE_CACHE_ROOT` set to a
+volume-local override for the run; no caches or targets were deleted.
+
+Cargo expands `{workspace-path-hash}` to `build/d4/96565f96fb3682` for
+this worktree. The first isolated `codewhale-config` `--no-run` created a
+stub `./target` (`CACHEDIR.TAG`); treating that as a warm traditional
+target made the next command recompile into `./target` (8.65 s). The
+helper now stays isolated unless `CODEWHALE_DEV_CACHE=local` or `0`.
+
+**Compile-time** (`scripts/dev-cargo.sh test … --locked --offline --no-run`):
+
+| Step | Wall | Notes |
+| --- | ---: | --- |
+| First isolated `codewhale-config --lib --no-run` | 9.14 s (user 23.8 s) | 90 units into the hashed build-dir |
+| Warm isolated same command (after the stub-target fix) | 0.13 s | `Finished` in 0.07 s |
+| `touch crates/config/src/lib.rs` + isolated `--no-run` | 0.93 s | only `codewhale-config` rebuilt |
+| First isolated `codewhale-tui --lib --no-run` | **121.5 s** (user 305 s) | 600 units; 340 MB binary; A0 empty-target was 127 s / 329 s |
+| `touch crates/tui/src/elapsed.rs` + isolated `--no-run` | **18.15 s** | everyday compile loop; A0 was 21 s / 19 s |
+| `CODEWHALE_SCCACHE=1` config `--no-run` on the already-warm tree | 5.21 s then 0.14 s | wrapper and `SCCACHE_DIR=…/sccache/<rustc-commit>` set; 0 sccache hits because only workspace crates recompiled and the build-dir was not emptied |
+
+**Test-runtime**:
+
+| Step | Wall | Notes |
+| --- | ---: | --- |
+| `scripts/dev-test.sh config` (nextest, 557 tests) | run 0.479 s / real 2.40 s | includes a 0.85 s profile flip compile |
+| `CODEWHALE_DEV_NEXTEST=0 scripts/dev-test.sh config` (libtest) | body 0.11 s / real 0.27 s | 557 tiny tests: process-per-test is slower here |
+| `scripts/dev-test.sh crates/tui/src/elapsed.rs` | run 0.023 s / real 2.81 s | 4 passed, 10,516 skipped; nextest filter works |
+
+The 268 s → ~100 s nextest win remains the earlier tui-unit-suite receipt.
+Config is too small for that win; nextest is still the right default for
+unfiltered crate/workspace runs.
+
+**Ergonomics:** `sh` and `dash` both pass `dev-cache.test.sh` (22) and
+`dev-test.test.sh` (27). Missing sccache is a fallback. `--list` covers
+every workspace crate.
+
 ### A2 nextest in CI
 
 `cargo test --workspace --all-features --locked --doc` inventories
