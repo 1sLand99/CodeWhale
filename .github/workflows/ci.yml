@@ -435,9 +435,17 @@ jobs:
         with:
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Run tests
+      - uses: taiki-e/install-action@nextest
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
-        run: cargo test --workspace --all-features --locked
+      - name: Run tests
+        # Same test binaries as `cargo test`, run by cargo-nextest: one
+        # process per test, all runner cores busy, slow tests named instead
+        # of stalling the binary. `.config/nextest.toml` serializes the PTY
+        # binary and bounds the integration binary that spawns the real
+        # executable; retries are off, so a flake is a red run, not a hidden
+        # one. nextest does not run doctests — the next step keeps them.
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        run: cargo nextest run --workspace --all-features --locked --profile ci
         env:
           # Give test threads the stack the product gives itself. main.rs runs
           # the owner thread and every tokio worker at
@@ -451,6 +459,11 @@ jobs:
           # Box::pin'd that one frame; the mismatch itself remained). std reads
           # this for any thread spawned without an explicit size, which covers
           # both libtest's per-test threads and tokio's workers.
+          RUST_MIN_STACK: '16777216'
+      - name: Run doctests
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        run: cargo test --workspace --all-features --locked --doc
+        env:
           RUST_MIN_STACK: '16777216'
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
       # source-bound measurement on macOS so loss or growth of RSS evidence

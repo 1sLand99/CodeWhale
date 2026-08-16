@@ -46,6 +46,13 @@ cargo test --workspace
 cargo build --release -p codewhale-cli -p codewhale-tui
 ```
 
+`cargo nextest run` (config in `.config/nextest.toml`) is the fast way to
+*run* those suites locally and in CI's Test job; `cargo test --no-run` and
+`cargo test -p codewhale-tui --lib` remain the compile-time measurement and
+the authoritative gate, and `cargo test --doc` covers what nextest skips.
+`scripts/dev-test.sh <area>` maps a code area to its fastest `cargo test -p`
+invocation. See `docs/BUILD_PERFORMANCE.md`.
+
 Report commands actually run and distinguish source, local tests, packaged
 artifacts, CI, and public release state. A commit is WIP until its claimed
 behavior has direct evidence.

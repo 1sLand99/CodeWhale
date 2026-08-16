@@ -38,3 +38,11 @@ slow-timeout = { period = "120s" }
 [[profile.default.overrides]]
 filter = 'binary(integration)'
 test-group = 'spawns-binaries'
+
+# CI (profiles inherit from default): the final summary lists every failure and
+# slow test in full so the run log is enough to diagnose without rerunning.
+[profile.ci]
+retries = 0
+fail-fast = false
+final-status-level = "slow"
+failure-output = "immediate-final"
