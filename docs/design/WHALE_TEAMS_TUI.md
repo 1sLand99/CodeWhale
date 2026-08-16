@@ -92,6 +92,10 @@ accents only and must never be used for status, mode, or permission.
 
 ## Art
 
+The drawing decisions — including the empty-state hero mark in
+`underwater.rs`, which shares this glyph vocabulary — live in
+[`WHALE_TEAMS_TUI_ART.md`](WHALE_TEAMS_TUI_ART.md).
+
 Portraits are 3 rows × 14 columns: a two-column state-cue lane on the left,
 the head at the left, the crown fluke `▚△▞` on the right (the same vocabulary
 as the idle Codewhale mark in `underwater.rs`), and a wake lane under the tail.

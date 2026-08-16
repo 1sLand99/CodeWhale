@@ -3936,7 +3936,7 @@ fn release_semantic_read_fifo(
 }
 
 fn whale_ansi_signature(frame: &crate::qa_harness::Frame) -> Vec<crate::qa_harness::Color> {
-    const WHALE_BACK: &str = "▗▄▄▄▄▄▄▄▄▄▄▄▖";
+    const WHALE_BACK: &str = "▗▄▄▟▄▄▄▄▄▖";
     let (row, mut col) = frame
         .find_text(WHALE_BACK)
         .unwrap_or_else(|| panic!("idle BlueWhale silhouette missing:\n{}", frame.debug_dump()));
@@ -4127,7 +4127,7 @@ fn assert_running_tool_lifecycle_frame(
         "real Bash card did not remain live:\n{dump}"
     );
     assert!(
-        frame.find_text("▗▄▄▄▄▄▄▄▄▄▄▄▖").is_none(),
+        frame.find_text("▗▄▄▟▄▄▄▄▄▖").is_none(),
         "idle BlueWhale should yield to functional transcript activity:\n{dump}"
     );
     let tool_row = visible_row_with_text(frame, "run running").expect("live Bash row");
@@ -4394,7 +4394,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
             |frame| {
                 frame.rows() == rows
                     && frame.cols() == cols
-                    && frame.find_text("▗▄▄▄▄▄▄▄▄▄▄▄▖").is_some()
+                    && frame.find_text("▗▄▄▟▄▄▄▄▄▖").is_some()
             },
             KEY_TIMEOUT,
         )?;
