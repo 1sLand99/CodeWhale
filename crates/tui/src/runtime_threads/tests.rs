@@ -18,6 +18,9 @@ const EVENT_PROCESS_START_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_START";
 const EVENT_PROCESS_WORKER_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_WORKER";
 const EVENT_PROCESS_COUNT_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_COUNT";
 const EVENT_PROCESS_HELPER: &str = "runtime_threads::tests::runtime_event_process_child_helper";
+// Deadlock ceiling for monitor settlement in the 10k-test lib binary. This is
+// a test watchdog, not an expected runtime latency or a customer-facing SLO.
+const TURN_SETTLEMENT_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 #[ignore = "spawned by real cross-process Runtime event tests"]
@@ -4772,7 +4775,8 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
             },
         )
         .await?;
-    let turn_1 = wait_for_terminal_turn(&manager, &turn_1.id, Duration::from_secs(2)).await?;
+    let turn_1 =
+        wait_for_terminal_turn(&manager, &turn_1.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(turn_1.status, RuntimeTurnStatus::Completed);
 
     let turn_2 = manager
@@ -4790,7 +4794,8 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
             },
         )
         .await?;
-    let turn_2 = wait_for_terminal_turn(&manager, &turn_2.id, Duration::from_secs(2)).await?;
+    let turn_2 =
+        wait_for_terminal_turn(&manager, &turn_2.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(turn_2.status, RuntimeTurnStatus::Completed);
 
     let detail = manager.get_thread_detail(&thread.id).await?;
@@ -8194,7 +8199,8 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -8280,7 +8286,8 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }

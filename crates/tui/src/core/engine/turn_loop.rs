@@ -20,6 +20,33 @@ use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
+fn localized_request_preparation_error(locale_tag: &str, error: &anyhow::Error) -> Option<String> {
+    if matches!(
+        error.downcast_ref::<crate::client::cloud_code::CloudCodeRequestError>(),
+        Some(crate::client::cloud_code::CloudCodeRequestError::SystemPromptUnsupported)
+    ) {
+        return Some(
+            crate::localization::tr(
+                crate::localization::resolve_locale(locale_tag),
+                crate::localization::MessageId::CloudCodeSystemPromptUnsupported,
+            )
+            .into_owned(),
+        );
+    }
+    None
+}
+
+pub(super) fn initial_stream_error_user_message(locale_tag: &str, error: &anyhow::Error) -> String {
+    localized_request_preparation_error(locale_tag, error).unwrap_or_else(|| error.to_string())
+}
+
+pub(super) fn preview_request_error_user_message(
+    locale_tag: &str,
+    error: &anyhow::Error,
+) -> String {
+    localized_request_preparation_error(locale_tag, error).unwrap_or_else(|| format!("{error:#}"))
+}
+
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -921,7 +948,9 @@ impl Engine {
                     s
                 }
                 Err(e) => {
-                    let message = self.decorate_auth_error_message(e.to_string());
+                    let message = self.decorate_auth_error_message(
+                        initial_stream_error_user_message(&self.config.locale_tag, &e),
+                    );
                     if is_context_length_error_message(&message)
                         && context_recovery_attempts < MAX_CONTEXT_RECOVERY_ATTEMPTS
                         && self

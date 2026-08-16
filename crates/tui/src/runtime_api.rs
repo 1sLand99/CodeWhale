@@ -748,6 +748,35 @@ struct StartTurnResponse {
     turn: TurnRecord,
 }
 
+fn install_runtime_server_workshop_budgets(
+    config: &Config,
+) -> crate::tools::large_output_router::WorkshopConfig {
+    crate::tools::large_output_router::WorkshopConfig::install_active(config.workshop.as_ref())
+}
+
+fn open_runtime_threads_for_server(
+    config: &Config,
+    workspace: PathBuf,
+    manager_config: RuntimeThreadManagerConfig,
+    plugin_registry: Arc<crate::plugins::PluginRegistry>,
+) -> Result<(
+    SharedRuntimeThreadManager,
+    crate::tools::large_output_router::WorkshopConfig,
+)> {
+    // The Runtime API lazily creates engines after the HTTP/Web server starts.
+    // Install the resolved process-wide read/tool byte limits before the
+    // thread manager can spawn any of those engines, matching interactive and
+    // headless exec startup.
+    let workshop_activation = install_runtime_server_workshop_budgets(config);
+    let manager = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
+        config.clone(),
+        workspace,
+        manager_config,
+        plugin_registry,
+    )?);
+    Ok((manager, workshop_activation))
+}
+
 /// Start the runtime API server.
 pub async fn run_http_server(
     config: Config,
@@ -771,12 +800,12 @@ pub async fn run_http_server(
         config.default_text_model.clone(),
         Some(options.workers),
     );
-    let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
-        config.clone(),
+    let (runtime_threads, _workshop_activation) = open_runtime_threads_for_server(
+        &config,
         workspace.clone(),
         RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
         plugin_discovery.registry_for_workspace(&workspace),
-    )?);
+    )?;
     let task_manager =
         TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
             .await?;

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::llm_client::StreamEventBox;
 use crate::models::{
     ContentBlock, ContentBlockStart, Delta, MessageRequest, MessageResponse, StreamEvent,
+    SystemPrompt,
 };
 
 use super::PreparedOutboundRequest;
@@ -19,6 +20,14 @@ use super::stream_entry;
 /// Model id advertised only after a live cloud-code turn succeeds.
 #[cfg(test)]
 pub const GEMINI_37_FLASH: &str = "gemini-3.7-flash";
+
+/// Semantic request-shape failures that must remain typed until the host
+/// chooses localized user-facing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum CloudCodeRequestError {
+    #[error("cloud-code request would omit non-empty system instructions")]
+    SystemPromptUnsupported,
+}
 
 /// Build the cloud-code streaming URL from the configured `/v1internal` base.
 #[must_use]
@@ -30,6 +39,16 @@ pub fn stream_generate_content_url(base_url: &str) -> String {
 /// Minimum GenerateContent JSON body. Tools, images, and unknown roles fail
 /// closed — those shapes are unproven on this wire.
 pub fn build_generate_content_body(request: &MessageRequest) -> Result<Value> {
+    let has_system_text = match request.system.as_ref() {
+        Some(SystemPrompt::Text(text)) => !text.trim().is_empty(),
+        Some(SystemPrompt::Blocks(blocks)) => {
+            blocks.iter().any(|block| !block.text.trim().is_empty())
+        }
+        None => false,
+    };
+    if has_system_text {
+        return Err(CloudCodeRequestError::SystemPromptUnsupported.into());
+    }
     if request
         .tools
         .as_ref()
@@ -261,7 +280,7 @@ impl super::DeepSeekClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Message, MessageRequest};
+    use crate::models::{Message, MessageRequest, SystemBlock, SystemPrompt};
 
     fn text_request(model: &str, prompt: &str) -> MessageRequest {
         MessageRequest {
@@ -370,5 +389,47 @@ mod tests {
             cache_control: None,
         }]);
         assert!(build_generate_content_body(&request).is_err());
+    }
+
+    #[test]
+    fn generate_content_body_rejects_text_system_prompt_instead_of_dropping_it() {
+        let mut request = text_request(GEMINI_37_FLASH, "ping");
+        request.system = Some(SystemPrompt::Text("Keep this instruction".to_string()));
+
+        let error = build_generate_content_body(&request).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<CloudCodeRequestError>(),
+            Some(CloudCodeRequestError::SystemPromptUnsupported)
+        ));
+    }
+
+    #[test]
+    fn generate_content_body_rejects_block_system_prompt_instead_of_dropping_it() {
+        let mut request = text_request(GEMINI_37_FLASH, "ping");
+        request.system = Some(SystemPrompt::Blocks(vec![SystemBlock {
+            block_type: "text".to_string(),
+            text: "Keep this structured instruction".to_string(),
+            cache_control: None,
+        }]));
+
+        let error = build_generate_content_body(&request).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<CloudCodeRequestError>(),
+            Some(CloudCodeRequestError::SystemPromptUnsupported)
+        ));
+    }
+
+    #[test]
+    fn generate_content_body_accepts_semantically_empty_system_prompt() {
+        let mut request = text_request(GEMINI_37_FLASH, "ping");
+        request.system = Some(SystemPrompt::Blocks(vec![SystemBlock {
+            block_type: "text".to_string(),
+            text: " \n\t".to_string(),
+            cache_control: None,
+        }]));
+
+        assert!(build_generate_content_body(&request).is_ok());
     }
 }

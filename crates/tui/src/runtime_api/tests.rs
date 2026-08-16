@@ -68,6 +68,68 @@ fn web_launcher_failure_is_a_recoverable_manual_bootstrap_warning() {
     assert!(warning.contains("open the bootstrap URL above manually"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn http_and_web_server_thread_manager_installs_configured_workshop_byte_budgets() -> Result<()>
+{
+    let _workshop_guard = crate::tools::large_output_router::active_workshop_test_guard();
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let config = Config {
+        workshop: Some(crate::tools::large_output_router::WorkshopConfig {
+            read_result_max_bytes: Some(73_728),
+            tool_result_max_bytes: Some(65_536),
+            ..crate::tools::large_output_router::WorkshopConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    let (runtime_threads, startup_activation) = open_runtime_threads_for_server(
+        &config,
+        workspace.clone(),
+        RuntimeThreadManagerConfig {
+            data_dir: temp.path().join("runtime"),
+            task_data_dir: temp.path().join("tasks"),
+            max_active_threads: 2,
+        },
+        Arc::new(crate::plugins::PluginRegistry::empty(&workspace)),
+    )?;
+
+    assert_eq!(startup_activation.read_result_max_bytes, Some(73_728));
+    assert_eq!(startup_activation.tool_result_max_bytes, Some(65_536));
+    assert_eq!(
+        crate::tools::large_output_router::WorkshopConfig::active_read_result_max_bytes(),
+        Some(73_728)
+    );
+    assert_eq!(
+        crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes(),
+        Some(65_536)
+    );
+
+    let reload_activation = runtime_threads
+        .reload_config(Config {
+            workshop: Some(crate::tools::large_output_router::WorkshopConfig {
+                read_result_max_bytes: Some(81_920),
+                tool_result_max_bytes: Some(77_824),
+                ..crate::tools::large_output_router::WorkshopConfig::default()
+            }),
+            ..Config::default()
+        })
+        .await?;
+    assert_eq!(reload_activation.read_result_max_bytes, Some(81_920));
+    assert_eq!(reload_activation.tool_result_max_bytes, Some(77_824));
+    assert_eq!(
+        crate::tools::large_output_router::WorkshopConfig::active_read_result_max_bytes(),
+        Some(81_920)
+    );
+    assert_eq!(
+        crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes(),
+        Some(77_824)
+    );
+    crate::tools::large_output_router::WorkshopConfig::install_active(None);
+    Ok(())
+}
+
 #[test]
 fn runtime_tui_settings_reject_legacy_modes_and_do_not_save_env_overlays() -> Result<()> {
     let _lock = lock_test_env();

@@ -2206,7 +2206,7 @@ impl ConfigView {
         let value = self.row_display_value(row).to_lowercase();
         let scope = row.scope.label(self.locale).to_lowercase();
         let scope_en = row.scope.label(Locale::En).to_lowercase();
-        let hint = config_hint_for_key(&row.key).to_lowercase();
+        let hint = config_hint_for_key(self.locale, &row.key).to_lowercase();
 
         filter.split_whitespace().all(|term| {
             section.contains(term)
@@ -2759,7 +2759,7 @@ impl ConfigView {
         let row = self.rows.get(row_idx)?;
         let meta = SettingsRegistry::new(self).meta(row);
         let label = config_label_for_key_for_locale(self.locale, &row.key);
-        let hint = config_hint_for_key(&row.key);
+        let hint = config_hint_for_key(self.locale, &row.key);
         let action_id = if row.key == "provider" {
             MessageId::ConfigActionOpenProvider
         } else if row.key == "model" {
@@ -2984,7 +2984,14 @@ fn humanize_config_key(key: &str) -> String {
         .join(" ")
 }
 
-fn config_hint_for_key(key: &str) -> &'static str {
+fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
+    if key == "provider_url" {
+        return tr(locale, MessageId::ConfigHintProviderUrl);
+    }
+    Cow::Borrowed(config_literal_hint_for_key(key))
+}
+
+fn config_literal_hint_for_key(key: &str) -> &'static str {
     match key {
         "model" => "provider-scoped saved route; Enter opens /model",
         "fast_model" => {
@@ -3039,9 +3046,6 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "work_surface_top_height" => "2..=16 rows · also adjustable by dragging the divider",
         "work_surface_side_width" => "26..=80 columns · also adjustable by dragging the divider",
         "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
-        "provider_url" => {
-            "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
-        }
         // #5134: the filter matches hint text, so the words a confused user
         // actually types — "context length", "context size", "max context",
         // "1m" — have to appear here or these rows stay unfindable.
@@ -3706,7 +3710,7 @@ impl ModalView for ConfigView {
                 if spacious {
                     lines.push(Line::from(""));
                 }
-                let hint = config_hint_for_key(&edit.key);
+                let hint = config_hint_for_key(self.locale, &edit.key);
                 if !hint.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled(
@@ -6066,8 +6070,9 @@ base_url = "https://api.xiaomimimo.com/v1"
 
         let mut app = create_test_app();
         app.api_provider = crate::config::ApiProvider::XiaomiMimo;
+        app.ui_locale = Locale::Es419;
         app.config_path = Some(config_path.clone());
-        let view = ConfigView::new_for_app(&app);
+        let mut view = ConfigView::new_for_app(&app);
 
         let row = view
             .rows
@@ -6076,6 +6081,18 @@ base_url = "https://api.xiaomimimo.com/v1"
             .expect("provider_url row missing");
         assert_eq!(row.value, crate::config::DEFAULT_XIAOMI_MIMO_BASE_URL);
         assert!(!view.rows.iter().any(|row| row.key == "base_url"));
+
+        view.focus_key("provider_url");
+        let hint = view
+            .selected_row_hint()
+            .expect("provider URL row should expose its localized guidance");
+        let es_hint = tr(Locale::Es419, MessageId::ConfigHintProviderUrl);
+        assert!(hint.contains(es_hint.as_ref()), "{hint}");
+        assert!(hint.contains("pago por uso"), "{hint}");
+        assert!(
+            !hint.contains(tr(Locale::En, MessageId::ConfigHintProviderUrl).as_ref()),
+            "the Spanish settings view must not leak the English guidance: {hint}"
+        );
     }
 
     #[test]

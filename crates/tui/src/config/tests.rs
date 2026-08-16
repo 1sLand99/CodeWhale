@@ -2680,6 +2680,11 @@ fn save_api_key_writes_config_file_under_cfg_test() -> Result<()> {
 
 #[test]
 fn policy_control_waits_for_foreign_test_env_overrides_to_restore() {
+    // This is a deadlock ceiling, not a latency requirement. In the full
+    // library suite, hundreds of environment-sensitive tests can acquire the
+    // process-wide lock before this deliberately blocked reader resumes.
+    const FULL_SUITE_SCHEDULING_TIMEOUT: Duration = Duration::from_secs(30);
+
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     let workspace = temp.path().join("workspace");
@@ -2707,7 +2712,7 @@ fn policy_control_waits_for_foreign_test_env_overrides_to_restore() {
         });
 
         started_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(FULL_SUITE_SCHEDULING_TIMEOUT)
             .expect("reader reached policy read");
         assert!(
             rx.recv_timeout(Duration::from_millis(50)).is_err(),
@@ -2720,7 +2725,7 @@ fn policy_control_waits_for_foreign_test_env_overrides_to_restore() {
     };
 
     let (shell, approval) = rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(FULL_SUITE_SCHEDULING_TIMEOUT)
         .expect("reader resumed after policy overrides were restored");
     reader.join().expect("reader thread");
     assert_eq!(shell, ShellAccessControl::Unset);

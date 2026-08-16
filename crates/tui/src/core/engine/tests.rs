@@ -3,7 +3,8 @@ use super::*;
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    auto_review_block_tool_error, merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    auto_review_block_tool_error, initial_stream_error_user_message, merge_new_runtime_mcp_tools,
+    preview_request_error_user_message, registered_tool_approval_required,
     registered_tool_forces_prompt, repo_law_must_block_without_prompt,
     requested_sandbox_escalation, workspace_write_carve_out_applies,
 };
@@ -37,6 +38,29 @@ const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
     "- Do not contact remotes, providers, registries, or production services.\n",
     "- Record exact measurements and distinguish source proof from installed proof.\n",
 );
+
+#[test]
+fn cloud_code_system_prompt_rejection_is_localized_from_its_semantic_error() {
+    let error = anyhow::Error::new(
+        crate::client::cloud_code::CloudCodeRequestError::SystemPromptUnsupported,
+    );
+    let message = initial_stream_error_user_message("es-419", &error);
+    assert!(message.contains("No se envió nada"), "{message}");
+    assert!(!message.contains("omit non-empty system"), "{message}");
+}
+
+#[test]
+fn preview_request_error_preserves_non_semantic_context_chain() {
+    let error = anyhow::Error::msg("root cause").context("request preparation failed");
+    assert_eq!(
+        preview_request_error_user_message("en", &error),
+        "request preparation failed: root cause"
+    );
+    assert_eq!(
+        initial_stream_error_user_message("en", &error),
+        "request preparation failed"
+    );
+}
 const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCTIONS";
 const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
 const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";

@@ -74,8 +74,15 @@ fn agent_tool_call_sse(count: usize) -> String {
                 "function": {
                     "name": "agent",
                     "arguments": serde_json::to_string(&json!({
-                        "message": format!("{CHILD_MARKER}{worker} keep working"),
-                        "agent_type": "explorer",
+                        "action": "start",
+                        // The work bar is the inspectable surface for agents
+                        // that outlive the parent wrap-up. Turn-owned starts
+                        // are cancelled when the mock parent finishes, which
+                        // is not the owner-reported "spawned and inspectable"
+                        // contract these probes pin.
+                        "detached": true,
+                        "prompt": format!("{CHILD_MARKER}{worker} keep working"),
+                        "type": "explorer",
                         // Explicit fresh context: a forked child would carry the
                         // parent prompt into its own requests and defeat the
                         // parent/child discrimination in the responder.

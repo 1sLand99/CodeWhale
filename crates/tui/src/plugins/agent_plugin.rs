@@ -177,7 +177,7 @@ struct KimiPluginManifest {
     #[serde(default)]
     agents: Option<KimiPathSpec>,
     #[serde(rename = "mcpServers", default)]
-    mcp_servers: BTreeMap<String, StandardMcpServer>,
+    mcp_servers: BTreeMap<String, KimiMcpServer>,
     #[serde(rename = "interface", default)]
     interface_metadata: Option<KimiInterface>,
 }
@@ -224,6 +224,77 @@ struct KimiInterface {
     _developer_name: Option<String>,
     #[serde(rename = "websiteURL", default)]
     _website_url: Option<String>,
+    #[serde(rename = "iconUrl", default)]
+    _icon_url: Option<String>,
+    #[serde(rename = "category", default)]
+    _category: Option<String>,
+    #[serde(rename = "hostKind", default)]
+    host_kind: Option<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(rename = "mcpOverrides", default)]
+    mcp_overrides: BTreeMap<String, KimiMcpInterfaceOverride>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KimiMcpInterfaceOverride {
+    #[serde(rename = "displayName", default)]
+    _display_name: Option<String>,
+    #[serde(rename = "iconUrl", default)]
+    _icon_url: Option<String>,
+}
+
+/// Kimi's MCP shape is the standard MCP server entry plus a top-level
+/// `enabledTools` allow-list. Keeping this as a separate closed type prevents
+/// Kimi-only fields from weakening the Agent Plugins `mcp.json` parser.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KimiMcpServer {
+    #[serde(rename = "type", default)]
+    transport: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    extensions: BTreeMap<String, serde_json::Value>,
+    #[serde(rename = "enabledTools", default)]
+    enabled_tools: Vec<String>,
+}
+
+impl KimiMcpServer {
+    fn into_config(self, id: &str) -> Result<McpServerConfig, String> {
+        let enabled_tools = self.enabled_tools;
+        let standard = StandardMcpServer {
+            transport: self.transport,
+            command: self.command,
+            args: self.args,
+            env: self.env,
+            cwd: self.cwd,
+            url: self.url,
+            headers: self.headers,
+            extensions: self.extensions,
+        };
+        let mut config = standard_server_to_config(id, standard)?;
+        if !enabled_tools.is_empty() {
+            if !config.enabled_tools.is_empty() && config.enabled_tools != enabled_tools {
+                return Err(format!(
+                    "kimi.plugin.json MCP server `{id}` declares conflicting enabledTools filters"
+                ));
+            }
+            config.enabled_tools = enabled_tools;
+        }
+        Ok(config)
+    }
 }
 
 /// Parse the Skills/MCP-compatible subset of a Kimi Code plugin manifest.
@@ -231,8 +302,10 @@ struct KimiInterface {
 /// The input shape is deliberately closed. Kimi capabilities Codewhale does
 /// not yet implement (for example lifecycle hooks or prompt injection) fail
 /// validation instead of being silently dropped and then presented as fully
-/// working. The current official `kimi-datasource` and `kimi-webbridge`
-/// bundles only use the compatible fields represented here.
+/// working. In addition to the Skills-only official bundles, this accepts the
+/// known Kimi-managed CU shape: display/platform interface metadata and MCP
+/// `enabledTools`. External applications, daemons, binaries, and permissions
+/// are prerequisites outside this parser and are never implied to exist.
 pub fn parse_kimi_plugin_json(text: &str, root: &Path) -> Result<PluginManifest, String> {
     let kimi: KimiPluginManifest = serde_json::from_str(text)
         .map_err(|error| format!("failed to parse kimi.plugin.json: {error}"))?;
@@ -267,7 +340,7 @@ pub fn parse_kimi_plugin_json(text: &str, root: &Path) -> Result<PluginManifest,
 
     let mut mcp_servers = HashMap::with_capacity(kimi.mcp_servers.len());
     for (id, server) in kimi.mcp_servers {
-        mcp_servers.insert(id.clone(), standard_server_to_config(&id, server)?);
+        mcp_servers.insert(id.clone(), server.into_config(&id)?);
     }
     let mut network_hosts = mcp_servers
         .values()
@@ -283,9 +356,51 @@ pub fn parse_kimi_plugin_json(text: &str, root: &Path) -> Result<PluginManifest,
         Some(KimiAuthor::Detailed(author)) => Some(compose_author(author)?),
         None => None,
     };
-    let display_name = kimi
-        .interface_metadata
-        .and_then(|interface| interface.display_name);
+    let (display_name, when) = match kimi.interface_metadata {
+        Some(interface) => {
+            if let Some(host_kind) = interface.host_kind.as_deref()
+                && !host_kind.eq_ignore_ascii_case("local")
+            {
+                return Err(format!(
+                    "kimi.plugin.json interface hostKind `{host_kind}` is unsupported; only `local` is understood"
+                ));
+            }
+            if interface
+                .mcp_overrides
+                .keys()
+                .any(|key| key.trim().is_empty())
+            {
+                return Err(
+                    "kimi.plugin.json interface mcpOverrides keys must not be empty".to_string(),
+                );
+            }
+            let mut platforms = Vec::with_capacity(interface.platforms.len());
+            let mut seen = BTreeSet::new();
+            const SUPPORTED_PLATFORMS: &[&str] = &[
+                "windows", "linux", "macos", "freebsd", "openbsd", "netbsd", "android", "ios",
+            ];
+            for platform in interface.platforms {
+                let platform = platform.trim().to_ascii_lowercase();
+                if !SUPPORTED_PLATFORMS.contains(&platform.as_str()) {
+                    return Err(format!(
+                        "kimi.plugin.json interface has unsupported platform `{platform}`"
+                    ));
+                }
+                if !seen.insert(platform.clone()) {
+                    return Err(format!(
+                        "kimi.plugin.json interface repeats platform `{platform}`"
+                    ));
+                }
+                platforms.push(platform);
+            }
+            let when = (!platforms.is_empty()).then_some(PluginWhen {
+                os: Some(platforms),
+                binaries: None,
+            });
+            (interface.display_name, when)
+        }
+        None => (None, None),
+    };
 
     Ok(PluginManifest {
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -311,7 +426,7 @@ pub fn parse_kimi_plugin_json(text: &str, root: &Path) -> Result<PluginManifest,
             network_hosts,
             ..PluginCapabilities::default()
         },
-        when: None,
+        when,
     })
 }
 

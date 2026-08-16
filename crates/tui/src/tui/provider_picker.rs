@@ -66,6 +66,8 @@ use std::sync::OnceLock;
 const DS4_PROVIDER_ID: &str = "ds4";
 const DS4_BASE_URL: &str = "http://127.0.0.1:8000/v1";
 const DS4_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+const LM_STUDIO_PROVIDER_ID: &str = "lm_studio";
+const LM_STUDIO_BASE_URL: &str = "http://127.0.0.1:1234/v1";
 /// SenseTime SenseNova OpenAI-compatible host (#5350). Custom form only —
 /// not a first-class provider. Agnes has no published URL, so it has no
 /// preset. OpenCode Zen/Go stay first-class rows.
@@ -2158,6 +2160,17 @@ impl ProviderPickerView {
         self.custom_provider_api_key_env.clear();
     }
 
+    fn enter_lm_studio_form(&mut self) {
+        self.stage = Stage::CustomForm;
+        self.custom_provider_field = CustomProviderField::Model;
+        self.custom_provider_id = LM_STUDIO_PROVIDER_ID.to_string();
+        self.custom_provider_base_url = LM_STUDIO_BASE_URL.to_string();
+        // LM Studio model identifiers depend on what the user has loaded, so
+        // leave the model editable instead of guessing a stale default.
+        self.custom_provider_model.clear();
+        self.custom_provider_api_key_env.clear();
+    }
+
     fn enter_sensenova_form(&mut self) {
         self.stage = Stage::CustomForm;
         self.custom_provider_field = CustomProviderField::ApiKeyEnv;
@@ -2326,6 +2339,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("L", "local only"),
+                    ActionHint::new("I", "LM Studio"),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
                     ActionHint::new("S", "SenseNova"),
@@ -2341,6 +2355,7 @@ impl ProviderPickerView {
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action),
                     ActionHint::new("L", "local only"),
+                    ActionHint::new("I", "LM Studio"),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
                     ActionHint::new("D", "DS4"),
                     ActionHint::new("S", "SenseNova"),
@@ -3473,6 +3488,14 @@ impl ModalView for ProviderPickerView {
                         && c.eq_ignore_ascii_case(&'l') =>
                 {
                     self.show_local_routes();
+                    ViewAction::None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty()
+                        && self.query.is_empty()
+                        && c.eq_ignore_ascii_case(&'i') =>
+                {
+                    self.enter_lm_studio_form();
                     ViewAction::None
                 }
                 KeyCode::Char(c)
@@ -5527,6 +5550,48 @@ mod tests {
         );
         assert_eq!(picker.custom_provider_model, "deepseek-v4-flash");
         assert_eq!(picker.custom_provider_api_key_env, "SENSENOVA_API_KEY");
+    }
+
+    #[test]
+    fn lm_studio_preset_is_loopback_keyless_and_requests_the_loaded_model() {
+        let config = Config::default();
+        let mut picker =
+            ProviderPickerView::new_for_onboarding(ApiProvider::Deepseek, None, &config, None);
+
+        assert_eq!(picker.view, ProviderListView::Local);
+        assert_eq!(picker.selected_provider(), ApiProvider::Ollama);
+        let rendered = render_text(&picker, 100, 28);
+        assert!(rendered.contains("I LM Studio"), "{rendered}");
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('i'))),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::CustomForm);
+        assert_eq!(picker.custom_provider_field, CustomProviderField::Model);
+        assert_eq!(picker.custom_provider_id, "lm_studio");
+        assert_eq!(picker.custom_provider_base_url, "http://127.0.0.1:1234/v1");
+        assert!(picker.custom_provider_model.is_empty());
+        assert!(picker.custom_provider_api_key_env.is_empty());
+
+        for ch in "local-code-model".chars() {
+            picker.handle_key(key(KeyCode::Char(ch)));
+        }
+        picker.handle_key(key(KeyCode::Enter));
+        let action = picker.handle_key(key(KeyCode::Enter));
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerCustomProviderSubmitted {
+                provider_id,
+                base_url,
+                model,
+                api_key_env,
+            }) => {
+                assert_eq!(provider_id, "lm_studio");
+                assert_eq!(base_url, "http://127.0.0.1:1234/v1");
+                assert_eq!(model.as_deref(), Some("local-code-model"));
+                assert_eq!(api_key_env, None);
+            }
+            other => panic!("expected LM Studio custom-provider submit event, got {other:?}"),
+        }
     }
 
     #[test]

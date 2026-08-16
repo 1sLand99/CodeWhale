@@ -290,14 +290,14 @@ const COMPLETION_BREATH_MS: u128 = 800;
 const COMPLETION_RELEASE_MS: u128 = 560;
 const IDLE_WHALE_SPOUT_ROW: &str = "   ˚";
 const IDLE_WHALE_ROWS: [&str; 3] = [
-    "  ▗▄▄▄▄▄▄▄▄▄▄▄▖      ▚▞",
+    "  ▗▄▄▄▄▄▄▄▄▄▄▄▖      ▚△▞",
     " ▐██·███████████▙━━━━▞",
     "  ▝▀▀▀▀▀▀▀▀▀▀▀▀▘",
 ];
 
 const UWU_IDLE_WHALE_SPOUT_ROW: &str = "   ˚✦";
 const UWU_IDLE_WHALE_ROWS: [&str; 3] = [
-    " ▗▄▄▄▄▄▄▄▄▄▄▄▖    ▚▞",
+    " ▗▄▄▄▄▄▄▄▄▄▄▄▖    ▚△▞",
     "▐█░·░█████████▙▄▄▞",
     " ▝▀▀▀▀▀▀▀▀▀▀▀▘",
 ];
@@ -1446,8 +1446,9 @@ fn idle_whale_row_spans(
 
     for (column, ch) in text.chars().enumerate() {
         let diagonal = (column as f32 + (rows - 1.0 - row as f32)) / (cols + rows);
-        let color = if matches!(ch, '·' | '░' | '✦') {
-            // Soft uwu blush/sparkle use the eye/sakura channel; classic only has ·.
+        let color = if matches!(ch, '·' | '░' | '✦' | '△') {
+            // Soft uwu blush/sparkle and the quiet crown-fluke center use the
+            // eye/sakura channel; classic otherwise only has the eye dot.
             eye
         } else if animated {
             idle_mark_color(
@@ -1476,18 +1477,12 @@ fn idle_whale_row_spans(
 }
 
 #[must_use]
-fn idle_whale_block_width() -> usize {
-    let classic = std::iter::once(IDLE_WHALE_SPOUT_ROW)
-        .chain(IDLE_WHALE_ROWS.iter().copied())
+fn idle_whale_block_width(spout: &str, rows: &[&str]) -> usize {
+    std::iter::once(spout)
+        .chain(rows.iter().copied())
         .map(UnicodeWidthStr::width)
         .max()
-        .unwrap_or(0);
-    let uwu = std::iter::once(UWU_IDLE_WHALE_SPOUT_ROW)
-        .chain(UWU_IDLE_WHALE_ROWS.iter().copied())
-        .map(UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(0);
-    classic.max(uwu)
+        .unwrap_or(0)
 }
 
 pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
@@ -1526,7 +1521,8 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         // The spout, head, belly, peduncle, and flukes are one drawing. Give
         // every row the same outer inset so the authored offsets survive;
         // centering each row independently shears the silhouette apart.
-        let block_inset = " ".repeat(width.saturating_sub(idle_whale_block_width()) / 2);
+        let block_inset =
+            " ".repeat(width.saturating_sub(idle_whale_block_width(spout, &rows)) / 2);
         for row in mark {
             let mut spans = vec![Span::raw(block_inset.clone())];
             spans.extend(row);
@@ -1545,19 +1541,27 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         |branch| Cow::Owned(branch.to_string()),
     );
     let context = if tier == ShellTier::Compact {
-        format!("codewhale · {branch}")
+        branch.into_owned()
     } else {
         format!(
-            "codewhale · {workspace} · {branch} · {} {}",
+            "{workspace} · {branch} · {} {}",
             tr(app.ui_locale, MessageId::EmptyStateMcpLabel),
             app.mcp_configured_count
         )
     };
+    let brand = "Codewhale";
+    let brand_inset = " ".repeat(width.saturating_sub(brand.width()) / 2);
+    lines.push(Line::from(Span::styled(
+        format!("{brand_inset}{brand}"),
+        Style::default()
+            .fg(app.ui_theme.text_body)
+            .add_modifier(Modifier::BOLD),
+    )));
     let context = truncate_to_width(&context, width);
     let inset = " ".repeat(width.saturating_sub(context.width()) / 2);
     lines.push(Line::from(Span::styled(
         format!("{inset}{context}"),
-        Style::default().fg(app.ui_theme.text_muted),
+        Style::default().fg(app.ui_theme.text_soft),
     )));
     if area.height >= 6 {
         lines.push(Line::from(""));
@@ -1580,20 +1584,40 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         };
         let fleet = format!("{fleet_label}  {fleet_action}");
         let inset = " ".repeat(width.saturating_sub(fleet.width()) / 2);
-        lines.push(Line::from(Span::styled(
-            format!("{inset}{fleet}"),
-            Style::default().fg(app.ui_theme.text_hint),
-        )));
+        lines.push(Line::from(vec![
+            Span::raw(inset),
+            Span::styled(
+                fleet_label.into_owned(),
+                Style::default().fg(app.ui_theme.text_soft),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                fleet_action,
+                Style::default()
+                    .fg(app.ui_theme.accent_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
         if area.height >= 7 {
-            let help = format!(
-                "/help or Ctrl+K {}",
-                tr(app.ui_locale, MessageId::EmptyStateHelpHint)
-            );
+            let help_connector = tr(app.ui_locale, MessageId::EmptyStateHelpConnector);
+            let help_command = format!("/help {help_connector} Ctrl+K");
+            let help_hint = tr(app.ui_locale, MessageId::EmptyStateHelpHint);
+            let help = format!("{help_command} {help_hint}");
             let inset = " ".repeat(width.saturating_sub(help.width()) / 2);
-            lines.push(Line::from(Span::styled(
-                format!("{inset}{help}"),
-                Style::default().fg(app.ui_theme.text_hint),
-            )));
+            lines.push(Line::from(vec![
+                Span::raw(inset),
+                Span::styled(
+                    help_command,
+                    Style::default()
+                        .fg(app.ui_theme.accent_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    help_hint.into_owned(),
+                    Style::default().fg(app.ui_theme.text_soft),
+                ),
+            ]));
         }
     }
     lines
@@ -2535,12 +2559,12 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        let block_width = idle_whale_block_width();
+        let block_width = idle_whale_block_width(IDLE_WHALE_SPOUT_ROW, &IDLE_WHALE_ROWS);
         let block_inset = (width - block_width) / 2;
 
         assert_eq!(
-            block_width, 23,
-            "the final mark should stay quiet at 60 cols"
+            block_width, 24,
+            "the crown-fluke mark should stay quiet at 60 cols"
         );
         for row in std::iter::once(IDLE_WHALE_SPOUT_ROW).chain(IDLE_WHALE_ROWS) {
             let line = rendered
@@ -2558,6 +2582,41 @@ mod tests {
             assert!(
                 line.width() <= block_inset + block_width,
                 "row escaped the centered mark block: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uwu_idle_whale_uses_its_own_centered_block_width() {
+        let mut app = test_app();
+        app.ui_theme = crate::palette::ThemeId::Uwu.ui_theme();
+        app.low_motion = true;
+        let width = 60usize;
+        let rendered = empty_state_lines(&app, Rect::new(0, 0, width as u16, 16))
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let block_width = idle_whale_block_width(UWU_IDLE_WHALE_SPOUT_ROW, &UWU_IDLE_WHALE_ROWS);
+        let block_inset = (width - block_width) / 2;
+
+        assert_eq!(block_width, 21);
+        for row in std::iter::once(UWU_IDLE_WHALE_SPOUT_ROW).chain(UWU_IDLE_WHALE_ROWS) {
+            let line = rendered
+                .iter()
+                .find(|line| line.trim_start() == row.trim_start())
+                .unwrap_or_else(|| panic!("missing authored uwu whale row {row:?}"));
+            let rendered_inset = line.chars().take_while(|ch| *ch == ' ').count();
+            let authored_inset = row.chars().take_while(|ch| *ch == ' ').count();
+
+            assert_eq!(
+                rendered_inset - authored_inset,
+                block_inset,
+                "uwu row drifted out of its own centered silhouette: {line:?}"
             );
         }
     }
@@ -2583,7 +2642,7 @@ mod tests {
             rows,
             [
                 "   o",
-                r"  .###########.      \/",
+                r"  .###########.      \^/",
                 " |##.############----/",
                 "  .############.",
             ]

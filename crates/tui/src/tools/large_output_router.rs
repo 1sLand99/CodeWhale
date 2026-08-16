@@ -36,6 +36,45 @@ pub const WORKSHOP_LAST_TOOL_RESULT_VAR: &str = "last_tool_result";
 
 static ACTIVE_WORKSHOP: OnceLock<Mutex<WorkshopConfig>> = OnceLock::new();
 
+#[cfg(test)]
+static ACTIVE_WORKSHOP_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+std::thread_local! {
+    static ACTIVE_WORKSHOP_TEST_SERIAL_HELD: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+/// Holds every test-side workshop activation behind one process-wide gate.
+/// The thread-local marker lets the owning current-thread test call
+/// `install_active` without trying to acquire its own non-reentrant lock.
+#[cfg(test)]
+pub(crate) struct ActiveWorkshopTestGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for ActiveWorkshopTestGuard {
+    fn drop(&mut self) {
+        ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(|held| held.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn active_workshop_test_guard() -> ActiveWorkshopTestGuard {
+    assert!(
+        !ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(std::cell::Cell::get),
+        "active workshop test guard is not reentrant"
+    );
+    let serial = ACTIVE_WORKSHOP_TEST_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(|held| held.set(true));
+    ActiveWorkshopTestGuard { _serial: serial }
+}
+
 fn active_workshop_slot() -> &'static Mutex<WorkshopConfig> {
     ACTIVE_WORKSHOP.get_or_init(|| Mutex::new(WorkshopConfig::default()))
 }
@@ -68,11 +107,28 @@ pub struct WorkshopConfig {
 
 impl WorkshopConfig {
     /// Install the process-wide workshop budgets used by read/tool compactors.
-    pub fn install_active(config: Option<&Self>) {
+    ///
+    /// The returned immutable receipt is the snapshot written while the
+    /// singleton lock was held. Callers that need evidence of their own
+    /// activation can inspect it without racing a later process-wide update.
+    pub fn install_active(config: Option<&Self>) -> Self {
+        #[cfg(test)]
+        let _test_serial = if ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(std::cell::Cell::get) {
+            None
+        } else {
+            Some(
+                ACTIVE_WORKSHOP_TEST_SERIAL
+                    .get_or_init(|| Mutex::new(()))
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        };
         let snapshot = config.cloned().unwrap_or_default();
-        if let Ok(mut slot) = active_workshop_slot().lock() {
-            *slot = snapshot;
-        }
+        let mut slot = active_workshop_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = snapshot;
+        slot.clone()
     }
 
     /// Optional model-visible read budget, when the user opted in (#5367).
@@ -447,18 +503,23 @@ mod tests {
 
     #[test]
     fn workshop_byte_budgets_raise_floor_only() {
-        WorkshopConfig::install_active(Some(&WorkshopConfig {
+        let _guard = active_workshop_test_guard();
+        let installed = WorkshopConfig::install_active(Some(&WorkshopConfig {
             large_output_threshold_tokens: None,
             per_tool_thresholds: None,
             read_result_max_bytes: Some(102_400),
             tool_result_max_bytes: Some(80_000),
         }));
+        assert_eq!(installed.read_result_max_bytes, Some(102_400));
+        assert_eq!(installed.tool_result_max_bytes, Some(80_000));
         assert_eq!(
             WorkshopConfig::active_read_result_max_bytes(),
             Some(102_400)
         );
         assert_eq!(WorkshopConfig::active_tool_result_max_bytes(), Some(80_000));
-        WorkshopConfig::install_active(None);
+        let cleared = WorkshopConfig::install_active(None);
+        assert_eq!(cleared.read_result_max_bytes, None);
+        assert_eq!(cleared.tool_result_max_bytes, None);
         assert_eq!(WorkshopConfig::active_read_result_max_bytes(), None);
         assert_eq!(WorkshopConfig::active_tool_result_max_bytes(), None);
     }

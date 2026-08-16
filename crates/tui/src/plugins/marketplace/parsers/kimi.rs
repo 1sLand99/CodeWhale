@@ -29,6 +29,9 @@ use super::super::types::{
 use super::{MarketplaceDocument, str_array_field, str_field, unknown_fields_warning};
 
 const TOP_LEVEL_FIELDS: &[&str] = &["version", "plugins"];
+pub const KIMI_ZIP_UNSUPPORTED_REASON: &str = "kimi_zip_unsupported";
+pub const KIMI_REMOTE_UNSUPPORTED_REASON: &str = "kimi_remote_archive_unsupported";
+pub const KIMI_GZIP_TARBALL_SOURCE_KIND: &str = "kimi_gzip_tarball_url";
 const ENTRY_FIELDS: &[&str] = &[
     "id",
     "source",
@@ -289,10 +292,20 @@ fn normalize_kimi_source(raw: &str) -> (MarketplaceSourceSpec, MarketplaceInstal
         );
     }
     if raw.starts_with("https://") || raw.starts_with("http://") {
-        let is_archive = [".zip", ".tar.gz", ".tgz"]
-            .iter()
-            .any(|e| raw.to_ascii_lowercase().ends_with(e));
-        if is_archive {
+        let lower = raw.to_ascii_lowercase();
+        if lower.ends_with(".zip") {
+            return (
+                MarketplaceSourceSpec::ArchiveUrl {
+                    url: raw.to_string(),
+                    sha256: None,
+                },
+                MarketplaceInstallPlan::Unsupported {
+                    reason: KIMI_ZIP_UNSUPPORTED_REASON.to_string(),
+                    raw: raw.to_string(),
+                },
+            );
+        }
+        if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
             return (
                 MarketplaceSourceSpec::ArchiveUrl {
                     url: raw.to_string(),
@@ -300,7 +313,7 @@ fn normalize_kimi_source(raw: &str) -> (MarketplaceSourceSpec, MarketplaceInstal
                 },
                 MarketplaceInstallPlan::Supported {
                     spec: raw.to_string(),
-                    source_kind: "Tarball or zip URL".to_string(),
+                    source_kind: KIMI_GZIP_TARBALL_SOURCE_KIND.to_string(),
                 },
             );
         }
@@ -311,8 +324,7 @@ fn normalize_kimi_source(raw: &str) -> (MarketplaceSourceSpec, MarketplaceInstal
                 ),
             },
             MarketplaceInstallPlan::Unsupported {
-                reason: "Kimi zip sources must end in .zip/.tar.gz/.tgz for Codewhale install"
-                    .to_string(),
+                reason: KIMI_REMOTE_UNSUPPORTED_REASON.to_string(),
                 raw: raw.to_string(),
             },
         );

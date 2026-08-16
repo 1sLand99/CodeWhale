@@ -3625,7 +3625,7 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
-mod cloud_code;
+pub(crate) mod cloud_code;
 mod deepseek_effort;
 #[cfg(test)]
 mod ds4_tests;

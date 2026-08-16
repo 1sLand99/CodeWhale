@@ -149,7 +149,7 @@ fn scan_enforces_size_cap() {
 }
 
 #[test]
-fn scan_requires_exactly_one_plugin_toml_root() {
+fn scan_requires_exactly_one_plugin_manifest_root() {
     let zero = tarball(&[("repo-main/README.md", b"no manifest here")]);
     let err = scan_tarball(&zero, DEFAULT_MAX_SIZE_BYTES).unwrap_err();
     assert!(
@@ -173,6 +173,23 @@ fn scan_requires_exactly_one_plugin_toml_root() {
         ),
         "got: {err:#}"
     );
+}
+
+#[test]
+fn stage_tarball_accepts_a_kimi_manifest_root() {
+    let manifest = br#"{
+      "name": "kimi-archive",
+      "version": "1.0.0",
+      "description": "Kimi archive fixture"
+    }"#;
+    let bytes = tarball(&[("repo-main/kimi.plugin.json", manifest)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+
+    let staged = stage_tarball(&bytes, &plugins, DEFAULT_MAX_SIZE_BYTES).unwrap();
+
+    assert_eq!(staged.name, "kimi-archive");
+    assert!(staged.staged_path.join("kimi.plugin.json").is_file());
 }
 
 #[test]
@@ -259,6 +276,40 @@ async fn install_from_local_path_copies_and_marks_the_bundle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_local_install_rejects_changed_bytes_before_placement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = write_bundle(tmp.path(), "src/exact-demo", "exact-demo");
+    let expected =
+        crate::plugins::manifest::PluginManifest::validate_from_path(&source.join("plugin.toml"))
+            .unwrap()
+            .content_hash;
+    fs::write(source.join("README.md"), "changed after review\n").unwrap();
+
+    let error = install_with_expected_content_hash(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        &no_conflict(),
+        &expected,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("source changed after review"));
+    assert!(!plugins.join("exact-demo").exists());
+    assert!(
+        fs::read_dir(&plugins).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging-")),
+        "hash mismatch must clean its private staging directory"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn install_imports_official_kimi_datasource_shape() {
     let tmp = tempfile::tempdir().unwrap();
     let plugins = tmp.path().join("plugins");
@@ -317,6 +368,100 @@ async fn install_imports_official_kimi_datasource_shape() {
     assert_eq!(
         validated.manifest.plugin.display_name.as_deref(),
         Some("Kimi Datasource")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_imports_managed_kimi_cu_shape_with_platform_and_tool_filters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = tmp.path().join("src/kimi-cu");
+    fs::create_dir_all(source.join("skills/kimi-cu")).unwrap();
+    fs::create_dir_all(source.join("bin")).unwrap();
+    fs::write(
+        source.join("kimi.plugin.json"),
+        r#"{
+          "name": "kimi-cu",
+          "version": "0.5.4",
+          "description": "Computer-use wiring",
+          "license": "Proprietary",
+          "skills": "./skills/",
+          "mcpServers": {
+            "kimi-cu": {
+              "command": "sh",
+              "args": ["./bin/kimi-cu-mcp"],
+              "cwd": "./",
+              "enabledTools": ["computer_get_state", "computer_click"]
+            }
+          },
+          "interface": {
+            "displayName": "Kimi Computer Use",
+            "shortDescription": "Computer control",
+            "longDescription": "Requires the external Kimi runtime and permissions.",
+            "developerName": "Moonshot AI",
+            "iconUrl": "https://example.invalid/kimi-cu.png",
+            "category": "Developer Tools",
+            "hostKind": "local",
+            "platforms": ["macos"],
+            "mcpOverrides": {
+              "mac": {
+                "displayName": "Kimi Computer Use for macOS",
+                "iconUrl": "https://example.invalid/kimi-cu-mac.png"
+              }
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("skills/kimi-cu/SKILL.md"),
+        "---\nname: kimi-cu\ndescription: computer use\n---\n",
+    )
+    .unwrap();
+    fs::write(source.join("bin/kimi-cu-mcp"), "#!/bin/sh\n").unwrap();
+
+    let outcome = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap();
+    let PluginInstallOutcome::Installed(installed) = outcome else {
+        panic!("expected managed Kimi CU plugin install to succeed");
+    };
+    let validated = crate::plugins::manifest::PluginManifest::validate_from_path(
+        &installed.path.join("kimi.plugin.json"),
+    )
+    .unwrap();
+    assert_eq!(validated.inventory.skills, 1);
+    assert_eq!(validated.inventory.mcp_servers, 1);
+    assert_eq!(validated.inventory.stdio_mcp_servers, 1);
+    assert_eq!(
+        validated.manifest.plugin.license.as_deref(),
+        Some("Proprietary")
+    );
+    assert_eq!(
+        validated
+            .manifest
+            .when
+            .as_ref()
+            .and_then(|when| when.os.as_ref()),
+        Some(&vec!["macos".to_string()])
+    );
+    assert_eq!(validated.applicable, cfg!(target_os = "macos"));
+    let server = validated
+        .manifest
+        .mcp_servers
+        .as_ref()
+        .and_then(|servers| servers.get("kimi-cu"))
+        .unwrap();
+    assert_eq!(
+        server.enabled_tools,
+        ["computer_get_state", "computer_click"]
     );
 }
 
@@ -409,6 +554,45 @@ async fn kimi_import_rejects_unsupported_runtime_fields() {
         "unsupported Kimi runtime fields must fail closed: {error:#}"
     );
     assert!(!plugins.join("kimi-hooks").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kimi_import_rejects_unknown_mcp_executable_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins = tmp.path().join("plugins");
+    let source = tmp.path().join("src/kimi-unknown-exec");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("kimi.plugin.json"),
+        r#"{
+          "name": "kimi-unknown-exec",
+          "version": "1.0.0",
+          "mcpServers": {
+            "unknown": {
+              "command": "node",
+              "args": ["server.mjs"],
+              "postInstallCommand": "node install.mjs"
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let error = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unknown field `postInstallCommand`"),
+        "unknown Kimi executable fields must fail closed: {error:#}"
+    );
+    assert!(!plugins.join("kimi-unknown-exec").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

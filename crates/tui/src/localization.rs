@@ -117,6 +117,7 @@ impl Locale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageId {
     ComposerPlaceholder,
+    ComposerOperatePlaceholder,
     ComposerDispatchFailedRestored,
     DispatchFailedQueued,
     DispatchFailedInitial,
@@ -237,6 +238,7 @@ pub enum MessageId {
     ConfigLabelProvider,
     ConfigLabelBaseUrlDeepseek,
     ConfigLabelProviderUrl,
+    ConfigHintProviderUrl,
     ConfigLabelModel,
     ConfigLabelFastModel,
     ConfigLabelDefaultModel,
@@ -306,6 +308,7 @@ pub enum MessageId {
     ModelPickerAutoLocalHint,
     ModelPickerAutoLastRoute,
     AutoRouteSelectedToast,
+    CloudCodeSystemPromptUnsupported,
     HelpTitle,
     HelpSubtitle,
     HelpFilterPlaceholder,
@@ -378,8 +381,47 @@ pub enum MessageId {
     CmdLoadDescription,
     CmdLogoutDescription,
     CmdMcpDescription,
+    McpRecommendedUnknownId,
+    McpRecommendationsSafety,
+    McpRecommendationGithub,
+    McpRecommendationChrome,
     CmdMemoryDescription,
     CmdPluginDescription,
+    PluginKimiUsage,
+    PluginKimiManagedRootHeading,
+    PluginKimiNoneFound,
+    PluginKimiLicenseUnspecified,
+    PluginKimiApplicable,
+    PluginKimiNotApplicable,
+    PluginKimiCandidateSummary,
+    PluginKimiCandidateDetails,
+    PluginKimiRejectedHeading,
+    PluginKimiInspectionFooter,
+    PluginKimiCandidateMissing,
+    PluginKimiCandidateChanged,
+    PluginKimiHomeMissing,
+    PluginKimiRootInspectFailed,
+    PluginKimiRootMustBeDirectory,
+    PluginKimiRootCanonicalizeFailed,
+    PluginKimiRootListFailed,
+    PluginKimiEntryReadFailed,
+    PluginKimiEntryLimit,
+    PluginKimiEntryInspectFailed,
+    PluginKimiEntryLinksRefused,
+    PluginKimiEntryOutsideRoot,
+    PluginKimiEntryCanonicalizeFailed,
+    PluginKimiManifestUnreadable,
+    PluginKimiManifestMustBeFile,
+    PluginKimiManifestInvalid,
+    PluginKimiDirectoryNameMismatch,
+    PluginKimiHashUnavailable,
+    PluginKimiRollbackDestinationMissing,
+    PluginKimiMismatchRemoved,
+    PluginKimiMismatchRollbackFailed,
+    PluginKimiUserPluginDirectory,
+    PluginKimiMarketplaceZipUnsupported,
+    PluginKimiMarketplaceRemoteUnsupported,
+    PluginKimiMarketplaceGzipTarball,
     CmdPluginBundleUsage,
     CmdPluginBundleNoneFound,
     CmdPluginBundleListHeader,
@@ -1217,6 +1259,7 @@ pub enum MessageId {
     EmptyStateMcpLabel,
     EmptyStateFleetLabel,
     EmptyStateFleetSetupLabel,
+    EmptyStateHelpConnector,
     EmptyStateHelpHint,
     // Session picker surface.
     SessionsSurfaceTitle,
@@ -1530,6 +1573,7 @@ pub enum MessageId {
 #[allow(dead_code)]
 pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ComposerPlaceholder,
+    MessageId::ComposerOperatePlaceholder,
     MessageId::ComposerDispatchFailedRestored,
     MessageId::DispatchFailedQueued,
     MessageId::DispatchFailedInitial,
@@ -1647,6 +1691,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigLabelProvider,
     MessageId::ConfigLabelBaseUrlDeepseek,
     MessageId::ConfigLabelProviderUrl,
+    MessageId::ConfigHintProviderUrl,
     MessageId::ConfigLabelModel,
     MessageId::ConfigLabelFastModel,
     MessageId::ConfigLabelDefaultModel,
@@ -1716,6 +1761,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ModelPickerAutoLocalHint,
     MessageId::ModelPickerAutoLastRoute,
     MessageId::AutoRouteSelectedToast,
+    MessageId::CloudCodeSystemPromptUnsupported,
     MessageId::HelpTitle,
     MessageId::HelpSubtitle,
     MessageId::HelpFilterPlaceholder,
@@ -1788,7 +1834,46 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdLoadDescription,
     MessageId::CmdLogoutDescription,
     MessageId::CmdMcpDescription,
+    MessageId::McpRecommendedUnknownId,
+    MessageId::McpRecommendationsSafety,
+    MessageId::McpRecommendationGithub,
+    MessageId::McpRecommendationChrome,
     MessageId::CmdPluginDescription,
+    MessageId::PluginKimiUsage,
+    MessageId::PluginKimiManagedRootHeading,
+    MessageId::PluginKimiNoneFound,
+    MessageId::PluginKimiLicenseUnspecified,
+    MessageId::PluginKimiApplicable,
+    MessageId::PluginKimiNotApplicable,
+    MessageId::PluginKimiCandidateSummary,
+    MessageId::PluginKimiCandidateDetails,
+    MessageId::PluginKimiRejectedHeading,
+    MessageId::PluginKimiInspectionFooter,
+    MessageId::PluginKimiCandidateMissing,
+    MessageId::PluginKimiCandidateChanged,
+    MessageId::PluginKimiHomeMissing,
+    MessageId::PluginKimiRootInspectFailed,
+    MessageId::PluginKimiRootMustBeDirectory,
+    MessageId::PluginKimiRootCanonicalizeFailed,
+    MessageId::PluginKimiRootListFailed,
+    MessageId::PluginKimiEntryReadFailed,
+    MessageId::PluginKimiEntryLimit,
+    MessageId::PluginKimiEntryInspectFailed,
+    MessageId::PluginKimiEntryLinksRefused,
+    MessageId::PluginKimiEntryOutsideRoot,
+    MessageId::PluginKimiEntryCanonicalizeFailed,
+    MessageId::PluginKimiManifestUnreadable,
+    MessageId::PluginKimiManifestMustBeFile,
+    MessageId::PluginKimiManifestInvalid,
+    MessageId::PluginKimiDirectoryNameMismatch,
+    MessageId::PluginKimiHashUnavailable,
+    MessageId::PluginKimiRollbackDestinationMissing,
+    MessageId::PluginKimiMismatchRemoved,
+    MessageId::PluginKimiMismatchRollbackFailed,
+    MessageId::PluginKimiUserPluginDirectory,
+    MessageId::PluginKimiMarketplaceZipUnsupported,
+    MessageId::PluginKimiMarketplaceRemoteUnsupported,
+    MessageId::PluginKimiMarketplaceGzipTarball,
     MessageId::CmdPluginBundleUsage,
     MessageId::CmdPluginBundleNoneFound,
     MessageId::CmdPluginBundleListHeader,
@@ -2579,6 +2664,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::EmptyStateMcpLabel,
     MessageId::EmptyStateFleetLabel,
     MessageId::EmptyStateFleetSetupLabel,
+    MessageId::EmptyStateHelpConnector,
     MessageId::EmptyStateHelpHint,
     MessageId::SessionsSurfaceTitle,
     MessageId::SessionsPaneTitle,
@@ -3719,6 +3805,8 @@ mod tests {
             MessageId::ProviderNoConfiguredTitle,
             MessageId::ProviderNoConfiguredHint,
             MessageId::ProviderNoCatalogModels,
+            MessageId::ConfigHintProviderUrl,
+            MessageId::CloudCodeSystemPromptUnsupported,
             MessageId::SessionsOpenedHistory,
             MessageId::SessionsTimeJustNow,
         ];
@@ -3741,6 +3829,103 @@ mod tests {
                     "{} should translate {id:?}",
                     locale.tag()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_state_and_operate_composer_strings_are_translated_in_complete_locales() {
+        let ids = [
+            MessageId::ComposerOperatePlaceholder,
+            MessageId::EmptyStateHelpConnector,
+        ];
+        for locale in Locale::shipped_complete() {
+            if *locale == Locale::En {
+                continue;
+            }
+            for id in ids {
+                let localized = tr(*locale, id);
+                assert!(!localized.is_empty(), "{} empty for {id:?}", locale.tag());
+                assert_ne!(
+                    localized,
+                    tr(Locale::En, id),
+                    "{} should translate {id:?}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kimi_import_and_new_mcp_recommendations_have_complete_locale_parity() {
+        let ids = [
+            MessageId::McpRecommendedUnknownId,
+            MessageId::McpRecommendationsSafety,
+            MessageId::McpRecommendationGithub,
+            MessageId::McpRecommendationChrome,
+            MessageId::PluginKimiUsage,
+            MessageId::PluginKimiManagedRootHeading,
+            MessageId::PluginKimiNoneFound,
+            MessageId::PluginKimiLicenseUnspecified,
+            MessageId::PluginKimiApplicable,
+            MessageId::PluginKimiNotApplicable,
+            MessageId::PluginKimiCandidateSummary,
+            MessageId::PluginKimiCandidateDetails,
+            MessageId::PluginKimiRejectedHeading,
+            MessageId::PluginKimiInspectionFooter,
+            MessageId::PluginKimiCandidateMissing,
+            MessageId::PluginKimiCandidateChanged,
+            MessageId::PluginKimiHomeMissing,
+            MessageId::PluginKimiRootInspectFailed,
+            MessageId::PluginKimiRootMustBeDirectory,
+            MessageId::PluginKimiRootCanonicalizeFailed,
+            MessageId::PluginKimiRootListFailed,
+            MessageId::PluginKimiEntryReadFailed,
+            MessageId::PluginKimiEntryLimit,
+            MessageId::PluginKimiEntryInspectFailed,
+            MessageId::PluginKimiEntryLinksRefused,
+            MessageId::PluginKimiEntryOutsideRoot,
+            MessageId::PluginKimiEntryCanonicalizeFailed,
+            MessageId::PluginKimiManifestUnreadable,
+            MessageId::PluginKimiManifestMustBeFile,
+            MessageId::PluginKimiManifestInvalid,
+            MessageId::PluginKimiDirectoryNameMismatch,
+            MessageId::PluginKimiHashUnavailable,
+            MessageId::PluginKimiRollbackDestinationMissing,
+            MessageId::PluginKimiMismatchRemoved,
+            MessageId::PluginKimiMismatchRollbackFailed,
+            MessageId::PluginKimiUserPluginDirectory,
+            MessageId::PluginKimiMarketplaceZipUnsupported,
+            MessageId::PluginKimiMarketplaceRemoteUnsupported,
+            MessageId::PluginKimiMarketplaceGzipTarball,
+        ];
+        let english = raw_locale_messages(Locale::En);
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for id in ids {
+                let key = format!("{id:?}");
+                let english_value = english
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English pack is missing {key}"));
+                let translated = pack
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+                if *locale != Locale::En {
+                    assert_ne!(
+                        translated,
+                        english_value,
+                        "{} must translate {key} instead of copying English",
+                        locale.tag()
+                    );
+                }
             }
         }
     }

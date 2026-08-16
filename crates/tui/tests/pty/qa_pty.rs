@@ -449,11 +449,14 @@ fn assert_real_pty_frame_geometry(frame: &crate::qa_harness::Frame, cols: u16, r
 
 fn assert_empty_state_hierarchy(frame: &crate::qa_harness::Frame, ascii_safe: bool) {
     let dump = frame.debug_dump();
-    let context = visible_row_with_text(frame, "codewhale").expect("empty-state context row");
+    let brand = visible_row_with_text(frame, "Codewhale").expect("empty-state brand row");
+    let context = visible_row_with_text(frame, "mcp ")
+        .or_else(|| visible_row_with_text(frame, "no git"))
+        .expect("empty-state workspace/branch context row");
     let composer = visible_row_with_text(frame, COMPOSER_READY_TEXT).expect("composer row");
     assert!(
-        context < composer,
-        "empty-state facts must precede the composer:\n{dump}"
+        brand < context && context < composer,
+        "brand and workspace facts must precede the composer in order:\n{dump}"
     );
     if let Some(fleet) = visible_row_with_text(frame, "Fleet ready") {
         assert!(
@@ -473,7 +476,7 @@ fn assert_empty_state_hierarchy(frame: &crate::qa_harness::Frame, ascii_safe: bo
         );
     }
 
-    let whale_row = (2..context).find(|&row| {
+    let whale_row = (2..brand).find(|&row| {
         let text = frame.row(row);
         if ascii_safe {
             text.chars().filter(|ch| *ch == '#').count() >= 8
@@ -500,8 +503,8 @@ fn assert_empty_state_hierarchy(frame: &crate::qa_harness::Frame, ascii_safe: bo
     }
     if let Some(row) = whale_row {
         assert!(
-            row < context,
-            "idle whale must yield before functional empty-state facts:\n{dump}"
+            row < brand,
+            "idle whale must yield before the brand and functional facts:\n{dump}"
         );
     }
 }
@@ -622,7 +625,7 @@ fn v091_real_pty_visual_matrix_preserves_control_grammar() -> anyhow::Result<()>
             .seal_home(ws.home())
             .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
             .env(
-                "DEEPSEEK_CONFIG_PATH",
+                "CODEWHALE_CONFIG_PATH",
                 codewhale_home.join("config.toml").to_string_lossy(),
             )
             .env("CODEX_HOME", codex_home.to_string_lossy())
@@ -2155,12 +2158,13 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
             .seal_home(ws.home())
             .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
             .env(
-                "DEEPSEEK_CONFIG_PATH",
+                "CODEWHALE_CONFIG_PATH",
                 codewhale_home.join("config.toml").to_string_lossy(),
             )
             .env("CODEX_HOME", codex_home.to_string_lossy())
             .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
             .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+            .env("CODEWHALE_DISABLE_MODELS_DEV_FETCH", "1")
             .env("NO_ANIMATIONS", "1")
             .env("RUST_LOG", "warn")
             .args([
@@ -2191,13 +2195,25 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
         "{}",
         h.frame().debug_dump()
     );
+    // Pin the live starting tier before cycling. Auto-model startup used to
+    // hide a configured `low` as the word `auto`; the receipt below is only
+    // meaningful if this frame already shows the configured DeepSeek tier.
+    assert!(
+        h.frame().row(0).contains(" · low "),
+        "configured low effort missing from narrow header before Ctrl+T:\n{}",
+        h.frame().debug_dump()
+    );
 
-    h.send(b"\x14")?;
-    h.wait_for_text("Reasoning effort: max", KEY_TIMEOUT)?;
+    // Pinning Models.dev refresh above keeps this fixture on the bundled
+    // DeepSeek ladder: auto → off → low → high → max. One Ctrl+T from the
+    // configured `low` must land on `high`, not the retired off/high/max
+    // shortcut that jumped straight to max.
+    h.send(keys::key::ctrl('t'))?;
+    h.wait_for_text("Reasoning effort: high", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
     let cycled = h.frame();
     assert!(
-        cycled.row(0).contains(" · max ") && cycled.row(0).contains("Full Access"),
+        cycled.row(0).contains(" · high ") && cycled.row(0).contains("Full Access"),
         "Ctrl+T effort missing from narrow header:\n{}",
         cycled.debug_dump()
     );
@@ -2252,8 +2268,8 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
         .and_then(|activities| activities.last())
         .expect("Ctrl+T Work activity");
     assert_eq!(activity["kind"], "reasoning_effort_changed");
-    assert_eq!(activity["requested"], "max");
-    assert_eq!(activity["effective"], "max");
+    assert_eq!(activity["requested"], "high");
+    assert_eq!(activity["effective"], "high");
     assert_eq!(activity["provider"], "deepseek");
     let receipt = activity.as_object().expect("typed activity object");
     for forbidden in ["text", "content", "reasoning", "reasoning_text"] {
@@ -2277,10 +2293,10 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
     // The Ctrl+T selection above is the user's last explicit choice, so it is
     // the startup default the next launch must come up with — before any
     // session is loaded. Asserting it here separates the two mechanisms that
-    // could otherwise both explain a `max` header after `/load`: a persisted
+    // could otherwise both explain a `high` header after `/load`: a persisted
     // startup default, or session-restored state.
     assert!(
-        restored.frame().row(0).contains(" · max "),
+        restored.frame().row(0).contains(" · high "),
         "fresh launch lost the persisted effort selection:\n{}",
         restored.frame().debug_dump()
     );
@@ -2302,7 +2318,7 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
         frame.debug_dump()
     );
     assert!(
-        frame.row(0).contains(" · max ") && frame.row(0).contains("Full Access"),
+        frame.row(0).contains(" · high ") && frame.row(0).contains("Full Access"),
         "restart lost narrow effort/permission truth:\n{}",
         frame.debug_dump()
     );
