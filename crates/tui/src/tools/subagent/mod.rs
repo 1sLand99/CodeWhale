@@ -13963,7 +13963,7 @@ impl SubAgentToolRegistry {
     #[cfg(test)]
     pub(crate) fn envelope_refusal(&self, name: &str, input: &Value) -> Option<String> {
         let spec = self.registry.get(name)?;
-        crate::tools::execution_envelope::enforce_execution_envelope_with_proven_readonly(
+        crate::tools::execution_envelope::enforce_execution_envelope(
             name,
             input,
             spec.as_ref(),
@@ -13979,16 +13979,14 @@ impl SubAgentToolRegistry {
             return true;
         }
         match self.registry.get(name) {
-            Some(spec) => {
-                crate::tools::execution_envelope::enforce_execution_envelope_with_proven_readonly(
-                    name,
-                    input,
-                    spec.as_ref(),
-                    envelope,
-                    self.bounded_readonly_bash_evidence(name, input),
-                )
-                .is_ok()
-            }
+            Some(spec) => crate::tools::execution_envelope::enforce_execution_envelope(
+                name,
+                input,
+                spec.as_ref(),
+                envelope,
+                self.bounded_readonly_bash_evidence(name, input),
+            )
+            .is_ok(),
             None => true,
         }
     }
@@ -14227,7 +14225,7 @@ impl SubAgentToolRegistry {
         // (#5426/#5438) carries its proven-read-only evidence so the envelope
         // classifies it Bounded instead of refusing it as Executes.
         if let Some(spec) = self.registry.get(name) {
-            crate::tools::execution_envelope::enforce_execution_envelope_with_proven_readonly(
+            crate::tools::execution_envelope::enforce_execution_envelope(
                 name,
                 &input,
                 spec.as_ref(),
