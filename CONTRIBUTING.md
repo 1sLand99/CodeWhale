@@ -93,16 +93,18 @@ reasoning are in [`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md)):
 
 ```bash
 # 1. Type-check first (seconds after the first build; no codegen, no link).
-cargo check -p codewhale-tui
+scripts/dev-cargo.sh check -p codewhale-tui
 
 # 2. Run only the tests near your change (one crate, one filter).
-cargo test -p codewhale-tui --lib --locked -- fleet_setup
+scripts/dev-test.sh tui fleet_setup
+# or: scripts/dev-test.sh crates/tui/src/elapsed.rs
 
-# 3. Run a whole crate's unit suite with nextest: one process per test,
-#    all cores busy, slow tests named. ~100 s here vs ~270 s with libtest.
+# 3. Run a whole crate's unit suite. scripts/dev-test.sh uses nextest when
+#    it is installed (one process per test, all cores busy, slow tests
+#    named; ~100 s here vs ~270 s with libtest).
 cargo install cargo-nextest --locked      # once
-cargo nextest run -p codewhale-tui --lib --locked
-cargo nextest run --workspace --all-features --locked   # whole tree, ~6 min here
+scripts/dev-test.sh tui
+scripts/dev-cargo.sh nextest run --workspace --all-features --locked
 
 # 4. Before pushing, run the authoritative gate exactly as CI does:
 cargo test --workspace --all-features --locked
@@ -123,11 +125,18 @@ The tui library needs ~6 GB for its own rustc and its unit-test build ~8 GB;
 `cargo test --workspace` runs both at once. Numbers and the full recipe:
 [`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md#low-memory-build-recipe-machines-with--16-gb-cross-builds).
 
-If you work in several worktrees, point them at one target directory so
-dependencies compile once (`export CARGO_TARGET_DIR=$HOME/.cache/codewhale-target`),
-and prefer `cargo clean -p codewhale-tui` over deleting the directory
-when it grows. `sccache` as `RUSTC_WRAPPER` is optional and matches what
-CI uses.
+If you work in several worktrees, do **not** share one `CARGO_TARGET_DIR`
+by default: two cargos on the same target flock and serialize. Use
+`scripts/dev-cargo.sh` / `scripts/dev-test.sh`, which give each workspace
+its own Cargo `build-dir` (`{workspace-path-hash}` under
+`${CODEWHALE_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codewhale}`).
+`sccache` wraps rustc only when incremental compilation is already off
+(`CARGO_INCREMENTAL=0` or `CODEWHALE_SCCACHE=1`) and `sccache` is on
+`PATH`; a missing binary is a printed fallback, not an error. Override
+the cache root with `CODEWHALE_CACHE_ROOT` — there is no machine-specific
+default. A single shared `CARGO_TARGET_DIR` remains valid only for
+serialized trunk work. See
+[`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md).
 
 Some suites are slow, platform-bound, or intentionally excluded from the
 default run; treat them as documented isolation cases rather than

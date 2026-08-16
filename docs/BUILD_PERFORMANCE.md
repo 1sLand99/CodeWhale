@@ -113,6 +113,38 @@ build-dir = "/path/to/cache/codewhale/build/{workspace-path-hash}"
 `sccache` was installed with `brew install sccache` on this machine for the
 measurement.
 
+### Public helper (A1/A5) — what `dev-test.sh` actually does now
+
+`scripts/dev-test.sh` previously only mapped an area to `cargo test -p`.
+It did **not** activate the measured build-dir + sccache topology, so a
+new worktree still paid a cold compile into `./target`.
+
+`scripts/dev-cache.sh` is the portable opt-in helper.
+`scripts/dev-cargo.sh` and `scripts/dev-test.sh` source it.
+
+| Class | What changed | What it is not |
+| --- | --- | --- |
+| **Compile-time** | New worktrees (no `./target`) get `CARGO_BUILD_BUILD_DIR=$CODEWHALE_CACHE_ROOT/build/{workspace-path-hash}`, so concurrent worktrees do not share a Cargo lock. `CODEWHALE_DEV_CACHE=1` forces that isolation even when `./target` exists. Cargo older than 1.91 falls back to a per-workspace `CARGO_TARGET_DIR`. | Not a smaller rustc unit. Workspace crates still rebuild. |
+| **Compile-time (sccache)** | `RUSTC_WRAPPER=sccache` and `SCCACHE_DIR=$CODEWHALE_CACHE_ROOT/sccache/<rustc-commit>` only when incremental is already off (`CARGO_INCREMENTAL=0` or `CODEWHALE_SCCACHE=1`) **and** `sccache` is on `PATH`. | Not enabled on the everyday incremental loop. sccache cannot cache incremental units; wrapping those builds adds overhead and 0% hits. Missing sccache is a printed fallback, not an error. |
+| **Test-runtime** | `scripts/dev-test.sh` uses `cargo nextest run` when `cargo-nextest` is installed (`CODEWHALE_DEV_NEXTEST=0` forces libtest). Same binaries; process per test. Retries stay 0. `RUST_MIN_STACK=16MiB` is exported when unset. | Not a compile win. nextest does not run doctests; `cargo test --doc` remains a separate gate. |
+| **Ergonomics** | `--list` and path mapping cover every workspace crate (`app-server`, `workflow-js`, …). `scripts/dev-cache.sh --status` / `--self-check` print the topology. | No product behavior change. |
+
+Defaults never contain a machine-specific absolute path:
+
+```sh
+# Portable default:
+#   ${XDG_CACHE_HOME:-$HOME/.cache}/codewhale
+# Desk override, if you want the cache on a particular volume:
+export CODEWHALE_CACHE_ROOT=/path/to/cache/codewhale
+
+scripts/dev-cache.sh --self-check
+scripts/dev-test.sh crates/tui/src/elapsed.rs
+CARGO_INCREMENTAL=0 scripts/dev-cargo.sh test -p codewhale-config --lib --locked --no-run
+```
+
+Hermetic script tests (no rustc compile): `sh scripts/dev-cache.test.sh` and
+`sh scripts/dev-test.test.sh`.
+
 ### A2 nextest in CI
 
 `cargo test --workspace --all-features --locked --doc` inventories
@@ -230,7 +262,12 @@ TUI-DOG-017) — left as they are.
 
 ## What changed (this lane)
 
-1. **`cargo nextest` is supported and documented** (`.config/nextest.toml`).
+1. **`scripts/dev-cache.sh` / `scripts/dev-cargo.sh` activate the measured
+   isolated build-dir topology** from `scripts/dev-test.sh`. New worktrees
+   no longer compile into a private cold `./target` unless the helper is
+   disabled. sccache is opt-in and incremental-gated. Script self-checks
+   live in `scripts/dev-cache.test.sh` and `scripts/dev-test.test.sh`.
+2. **`cargo nextest` is supported and documented** (`.config/nextest.toml`).
    Same test binaries, one process per test, so the tui unit suite runs in
    ~100 s instead of ~270 s here and slow or hanging tests are named instead
    of stalling the binary. The PTY binary is pinned to one test at a time
@@ -241,17 +278,17 @@ TUI-DOG-017) — left as they are.
    start-up budgets survive a fully loaded machine.
    `cargo test --workspace --all-features --locked` remains the
    authoritative gate; nextest is the local loop.
-2. **Three tests depended on test order** and only passed because another
+3. **Three tests depended on test order** and only passed because another
    test in the same process had installed the rustls crypto provider first:
    `codewhale-tui mcp::sse::endpoint_tests::message_before_endpoint_is_rejected_instead_of_buffered`,
    `codewhale-app-server tests::failed_config_set_keeps_the_stdio_bridge`,
    and `tests::successful_config_set_still_invalidates_the_stdio_bridge`.
    Each now installs the provider itself, exactly as production does at
    startup. No runtime code changed.
-3. **CONTRIBUTING.md has a "Fast local loop" section**: `cargo check`
-   first, targeted `-p codewhale-tui --lib <filter>` runs, nextest, sharing
-   one `CARGO_TARGET_DIR` across worktrees, and the optional accelerators
-   below.
+4. **CONTRIBUTING.md has a "Fast local loop" section**: `scripts/dev-cargo.sh`
+   / `scripts/dev-test.sh` first, targeted `-p` filters, nextest, isolated
+   per-worktree build dirs, and the optional accelerators below. A shared
+   `CARGO_TARGET_DIR` is documented only for serialized trunk work.
 
 ## Measured and deliberately not adopted
 
@@ -297,10 +334,12 @@ until the tests that live with those modules move with them.
 ## Optional accelerators (not required)
 
 - `cargo install cargo-nextest` — see above.
-- One `CARGO_TARGET_DIR` for all worktrees (e.g. `export
-  CARGO_TARGET_DIR=$HOME/.cache/codewhale-target`) so dependency
-  artifacts are compiled once; run `cargo clean -p codewhale-tui` rather
-  than deleting the directory when it grows.
+- `scripts/dev-cargo.sh` / `scripts/dev-test.sh` — isolated `build-dir`
+  per worktree plus optional sccache. Override the root with
+  `CODEWHALE_CACHE_ROOT`; do not commit a machine path.
+- One shared `CARGO_TARGET_DIR` only for serialized trunk work (two
+  cargos on the same target flock). Prefer the helper above.
 - `sccache` as `RUSTC_WRAPPER` caches dependency compilation across clean
-  checkouts and matches what CI does (`.github/workflows/ci.yml` uses
-  `mozilla-actions/sccache-action` plus `Swatinem/rust-cache`).
+  checkouts when `CARGO_INCREMENTAL=0`, and matches what CI does
+  (`.github/workflows/ci.yml` uses `mozilla-actions/sccache-action` plus
+  `Swatinem/rust-cache`).

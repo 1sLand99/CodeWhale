@@ -50,8 +50,10 @@ cargo build --release -p codewhale-cli -p codewhale-tui
 *run* those suites locally and in CI's Test job; `cargo test --no-run` and
 `cargo test -p codewhale-tui --lib` remain the compile-time measurement and
 the authoritative gate, and `cargo test --doc` covers what nextest skips.
-`scripts/dev-test.sh <area>` maps a code area to its fastest `cargo test -p`
-invocation. See `docs/BUILD_PERFORMANCE.md`.
+`scripts/dev-test.sh <area>` maps a code area to its fastest `-p` invocation
+and applies the portable isolated build-dir topology for new worktrees
+(`scripts/dev-cache.sh`, `scripts/dev-cargo.sh`). See
+`docs/BUILD_PERFORMANCE.md`.
 
 Report commands actually run and distinguish source, local tests, packaged
 artifacts, CI, and public release state. A commit is WIP until its claimed
