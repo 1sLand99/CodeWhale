@@ -9,12 +9,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `/title [name|off]` sets a per-session tab/window title, shown as
-  `[title] …` in front of the terminal window title (`Codewhale` /
-  `reasoning…` / `using tool…` / `done`). The `title` config key supplies
-  the default (`/config title … --save` persists it); multi-window
-  workflows can tell parallel sessions apart at a glance. `/title` is
-  independent of `/rename`, which keeps naming the session in the picker.
+- Terminal tab/window titles now carry the existing saved session name before
+  the live state (`Codewhale`, `reasoning…`, `using tool…`, `done`), so parallel
+  sessions are identifiable at a glance without a second title setting.
+  `/title <name>` is a discoverable alias for `/rename`; both update the one
+  session name shown in the picker, composer, and terminal tab. Control and
+  bidi-format characters are stripped before any name reaches OSC 0.
+- Children (sub-agents and Fleet workers) inherit the session's permission
+  posture faithfully: Auto-Review's deterministic floor and model guardian
+  decide a worker's held calls (fail closed when unavailable, never a
+  prompt); under Ask a held call is raised in the parent's approval UI and
+  the worker waits visibly; Full Access still fails closed on the safety
+  floor. Each prompt-less decision is a one-line note in that worker's
+  transcript (focus mode) and an audit-log record.
+- Worker role defaults keep what the role does not intend to withhold:
+  every built-in role keeps network reads; `planner` may run read-only
+  shell probes; `custom` inherits the parent's write/network/shell posture
+  and is narrowed only by its explicit tool list or the spawning call.
+  Read-only roles (`scout`, `reviewer`, `planner`, `verifier`,
+  `consultant`) still never write the workspace. The focused worker's
+  header states its effective posture from the runtime snapshot.
+- `/workflow status`, `/workflow cancel [run_id]`, `/workflow settings`, and
+  `/workflow help` are answered by Codewhale itself from the run journal and
+  live run state — no model turn — and `/workflow run <path>` launches a
+  checked-in workflow as-is. `/config workflow` and `/config goal` explain
+  the effective tables. The workflow tool now honors the session `[workflow]`
+  table (`automatic`, `auto_start_read_only`, `require_approval_for_writes`,
+  limits) instead of product defaults.
+- Goal mode enters as readily as DeepSeek Harness: the agent may create the
+  session goal when a direct request describes a verifiable multi-turn end
+  state, and Codewhale shows a one-line `Goal set` receipt with how to pause
+  or clear it. Bare `/goal` shows plain progress (and how to continue when no
+  turn is running), prints usage on an empty session instead of asking the
+  model, and `/goal help|status` are reserved words.
+
+- Whale Teams in the terminal: the six Signal Cut whale identities (Scout,
+  Patch, Harbor, Echo, Keel, Lantern) appear as species badges on `/fleet`
+  roster rows and worker rows, with an identity portrait in the roster detail
+  pane and a six-state word (Resting, Thinking, Working, Waiting for you,
+  Blocked, Offline) derived only from the child's real runtime status. Colors
+  come from the theme tokens, every glyph has an ASCII fallback, and the
+  working wake animates only under full motion. See
+  `docs/design/WHALE_TEAMS_TUI.md`.
+- A session metrics strip on the phase row (`4 turns · 108 steps │ LLM
+  11m46s · Tool call 1m52s │ TTFT avg 1.5s · 120 tok/s │ Cache hit 99% │
+  Input 9.3M`), on by default as the `session_metrics` footer item
+  (`/statusline`, `[tui].status_items`). Every value comes from engine
+  receipts — turn starts, per-model-call usage with stream time,
+  time-to-first-token and whole-call time, tool start/complete edges, and
+  provider-reported cache and input tokens. Cells without evidence are
+  omitted, never estimated. `/status` prints the untrimmed line; the phase
+  row sheds its lowest-value groups to fit the columns it actually has.
+- Auto-Review decisions nobody was prompted for are now visible in the
+  transcript as one-line notes: model-guardian allow/deny verdicts with
+  their risk tier and stated reason, guardian failures (denied, fail
+  closed), deterministic policy blocks, and holds Auto-Review denied
+  without pausing. The audit log keeps the full record. `/permissions`
+  ends with the active posture, what it decides on its own versus never,
+  and the audit-log path. The footer's `Esc to interrupt` hint is
+  localized. See `docs/design/AUTO_MODE_PARITY.md` for the Claude Code /
+  Kimi Code parity ledger and follow-ups.
+- `codewhale integrations dsh status|plan|connect|update|launch|disable|enable|remove`
+  connects an existing official DeepSeek Harness (`dsh` 0.1.0-rc.6, verified)
+  through Codewhale using only its documented seams: a `--patch` overlay that
+  pins the exact Codewhale provider/model/endpoint identity (native
+  `deepseek-official` route, or a hand-declared `openai-completions` route
+  named `codewhale-<provider>` for OpenAI-compatible providers), the
+  Codewhale permission posture exported as `DSH_PERMISSION_MODE`, and an
+  append-only receipt. Codewhale writes only under
+  `$CODEWHALE_HOME/integrations/dsh/`, never copies API keys or edits DSH
+  files, never broadens permissions (`--allow-full-access` only mirrors an
+  existing Codewhale full-access posture), and reports not-installed /
+  offline / incompatible / detected / connected / stale-config /
+  stale-version / disabled honestly. Anthropic Messages and OpenAI Responses
+  routes are refused as not carriable. The documented DSH plugin path is an
+  explicit opt-in: `install-bundle` materializes a Codewhale bundle package
+  (`codewhale-dsh-bundle`, MIT notice retained) and installs it with
+  `dsh plugin --profile codewhale add <path>` into a dedicated `codewhale`
+  profile (pnpm required, reported truthfully when missing; `web`/`headless`
+  untouched), so `dsh --profile codewhale` alone carries the identity;
+  `update` regenerates the bundle patch and `remove-bundle` reverses it,
+  leaving the DSH-owned profile directory in place. `/setup tools` and `codewhale doctor`
+  show the read-only detection state; `doctor` also lists the DSH read-only
+  credential consent alongside Codex and Grok. The optional `--skin` export
+  writes a Codewhale token stylesheet generated from the TUI palette
+  (Blue Stage dark/light, ombre water column, mode/permission/state colors,
+  reduced-motion fallbacks); DSH exposes no custom-theme API, so the sheet is
+  labeled an unsupported overlay and is never injected. See
+  `docs/INTEGRATIONS_DSH.md`.
 
 ### Fixed
 
@@ -32,6 +114,19 @@ settings polish moves to v0.9.9. Prefab third-party templates that have
 a published OpenAI-compatible host ship here (#5350).
 
 ### Changed
+
+- Prompt-cache prefix is pinned for the session. The tool loop no longer
+  recomposes the system prompt from disk on every model step, so an agent
+  writing a file no longer busts the provider KV prefix cache mid-turn. The
+  system prompt and tool catalog are re-composed only on a declared header
+  change (`/model`, mode, goal, session resume), which re-pins under a logged
+  reason; an undeclared change is reported as drift and the original pin is
+  kept instead of silently becoming the new baseline. Workspace, AGENTS.md,
+  skills, memory, and goal drift now reaches the model as one bounded
+  `<context_update>` user message at the next user turn — a history append,
+  not a header rewrite. `/cache stats` shows the pin reason, the last-miss
+  reason, the undeclared-drift count, and the context-update count. See
+  [docs/CACHE.md](docs/CACHE.md).
 
 - Plugin compatibility is now per-component. A reviewed, trusted, enabled
   bundle that mixes Skills or MCP with unsupported commands, agents, hooks,
@@ -68,7 +163,10 @@ a published OpenAI-compatible host ship here (#5350).
   of sliding under the rail.
 
 - Z.ai `GLM-5.3` is live on the Coding Plan and is now the default direct
-  Z.ai model. Explicit `GLM-5.2` selections keep their own id.
+  Z.ai model: `DEFAULT_ZAI_MODEL` resolves to `GLM-5.3` in both
+  `codewhale-tui` and `codewhale-config`, and it is the first `/model` row
+  after `/provider zai`. Explicit `GLM-5.2` selections (`model = "GLM-5.2"`
+  and its `glm-5.2` aliases) keep their own id — only the default moved.
   Limits and reasoning options still inherit from `GLM-5.2` until Z.ai
   publishes distinct 5.3 numbers. No USD price is claimed. A live call
   can still 429 with entitlement code 1311 on accounts that are not
@@ -184,6 +282,14 @@ a published OpenAI-compatible host ship here (#5350).
   (44 runnable routes). Antigravity stays credential-plane-only.
   Harvested from #5398 (Lstarsky0) with that correction.
 
+- The website models page carries a truthful read-only settings preview
+  built from repository facts; it never implies the site can change local
+  configuration (#5370, #5411, mvanhorn).
+
+- The canonical `ultra` reasoning effort now maps to each provider's
+  maximum tier alongside the legacy `ultracode` alias, instead of being
+  silently dropped (#5303, #5409, buiducnhat).
+
 ### Removed
 
 - The source-structure budget ratchet (CI step, checker, baseline JSON).
@@ -220,6 +326,10 @@ a published OpenAI-compatible host ship here (#5350).
   (#5383/#5384); macOS agy fixture canonicalization (#5392); zh-Hans 宪章
   terminology (#5397); regenerated website facts harvested and corrected
   from #5398.
+- Matt Van Horn (@mvanhorn) — read-only models settings preview on the
+  website (#5411, fixes #5370).
+- Nhat Bui (@buiducnhat) — canonical `ultra` reasoning effort mapped across
+  provider effort tables (#5409).
 
 ## [0.9.7] - 2026-08-12
 

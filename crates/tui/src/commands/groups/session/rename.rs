@@ -108,7 +108,9 @@ pub(crate) fn rename_with_manager(
                     "Session renamed, but Work views were not published: {err}"
                 ));
             }
-            CommandResult::message(format!("Session renamed to \"{new_title}\""))
+            CommandResult::message(format!(
+                "Session and terminal tab renamed to \"{new_title}\""
+            ))
         }
         Err(e) => CommandResult::error(format!("Could not save session: {e}")),
     }

@@ -448,11 +448,25 @@ fn taskbar_progress_sequence(state: u8, progress: Option<u8>) -> String {
     }
 }
 
-/// Build the OSC 0 window-title sequence. Split from the write for the same
-/// reason as [`taskbar_progress_sequence`].
+const MAX_TERMINAL_TITLE_CHARS: usize = 160;
+
+/// Build a bounded OSC 0 window-title sequence. User-controlled session names
+/// can reach this boundary, so control and bidi-format characters are removed
+/// before the title is embedded in a terminal escape sequence.
 #[must_use]
 fn terminal_title_sequence(title: &str) -> String {
-    format!("\x1b]0;{title}\x07")
+    let safe: String = title
+        .chars()
+        .filter(|ch| {
+            !ch.is_control()
+                && !matches!(
+                    *ch,
+                    '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(MAX_TERMINAL_TITLE_CHARS)
+        .collect();
+    format!("\x1b]0;{safe}\x07")
 }
 
 /// Whether raw terminal control sequences may be written to stdout.
@@ -487,11 +501,8 @@ pub fn clear_taskbar_progress() {
     set_taskbar_progress(0, None);
 }
 
-/// User-configured window-title prefix, rendered as `[prefix] …` in front of
-/// every terminal window title. Empty means no prefix — the historical
-/// byte-for-byte behavior. Set via the `/title` command (session level) or
-/// the `title` config key (default level); the render loop syncs it here
-/// through [`set_title_prefix`].
+/// Current session name, mirrored by the render loop so background title
+/// updates can identify their session without duplicating session state.
 static TITLE_PREFIX: OnceLock<Mutex<String>> = OnceLock::new();
 
 pub(crate) fn title_prefix_slot() -> &'static Mutex<String> {
@@ -510,7 +521,7 @@ pub(crate) fn title_prefix_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Set the `[prefix] …` window-title prefix, or clear it with `None`/empty.
+/// Mirror the current session name into the background title renderer.
 ///
 /// Change detection keeps the per-frame render-loop sync free when the title
 /// did not move; on an actual change the running title is redrawn immediately
@@ -1533,6 +1544,19 @@ mod tests {
         assert_eq!(
             terminal_title_sequence("🐳 working…"),
             "\x1b]0;🐳 working…\x07"
+        );
+    }
+
+    #[test]
+    fn terminal_title_sequence_strips_control_and_bidi_injection() {
+        assert_eq!(
+            terminal_title_sequence("safe\u{1b}]2;owned\u{7}\u{202e}title"),
+            "\x1b]0;safe]2;ownedtitle\x07"
+        );
+        let oversized = "x".repeat(MAX_TERMINAL_TITLE_CHARS + 20);
+        assert_eq!(
+            terminal_title_sequence(&oversized),
+            format!("\x1b]0;{}\x07", "x".repeat(MAX_TERMINAL_TITLE_CHARS))
         );
     }
 
