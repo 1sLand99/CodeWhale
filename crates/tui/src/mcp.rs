@@ -685,24 +685,16 @@ impl ReviewedPluginMcpSource {
             }
         }
         #[cfg(target_os = "macos")]
-        if is_node_command(command)
-            && args.iter().any(|argument| {
+        if is_node_command(command) {
+            let entry_index = args.iter().position(|argument| {
                 let path = Path::new(argument);
                 path.is_absolute()
                     && path.starts_with(staged_root)
                     && path.extension().is_some_and(|extension| extension == "mjs")
-            })
-        {
-            // Node determines the entrypoint module type from its filename.
-            // Darwin's reviewed-launch binding deliberately replaces the
-            // staged `.mjs` path with an inherited `/dev/fd/N` descriptor,
-            // which has no extension; without this flag Node 22 exits cleanly
-            // without evaluating the module. Preserve ESM semantics while
-            // continuing to execute the exact reviewed bytes by descriptor.
-            launch.args.insert(
-                0,
-                std::ffi::OsString::from("--experimental-default-type=module"),
-            );
+            });
+            if let Some(entry_index) = entry_index {
+                launch.args = node_esm_descriptor_args(&launch.args, entry_index);
+            }
         }
         if let Some(cwd) = cwd {
             if !cwd.starts_with(staged_root) {
@@ -772,6 +764,45 @@ fn is_node_command(command: &str) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| matches!(name, "node" | "nodejs"))
+}
+
+/// Rewrite a Node launch so a reviewed `.mjs` entrypoint keeps ESM semantics
+/// after Darwin's reviewed-launch binding replaced its staged path with an
+/// inherited `/dev/fd/N` descriptor.
+///
+/// Node determines the entrypoint module type from its filename and a
+/// descriptor path has no extension, so `node /dev/fd/N` exits without
+/// evaluating the module. `--experimental-default-type=module` used to fix
+/// that but was removed from current Node releases (Node 25 rejects it as a
+/// bad option, which killed the child before the MCP handshake). `--import`
+/// has loaded its specifier as an ES module on every supported release, so
+/// the reviewed bytes are imported by descriptor once, `-e ""` supplies an
+/// empty main, and the descriptor path is echoed after `--` so
+/// `process.argv[1]` and the script's own arguments keep the file-mode shape.
+/// Node options that preceded the entrypoint stay in front; anything after it
+/// is passed through untouched. When the `.mjs` file is not the first
+/// positional argument it is not the entrypoint and the launch is left alone.
+#[cfg(target_os = "macos")]
+fn node_esm_descriptor_args(
+    args: &[std::ffi::OsString],
+    entry_index: usize,
+) -> Vec<std::ffi::OsString> {
+    let leading_are_options = args[..entry_index]
+        .iter()
+        .all(|argument| argument.to_string_lossy().starts_with('-'));
+    if !leading_are_options {
+        return args.to_vec();
+    }
+    let bound_entry = args[entry_index].clone();
+    let mut rewritten: Vec<std::ffi::OsString> = args[..entry_index].to_vec();
+    rewritten.push(std::ffi::OsString::from("--import"));
+    rewritten.push(bound_entry.clone());
+    rewritten.push(std::ffi::OsString::from("-e"));
+    rewritten.push(std::ffi::OsString::from(""));
+    rewritten.push(std::ffi::OsString::from("--"));
+    rewritten.push(bound_entry);
+    rewritten.extend(args[entry_index + 1..].iter().cloned());
+    rewritten
 }
 
 pub(crate) struct ReviewedStdioLaunch {

@@ -1112,6 +1112,42 @@ connect_timeout = 2
     assert_eq!(connection.tools()[0].name, "ready");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn node_esm_descriptor_launch_keeps_options_argv_shape_and_script_arguments() {
+    use std::ffi::OsString;
+    let os = |value: &str| OsString::from(value);
+
+    // Options before the entrypoint stay in front; the entry is imported by
+    // descriptor once, an empty main is supplied, and the descriptor path is
+    // echoed after `--` so `process.argv[1]` keeps the file-mode shape.
+    let args = vec![
+        os("--max-old-space-size=256"),
+        os("/dev/fd/7"),
+        os("--port"),
+        os("0"),
+    ];
+    assert_eq!(
+        super::node_esm_descriptor_args(&args, 1),
+        vec![
+            os("--max-old-space-size=256"),
+            os("--import"),
+            os("/dev/fd/7"),
+            os("-e"),
+            os(""),
+            os("--"),
+            os("/dev/fd/7"),
+            os("--port"),
+            os("0"),
+        ]
+    );
+
+    // A `.mjs` that is not the first positional argument is not the
+    // entrypoint; the launch is left untouched.
+    let args = vec![os("other.js"), os("/dev/fd/7")];
+    assert_eq!(super::node_esm_descriptor_args(&args, 1), args);
+}
+
 #[test]
 fn plugin_server_ids_are_unambiguous_across_hyphenated_plugin_and_server_names() {
     let left = qualified_plugin_server_name("foo-bar", "baz");
