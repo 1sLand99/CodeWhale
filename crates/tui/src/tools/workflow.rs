@@ -1203,9 +1203,12 @@ async fn cancel_workflow(
 }
 
 /// Synchronous cancellation core shared by the model-facing tool action and
-/// the host `/workflow cancel` command. Cancellation only signals the VM,
-/// aborts the run task, journals the terminal snapshot, and streams the
-/// cancelled event; nothing here waits on the network.
+/// the host `/workflow cancel` command. When a live controller exists this
+/// signals the VM, aborts the run task, journals the terminal snapshot, and
+/// streams the cancelled event. When the journal has a running line but no
+/// controller (typical after a restart), the journal is still marked
+/// cancelled with an honest nothing-live receipt. Nothing here waits on the
+/// network.
 fn cancel_workflow_run(
     run_id: &str,
     state: Arc<WorkflowWorkspaceState>,
@@ -1230,22 +1233,27 @@ fn cancel_workflow_run(
         }
         return workflow_result_for(run_id, state);
     }
+    let live = controller.is_some();
     state.reconcile_cancel(
         run_id,
-        if controller.is_some() {
+        if live {
             CancelOutcome::Requested
         } else {
-            CancelOutcome::StaleUnknown
+            // Nothing live to signal; the journal cancel below is the receipt.
+            CancelOutcome::Acknowledged
         },
     );
-    let Some(controller) = controller else {
-        return Err(ToolError::execution_failed(
-            "workflow controller missing; cancellation outcome is unknown",
-        ));
-    };
-    controller.cancel();
+    if let Some(controller) = controller.as_ref() {
+        controller.cancel();
+    }
+    let reason = if live {
+        "cancelled by workflow tool"
+    } else {
+        "cancelled; no live process to stop"
+    }
+    .to_string();
     let cancelled_event = WorkflowUiEvent::new(WorkflowUiEventKind::RunCancelled {
-        reason: "cancelled by workflow tool".to_string(),
+        reason: reason.clone(),
     });
     let snapshot = {
         let mut runs_guard = lock_mutex(&state.runs)?;
@@ -1255,7 +1263,6 @@ fn cancel_workflow_run(
         record.status = WorkflowRunStatus::Cancelled;
         record.lifecycle_seq = record.lifecycle_seq.saturating_add(1);
         record.completed_at_ms = Some(now_ms());
-        let reason = "cancelled by workflow tool".to_string();
         record.error = Some(reason);
         record.push_event(cancelled_event.clone());
         record.clone()
@@ -1270,7 +1277,9 @@ fn cancel_workflow_run(
     // The VM may publish its terminal `run_completed` event while cancellation
     // is racing it. Always stream the authoritative cancellation afterward so
     // the live panel finalizes running rows and cannot remain visually failed.
-    controller.driver.emit_ui_event(&cancelled_event);
+    if let Some(controller) = controller {
+        controller.driver.emit_ui_event(&cancelled_event);
+    }
     workflow_result_for(run_id, state)
 }
 
@@ -4608,8 +4617,19 @@ mod journal {
 
     impl WorkflowWorkspaceState {
         pub fn open(workspace: &Path) -> Arc<Self> {
+            Self::open_inner(workspace, true)
+        }
+
+        /// Hydrate the journal without rewriting leftover `running` rows to
+        /// `failed`. Host cancel uses this after a restart so a controller-less
+        /// run can still be marked cancelled instead of looking like a crash.
+        pub fn open_preserving_running(workspace: &Path) -> Arc<Self> {
+            Self::open_inner(workspace, false)
+        }
+
+        fn open_inner(workspace: &Path, recover_orphans: bool) -> Arc<Self> {
             let journal = WorkflowRunJournal::open(workspace);
-            let runs = Arc::new(Mutex::new(journal.hydrate_runs()));
+            let runs = Arc::new(Mutex::new(journal.hydrate_runs(recover_orphans)));
             Arc::new(Self {
                 runs,
                 controllers: Arc::new(Mutex::new(HashMap::new())),
@@ -4778,7 +4798,7 @@ mod journal {
             Self { ledger_path }
         }
 
-        fn hydrate_runs(&self) -> HashMap<String, WorkflowRunRecord> {
+        fn hydrate_runs(&self, recover_orphans: bool) -> HashMap<String, WorkflowRunRecord> {
             let file = match std::fs::File::open(&self.ledger_path) {
                 Ok(file) => file,
                 Err(_) => return HashMap::new(),
@@ -4820,28 +4840,32 @@ mod journal {
             }
             // A run journaled as Running belongs to a process that is gone;
             // without this it would show as live forever after a restart.
-            let mut recovered = Vec::new();
-            for run in runs.values_mut() {
-                if run.status == WorkflowRunStatus::Running {
-                    run.status = WorkflowRunStatus::Failed;
-                    run.lifecycle_seq = run.lifecycle_seq.saturating_add(1);
-                    run.completed_at_ms.get_or_insert_with(super::now_ms);
-                    run.error = Some(
-                        "process exited before the run completed (recovered on startup)"
-                            .to_string(),
-                    );
-                    recovered.push(run.clone());
+            // Host cancel skips this rewrite so it can still mark the line
+            // cancelled with an honest "nothing live to stop" receipt.
+            if recover_orphans {
+                let mut recovered = Vec::new();
+                for run in runs.values_mut() {
+                    if run.status == WorkflowRunStatus::Running {
+                        run.status = WorkflowRunStatus::Failed;
+                        run.lifecycle_seq = run.lifecycle_seq.saturating_add(1);
+                        run.completed_at_ms.get_or_insert_with(super::now_ms);
+                        run.error = Some(
+                            "process exited before the run completed (recovered on startup)"
+                                .to_string(),
+                        );
+                        recovered.push(run.clone());
+                    }
                 }
-            }
-            // The recovery decision is owner truth, not a presentation-only
-            // repair. Append it so another restart replays the same terminal
-            // sequence instead of rediscovering and incrementing it again.
-            for run in recovered {
-                if let Err(err) = self.append_snapshot(&run) {
-                    warn!(
-                        run_id = run.run_id,
-                        "workflow recovery snapshot append failed: {err}"
-                    );
+                // The recovery decision is owner truth, not a presentation-only
+                // repair. Append it so another restart replays the same terminal
+                // sequence instead of rediscovering and incrementing it again.
+                for run in recovered {
+                    if let Err(err) = self.append_snapshot(&run) {
+                        warn!(
+                            run_id = run.run_id,
+                            "workflow recovery snapshot append failed: {err}"
+                        );
+                    }
                 }
             }
             runs
@@ -5075,8 +5099,7 @@ mod journal {
         fn host_cancel_hydrates_a_journal_without_live_process_state() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let state = WorkflowWorkspaceState::open(tmp.path());
-            let mut record = sample_record("workflow_prior", WorkflowRunStatus::Completed);
-            record.completed_at_ms = Some(99);
+            let record = sample_record("workflow_prior", WorkflowRunStatus::Running);
             state.record_snapshot(&record);
             drop(state);
 
@@ -5088,7 +5111,24 @@ mod journal {
             let line = super::super::host_cancel_workflow(tmp.path(), "workflow_prior")
                 .expect("a journaled run must be visible to host cancel after restart");
             assert_eq!(line.run_id, "workflow_prior");
-            assert_eq!(line.status, "completed");
+            assert_eq!(line.status, "cancelled");
+            assert!(
+                line.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("no live process")),
+                "controller-less cancel must leave an honest receipt, got {:?}",
+                line.error
+            );
+
+            let reopened = WorkflowWorkspaceState::open(tmp.path());
+            let replayed = reopened
+                .runs
+                .lock()
+                .expect("runs lock")
+                .get("workflow_prior")
+                .cloned()
+                .expect("cancelled journal line");
+            assert_eq!(replayed.status, WorkflowRunStatus::Cancelled);
         }
     }
 }
@@ -5193,10 +5233,24 @@ fn host_workflow_state(workspace: &Path) -> Option<Arc<WorkflowWorkspaceState>> 
     // No live state yet: hydrate only if a journal already exists so
     // status/cancel can see runs from a previous process without creating
     // files in a workspace that never ran a workflow.
-    let ledger = workspace
+    workflow_journal_exists(workspace).then(|| shared_workflow_state(workspace))
+}
+
+/// Cancel hydrates an on-disk journal without the restart-orphan Failed
+/// rewrite so a running line with no live controller can still be cancelled.
+fn host_workflow_state_for_cancel(workspace: &Path) -> Option<Arc<WorkflowWorkspaceState>> {
+    if let Some(state) = peek_shared_workflow_state(workspace) {
+        return Some(state);
+    }
+    workflow_journal_exists(workspace)
+        .then(|| WorkflowWorkspaceState::open_preserving_running(workspace))
+}
+
+fn workflow_journal_exists(workspace: &Path) -> bool {
+    workspace
         .join(journal::CODEWHALE_DIR)
-        .join(journal::WORKFLOW_RUNS_FILE);
-    ledger.is_file().then(|| shared_workflow_state(workspace))
+        .join(journal::WORKFLOW_RUNS_FILE)
+        .is_file()
 }
 
 /// Every workflow run this workspace knows about (live and journaled),
@@ -5219,12 +5273,14 @@ pub(crate) fn host_workflow_runs(workspace: &Path) -> Vec<HostWorkflowRunLine> {
 /// Cancel a running workflow directly from the host (the `/workflow cancel`
 /// command and the panel's cancel control), without a model turn. Returns
 /// the run's projection after cancellation, or a plain reason when the run
-/// is unknown. A run that already finished is reported as it is.
+/// is unknown. A run that already finished is reported as it is. After a
+/// restart, a journaled running line with no live controller is cancelled
+/// in the journal rather than rejected as unknown or controller-missing.
 pub(crate) fn host_cancel_workflow(
     workspace: &Path,
     run_id: &str,
 ) -> Result<HostWorkflowRunLine, String> {
-    let Some(state) = host_workflow_state(workspace) else {
+    let Some(state) = host_workflow_state_for_cancel(workspace) else {
         return Err(format!("Unknown workflow run '{run_id}'."));
     };
     match cancel_workflow_run(run_id, state.clone()) {
@@ -5469,7 +5525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_without_controller_fails_closed_as_stale() {
+    async fn cancellation_without_controller_marks_the_journal_cancelled() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
         let record =
@@ -5515,13 +5571,12 @@ mod tests {
             },
         );
 
-        let error = cancel_workflow(
+        cancel_workflow(
             json!({"run_id": "workflow_missing_controller"}),
             state.clone(),
         )
         .await
-        .expect_err("missing controller cannot acknowledge cancellation");
-        assert!(error.to_string().contains("outcome is unknown"), "{error}");
+        .expect("controller-less cancel must still journal cancelled");
         let record = state
             .runs
             .lock()
@@ -5529,8 +5584,16 @@ mod tests {
             .get("workflow_missing_controller")
             .cloned()
             .expect("workflow owner");
-        assert_eq!(record.status, WorkflowRunStatus::Running);
-        assert_eq!(record.lifecycle_seq, 1);
+        assert_eq!(record.status, WorkflowRunStatus::Cancelled);
+        assert_eq!(record.lifecycle_seq, 2);
+        assert!(
+            record
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("no live process")),
+            "expected an honest nothing-live receipt, got {:?}",
+            record.error
+        );
         let operation = work
             .capture(Some("missing-controller-session"))
             .expect("capture")
@@ -5540,7 +5603,7 @@ mod tests {
             .into_iter()
             .find(|node| node.kind == crate::work_graph::NodeKind::Operation)
             .expect("workflow operation");
-        assert_eq!(operation.state, crate::work_graph::NodeState::Stale);
+        assert_eq!(operation.state, crate::work_graph::NodeState::Cancelled);
     }
 
     #[test]

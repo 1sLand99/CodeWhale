@@ -303,19 +303,21 @@ mod tests {
         assert!(result.action.is_none());
 
         // Cancel with one running run needs no id and never asks the model.
-        // The seeded record has no live controller (no VM ran), so the host
-        // reports the unknown outcome truthfully instead of claiming success.
+        // The seeded record has no live controller (no VM ran); cancel still
+        // marks the journal cancelled with an honest nothing-live receipt.
         let result = workflow(&mut app, Some("cancel"));
         assert!(result.action.is_none());
-        assert!(result.is_error, "{:?}", result.message);
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap()
-                .contains("controller missing"),
-            "{:?}",
-            result.message
+        assert!(!result.is_error, "{:?}", result.message);
+        let text = result.message.as_deref().unwrap();
+        assert!(text.contains("workflow_seed"), "{text}");
+        assert!(text.contains("cancelled"), "{text}");
+        let after = crate::tools::workflow::host_workflow_runs(&app.workspace);
+        assert_eq!(
+            after
+                .iter()
+                .find(|line| line.run_id == "workflow_seed")
+                .map(|line| line.status),
+            Some("cancelled")
         );
 
         let result = workflow(&mut app, Some("cancel with spaces"));
