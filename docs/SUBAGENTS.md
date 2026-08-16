@@ -82,6 +82,24 @@ its explicit tool list or the spawning call. The focused worker's header
 states the effective posture (`scout · read-only · network · read-only
 shell`) from the runtime's own permission snapshot.
 
+**Delegation moves work, never authority** (the containment answer for
+#5426). A read-only role delegating to a write-capable role (scout →
+builder) is a supported escape hatch for *work capacity* — the child brings
+its own model, route, and step budget — but the child's authority is clamped
+against the delegating parent's live posture, not the operator's: a scout's
+builder child lands read-only with raw shell and mutating tools denied, and
+canonical `Bash` is denied to it too (only bounded-inspection roles keep the
+classified read-only shell). Delegating to obtain shell is therefore
+mechanically useless — the scout's own bounded shell (`git -C … log`,
+`find … | head`, `npm view …`, classifier-gated) is the only shell path a
+read-only parent has. Read-only is transitive through any delegation chain:
+the clamp (`ChildAuthority::clamp` in `fleet/exact.rs`) intersects every
+field with the narrower side, the deny-list union means a descendant can
+never drop an ancestor's restriction, and `inherit_disallowed_tools: false`
+cannot drop a posture denial (`is_posture_denial`). This is pinned by
+`a_read_only_parents_delegation_never_widens_authority` in
+`crates/tui/src/fleet/exact.rs` tests.
+
 The session's **permission posture** applies inside every child exactly as
 it applies to the parent turn: under Auto-Review the same deterministic
 floor and one-shot model guardian decide a worker's held calls (never a
