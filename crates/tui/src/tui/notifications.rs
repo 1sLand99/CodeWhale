@@ -455,30 +455,11 @@ const MAX_TERMINAL_TITLE_CHARS: usize = 160;
 /// before the title is embedded in a terminal escape sequence.
 #[must_use]
 fn terminal_title_sequence(title: &str) -> String {
-    let safe: String = title
+    let safe: String = crate::session_manager::sanitize_session_title(title)
         .chars()
-        .filter(|ch| !ch.is_control() && !is_title_format_char(*ch))
         .take(MAX_TERMINAL_TITLE_CHARS)
         .collect();
     format!("\x1b]0;{safe}\x07")
-}
-
-/// Unicode format characters that are dropped from window titles: bidi
-/// embeddings/overrides/isolates and marks, zero-width joiners/spaces, the
-/// soft hyphen, BOM, and line/paragraph separators. None of them can escape
-/// the OSC sequence (that needs ESC/BEL/C1, which `is_control` removes), but
-/// they can reorder or hide what the tab shows for a session name.
-fn is_title_format_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{00ad}'
-            | '\u{061c}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{feff}'
-    )
 }
 
 /// Whether raw terminal control sequences may be written to stdout.

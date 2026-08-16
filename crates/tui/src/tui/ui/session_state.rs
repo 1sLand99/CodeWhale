@@ -1006,7 +1006,9 @@ pub(crate) fn derive_session_title(messages: &[Message]) -> Option<String> {
         })
     })?;
 
-    let first_line = text.lines().next().unwrap_or("").trim();
+    let first_line =
+        crate::session_manager::sanitize_session_title(text.lines().next().unwrap_or("").trim());
+    let first_line = first_line.trim();
     if first_line.is_empty() {
         return None;
     }
@@ -1025,4 +1027,32 @@ pub(crate) fn derive_session_title(messages: &[Message]) -> Option<String> {
     }
 
     Some(short_title_truncate(first_line, SESSION_TITLE_MAX_CHARS))
+}
+
+#[cfg(test)]
+mod derived_title_tests {
+    use super::*;
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn derived_titles_drop_terminal_controls_and_bidi_format_chars() {
+        // The first user message can carry pasted escape sequences; the
+        // derived session name must never persist them.
+        let msgs = [user("Fix \u{1b}]0;PWNED\u{7}the\u{202e} build 会議")];
+        assert_eq!(
+            derive_session_title(&msgs).as_deref(),
+            Some("Fix ]0;PWNEDthe build 会議")
+        );
+        // Controls alone leave no title to derive.
+        assert_eq!(derive_session_title(&[user("\u{1b}\u{7}\u{200b}")]), None);
+    }
 }
