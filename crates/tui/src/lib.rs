@@ -136,7 +136,9 @@ mod task_manager;
 mod telemetry_notice;
 #[cfg(test)]
 mod test_support;
-mod tls;
+// TLS bootstrap and platform client builders live in codewhale-release;
+// `crate::tls::*` keeps resolving for every caller.
+use codewhale_release::tls;
 mod todo_snapshot;
 mod tool_history_repair;
 mod tool_inspection;
