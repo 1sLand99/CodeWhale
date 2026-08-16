@@ -105,6 +105,7 @@ pub mod underwater;
 pub mod user_input;
 pub mod views;
 pub mod vim_mode;
+pub mod whales;
 pub mod widgets;
 pub mod window_control;
 pub mod work_surface;

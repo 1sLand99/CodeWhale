@@ -1296,7 +1296,7 @@ pub(crate) async fn handle_view_events(
                 if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
                     let agents = subagent_view_agents(app, &app.subagent_cache);
                     app.view_stack
-                        .push(crate::tui::views::SubAgentsView::new(agents));
+                        .push(crate::tui::views::SubAgentsView::for_app(app, agents));
                 }
                 app.status_message =
                     Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());

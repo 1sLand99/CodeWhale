@@ -4035,6 +4035,13 @@ pub struct SubAgentsView {
     last_render_scroll: std::cell::Cell<usize>,
     /// Visible body height of the last render.
     last_visible_lines: std::cell::Cell<usize>,
+    /// Motion policy at open: the Whale Teams working wake animates only
+    /// under `MotionMode::Full` (Reduced/Still hold the poster frame).
+    motion: crate::tui::motion::mode::MotionMode,
+    /// UI locale for the whale state words.
+    locale: Locale,
+    /// Wall clock anchor for the working-wake frame.
+    opened_at: std::time::Instant,
 }
 
 /// Build the agent rows shown by `/subagents`.
@@ -4187,7 +4194,25 @@ impl SubAgentsView {
             body_area: std::cell::Cell::new(Rect::default()),
             last_render_scroll: std::cell::Cell::new(0),
             last_visible_lines: std::cell::Cell::new(0),
+            motion: crate::tui::motion::mode::MotionMode::Still,
+            locale: Locale::En,
+            opened_at: std::time::Instant::now(),
         }
+    }
+
+    /// Open with the app's motion policy and locale so the whale rows follow
+    /// the user's reduced-motion setting and language.
+    pub fn for_app(app: &App, agents: Vec<SubAgentResult>) -> Self {
+        let mut view = Self::new(agents);
+        view.motion = app.motion_policy().mode();
+        view.locale = app.ui_locale;
+        view
+    }
+
+    /// Working-wake frame for this render: 0 unless motion is Full.
+    fn whale_frame(&self) -> usize {
+        let now_ms = u64::try_from(self.opened_at.elapsed().as_millis()).unwrap_or(0);
+        crate::tui::whales::working_frame(now_ms, self.motion)
     }
 
     /// The five status groups in render order, each sorted the way the view
@@ -4432,6 +4457,10 @@ impl ModalView for SubAgentsView {
                     group,
                     content_width,
                     &selected_id,
+                    WhaleRowContext {
+                        locale: self.locale,
+                        frame: self.whale_frame(),
+                    },
                 );
             }
         }
@@ -4496,6 +4525,13 @@ impl ModalView for SubAgentsView {
     }
 }
 
+/// Locale and working-wake frame for the whale badge on each worker row.
+#[derive(Debug, Clone, Copy)]
+struct WhaleRowContext {
+    locale: Locale,
+    frame: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_subagent_group(
     lines: &mut Vec<ratatui::text::Line<'static>>,
@@ -4505,6 +4541,7 @@ fn append_subagent_group(
     agents: &[&SubAgentResult],
     content_width: usize,
     selected_id: &str,
+    whale: WhaleRowContext,
 ) {
     use ratatui::{
         style::Style,
@@ -4536,13 +4573,28 @@ fn append_subagent_group(
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
-        lines.push(Line::from(vec![
+        // Whale Teams: species badge from the worker's Fleet role (or its
+        // advisory role hint), then the six-state word derived from the
+        // child's real status — never from elapsed time.
+        let species = agent
+            .assignment
+            .role
+            .as_deref()
+            .map(crate::tui::whales::WhaleSpecies::for_role_id)
+            .filter(|species| *species != crate::tui::whales::WhaleSpecies::Plain)
+            .unwrap_or_else(|| crate::tui::whales::WhaleSpecies::for_fleet_role(&agent.agent_type));
+        let whale_state = crate::tui::whales::WhaleState::for_subagent(agent);
+        let mut row = vec![
             // The selection cursor: Enter (or a click) opens this agent's
             // transcript, matching every other agent surface.
             Span::styled(
                 if is_selected { "\u{25B8} " } else { "  " },
                 Style::default().fg(palette::WHALE_ACTION),
             ),
+        ];
+        row.extend(crate::tui::whales::badge(species, &palette::UI_THEME));
+        row.push(Span::raw(" "));
+        row.extend([
             Span::styled(display_name, name_style),
             Span::raw(" "),
             Span::styled(format!("{id:<11}"), Style::default().fg(palette::TEXT_DIM)),
@@ -4562,7 +4614,21 @@ fn append_subagent_group(
                 format!("{:>6}ms", agent.duration_ms),
                 Style::default().fg(palette::TEXT_DIM),
             ),
-        ]));
+        ]);
+        lines.push(Line::from(row));
+
+        // The whale's own state word, paired with its glyph cue, so the row
+        // says "Waiting for you" / "Blocked" in the user's language next to
+        // the raw runtime status above. No caption text beyond that.
+        let mut whale_line = vec![Span::raw("    ")];
+        whale_line.extend(crate::tui::whales::badge_with_state_frame(
+            species,
+            Some(whale_state),
+            whale.frame,
+            &palette::UI_THEME,
+            whale.locale,
+        ));
+        lines.push(Line::from(whale_line));
 
         if let Some(detail) = status_detail {
             let max_len = content_width.saturating_sub(10);
@@ -5324,6 +5390,44 @@ mod tests {
             empty.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ViewAction::Emit(ViewEvent::SubAgentsRefresh)
         ));
+    }
+
+    /// Whale Teams rows: every worker carries its species badge and a state
+    /// word derived from the real status (running → Working, completed →
+    /// Resting, failed → Blocked, interrupted → Waiting for you), and the
+    /// working wake holds the poster frame outside Full motion.
+    #[test]
+    fn subagents_rows_carry_species_badges_and_truthful_state_words() {
+        let mut interrupted = manager_agent("agent_wait", SubAgentStatus::Interrupted("q".into()));
+        interrupted.agent_type = FleetRole::Builder;
+        let mut failed = manager_agent("agent_fail", SubAgentStatus::Failed("boom".into()));
+        failed.agent_type = FleetRole::Reviewer;
+        let view = SubAgentsView::new(vec![
+            manager_agent("agent_done", SubAgentStatus::Completed),
+            manager_agent("agent_live", SubAgentStatus::Running),
+            interrupted,
+            failed,
+        ]);
+        assert_eq!(view.whale_frame(), 0, "Still motion holds the poster frame");
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let text = buffer_text(&buf, area);
+        // Scout (manager_agent default role) → beak badge; Builder → Patch
+        // bracket; Reviewer → Lantern lens.
+        assert!(text.contains("◂▰ agent_live"), "{text}");
+        assert!(text.contains("◂▰ · Working"), "{text}");
+        assert!(text.contains("◂▰ Resting"), "{text}");
+        assert!(text.contains("▰] ◆ Waiting for you"), "{text}");
+        assert!(text.contains("◇▰ ▌ Blocked"), "{text}");
+        assert!(
+            !text.contains("Scout · research"),
+            "no caption labels: {text}"
+        );
+        assert!(
+            !text.contains("Lantern · review"),
+            "no caption labels: {text}"
+        );
     }
 
     /// A click on a rendered `/agents` row opens the clicked agent's

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Whale Teams in the terminal: the six Signal Cut whale identities (Scout,
+  Patch, Harbor, Echo, Keel, Lantern) appear as species badges on `/fleet`
+  roster rows and worker rows, with an identity portrait in the roster detail
+  pane and a six-state word (Resting, Thinking, Working, Waiting for you,
+  Blocked, Offline) derived only from the child's real runtime status. Colors
+  come from the theme tokens, every glyph has an ASCII fallback, and the
+  working wake animates only under full motion. See
+  `docs/design/WHALE_TEAMS_TUI.md`.
+
 ### Fixed
 
 - Wide terminals and tmux panes fill the full available width again for the
