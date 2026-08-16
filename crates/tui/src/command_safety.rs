@@ -728,6 +728,13 @@ fn readonly_options_are_allowed(canonical: &str, tokens: &[&str]) -> bool {
         && (!canonical.starts_with("gh ") || !github_command_targets_unsupported_host(tokens))
 }
 
+fn is_numeric_count_shorthand(token: &str) -> bool {
+    let Some(digits) = token.strip_prefix('-') else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> bool {
     let mut index = 0;
     let mut options = true;
@@ -738,6 +745,15 @@ fn options_match_allowlist(tokens: &[&str], switches: &str, values: &str) -> boo
         } else if options && token.starts_with('-') && token != "-" {
             if switches.split_ascii_whitespace().any(|name| name == token) {
                 // exact, no-value switch
+            } else if is_numeric_count_shorthand(token)
+                && values
+                    .split_ascii_whitespace()
+                    .any(|name| name == "-n" || name == "--lines")
+            {
+                // `head -5` / `tail -20` are the ubiquitous shorthand for
+                // `-n 5` / `-n 20`; only commands whose value flags include a
+                // line-count accept them, and the digit-only form can carry no
+                // attached path or value injection.
             } else if values.split_ascii_whitespace().any(|name| name == token) {
                 index += 1;
                 if index >= tokens.len() || tokens[index].starts_with('-') {
