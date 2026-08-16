@@ -2059,8 +2059,7 @@ mod shell_ceiling_tests {
         };
         assert!(builder_member.write && builder_member.shell == ShellCeiling::Full);
 
-        let authority =
-            ChildAuthority::clamp_for_role("builder", builder_member, scout_runtime);
+        let authority = ChildAuthority::clamp_for_role("builder", builder_member, scout_runtime);
 
         // Authority does not widen through delegation: the child is read-only.
         assert!(!authority.ceiling.write);
@@ -2073,7 +2072,10 @@ mod shell_ceiling_tests {
         assert!(denies_raw_shell(&authority));
         for mutating in ["write_file", "apply_patch"] {
             assert!(
-                authority.disallowed_tools.iter().any(|rule| rule == mutating),
+                authority
+                    .disallowed_tools
+                    .iter()
+                    .any(|rule| rule == mutating),
                 "{mutating} must stay denied for a scout-delegated builder: {:?}",
                 authority.disallowed_tools
             );
