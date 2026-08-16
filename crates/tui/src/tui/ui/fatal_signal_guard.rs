@@ -202,11 +202,10 @@ unsafe fn install_handler(signal: libc::c_int) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn restore_bytes_cover_every_poisoning_mode() {
         // Input-poisoning modes first: mouse capture (all four DEC modes)
@@ -223,7 +222,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn restore_bytes_are_one_write_friendly() {
         // No interior NULs, ASCII-only escape program, reasonable size.
