@@ -28,7 +28,10 @@ cargo test -p codewhale-tui --tests --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-`--lib` and `--tests` are disjoint; use both or the workspace gate. For PTY
+`--lib` and `--tests` are disjoint; use both or the workspace gate.
+`scripts/dev-test.sh <area|path> [filter]` prints and runs the fastest
+targeted invocation for a source path (for example
+`scripts/dev-test.sh crates/tui/src/elapsed.rs`). For PTY
 failures, rerun the exact test before changing behavior. Script one input at a
 time and capture after the UI settles. Validate representative layouts at
 40x12, 60x16, 80x24, 100x32, and 140x40; judge motion from repeated frames, not
