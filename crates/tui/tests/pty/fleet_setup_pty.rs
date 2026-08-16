@@ -87,7 +87,14 @@ fn fleet_setup_journey_shows_destination_before_writing_and_never_replaces_silen
         .join("manager.toml");
     h.wait_for(
         |frame| {
-            let text = frame.text();
+            // The destination path can hard-wrap mid-token when the temp
+            // directory is long (macOS /var/folders, Windows Temp, VIX
+            // volumes), so compare with whitespace and borders removed.
+            let text: String = frame
+                .text()
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '│')
+                .collect();
             text.contains("File:") && text.contains("agents") && text.contains("manager.toml")
         },
         STEP_TIMEOUT,

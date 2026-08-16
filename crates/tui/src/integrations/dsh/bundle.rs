@@ -150,16 +150,28 @@ pub(crate) fn launcher_package_root(binary: &Path) -> Option<PathBuf> {
     // …/@deepseek-ai/dsh/lib/bin.js → …/@deepseek-ai/dsh
     let mut dir = resolved.parent()?.to_path_buf();
     for _ in 0..4 {
-        if dir.join("package.json").is_file()
-            && std::fs::read_to_string(dir.join("package.json"))
-                .ok()
-                .is_some_and(|text| text.contains("\"@deepseek-ai/dsh\""))
-        {
+        if is_dsh_package_root(&dir) {
             return Some(dir);
         }
-        dir = dir.parent()?.to_path_buf();
+        let Some(parent) = dir.parent() else { break };
+        dir = parent.to_path_buf();
     }
-    None
+    // npm on Windows (and some Unix wrappers) install a copied `.cmd`/`.ps1`
+    // shim next to the prefix's `node_modules` instead of a symlink into the
+    // package, so the shim's directory owns the launcher package directly.
+    let sibling = resolved
+        .parent()?
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh");
+    is_dsh_package_root(&sibling).then_some(sibling)
+}
+
+fn is_dsh_package_root(dir: &Path) -> bool {
+    dir.join("package.json").is_file()
+        && std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .is_some_and(|text| text.contains("\"@deepseek-ai/dsh\""))
 }
 
 /// The shipped app bundle directory inside the installed launcher, if it

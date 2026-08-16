@@ -19047,6 +19047,14 @@ mod child_permission_gate {
         assert_eq!(receipts[0].1, ToolGateVerdict::Denied);
     }
 
+    /// A harmless pipeline (never "routine" for the deterministic floor).
+    /// PowerShell's `cat` is Get-Content, which rejects pipeline input, so
+    /// Windows pipes through Out-String instead.
+    #[cfg(windows)]
+    const GUARDIAN_PIPELINE: &str = "echo built | Out-String";
+    #[cfg(not(windows))]
+    const GUARDIAN_PIPELINE: &str = "echo built | cat";
+
     #[tokio::test]
     async fn auto_review_consults_the_guardian_and_runs_an_allowed_call_with_a_receipt() {
         let (_server, client) = guardian_mock(
@@ -19057,7 +19065,7 @@ mod child_permission_gate {
         let output = registry
             // A pipeline is never "routine" for the deterministic floor, so it
             // reaches the guardian; the command itself is harmless.
-            .execute("agent_gate", "bash", json!({"command": "echo built | cat"}))
+            .execute("agent_gate", "bash", json!({"command": GUARDIAN_PIPELINE}))
             .await
             .expect("guardian-approved call runs");
         assert!(output.contains("built"), "{output}");

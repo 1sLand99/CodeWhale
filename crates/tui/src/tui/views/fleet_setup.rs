@@ -2621,6 +2621,19 @@ mod tests {
         assert_eq!(view.step, Step::Review);
     }
 
+    /// Rendered text with all whitespace and box borders removed, so a phrase
+    /// or path that wrapped across rows (temp-dir paths vary in length per
+    /// platform and CI runner) still compares as one token.
+    fn squashed(text: &str) -> String {
+        text.chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '┆' | '┊' | '|'))
+            .collect()
+    }
+
+    fn contains_wrapped(text: &str, needle: &str) -> bool {
+        squashed(text).contains(&squashed(needle))
+    }
+
     fn rendered_text(view: &FleetSetupView, w: u16, h: u16) -> String {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
@@ -2750,11 +2763,17 @@ mod tests {
         view.handle_key(key(KeyCode::Enter)); // inherit -> Destination
         view.handle_key(key(KeyCode::Up)); // This project
         let text = rendered_text(&view, 120, 32);
-        assert!(text.contains("Will replace the existing file"), "{text}");
+        assert!(
+            contains_wrapped(&text, "Will replace the existing file"),
+            "{text}"
+        );
         view.handle_key(key(KeyCode::Enter)); // -> Review
         let text = rendered_text(&view, 120, 32);
-        assert!(text.contains("Replace in this project"), "{text}");
-        assert!(text.contains("Will replace the existing file"), "{text}");
+        assert!(contains_wrapped(&text, "Replace in this project"), "{text}");
+        assert!(
+            contains_wrapped(&text, "Will replace the existing file"),
+            "{text}"
+        );
         // First Enter arms; nothing is emitted.
         let action = view.handle_key(key(KeyCode::Enter));
         assert!(
@@ -3684,7 +3703,7 @@ mod tests {
         )
         .join("\n");
         assert!(
-            role_step.contains("Replaces the built-in 'reviewer'"),
+            contains_wrapped(&role_step, "Replaces the built-in 'reviewer'"),
             "{role_step}"
         );
 
@@ -3702,7 +3721,7 @@ mod tests {
         )
         .join("\n");
         assert!(
-            review.contains("Replaces the built-in 'reviewer'"),
+            contains_wrapped(&review, "Replaces the built-in 'reviewer'"),
             "{review}"
         );
 
@@ -3962,12 +3981,17 @@ mod tests {
         }
     }
 
+    const BLEED_FILL: &str = "\u{e000}";
+
     fn render_through_stack(view_at: impl Fn() -> FleetSetupView, w: u16, h: u16) -> Vec<String> {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
         for y in 0..h {
             for x in 0..w {
-                buf[(x, y)].set_symbol("X");
+                // A private-use glyph that no rendered copy or temp path can
+                // contain, so bleed-through detection cannot false-positive
+                // on a path like `/Volumes/VIXinSSD/...`.
+                buf[(x, y)].set_symbol(BLEED_FILL);
             }
         }
         let mut stack = ViewStack::new();
@@ -4007,7 +4031,7 @@ mod tests {
 
                 // No bleed-through anywhere in the composited frame.
                 assert!(
-                    !text.contains('X'),
+                    !text.contains(BLEED_FILL),
                     "{label} {w}x{h}: background bleed-through"
                 );
                 // Some action label is always visible.

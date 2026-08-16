@@ -681,7 +681,12 @@ impl DshRunner for PluginRunner {
 
 /// A fake installed launcher tree so `app_bundle_source` resolves.
 fn fake_launcher(dir: &std::path::Path) -> PathBuf {
+    // Unix npm: <prefix>/bin/dsh -> <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+    // Windows npm: <prefix>\dsh.cmd shim beside <prefix>\node_modules\@deepseek-ai\dsh
+    #[cfg(unix)]
     let root = dir.join("npm/lib/node_modules/@deepseek-ai/dsh");
+    #[cfg(not(unix))]
+    let root = dir.join("npm/node_modules/@deepseek-ai/dsh");
     std::fs::create_dir_all(root.join("lib")).unwrap();
     std::fs::write(
         root.join("package.json"),
@@ -692,13 +697,43 @@ fn fake_launcher(dir: &std::path::Path) -> PathBuf {
     let app = root.join("node_modules/@deepseek-ai/dsh-web-app");
     std::fs::create_dir_all(&app).unwrap();
     std::fs::write(app.join("package.json"), "{\"name\":\"@deepseek-ai/dsh-web-app\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}}}").unwrap();
+    #[cfg(unix)]
     let bin = dir.join("bin");
+    #[cfg(not(unix))]
+    let bin = dir.join("npm");
     std::fs::create_dir_all(&bin).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(root.join("lib/bin.js"), bin.join("dsh")).unwrap();
     #[cfg(not(unix))]
     std::fs::copy(root.join("lib/bin.js"), bin.join("dsh")).unwrap();
     bin.join("dsh")
+}
+
+#[test]
+fn launcher_package_root_resolves_a_copied_shim_beside_node_modules() {
+    // The npm-on-Windows layout: no symlink, the shim sits next to the
+    // prefix's node_modules. Exercised on every platform with a plain copy.
+    let temp = tempfile::tempdir().unwrap();
+    let prefix = temp.path().join("npm");
+    let root = prefix.join("node_modules/@deepseek-ai/dsh");
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"@deepseek-ai/dsh\",\"version\":\"0.1.0-rc.6\"}",
+    )
+    .unwrap();
+    std::fs::write(root.join("lib/bin.js"), "// launcher").unwrap();
+    std::fs::copy(root.join("lib/bin.js"), prefix.join("dsh")).unwrap();
+    let found = super::bundle::launcher_package_root(&prefix.join("dsh")).expect("root");
+    assert_eq!(
+        std::fs::canonicalize(found).unwrap(),
+        std::fs::canonicalize(root).unwrap()
+    );
+    // A shim with no package beside it and no symlink resolves to nothing.
+    let lonely = temp.path().join("lonely");
+    std::fs::create_dir_all(&lonely).unwrap();
+    std::fs::write(lonely.join("dsh"), "// shim").unwrap();
+    assert!(super::bundle::launcher_package_root(&lonely.join("dsh")).is_none());
 }
 
 #[test]
