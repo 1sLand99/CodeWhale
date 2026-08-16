@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "Tidak dapat mengirim ke {agent}: {reason}",
   "FooterHintForAgents": "agen",
   "FooterHintToManage": "kelola",
-  "AgentRailQueuedCount": "{count} antre"
+  "AgentRailQueuedCount": "{count} antre",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "menulis",
+  "AgentFocusPostureReadOnly": "hanya-baca",
+  "AgentFocusPostureNetwork": "jaringan",
+  "AgentFocusPostureNoNetwork": "tanpa jaringan",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell hanya-baca",
+  "AgentFocusPostureShellNone": "tanpa shell"
 }

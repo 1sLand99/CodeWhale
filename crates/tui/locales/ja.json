@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "{agent} に届けられませんでした: {reason}",
   "FooterHintForAgents": "エージェント",
   "FooterHintToManage": "管理",
-  "AgentRailQueuedCount": "{count} 件キュー"
+  "AgentRailQueuedCount": "{count} 件キュー",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "書き込み可",
+  "AgentFocusPostureReadOnly": "読み取り専用",
+  "AgentFocusPostureNetwork": "ネットワーク可",
+  "AgentFocusPostureNoNetwork": "ネットワーク不可",
+  "AgentFocusPostureShellFull": "シェル可",
+  "AgentFocusPostureShellReadOnly": "読み取り専用シェル",
+  "AgentFocusPostureShellNone": "シェル不可"
 }

@@ -242,6 +242,31 @@ narrowed before metadata is built and cannot invent approval authority. An
 explicit Full Access sub-agent handoff preserves the parent's standing posture
 so ordinary child work does not begin prompting again.
 
+### Children (sub-agents and Fleet workers)
+
+Children inherit the session posture faithfully rather than a bare
+auto-approve bit:
+
+- **Auto-Review**: a worker's held call goes through the same deterministic
+  policy (proven-safe calls run; publish-like and destructive background work
+  is hard-blocked) and, for holds it cannot prove safe, the same one-shot
+  model guardian using the child's own session client. No prompt is ever
+  opened for a child; an unavailable guardian denies, fail closed.
+- **Ask**: a call the role may delegate runs. A held call is raised as an
+  approval prompt in the parent's UI (`agent:<id>:approval:<n>`) when the
+  host is an interactive TUI; the worker waits visibly (`waiting for user`)
+  and the person's answer is routed back to it, whether the parent turn is
+  idle or itself awaiting an approval. Hosts that cannot prompt deny with the
+  reason.
+- **Full Access**: ordinary calls run; destructive detached work still fails
+  closed, because children are background workers.
+
+Role posture and the execution envelope are checked before and after this
+gate and never widen. Every decision a person did not make at a prompt is
+written to the audit log and to the child's transcript as a one-line note
+(`Auto-Review allowed 'bash' (low risk, model guardian): …`), visible when
+the worker is focused.
+
 ## Small-Screen Status Behavior
 
 When terminal height is constrained, the status area compacts first so header/chat/composer/footer remain visible:

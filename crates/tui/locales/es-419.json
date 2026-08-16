@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "No se pudo entregar a {agent}: {reason}",
   "FooterHintForAgents": "agentes",
   "FooterHintToManage": "gestionar",
-  "AgentRailQueuedCount": "{count} en cola"
+  "AgentRailQueuedCount": "{count} en cola",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "escribe",
+  "AgentFocusPostureReadOnly": "solo lectura",
+  "AgentFocusPostureNetwork": "red",
+  "AgentFocusPostureNoNetwork": "sin red",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell de solo lectura",
+  "AgentFocusPostureShellNone": "sin shell"
 }

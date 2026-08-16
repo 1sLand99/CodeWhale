@@ -266,7 +266,14 @@ holding an `http`/`https`/`ws`/`wss`/`ftp` address. A URL appearing in file
 A member's `role` picks the worker
 posture (and system prompt) when that role already fits inside the ceiling —
 `reviewer`, `verifier`, `consultant`, `planner` — and a domain-specific role
-such as `auditor` falls back to the narrowest posture the ceiling allows. Tasks
+such as `auditor` falls back to the narrowest posture the ceiling allows.
+Built-in role defaults withhold only what the role intends: read-only roles
+never write the workspace, every role keeps network reads, `planner` may run
+read-only shell probes, and `builder`/`worker`/`custom` inherit the parent's
+effective write/network/shell posture as their ceiling (see the role table in
+`docs/SUBAGENTS.md`). The session's permission posture — Ask, Auto-Review,
+Full Access — then gates each worker call exactly as it gates the parent
+(`docs/MODES.md`, "Children"). Tasks
 cannot override any of it: `model`, `thinking`,
 `subagent_type`, `allowed_tools`, and `write_authority` are rejected on an exact
 Fleet rather than silently ignored.

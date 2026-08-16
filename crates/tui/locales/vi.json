@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "Không thể gửi tới {agent}: {reason}",
   "FooterHintForAgents": "agent",
   "FooterHintToManage": "quản lý",
-  "AgentRailQueuedCount": "{count} đang chờ"
+  "AgentRailQueuedCount": "{count} đang chờ",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "được ghi",
+  "AgentFocusPostureReadOnly": "chỉ đọc",
+  "AgentFocusPostureNetwork": "có mạng",
+  "AgentFocusPostureNoNetwork": "không mạng",
+  "AgentFocusPostureShellFull": "shell",
+  "AgentFocusPostureShellReadOnly": "shell chỉ đọc",
+  "AgentFocusPostureShellNone": "không shell"
 }

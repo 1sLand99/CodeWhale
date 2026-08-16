@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "{agent}에게 전달할 수 없습니다: {reason}",
   "FooterHintForAgents": "에이전트",
   "FooterHintToManage": "관리",
-  "AgentRailQueuedCount": "{count}개 대기"
+  "AgentRailQueuedCount": "{count}개 대기",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "쓰기 가능",
+  "AgentFocusPostureReadOnly": "읽기 전용",
+  "AgentFocusPostureNetwork": "네트워크 가능",
+  "AgentFocusPostureNoNetwork": "네트워크 없음",
+  "AgentFocusPostureShellFull": "셸 가능",
+  "AgentFocusPostureShellReadOnly": "읽기 전용 셸",
+  "AgentFocusPostureShellNone": "셸 없음"
 }

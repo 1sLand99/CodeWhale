@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "無法傳送給 {agent}：{reason}",
   "FooterHintForAgents": "代理",
   "FooterHintToManage": "管理",
-  "AgentRailQueuedCount": "{count} 則排隊"
+  "AgentRailQueuedCount": "{count} 則排隊",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "可寫入",
+  "AgentFocusPostureReadOnly": "唯讀",
+  "AgentFocusPostureNetwork": "可連網",
+  "AgentFocusPostureNoNetwork": "無網路",
+  "AgentFocusPostureShellFull": "可用 shell",
+  "AgentFocusPostureShellReadOnly": "唯讀 shell",
+  "AgentFocusPostureShellNone": "無 shell"
 }

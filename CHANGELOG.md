@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Children (sub-agents and Fleet workers) inherit the session's permission
+  posture faithfully: Auto-Review's deterministic floor and model guardian
+  decide a worker's held calls (fail closed when unavailable, never a
+  prompt); under Ask a held call is raised in the parent's approval UI and
+  the worker waits visibly; Full Access still fails closed on the safety
+  floor. Each prompt-less decision is a one-line note in that worker's
+  transcript (focus mode) and an audit-log record.
+- Worker role defaults keep what the role does not intend to withhold:
+  every built-in role keeps network reads; `planner` may run read-only
+  shell probes; `custom` inherits the parent's write/network/shell posture
+  and is narrowed only by its explicit tool list or the spawning call.
+  Read-only roles (`scout`, `reviewer`, `planner`, `verifier`,
+  `consultant`) still never write the workspace. The focused worker's
+  header states its effective posture from the runtime snapshot.
 - Whale Teams in the terminal: the six Signal Cut whale identities (Scout,
   Patch, Harbor, Echo, Keel, Lantern) appear as species badges on `/fleet`
   roster rows and worker rows, with an identity portrait in the roster detail

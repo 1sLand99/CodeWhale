@@ -1440,5 +1440,13 @@
   "AgentFocusFollowUpFailed": "{agent} तक नहीं पहुँचाया जा सका: {reason}",
   "FooterHintForAgents": "एजेंट",
   "FooterHintToManage": "प्रबंधन",
-  "AgentRailQueuedCount": "{count} कतार में"
+  "AgentRailQueuedCount": "{count} कतार में",
+  "AgentFocusPosture": "{role} · {write} · {network} · {shell}",
+  "AgentFocusPostureWrites": "लिख सकता है",
+  "AgentFocusPostureReadOnly": "केवल-पढ़ने",
+  "AgentFocusPostureNetwork": "नेटवर्क",
+  "AgentFocusPostureNoNetwork": "नेटवर्क नहीं",
+  "AgentFocusPostureShellFull": "शेल",
+  "AgentFocusPostureShellReadOnly": "केवल-पढ़ने शेल",
+  "AgentFocusPostureShellNone": "शेल नहीं"
 }
