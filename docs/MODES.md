@@ -85,11 +85,16 @@ The fast `deepseek-v4-flash` / thinking-off path is called Fin in the product
 language. Fin is a seam for routing, summaries, cheap child calls, and
 coordination work; it does not change approval behavior.
 
-`/goal` sets a session objective with an optional token budget and keeps active
-objectives visible as Work context. `/goal pause` stops goal continuation without
-changing the objective, `/goal resume` resumes and sends the objective back into
-the turn, `/goal complete` marks it done, `/goal blocked` marks it blocked, and
-`/goal clear` removes it. Goal state does not change the active TUI mode,
+`/goal <objective>` sets a session objective with an optional token budget and
+keeps active objectives visible as Work context. The agent may also create the
+goal itself when a direct request describes a verifiable end state that will
+take more than one turn ("until the tests pass", "make X work end to end"); it
+then shows one receipt line and you can `/goal pause` or `/goal clear` it. Bare
+`/goal` shows progress (state, elapsed, continuations, and how to continue when
+no turn is running); with no goal and no conversation yet it prints usage.
+`/goal pause` stops goal continuation without changing the objective, `/goal
+resume` resumes and sends the objective back into the turn, `/goal complete`
+marks it done, `/goal blocked` marks it blocked, and `/goal clear` removes it. Goal state does not change the active TUI mode,
 permission posture, or model route. This remains distinct from `--model auto`, which
 only controls model and thinking selection.
 

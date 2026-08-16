@@ -313,7 +313,8 @@ Common commands for first-time users:
 | `/model` | Select a model or use `/model auto` |
 | `/provider` | Pick the active API provider |
 | `/fleet` | Configure Fleet roles or open worker status |
-| `/workflow` | Orchestrate the current work as a Workflow |
+| `/goal` | Set a persistent objective the agent works toward across turns; bare `/goal` shows progress |
+| `/workflow` | Orchestrate the current work as a Workflow; `status`, `cancel`, `settings` answer without a model turn |
 | `/config` | Edit runtime and provider settings |
 | `/statusline` | Choose which footer status chips are visible |
 | `/compact` | Summarize long context to recover token budget |
