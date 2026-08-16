@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "komunikasi",
   "WhaleJobKeel": "operasi",
   "WhaleJobLantern": "tinjauan",
-  "WhaleJobPlain": "pekerjaan umum",
-  "WhaleIdentityLabel": "Identitas paus",
-  "WhaleIdentityNotRuntime": "hanya identitas · bukan status runtime"
+  "WhaleJobPlain": "pekerjaan umum"
 }

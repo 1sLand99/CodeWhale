@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "liên lạc",
   "WhaleJobKeel": "vận hành",
   "WhaleJobLantern": "đánh giá",
-  "WhaleJobPlain": "việc chung",
-  "WhaleIdentityLabel": "Danh tính cá voi",
-  "WhaleIdentityNotRuntime": "chỉ là danh tính · không phải trạng thái chạy"
+  "WhaleJobPlain": "việc chung"
 }

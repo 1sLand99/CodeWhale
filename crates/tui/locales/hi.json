@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "संचार",
   "WhaleJobKeel": "संचालन",
   "WhaleJobLantern": "समीक्षा",
-  "WhaleJobPlain": "सामान्य कार्य",
-  "WhaleIdentityLabel": "व्हेल पहचान",
-  "WhaleIdentityNotRuntime": "केवल पहचान · यह रनटाइम स्थिति नहीं है"
+  "WhaleJobPlain": "सामान्य कार्य"
 }

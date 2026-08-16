@@ -510,8 +510,8 @@ fn member_species(member: &AgentProfile) -> whales::WhaleSpecies {
 }
 
 /// Identity block for the detail pane: portrait when the view is at least
-/// the Compact tier width, badge otherwise; then `Name · species · job` and
-/// the explicit "identity only" note.
+/// the Compact tier width, badge otherwise; then `Name · species · job`. No
+/// state is drawn or claimed — a roster member is a profile, not a runtime.
 fn whale_identity_lines(
     member: &AgentProfile,
     locale: Locale,
@@ -520,10 +520,6 @@ fn whale_identity_lines(
     let species = member_species(member);
     let theme = &palette::UI_THEME;
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        tr(locale, MessageId::WhaleIdentityLabel).into_owned(),
-        Style::default().fg(palette::WHALE_INFO).bold(),
-    )));
     if whales::portrait_fits(view_width) {
         lines.extend(whales::portrait(species, None, 0, theme));
     }
@@ -538,10 +534,6 @@ fn whale_identity_lines(
         Style::default().fg(palette::TEXT_PRIMARY),
     ));
     lines.push(Line::from(caption));
-    lines.push(Line::from(Span::styled(
-        tr(locale, MessageId::WhaleIdentityNotRuntime).into_owned(),
-        Style::default().fg(palette::TEXT_DIM),
-    )));
     lines.push(Line::from(""));
     lines
 }

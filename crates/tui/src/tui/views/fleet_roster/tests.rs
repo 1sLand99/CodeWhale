@@ -392,8 +392,8 @@ fn fleet_roster_is_usable_and_opaque_at_blocker_sizes() {
 }
 
 /// Whale Teams: member rows carry the species badge and the detail pane
-/// opens with the identity block (portrait at ≥ 60 cols, badge-only below),
-/// explicitly labelled as identity, not a runtime state.
+/// opens with the identity block (portrait at ≥ 60 cols, badge-only below)
+/// with no caption labels and no state claim.
 #[test]
 fn roster_rows_and_detail_carry_whale_identity_without_claiming_state() {
     let wide = render_through_stack(
@@ -409,13 +409,13 @@ fn roster_rows_and_detail_carry_whale_identity_without_claiming_state() {
     assert!(wide.contains("◂▰ scout"), "{wide}");
     assert!(wide.contains("▰] builder"), "{wide}");
     assert!(wide.contains("◇▰ reviewer"), "{wide}");
-    assert!(wide.contains("Whale identity"), "{wide}");
     assert!(wide.contains("▚△▞"), "portrait fluke missing: {wide}");
     assert!(wide.contains("Scout · beaked whale · research"), "{wide}");
     assert!(
-        wide.contains("identity only · not a runtime state"),
-        "{wide}"
+        !wide.contains("Whale identity"),
+        "no caption labels: {wide}"
     );
+    assert!(!wide.contains("identity only"), "no caption labels: {wide}");
     for word in ["Working", "Waiting for you", "Blocked", "Offline"] {
         assert!(!wide.contains(word), "roster must not claim {word}: {wide}");
     }
@@ -430,7 +430,7 @@ fn roster_rows_and_detail_carry_whale_identity_without_claiming_state() {
         20,
     )
     .join("\n");
-    assert!(narrow.contains("Whale identity"), "{narrow}");
+    assert!(narrow.contains("◂▰ Scout · beaked whale"), "{narrow}");
     assert!(
         !narrow.contains("▚△▞"),
         "compact tier is badge-only: {narrow}"

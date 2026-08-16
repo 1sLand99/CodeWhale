@@ -4619,7 +4619,7 @@ fn append_subagent_group(
 
         // The whale's own state word, paired with its glyph cue, so the row
         // says "Waiting for you" / "Blocked" in the user's language next to
-        // the raw runtime status above.
+        // the raw runtime status above. No caption text beyond that.
         let mut whale_line = vec![Span::raw("    ")];
         whale_line.extend(crate::tui::whales::badge_with_state_frame(
             species,
@@ -4627,10 +4627,6 @@ fn append_subagent_group(
             whale.frame,
             &palette::UI_THEME,
             whale.locale,
-        ));
-        whale_line.push(Span::styled(
-            format!("  {} · {}", species.name(), species.job(whale.locale)),
-            Style::default().fg(palette::TEXT_DIM),
         ));
         lines.push(Line::from(whale_line));
 
@@ -5424,8 +5420,14 @@ mod tests {
         assert!(text.contains("◂▰ Resting"), "{text}");
         assert!(text.contains("▰] ◆ Waiting for you"), "{text}");
         assert!(text.contains("◇▰ ▌ Blocked"), "{text}");
-        assert!(text.contains("Scout · research"), "{text}");
-        assert!(text.contains("Lantern · review"), "{text}");
+        assert!(
+            !text.contains("Scout · research"),
+            "no caption labels: {text}"
+        );
+        assert!(
+            !text.contains("Lantern · review"),
+            "no caption labels: {text}"
+        );
     }
 
     /// A click on a rendered `/agents` row opens the clicked agent's

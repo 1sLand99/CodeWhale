@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "沟通",
   "WhaleJobKeel": "运维",
   "WhaleJobLantern": "评审",
-  "WhaleJobPlain": "通用工作",
-  "WhaleIdentityLabel": "鲸鱼身份",
-  "WhaleIdentityNotRuntime": "仅为身份 · 不是运行状态"
+  "WhaleJobPlain": "通用工作"
 }

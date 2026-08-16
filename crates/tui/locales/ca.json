@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "comunicacions",
   "WhaleJobKeel": "operacions",
   "WhaleJobLantern": "revisió",
-  "WhaleJobPlain": "feina general",
-  "WhaleIdentityLabel": "Identitat de la balena",
-  "WhaleIdentityNotRuntime": "només identitat · no és un estat d'execució"
+  "WhaleJobPlain": "feina general"
 }

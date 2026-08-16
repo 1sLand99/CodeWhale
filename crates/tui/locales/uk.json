@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "комунікації",
   "WhaleJobKeel": "експлуатація",
   "WhaleJobLantern": "рев'ю",
-  "WhaleJobPlain": "загальна робота",
-  "WhaleIdentityLabel": "Ідентичність кита",
-  "WhaleIdentityNotRuntime": "лише ідентичність · не стан виконання"
+  "WhaleJobPlain": "загальна робота"
 }

@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "溝通",
   "WhaleJobKeel": "營運",
   "WhaleJobLantern": "審查",
-  "WhaleJobPlain": "一般工作",
-  "WhaleIdentityLabel": "鯨魚身分",
-  "WhaleIdentityNotRuntime": "僅為身分 · 不是執行狀態"
+  "WhaleJobPlain": "一般工作"
 }

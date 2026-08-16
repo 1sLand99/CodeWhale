@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "連絡",
   "WhaleJobKeel": "運用",
   "WhaleJobLantern": "レビュー",
-  "WhaleJobPlain": "一般作業",
-  "WhaleIdentityLabel": "クジラの識別",
-  "WhaleIdentityNotRuntime": "識別のみ · 実行状態ではありません"
+  "WhaleJobPlain": "一般作業"
 }

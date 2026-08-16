@@ -1589,8 +1589,6 @@ pub enum MessageId {
     WhaleJobKeel,
     WhaleJobLantern,
     WhaleJobPlain,
-    WhaleIdentityLabel,
-    WhaleIdentityNotRuntime,
 }
 
 #[allow(dead_code)]
@@ -2999,8 +2997,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WhaleJobKeel,
     MessageId::WhaleJobLantern,
     MessageId::WhaleJobPlain,
-    MessageId::WhaleIdentityLabel,
-    MessageId::WhaleIdentityNotRuntime,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

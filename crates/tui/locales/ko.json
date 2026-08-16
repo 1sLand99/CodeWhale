@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "소통",
   "WhaleJobKeel": "운영",
   "WhaleJobLantern": "리뷰",
-  "WhaleJobPlain": "일반 작업",
-  "WhaleIdentityLabel": "고래 정체성",
-  "WhaleIdentityNotRuntime": "정체성만 표시 · 실행 상태가 아님"
+  "WhaleJobPlain": "일반 작업"
 }

@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "comunicação",
   "WhaleJobKeel": "operações",
   "WhaleJobLantern": "revisão",
-  "WhaleJobPlain": "trabalho geral",
-  "WhaleIdentityLabel": "Identidade da baleia",
-  "WhaleIdentityNotRuntime": "apenas identidade · não é um estado de execução"
+  "WhaleJobPlain": "trabalho geral"
 }

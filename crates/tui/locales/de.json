@@ -1401,7 +1401,5 @@
   "WhaleJobEcho": "Kommunikation",
   "WhaleJobKeel": "Betrieb",
   "WhaleJobLantern": "Review",
-  "WhaleJobPlain": "allgemeine Arbeit",
-  "WhaleIdentityLabel": "Wal-Identität",
-  "WhaleIdentityNotRuntime": "nur Identität · kein Laufzeitzustand"
+  "WhaleJobPlain": "allgemeine Arbeit"
 }

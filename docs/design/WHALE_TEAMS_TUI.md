@@ -49,8 +49,8 @@ Rules:
   session `ShellPhase`. Working is never inferred from elapsed time or a
   timestamp.
 - **A portrait without a state claims nothing.** The `/fleet` roster renders
-  members as identity only ("identity only · not a runtime state") because a
-  profile is not a runtime.
+  members as identity only (no state cue, no state word, no caption) because
+  a profile is not a runtime.
 - **Glyph + word, always.** Every state pairs a cue glyph with a localized word
   (`WhaleState::word`), so state never depends on color alone — the same rule
   `menu_style::StatusMark` enforces.
@@ -105,9 +105,10 @@ the seven badges stay distinct: `<#` `#]` `#\` `:#` `#-` `*#` `.#`.
 ## Surfaces
 
 - `/fleet` roster: species badge on every member row; the detail pane opens
-  with the identity block (portrait at ≥ 60 columns, badge only below).
+  with the portrait (≥ 60 columns) and the `badge Name · species · job` line
+  — no caption labels.
 - `/fleet` workers (`SubAgentsView`): badge on every worker row, plus a
-  second line with the badge, the state cue and word, and `Name · job`.
+  second line with the badge and the state cue and word — nothing else.
 - `whales::portrait` / `whales::badge` are public for other surfaces (the
   Fleet setup role pane is the intended next consumer).
 
