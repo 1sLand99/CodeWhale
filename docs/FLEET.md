@@ -80,17 +80,37 @@ they are the same command.
 
 The wizard is progressive: you make one focused choice at a time — a **role**,
 then a **model** (`inherit`, or a concrete model from *any configured
-provider*, not only the one the parent session is currently using), then a
-**thinking tier** (`inherit`, `off`, `low`, `medium`, `high`, `max`, or `auto`)
-— and then review the full posture (route, thinking, permissions, tools,
-scope, and review policy) before doing anything. On Review, press **`s`** to
-choose where the profile lives:
+provider*, not only the one the parent session is currently using), then
+**where the profile lives**, and finally a **review** of the full posture
+(route, thinking, permissions, tools, and review policy). The header shows
+"Saves to: …" on every step — the choice you still have to make, or the exact
+resolved file once you have made it. Nothing is written until you activate the
+save control on the review step.
 
-- **Project** (default) writes `.codewhale/agents/<role>.toml` and can travel
-  with this repository.
+The **Destination** step is a focused two-option list (arrows move, Enter or
+Space chooses; Tab never changes the destination):
+
+- **This project** writes `<workspace>/.codewhale/agents/<role>.toml`. It
+  applies to this project only and takes precedence over a Personal profile
+  with the same id. When project profiles are disabled for the session
+  (`--no-project-config`) or the workspace folder is unavailable, the option is
+  shown disabled with that reason; the wizard never falls back to Personal on
+  its own.
 - **Personal** writes `$CODEWHALE_HOME/agents/<role>.toml` and is available in
-  every repository on this machine. A project profile with the same id still
-  overrides the personal profile for that project.
+  every project on this machine, except where a project has its own profile
+  with the same id.
+
+For the highlighted option the step shows the exact file, whether saving would
+create a new file or **replace an existing one**, and the precedence
+consequence for the roster. The review step repeats those facts under
+"Saves to" and names the final action by its effect — **Save to this
+project**, **Save as Personal profile**, or **Replace …**. Replacing an
+existing file needs a second Enter on the save control. Tab / Shift+Tab (or
+←/→) move focus between the save control, **Change destination**, and
+**Back**; `s` is a secondary shortcut back to the Destination step. Reopening a
+saved member from `/fleet` starts from what is on disk: its route, thinking
+tier, and the scope it was saved in. Thinking (`inherit`, `off`, `low`,
+`medium`, `high`, `max`, or `auto`) is adjusted on the review step with `t`.
 
 Profile scope controls where a role definition is reusable; it does not widen
 the authority of a running operation. To coordinate several nearby

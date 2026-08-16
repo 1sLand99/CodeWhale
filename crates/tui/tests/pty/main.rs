@@ -15,6 +15,7 @@
 mod qa_harness;
 
 mod agent_focus_pty;
+mod fleet_setup_pty;
 mod qa_pty;
 mod release_runtime_qa;
 mod terminal_matrix_qa;
