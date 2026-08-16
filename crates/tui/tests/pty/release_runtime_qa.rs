@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::qa_harness::frame::Frame;
 use crate::qa_harness::harness::{Harness, SealedWorkspace, make_sealed_workspace};
 use crate::qa_harness::keys;
 use anyhow::{Result, anyhow};
@@ -277,6 +278,26 @@ fn wait_for_counter(
         }
         std::thread::sleep(Duration::from_millis(40));
     }
+}
+
+/// Screen text with transcript continuation rows (`▏` gutter) rejoined to
+/// the row they wrap from, so a receipt can be asserted regardless of where
+/// the terminal width breaks it.
+fn unwrapped_transcript(frame: &Frame) -> String {
+    let mut out = String::new();
+    for row in 0..frame.rows() {
+        let text = frame.row(row);
+        if let Some(rest) = text.strip_prefix('▏') {
+            out.push(' ');
+            out.push_str(rest.trim_start());
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text);
+        }
+    }
+    out
 }
 
 fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
@@ -2071,10 +2092,14 @@ base_url = "{base_url}"
     type_and_submit(&mut tui, "/model deepseek-v4-flash")?;
     tui.wait_for_text("session only", INTERACTION_TIMEOUT)?;
     type_and_submit(&mut tui, "/fleet save-as")?;
-    // The receipt wraps across lines at this width; assert on fragments that
-    // land on a single row.
+    // The receipt wraps across rows at this width and the wrap point moves
+    // with the temp-dir path length, so assert on the receipt with its
+    // transcript continuation rows rejoined rather than on any one row.
     tui.wait_for_text("as new Fleet", INTERACTION_TIMEOUT)?;
-    tui.wait_for_text("user-global default", INTERACTION_TIMEOUT)?;
+    tui.wait_for(
+        |frame| unwrapped_transcript(frame).contains("user-global default"),
+        INTERACTION_TIMEOUT,
+    )?;
     // The new Fleet is named after the route: `DeepSeek deepseek-v4-flash`.
     let second_file = ws
         .home()
