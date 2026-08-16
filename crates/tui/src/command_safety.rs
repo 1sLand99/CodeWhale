@@ -1606,8 +1606,6 @@ mod tests {
         }
     }
 
-    use super::*;
-
     #[test]
     fn test_safe_commands() {
         assert_eq!(analyze_command("ls -la").level, SafetyLevel::Safe);
