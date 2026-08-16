@@ -1426,5 +1426,19 @@
   "PermissionsPostureAuto": "Auto-Review: tidak pernah membuka prompt. Kebijakan deterministik mengizinkan panggilan yang terbukti aman dan memblokir keras pekerjaan latar belakang yang bersifat publikasi atau destruktif; panggilan yang tidak dapat dibuktikan aman diteruskan ke penjaga model sekali jalan yang mengizinkan atau menolak dengan alasan (risiko tinggi atau kritis tidak pernah berjalan otomatis; tinjauan gagal berarti ditolak, fail closed). Penahanan yang memerlukan manusia ditolak, bukan disembunyikan. Setiap keputusan seperti itu ditulis ke transkrip sebagai catatan dan ke log audit.",
   "PermissionsPostureBypass": "Full Access: panggilan tool biasa berjalan tanpa prompt. Penahanan keamanan, hukum repositori, dan kebijakan terkelola yang tidak dapat dilewati fail closed sebagai blokir keras alih-alih bertanya.",
   "PermissionsPostureNever": "never: hanya tool yang dianggap aman/hanya-baca yang berjalan; selebihnya diblokir tanpa prompt.",
-  "PermissionsReceiptsNote": "Keputusan yang dibuat tanpa prompt (putusan penjaga Auto-Review, blokir, dan penahanan) muncul sebagai catatan transkrip dan di log audit pada {audit_path}. Full Access dipilih dengan sengaja lewat Shift+Tab atau /config, tidak pernah oleh aturan."
+  "PermissionsReceiptsNote": "Keputusan yang dibuat tanpa prompt (putusan penjaga Auto-Review, blokir, dan penahanan) muncul sebagai catatan transkrip dan di log audit pada {audit_path}. Full Access dipilih dengan sengaja lewat Shift+Tab atau /config, tidak pernah oleh aturan.",
+  "AgentFocusOpened": "Fokus pada {agent}. Pesan Anda kini menuju worker ini; Esc kembali ke percakapan utama.",
+  "AgentFocusClosed": "Kembali ke percakapan utama.",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "Pesan untuk {agent} · Esc kembali ke utama",
+  "AgentFocusNoTranscript": "Belum ada transkrip untuk {agent}. Pesan muncul di sini saat worker bertukar pesan.",
+  "AgentFocusOmitted": "Pesan sebelumnya ({count}) dihilangkan dari transkrip dalam memori.",
+  "AgentFocusFollowUpDelivered": "Diantrekan untuk {agent}: pesan dibaca pada putaran berikutnya.",
+  "AgentFocusFollowUpQueued": "Diantrekan untuk {agent}",
+  "AgentFocusFollowUpContinued": "{agent} sudah selesai; dilanjutkan pada fork baru ({target}). Tampilan ini kini mengikuti fork tersebut.",
+  "AgentFocusFollowUpFailed": "Tidak dapat mengirim ke {agent}: {reason}",
+  "FooterHintForAgents": "agen",
+  "FooterHintToManage": "kelola",
+  "AgentRailQueuedCount": "{count} antre"
 }

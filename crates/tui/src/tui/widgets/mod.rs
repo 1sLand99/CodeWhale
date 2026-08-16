@@ -1310,6 +1310,19 @@ impl Renderable for ComposerWidget<'_> {
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
             }
+            // Agent focus chip: the composer names the fork it addresses so
+            // a message never goes to a worker by surprise.
+            if let Some(chip) = crate::tui::agent_focus::composer_chip_text(self.app) {
+                top_border = top_border.title_top(
+                    Line::from(Span::styled(
+                        format!(" {chip} "),
+                        Style::default()
+                            .fg(self.app.ui_theme.accent_action)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .right_aligned(),
+                );
+            }
             top_border.render(area, buf);
 
             let mut bottom_border = Block::default()
@@ -1321,10 +1334,21 @@ impl Renderable for ComposerWidget<'_> {
             }
             bottom_border.render(area, buf);
         } else if area.height >= 2 {
-            let block = Block::default()
+            let mut block = Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(self.app.ui_theme.border))
                 .style(background);
+            if let Some(chip) = crate::tui::agent_focus::composer_chip_text(self.app) {
+                block = block.title_top(
+                    Line::from(Span::styled(
+                        format!(" {chip} "),
+                        Style::default()
+                            .fg(self.app.ui_theme.accent_action)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .right_aligned(),
+                );
+            }
             block.render(area, buf);
         } else {
             Block::default().style(background).render(area, buf);
@@ -3252,7 +3276,9 @@ fn placeholder_visual_lines_for(placeholder: &str, content_width: usize) -> usiz
 }
 
 pub(crate) fn composer_empty_hint_text(app: &App) -> Cow<'static, str> {
-    if app.is_history_search_active() {
+    if let Some(placeholder) = crate::tui::agent_focus::composer_placeholder(app) {
+        Cow::Owned(placeholder)
+    } else if app.is_history_search_active() {
         app.tr(crate::localization::MessageId::HistorySearchPlaceholder)
     } else if app.mode == crate::tui::app::AppMode::Operate {
         // Operate is goal-driven; the empty composer says what to type, not

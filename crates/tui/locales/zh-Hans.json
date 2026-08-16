@@ -1426,5 +1426,19 @@
   "PermissionsPostureAuto": "Auto-Review：从不弹出提示。确定性策略允许已证明安全的调用，并硬性阻止类似发布或破坏性的后台工作；无法证明安全的调用交给一次性模型守护者，其给出理由后允许或拒绝（高或严重风险绝不自动运行；审查失败即拒绝，故障关闭）。需要人工决定的搁置会被拒绝而非隐藏。每个此类决定都会作为备注写入对话记录和审计日志。",
   "PermissionsPostureBypass": "Full Access：普通 tool 调用无需提示即可运行。不可绕过的安全、仓库规则和托管策略搁置会作为硬性阻止故障关闭，而不是弹出提示。",
   "PermissionsPostureNever": "never：仅运行被视为安全/只读的 tool；其他一切均在不提示的情况下被阻止。",
-  "PermissionsReceiptsNote": "未经提示做出的决定（Auto-Review 守护者裁定、阻止和搁置）会作为对话记录备注显示，并写入 {audit_path} 的审计日志。Full Access 只能通过 Shift+Tab 或 /config 有意选择，绝不会由规则选择。"
+  "PermissionsReceiptsNote": "未经提示做出的决定（Auto-Review 守护者裁定、阻止和搁置）会作为对话记录备注显示，并写入 {audit_path} 的审计日志。Full Access 只能通过 Shift+Tab 或 /config 有意选择，绝不会由规则选择。",
+  "AgentFocusOpened": "已聚焦 {agent}。之后的消息将发送给该工作者；按 Esc 返回主对话。",
+  "AgentFocusClosed": "已返回主对话。",
+  "AgentFocusBanner": "{agent} · {status}",
+  "AgentFocusComposerChip": "→ {agent}",
+  "AgentFocusPlaceholder": "给 {agent} 发消息 · Esc 返回主对话",
+  "AgentFocusNoTranscript": "{agent} 尚无对话记录。工作者开始交流后会在此显示。",
+  "AgentFocusOmitted": "内存中的对话记录省略了较早的 {count} 条消息。",
+  "AgentFocusFollowUpDelivered": "已为 {agent} 排队：它会在下一轮读取该消息。",
+  "AgentFocusFollowUpQueued": "已为 {agent} 排队",
+  "AgentFocusFollowUpContinued": "{agent} 已完成；已在新分支（{target}）上继续。此视图现在跟随该分支。",
+  "AgentFocusFollowUpFailed": "无法发送给 {agent}：{reason}",
+  "FooterHintForAgents": "智能体",
+  "FooterHintToManage": "管理",
+  "AgentRailQueuedCount": "{count} 条排队"
 }

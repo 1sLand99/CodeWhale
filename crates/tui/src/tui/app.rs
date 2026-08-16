@@ -1518,6 +1518,12 @@ pub struct App {
     /// Maps raw agent_id to a stable user-facing label (#3030).
     /// Populated when `AgentSpawned` fires; read by sidebar rendering.
     pub agent_label_map: HashMap<String, String>,
+    /// The child whose full transcript currently owns the main conversation
+    /// area and whose fork the composer addresses (`None` = main session).
+    pub agent_focus: Option<crate::tui::agent_focus::AgentFocus>,
+    /// Follow-ups a running child has not yet taken at its next round
+    /// boundary (`agent_id` → count), from the latest `AgentList` refresh.
+    pub agent_queued_follow_ups: HashMap<String, usize>,
     /// Per-role sequence counters for unnamed children (#3030). Two concurrent
     /// builders render as `builder · 1` and `builder · 2` instead of sharing a
     /// bare, indistinguishable role label.

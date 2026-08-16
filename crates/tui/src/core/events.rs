@@ -367,11 +367,23 @@ pub enum Event {
     /// Sub-agent completed
     AgentComplete { id: String, result: String },
 
+    /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
+    /// `Ok` carries the delivery outcome (the target id may differ from the
+    /// addressed id when a fork was continued from a checkpoint); `Err` is the
+    /// exact reason nothing was delivered.
+    SubAgentFollowUp {
+        agent_id: String,
+        outcome: Result<crate::tools::subagent::UserFollowUpOutcome, String>,
+    },
+
     /// Sub-agent listing plus the same bounded typed coordination projection
     /// used by machine-readable `agents/coordinate inspect`.
     AgentList {
         agents: Vec<SubAgentResult>,
         coordination: CoordinationDetailProjection,
+        /// Follow-ups handed to a running child that it has not yet taken at
+        /// its next round boundary (`agent_id` → count). Only non-zero entries.
+        queued_follow_ups: std::collections::HashMap<String, usize>,
     },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the

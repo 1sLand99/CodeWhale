@@ -1615,6 +1615,20 @@ pub enum MessageId {
     WhaleJobKeel,
     WhaleJobLantern,
     WhaleJobPlain,
+    AgentFocusOpened,
+    AgentFocusClosed,
+    AgentFocusBanner,
+    AgentFocusComposerChip,
+    AgentFocusPlaceholder,
+    AgentFocusNoTranscript,
+    AgentFocusOmitted,
+    AgentFocusFollowUpDelivered,
+    AgentFocusFollowUpQueued,
+    AgentFocusFollowUpContinued,
+    AgentFocusFollowUpFailed,
+    FooterHintForAgents,
+    FooterHintToManage,
+    AgentRailQueuedCount,
 }
 
 #[allow(dead_code)]
@@ -3048,6 +3062,20 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WhaleJobKeel,
     MessageId::WhaleJobLantern,
     MessageId::WhaleJobPlain,
+    MessageId::AgentFocusOpened,
+    MessageId::AgentFocusClosed,
+    MessageId::AgentFocusBanner,
+    MessageId::AgentFocusComposerChip,
+    MessageId::AgentFocusPlaceholder,
+    MessageId::AgentFocusNoTranscript,
+    MessageId::AgentFocusOmitted,
+    MessageId::AgentFocusFollowUpDelivered,
+    MessageId::AgentFocusFollowUpQueued,
+    MessageId::AgentFocusFollowUpContinued,
+    MessageId::AgentFocusFollowUpFailed,
+    MessageId::FooterHintForAgents,
+    MessageId::FooterHintToManage,
+    MessageId::AgentRailQueuedCount,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {
