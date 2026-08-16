@@ -116,12 +116,15 @@ pub(crate) const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 pub(crate) const DEFAULT_OLLAMA_CLOUD_MODEL: &str = "gpt-oss:120b";
 pub(crate) const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/v1";
 
-// Z.ai (GLM Coding Plan) defaults
-pub(crate) const DEFAULT_ZAI_MODEL: &str = "GLM-5.2";
-// GLM-5.3 is a live peer of the default, never the default. Capability/limit
+// Z.ai (GLM Coding Plan) defaults. GLM-5.3 is live on the Z.ai Coding Plan
+// (2026-08-13) and is the default for new Z.ai routes. Capability/limit
 // metadata still inherits from glm-5.2 until Z.ai publishes distinct 5.3
-// numbers. See models_dev.bundled.json `_meta.pending_release_metadata`.
+// numbers; no USD price is claimed. See models_dev.bundled.json
+// `_meta.pending_release_metadata`. Explicit GLM-5.2 selections keep their
+// own id: only the default moved.
+pub(crate) const DEFAULT_ZAI_MODEL: &str = ZAI_GLM_5_3_MODEL;
 pub(crate) const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
+pub(crate) const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
 pub(crate) const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
 pub(crate) const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub(crate) const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";

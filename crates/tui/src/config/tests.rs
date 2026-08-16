@@ -6236,16 +6236,16 @@ fn model_completion_names_for_moonshot_uses_latest_platform_model() {
 fn model_completion_names_for_zai_lists_default_5_1_and_turbo() {
     let models = model_completion_names_for_provider(ApiProvider::Zai);
 
-    // GLM-5.2 is the default and must be first; GLM-5.1 stays available,
-    // and GLM-5-Turbo is the faster sub-agent sibling.
+    // GLM-5.3 is the default and must be first; GLM-5.2 and GLM-5.1 stay
+    // available, and GLM-5-Turbo is the faster sub-agent sibling.
     assert_eq!(models.first().copied(), Some(DEFAULT_ZAI_MODEL));
-    assert_eq!(DEFAULT_ZAI_MODEL, ZAI_GLM_5_2_MODEL);
+    assert_eq!(DEFAULT_ZAI_MODEL, ZAI_GLM_5_3_MODEL);
     assert!(models.contains(&ZAI_GLM_5_1_MODEL));
     assert!(models.contains(&ZAI_GLM_5_TURBO_MODEL));
-    // GLM-5.3 is offered alongside the others but must not take the default
-    // slot: adding a model never changes anyone's route.
-    assert!(models.contains(&ZAI_GLM_5_3_MODEL));
-    assert_ne!(models.first().copied(), Some(ZAI_GLM_5_3_MODEL));
+    // GLM-5.2 is still offered alongside the others but no longer takes the
+    // default slot; explicit 5.2 routes are untouched.
+    assert!(models.contains(&ZAI_GLM_5_2_MODEL));
+    assert_ne!(models.first().copied(), Some(ZAI_GLM_5_2_MODEL));
     // No accidental duplicate entries.
     let mut sorted = models.to_vec();
     sorted.sort_unstable();
@@ -6259,9 +6259,9 @@ fn normalize_model_name_for_zai_canonicalizes_current_glm_models() {
     for (alias, expected) in [
         ("glm-5.1", ZAI_GLM_5_1_MODEL),
         ("glm-5-1", ZAI_GLM_5_1_MODEL),
-        ("glm-5.2", DEFAULT_ZAI_MODEL),
-        ("zai-glm-5-2", DEFAULT_ZAI_MODEL),
-        ("glm-5.3", ZAI_GLM_5_3_MODEL),
+        ("glm-5.2", ZAI_GLM_5_2_MODEL),
+        ("zai-glm-5-2", ZAI_GLM_5_2_MODEL),
+        ("glm-5.3", DEFAULT_ZAI_MODEL),
         ("glm-5-3", ZAI_GLM_5_3_MODEL),
         ("zai-glm-5-3", ZAI_GLM_5_3_MODEL),
         ("glm-5-turbo", ZAI_GLM_5_TURBO_MODEL),
@@ -6272,12 +6272,12 @@ fn normalize_model_name_for_zai_canonicalizes_current_glm_models() {
             Some(expected)
         );
     }
-    // The 5.1-era bug shape: a new alias silently resolving to the provider
-    // default. GLM-5.3 must keep its own id.
-    assert_ne!(ZAI_GLM_5_3_MODEL, DEFAULT_ZAI_MODEL);
+    // The 5.1-era bug shape: an alias silently resolving to the provider
+    // default. Now that GLM-5.3 is the default, GLM-5.2 must keep its own id.
+    assert_ne!(ZAI_GLM_5_2_MODEL, DEFAULT_ZAI_MODEL);
     assert_eq!(
-        normalize_model_name_for_provider(ApiProvider::Zai, "glm-5.3").as_deref(),
-        Some(ZAI_GLM_5_3_MODEL)
+        normalize_model_name_for_provider(ApiProvider::Zai, "glm-5.2").as_deref(),
+        Some(ZAI_GLM_5_2_MODEL)
     );
     assert_eq!(
         normalize_model_name_for_provider(ApiProvider::Zai, "glm-next-preview").as_deref(),
@@ -10573,15 +10573,23 @@ fn provider_capability_kimi_membership_ids_report_unknown_output_ceiling() {
 }
 
 #[test]
-fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
-    // GLM-5.2 is now the default direct Z.AI model (1M context window).
+fn provider_capability_zai_defaults_to_5_3_and_tracks_5_2_5_1_and_turbo() {
+    // GLM-5.3 is now the default direct Z.AI model; its limits inherit from
+    // GLM-5.2 (1M context window) until Z.ai publishes distinct 5.3 numbers.
     let default = provider_capability(ApiProvider::Zai, DEFAULT_ZAI_MODEL);
     assert_eq!(default.resolved_model, DEFAULT_ZAI_MODEL);
-    assert_eq!(default.resolved_model, ZAI_GLM_5_2_MODEL);
+    assert_eq!(default.resolved_model, ZAI_GLM_5_3_MODEL);
     assert_eq!(default.context_window, 1_000_000);
     assert_eq!(default.max_output, Some(131_072));
     assert!(default.thinking_supported);
     assert!(!default.cache_telemetry_supported);
+
+    // GLM-5.2 remains available as an explicit model with its own id.
+    let v52 = provider_capability(ApiProvider::Zai, ZAI_GLM_5_2_MODEL);
+    assert_eq!(v52.resolved_model, ZAI_GLM_5_2_MODEL);
+    assert_eq!(v52.context_window, 1_000_000);
+    assert_eq!(v52.max_output, Some(131_072));
+    assert!(v52.thinking_supported);
 
     // GLM-5.1 remains available as an explicit model (smaller window).
     let v51 = provider_capability(ApiProvider::Zai, ZAI_GLM_5_1_MODEL);

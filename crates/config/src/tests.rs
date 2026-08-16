@@ -5165,24 +5165,28 @@ fn xiaomi_mimo_aliases_resolve_to_canonical_models() {
 
 #[test]
 fn zai_aliases_resolve_to_canonical_models() {
-    // GLM-5.2 is the default; the glm-5.1 alias must still resolve to 5.1
+    // GLM-5.3 is the default; the glm-5.1 alias must still resolve to 5.1
     // (not to the default), and GLM-5-Turbo resolves to its own id.
     assert_eq!(
         normalize_model_for_provider(ProviderKind::Zai, "glm-5.1"),
         ZAI_GLM_5_1_MODEL
     );
-    assert_eq!(
-        normalize_model_for_provider(ProviderKind::Zai, "glm-5-2"),
-        DEFAULT_ZAI_MODEL
-    );
-    assert_eq!(DEFAULT_ZAI_MODEL, "GLM-5.2");
-    // GLM-5.3 is a peer, not the default: its aliases must land on its own id
-    // and must never fold into DEFAULT_ZAI_MODEL.
+    assert_eq!(DEFAULT_ZAI_MODEL, "GLM-5.3");
+    assert_eq!(DEFAULT_ZAI_MODEL, ZAI_GLM_5_3_MODEL);
     for alias in ["glm-5.3", "glm-5-3", "zai-glm-5.3", "zai-glm-5-3"] {
         assert_eq!(
             normalize_model_for_provider(ProviderKind::Zai, alias),
             ZAI_GLM_5_3_MODEL,
             "{alias} must canonicalize to GLM-5.3"
+        );
+    }
+    // GLM-5.2 is a peer, no longer the default: an explicit 5.2 selection
+    // must keep its own id and must never fold into DEFAULT_ZAI_MODEL.
+    for alias in ["glm-5.2", "glm-5-2", "zai-glm-5.2", "zai-glm-5-2"] {
+        assert_eq!(
+            normalize_model_for_provider(ProviderKind::Zai, alias),
+            ZAI_GLM_5_2_MODEL,
+            "{alias} must canonicalize to GLM-5.2"
         );
         assert_ne!(
             normalize_model_for_provider(ProviderKind::Zai, alias),
@@ -5229,10 +5233,10 @@ fn zhipu_aliases_fold_into_zai_provider() {
     );
     assert_eq!(provider.model.as_deref(), Some("glm-5-2"));
 
-    // GLM aliases canonicalize under the Zai umbrella.
+    // GLM aliases canonicalize under the Zai umbrella, to their own ids.
     assert_eq!(
         normalize_model_for_provider(ProviderKind::Zai, "glm-5-2"),
-        DEFAULT_ZAI_MODEL
+        ZAI_GLM_5_2_MODEL
     );
 }
 

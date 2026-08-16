@@ -1173,10 +1173,10 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
     let normalized = normalized.replace(['_', ' '], "-");
     match normalized.as_str() {
         "glm-5.1" | "glm-5-1" | "zai-glm-5.1" | "zai-glm-5-1" => Some(ZAI_GLM_5_1_MODEL),
-        "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(DEFAULT_ZAI_MODEL),
-        // Resolves to its own constant, never to `DEFAULT_ZAI_MODEL`: adding a
-        // model must not silently re-point an explicit 5.3 request at the
-        // default (GLM-5.2).
+        // Each alias resolves to its own constant, never through
+        // `DEFAULT_ZAI_MODEL`: moving the default (now GLM-5.3) must not
+        // silently re-point an explicit GLM-5.2 request.
+        "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,
@@ -1493,7 +1493,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Openmodel => vec![DEFAULT_OPENMODEL_MODEL],
         ApiProvider::Zai => vec![
             DEFAULT_ZAI_MODEL,
-            ZAI_GLM_5_3_MODEL,
+            ZAI_GLM_5_2_MODEL,
             ZAI_GLM_5_1_MODEL,
             ZAI_GLM_5_TURBO_MODEL,
         ],

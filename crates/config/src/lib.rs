@@ -4192,9 +4192,10 @@ fn canonical_zai_model_id(model: &str) -> Option<&'static str> {
     let normalized = normalized.replace(['_', ' '], "-");
     match normalized.as_str() {
         "glm-5.1" | "glm-5-1" | "zai-glm-5.1" | "zai-glm-5-1" => Some(ZAI_GLM_5_1_MODEL),
-        "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(DEFAULT_ZAI_MODEL),
-        // GLM-5.3 resolves to its own id, never to DEFAULT_ZAI_MODEL: adding a
-        // model must not silently re-point a route at the default.
+        // Every alias resolves to its own id, never through DEFAULT_ZAI_MODEL:
+        // moving the default (now GLM-5.3) must not silently re-point an
+        // explicit GLM-5.2 route.
+        "glm-5.2" | "glm-5-2" | "zai-glm-5.2" | "zai-glm-5-2" => Some(ZAI_GLM_5_2_MODEL),
         "glm-5.3" | "glm-5-3" | "zai-glm-5.3" | "zai-glm-5-3" => Some(ZAI_GLM_5_3_MODEL),
         "glm-5-turbo" | "glm-5turbo" | "zai-glm-5-turbo" => Some(ZAI_GLM_5_TURBO_MODEL),
         _ => None,

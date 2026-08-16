@@ -167,15 +167,16 @@ pub const COMMON_DEEPSEEK_MODELS: &[&str] = &[
     "deepseek/deepseek-v4-flash",
 ];
 pub const OFFICIAL_DEEPSEEK_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-flash"];
-pub const DEFAULT_ZAI_MODEL: &str = "GLM-5.2";
-pub const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
-pub const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
-// GLM-5.3 is live on the Z.ai Coding Plan (2026-08-13). The id follows the
-// family's naming convention. Limits and reasoning options still inherit
-// from glm-5.2 until Z.ai publishes distinct 5.3 numbers; no USD price is
+// GLM-5.3 is live on the Z.ai Coding Plan (2026-08-13) and is the default
+// for new Z.ai routes. Limits and reasoning options still inherit from
+// glm-5.2 until Z.ai publishes distinct 5.3 numbers; no USD price is
 // claimed. Scope is first-party Z.ai plus its OpenRouter mirror only.
 // Correct at crates/config/assets/models_dev.bundled.json
 // `_meta.pending_release_metadata` when distinct 5.3 facts exist.
+// Explicit GLM-5.2 selections keep their own id: only the default moved.
+pub const DEFAULT_ZAI_MODEL: &str = ZAI_GLM_5_3_MODEL;
+pub const ZAI_GLM_5_1_MODEL: &str = "GLM-5.1";
+pub const ZAI_GLM_5_2_MODEL: &str = "GLM-5.2";
 pub const ZAI_GLM_5_3_MODEL: &str = "GLM-5.3";
 pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
