@@ -144,7 +144,10 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             ));
         }
         left.push(Span::styled(
-            " · Esc to interrupt",
+            format!(
+                " · {}",
+                tr(app.ui_locale, MessageId::FooterHintEscInterrupt)
+            ),
             Style::default().fg(app.ui_theme.text_dim),
         ));
     }

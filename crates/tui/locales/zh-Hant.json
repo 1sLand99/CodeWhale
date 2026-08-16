@@ -1412,5 +1412,17 @@
   "SessionMetricsTokensPerSecond": "tok/s",
   "SessionMetricsCache": "快取命中",
   "SessionMetricsInput": "輸入",
-  "SessionMetricsStatusLine": "工作階段指標：{metrics}"
+  "SessionMetricsStatusLine": "工作階段指標：{metrics}",
+  "AutoReviewReceiptGuardianAllowed": "Auto-Review 已允許 '{tool}'（風險 {risk}，模型守護者）：{reason}",
+  "AutoReviewReceiptGuardianDenied": "Auto-Review 已拒絕 '{tool}'（風險 {risk}，模型守護者）：{reason}",
+  "AutoReviewReceiptGuardianUnavailable": "Auto-Review 無法審查 '{tool}'（{reason}）；已拒絕，故障關閉",
+  "AutoReviewReceiptDeterministicBlocked": "Auto-Review 已封鎖 '{tool}'（確定性策略）：{reason}",
+  "AutoReviewReceiptHeld": "Auto-Review 未暫停即擱置了 '{tool}'；已拒絕（需要人工決定 — 切換到 Ask）",
+  "FooterHintEscInterrupt": "Esc 中斷",
+  "PermissionsPostureHeader": "目前權限姿態：{posture}",
+  "PermissionsPostureAsk": "Ask：會改變權限、成本、範圍或結果的 tool 呼叫會開啟提示；已證明安全的唯讀呼叫無需提示即可執行。上面的 ask 規則始終強制提示。",
+  "PermissionsPostureAuto": "Auto-Review：從不開啟提示。確定性策略允許已證明安全的呼叫，並硬性封鎖類似發佈或破壞性的背景工作；無法證明安全的呼叫交給一次性模型守護者，其給出理由後允許或拒絕（高或嚴重風險絕不自動執行；審查失敗即拒絕，故障關閉）。需要人工決定的擱置會被拒絕而非隱藏。每個此類決定都會作為備註寫入對話記錄和稽核日誌。",
+  "PermissionsPostureBypass": "Full Access：普通 tool 呼叫無需提示即可執行。不可繞過的安全、儲存庫規則和託管策略擱置會作為硬性封鎖故障關閉，而不是開啟提示。",
+  "PermissionsPostureNever": "never：僅執行被視為安全/唯讀的 tool；其他一切均在不提示的情況下被封鎖。",
+  "PermissionsReceiptsNote": "未經提示做出的決定（Auto-Review 守護者裁定、封鎖和擱置）會作為對話記錄備註顯示，並寫入 {audit_path} 的稽核日誌。Full Access 只能透過 Shift+Tab 或 /config 有意選擇，絕不會由規則選擇。"
 }

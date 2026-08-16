@@ -45,6 +45,7 @@ pub mod focus_texture;
 pub mod footer_ui;
 pub mod format_helpers;
 pub mod frame_rate_limiter;
+pub mod gate_receipts;
 pub mod git_mention;
 pub mod git_status;
 pub mod glyphs;

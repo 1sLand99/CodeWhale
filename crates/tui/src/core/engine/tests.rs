@@ -5727,16 +5727,27 @@ fn guardian_tool_results<'a>(
         .collect()
 }
 
-async fn collect_guardian_journey(
+/// One transcript-visible gate receipt observed on the event stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GateReceipt {
+    gate: crate::core::events::ToolGate,
+    decision: crate::core::events::ToolGateVerdict,
+    risk: Option<String>,
+    reason: String,
+}
+
+async fn collect_guardian_journey_with_receipts(
     handle: &EngineHandle,
     call_id: &str,
 ) -> (
     Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
     Vec<Usage>,
     Usage,
+    Vec<GateReceipt>,
 ) {
     let mut completion = None;
     let mut usage_events = Vec::new();
+    let mut receipts = Vec::new();
     let mut rx = handle.rx_event.write().await;
     let terminal_usage = loop {
         let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
@@ -5751,6 +5762,19 @@ async fn collect_guardian_journey(
                 );
             }
             Event::TurnUsage { usage, .. } => usage_events.push(usage),
+            Event::ToolGateDecision {
+                tool_id,
+                gate,
+                decision,
+                risk,
+                reason,
+                ..
+            } if tool_id == call_id => receipts.push(GateReceipt {
+                gate,
+                decision,
+                risk,
+                reason,
+            }),
             Event::TurnComplete {
                 status,
                 error,
@@ -5768,6 +5792,7 @@ async fn collect_guardian_journey(
         completion.expect("held call must have one paired result"),
         usage_events,
         terminal_usage,
+        receipts,
     )
 }
 
@@ -5815,9 +5840,22 @@ async fn auto_review_guardian_allow_executes_once_and_accounts_usage_without_pro
         .await
         .expect("send Auto-Review allow journey");
 
-    let (completion, usage_events, terminal_usage) =
-        collect_guardian_journey(&handle, "call-guardian-allow").await;
+    let (completion, usage_events, terminal_usage, receipts) =
+        collect_guardian_journey_with_receipts(&handle, "call-guardian-allow").await;
     assert!(completion.expect("guardian-approved tool result").success);
+    // The person never saw a prompt, so the transcript gets exactly one
+    // receipt naming the guardian's verdict and risk tier.
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    assert_eq!(
+        receipts[0].gate,
+        crate::core::events::ToolGate::AutoReviewGuardian
+    );
+    assert_eq!(
+        receipts[0].decision,
+        crate::core::events::ToolGateVerdict::Allowed
+    );
+    assert!(receipts[0].risk.is_some(), "{receipts:?}");
+    assert!(!receipts[0].reason.contains('\n'));
     assert!(
         usage_events
             .iter()
@@ -5887,9 +5925,16 @@ async fn auto_review_guardian_deny_returns_one_paired_failed_result() {
         .await
         .expect("send Auto-Review deny journey");
 
-    let (completion, _, _) = collect_guardian_journey(&handle, "call-guardian-deny").await;
+    let (completion, _, _, receipts) =
+        collect_guardian_journey_with_receipts(&handle, "call-guardian-deny").await;
     let error = completion.expect_err("guardian denial must fail the tool call");
     assert!(error.to_string().contains(DENIAL), "{error}");
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    assert_eq!(
+        receipts[0].decision,
+        crate::core::events::ToolGateVerdict::Denied
+    );
+    assert!(receipts[0].reason.contains(DENIAL), "{receipts:?}");
     assert!(!workspace.path().join(".env").exists());
     assert_eq!(mock.captured_requests().len(), 3);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -5942,9 +5987,17 @@ async fn auto_review_guardian_parse_and_transport_failures_deny_closed() {
             .await
             .expect("send reviewer failure journey");
 
-        let (completion, _, _) = collect_guardian_journey(&handle, &call_id).await;
+        let (completion, _, _, receipts) =
+            collect_guardian_journey_with_receipts(&handle, &call_id).await;
         let error = completion.expect_err("reviewer failure must deny");
         assert!(error.to_string().contains("fail closed"), "{error}");
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        assert_eq!(
+            receipts[0].decision,
+            crate::core::events::ToolGateVerdict::Unavailable,
+            "{receipts:?}"
+        );
+        assert!(receipts[0].risk.is_none());
         assert!(!workspace.path().join(".env").exists());
         handle.send(Op::Shutdown).await.expect("shutdown engine");
         task.await.expect("engine task");

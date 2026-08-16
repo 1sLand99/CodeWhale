@@ -22131,3 +22131,39 @@ async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
         app.status_message
     );
 }
+
+#[test]
+fn gate_receipts_are_held_until_their_tool_card_completes_then_flushed_in_order() {
+    let mut app = create_test_app();
+    let before = app.history.len();
+    app.pending_gate_receipts
+        .push(("call-a".to_string(), "receipt for a".to_string()));
+    app.pending_gate_receipts
+        .push(("call-b".to_string(), "receipt for b".to_string()));
+
+    // Completing an unrelated tool moves nothing.
+    assert!(!super::event_loop::flush_gate_receipts_for(
+        &mut app,
+        Some("call-zzz")
+    ));
+    assert_eq!(app.history.len(), before);
+    assert_eq!(app.pending_gate_receipts.len(), 2);
+
+    // Completing tool `b` lands only its receipt, as a System note.
+    assert!(super::event_loop::flush_gate_receipts_for(
+        &mut app,
+        Some("call-b")
+    ));
+    assert_eq!(app.history.len(), before + 1);
+    assert!(matches!(
+        &app.history[before],
+        HistoryCell::System { content } if content == "receipt for b"
+    ));
+    assert_eq!(app.pending_gate_receipts.len(), 1);
+
+    // Turn end flushes whatever is left so no decision goes unseen.
+    assert!(super::event_loop::flush_gate_receipts_for(&mut app, None));
+    assert_eq!(app.history.len(), before + 2);
+    assert!(app.pending_gate_receipts.is_empty());
+    assert!(!super::event_loop::flush_gate_receipts_for(&mut app, None));
+}

@@ -1412,5 +1412,17 @@
   "SessionMetricsTokensPerSecond": "tok/s",
   "SessionMetricsCache": "Cache",
   "SessionMetricsInput": "Masukan",
-  "SessionMetricsStatusLine": "Metrik sesi: {metrics}"
+  "SessionMetricsStatusLine": "Metrik sesi: {metrics}",
+  "AutoReviewReceiptGuardianAllowed": "Auto-Review mengizinkan '{tool}' (risiko {risk}, penjaga model): {reason}",
+  "AutoReviewReceiptGuardianDenied": "Auto-Review menolak '{tool}' (risiko {risk}, penjaga model): {reason}",
+  "AutoReviewReceiptGuardianUnavailable": "Auto-Review tidak dapat meninjau '{tool}' ({reason}); ditolak, fail closed",
+  "AutoReviewReceiptDeterministicBlocked": "Auto-Review memblokir '{tool}' (kebijakan deterministik): {reason}",
+  "AutoReviewReceiptHeld": "Auto-Review menahan '{tool}' tanpa berhenti; ditolak (perlu manusia — beralih ke Ask)",
+  "FooterHintEscInterrupt": "Esc untuk menghentikan",
+  "PermissionsPostureHeader": "Postur izin saat ini: {posture}",
+  "PermissionsPostureAsk": "Ask: panggilan tool yang mengubah wewenang, biaya, cakupan, atau hasil membuka prompt; panggilan hanya-baca yang terbukti aman berjalan tanpa prompt. Aturan ask di atas selalu memaksa prompt.",
+  "PermissionsPostureAuto": "Auto-Review: tidak pernah membuka prompt. Kebijakan deterministik mengizinkan panggilan yang terbukti aman dan memblokir keras pekerjaan latar belakang yang bersifat publikasi atau destruktif; panggilan yang tidak dapat dibuktikan aman diteruskan ke penjaga model sekali jalan yang mengizinkan atau menolak dengan alasan (risiko tinggi atau kritis tidak pernah berjalan otomatis; tinjauan gagal berarti ditolak, fail closed). Penahanan yang memerlukan manusia ditolak, bukan disembunyikan. Setiap keputusan seperti itu ditulis ke transkrip sebagai catatan dan ke log audit.",
+  "PermissionsPostureBypass": "Full Access: panggilan tool biasa berjalan tanpa prompt. Penahanan keamanan, hukum repositori, dan kebijakan terkelola yang tidak dapat dilewati fail closed sebagai blokir keras alih-alih bertanya.",
+  "PermissionsPostureNever": "never: hanya tool yang dianggap aman/hanya-baca yang berjalan; selebihnya diblokir tanpa prompt.",
+  "PermissionsReceiptsNote": "Keputusan yang dibuat tanpa prompt (putusan penjaga Auto-Review, blokir, dan penahanan) muncul sebagai catatan transkrip dan di log audit pada {audit_path}. Full Access dipilih dengan sengaja lewat Shift+Tab atau /config, tidak pernah oleh aturan."
 }

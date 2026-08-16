@@ -1412,5 +1412,17 @@
   "SessionMetricsTokensPerSecond": "tok/s",
   "SessionMetricsCache": "Cache-Hit",
   "SessionMetricsInput": "Eingabe",
-  "SessionMetricsStatusLine": "Sitzungsmetriken: {metrics}"
+  "SessionMetricsStatusLine": "Sitzungsmetriken: {metrics}",
+  "AutoReviewReceiptGuardianAllowed": "Auto-Review hat '{tool}' erlaubt (Risiko {risk}, Modell-Guardian): {reason}",
+  "AutoReviewReceiptGuardianDenied": "Auto-Review hat '{tool}' abgelehnt (Risiko {risk}, Modell-Guardian): {reason}",
+  "AutoReviewReceiptGuardianUnavailable": "Auto-Review konnte '{tool}' nicht prüfen ({reason}); abgelehnt, fail closed",
+  "AutoReviewReceiptDeterministicBlocked": "Auto-Review hat '{tool}' blockiert (deterministische Richtlinie): {reason}",
+  "AutoReviewReceiptHeld": "Auto-Review hat '{tool}' ohne Pause zurückgehalten; abgelehnt (braucht eine Person — zu Ask wechseln)",
+  "FooterHintEscInterrupt": "Esc zum Unterbrechen",
+  "PermissionsPostureHeader": "Aktuelle Berechtigungshaltung: {posture}",
+  "PermissionsPostureAsk": "Ask: Tool-Aufrufe, die Befugnis, Kosten, Umfang oder Ergebnis ändern, öffnen eine Abfrage; nachweislich sichere Nur-Lese-Aufrufe laufen ohne. Die ask-Regeln oben erzwingen immer eine Abfrage.",
+  "PermissionsPostureAuto": "Auto-Review: öffnet nie eine Abfrage. Eine deterministische Richtlinie erlaubt nachweislich sichere Aufrufe und blockiert veröffentlichungsartige oder destruktive Hintergrundarbeit hart; Aufrufe, die sie nicht als sicher beweisen kann, gehen an einen einmaligen Modell-Guardian, der mit Begründung erlaubt oder ablehnt (hohes oder kritisches Risiko läuft nie automatisch; eine fehlgeschlagene Prüfung lehnt ab, fail closed). Zurückhaltungen, die eine Person erfordern, werden abgelehnt, nicht versteckt. Jede solche Entscheidung wird als Notiz ins Transkript und ins Audit-Log geschrieben.",
+  "PermissionsPostureBypass": "Full Access: gewöhnliche Tool-Aufrufe laufen ohne Abfragen. Nicht umgehbare Zurückhaltungen aus Sicherheit, Repository-Recht und verwalteter Richtlinie schlagen als harte Blockaden fail closed fehl, statt zu fragen.",
+  "PermissionsPostureNever": "never: nur als sicher/nur-lesend eingestufte Tools laufen; alles andere wird ohne Abfrage blockiert.",
+  "PermissionsReceiptsNote": "Entscheidungen ohne Abfrage (Auto-Review-Guardian-Urteile, Blockaden und Zurückhaltungen) erscheinen als Notizen im Transkript und im Audit-Log unter {audit_path}. Full Access wird bewusst mit Shift+Tab oder /config gewählt, nie durch eine Regel."
 }

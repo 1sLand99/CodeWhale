@@ -3246,6 +3246,23 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                 |frame| frame.contains("tool issue") && frame.contains("guardian unavailable"),
                 Duration::from_secs(10),
             )?;
+            // Auto-Review never prompted, so the transcript must carry the
+            // one-line receipt for the decision the person did not see.
+            h.wait_for_text("could not review 'File'", Duration::from_secs(10))?;
+            assert!(
+                h.frame().contains("denied, fail closed"),
+                "Auto-Review guardian receipt missing:\n{}",
+                h.frame().debug_dump()
+            );
+            // Optional evidence export for release notes / design docs.
+            if let Ok(dir) = std::env::var("CODEWHALE_PTY_FRAME_DIR") {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    std::path::Path::new(&dir)
+                        .join(format!("auto-review-guardian-receipt-{cols}x{rows}.txt")),
+                    h.frame().debug_dump(),
+                );
+            }
         }
         h.wait_for_idle(Duration::from_millis(250), Duration::from_secs(3))?;
 
