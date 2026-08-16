@@ -384,7 +384,7 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 #   auto_allow = ["cargo check", "npm run"]
 #
 # auto_allow = []
-max_subagents = 10 # optional (1-20)
+max_subagents = 10 # optional (default 64, clamped to 1-128)
 
 # Optional sub-agent tuning. max_concurrent overrides top-level max_subagents.
 # [subagents]
@@ -395,7 +395,7 @@ max_subagents = 10 # optional (1-20)
 #   max_depth = 0   # opt out completely — the agent never spawns sub-agents
 #   max_depth = 1   # the agent may spawn sub-agents, but those may not spawn more
 #   max_depth = 2   # one more level of nesting, etc.
-# Unset defaults to 3; any value is clamped to the hard ceiling (3). The depth
+# Unset defaults to 3; any value is clamped to the hard ceiling (8). The depth
 # limit is enforced in code, not requested of the model — a sub-agent past the
 # limit cannot be spawned regardless of what the model decides.
 # max_depth = 3

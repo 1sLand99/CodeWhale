@@ -577,7 +577,7 @@ budget has no remaining tokens.
 
 ## Output contract
 
-Every sub-agent ends with five Markdown headings, in this order:
+Non-scout sub-agents end with five Markdown headings, in this order:
 
 ```
 ### SUMMARY    one paragraph; what you did and what happened
@@ -588,9 +588,18 @@ Every sub-agent ends with five Markdown headings, in this order:
 ```
 
 They are `### HEADING` lines, not `HEADING:` labels, and `EVIDENCE` comes
-before `CHANGES`. The exact format lives in `crates/tui/src/prompts/text.rs`
-(`SUBAGENT_OUTPUT_FORMAT`, :414-422) and `crates/tui/src/prompts.rs:3222`
-asserts every heading against it.
+before `CHANGES`. That five-heading contract is `SUBAGENT_OUTPUT_FORMAT` in
+`crates/tui/src/prompts/text.rs`. `prompt_documents_structured_subagent_briefs`
+in `crates/tui/src/prompts.rs` asserts every heading against it.
+
+Scouts are the carve-out (#5189 F5): they end with `### SUMMARY` and
+`### EVIDENCE` only (`SUBAGENT_SCOUT_OUTPUT_FORMAT` in
+`crates/tui/src/prompts/text.rs`). `FleetRole::system_prompt` in
+`crates/tui/src/tools/subagent/mod.rs` injects the scout contract for
+`FleetRole::Scout` and the five-heading contract for every other role. A
+subagent test pins that scouts contain `## Output contract (scout)` and do
+not contain `### BLOCKERS`.
+
 The parent reads `EVIDENCE` as a working set for the next turn, so
 scouts and reviewers should be precise here.
 
