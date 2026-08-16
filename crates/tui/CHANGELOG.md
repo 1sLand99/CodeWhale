@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/title [name|off]` sets a per-session tab/window title, shown as
+  `[title] …` in front of the terminal window title (`Codewhale` /
+  `reasoning…` / `using tool…` / `done`). The `title` config key supplies
+  the default (`/config title … --save` persists it); multi-window
+  workflows can tell parallel sessions apart at a glance. `/title` is
+  independent of `/rename`, which keeps naming the session in the picker.
+
 ### Fixed
 
 - Session titles truncate by character count, not byte offset, so
@@ -48,12 +57,6 @@ a published OpenAI-compatible host ship here (#5350).
   Foreign auto-install policy (Codex `INSTALLED_BY_DEFAULT`) is visibly
   ignored; nothing is auto-installed, auto-trusted, or granted vendor
   trust.
-- `/title [name|off]` sets a per-session tab/window title, shown as
-  `[title] …` in front of the terminal window title (`Codewhale` /
-  `reasoning…` / `using tool…` / `done`). The `title` config key supplies
-  the default (`/config title … --save` persists it); multi-window
-  workflows can tell parallel sessions apart at a glance. `/title` is
-  independent of `/rename`, which keeps naming the session in the picker.
 
 - `/rc` attach now includes an observed `owner/name` git remote when the
   folder has a GitHub, CNB, or Gitee origin, so CWC can label the paired

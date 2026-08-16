@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/title [name|off]` sets a per-session tab/window title, shown as
+  `[title] …` in front of the terminal window title (`Codewhale` /
+  `reasoning…` / `using tool…` / `done`). The `title` config key supplies
+  the default (`/config title … --save` persists it); multi-window
+  workflows can tell parallel sessions apart at a glance. `/title` is
+  independent of `/rename`, which keeps naming the session in the picker.
 - Children (sub-agents and Fleet workers) inherit the session's permission
   posture faithfully: Auto-Review's deterministic floor and model guardian
   decide a worker's held calls (fail closed when unavailable, never a
@@ -91,7 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reduced-motion fallbacks); DSH exposes no custom-theme API, so the sheet is
   labeled an unsupported overlay and is never injected. See
   `docs/INTEGRATIONS_DSH.md`.
-
 ### Fixed
 
 - Wide terminals and tmux panes fill the full available width again for the
