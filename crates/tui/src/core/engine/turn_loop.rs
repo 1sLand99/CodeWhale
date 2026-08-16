@@ -797,6 +797,7 @@ impl Engine {
                 let stability_pct = (pm.stability_ratio() * 100.0).round() as u32;
                 let pin_reason = pm.pin_reason().unwrap_or_default().to_string();
                 let last_miss_reason = pm.last_miss_reason().unwrap_or_default().to_string();
+                let context_updates = pm.context_update_count();
                 let event = match outcome {
                     crate::prefix_cache::PrefixCheck::Stable => Event::PrefixCacheChange {
                         description: String::new(),
@@ -807,6 +808,7 @@ impl Engine {
                         pinned_combined_hash: pinned_hash,
                         pin_reason,
                         last_miss_reason,
+                        context_updates,
                     },
                     crate::prefix_cache::PrefixCheck::Repinned { reason, change } => {
                         // A declared header change re-pins under a logged
@@ -826,6 +828,7 @@ impl Engine {
                             pinned_combined_hash: pinned_hash,
                             pin_reason,
                             last_miss_reason,
+                            context_updates,
                         }
                     }
                     crate::prefix_cache::PrefixCheck::Drift { change } => {
@@ -847,6 +850,7 @@ impl Engine {
                             pinned_combined_hash: pinned_hash,
                             pin_reason,
                             last_miss_reason,
+                            context_updates,
                         }
                     }
                 };
@@ -896,6 +900,7 @@ impl Engine {
                             pinned_combined_hash: frozen.hash().to_string(),
                             pin_reason: "initial".to_string(),
                             last_miss_reason: String::new(),
+                            context_updates: 0,
                         })
                         .await;
                     self.session.frozen_prefix = Some(frozen);

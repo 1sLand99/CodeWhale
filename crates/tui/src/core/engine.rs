@@ -4051,8 +4051,19 @@ impl Engine {
 
         // Compose from the immutable values accepted for this turn. Preview
         // receives the same context before anything is installed, so prompt
-        // bytes cannot depend on stale session state or mutation order.
-        self.refresh_system_prompt_from_context(&prompt_context);
+        // bytes cannot depend on stale session state or mutation order. The
+        // pinned header only moves on an explicit-input change; workspace
+        // drift arrives as a `<context_update>` user message appended below.
+        let context_update = self.refresh_pinned_header_for_turn(&prompt_context);
+        if let Some(update) = context_update {
+            self.session.add_message(Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: update,
+                    cache_control: None,
+                }],
+            });
+        }
 
         self.session
             .working_set
@@ -5058,10 +5069,6 @@ impl Engine {
         self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
-    fn refresh_system_prompt_from_context(&mut self, context: &NextTurnPromptContext) {
-        self.refresh_system_prompt_from_context_with_reason(context, "system");
-    }
-
     /// Recompose the stable system prompt from current context. When the bytes
     /// actually change (hash differs), record `reason` as the declared cause
     /// so the turn loop's prefix check re-pins the KV-cache prefix under a
@@ -5080,11 +5087,70 @@ impl Engine {
         if self.session.system_prompt_override {
             return;
         }
+        self.session.pinned_prompt_context = Some(context.clone());
         if self.session.last_system_prompt_hash != Some(stable_hash) {
             self.session.system_prompt = stable_prompt;
             self.session.last_system_prompt_hash = Some(stable_hash);
             self.session.pending_prefix_change_reason = Some(reason.to_string());
+            // A re-pinned header carries every workspace change; the delta
+            // baseline restarts from it.
+            self.session.context_update_baseline = None;
         }
+    }
+
+    /// New-user-turn header policy. Called once per submitted user turn,
+    /// never mid-tool-loop.
+    ///
+    /// - When the explicit prompt inputs (model, mode, goal, route,
+    ///   translation, verbosity) changed, that is a declared header change:
+    ///   recompose and re-pin under a `change:<field>` reason.
+    /// - Otherwise the pinned header stays byte-identical. If a fresh compose
+    ///   would differ (workspace files, AGENTS.md, skills, memory drifted), the
+    ///   delta is returned as a bounded `<context_update>` snapshot for the
+    ///   caller to append as a user-role message *before* the user's message
+    ///   — a normal history append, so the prefix still extends.
+    /// - Returns `None` when nothing changed or a header re-pin absorbed it.
+    fn refresh_pinned_header_for_turn(
+        &mut self,
+        context: &NextTurnPromptContext,
+    ) -> Option<String> {
+        if self.session.system_prompt_override {
+            return None;
+        }
+        let explicit_reason = match self.session.pinned_prompt_context.as_ref() {
+            None => Some("system".to_string()),
+            Some(pinned) if pinned != context => {
+                Some(explicit_prompt_context_change_reason(pinned, context))
+            }
+            Some(_) => None,
+        };
+        if let Some(reason) = explicit_reason {
+            self.refresh_system_prompt_from_context_with_reason(context, &reason);
+            return None;
+        }
+
+        let composed = self.compose_stable_system_prompt(context);
+        let composed_hash = system_prompt_hash(composed.as_ref());
+        if self.session.last_system_prompt_hash == Some(composed_hash) {
+            return None;
+        }
+        let pinned_text =
+            crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
+        let known_text = self
+            .session
+            .context_update_baseline
+            .clone()
+            .unwrap_or(pinned_text);
+        let current_text = crate::prefix_cache::system_prompt_text(composed.as_ref());
+        if known_text == current_text {
+            return None;
+        }
+        let summary = crate::prefix_cache::context_update_message(&known_text, &current_text)?;
+        self.session.context_update_baseline = Some(current_text);
+        if let Some(pm) = self.session.prefix_stability.as_mut() {
+            pm.note_context_update();
+        }
+        Some(summary)
     }
 
     /// Compose the stable system prompt for an explicit route, without
@@ -5734,6 +5800,43 @@ pub(crate) struct NextTurnPromptContext {
     pub(crate) goal_token_budget: Option<u32>,
     pub(crate) translation_enabled: bool,
     pub(crate) verbosity: Option<String>,
+}
+
+/// Name the explicit prompt inputs that differ between two contexts, for the
+/// `change:<what>` prefix-pin reason.
+pub(crate) fn explicit_prompt_context_change_reason(
+    pinned: &NextTurnPromptContext,
+    next: &NextTurnPromptContext,
+) -> String {
+    let mut fields = Vec::new();
+    if pinned.provider != next.provider {
+        fields.push("provider");
+    }
+    if pinned.model != next.model {
+        fields.push("model");
+    }
+    if pinned.route_limits != next.route_limits {
+        fields.push("route");
+    }
+    if pinned.mode != next.mode {
+        fields.push("mode");
+    }
+    if pinned.goal_objective != next.goal_objective
+        || pinned.goal_token_budget != next.goal_token_budget
+    {
+        fields.push("goal");
+    }
+    if pinned.translation_enabled != next.translation_enabled {
+        fields.push("translation");
+    }
+    if pinned.verbosity != next.verbosity {
+        fields.push("verbosity");
+    }
+    if fields.is_empty() {
+        "system".to_string()
+    } else {
+        fields.join("+")
+    }
 }
 
 impl NextTurnPromptContext {

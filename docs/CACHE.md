@@ -19,7 +19,16 @@ Concretely:
   cannot move the pinned prefix under the model's feet mid-turn.
 - **History only grows.** Volatile facts the model must see (LSP diagnostics,
   steer input, subagent completions) are appended to the message list, never
-  spliced into the frozen prefix.
+  spliced into the frozen prefix. Workspace drift is delivered the same way:
+  at the start of each **new user turn** (never mid-tool-loop) the engine
+  recomposes the volatile contributors and, if anything differs from what the
+  model last saw, appends **one** `<context_update>` user-role message with a
+  bounded `+`/`-` line delta (new files in the project pack, edited AGENTS.md
+  lines, added skills, memory entries, goal text) *before* the user's message.
+  The header bytes stay pinned; the update is a normal append, so the prefix
+  still extends. The pinned system prompt tells the model once that updates
+  arrive this way. Each delta is delivered exactly once (`/cache stats` shows
+  `Context updates: N`).
 - Every miss is **attributable**. `PrefixStabilityManager` (`prefix_cache.rs`)
   records each change with a reason and reports it through `/cache stats`.
 
@@ -92,11 +101,7 @@ header change or a history reset explains the difference.
 
 DeepSeek Harness derives every request from an append-only session log via a
 pure `deriveMessages()` projection, so prefix-extension is emergent rather than
-managed, and volatile facts are always user-role snapshots. Codewhale already
-assembles most-static → most-volatile and pins the header; the remaining step
-is to (1) route mid-session file/instruction/skill/memory changes into explicit
-`<context_update>` user-role snapshots on the next user turn (today they are
-simply not spliced into the frozen prefix, which preserves cache but omits the
-update until the header is next legitimately recomposed), and (2) make the
-session log the single source of truth with a pure projection. That is a
-follow-up lane, not part of this change.
+managed. Codewhale now pins the header and delivers drift as `<context_update>`
+appends; the remaining step is to make the session log the single source of
+truth with a pure projection (and to persist the context-update baseline with
+it). That is a follow-up lane, not part of this change.

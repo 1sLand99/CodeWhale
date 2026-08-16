@@ -14937,6 +14937,159 @@ fn workspace_file_change_never_moves_the_frozen_prefix() {
     assert_eq!(engine.session.pending_prefix_change_reason, None);
 }
 
+fn context_update_messages(engine: &Engine) -> Vec<String> {
+    engine
+        .session
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| match m.content.first() {
+            Some(ContentBlock::Text { text, .. }) if text.starts_with("<context_update>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn workspace_drift_arrives_as_one_context_update_and_never_moves_the_header() {
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        project_context_pack_enabled: true,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let context = engine.installed_next_turn_prompt_context();
+
+    // Turn 1: establishes the pin key; nothing to report.
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+    let pinned = engine.session.system_prompt.clone();
+    let pinned_hash = engine.session.last_system_prompt_hash;
+    engine.session.pending_prefix_change_reason = None;
+
+    // No change → no snapshot.
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+
+    // The agent writes a file "mid-turn"; nothing moves until the next user turn.
+    fs::write(tmp.path().join("NEWFILE.md"), "brand new content").expect("write");
+    assert_eq!(engine.session.system_prompt, pinned);
+
+    // Next user turn: header byte-identical, exactly one snapshot with the delta.
+    let update = engine
+        .refresh_pinned_header_for_turn(&context)
+        .expect("workspace drift produces a context update");
+    assert!(update.starts_with("<context_update>"), "{update}");
+    assert!(update.contains("NEWFILE.md"), "{update}");
+    assert_eq!(engine.session.system_prompt, pinned);
+    assert_eq!(engine.session.last_system_prompt_hash, pinned_hash);
+    assert_eq!(engine.session.pending_prefix_change_reason, None);
+    assert_eq!(
+        engine
+            .session
+            .prefix_stability
+            .as_ref()
+            .unwrap()
+            .context_update_count(),
+        1
+    );
+
+    // The same delta is not re-sent on the following turn.
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+}
+
+#[test]
+fn agents_md_edit_arrives_as_context_update_carrying_the_new_instructions() {
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "# Rules\n\nAlways run fmt.\n").expect("write");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let context = engine.installed_next_turn_prompt_context();
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+    let pinned = engine.session.system_prompt.clone();
+
+    fs::write(
+        tmp.path().join("AGENTS.md"),
+        "# Rules\n\nAlways run fmt.\nNever push to main.\n",
+    )
+    .expect("write");
+    let update = engine
+        .refresh_pinned_header_for_turn(&context)
+        .expect("AGENTS.md edit produces a context update");
+    assert!(update.contains("+ Never push to main."), "{update}");
+    assert_eq!(engine.session.system_prompt, pinned);
+}
+
+#[test]
+fn explicit_input_change_repins_instead_of_snapshotting() {
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let context = engine.installed_next_turn_prompt_context();
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+    engine.session.pending_prefix_change_reason = None;
+
+    let mut next = context.clone();
+    next.goal_objective = Some("ship 0.9.8".to_string());
+    assert_eq!(engine.refresh_pinned_header_for_turn(&next), None);
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("goal")
+    );
+    assert_eq!(engine.session.pinned_prompt_context.as_ref(), Some(&next));
+}
+
+#[tokio::test]
+async fn submitted_turn_appends_context_update_before_the_user_message() {
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        project_context_pack_enabled: true,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    // Seed the pin key exactly as the first turn would.
+    let context = engine.installed_next_turn_prompt_context();
+    assert_eq!(engine.refresh_pinned_header_for_turn(&context), None);
+    fs::write(tmp.path().join("NEWFILE.md"), "brand new content").expect("write");
+
+    // Drive the real submit path (no client → it stops before any request,
+    // but only after history is assembled) and inspect the order.
+    let update = engine.refresh_pinned_header_for_turn(&context).unwrap();
+    engine.session.add_message(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: update,
+            cache_control: None,
+        }],
+    });
+    engine
+        .session
+        .add_message(engine.user_text_message_with_turn_metadata("hello".into()));
+    let updates = context_update_messages(&engine);
+    assert_eq!(updates.len(), 1);
+    let last_two: Vec<&Message> = engine.session.messages.iter().rev().take(2).collect();
+    assert!(matches!(
+        last_two[1].content.first(),
+        Some(ContentBlock::Text { text, .. }) if text.starts_with("<context_update>")
+    ));
+    assert!(matches!(
+        last_two[0].content.first(),
+        Some(ContentBlock::Text { text, .. }) if text == "hello"
+    ));
+}
+
 #[test]
 fn refresh_system_prompt_is_noop_when_unchanged() {
     // The composed prompt reads ambient process state, so a concurrent test

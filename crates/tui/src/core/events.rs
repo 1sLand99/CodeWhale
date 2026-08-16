@@ -522,6 +522,8 @@ pub enum Event {
         /// Explanation of the most recent expected miss (declared header
         /// change, history reset, or undeclared drift). Empty when none.
         last_miss_reason: String,
+        /// `<context_update>` snapshots appended this session.
+        context_updates: u64,
     },
 }
 

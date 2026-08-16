@@ -2005,8 +2005,10 @@ pub(crate) async fn run_event_loop(
                         pinned_combined_hash,
                         pin_reason,
                         last_miss_reason,
+                        context_updates,
                         ..
                     } => {
+                        app.prefix_context_updates = context_updates;
                         app.prefix_checks_total = app.prefix_checks_total.saturating_add(1);
                         app.prefix_stability_pct = Some(stability_pct);
                         app.last_pinned_prefix_hash =

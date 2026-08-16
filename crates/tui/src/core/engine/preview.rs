@@ -370,7 +370,12 @@ impl Engine {
         // an auto-routed preview must not reuse the installed model's prompt.
         // A session-level override wins here exactly as it does in
         // `refresh_system_prompt`.
-        let system_prompt = if self.session.system_prompt_override {
+        // The header is pinned for the session: with unchanged explicit
+        // inputs a real turn reuses the pinned bytes (workspace drift arrives
+        // as a `<context_update>` message instead), so preview mirrors that.
+        let system_prompt = if self.session.system_prompt_override
+            || self.session.pinned_prompt_context.as_ref() == Some(&prompt_context)
+        {
             self.session.system_prompt.clone()
         } else {
             self.compose_stable_system_prompt(&prompt_context)

@@ -307,6 +307,12 @@ fn format_cache_stats(app: &App) -> String {
                     "  Stability: {pct}% ({stable_checks}/{checks} checks)\n"
                 ));
                 out.push_str("  Status:    stable (no prefix changes this session)\n");
+                if app.prefix_context_updates > 0 {
+                    out.push_str(&format!(
+                        "  Context updates: {} (workspace drift delivered as history, header unchanged)\n",
+                        app.prefix_context_updates
+                    ));
+                }
             } else {
                 out.push_str(&format!(
                     "  Stability: {pct}% ({stable_checks}/{checks} checks, {changes} change{})\n",
@@ -324,6 +330,12 @@ fn format_cache_stats(app: &App) -> String {
                 }
                 if let Some(ref reason) = app.prefix_pin_reason {
                     out.push_str(&format!("  Pin reason: {reason}\n"));
+                }
+                if app.prefix_context_updates > 0 {
+                    out.push_str(&format!(
+                        "  Context updates: {} (workspace drift delivered as history, header unchanged)\n",
+                        app.prefix_context_updates
+                    ));
                 }
                 if let Some(ref reason) = app.prefix_last_miss_reason {
                     out.push_str(&format!("  Last miss:  {reason}\n"));

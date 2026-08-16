@@ -1924,6 +1924,8 @@ pub struct App {
     pub prefix_last_miss_reason: Option<String>,
     /// Undeclared prefix drifts this session (should stay 0 after the fix).
     pub prefix_drift_count: u64,
+    /// `<context_update>` snapshots appended this session.
+    pub prefix_context_updates: u64,
 
     // === Transcript filtering (#397) ===
     /// Transcript cells the user has collapsed (hidden from view).
@@ -2281,6 +2283,7 @@ impl App {
         self.prefix_pin_reason = None;
         self.prefix_last_miss_reason = None;
         self.prefix_drift_count = 0;
+        self.prefix_context_updates = 0;
     }
 
     /// Invalidate facts that were accepted under the previous reasoning

@@ -191,6 +191,9 @@ pub struct PrefixStabilityManager {
     /// Explanation of the most recent expected cache miss (a declared header
     /// change, a history reset such as compaction, or undeclared drift).
     last_miss_reason: Option<String>,
+    /// `<context_update>` snapshots appended this session (workspace drift
+    /// delivered as history, with the pinned header untouched).
+    context_update_count: u64,
     /// Process-local cache for the tool-catalog JSON serialization. Avoids
     /// re-running `tool_to_api_json` + sort + join on every `check_and_update`
     /// when the tool set is unchanged (the common case once tools are
@@ -429,6 +432,7 @@ impl PrefixStabilityManager {
             pin_reason: Some("initial".to_string()),
             history: VecDeque::new(),
             last_miss_reason: None,
+            context_update_count: 0,
             tool_catalog_cache: cache,
         }
     }
@@ -445,6 +449,7 @@ impl PrefixStabilityManager {
             pin_reason: None,
             history: VecDeque::new(),
             last_miss_reason: None,
+            context_update_count: 0,
             tool_catalog_cache: ToolCatalogCache::new(),
         }
     }
@@ -492,6 +497,28 @@ impl PrefixStabilityManager {
             to_sha256: hash,
         });
         self.last_miss_reason = Some(format!("reset:{what}"));
+    }
+
+    /// Record that workspace drift was delivered as a `<context_update>`
+    /// history append. Not a miss: the pin and the prefix are unchanged.
+    pub fn note_context_update(&mut self) {
+        self.context_update_count = self.context_update_count.saturating_add(1);
+        let hash = self
+            .pinned
+            .as_ref()
+            .map(|fp| fp.combined_sha256.clone())
+            .unwrap_or_default();
+        self.push_history(PrefixHistoryEntry {
+            reason: "context_update".to_string(),
+            repinned: false,
+            from_sha256: hash.clone(),
+            to_sha256: hash,
+        });
+    }
+
+    /// Number of `<context_update>` snapshots appended this session.
+    pub fn context_update_count(&self) -> u64 {
+        self.context_update_count
     }
 
     fn push_history(&mut self, entry: PrefixHistoryEntry) {
@@ -701,6 +728,80 @@ fn sha256_hex(bytes: &[u8]) -> String {
     crate::hashing::sha256_hex(bytes)
 }
 
+/// Bounded line delta between the session context the model last saw and a
+/// fresh composition, rendered as a `<context_update>` user-role message.
+///
+/// The pinned system prompt is never rewritten; this is how workspace,
+/// instruction, skills, memory, and goal drift reaches the model as a normal
+/// history append. Returns `None` when the two texts are line-identical (only
+/// whitespace/ordering noise), so no empty update is ever sent.
+pub const CONTEXT_UPDATE_MAX_LINES: usize = 80;
+pub const CONTEXT_UPDATE_MAX_BYTES: usize = 6_000;
+
+pub fn context_update_message(known: &str, current: &str) -> Option<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, i64> = HashMap::new();
+    for line in known.lines() {
+        *counts.entry(line).or_insert(0) -= 1;
+    }
+    for line in current.lines() {
+        *counts.entry(line).or_insert(0) += 1;
+    }
+    let mut added: Vec<&str> = Vec::new();
+    for line in current.lines() {
+        if let Some(count) = counts.get_mut(line)
+            && *count > 0
+        {
+            *count -= 1;
+            if !line.trim().is_empty() {
+                added.push(line);
+            }
+        }
+    }
+    let mut removed: Vec<&str> = Vec::new();
+    for line in known.lines() {
+        if let Some(count) = counts.get_mut(line)
+            && *count < 0
+        {
+            *count += 1;
+            if !line.trim().is_empty() {
+                removed.push(line);
+            }
+        }
+    }
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from(
+        "<context_update>\nSession context changed since it was pinned; the pinned system \
+         prompt is unchanged. Delta (+ added, - removed):\n",
+    );
+    let mut lines_written = 0usize;
+    let mut truncated = 0usize;
+    for (sign, group) in [("+ ", &added), ("- ", &removed)] {
+        for line in group {
+            if lines_written >= CONTEXT_UPDATE_MAX_LINES
+                || out.len() + sign.len() + line.len() + 1 > CONTEXT_UPDATE_MAX_BYTES
+            {
+                truncated += 1;
+                continue;
+            }
+            out.push_str(sign);
+            out.push_str(line);
+            out.push('\n');
+            lines_written += 1;
+        }
+    }
+    if truncated > 0 {
+        out.push_str(&format!(
+            "(+{truncated} more changed lines; re-read the files you need)\n"
+        ));
+    }
+    out.push_str("</context_update>");
+    Some(out)
+}
+
 /// Extract the system prompt text from an optional SystemPrompt,
 /// returning an owned String. This is used for prefix fingerprinting
 /// and avoids lifetime/leak issues with the rare SystemPrompt::Blocks case.
@@ -846,6 +947,41 @@ mod tests {
         ));
         assert_eq!(mgr.change_count(), 0);
         assert_eq!(mgr.pin_reason(), Some("initial"));
+    }
+
+    #[test]
+    fn context_update_message_reports_added_and_removed_lines_bounded() {
+        let known = "## Files\nsrc/a.rs\nsrc/b.rs\n## Instructions\nbe kind\n";
+        let current = "## Files\nsrc/a.rs\nsrc/b.rs\nsrc/c.rs\n## Instructions\nbe precise\n";
+        let update = context_update_message(known, current).expect("delta");
+        assert!(update.starts_with("<context_update>"));
+        assert!(update.ends_with("</context_update>"));
+        assert!(update.contains("+ src/c.rs"));
+        assert!(update.contains("+ be precise"));
+        assert!(update.contains("- be kind"));
+        assert!(!update.contains("- src/a.rs"));
+        assert!(context_update_message(known, known).is_none());
+
+        let mut big = String::new();
+        for i in 0..500 {
+            big.push_str(&format!("line {i}\n"));
+        }
+        let bounded = context_update_message("", &big).expect("delta");
+        assert!(
+            bounded.len() <= CONTEXT_UPDATE_MAX_BYTES + 128,
+            "{}",
+            bounded.len()
+        );
+        assert!(bounded.contains("more changed lines"));
+    }
+
+    #[test]
+    fn context_update_is_logged_but_is_not_a_miss() {
+        let mut mgr = PrefixStabilityManager::new("sys", None);
+        mgr.note_context_update();
+        assert_eq!(mgr.context_update_count(), 1);
+        assert_eq!(mgr.last_miss_reason(), None);
+        assert!(matches!(mgr.check("sys", None, None), PrefixCheck::Stable));
     }
 
     #[test]

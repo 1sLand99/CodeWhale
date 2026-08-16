@@ -965,6 +965,7 @@ impl App {
             prefix_pin_reason: None,
             prefix_last_miss_reason: None,
             prefix_drift_count: 0,
+            prefix_context_updates: 0,
             collapsed_cells: HashSet::new(),
             folded_thinking: HashSet::new(),
             collapsed_cell_map: Vec::new(),
