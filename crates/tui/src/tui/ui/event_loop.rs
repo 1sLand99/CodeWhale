@@ -2672,6 +2672,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::ToolGateDecision {
+                        agent_id,
                         tool_id,
                         tool_name,
                         gate,
@@ -2693,7 +2694,24 @@ pub(crate) async fn run_event_loop(
                             risk.as_deref(),
                             &reason,
                         );
-                        app.pending_gate_receipts.push((tool_id, receipt));
+                        if let Some(agent_id) = agent_id {
+                            // A child's decision belongs to the child's
+                            // conversation: it renders under that tool card
+                            // in focus mode, not in the main transcript.
+                            app.child_gate_receipts
+                                .entry(agent_id.clone())
+                                .or_default()
+                                .push((tool_id, receipt));
+                            if app
+                                .agent_focus
+                                .as_ref()
+                                .is_some_and(|focus| focus.is(&agent_id))
+                            {
+                                crate::tui::agent_focus::refresh_focus(app);
+                            }
+                        } else {
+                            app.pending_gate_receipts.push((tool_id, receipt));
+                        }
                     }
                 }
                 events_drained = events_drained.saturating_add(1);

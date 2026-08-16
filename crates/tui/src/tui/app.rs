@@ -1757,6 +1757,10 @@ pub struct App {
     /// was prompted for, held until that tool's card completes so the note
     /// lands directly under the card instead of splitting a running tool run.
     pub pending_gate_receipts: Vec<(String, String)>,
+    /// Permission receipts for child (sub-agent) tool calls, keyed by agent
+    /// id then `(tool_id, text)`, rendered under the matching tool card when
+    /// that child is focused. Session-resident only.
+    pub child_gate_receipts: std::collections::HashMap<String, Vec<(String, String)>>,
     /// User messages queued while a turn is running
     pub queued_messages: VecDeque<QueuedMessage>,
     /// Draft queued message being edited

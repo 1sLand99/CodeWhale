@@ -2412,6 +2412,18 @@ pub struct SubAgentRuntime {
     pub todos: SharedTodoList,
     /// Session mode of the orchestrating parent at spawn time (Wave 7 M4/M5).
     pub parent_mode: AppMode,
+    /// The session's permission posture at spawn time. Children inherit it
+    /// faithfully: under Auto-Review the same deterministic floor and model
+    /// guardian that gate the parent gate the child's held calls; under Ask a
+    /// held call is routed to the parent's approval UI when one exists;
+    /// Full Access still fails closed on the non-bypassable safety floor.
+    pub approval_mode: crate::tui::approval::ApprovalMode,
+    /// The session's deterministic Auto-Review policy (configured allow/block
+    /// rules plus the built-in safety floor), shared with every descendant.
+    pub auto_review_policy: std::sync::Arc<crate::tui::auto_review::AutoReviewPolicy>,
+    /// Whether the host can answer an approval prompt for a child (an
+    /// interactive TUI). Headless hosts keep the fail-closed denial.
+    pub parent_can_prompt: bool,
 }
 
 impl SubAgentRuntime {
@@ -2464,6 +2476,11 @@ impl SubAgentRuntime {
             speech_output_dir: None,
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: AppMode::Agent,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            auto_review_policy: std::sync::Arc::new(
+                crate::tui::auto_review::AutoReviewPolicy::default(),
+            ),
+            parent_can_prompt: false,
         }
     }
 
@@ -2471,6 +2488,22 @@ impl SubAgentRuntime {
     #[must_use]
     pub fn with_parent_mode(mut self, mode: AppMode) -> Self {
         self.parent_mode = mode;
+        self
+    }
+
+    /// Install the session's permission posture and Auto-Review policy so
+    /// children are gated exactly like the parent, and say whether the host
+    /// can answer a prompt raised on a child's behalf.
+    #[must_use]
+    pub fn with_permission_posture(
+        mut self,
+        approval_mode: crate::tui::approval::ApprovalMode,
+        auto_review_policy: std::sync::Arc<crate::tui::auto_review::AutoReviewPolicy>,
+        parent_can_prompt: bool,
+    ) -> Self {
+        self.approval_mode = approval_mode;
+        self.auto_review_policy = auto_review_policy;
+        self.parent_can_prompt = parent_can_prompt;
         self
     }
 
@@ -2770,6 +2803,9 @@ impl SubAgentRuntime {
             // opt-in forked child as immutable `fork_context` text.
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: self.parent_mode,
+            approval_mode: self.approval_mode,
+            auto_review_policy: Arc::clone(&self.auto_review_policy),
+            parent_can_prompt: self.parent_can_prompt,
         }
     }
 
@@ -3196,9 +3232,64 @@ pub struct SubAgentManager {
     /// the same interrupted id returns the existing resumed target instead of
     /// spawning a duplicate agent loop (duplicate-resume guard).
     resume_targets: HashMap<String, String>,
+    /// Approval prompts raised on a child's behalf under Ask: the approval id
+    /// the host sees (`agent:<agent_id>:<n>`) → the waiting child. The engine
+    /// routes the person's decision here; a decision for an id nobody is
+    /// waiting on is dropped, never applied to a different call.
+    child_approvals: HashMap<String, tokio::sync::oneshot::Sender<ChildApprovalOutcome>>,
+    child_approval_seq: u64,
+}
+
+/// A person's answer to an approval prompt raised for a child's tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildApprovalOutcome {
+    Approved,
+    Denied,
 }
 
 impl SubAgentManager {
+    /// Register a prompt raised for a child's held call. Returns the approval
+    /// id to publish and the receiver the child awaits.
+    pub fn register_child_approval(
+        &mut self,
+        agent_id: &str,
+    ) -> (String, tokio::sync::oneshot::Receiver<ChildApprovalOutcome>) {
+        self.child_approval_seq = self.child_approval_seq.wrapping_add(1);
+        let id = format!("agent:{agent_id}:approval:{}", self.child_approval_seq);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.child_approvals.insert(id.clone(), tx);
+        (id, rx)
+    }
+
+    /// Whether an approval id belongs to a child prompt (routing hint for the
+    /// engine before it consults the map).
+    #[must_use]
+    pub fn is_child_approval_id(id: &str) -> bool {
+        id.starts_with("agent:") && id.contains(":approval:")
+    }
+
+    /// Deliver a person's decision to the waiting child. Returns `false` when
+    /// no child is waiting on that id (already answered, cancelled, or not a
+    /// child prompt).
+    pub fn resolve_child_approval(&mut self, id: &str, outcome: ChildApprovalOutcome) -> bool {
+        match self.child_approvals.remove(id) {
+            Some(tx) => tx.send(outcome).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Forget a prompt the child stopped waiting for (cancellation).
+    pub fn cancel_child_approval(&mut self, id: &str) {
+        self.child_approvals.remove(id);
+    }
+
+    /// Number of child prompts currently awaiting a person.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pending_child_approvals(&self) -> usize {
+        self.child_approvals.len()
+    }
+
     /// Create a new manager for sub-agents.
     #[must_use]
     pub fn new(workspace: PathBuf, max_agents: usize) -> Self {
@@ -3242,6 +3333,8 @@ impl SubAgentManager {
             woken_agents: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
+            child_approvals: HashMap::new(),
+            child_approval_seq: 0,
         }
     }
 
@@ -11063,6 +11156,7 @@ async fn run_subagent(
                 tool_registry
                     .execute_from_surface(
                         &agent_id,
+                        &tool_id,
                         &mut tool_surface,
                         &request_active_tool_names,
                         &tool_name,
@@ -13167,6 +13261,19 @@ struct SubAgentToolRegistry {
     coordination_manager: SharedSubAgentManager,
     enforce_write_claim: bool,
     registry: ToolRegistry,
+    /// The session posture and reviewer wiring this child is gated by (see
+    /// [`SubAgentToolRegistry::gate_held_call`]). Cloned from the spawning
+    /// runtime so a child is gated exactly like the parent turn.
+    gate_runtime: SubAgentRuntime,
+}
+
+/// What the child permission gate decided for one held call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildGateVerdict {
+    /// Run the call.
+    Proceed,
+    /// Refuse the call with this reason (returned to the child model).
+    Deny(String),
 }
 
 impl SubAgentToolRegistry {
@@ -13260,6 +13367,372 @@ impl SubAgentToolRegistry {
             coordination_manager,
             enforce_write_claim: true,
             registry,
+            gate_runtime: runtime,
+        }
+    }
+
+    /// The refusal the pre-posture registry applied to an approval-gated call
+    /// when the parent was not Full Access: read-only roles cannot write,
+    /// arbitrary shell needs the parent auto-approved. `None` when the call
+    /// clears the role-based delegation rules on its own.
+    fn delegation_refusal(&self, name: &str, input: &Value) -> Option<String> {
+        let spec = self.registry.get(name)?;
+        match spec.approval_requirement_for(input) {
+            ApprovalRequirement::Auto => None,
+            ApprovalRequirement::Suggest => {
+                // Write/edit/patch tools land here. Explicit write-capable
+                // roles (`builder`, `custom`) may run them without parent
+                // auto-approve (#1828, #1833). Workflow-spawned children also
+                // accept Suggest edits for any write-capable posture. #5186:
+                // children inherit the session's in-workspace write carve-out
+                // (#5185) too.
+                let may_write = self.runtime_profile.permissions.write
+                    && (self.accept_edits || Self::role_can_delegate_writes(&self.agent_type));
+                (!may_write && !self.workspace_write_carve_out_permits(name, input)).then(|| {
+                    format!(
+                        "Tool {name} requires approval and is not delegated to {role} sub-agents; pick a write-capable role or approve it from the session",
+                        role = self.agent_type.as_str()
+                    )
+                })
+            }
+            ApprovalRequirement::Required => {
+                // #5186: the bounded built-in verification surface is
+                // delegated to any shell-capable child; arbitrary shell and
+                // every other Required tool stay gated.
+                (!Self::is_delegated_builtin_verification(name, input)).then(|| {
+                    format!(
+                        "Tool {name} requires approval and cannot run inside this sub-agent without a session decision"
+                    )
+                })
+            }
+        }
+    }
+
+    /// Emit a transcript-visible receipt for a decision made on this child's
+    /// call without a person seeing a prompt (the audit log has the record).
+    async fn emit_child_gate_receipt(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+        name: &str,
+        gate: crate::core::events::ToolGate,
+        decision: crate::core::events::ToolGateVerdict,
+        risk: Option<&str>,
+        reason: &str,
+    ) {
+        crate::core::engine::emit_tool_audit(json!({
+            "event": "tool.auto_review",
+            "gate": gate.as_str(),
+            "agent_id": agent_id,
+            "tool_id": tool_id,
+            "tool_name": name,
+            "decision": decision.as_str(),
+            "risk": risk,
+            "reason": reason,
+        }));
+        if let Some(tx) = self.gate_runtime.event_tx.as_ref() {
+            let _ = tx
+                .send(Event::ToolGateDecision {
+                    agent_id: Some(agent_id.to_string()),
+                    tool_id: tool_id.to_string(),
+                    tool_name: name.to_string(),
+                    gate,
+                    decision,
+                    risk: risk.map(str::to_string),
+                    reason: crate::core::events::bounded_gate_reason(reason),
+                })
+                .await;
+        }
+    }
+
+    /// Apply the session's permission posture to one of this child's tool
+    /// calls, exactly as the parent turn applies it to its own:
+    ///
+    /// - **Full Access**: ordinary calls run; the non-bypassable safety floor
+    ///   (publish-like, destructive background work) still fails closed.
+    /// - **Auto-Review**: the deterministic policy allows proven-safe calls
+    ///   and blocks the floor; anything it cannot prove safe goes to the same
+    ///   one-shot model guardian the parent uses. No prompt is ever opened;
+    ///   an unavailable guardian denies (fail closed).
+    /// - **Ask**: a call the role may delegate runs; a held call is raised as
+    ///   an approval prompt in the parent's UI when the host can answer one
+    ///   (the child waits, visibly, as `waiting for user`); otherwise it is
+    ///   denied with the reason.
+    /// - **never**: held calls are denied.
+    ///
+    /// Every decision a person did not make at a prompt is written to the
+    /// audit log and, through [`Event::ToolGateDecision`], into this child's
+    /// transcript. Role posture and the execution envelope are checked by the
+    /// caller before and after; this gate never widens them.
+    async fn gate_held_call(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+        name: &str,
+        input: &Value,
+    ) -> ChildGateVerdict {
+        use crate::core::engine::{AutoReviewPlanDecision, auto_review_plan_decision_for_context};
+        use crate::core::events::{ToolGate, ToolGateVerdict};
+        use crate::tui::approval::ApprovalMode;
+        use crate::tui::auto_review::{AutoReviewContext, RunOrigin};
+
+        let approval_mode = if self.auto_approve {
+            ApprovalMode::Bypass
+        } else {
+            self.gate_runtime.approval_mode
+        };
+        let workspace = self.gate_runtime.context.workspace.clone();
+        let workspace_trusted = crate::config::is_workspace_trusted(&workspace);
+        // Children are background workers: destructive detached work holds
+        // in every posture, exactly as it does for a detached parent start.
+        let review_context = AutoReviewContext::from_tool_call(
+            name,
+            input,
+            RunOrigin::Background,
+            approval_mode,
+            workspace_trusted,
+            Some(&workspace),
+        );
+        let (decision, _audit) = auto_review_plan_decision_for_context(
+            &self.gate_runtime.auto_review_policy,
+            &review_context,
+        );
+
+        match approval_mode {
+            ApprovalMode::Bypass => match decision {
+                AutoReviewPlanDecision::Block(reason) => {
+                    self.emit_child_gate_receipt(
+                        agent_id,
+                        tool_id,
+                        name,
+                        ToolGate::AutoReviewDeterministic,
+                        ToolGateVerdict::Denied,
+                        None,
+                        &reason,
+                    )
+                    .await;
+                    ChildGateVerdict::Deny(reason)
+                }
+                // Full Access has no prompt to force; the plan decision
+                // already turned every safety-floor hold into a block.
+                AutoReviewPlanDecision::ForcePrompt(reason) => ChildGateVerdict::Deny(reason),
+                AutoReviewPlanDecision::NoChange
+                | AutoReviewPlanDecision::Allow
+                | AutoReviewPlanDecision::ConsultReviewer(_) => ChildGateVerdict::Proceed,
+            },
+            ApprovalMode::Auto => match decision {
+                AutoReviewPlanDecision::Allow | AutoReviewPlanDecision::NoChange => {
+                    ChildGateVerdict::Proceed
+                }
+                AutoReviewPlanDecision::Block(reason)
+                | AutoReviewPlanDecision::ForcePrompt(reason) => {
+                    self.emit_child_gate_receipt(
+                        agent_id,
+                        tool_id,
+                        name,
+                        ToolGate::AutoReviewDeterministic,
+                        ToolGateVerdict::Denied,
+                        None,
+                        &reason,
+                    )
+                    .await;
+                    ChildGateVerdict::Deny(reason)
+                }
+                AutoReviewPlanDecision::ConsultReviewer(held_reason) => {
+                    self.consult_child_guardian(
+                        agent_id,
+                        tool_id,
+                        name,
+                        input,
+                        &review_context,
+                        &held_reason,
+                    )
+                    .await
+                }
+            },
+            ApprovalMode::Suggest | ApprovalMode::Never => {
+                // The deterministic floor still hard-blocks what it blocks for
+                // the parent (publish-like, destructive background work).
+                if let AutoReviewPlanDecision::Block(reason) = &decision {
+                    self.emit_child_gate_receipt(
+                        agent_id,
+                        tool_id,
+                        name,
+                        ToolGate::AutoReviewDeterministic,
+                        ToolGateVerdict::Denied,
+                        None,
+                        reason,
+                    )
+                    .await;
+                    return ChildGateVerdict::Deny(reason.clone());
+                }
+                let force_prompt = matches!(decision, AutoReviewPlanDecision::ForcePrompt(_));
+                let Some(refusal) = self.delegation_refusal(name, input) else {
+                    if !force_prompt {
+                        return ChildGateVerdict::Proceed;
+                    }
+                    // A safety-floor hold on a call the role could otherwise
+                    // delegate: a person still has to decide it.
+                    let AutoReviewPlanDecision::ForcePrompt(reason) = decision else {
+                        unreachable!("force_prompt implies ForcePrompt");
+                    };
+                    return self
+                        .prompt_parent_for_child_call(agent_id, name, input, &reason, true)
+                        .await;
+                };
+                if approval_mode == ApprovalMode::Never {
+                    return ChildGateVerdict::Deny(refusal);
+                }
+                self.prompt_parent_for_child_call(agent_id, name, input, &refusal, force_prompt)
+                    .await
+            }
+        }
+    }
+
+    /// Auto-Review: ask the one-shot model guardian about a held call, using
+    /// the child's own session client, and turn its answer into a verdict
+    /// plus a transcript receipt. Any failure denies (fail closed).
+    async fn consult_child_guardian(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+        name: &str,
+        input: &Value,
+        review_context: &crate::tui::auto_review::AutoReviewContext<'_>,
+        held_reason: &str,
+    ) -> ChildGateVerdict {
+        use crate::core::engine::reviewer::{ReviewerOutcome, consult_reviewer};
+        use crate::core::events::{ToolGate, ToolGateVerdict};
+
+        let context_text =
+            crate::tui::auto_review::build_reviewer_context(review_context, held_reason, input);
+        let review = consult_reviewer(
+            &self.gate_runtime.client,
+            &context_text,
+            &self.gate_runtime.cancel_token,
+        )
+        .await;
+        let risk = review.outcome.audit_risk();
+        let (verdict, reason) = match &review.outcome {
+            ReviewerOutcome::Allow { reason, .. } => (ToolGateVerdict::Allowed, reason.clone()),
+            ReviewerOutcome::Deny { reason, .. } => (ToolGateVerdict::Denied, reason.clone()),
+            ReviewerOutcome::Unavailable { reason } => {
+                (ToolGateVerdict::Unavailable, reason.clone())
+            }
+            ReviewerOutcome::Cancelled => {
+                return ChildGateVerdict::Deny(
+                    "Auto-Review guardian request cancelled".to_string(),
+                );
+            }
+        };
+        self.emit_child_gate_receipt(
+            agent_id,
+            tool_id,
+            name,
+            ToolGate::AutoReviewGuardian,
+            verdict,
+            risk,
+            &reason,
+        )
+        .await;
+        match review.outcome.into_tool_result(name) {
+            Ok(_) => ChildGateVerdict::Proceed,
+            Err(error) => ChildGateVerdict::Deny(error.to_string()),
+        }
+    }
+
+    /// Ask: raise the held call as an approval prompt in the parent's UI and
+    /// wait for the person, visibly (`waiting for user`). Hosts that cannot
+    /// prompt keep the fail-closed denial with the reason.
+    async fn prompt_parent_for_child_call(
+        &self,
+        agent_id: &str,
+        name: &str,
+        input: &Value,
+        reason: &str,
+        force_prompt: bool,
+    ) -> ChildGateVerdict {
+        let Some(event_tx) = self
+            .gate_runtime
+            .event_tx
+            .as_ref()
+            .filter(|_| self.gate_runtime.parent_can_prompt)
+        else {
+            return ChildGateVerdict::Deny(format!(
+                "{reason} (this host cannot raise a prompt for a worker; run the call in the main conversation, or switch the session to Auto-Review or Full Access)"
+            ));
+        };
+        let (approval_id, receiver) = self
+            .gate_runtime
+            .manager
+            .write()
+            .await
+            .register_child_approval(agent_id);
+        let description = format!(
+            "{} (worker {}) wants to run '{name}': {reason}",
+            self.owner_agent_name,
+            agent_id.chars().take(12).collect::<String>()
+        );
+        let approval_key = format!("{approval_id}:{name}");
+        let sent = event_tx
+            .send(Event::ApprovalRequired {
+                id: approval_id.clone(),
+                tool_name: name.to_string(),
+                description,
+                input: input.clone(),
+                approval_key: approval_key.clone(),
+                approval_grouping_key: approval_key,
+                intent_summary: None,
+                approval_force_prompt: force_prompt,
+            })
+            .await
+            .is_ok();
+        if !sent {
+            self.gate_runtime
+                .manager
+                .write()
+                .await
+                .cancel_child_approval(&approval_id);
+            return ChildGateVerdict::Deny(format!(
+                "{reason} (the session could not be asked; the call was denied)"
+            ));
+        }
+        record_agent_progress(
+            &self.gate_runtime,
+            agent_id,
+            AgentProgressEventMeta::new(AgentWorkerStatus::WaitingForUser)
+                .with_tool(name.to_string()),
+            format!("waiting for your decision on '{name}'"),
+        );
+        let outcome = tokio::select! {
+            () = self.gate_runtime.cancel_token.cancelled() => None,
+            answer = receiver => answer.ok(),
+        };
+        if outcome.is_none() {
+            self.gate_runtime
+                .manager
+                .write()
+                .await
+                .cancel_child_approval(&approval_id);
+        }
+        record_agent_progress(
+            &self.gate_runtime,
+            agent_id,
+            AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool).with_tool(name.to_string()),
+            match outcome {
+                Some(ChildApprovalOutcome::Approved) => format!("approved '{name}'"),
+                Some(ChildApprovalOutcome::Denied) => format!("denied '{name}'"),
+                None => format!("stopped waiting on '{name}'"),
+            },
+        );
+        match outcome {
+            Some(ChildApprovalOutcome::Approved) => ChildGateVerdict::Proceed,
+            Some(ChildApprovalOutcome::Denied) => {
+                ChildGateVerdict::Deny(format!("Tool {name} was denied by the user"))
+            }
+            None => ChildGateVerdict::Deny(format!(
+                "Tool {name} was cancelled while awaiting the user's decision"
+            )),
         }
     }
 
@@ -13632,7 +14105,8 @@ impl SubAgentToolRegistry {
 
     async fn execute_full(
         &self,
-        _agent_id: &str,
+        agent_id: &str,
+        tool_id: &str,
         name: &str,
         input: Value,
     ) -> Result<RichToolResult> {
@@ -13675,46 +14149,18 @@ impl SubAgentToolRegistry {
                 role = self.agent_type.as_str()
             ));
         }
-        if !self.auto_approve {
-            let Some(spec) = self.registry.get(name) else {
-                return Err(anyhow!("Tool {name} is not registered"));
-            };
-            match spec.approval_requirement_for(&input) {
-                ApprovalRequirement::Auto => {}
-                ApprovalRequirement::Suggest => {
-                    // Write/edit/patch tools land here. Explicit
-                    // write-capable roles (`builder`, `custom`) may run them
-                    // without parent auto-approve (#1828, #1833). Workflow-spawned
-                    // children also accept Suggest edits for any write-capable
-                    // posture (including general). Read-only roles still bounce.
-                    // #5186: children also inherit the session's in-workspace
-                    // write carve-out (#5185) — a write-capable-posture child
-                    // may edit in-workspace, non-sensitive, non-`.git` paths
-                    // without the parent being auto-approved.
-                    let may_write = self.runtime_profile.permissions.write
-                        && (self.accept_edits || Self::role_can_delegate_writes(&self.agent_type));
-                    if !may_write && !self.workspace_write_carve_out_permits(name, &input) {
-                        return Err(anyhow!(
-                            "Tool {name} requires approval and is not delegated to {role} sub-agents; rerun the parent with auto approval or pick a write-capable role",
-                            role = self.agent_type.as_str()
-                        ));
-                    }
-                }
-                ApprovalRequirement::Required => {
-                    // #5186: the bounded built-in verification surface (the
-                    // fixed workspace-root command or a pure test selection,
-                    // per the one classifier the execution envelope also
-                    // reads) is delegated to any child whose posture reached
-                    // this branch — shell-capable by construction — instead
-                    // of keying everything off parent auto-approve. Arbitrary
-                    // shell and every other Required tool stay gated.
-                    if !Self::is_delegated_builtin_verification(name, &input) {
-                        return Err(anyhow!(
-                            "Tool {name} requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
-                        ));
-                    }
-                }
-            }
+        // The session's permission posture, applied to this child exactly as
+        // it is applied to the parent turn: the deterministic Auto-Review
+        // floor first, then (Auto-Review) the model guardian for holds it
+        // could not prove safe, or (Ask) a prompt raised in the parent's UI.
+        // Full Access still fails closed on the non-bypassable safety floor.
+        // Role posture and the execution envelope below stay authoritative:
+        // this gate can only decide whether a call the role permits also
+        // clears the session's approval boundary.
+        if let ChildGateVerdict::Deny(reason) =
+            self.gate_held_call(agent_id, tool_id, name, &input).await
+        {
+            return Err(anyhow!(reason));
         }
         reject_subagent_terminal_takeover(name, &input)?;
         if self.network_is_denied() {
@@ -13808,7 +14254,7 @@ impl SubAgentToolRegistry {
 
     #[cfg(test)]
     async fn execute(&self, agent_id: &str, name: &str, input: Value) -> Result<String> {
-        self.execute_full(agent_id, name, input)
+        self.execute_full(agent_id, "", name, input)
             .await
             .map(|result| result.result.content)
     }
@@ -13816,6 +14262,7 @@ impl SubAgentToolRegistry {
     async fn execute_from_surface(
         &self,
         agent_id: &str,
+        tool_id: &str,
         surface: &mut SubAgentToolSurface,
         request_active_names: &std::collections::HashSet<String>,
         name: &str,
@@ -13848,7 +14295,7 @@ impl SubAgentToolRegistry {
         if !request_active_names.contains(name) {
             return Err(anyhow!("Tool {name} is not active for this sub-agent"));
         }
-        let result = self.execute_full(agent_id, name, input).await;
+        let result = self.execute_full(agent_id, tool_id, name, input).await;
         if deferred && result.is_ok() {
             touch_cached_tool_after_execution(
                 &surface.catalog,

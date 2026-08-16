@@ -58,6 +58,9 @@ pub struct AgentFocus {
     pub last_visible: usize,
     /// Last total line count after wrapping (for scrollbar/clamping).
     pub last_total: usize,
+    /// Number of permission receipts folded into `cells`, so a new receipt
+    /// on an unchanged message count still triggers a rebuild.
+    receipt_count: usize,
     last_refresh: Instant,
 }
 
@@ -73,6 +76,7 @@ impl AgentFocus {
             scroll_top: None,
             last_visible: 0,
             last_total: 0,
+            receipt_count: 0,
             last_refresh: Instant::now() - REFRESH_INTERVAL,
         }
     }
@@ -143,11 +147,48 @@ pub(crate) fn agent_display_label(app: &App, agent_id: &str) -> String {
         .unwrap_or_else(|| crate::tui::agent_details::safe_agent_display_name(app, agent_id))
 }
 
-fn cells_for_messages(messages: &[Message]) -> Vec<HistoryCell> {
-    messages
-        .iter()
-        .flat_map(history_cells_from_message)
-        .collect()
+/// Render a child's messages as history cells, folding in the permission
+/// receipts recorded for that child: each receipt lands right after the
+/// message that carries the tool's result (or, while the call is still
+/// running, after the tool-use block itself), so a decision reads in place.
+fn cells_for_messages(messages: &[Message], receipts: &[(String, String)]) -> Vec<HistoryCell> {
+    use crate::models::ContentBlock;
+    let mut resulted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for message in messages {
+        for block in &message.content {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                resulted.insert(tool_use_id.as_str());
+            }
+        }
+    }
+    let mut cells = Vec::new();
+    for message in messages {
+        cells.extend(history_cells_from_message(message));
+        for block in &message.content {
+            let anchor = match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                ContentBlock::ToolUse { id, .. } if !resulted.contains(id.as_str()) => {
+                    Some(id.as_str())
+                }
+                _ => None,
+            };
+            let Some(anchor) = anchor else { continue };
+            for (tool_id, text) in receipts {
+                if tool_id == anchor {
+                    cells.push(HistoryCell::System {
+                        content: text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn child_receipts<'a>(app: &'a App, agent_id: &str) -> &'a [(String, String)] {
+    app.child_gate_receipts
+        .get(agent_id)
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Focus a child: its full transcript owns the main area and the composer
@@ -165,7 +206,9 @@ pub(crate) fn focus_agent(app: &mut App, agent_id: &str) {
     let label = agent_display_label(app, agent_id);
     let mut focus = AgentFocus::new(agent_id.to_string(), label.clone());
     let (messages, omitted) = resolve_agent_transcript_messages(app, agent_id);
-    focus.cells = cells_for_messages(&messages);
+    let receipts = child_receipts(app, agent_id);
+    focus.cells = cells_for_messages(&messages, receipts);
+    focus.receipt_count = receipts.len();
     focus.source_message_count = messages.len();
     focus.omitted_messages = omitted;
     focus.last_refresh = Instant::now();
@@ -208,15 +251,20 @@ pub(crate) fn refresh_focus(app: &mut App) {
     }
     let agent_id = focus.agent_id.clone();
     let (messages, omitted) = resolve_agent_transcript_messages(app, &agent_id);
+    let receipts = child_receipts(app, &agent_id).to_vec();
     let Some(focus) = app.agent_focus.as_mut() else {
         return;
     };
     focus.last_refresh = Instant::now();
-    if messages.len() == focus.source_message_count && omitted == focus.omitted_messages {
+    if messages.len() == focus.source_message_count
+        && omitted == focus.omitted_messages
+        && receipts.len() == focus.receipt_count
+    {
         return;
     }
     let previous_count = focus.source_message_count;
-    focus.cells = cells_for_messages(&messages);
+    focus.cells = cells_for_messages(&messages, &receipts);
+    focus.receipt_count = receipts.len();
     focus.source_message_count = messages.len();
     focus.omitted_messages = omitted;
     // Drop local user echoes that the transcript now carries itself.

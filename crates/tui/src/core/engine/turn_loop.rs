@@ -496,6 +496,7 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::ToolGateDecision {
+                    agent_id: None,
                     tool_id: tool_id.to_string(),
                     tool_name: context.tool_name.to_string(),
                     gate: crate::core::events::ToolGate::AutoReviewGuardian,
@@ -2761,6 +2762,7 @@ impl Engine {
                             let _ = self
                                 .tx_event
                                 .send(Event::ToolGateDecision {
+                                    agent_id: None,
                                     tool_id: tool_id.clone(),
                                     tool_name: tool_name.clone(),
                                     gate: crate::core::events::ToolGate::AutoReviewDeterministic,

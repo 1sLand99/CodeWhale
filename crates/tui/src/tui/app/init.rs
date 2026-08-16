@@ -920,6 +920,7 @@ impl App {
             last_reasoning: None,
             pending_tool_uses: Vec::new(),
             pending_gate_receipts: Vec::new(),
+            child_gate_receipts: std::collections::HashMap::new(),
             queued_messages: VecDeque::new(),
             queued_draft: None,
             pending_steers: VecDeque::new(),
