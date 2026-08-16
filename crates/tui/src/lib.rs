@@ -58,6 +58,7 @@ mod goal_loop;
 mod hashing;
 mod hooks;
 mod image_attach;
+mod integrations;
 mod lane_control;
 mod llm_client;
 mod llm_response_cache;
@@ -343,6 +344,11 @@ enum Commands {
     },
     /// Inspect feature flags
     Features(FeaturesCli),
+    /// Connect third-party harnesses through Codewhale (currently: DeepSeek Harness `dsh`)
+    Integrations {
+        #[command(subcommand)]
+        command: IntegrationsCommand,
+    },
     /// Run a command inside the sandbox
     Sandbox(SandboxArgs),
     /// Run a local server (e.g. MCP)
@@ -1380,6 +1386,83 @@ enum McpCommand {
     },
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum IntegrationsCommand {
+    /// Official DeepSeek Harness (`dsh`) connected through Codewhale
+    Dsh {
+        #[command(subcommand)]
+        command: DshIntegrationCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum DshIntegrationCommand {
+    /// Detect dsh and report the integration state without writing anything
+    Status {
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show exactly what `connect`/`update` would write, without writing it
+    Plan {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// DSH profile the overlay targets (`web` or `headless`)
+        #[arg(long, default_value = "web")]
+        profile: String,
+        /// Mirror Codewhale full access as DSH danger-full-access (only when Codewhale itself runs with full access)
+        #[arg(long, default_value_t = false)]
+        allow_full_access: bool,
+        /// Also export the Codewhale skin stylesheet (unsupported DSH overlay; never injected)
+        #[arg(long, default_value_t = false)]
+        skin: bool,
+    },
+    /// Write the overlay and receipt under $CODEWHALE_HOME/integrations/dsh
+    Connect {
+        #[arg(long, default_value = "web")]
+        profile: String,
+        #[arg(long, default_value_t = false)]
+        allow_full_access: bool,
+        #[arg(long, default_value_t = false)]
+        skin: bool,
+        /// Confirm the disclosed plan without an interactive prompt (required when stdin is not a terminal)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Re-derive the overlay from the current Codewhale route
+    Update {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = false)]
+        allow_full_access: bool,
+        /// Keep/refresh the skin export (defaults to the previous choice)
+        #[arg(long)]
+        skin: Option<bool>,
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Run dsh with the Codewhale overlay; extra args go to the dsh app
+    Launch {
+        /// Override the recorded profile (`web` or `headless`)
+        #[arg(long)]
+        profile: Option<String>,
+        /// Print the exact command instead of running it
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Keep the overlay but refuse launches
+    Disable,
+    /// Allow launches again
+    Enable,
+    /// Delete Codewhale-owned files only; $DSH_HOME is never touched
+    Remove {
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+}
+
 #[derive(Args, Debug, Clone)]
 struct FeaturesCli {
     #[command(subcommand)]
@@ -2099,6 +2182,13 @@ async fn run_async_main_dispatch(
             Commands::Features(command) => {
                 let config = load_config_from_cli(&cli)?;
                 run_features_command(&config, command)
+            }
+            Commands::Integrations { command } => {
+                // Identity derivation is structural: credential-bearing
+                // environment values never enter this path.
+                let config = load_structural_config_from_cli(&cli)?;
+                let workspace = resolve_workspace(&cli);
+                integrations::cli::run(&config, &workspace, command)
             }
             Commands::Sandbox(args) => run_sandbox_command(args),
             Commands::Serve(args) => {
@@ -4194,6 +4284,15 @@ async fn run_doctor(
         println!("  {line}");
     }
 
+    println!();
+    println!(
+        "{}",
+        "DeepSeek Harness integration (read-only detection):".bold()
+    );
+    for line in doctor_dsh_integration_lines(config, workspace) {
+        println!("  {line}");
+    }
+
     let credential = resolve_credential_diagnostic(config);
     let source_label = match credential.source {
         ApiKeySource::ConfigDeclared => "literal config value structurally present",
@@ -5998,12 +6097,66 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
     })
 }
 
+fn doctor_dsh_integration_report(
+    config: &Config,
+    workspace: &Path,
+) -> anyhow::Result<crate::integrations::dsh::DshStatusReport> {
+    use crate::integrations::dsh;
+    let paths = dsh::DshPaths::from_process()?;
+    let detection = dsh::detect::detect(&dsh::DetectEnv::from_process(), &dsh::ProcessRunner);
+    let identity = dsh::codewhale_route_identity(config, workspace);
+    dsh::compute_status(&paths, detection, identity, false)
+}
+
+fn doctor_dsh_integration_lines(config: &Config, workspace: &Path) -> Vec<String> {
+    match doctor_dsh_integration_report(config, workspace) {
+        Ok(report) => {
+            let mut lines = vec![
+                format!("state: {}", report.state.label()),
+                crate::integrations::dsh::status_line(&report),
+                format!(
+                    "owned files: {} (overlay {})",
+                    crate::utils::display_path(&report.paths_root),
+                    if report.overlay_present {
+                        "present"
+                    } else {
+                        "absent"
+                    }
+                ),
+            ];
+            if !report.shadowing_namespaces.is_empty() {
+                lines.push(format!(
+                    "dsh settings.yaml sections that can shadow the overlay: {}",
+                    report.shadowing_namespaces.join(", ")
+                ));
+            }
+            lines
+        }
+        Err(error) => vec![format!("unavailable: {error}")],
+    }
+}
+
+fn doctor_dsh_integration_json(config: &Config, workspace: &Path) -> serde_json::Value {
+    match doctor_dsh_integration_report(config, workspace) {
+        Ok(report) => serde_json::json!({
+            "state": report.state.label(),
+            "summary": crate::integrations::dsh::status_line(&report),
+            "dsh_version": report.detection.version,
+            "compatibility": report.detection.compatibility.label(),
+            "overlay_present": report.overlay_present,
+            "shadowing_namespaces": report.shadowing_namespaces,
+        }),
+        Err(error) => serde_json::json!({ "state": "unavailable", "error": error.to_string() }),
+    }
+}
+
 fn doctor_external_credential_consent_statuses(
     config: &Config,
 ) -> Vec<codewhale_config::ExternalCredentialConsentStatus> {
     [
         crate::config::ApiProvider::OpenaiCodex,
         crate::config::ApiProvider::Xai,
+        crate::config::ApiProvider::Deepseek,
     ]
     .into_iter()
     .filter_map(|provider| config.external_credential_consent_status(provider))
@@ -6423,6 +6576,7 @@ fn run_doctor_json(
             "availability": credential.availability.label(),
         },
         "external_credentials": doctor_external_credential_consent_json(config),
+        "dsh_integration": doctor_dsh_integration_json(config, workspace),
         "base_url": crate::doctor::structural_url_authority(&api_target.base_url),
         "default_text_model": api_target.model,
         // DGF-01: this report describes the route a session launched now

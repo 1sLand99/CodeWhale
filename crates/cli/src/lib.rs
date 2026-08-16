@@ -355,6 +355,8 @@ lifecycle generation you observed.
     Mcp(TuiPassthroughArgs),
     /// Inspect feature flags.
     Features(TuiPassthroughArgs),
+    /// Connect third-party harnesses through Codewhale (e.g. `integrations dsh status`).
+    Integrations(TuiPassthroughArgs),
     /// Run a local Codewhale server.
     #[command(after_help = "\
 Forwarded serve options:
@@ -1845,6 +1847,14 @@ fn run() -> Result<()> {
         Some(Commands::Mcp(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("mcp", args))
+        }
+        Some(Commands::Integrations(args)) => {
+            // Integrations only need route *identity*. Do not recover or
+            // export a stored credential just to plan/launch a third-party
+            // harness: it resolves its own keys from its own environment.
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("integrations", args))
         }
         Some(Commands::Features(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
