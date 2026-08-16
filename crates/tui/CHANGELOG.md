@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- TUI prose — user messages, assistant answers, and reasoning/thinking —
+  now wraps at the full content width on wide terminals, matching
+  tool/status cells, instead of stopping at a 105-column rail that left a
+  dead right margin on ultrawide displays (#5436).
+
+### Added
+
+- `[transcript] prose_measure` (positive integer, optional): caps prose
+  wrap at N columns for owners who want a bounded reading measure on
+  ultrawide terminals. `0` or absent keeps the full width; negative or
+  non-integer values are rejected with a clear config error. Tool, diff,
+  and status cells never inherit the cap (#5436).
+
 ## [0.9.8] - 2026-08-16
 
 Codewhale v0.9.8 ships the remaining assigned finish. Remaining web
