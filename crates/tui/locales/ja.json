@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "{agent} に届けられませんでした: {reason}",
   "FooterHintForAgents": "エージェント",
   "FooterHintToManage": "管理",
-  "AgentRailQueuedCount": "{count} 件キュー"
+  "AgentRailQueuedCount": "{count} 件キュー",
+  "GoalReceiptSet": "目標を設定: 「{objective}」 · /goal で進捗表示 · /goal pause または /goal clear で停止",
+  "GoalStatusIdleHint": "現在は実行中ではありません — メッセージを送るか /goal resume で続行"
 }

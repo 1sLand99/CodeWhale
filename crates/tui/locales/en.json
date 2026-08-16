@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Could not deliver to {agent}: {reason}",
   "FooterHintForAgents": "for agents",
   "FooterHintToManage": "to manage",
-  "AgentRailQueuedCount": "{count} queued"
+  "AgentRailQueuedCount": "{count} queued",
+  "GoalReceiptSet": "Goal set: \"{objective}\" · /goal shows progress · /goal pause or /goal clear stops it",
+  "GoalStatusIdleHint": "not running now — send a message or /goal resume to continue"
 }

@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Tidak dapat mengirim ke {agent}: {reason}",
   "FooterHintForAgents": "agen",
   "FooterHintToManage": "kelola",
-  "AgentRailQueuedCount": "{count} antre"
+  "AgentRailQueuedCount": "{count} antre",
+  "GoalReceiptSet": "Tujuan ditetapkan: \"{objective}\" · /goal menampilkan progres · /goal pause atau /goal clear menghentikannya",
+  "GoalStatusIdleHint": "tidak sedang berjalan — kirim pesan atau /goal resume untuk melanjutkan"
 }

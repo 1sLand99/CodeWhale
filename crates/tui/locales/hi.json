@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "{agent} तक नहीं पहुँचाया जा सका: {reason}",
   "FooterHintForAgents": "एजेंट",
   "FooterHintToManage": "प्रबंधन",
-  "AgentRailQueuedCount": "{count} कतार में"
+  "AgentRailQueuedCount": "{count} कतार में",
+  "GoalReceiptSet": "लक्ष्य सेट: \"{objective}\" · /goal प्रगति दिखाता है · /goal pause या /goal clear इसे रोकता है",
+  "GoalStatusIdleHint": "अभी नहीं चल रहा — जारी रखने के लिए संदेश भेजें या /goal resume"
 }

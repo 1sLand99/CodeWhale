@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "{agent}에게 전달할 수 없습니다: {reason}",
   "FooterHintForAgents": "에이전트",
   "FooterHintToManage": "관리",
-  "AgentRailQueuedCount": "{count}개 대기"
+  "AgentRailQueuedCount": "{count}개 대기",
+  "GoalReceiptSet": "목표 설정: \"{objective}\" · /goal 로 진행 상황 확인 · /goal pause 또는 /goal clear 로 중지",
+  "GoalStatusIdleHint": "지금은 실행 중이 아님 — 메시지를 보내거나 /goal resume 로 계속"
 }

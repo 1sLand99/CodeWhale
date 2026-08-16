@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Impossible de transmettre à {agent} : {reason}",
   "FooterHintForAgents": "agents",
   "FooterHintToManage": "gérer",
-  "AgentRailQueuedCount": "{count} en file"
+  "AgentRailQueuedCount": "{count} en file",
+  "GoalReceiptSet": "Objectif défini : « {objective} » · /goal affiche la progression · /goal pause ou /goal clear l'arrête",
+  "GoalStatusIdleHint": "à l'arrêt pour l'instant — envoyez un message ou /goal resume pour continuer"
 }

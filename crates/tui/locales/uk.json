@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Не вдалося доставити {agent}: {reason}",
   "FooterHintForAgents": "агенти",
   "FooterHintToManage": "керування",
-  "AgentRailQueuedCount": "{count} у черзі"
+  "AgentRailQueuedCount": "{count} у черзі",
+  "GoalReceiptSet": "Ціль задано: «{objective}» · /goal показує прогрес · /goal pause або /goal clear зупиняє",
+  "GoalStatusIdleHint": "зараз не виконується — надішліть повідомлення або /goal resume, щоб продовжити"
 }

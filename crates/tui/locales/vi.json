@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Không thể gửi tới {agent}: {reason}",
   "FooterHintForAgents": "agent",
   "FooterHintToManage": "quản lý",
-  "AgentRailQueuedCount": "{count} đang chờ"
+  "AgentRailQueuedCount": "{count} đang chờ",
+  "GoalReceiptSet": "Đã đặt mục tiêu: \"{objective}\" · /goal hiển thị tiến độ · /goal pause hoặc /goal clear để dừng",
+  "GoalStatusIdleHint": "hiện không chạy — gửi tin nhắn hoặc /goal resume để tiếp tục"
 }

@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "無法傳送給 {agent}：{reason}",
   "FooterHintForAgents": "代理",
   "FooterHintToManage": "管理",
-  "AgentRailQueuedCount": "{count} 則排隊"
+  "AgentRailQueuedCount": "{count} 則排隊",
+  "GoalReceiptSet": "已設定目標：「{objective}」 · /goal 查看進度 · /goal pause 或 /goal clear 停止",
+  "GoalStatusIdleHint": "目前未執行 — 傳送訊息或 /goal resume 以繼續"
 }

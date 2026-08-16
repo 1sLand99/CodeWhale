@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "Zustellung an {agent} nicht möglich: {reason}",
   "FooterHintForAgents": "Agenten",
   "FooterHintToManage": "verwalten",
-  "AgentRailQueuedCount": "{count} eingereiht"
+  "AgentRailQueuedCount": "{count} eingereiht",
+  "GoalReceiptSet": "Ziel gesetzt: \"{objective}\" · /goal zeigt den Fortschritt · /goal pause oder /goal clear beendet es",
+  "GoalStatusIdleHint": "läuft gerade nicht — Nachricht senden oder /goal resume zum Fortsetzen"
 }

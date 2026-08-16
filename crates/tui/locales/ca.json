@@ -1469,5 +1469,7 @@
   "AgentFocusFollowUpFailed": "No s'ha pogut lliurar a {agent}: {reason}",
   "FooterHintForAgents": "agents",
   "FooterHintToManage": "gestionar",
-  "AgentRailQueuedCount": "{count} a la cua"
+  "AgentRailQueuedCount": "{count} a la cua",
+  "GoalReceiptSet": "Objectiu establert: \"{objective}\" · /goal mostra el progrés · /goal pause o /goal clear l'atura",
+  "GoalStatusIdleHint": "no s'està executant — envia un missatge o /goal resume per continuar"
 }
