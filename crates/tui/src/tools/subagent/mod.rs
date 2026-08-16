@@ -395,7 +395,7 @@ const FLEET_ROLE_SCHEMA_VALUES: [&str; 8] = [
     "consultant",
     "custom",
 ];
-const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. worker: full tool access for multi-step tasks. scout: fast read-only exploration. planner: analysis-only planning. reviewer: reads and grades code. builder: lands focused code changes. verifier: runs tests/validation gates and reports evidence. consultant: read-only high-reasoning counsel for judgement calls and design critique. custom: exactly the tools listed in allowed_tools.";
+const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. worker: full tool access for multi-step tasks. scout: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. builder: lands focused code changes. verifier: runs tests/validation gates and reports evidence. consultant: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture.";
 
 // === Types ===
 
@@ -434,7 +434,8 @@ pub enum FleetRole {
     Worker,
     /// Fast exploration - read-only tools for codebase search.
     Scout,
-    /// Planning - analysis tools only for architectural planning.
+    /// Planning — grounded strategy. Reads the workspace and the web and
+    /// may run classifier-bounded shell probes; never mutates.
     Planner,
     /// Code review - read + analysis tools.
     Reviewer,
@@ -452,12 +453,14 @@ pub enum FleetRole {
     /// for guidance, judgement calls, and design critique (#4752).
     ///
     /// Read-only and shell-less by construction: a Consultant reasons about the
-    /// code and says what it thinks. It is distinct from `Reviewer`, which
-    /// grades a specific change against a standard, and from `Planner`, which
-    /// produces a plan to execute. A Consultant answers "what should we do here,
-    /// and what are we not seeing".
+    /// code (and may read the web to ground that counsel) and says what it
+    /// thinks. It is distinct from `Reviewer`, which grades a specific change
+    /// against a standard, and from `Planner`, which produces a plan to execute.
+    /// A Consultant answers "what should we do here, and what are we not seeing".
     Consultant,
-    /// Custom tool access defined at spawn time.
+    /// Custom tool access defined at spawn time. Inherits the parent's
+    /// write/network/shell ceiling and is narrowed by the explicit tool list
+    /// or an explicit write_authority, never by a silent lock-down.
     Custom,
 }
 
@@ -1460,8 +1463,9 @@ fn worker_profile_for_spawn(
     custom_write_authority: bool,
 ) -> WorkerRuntimeProfile {
     let mut requested = WorkerRuntimeProfile::for_role(agent_type.clone());
-    // Custom starts locked down, but an explicit bounded write authority may
-    // deliberately open only the posture needed by its explicit tool list.
+    // Custom inherits the parent's effective posture by default (its explicit
+    // tool list is the narrowing). The bounded write authority a spawning call
+    // may pass is kept as an explicit, redundant grant for older callers.
     // Parent intersection below remains the hard ceiling.
     if *agent_type == FleetRole::Custom && custom_write_authority {
         requested.permissions.write = true;
@@ -7569,7 +7573,7 @@ impl ToolSpec for AgentTool {
         concat!(
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
-            "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (analysis-only), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (exactly allowed_tools). ",
+            "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
             "profile runs the child as a named Fleet profile (roster member) — its role posture, model route, and instruction overlay — so pass a profile only when the task needs that member and never pass model alongside it. ",
             "max_depth caps how deep the child may spawn its own descendants (it can only narrow the inherited budget). workspace_policy=shared (default) runs in the parent checkout; worktree=true (or workspace_policy=worktree) gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) and exact_files (individual files) so parallel children claim disjoint scope. ",
@@ -13319,8 +13323,10 @@ impl SubAgentToolRegistry {
         // has a full shell.
         let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
-        if matches!(&agent_type, FleetRole::Scout | FleetRole::Reviewer)
-            && child_shell.allows_shell()
+        if matches!(
+            &agent_type,
+            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+        ) && child_shell.allows_shell()
         {
             child_shell = ShellPolicy::ReadOnly;
         }
@@ -13801,8 +13807,9 @@ impl SubAgentToolRegistry {
     /// Whether this child may surface and dispatch the canonical lowercase
     /// `bash` tool under the read-only inspection posture.
     ///
-    /// Scout and Reviewer keep exactly one shell entry point — canonical
-    /// `bash` — whose concrete calls the strict read-only classifier bounds.
+    /// Scout, Reviewer, and Planner keep exactly one shell entry point —
+    /// canonical `bash` — whose concrete calls the strict read-only
+    /// classifier bounds.
     /// Catalog visibility and dispatch authorization consult this same
     /// predicate, so a tool that appears on the wire can always be called and
     /// one that is denied never appears.
@@ -13822,7 +13829,10 @@ impl SubAgentToolRegistry {
     /// first-turn catalog actually offers is bounded by the classifier.
     fn allows_bounded_readonly_bash(&self, name: &str) -> bool {
         name == "bash"
-            && matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+            && matches!(
+                &self.agent_type,
+                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+            )
             && self.runtime_profile.shell != crate::worker_profile::ShellPolicy::None
     }
 
@@ -13964,7 +13974,10 @@ impl SubAgentToolRegistry {
         // Visibility and dispatch consult the same capability guard. These
         // representative calls let a read-only bash schema survive catalog
         // shaping without treating an empty input as arbitrary shell authority.
-        if !matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer) {
+        if !matches!(
+            &self.agent_type,
+            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+        ) {
             return None;
         }
         match name {
@@ -14826,6 +14839,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
 const PLAN_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet planner (role: `planner`). Your job is to produce a grounded, prioritized plan, not patches.\n",
     "Read enough code to avoid guessing; each step names its artifact and verification.\n",
+    "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
     "Use todo_write for concrete To-do progress; explain key trade-offs in the plan you return.\n",
     "CHANGES should list plan artifacts only, not future speculative edits.\n\n"
 );
@@ -14871,7 +14885,7 @@ const WRITE_CHILD_VERIFY_CONTRACT: &str = concat!(
 
 const CONSULTANT_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet consultant (role: `consultant`). You are asked for judgement, not for labour.\n",
-    "You are read-only and have no shell. Read what you need, then give counsel.\n",
+    "You are read-only and have no shell. Read the workspace and the public web to ground your advice, then give counsel.\n",
     "Lead with your actual recommendation, not a survey of options. If you would do something different from what was proposed, say so first and say why.\n",
     "Name what the asker appears not to have considered: the failure mode, the constraint, the cheaper alternative, the reason this is harder than it looks.\n",
     "Distinguish what you verified by reading from what you are inferring. An unverified hunch is still useful — labelled as one.\n",

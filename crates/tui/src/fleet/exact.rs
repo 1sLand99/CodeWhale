@@ -504,7 +504,15 @@ impl ChildAuthority {
         authority.posture_role = posture_role_for_member(role, authority.ceiling);
         let bounded_inspection_role = matches!(
             role.trim().to_ascii_lowercase().as_str(),
-            "scout" | "explore" | "explorer" | "reviewer" | "review"
+            "scout"
+                | "explore"
+                | "explorer"
+                | "reviewer"
+                | "review"
+                | "planner"
+                | "plan"
+                | "planning"
+                | "awaiter"
         );
         if bounded_inspection_role && authority.ceiling.shell != ShellCeiling::None {
             // Read-only inspection needs ordinary `git`/`rg`/`gh ... view|list` inspection.
@@ -601,7 +609,14 @@ fn canonical_role_within_ceiling(role: &str, ceiling: PermissionCeiling) -> Opti
         crate::worker_profile::ShellPolicy::ReadOnly => ShellCeiling::ReadOnly,
         crate::worker_profile::ShellPolicy::Full => ShellCeiling::Full,
     };
-    if (posture.permissions.write && !ceiling.write) || role_shell > ceiling.shell {
+    if posture.permissions.write && !ceiling.write {
+        return None;
+    }
+    // Full-shell roles (verifier, reviewer, scout) do not fit a narrower
+    // ceiling — their job needs that shell. A read-only probe default
+    // (planner) intersects with the ceiling instead of flattening the
+    // named role into scout.
+    if role_shell == ShellCeiling::Full && role_shell > ceiling.shell {
         return None;
     }
     Some(canonical.as_str())
@@ -1941,7 +1956,7 @@ mod shell_ceiling_tests {
 
     #[test]
     fn bounded_inspection_role_keeps_only_classifier_bounded_bash() {
-        for role in ["scout", "reviewer"] {
+        for role in ["scout", "reviewer", "planner"] {
             let authority = ChildAuthority::clamp_for_role(
                 role,
                 ceiling(false, ShellCeiling::ReadOnly),
@@ -1970,7 +1985,7 @@ mod shell_ceiling_tests {
             }
         }
 
-        for role in ["planner", "consultant", "verifier"] {
+        for role in ["consultant", "verifier"] {
             let authority = ChildAuthority::clamp_for_role(
                 role,
                 ceiling(false, ShellCeiling::ReadOnly),
@@ -1997,6 +2012,19 @@ mod shell_ceiling_tests {
                 .any(|name| name.eq_ignore_ascii_case("Bash")),
             "a named Scout may not turn a parent shell-off ceiling into ReadOnly"
         );
+        let planner_parent_shell_off = ChildAuthority::clamp_for_role(
+            "planner",
+            ceiling(false, ShellCeiling::ReadOnly),
+            ceiling(true, ShellCeiling::None),
+        );
+        assert!(
+            planner_parent_shell_off
+                .disallowed_tools
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Bash")),
+            "a named planner may not turn a parent shell-off ceiling into ReadOnly"
+        );
+        assert_eq!(planner_parent_shell_off.posture_role, "planner");
         assert_eq!(
             session_shell_ceiling(crate::worker_profile::ShellPolicy::Full, false),
             ShellCeiling::None
@@ -2385,6 +2413,12 @@ permissions = "read_only"
         assert_eq!(posture_role_for_member("reviewer", read_only), "scout");
         assert_eq!(posture_role_for_member("reviewer", read_write), "reviewer");
         assert_eq!(posture_role_for_member("planner", read_only), "planner");
+        let analyst = PermissionCeiling::preset("analyst").expect("preset");
+        assert_eq!(
+            posture_role_for_member("planner", analyst),
+            "planner",
+            "a named planner under a no-shell ceiling stays planner; shell intersects"
+        );
         assert_eq!(
             posture_role_for_member("consultant", read_only),
             "consultant"

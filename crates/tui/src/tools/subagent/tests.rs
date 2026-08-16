@@ -551,10 +551,13 @@ fn declared_read_only_write_roles_derive_without_mutating_shell() {
 }
 
 #[test]
-fn custom_runtime_opens_only_for_explicit_bounded_write_authority() {
+fn custom_runtime_inherits_the_parent_posture_and_explicit_authority_is_a_no_op_superset() {
     let runtime = stub_runtime().background_runtime();
     let tools = AgentWorkerToolProfile::Explicit(vec!["write_file".to_string()]);
-    let locked = worker_profile_for_spawn(
+    // A custom worker is narrowed by its explicit tool list and by the
+    // spawning call, not by a silent locked-down default: it inherits the
+    // parent's effective posture (write, network, shell) as its ceiling.
+    let inherited = worker_profile_for_spawn(
         &runtime,
         &FleetRole::Custom,
         &tools,
@@ -562,8 +565,9 @@ fn custom_runtime_opens_only_for_explicit_bounded_write_authority() {
         None,
         false,
     );
-    assert!(!locked.permissions.write);
-    assert_eq!(locked.shell, ShellPolicy::None);
+    assert!(inherited.permissions.write);
+    assert!(inherited.permissions.network);
+    assert_eq!(inherited.shell, ShellPolicy::Full);
 
     let opened = worker_profile_for_spawn(
         &runtime,
@@ -5777,7 +5781,8 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
     // Only Full-shell roles may run shell (Required) tools. Scout/reviewer
     // now carry the read-only inspection posture (full shell authority, bounded verification
     // surface; raw shell still requires write and stays denied by the clamp),
-    // so they join verifier/builder/worker. Planner stays shell-less.
+    // so they join verifier/builder/worker. Planner's declared posture is
+    // read-only probes (Auto-classified bash), not Required/raw shell.
     for role in [
         FleetRole::Verifier,
         FleetRole::Builder,
@@ -5792,7 +5797,7 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
     }
     assert!(
         !role_posture_permits(&FleetRole::Planner, ApprovalRequirement::Required),
-        "Planner must not run shell tools"
+        "Planner must not run raw/Required shell; read-only probes are Auto"
     );
 
     // Custom passes the role-only check; its explicit allowlist, bounded write
@@ -6303,6 +6308,9 @@ fn every_named_role_has_one_complete_capability_based_surface() {
             expected.insert("pandoc_convert".to_string());
         }
 
+        if role == FleetRole::Planner {
+            expected.insert("bash".to_string());
+        }
         assert_eq!(names, expected, "{role:?} visible surface drifted");
     }
 }
@@ -7185,6 +7193,60 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
 }
 
 #[tokio::test]
+async fn planner_exposes_and_dispatches_read_only_bash_probes() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
+    seed_read_only_role_deny_list(&mut runtime);
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Planner,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    let names = tool_names(registry.tools_for_model(&FleetRole::Planner));
+    assert!(
+        names.contains("bash"),
+        "planner keeps read-only bash probes"
+    );
+    assert!(names.contains("Git"), "planner keeps the Git family");
+    assert!(
+        !names.contains("Run"),
+        "planner must not gain the verification surface"
+    );
+    for command in ["pwd", "git status --short", "rg needle crates"] {
+        assert!(
+            registry
+                .envelope_refusal("bash", &json!({"command": command}))
+                .is_none(),
+            "planner should admit {command}"
+        );
+    }
+    for command in ["rm -rf crates", "git push origin main", "bash -lc 'id'"] {
+        assert!(
+            registry
+                .envelope_refusal("bash", &json!({"command": command}))
+                .is_some(),
+            "planner must refuse {command}"
+        );
+    }
+    let sentinel = "PLANNER_PROBE_SENTINEL";
+    std::fs::write(tmp.path().join("sentinel.txt"), sentinel).expect("sentinel");
+    let output = registry
+        .execute(
+            "agent_planner",
+            "bash",
+            json!({"command": "cat sentinel.txt"}),
+        )
+        .await
+        .expect("planner must dispatch a bounded read");
+    assert_eq!(output, sentinel);
+}
+
+#[tokio::test]
 async fn scout_shell_respects_parent_shell_and_network_ceilings() {
     let tmp = tempdir().expect("tempdir");
     let mut shell_off =
@@ -7234,11 +7296,7 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
         .to_string();
     assert!(error.contains("no network capability"), "{error}");
 
-    for role in [
-        FleetRole::Planner,
-        FleetRole::Consultant,
-        FleetRole::Verifier,
-    ] {
+    for role in [FleetRole::Consultant, FleetRole::Verifier] {
         let mut runtime =
             stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
         runtime.context = ToolContext::new(tmp.path().to_path_buf());
@@ -7252,7 +7310,7 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
         );
         assert!(
             !tool_names(registry.tools_for_model(&role)).contains("bash"),
-            "{role:?} must not inherit the Scout-only bash catalog exception"
+            "{role:?} must not inherit the read-only inspection bash catalog"
         );
         if role == FleetRole::Verifier {
             assert!(
@@ -7385,10 +7443,13 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
                     "read-only role {role:?} keeps load_skill without gaining {denied}"
                 );
             }
-            // Scout/reviewer expose only canonical lowercase bash, whose
-            // concrete calls are reclassified. Planner is shell-less; verifier
-            // keeps its bounded Run surface but not raw bash.
-            if matches!(&role, FleetRole::Scout | FleetRole::Reviewer) {
+            // Scout/reviewer/planner expose only canonical lowercase bash,
+            // whose concrete calls are reclassified. Verifier keeps its
+            // bounded Run surface but not raw bash.
+            if matches!(
+                &role,
+                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+            ) {
                 assert!(names.contains("bash"), "{role:?} keeps read-only bash");
                 for denied in ["exec_shell", "task_shell_start"] {
                     assert!(
