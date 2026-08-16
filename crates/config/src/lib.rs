@@ -3790,6 +3790,7 @@ fn provider_passes_model_through(provider: ProviderKind) -> bool {
             | ProviderKind::Meta
             | ProviderKind::Xai
             | ProviderKind::Telecomjs
+            | ProviderKind::Edenai
             | ProviderKind::ModelstudioTokenPlan
             | ProviderKind::ModelstudioTokenPlanAnthropic
             | ProviderKind::ModelstudioCodingPlan
@@ -4703,6 +4704,10 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
                 || provider::is_exact_ollama_cloud_route(provider, base_url)
         }
         ProviderKind::OllamaCloud => provider::is_exact_ollama_cloud_route(provider, base_url),
+        ProviderKind::Edenai => matches!(
+            normalized.as_str(),
+            "https://api.edenai.run/v3" | "https://api.eu.edenai.run/v3"
+        ),
         // Custom routes have no Codewhale-owned official endpoint. The
         // descriptor URL is a schema placeholder, never a credential scope.
         ProviderKind::Custom => false,

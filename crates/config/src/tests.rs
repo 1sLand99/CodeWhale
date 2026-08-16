@@ -1166,6 +1166,9 @@ struct EnvGuard {
     telecomjs_api_key: Option<OsString>,
     telecomjs_base_url: Option<OsString>,
     telecomjs_model: Option<OsString>,
+    edenai_api_key: Option<OsString>,
+    edenai_base_url: Option<OsString>,
+    edenai_model: Option<OsString>,
     opencode_go_api_key: Option<OsString>,
     opencode_go_base_url: Option<OsString>,
     opencode_go_model: Option<OsString>,
@@ -1205,6 +1208,9 @@ impl EnvGuard {
             telecomjs_api_key: env::var_os("TELECOMJS_API_KEY"),
             telecomjs_base_url: env::var_os("TELECOMJS_BASE_URL"),
             telecomjs_model: env::var_os("TELECOMJS_MODEL"),
+            edenai_api_key: env::var_os("EDENAI_API_KEY"),
+            edenai_base_url: env::var_os("EDENAI_BASE_URL"),
+            edenai_model: env::var_os("EDENAI_MODEL"),
             opencode_go_api_key: env::var_os("OPENCODE_GO_API_KEY"),
             opencode_go_base_url: env::var_os("OPENCODE_GO_BASE_URL"),
             opencode_go_model: env::var_os("OPENCODE_GO_MODEL"),
@@ -1340,6 +1346,9 @@ impl EnvGuard {
             env::remove_var("TELECOMJS_API_KEY");
             env::remove_var("TELECOMJS_BASE_URL");
             env::remove_var("TELECOMJS_MODEL");
+            env::remove_var("EDENAI_API_KEY");
+            env::remove_var("EDENAI_BASE_URL");
+            env::remove_var("EDENAI_MODEL");
             env::remove_var("OPENCODE_GO_API_KEY");
             env::remove_var("OPENCODE_GO_BASE_URL");
             env::remove_var("OPENCODE_GO_MODEL");
@@ -1498,6 +1507,9 @@ impl Drop for EnvGuard {
             Self::restore_var("TELECOMJS_API_KEY", self.telecomjs_api_key.take());
             Self::restore_var("TELECOMJS_BASE_URL", self.telecomjs_base_url.take());
             Self::restore_var("TELECOMJS_MODEL", self.telecomjs_model.take());
+            Self::restore_var("EDENAI_API_KEY", self.edenai_api_key.take());
+            Self::restore_var("EDENAI_BASE_URL", self.edenai_base_url.take());
+            Self::restore_var("EDENAI_MODEL", self.edenai_model.take());
             Self::restore_var("OPENCODE_GO_API_KEY", self.opencode_go_api_key.take());
             Self::restore_var("OPENCODE_GO_BASE_URL", self.opencode_go_base_url.take());
             Self::restore_var("OPENCODE_GO_MODEL", self.opencode_go_model.take());
@@ -4754,6 +4766,66 @@ model = "glm-5.2"
 }
 
 #[test]
+fn edenai_resolves_named_chat_gateway_and_environment_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for alias in ["edenai", "eden-ai", "eden_ai"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Edenai));
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("Eden AI alias");
+        assert_eq!(parsed.provider, ProviderKind::Edenai);
+    }
+
+    let metadata = provider::resolve_provider("eden-ai").expect("Eden AI metadata");
+    assert_eq!(metadata.id(), "edenai");
+    assert_eq!(metadata.display_name(), "Eden AI");
+    assert_eq!(metadata.provider_config_key(), "edenai");
+    assert_eq!(metadata.default_base_url(), DEFAULT_EDENAI_BASE_URL);
+    assert_eq!(metadata.default_model(), DEFAULT_EDENAI_MODEL);
+    assert_eq!(metadata.env_vars(), &["EDENAI_API_KEY"]);
+    assert_eq!(
+        metadata.wire_policy(),
+        provider::WirePolicy::Fixed(provider::WireFormat::ChatCompletions)
+    );
+
+    let config: ConfigToml = toml::from_str(
+        r#"
+provider = "edenai"
+
+[providers.edenai]
+api_key = "eden-config-key"
+model = "anthropic/claude-sonnet-4-5"
+"#,
+    )
+    .expect("Eden AI provider table");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.provider, ProviderKind::Edenai);
+    assert_eq!(resolved.base_url, DEFAULT_EDENAI_BASE_URL);
+    assert_eq!(resolved.model, "anthropic/claude-sonnet-4-5");
+    assert_eq!(resolved.api_key.as_deref(), Some("eden-config-key"));
+    assert_eq!(
+        resolved.api_key_source,
+        Some(RuntimeApiKeySource::ConfigFile)
+    );
+
+    unsafe {
+        std::env::set_var("EDENAI_API_KEY", "eden-env-key");
+        std::env::set_var("EDENAI_BASE_URL", "https://api.eu.edenai.run/v3");
+        std::env::set_var("EDENAI_MODEL", "deepseek/deepseek-v4-flash");
+    }
+    let env_config = ConfigToml {
+        provider: ProviderKind::Edenai,
+        ..ConfigToml::default()
+    };
+    let resolved = env_config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://api.eu.edenai.run/v3");
+    assert_eq!(resolved.model, "deepseek/deepseek-v4-flash");
+    assert_eq!(resolved.api_key.as_deref(), Some("eden-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
+#[test]
 fn opencode_zen_configures_model_aware_provider_with_catalog_proof() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
@@ -4854,9 +4926,9 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 46);
+    assert_eq!(providers.len(), 47);
     // Catalog surface is one identity per vendor (no dual-wire / plan rows).
-    assert_eq!(ProviderKind::ALL.len(), 41);
+    assert_eq!(ProviderKind::ALL.len(), 42);
     assert!(ProviderKind::ALL.len() < providers.len());
 
     let mut ids = std::collections::BTreeSet::new();

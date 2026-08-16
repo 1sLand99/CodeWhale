@@ -334,7 +334,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 47] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 48] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -386,7 +386,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 46] = [
+    const FROM_KIND_LOOKUP: [Self; 47] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -8804,6 +8804,7 @@ pub(crate) fn provider_passes_model_through(provider: ApiProvider) -> bool {
             | ApiProvider::Meta
             | ApiProvider::Xai
             | ApiProvider::Telecomjs
+            | ApiProvider::Edenai
             | ApiProvider::ModelstudioTokenPlan
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlan

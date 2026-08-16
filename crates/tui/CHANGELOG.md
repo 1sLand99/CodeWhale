@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/title <name>` is a discoverable alias for `/rename`; both update the one
   session name shown in the picker, composer, and terminal tab. Control and
   bidi-format characters are stripped before any name reaches OSC 0.
+- Eden AI is a named OpenAI-compatible Chat Completions provider (`edenai`,
+  aliases `eden-ai` / `eden_ai`) with `EDENAI_API_KEY`, global and EU base-URL
+  overrides, a live provider-scoped model catalog, and
+  `deepseek/deepseek-v4-pro` as the verified default. Generic reasoning fields
+  stay omitted because Eden AI routes multiple upstream model families.
 - Children (sub-agents and Fleet workers) inherit the session's permission
   posture faithfully: Auto-Review's deterministic floor and model guardian
   decide a worker's held calls (fail closed when unavailable, never a

@@ -1654,9 +1654,11 @@ pub async fn verify_provider_api_key(
         // malformed; in that case failure-preserving catalog semantics keep the
         // existing/static rows.
         let body = response.text().await.unwrap_or_default();
-        if provider == ApiProvider::Telecomjs
-            && let Ok(offerings) = telecomjs_catalog_offerings_from_body(
+        if matches!(provider, ApiProvider::Telecomjs | ApiProvider::Edenai)
+            && let Some(kind) = provider.kind()
+            && let Ok(offerings) = named_gateway_catalog_offerings_from_body(
                 &body,
+                kind,
                 provider.as_str(),
                 &base_url_fingerprint(base_url),
                 now_unix(),
@@ -2184,7 +2186,21 @@ impl DeepSeekClient {
                 })
                 .collect()
         } else if provider == "telecomjs" {
-            telecomjs_catalog_offerings_from_body(&body, &provider, &fingerprint, fetched_at)?
+            named_gateway_catalog_offerings_from_body(
+                &body,
+                codewhale_config::ProviderKind::Telecomjs,
+                &provider,
+                &fingerprint,
+                fetched_at,
+            )?
+        } else if provider == "edenai" {
+            named_gateway_catalog_offerings_from_body(
+                &body,
+                codewhale_config::ProviderKind::Edenai,
+                &provider,
+                &fingerprint,
+                fetched_at,
+            )?
         } else {
             let models = apply_provider_model_cutline(
                 self.api_provider,
@@ -2269,7 +2285,7 @@ impl DeepSeekClient {
         let provider = config.api_provider();
         // Only refresh for providers that serve their own model list and are
         // not already covered by the Models.dev catalog.
-        if !matches!(provider, ApiProvider::Telecomjs) {
+        if !matches!(provider, ApiProvider::Telecomjs | ApiProvider::Edenai) {
             return;
         }
 
@@ -2909,12 +2925,13 @@ fn apply_provider_model_cutline(
     models
 }
 
-/// Convert TelecomJS's bare `/models` response into truthful provider-scoped
+/// Convert a named gateway's `/models` response into truthful provider-scoped
 /// catalog rows. Matching model ids on other providers prove no capabilities,
 /// limits, or prices; only an explicit same-provider bundled row may enrich a
 /// live offering.
-fn telecomjs_catalog_offerings_from_body(
+fn named_gateway_catalog_offerings_from_body(
     body: &str,
+    kind: codewhale_config::ProviderKind,
     provider: &str,
     fingerprint: &str,
     fetched_at: u64,
@@ -2925,9 +2942,7 @@ fn telecomjs_catalog_offerings_from_body(
     }
 
     let bundled = codewhale_config::catalog::bundled_catalog_offerings();
-    let default_model_id = codewhale_config::ProviderKind::Telecomjs
-        .provider()
-        .default_model();
+    let default_model_id = kind.provider().default_model();
     Ok(models
         .into_iter()
         .map(|model| {
@@ -3181,7 +3196,6 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {}
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
-            | ApiProvider::Edenai
             | ApiProvider::XiaomiMimo
             | ApiProvider::Novita
             | ApiProvider::Siliconflow
@@ -3205,6 +3219,10 @@ pub(super) fn apply_reasoning_effort(
             // (qwen-max, deepseek-chat, gpt-4o, claude, etc.) accepts the same
             // reasoning dialect (#4188 review: verify against actual behavior).
             ApiProvider::Telecomjs => {}
+            // Eden AI documents `thinking` only for Anthropic Claude models.
+            // This gateway can route unrelated model families, so the generic
+            // provider must not inject a model-specific reasoning dialect.
+            ApiProvider::Edenai => {}
             // Model Studio (DashScope): its top-level controls are route- AND
             // model-specific, so the provider enum alone cannot decide them —
             // a custom `base_url` on the same identity is an arbitrary
@@ -3295,6 +3313,7 @@ pub(super) fn apply_reasoning_effort(
             // TelecomJS: see comment in the "off" branch above — the gateway's
             // Chat Completions API does not support reasoning_effort or thinking.
             ApiProvider::Telecomjs => {}
+            ApiProvider::Edenai => {}
             // Model Studio: see the "off" branch — the route- and model-aware
             // shaper in client::chat is the sole writer of these fields.
             ApiProvider::ModelstudioTokenPlan
@@ -3307,7 +3326,6 @@ pub(super) fn apply_reasoning_effort(
             // accept those directly.
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
-            | ApiProvider::Edenai
             | ApiProvider::Novita
             | ApiProvider::Together => {
                 let value = match normalized.as_str() {
@@ -3412,6 +3430,7 @@ pub(super) fn apply_reasoning_effort(
             // TelecomJS: see comment in the "off" branch above — the gateway's
             // Chat Completions API does not support reasoning_effort or thinking.
             ApiProvider::Telecomjs => {}
+            ApiProvider::Edenai => {}
             // Model Studio: see the "off" branch — the route- and model-aware
             // shaper in client::chat is the sole writer of these fields.
             ApiProvider::ModelstudioTokenPlan
@@ -3420,7 +3439,6 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::ModelstudioCodingPlanAnthropic => {}
             ApiProvider::Openrouter
             | ApiProvider::Orcarouter
-            | ApiProvider::Edenai
             | ApiProvider::Novita
             | ApiProvider::Together => {
                 body["reasoning_effort"] = json!("xhigh");
@@ -3744,7 +3762,9 @@ mod tests {
         tool_to_chat_for_base_url,
     };
     use crate::client::responses::build_responses_body;
-    use crate::config::{DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig};
+    use crate::config::{
+        DEFAULT_EDENAI_MODEL, DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig,
+    };
     use crate::models::{
         ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
         StreamEvent, Tool,
@@ -7967,6 +7987,15 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_edenai_does_not_guess_a_model_dialect() {
+        for effort in ["off", "low", "medium", "high", "max", "xhigh"] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(effort), ApiProvider::Edenai);
+            assert_eq!(body, json!({}), "unexpected Eden AI fields for {effort}");
+        }
+    }
+
+    #[test]
     fn moonshot_uses_codewhale_user_agent_not_kimi_cli_identity() {
         let user_agent = client_user_agent(ApiProvider::Moonshot);
 
@@ -8906,6 +8935,23 @@ mod tests {
         .expect("TelecomJS client")
     }
 
+    fn edenai_client_for(server: &MockServer) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        DeepSeekClient::new(&Config {
+            provider: Some("edenai".to_string()),
+            providers: Some(ProvidersConfig {
+                edenai: ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(format!("{}/v3", server.uri())),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Eden AI client")
+    }
+
     async fn mount_models_json(server: &MockServer, status: u16, body: serde_json::Value) {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
@@ -9081,6 +9127,46 @@ mod tests {
             .iter()
             .find(|offering| offering.wire_model_id == DEFAULT_TELECOMJS_MODEL)
             .expect("TelecomJS default row");
+        assert!(default.default_for_provider);
+    }
+
+    #[tokio::test]
+    async fn edenai_live_catalog_marks_the_default_and_keeps_unknowns_unclaimed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/models"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "synthetic/vendor-model"},
+                    {"id": DEFAULT_EDENAI_MODEL}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let delta = edenai_client_for(&server)
+            .fetch_catalog_delta()
+            .await
+            .expect("Eden AI catalog delta");
+        assert_eq!(delta.provider, "edenai");
+        assert_eq!(delta.offerings.len(), 2);
+
+        let unknown = delta
+            .offerings
+            .iter()
+            .find(|offering| offering.wire_model_id == "synthetic/vendor-model")
+            .expect("synthetic Eden AI row");
+        assert_eq!(unknown.canonical_model, None);
+        assert_eq!(unknown.reasoning, None);
+        assert_eq!(unknown.tool_call, None);
+        assert!(!unknown.default_for_provider);
+
+        let default = delta
+            .offerings
+            .iter()
+            .find(|offering| offering.wire_model_id == DEFAULT_EDENAI_MODEL)
+            .expect("Eden AI default row");
         assert!(default.default_for_provider);
     }
 

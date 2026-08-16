@@ -1692,7 +1692,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 46] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 47] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,

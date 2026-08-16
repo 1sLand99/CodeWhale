@@ -1297,6 +1297,7 @@ mod tests {
             "MODEL_API_KEY",
             "XAI_API_KEY",
             "TELECOMJS_API_KEY",
+            "EDENAI_API_KEY",
             "MODELSTUDIO_API_KEY",
             "DASHSCOPE_API_KEY",
             SECRET_BACKEND_ENV,
@@ -1848,6 +1849,19 @@ mod tests {
             "tokenhub",
         ] {
             assert_eq!(env_for(alias).as_deref(), Some("telecom-key"), "{alias}");
+        }
+
+        clear_known_envs();
+    }
+
+    #[test]
+    fn edenai_env_aliases_resolve() {
+        let _guard = env_lock();
+        clear_known_envs();
+        unsafe { std::env::set_var("EDENAI_API_KEY", "eden-key") };
+
+        for alias in ["edenai", "eden-ai", "eden_ai"] {
+            assert_eq!(env_for(alias).as_deref(), Some("eden-key"), "{alias}");
         }
 
         clear_known_envs();
