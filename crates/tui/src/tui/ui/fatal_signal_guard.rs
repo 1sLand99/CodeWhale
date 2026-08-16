@@ -36,6 +36,7 @@
 /// and minus every query (a dead process cannot read replies). Modes left
 /// over that a shell does not self-heal are the ones that poison input:
 /// mouse capture and the kitty keyboard stack get the full reset.
+#[cfg(unix)]
 const FATAL_RESTORE_BYTES: &[u8] = concat!(
     "\x1b[?2026l", // close any open DEC 2026 synchronized-update batch
     "\x1b[<1u",    // pop one kitty keyboard-enhancement stack level
@@ -54,7 +55,9 @@ const FATAL_RESTORE_BYTES: &[u8] = concat!(
 /// Absolute path of the append-only fatal-signal marker, fixed at install
 /// time (before any worker thread exists, after which it is never written
 /// again — a plain load from the signal handler).
+#[cfg(unix)]
 static MARKER_PATH: std::sync::OnceLock<Box<[u8; 4096]>> = std::sync::OnceLock::new();
+#[cfg(unix)]
 static MARKER_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Install the fatal-signal restore guard. POSIX only; no-op elsewhere.
@@ -203,6 +206,7 @@ unsafe fn install_handler(signal: libc::c_int) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn restore_bytes_cover_every_poisoning_mode() {
         // Input-poisoning modes first: mouse capture (all four DEC modes)
@@ -219,6 +223,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn restore_bytes_are_one_write_friendly() {
         // No interior NULs, ASCII-only escape program, reasonable size.
