@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A concrete route/offering output limit now outranks the conservative
+  8,192-token compatibility guess for an uncatalogued model. Routes that
+  publish no output limit remain fail-closed, documented model ceilings stay
+  authoritative, and a route limit can never raise the requested cap (#5460).
+
 ### Changed
 
 - TUI prose — user messages, assistant answers, and reasoning/thinking —
