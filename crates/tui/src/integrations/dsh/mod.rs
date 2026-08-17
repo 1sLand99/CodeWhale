@@ -21,6 +21,7 @@ pub(crate) mod bundle;
 pub(crate) mod detect;
 pub(crate) mod identity;
 pub(crate) mod receipt;
+pub(crate) mod scene;
 pub(crate) mod skin;
 
 #[cfg(test)]
@@ -168,7 +169,11 @@ fn client_or_patch_stale(
     disk_patch_sha256: Option<&str>,
     bundle: &bundle::DshBundleRecord,
 ) -> Option<String> {
-    if let Some(reason) = bundle::client_half_stale(&bundle.bundle_dir, record.skin_enabled) {
+    if let Some(reason) = bundle::client_half_stale(
+        &bundle.bundle_dir,
+        record.skin_enabled,
+        record.ocean_enabled,
+    ) {
         return Some(reason);
     }
     let overlay_text = overlay_bytes.and_then(|b| std::str::from_utf8(b).ok());
@@ -339,6 +344,9 @@ pub(crate) struct DshPlan {
     /// carries skin code; `skin_path` stays unset (no CSS export).
     pub(crate) skin: bool,
     pub(crate) skin_path: Option<PathBuf>,
+    /// Ambient ocean scene inside the bundle's client half; only meaningful
+    /// with `skin`. Default on; `update --ocean false` turns it off.
+    pub(crate) ocean: bool,
     pub(crate) profile: String,
     pub(crate) launch_command: String,
     pub(crate) env_exports: Vec<(String, String)>,
@@ -353,6 +361,7 @@ pub(crate) fn plan(
     profile: &str,
     allow_full_access: bool,
     skin: bool,
+    ocean: bool,
 ) -> Result<DshPlan> {
     let mapped = map_identity(identity, allow_full_access);
     let overlay_text = render_overlay(&mapped).ok_or_else(|| match &mapped.adapter {
@@ -382,6 +391,13 @@ pub(crate) fn plan(
             "Skin: Codewhale palette is applied through the bundle profile via overrideTokens (on by default for install-bundle). The --patch overlay path is unchanged; launch --profile web|headless stays overlay-only."
                 .to_string(),
         );
+        if ocean {
+            disclosures.push(format!(
+                "Ocean: an ambient canvas scene (whales, glyph fish, bubbles) is spliced into the bundle's client half and a few DSH background tokens become translucent so it shows through; `update --ocean false` turns it off, and in the browser `localStorage[\"{}\"] = \"off\"` or body class `{}` disables it per machine.",
+                scene::OCEAN_STORAGE_KEY,
+                scene::OCEAN_OFF_CLASS
+            ));
+        }
     }
     let env_exports = vec![(
         "DSH_PERMISSION_MODE".to_string(),
@@ -400,6 +416,7 @@ pub(crate) fn plan(
         receipt_path: paths.receipt.clone(),
         skin,
         skin_path: None,
+        ocean: skin && ocean,
         profile: profile.to_string(),
         launch_command,
         env_exports,
@@ -461,6 +478,7 @@ pub(crate) fn apply_plan(
                 &codewhale_version(),
                 &plan.overlay_text,
                 plan.skin,
+                plan.ocean,
             )?;
             b.patch_sha256 = sha.clone();
             b.package_version = bundle::bundle_version(&codewhale_version(), &sha);
@@ -481,6 +499,7 @@ pub(crate) fn apply_plan(
         skin_enabled: plan.skin,
         skin_path: None,
         skin_sha256: skin_sha256.clone(),
+        ocean_enabled: plan.ocean,
         disabled: false,
         bundle: bundle_record,
         identity: plan.mapped.clone(),
@@ -507,6 +526,7 @@ pub(crate) fn apply_plan(
             "identity": identity_summary(&plan.mapped),
             "permission_mode": plan.mapped.permission_mode.as_str(),
             "skin": plan.skin,
+            "ocean": plan.ocean,
         }),
     );
     Ok(record)
@@ -773,8 +793,15 @@ pub(crate) fn install_bundle(
     // install-bundle defaults the palette on; `update --skin false` is the
     // off switch. `connect --skin` records the same decision for a later update.
     let skin = true;
-    let patch_sha =
-        bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &overlay_text, skin)?;
+    // The ocean scene follows the recorded decision (default on).
+    let ocean = record.ocean_enabled;
+    let patch_sha = bundle::write_bundle(
+        &paths.bundle_dir,
+        &codewhale_version(),
+        &overlay_text,
+        skin,
+        ocean,
+    )?;
     let (app_source, outcomes) =
         match bundle::install_into_profile(runner, detection, app, &paths.bundle_dir) {
             Ok(ok) => ok,
@@ -811,6 +838,7 @@ pub(crate) fn install_bundle(
     record.skin_enabled = skin;
     record.skin_path = None;
     record.skin_sha256 = Some(skin::skin_tokens_sha256());
+    record.ocean_enabled = ocean;
     record.updated_at = now.clone();
     doc.push(DshReceiptEntry {
         event: DshReceiptEvent::InstallBundle,

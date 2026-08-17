@@ -351,7 +351,7 @@ fn credentialed_base_urls_are_refused_and_the_error_names_the_route() {
         "https://user:token@gateway/v1",
         WireProtocol::ChatCompletions,
     );
-    let error = super::plan(&paths, &detection, &id, "web", false, false)
+    let error = super::plan(&paths, &detection, &id, "web", false, false, true)
         .expect_err("credentialed URL must refuse");
     let text = format!("{error:#}");
     assert!(text.contains("custom/secret-gateway-model"), "{text}");
@@ -393,7 +393,7 @@ fn responses_dialect_route_is_carried_not_approximated() {
     // And it plans cleanly end-to-end.
     let (_dir, paths) = lab_paths();
     let detection = detection_ok();
-    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     assert!(plan.overlay_text.contains("api: openai-responses"));
     assert_eq!(plan.mapped.dsh_provider(), Some("codewhale-deepseek"));
 }
@@ -497,7 +497,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     assert!(matches!(report.state, DshIntegrationState::Detected { .. }));
     assert!(launch_spec(&report, None, &[], std::path::Path::new("/ws")).is_err());
 
-    let plan = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
     assert!(plan.overlay_text.contains("deepseek-official"));
     let record = apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     assert!(paths.overlay.is_file());
@@ -556,7 +556,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     assert!(err.contains("stale"), "{err}");
 
     // Update re-derives.
-    let plan2 = super::plan(&paths, &detection, &moved, "web", false, false).unwrap();
+    let plan2 = super::plan(&paths, &detection, &moved, "web", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan2, DshReceiptEvent::Update).unwrap();
     let report =
         compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
@@ -639,7 +639,7 @@ fn newer_dsh_reports_stale_version_but_stays_launchable() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let plan = super::plan(&paths, &detection, &id, "headless", false, false).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "headless", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     detection.version = Some("0.1.0-rc.9".to_string());
     detection.compatibility = classify_version("0.1.0-rc.9", true);
@@ -688,7 +688,7 @@ fn plan_discloses_shadowing_settings_namespaces() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     assert_eq!(plan.shadowing_namespaces, vec!["agent-default-model"]);
     assert!(plan.disclosures.iter().any(|d| d.contains("shadow")));
     assert!(
@@ -737,8 +737,8 @@ fn skin_flag_does_not_change_the_patch_overlay_bytes() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let on = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
-    let off = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let on = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
+    let off = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     assert_eq!(on.overlay_text, off.overlay_text);
     assert_eq!(on.overlay_sha256, off.overlay_sha256);
     assert!(on.skin);
@@ -749,8 +749,8 @@ fn skin_flag_does_not_change_the_patch_overlay_bytes() {
 
 #[test]
 fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
-    let a = skin::bundle_client_js();
-    let b = skin::bundle_client_js();
+    let a = skin::bundle_client_js(true);
+    let b = skin::bundle_client_js(true);
     assert_eq!(a, b);
     assert!(a.contains(&format!("codewhale-skin/{}", env!("CARGO_PKG_VERSION"))));
     assert!(a.contains(skin::SKIN_SOURCE));
@@ -943,7 +943,7 @@ fn bundle_availability_reports_pnpm_truthfully() {
 
 #[test]
 fn bundle_files_are_npm_shaped_and_carry_the_overlay_rows() {
-    let files = bundle::render_bundle_files("0.9.8", "- id: agent-default-model\n", false);
+    let files = bundle::render_bundle_files("0.9.8", "- id: agent-default-model\n", false, true);
     let names: Vec<_> = files.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         names,
@@ -965,7 +965,7 @@ fn bundle_files_are_npm_shaped_and_carry_the_overlay_rows() {
 #[test]
 fn bundle_files_with_skin_carry_client_half_and_insert_row() {
     let overlay = "- id: agent-default-model\n";
-    let files = bundle::render_bundle_files("0.9.8", overlay, true);
+    let files = bundle::render_bundle_files("0.9.8", overlay, true, true);
     let by_name: std::collections::BTreeMap<&str, &str> =
         files.iter().map(|(n, t)| (*n, t.as_str())).collect();
     let pkg: serde_json::Value = serde_json::from_str(by_name["package.json"]).unwrap();
@@ -987,7 +987,7 @@ fn bundle_files_with_skin_carry_client_half_and_insert_row() {
     assert!(by_name[bundle::BUNDLE_PATCH_FILE].ends_with(bundle::SKIN_INSERT_YAML));
     assert_eq!(
         by_name[bundle::BUNDLE_CLIENT_FILE],
-        skin::bundle_client_js()
+        skin::bundle_client_js(true)
     );
     assert_eq!(by_name[bundle::BUNDLE_INDEX_FILE], skin::bundle_index_js());
     assert!(!by_name[bundle::BUNDLE_CLIENT_FILE].contains("<style"));
@@ -1015,7 +1015,7 @@ fn install_update_remove_bundle_lifecycle_uses_documented_plugin_commands() {
 
     // Not connected → refused.
     assert!(install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).is_err());
-    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
 
     // pnpm missing → truthful refusal, nothing written.
@@ -1093,7 +1093,7 @@ fn install_update_remove_bundle_lifecycle_uses_documented_plugin_commands() {
         report.state,
         DshIntegrationState::StaleConfig { .. }
     ));
-    let plan2 = super::plan(&paths, &detection, &moved, "web", false, false).unwrap();
+    let plan2 = super::plan(&paths, &detection, &moved, "web", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan2, DshReceiptEvent::Update).unwrap();
     assert_eq!(
         std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml")).unwrap(),
@@ -1203,7 +1203,7 @@ fn failed_plugin_add_leaves_no_bundle_record_or_files() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let plan = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     let err = install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web)
         .unwrap_err()
@@ -1221,30 +1221,30 @@ fn client_half_stale_covers_present_absent_and_modified() {
     std::fs::create_dir_all(bundle_dir.join("lib")).unwrap();
 
     assert!(
-        bundle::client_half_stale(&bundle_dir, true)
+        bundle::client_half_stale(&bundle_dir, true, true)
             .unwrap()
             .contains("missing")
     );
-    assert!(bundle::client_half_stale(&bundle_dir, false).is_none());
+    assert!(bundle::client_half_stale(&bundle_dir, false, true).is_none());
 
     std::fs::write(bundle_dir.join(bundle::BUNDLE_CLIENT_FILE), "nope\n").unwrap();
     assert!(
-        bundle::client_half_stale(&bundle_dir, true)
+        bundle::client_half_stale(&bundle_dir, true, true)
             .unwrap()
             .contains("modified")
     );
     assert!(
-        bundle::client_half_stale(&bundle_dir, false)
+        bundle::client_half_stale(&bundle_dir, false, true)
             .unwrap()
             .contains("present")
     );
 
     std::fs::write(
         bundle_dir.join(bundle::BUNDLE_CLIENT_FILE),
-        skin::bundle_client_js(),
+        skin::bundle_client_js(true),
     )
     .unwrap();
-    assert!(bundle::client_half_stale(&bundle_dir, true).is_none());
+    assert!(bundle::client_half_stale(&bundle_dir, true, true).is_none());
 }
 
 #[test]
@@ -1266,7 +1266,7 @@ fn compute_status_reports_stale_config_when_client_half_drifts() {
         "https://api.deepseek.com",
         WireProtocol::ChatCompletions,
     );
-    let plan = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    let plan = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
     apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).unwrap();
 
@@ -1279,7 +1279,7 @@ fn compute_status_reports_stale_config_when_client_half_drifts() {
         report.state
     );
 
-    let plan_on = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    let plan_on = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
     apply_plan(&paths, &detection, &plan_on, DshReceiptEvent::Update).unwrap();
     let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
     assert!(
@@ -1296,7 +1296,7 @@ fn compute_status_reports_stale_config_when_client_half_drifts() {
         report.state
     );
 
-    let plan_off = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    let plan_off = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
     apply_plan(&paths, &detection, &plan_off, DshReceiptEvent::Update).unwrap();
     assert!(!client.exists());
     let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
@@ -1307,11 +1307,265 @@ fn compute_status_reports_stale_config_when_client_half_drifts() {
     );
 
     std::fs::create_dir_all(client.parent().unwrap()).unwrap();
-    std::fs::write(&client, skin::bundle_client_js()).unwrap();
+    std::fs::write(&client, skin::bundle_client_js(true)).unwrap();
     let report = compute_status(&paths, detection, Ok(id), false, avail()).unwrap();
     assert!(
         matches!(report.state, DshIntegrationState::StaleConfig { ref reason, .. } if reason.contains("present") && reason.contains("disabled")),
         "{:?}",
         report.state
     );
+}
+
+#[test]
+fn ocean_scene_fragment_mounts_a_canvas_and_honours_the_guards() {
+    let js = scene::bundle_scene_js();
+    assert!(js.contains("function createOcean(palette)"));
+    assert!(
+        !js.contains("\nexport "),
+        "plain script: spliced into client.js"
+    );
+    assert!(
+        !js.contains("\nimport "),
+        "plain script: spliced into client.js"
+    );
+    // mount: fixed full-viewport canvas below the app root, no hit-testing
+    assert!(js.contains("document.createElement(\"canvas\")"));
+    assert!(js.contains("position:fixed;inset:0"));
+    assert!(js.contains("z-index:-1"));
+    assert!(js.contains("pointer-events:none"));
+    assert!(js.contains("data-codewhale-ocean"));
+    // motion guards
+    assert!(js.contains("prefers-reduced-motion: reduce"));
+    assert!(js.contains("requestAnimationFrame"));
+    assert!(js.contains("visibilitychange"));
+    assert!(js.contains("devicePixelRatio"));
+    // off switch
+    assert!(js.contains(scene::OCEAN_STORAGE_KEY));
+    assert!(js.contains(scene::OCEAN_OFF_CLASS));
+    assert!(js.contains(&format!("window.{}", scene::OCEAN_WINDOW_HANDLE)));
+    // the cast
+    assert!(js.contains("traceWhale"));
+    assert!(js.contains("><>"));
+    assert!(js.contains("><o>"));
+    assert!(js.contains("drawBubbles"));
+    assert!(js.contains("drawSpout"));
+    assert!(!js.contains("eye"), "silhouette only, no eye dot");
+    assert_eq!(scene::scene_sha256().len(), 64);
+}
+
+#[test]
+fn ocean_palette_and_veil_come_from_the_skin_palette() {
+    let palette = scene::ocean_palette();
+    for scheme in ["light", "dark"] {
+        let p = &palette[scheme];
+        for key in ["base", "accent", "ink", "dim"] {
+            assert!(p[key].starts_with('#'), "{scheme}.{key} = {}", p[key]);
+        }
+    }
+    assert_ne!(palette["light"]["base"], palette["dark"]["base"]);
+    let tokens = skin::skin_tokens();
+    assert_eq!(palette["light"]["base"], tokens["--dsw-alias-bg-base"].0);
+    assert_eq!(palette["dark"]["base"], tokens["--dsw-alias-bg-base"].1);
+
+    let veil = scene::ocean_veil_tokens();
+    let base = &veil["--dsw-alias-bg-base"];
+    assert!(base.light.starts_with("rgba(") && base.light.ends_with(",0.55)"));
+    assert!(base.dark.starts_with("rgba(") && base.dark.ends_with(",0.55)"));
+    assert!(
+        veil["--dsw-specific-sidebar-fill"]
+            .light
+            .starts_with("rgba(")
+    );
+    // round-trips as the same {light, dark} shape overrideTokens validates
+    let json: serde_json::Value = serde_json::from_str(&scene::ocean_veil_json()).unwrap();
+    assert!(json["--dsw-alias-bg-base"]["light"].is_string());
+    assert!(json["--dsw-alias-bg-base"]["dark"].is_string());
+}
+
+#[test]
+fn bundle_client_js_splices_the_ocean_only_when_enabled() {
+    let on = skin::bundle_client_js(true);
+    let off = skin::bundle_client_js(false);
+    assert_ne!(on, off);
+    assert!(on.contains("const OCEAN = true;"));
+    assert!(on.contains("function createOcean(palette)"));
+    assert!(on.contains("const OCEAN_VEIL = "));
+    assert!(on.contains("const OCEAN_PALETTE = "));
+    assert!(on.contains("ocean.start()"));
+    assert!(on.contains("theme/change"));
+    assert!(on.contains("Object.assign({}, TOKENS, OCEAN_VEIL)"));
+    assert!(on.contains("prefers-reduced-motion: reduce"));
+    assert!(on.contains(scene::OCEAN_STORAGE_KEY));
+    // the whole fragment rides inside the factory (dsh serves only client.js)
+    assert!(
+        on.contains(
+            scene::bundle_scene_js()
+                .trim_end()
+                .replace('\n', "\n\t\t")
+                .as_str()
+        )
+    );
+    assert!(off.contains("const OCEAN = false;"));
+    assert!(!off.contains("traceWhale"));
+    assert!(!off.contains("prefers-reduced-motion"));
+    // both keep the palette override contract
+    for js in [&on, &off] {
+        assert!(js.contains("overrideTokens"));
+        assert!(js.contains("exports.inject = [\"theme\"];"));
+        assert!(js.contains("if (!ctx.theme) return;"));
+    }
+}
+
+#[test]
+fn bundle_manifest_records_the_ocean_decision_and_scene_sha() {
+    let overlay = "- id: agent-default-model\n";
+    let on = bundle::render_bundle_files("0.9.9", overlay, true, true);
+    let by_name: std::collections::BTreeMap<&str, &str> =
+        on.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let pkg: serde_json::Value = serde_json::from_str(by_name["package.json"]).unwrap();
+    assert_eq!(pkg["codewhale"]["ocean"], true);
+    assert_eq!(
+        pkg["codewhale"]["ocean_scene_sha256"],
+        scene::scene_sha256()
+    );
+    assert_eq!(
+        by_name[bundle::BUNDLE_CLIENT_FILE],
+        skin::bundle_client_js(true)
+    );
+    let names: Vec<_> = on.iter().map(|(n, _)| *n).collect();
+    assert!(
+        !names.iter().any(|n| n.contains("scene")),
+        "no separate scene file: {names:?}"
+    );
+
+    let off = bundle::render_bundle_files("0.9.9", overlay, true, false);
+    let by_name: std::collections::BTreeMap<&str, &str> =
+        off.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let pkg: serde_json::Value = serde_json::from_str(by_name["package.json"]).unwrap();
+    assert_eq!(pkg["codewhale"]["ocean"], false);
+    assert!(pkg["codewhale"].get("ocean_scene_sha256").is_none());
+    assert_eq!(
+        by_name[bundle::BUNDLE_CLIENT_FILE],
+        skin::bundle_client_js(false)
+    );
+
+    // skin off ⇒ ocean off regardless
+    let none = bundle::render_bundle_files("0.9.9", overlay, false, true);
+    let pkg: serde_json::Value = serde_json::from_str(&none[0].1).unwrap();
+    assert_eq!(pkg["codewhale"]["ocean"], false);
+}
+
+#[test]
+fn client_half_stale_distinguishes_ocean_on_and_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle_dir = dir.path().join("bundle");
+    std::fs::create_dir_all(bundle_dir.join("lib")).unwrap();
+    std::fs::write(
+        bundle_dir.join(bundle::BUNDLE_CLIENT_FILE),
+        skin::bundle_client_js(true),
+    )
+    .unwrap();
+    assert!(bundle::client_half_stale(&bundle_dir, true, true).is_none());
+    assert!(
+        bundle::client_half_stale(&bundle_dir, true, false)
+            .unwrap()
+            .contains("modified")
+    );
+    std::fs::write(
+        bundle_dir.join(bundle::BUNDLE_CLIENT_FILE),
+        skin::bundle_client_js(false),
+    )
+    .unwrap();
+    assert!(bundle::client_half_stale(&bundle_dir, true, false).is_none());
+    assert!(bundle::client_half_stale(&bundle_dir, true, true).is_some());
+}
+
+#[test]
+fn update_with_ocean_off_rewrites_the_client_half_and_receipt() {
+    let (dir, paths) = lab_paths();
+    let dsh_bin = fake_launcher(dir.path());
+    let mut detection = detection_ok();
+    detection.binary = Some(dsh_bin);
+    detection.dsh_home = dir.path().join("dsh-home");
+    let runner = PluginRunner {
+        profile_dir: detection.dsh_home.join("profiles").join("codewhale"),
+        calls: Default::default(),
+        fail_add: false,
+    };
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+    let plan = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
+    assert!(plan.ocean);
+    assert!(plan.disclosures.iter().any(|d| d.starts_with("Ocean:")));
+    apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
+    install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).unwrap();
+    let client = paths.bundle_dir.join(bundle::BUNDLE_CLIENT_FILE);
+    assert_eq!(
+        std::fs::read_to_string(&client).unwrap(),
+        skin::bundle_client_js(true)
+    );
+    let record = DshReceiptDocument::load(&paths.receipt)
+        .unwrap()
+        .current
+        .unwrap();
+    assert!(record.ocean_enabled);
+    assert_eq!(serde_json::to_value(&record).unwrap()["ocean"], true);
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+
+    let off = super::plan(&paths, &detection, &id, "web", false, true, false).unwrap();
+    assert!(!off.ocean);
+    assert!(!off.disclosures.iter().any(|d| d.starts_with("Ocean:")));
+    apply_plan(&paths, &detection, &off, DshReceiptEvent::Update).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&client).unwrap(),
+        skin::bundle_client_js(false)
+    );
+    let record = DshReceiptDocument::load(&paths.receipt)
+        .unwrap()
+        .current
+        .unwrap();
+    assert!(record.skin_enabled);
+    assert!(!record.ocean_enabled);
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+
+    // skin off implies ocean off in the plan
+    let no_skin = super::plan(&paths, &detection, &id, "web", false, false, true).unwrap();
+    assert!(!no_skin.ocean);
+}
+
+#[test]
+fn receipts_written_before_the_ocean_load_with_ocean_on() {
+    let (_dir, paths) = lab_paths();
+    let detection = detection_ok();
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+    let plan = super::plan(&paths, &detection, &id, "web", false, true, true).unwrap();
+    apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
+    let text = std::fs::read_to_string(&paths.receipt).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["current"].as_object_mut().unwrap().remove("ocean");
+    std::fs::write(&paths.receipt, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let record = DshReceiptDocument::load(&paths.receipt)
+        .unwrap()
+        .current
+        .unwrap();
+    assert!(record.ocean_enabled);
 }

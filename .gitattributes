@@ -18,6 +18,9 @@ crates/*/assets/**/*.json text eol=lf
 crates/*/assets/**/*.md text eol=lf
 crates/*/locales/*.json text eol=lf
 workflows/*.js text eol=lf
+# The dsh bundle scene is include_str!() into the generated client.js and
+# hashed for stale detection; CRLF would change both across platforms.
+crates/tui/src/integrations/dsh/*.js text eol=lf
 
 # Rustfmt writes LF; keep Rust sources stable across Windows/Linux/macOS.
 *.rs text eol=lf

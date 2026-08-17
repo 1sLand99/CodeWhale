@@ -126,6 +126,66 @@ injection hacks.
   theme API) + `Removed` (dead CSS/preview export, with the inline-vars
   reason).
 
+## Ocean scene (v0.9.9 addendum, owner request 2026-08-17)
+
+The palette alone recolors DSH; it does not make it *look* like Codewhale.
+`crates/tui/src/integrations/dsh/scene.js` (owned by `scene.rs`,
+`include_str!`) is a plain-script fragment that `skin::bundle_client_js(true)`
+splices into the client half. It defines `createOcean(palette)`; the client
+module calls it inside a second `ctx.effect`, starts it, follows
+`theme/change`, and stops/unmounts on dispose.
+
+Verified seam: `dsh-client-modules` serves only `/plugins/<id>/client.js`
+(+ `.map`) per client package (`lib/index.js:321-327`), so a sibling
+`lib/scene.js` would never be fetched — hence the splice, and no separate
+file in the bundle. `overrideTokens` validates only the `{light, dark}`
+shape, not the token name, so `--dsw-specific-sidebar-fill` can ride the same
+layer as the alias tokens.
+
+Design: one near whale (≈0.34 × viewport width, clamped 240–560 px) and one
+far, smaller, fainter whale on slow linear crossings (75–110 s) with a
+gentle sine in Y, pitch clamped to ±0.12 rad; paths are biased to the lower
+half (near) and the top edge (far) so neither crosses the composer card. The
+silhouette is a single filled shape (no eye) at ~5:1 length:height: blunt
+rounded head, long back with a low soft dorsal hump about two thirds back,
+slightly convex belly, thin tail stock, a HORIZONTAL fluke drawn as a wide,
+low, notched T seen with a hint of perspective (lobes sweep back, the lower
+one a touch longer for the downward curl — never a vertical fish tail), and
+one long pectoral flipper (~1/3 body length) sweeping down and back from a
+third of the way along the body. The fluke flexes ±10° about the tail stock
+(added to the path under a rotation, so no point math); when a whale is in
+the top third it occasionally releases a short bubble stream from the head.
+A 16-fish school of `><>` / `><o>` glyphs (14 px code font, scaled
+0.85–1.25) follows a lissajous leader with damped steering and facing
+hysteresis; 26 stroked bubbles; a two-stop depth gradient. Layer order:
+gradient, far whale, bubbles, spouts, fish, near whale. Palette per scheme
+is derived from the skin's `surface_bg` / `accent_primary` / `text_body` /
+`text_dim`; canvas alphas (near 0.5 light / 0.62 dark, far 0.3 / 0.34) land
+at roughly 10–12 % apparent under the veil.
+
+Visibility: `--dsw-alias-bg-base` → rgba α 0.55 and
+`--dsw-specific-sidebar-fill` → rgba α 0.72 (`scene::ocean_veil_tokens`),
+merged over the opaque `TOKENS` only when the scene is on. The frame and the
+centre column both paint `bg-base`, so the effective veil over the main area
+is `1 − 0.45² ≈ 0.80`; the canvas is opaque and the same base colour, so text
+contrast is unchanged in practice. Every other layer stays opaque.
+
+Budget and guards: rAF capped at ~30 fps, `visibilitychange` pause,
+`prefers-reduced-motion: reduce` → one settled static frame, DPR ≤ 2,
+typed arrays reused, no per-frame string/array allocation. Off switch:
+`localStorage["codewhale.ocean"] = "off"` or body class
+`codewhale-ocean-off` (both also skip the veil); `window.__codewhaleOcean`
+exposes `start/stop/setIntensity/setScheme`. Config: `update --ocean
+true|false` (default on; receipt `ocean`, package.json `codewhale.ocean` +
+`codewhale.ocean_scene_sha256`); the client-half byte check makes an ocean
+toggle or a drifted scene report `stale-config`.
+
+Live check (this machine, dsh 0.1.0-rc.6, headless Chromium): canvas
+present (`fixed`, `z-index:-1`, `pointer-events:none`), two frames 700 ms
+apart differ, console clean, dark via `prefers-color-scheme` follows through
+`theme/change`, reduced-motion frame is static. Screenshots:
+`docs/design/assets/dsh-ocean-light.png`, `docs/design/assets/dsh-ocean-dark.png`.
+
 ## Out of scope (decided)
 
 Wordmark/whale mark, title/favicon, persona text, layout, any non-bundle

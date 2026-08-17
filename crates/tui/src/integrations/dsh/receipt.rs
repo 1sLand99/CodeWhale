@@ -41,6 +41,10 @@ impl DshReceiptEvent {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// The live connection record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DshConnectionRecord {
@@ -61,6 +65,12 @@ pub(crate) struct DshConnectionRecord {
     pub(crate) skin_path: Option<PathBuf>,
     /// SHA-256 of the rendered TOKENS JSON (not of a stylesheet).
     pub(crate) skin_sha256: Option<String>,
+    /// Ambient ocean scene spliced into the bundle's client half (only
+    /// meaningful with `skin`). Serialized as `ocean`; receipts written before
+    /// the scene existed load as `true` (the default) and are reported stale
+    /// by the client-half byte check until `update` rewrites them.
+    #[serde(default = "default_true", rename = "ocean")]
+    pub(crate) ocean_enabled: bool,
     pub(crate) disabled: bool,
     /// Documented plugin path, when installed into the dedicated profile.
     #[serde(default)]
