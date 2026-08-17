@@ -1669,7 +1669,7 @@ impl ConfigView {
                         app.effective_model_for_budget(),
                         app.active_route_limits,
                     ),
-                    app.active_context_window_source.label()
+                    app.active_context_window_source.display_label()
                 ),
                 editable: false,
                 scope: ConfigScope::Session,

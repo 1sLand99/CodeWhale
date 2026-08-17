@@ -254,7 +254,15 @@ struct ModelPickerRow {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct EffectivePickerMetadata {
     context_window: Option<u32>,
+    /// The context window came through the legacy provider fallback rather
+    /// than an offering, catalog row, roster, or operator override — shown,
+    /// but never as a verified capability (#5239, #5441).
+    context_window_unverified: bool,
     max_output: Option<u32>,
+    /// The output ceiling is an assumed floor for a route that publishes no
+    /// ceiling we can stand behind (unknown Anthropic-family models),
+    /// clamped but never labeled "documented" (#5440).
+    max_output_unverified: bool,
     tool_calls: Option<bool>,
     reasoning: bool,
     vision: SupportState,
@@ -1846,8 +1854,23 @@ fn model_row_meta_chips(row: &ModelPickerRow) -> Vec<String> {
         }
         .to_string(),
     );
+    // #5239/#5441: an unverified window still drives budgets, but the chip
+    // must not lend it a verified reading. Honesty rides as its own chip
+    // *after* the stance so a squeezed row sheds the marker before it ever
+    // sheds the stance; the full "(unverified)" prose lives in the hint
+    // line, which always renders it.
+    if row.metadata.context_window_unverified {
+        chips.push("unverified ctx".to_string());
+    }
     if let Some(max_output) = row.metadata.max_output {
-        chips.push(format!("{max_output} out"));
+        // #5440: an assumed floor is shown as such, never as a documented
+        // ceiling.
+        let suffix = if row.metadata.max_output_unverified {
+            " (assumed floor)"
+        } else {
+            ""
+        };
+        chips.push(format!("{max_output} out{suffix}"));
     }
     // Modality and tool facts are shown only when the catalog genuinely knows
     // them — an unknown is never rendered as a claim.
@@ -2051,7 +2074,9 @@ fn effective_picker_metadata_with_codex(
     let Some(provider) = provider else {
         return EffectivePickerMetadata {
             context_window: registry.as_ref().and_then(|meta| meta.context_window),
+            context_window_unverified: false,
             max_output: registry.as_ref().and_then(|meta| meta.max_output),
+            max_output_unverified: false,
             tool_calls: None,
             reasoning: registry
                 .as_ref()
@@ -2156,9 +2181,30 @@ fn effective_picker_metadata_with_codex(
         PickerPricing::Unknown
     };
 
+    // Honesty rungs (#5239, #5440, #5441). A window that reached the picker
+    // only through the legacy provider fallback — no offering, no catalog
+    // row, no Codex roster, no operator override — is a guess (possibly an
+    // `_Nk` name-suffix parse), and an unknown Anthropic-family model's
+    // output ceiling is an assumed floor. Both still drive budgets; both
+    // must say what they are instead of borrowing a verified label.
+    let context_window_unverified = context_window.is_some()
+        && context_override.is_none()
+        && provider != ApiProvider::OpenaiCodex
+        && !preserves_unknown_limits
+        && crate::model_catalog::resolved_context_window(id).is_none();
+    let max_output_unverified = max_output.is_some()
+        && matches!(
+            provider,
+            ApiProvider::Anthropic | ApiProvider::MinimaxAnthropic | ApiProvider::Openmodel
+        )
+        && !preserves_unknown_limits
+        && crate::models::max_output_tokens_for_model(id).is_none();
+
     EffectivePickerMetadata {
         context_window,
+        context_window_unverified,
         max_output,
+        max_output_unverified,
         tool_calls,
         reasoning,
         vision,
@@ -2212,17 +2258,29 @@ fn render_picker_model_hint(
                 format_picker_context_window(u64::from(context_window))
             ));
         } else {
+            let suffix = if metadata.context_window_unverified {
+                " (unverified)"
+            } else {
+                ""
+            };
             parts.push(format!(
-                "{} ctx",
-                format_picker_context_window(u64::from(context_window))
+                "{} ctx{}",
+                format_picker_context_window(u64::from(context_window)),
+                suffix
             ));
         }
     }
 
     if let Some(max_output) = metadata.max_output {
+        let suffix = if metadata.max_output_unverified {
+            " (assumed floor)"
+        } else {
+            ""
+        };
         parts.push(format!(
-            "{} out",
-            format_picker_context_window(u64::from(max_output))
+            "{} out{}",
+            format_picker_context_window(u64::from(max_output)),
+            suffix
         ));
     }
 
@@ -3159,6 +3217,102 @@ mod tests {
             enabled: true,
         };
         assert_eq!(model_row_meta_chips(&row), vec!["reasoning".to_string()]);
+    }
+
+    /// #5441: a self-hosted `_Nk` route must never read as a verified window.
+    /// The hint line always carries the prose marker; the chip carries it
+    /// after the stance, so a squeezed row sheds the marker before the stance.
+    #[test]
+    fn name_suffix_windows_render_unverified_in_picker() {
+        let config = Config::default();
+
+        let meta = effective_picker_metadata(&config, Some(ApiProvider::Vllm), "qwen3-32b-256k");
+        assert_eq!(meta.context_window, Some(256_000));
+        assert!(meta.context_window_unverified);
+        let hint = render_picker_model_hint("qwen3-32b-256k", Some(ApiProvider::Vllm), &meta, None);
+        assert!(
+            hint.contains("256K ctx (unverified)"),
+            "hint must mark the name-suffix guess: {hint}"
+        );
+
+        let row = ModelPickerRow {
+            id: "qwen3-32b-256k".to_string(),
+            provider: Some(ApiProvider::Vllm),
+            provider_identity: None,
+            hint: String::new(),
+            metadata: meta,
+            selectable: true,
+            blocked_reason: None,
+            enabled: true,
+        };
+        let chips = model_row_meta_chips(&row);
+        assert!(
+            chips.contains(&"unverified ctx".to_string()),
+            "chips must carry the marker: {chips:?}"
+        );
+        let stance = chips
+            .iter()
+            .position(|chip| chip == "reasoning" || chip == "no reasoning")
+            .expect("stance chip");
+        let marker = chips
+            .iter()
+            .position(|chip| chip == "unverified ctx")
+            .expect("unverified marker chip");
+        assert!(
+            stance < marker,
+            "a squeezed row must shed the marker before the stance: {chips:?}"
+        );
+
+        // A window the catalog actually describes stays bare — the marker is
+        // for guesses, not for facts.
+        let documented =
+            effective_picker_metadata(&config, Some(ApiProvider::Vllm), "deepseek-v4-flash");
+        assert!(!documented.context_window_unverified);
+    }
+
+    /// #5440: an Anthropic-family model the catalog does not describe keeps
+    /// the 64K floor as its clamp, rendered as an assumed floor instead of a
+    /// documented ceiling.
+    #[test]
+    fn anthropic_unknown_output_ceiling_renders_as_assumed_floor() {
+        let config = Config::default();
+
+        let meta =
+            effective_picker_metadata(&config, Some(ApiProvider::Anthropic), "claude-future-99");
+        assert_eq!(meta.max_output, Some(64_000));
+        assert!(meta.max_output_unverified);
+        let hint = render_picker_model_hint(
+            "claude-future-99",
+            Some(ApiProvider::Anthropic),
+            &meta,
+            None,
+        );
+        assert!(
+            hint.contains("64K out (assumed floor)"),
+            "hint must not claim a documented ceiling: {hint}"
+        );
+
+        let row = ModelPickerRow {
+            id: "claude-future-99".to_string(),
+            provider: Some(ApiProvider::Anthropic),
+            provider_identity: None,
+            hint: String::new(),
+            metadata: meta,
+            selectable: true,
+            blocked_reason: None,
+            enabled: true,
+        };
+        let chips = model_row_meta_chips(&row);
+        assert!(
+            chips.iter().any(|chip| chip == "64000 out (assumed floor)"),
+            "chips must label the assumed floor: {chips:?}"
+        );
+
+        // A documented Anthropic ceiling keeps its verified rendering.
+        let documented =
+            effective_picker_metadata(&config, Some(ApiProvider::Anthropic), "claude-sonnet-4-6");
+        assert!(documented.max_output.is_some());
+        assert!(!documented.max_output_unverified);
     }
 
     #[test]

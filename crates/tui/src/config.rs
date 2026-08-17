@@ -631,8 +631,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // their 1M windows from models.rs rows (#3014).
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(200_000),
-            // 64K is the documented Anthropic Messages floor, so it stays a
-            // known cap rather than an unknown.
+            // 64K is the documented Anthropic Messages floor. For a model
+            // the catalogue describes this carries its documented ceiling;
+            // for an unknown one it is an *assumed* floor, and
+            // `route_budget::output_ceiling_source` labels it unverified so
+            // no receipt renders it as "documented" (#5440).
             max_output: Some(
                 crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
             ),
@@ -651,7 +654,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // The OAuth cache does not publish an output ceiling. This 4K is a
             // deliberate, long-standing product decision for the Codex route
             // (not a fallback): keep the compatibility capability conservative
-            // instead of inheriting the public API model's output limit.
+            // instead of inheriting the public API model's output limit. It is
+            // an assumption, not a documented fact — receipts label it
+            // unverified (#5440).
             max_output: Some(4096),
             thinking_supported: true,
             cache_telemetry_supported: false,
@@ -2695,6 +2700,12 @@ pub struct Config {
     pub approval_policy: Option<String>,
     #[serde(alias = "sandboxMode")]
     pub sandbox_mode: Option<String>,
+    /// `telemetry` as written to the config file, before environment and
+    /// default resolution. Kept so doctor and config displays can state the
+    /// *resolved* consent with its source (default | env | config) instead of
+    /// reading "unset" while batches ship (#5441).
+    #[serde(default)]
+    pub telemetry: Option<bool>,
     #[serde(default, alias = "fallbackProviders")]
     pub fallback_providers: Vec<codewhale_config::ProviderKind>,
     pub yolo: Option<bool>,
@@ -9772,6 +9783,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
     let override_defines_root_base_url = override_cfg.base_url.is_some();
     Config {
         provider: override_cfg.provider.or(base.provider),
+        telemetry: override_cfg.telemetry.or(base.telemetry),
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),

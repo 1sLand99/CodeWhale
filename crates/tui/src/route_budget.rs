@@ -97,6 +97,17 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
 /// [`API_MAX_OUTPUT_TOKENS`] request cap.
 const UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS: u32 = 8_192;
 
+/// Assumed output ceiling for an Anthropic-family model the catalogue does
+/// not describe (#5440). The 64K Messages floor is real, but applying it to
+/// an unknown model is an assumption about that model, not a documented
+/// fact, so it clamps under an `unverified` label.
+const ANTHROPIC_UNKNOWN_MAX_OUTPUT_TOKENS: u32 = 64_000;
+
+/// Assumed output ceiling for the ChatGPT/Codex OAuth route, which publishes
+/// no output ceiling of its own (#5440). Same clamp as the long-standing 4K
+/// policy — relabeled, not revalued.
+const CODEX_OAUTH_MAX_OUTPUT_TOKENS: u32 = 4_096;
+
 /// Why a route's compatibility output ceiling has the value it does.
 ///
 /// Carried so a clamp is always attributable: "unknown" is only allowed to
@@ -113,6 +124,13 @@ pub(crate) enum OutputCeilingSource {
     /// The catalogue has no row for this model. Fail closed to a conservative
     /// ceiling rather than treating absence as permission.
     Uncatalogued(u32),
+    /// The route publishes no ceiling we can stand behind, but a defensible
+    /// floor is still applied: an Anthropic-family model the catalogue does
+    /// not describe (64K Messages floor) and the Codex OAuth route (4K
+    /// policy). Clamping trades late provider failure for early truncation;
+    /// lying about why is not part of that trade, so receipts and pickers
+    /// must render this as an assumption, never as "documented" (#5440).
+    Unverified(u32),
 }
 
 impl OutputCeilingSource {
@@ -120,7 +138,9 @@ impl OutputCeilingSource {
     #[must_use]
     pub(crate) const fn clamp_tokens(self) -> Option<u32> {
         match self {
-            Self::Documented(tokens) | Self::Uncatalogued(tokens) => Some(tokens),
+            Self::Documented(tokens) | Self::Uncatalogued(tokens) | Self::Unverified(tokens) => {
+                Some(tokens)
+            }
             Self::RouteDeclaredUnknown => None,
         }
     }
@@ -133,6 +153,7 @@ impl OutputCeilingSource {
             Self::Documented(_) => "documented",
             Self::Uncatalogued(_) => "uncatalogued",
             Self::RouteDeclaredUnknown => "route-declared",
+            Self::Unverified(_) => "unverified",
         }
     }
 }
@@ -158,6 +179,19 @@ fn route_declares_unknown_output_ceiling(provider: ApiProvider, model: &str) -> 
 /// Resolve the compatibility output ceiling for a route, with its provenance.
 #[must_use]
 pub(crate) fn output_ceiling_source(provider: ApiProvider, model: &str) -> OutputCeilingSource {
+    // #5440: two routes clamp to a number the route itself never documented.
+    // The clamps stay (see `OutputCeilingSource::Unverified`); the labels must
+    // not borrow the documented rung's authority.
+    if provider == ApiProvider::OpenaiCodex {
+        return OutputCeilingSource::Unverified(CODEX_OAUTH_MAX_OUTPUT_TOKENS);
+    }
+    if matches!(
+        provider,
+        ApiProvider::Anthropic | ApiProvider::MinimaxAnthropic | ApiProvider::Openmodel
+    ) && crate::models::max_output_tokens_for_model(model).is_none()
+    {
+        return OutputCeilingSource::Unverified(ANTHROPIC_UNKNOWN_MAX_OUTPUT_TOKENS);
+    }
     provider_capability(provider, model).max_output.map_or_else(
         || {
             if route_declares_unknown_output_ceiling(provider, model) {
@@ -398,6 +432,53 @@ mod tests {
             output_ceiling_source(ApiProvider::OllamaCloud, "some-cloud-build"),
             OutputCeilingSource::Uncatalogued(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS),
             "hosted Ollama Cloud must not inherit the local runtime's unbounded output semantics"
+        );
+    }
+
+    /// #5440: an Anthropic-family model the catalogue does not describe keeps
+    /// the 64K Messages floor as its clamp, but the floor is an assumption
+    /// about that model — never a "documented" ceiling.
+    #[test]
+    fn anthropic_unknown_model_ceiling_is_an_unverified_assumed_floor() {
+        let source = output_ceiling_source(ApiProvider::Anthropic, "claude-future-99");
+        assert_eq!(source, OutputCeilingSource::Unverified(64_000));
+        assert_eq!(source.as_str(), "unverified");
+        assert_eq!(source.clamp_tokens(), Some(64_000));
+        // Same honesty on the compatibility dialects of the same family.
+        assert_eq!(
+            output_ceiling_source(ApiProvider::MinimaxAnthropic, "claude-future-99"),
+            OutputCeilingSource::Unverified(64_000)
+        );
+        assert_eq!(
+            output_ceiling_source(ApiProvider::Openmodel, "claude-future-99"),
+            OutputCeilingSource::Unverified(64_000)
+        );
+    }
+
+    /// #5440: a model the catalogue does describe keeps its documented
+    /// ceiling and its documented label — the unverified rung must not
+    /// swallow real facts.
+    #[test]
+    fn anthropic_documented_model_ceiling_stays_documented() {
+        let source = output_ceiling_source(ApiProvider::Anthropic, "claude-sonnet-4-6");
+        assert_eq!(source, OutputCeilingSource::Documented(128_000));
+        assert_eq!(source.as_str(), "documented");
+        assert_eq!(source.clamp_tokens(), Some(128_000));
+    }
+
+    /// #5440: the Codex OAuth route clamps every response to 4K by policy,
+    /// because the OAuth cache publishes no ceiling. The clamp stands; the
+    /// receipt must call the number what it is.
+    #[test]
+    fn codex_oauth_ceiling_clamps_but_never_claims_documented() {
+        let source = output_ceiling_source(ApiProvider::OpenaiCodex, "gpt-5.5");
+        assert_eq!(source, OutputCeilingSource::Unverified(4_096));
+        assert_eq!(source.as_str(), "unverified");
+        assert_eq!(source.clamp_tokens(), Some(4_096));
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::OpenaiCodex, "gpt-5.5", None),
+            4_096,
+            "the honesty relabel must not revalue the long-standing clamp"
         );
     }
 

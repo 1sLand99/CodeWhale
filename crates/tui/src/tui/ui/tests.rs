@@ -8386,6 +8386,67 @@ fn context_override_drives_compaction_meter_and_preflight_budget() {
     assert!(override_budget.input_budget_ceiling < catalog_budget.input_budget_ceiling);
 }
 
+/// #5239/#5441 acceptance: the compaction trigger, the context meter, and the
+/// provenance ladder must all read the same resolved window. A `_Nk`
+/// name-suffix window that drove the trigger while the meter or the receipt
+/// quoted a different rung's number is exactly the drift that made users see
+/// "128K compaction on a 1M model".
+#[test]
+fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Custom;
+    app.model = "qwen3-32b-256k".to_string();
+    app.auto_model = false;
+    app.active_route_limits = None;
+    app.active_context_window_source = crate::route_runtime::ContextWindowSource::NameSuffixHint;
+    app.update_model_compaction_budget();
+
+    // Every budget surface resolves the same number from the same chokepoint.
+    let ladder = crate::route_runtime::resolve_context_window(
+        ApiProvider::Custom,
+        "qwen3-32b-256k",
+        None,
+        None,
+    );
+    assert_eq!(ladder.tokens, 256_000);
+    assert_eq!(
+        ladder.source,
+        crate::route_runtime::ContextWindowSource::NameSuffixHint
+    );
+
+    let compaction = app.compaction_config();
+    assert_eq!(compaction.effective_context_window, Some(ladder.tokens));
+    assert_eq!(
+        compaction.token_threshold,
+        crate::route_budget::compaction_threshold_for_route_at_percent(
+            ApiProvider::Custom,
+            "qwen3-32b-256k",
+            None,
+            app.auto_compact_threshold_percent,
+        )
+    );
+
+    app.api_messages = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(2_000),
+            cache_control: None,
+        }],
+    }];
+    let (used, meter_window, _) = context_usage_snapshot(&app).expect("context meter");
+    assert_eq!(meter_window, ladder.tokens);
+
+    // The unverified rung must also reach the pressure message the user sees.
+    app.auto_compact = true;
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
+    maybe_warn_context_pressure(&mut app);
+    let pressure = app.status_message.as_deref().expect("pressure message");
+    assert!(
+        pressure.contains("unverified window"),
+        "pressure message must mark the guess: {pressure}"
+    );
+}
+
 #[cfg(not(windows))]
 fn write_message_submit_hook(dir: &TempDir, name: &str, body: &str) -> String {
     let path = dir.path().join(name);
