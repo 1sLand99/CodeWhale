@@ -1556,8 +1556,9 @@ impl ShellManager {
 
     /// Point lowercase-`bash` complete-output spill files at `dir` instead of
     /// the process temp dir. Tests use a nonexistent dir to simulate a full or
-    /// broken temp volume.
-    #[cfg(test)]
+    /// broken temp volume. (unix-only: the regression test that uses it drives
+    /// a POSIX shell loop.)
+    #[cfg(all(test, unix))]
     pub(crate) fn set_output_spill_dir_for_test(&mut self, dir: Option<PathBuf>) {
         self.output_spill_dir = dir;
     }
