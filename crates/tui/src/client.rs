@@ -3660,42 +3660,36 @@ fn extract_sse_data_value(line: &str) -> Option<&str> {
         .map(|value| value.strip_prefix(' ').unwrap_or(value))
 }
 
-/// A complete SSE line that was not valid UTF-8. Callers must fail closed:
-/// substituting U+FFFD would hide the error and can rewrite provider/model
-/// text into a different string (#5374).
+/// Genuine invalid UTF-8 in an SSE line (or an unterminated flush).
+///
+/// HTTP/2 DATA and other transports may split a multi-byte character across
+/// chunks. That is not this error: callers must buffer raw bytes until a
+/// complete line (or stream end) before decoding. This type is only returned
+/// when `str::from_utf8` rejects the assembled bytes. We never substitute
+/// U+FFFD — fail closed so garbled CJK cannot enter the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InvalidSseUtf8 {
     valid_up_to: usize,
-    error_len: Option<usize>,
 }
 
 impl std::fmt::Display for InvalidSseUtf8 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.error_len {
-            None => write!(
-                f,
-                "SSE line is not valid UTF-8: incomplete sequence at byte {}",
-                self.valid_up_to
-            ),
-            Some(len) => write!(
-                f,
-                "SSE line is not valid UTF-8: invalid sequence of {len} byte(s) at byte {}",
-                self.valid_up_to
-            ),
-        }
+        write!(
+            f,
+            "invalid UTF-8 in SSE stream at byte {}",
+            self.valid_up_to
+        )
     }
 }
 
 impl std::error::Error for InvalidSseUtf8 {}
 
-fn decode_sse_line_bytes(bytes: &[u8]) -> Result<String, InvalidSseUtf8> {
-    match std::str::from_utf8(bytes) {
-        Ok(line) => Ok(line.trim().to_string()),
-        Err(err) => Err(InvalidSseUtf8 {
-            valid_up_to: err.valid_up_to(),
-            error_len: err.error_len(),
-        }),
-    }
+/// Decode one assembled SSE line (or stream-end tail) with `str::from_utf8`.
+/// Does not substitute U+FFFD.
+fn decode_sse_line_bytes(bytes: &[u8]) -> Result<&str, InvalidSseUtf8> {
+    std::str::from_utf8(bytes).map_err(|err| InvalidSseUtf8 {
+        valid_up_to: err.valid_up_to(),
+    })
 }
 
 /// Take the next COMPLETE line (up to the first `\n`) off a raw byte buffer,
@@ -3705,23 +3699,26 @@ fn decode_sse_line_bytes(bytes: &[u8]) -> Result<String, InvalidSseUtf8> {
 /// split across two reads is never corrupted to U+FFFD, since the `\n`
 /// delimiter is ASCII and can never fall inside a multi-byte sequence.
 ///
-/// Complete lines are decoded strictly. Invalid bytes are an error, not a
-/// silent U+FFFD substitution (#5374).
+/// Genuine invalid bytes fail closed (`Err(InvalidSseUtf8)`); we do not
+/// substitute U+FFFD.
 fn take_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, InvalidSseUtf8> {
     let Some(line_end) = buffer.iter().position(|&b| b == b'\n') else {
         return Ok(None);
     };
+    // Strip a preceding `\r` so CRLF-delimited SSE frames do not leave CR.
     let mut end = line_end;
     if end > 0 && buffer[end - 1] == b'\r' {
         end -= 1;
     }
-    let decoded = decode_sse_line_bytes(&buffer[..end]);
+    let decoded = decode_sse_line_bytes(&buffer[..end]).map(|text| text.trim().to_string());
     buffer.drain(..=line_end);
     decoded.map(Some)
 }
 
-/// Decode leftover bytes after the HTTP body ends (final `data:` line with no
-/// trailing newline). Same strict UTF-8 contract as [`take_sse_line`].
+/// Decode the unterminated tail left in `buffer` at stream end.
+///
+/// Same fail-closed UTF-8 contract as [`take_sse_line`]. Empty / whitespace-only
+/// tails yield `Ok(None)`.
 fn flush_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, InvalidSseUtf8> {
     if buffer.is_empty() {
         return Ok(None);
@@ -3730,9 +3727,47 @@ fn flush_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, InvalidSseUtf8
     if buffer[end - 1] == b'\r' {
         end -= 1;
     }
-    let decoded = decode_sse_line_bytes(&buffer[..end]);
+    let decoded = decode_sse_line_bytes(&buffer[..end]).map(|text| text.trim().to_string());
     buffer.clear();
     decoded.map(|line| (!line.is_empty()).then_some(line))
+}
+
+/// Next decoded SSE line. When `at_end` is false, wait for `\n`. When `at_end`
+/// is true, also flush an unterminated tail (stream closed).
+fn next_sse_line(buffer: &mut Vec<u8>, at_end: bool) -> Result<Option<String>, InvalidSseUtf8> {
+    match take_sse_line(buffer)? {
+        Some(line) => Ok(Some(line)),
+        None if at_end => flush_sse_line(buffer),
+        None => Ok(None),
+    }
+}
+
+/// Incremental raw-byte SSE line assembler for tests and the Chat Completions
+/// decoder. HTTP/2 DATA may split a multi-byte UTF-8 character across chunks;
+/// we never decode until a complete line or [`SseLineDecoder::finish`].
+#[cfg(test)]
+struct SseLineDecoder {
+    buffer: Vec<u8>,
+}
+
+#[cfg(test)]
+impl SseLineDecoder {
+    fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, InvalidSseUtf8> {
+        self.buffer.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(line) = take_sse_line(&mut self.buffer)? {
+            lines.push(line);
+        }
+        Ok(lines)
+    }
+
+    fn finish(mut self) -> Result<Option<String>, InvalidSseUtf8> {
+        flush_sse_line(&mut self.buffer)
+    }
 }
 
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
@@ -10101,20 +10136,30 @@ mod tests {
         );
     }
 
+    fn mid_char_split(text: &str, ch: char) -> usize {
+        let needle = ch.to_string();
+        let start = text
+            .as_bytes()
+            .windows(needle.len())
+            .position(|window| window == needle.as_bytes())
+            .unwrap_or_else(|| panic!("{ch:?} present in {text:?}"));
+        start + 1
+    }
+
     #[test]
     fn take_sse_line_preserves_multibyte_split_across_reads() {
         // "你好" streamed so the 3-byte '好' straddles a read boundary.
         let full = "data: 你好\n";
         let bytes = full.as_bytes();
-        let split = bytes.len() - 2; // mid '好'
+        let split = mid_char_split(full, '好');
         let mut buffer: Vec<u8> = Vec::new();
         // First read: no complete line yet.
         buffer.extend_from_slice(&bytes[..split]);
-        assert_eq!(take_sse_line(&mut buffer).expect("utf-8"), None);
+        assert_eq!(take_sse_line(&mut buffer).expect("valid prefix"), None);
         // Second read completes the line; '好' must be intact, not U+FFFD.
         buffer.extend_from_slice(&bytes[split..]);
         let line = take_sse_line(&mut buffer)
-            .expect("utf-8")
+            .expect("valid utf-8")
             .expect("a complete line");
         assert_eq!(line, "data: 你好");
         assert!(!line.contains('\u{FFFD}'), "multibyte char was corrupted");
@@ -10126,8 +10171,33 @@ mod tests {
     #[test]
     fn take_sse_line_returns_none_without_newline() {
         let mut buffer = b"data: partial".to_vec();
-        assert_eq!(take_sse_line(&mut buffer).expect("utf-8"), None);
+        assert_eq!(take_sse_line(&mut buffer).expect("valid utf-8"), None);
         assert_eq!(buffer, b"data: partial");
+    }
+
+    #[test]
+    fn take_sse_line_reassembles_cjk_and_rejects_invalid_bytes() {
+        let full = "data: 测试中文\n";
+        let split = mid_char_split(full, '试');
+        let mut buffer = full.as_bytes()[..split].to_vec();
+        assert_eq!(take_sse_line(&mut buffer).expect("valid prefix"), None);
+        buffer.extend_from_slice(&full.as_bytes()[split..]);
+        let line = take_sse_line(&mut buffer)
+            .expect("valid utf-8")
+            .expect("complete line");
+        assert_eq!(line, "data: 测试中文");
+        assert!(!line.contains('\u{FFFD}'));
+
+        let mut invalid = b"data: ok".to_vec();
+        invalid.push(0xFF);
+        invalid.push(b'\n');
+        let err = take_sse_line(&mut invalid).expect_err("invalid bytes must fail closed");
+        assert!(!err.to_string().contains('\u{FFFD}'));
+        assert_eq!(err.valid_up_to, 8);
+        assert!(
+            invalid.is_empty(),
+            "invalid line is consumed so retries cannot loop"
+        );
     }
 
     #[test]
@@ -10136,15 +10206,38 @@ mod tests {
         buffer.push(0xFF);
         buffer.extend_from_slice(b"\n");
         let err = take_sse_line(&mut buffer).expect_err("0xFF is not UTF-8");
-        assert_eq!(err.error_len, Some(1));
+        assert_eq!(err.valid_up_to, 8);
+        assert!(!err.to_string().contains('\u{FFFD}'));
         assert!(buffer.is_empty(), "invalid line must be drained");
+    }
+
+    #[test]
+    fn flush_sse_line_reassembles_cjk_and_rejects_invalid_bytes() {
+        let text = "data: 你好世界";
+        let split = mid_char_split(text, '好');
+        let mut buffer = text.as_bytes()[..split].to_vec();
+        assert_eq!(take_sse_line(&mut buffer).expect("no newline yet"), None);
+        buffer.extend_from_slice(&text.as_bytes()[split..]);
+        let line = flush_sse_line(&mut buffer)
+            .expect("valid utf-8")
+            .expect("unterminated tail");
+        assert_eq!(line, "data: 你好世界");
+        assert!(!line.contains('\u{FFFD}'));
+        assert!(buffer.is_empty());
+        assert_eq!(flush_sse_line(&mut buffer).expect("empty"), None);
+
+        let mut invalid = vec![0x80, 0xBF];
+        let err = flush_sse_line(&mut invalid).expect_err("invalid flush must fail closed");
+        assert!(!err.to_string().contains('\u{FFFD}'));
+        assert_eq!(err.valid_up_to, 0);
+        assert!(invalid.is_empty());
     }
 
     #[test]
     fn flush_sse_line_preserves_unterminated_cjk() {
         let mut buffer = "data: 你好".as_bytes().to_vec();
         let line = flush_sse_line(&mut buffer)
-            .expect("utf-8")
+            .expect("valid utf-8")
             .expect("residual line");
         assert_eq!(line, "data: 你好");
         assert!(!line.contains('\u{FFFD}'));
@@ -10156,8 +10249,20 @@ mod tests {
         let mut buffer = "data: ".as_bytes().to_vec();
         buffer.extend_from_slice(&"好".as_bytes()[..2]);
         let err = flush_sse_line(&mut buffer).expect_err("truncated UTF-8");
-        assert!(err.error_len.is_none());
+        assert_eq!(err.valid_up_to, 6);
+        assert!(!err.to_string().contains('\u{FFFD}'));
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn decode_sse_line_bytes_rejects_invalid_without_replacement() {
+        let ok = decode_sse_line_bytes("data: 你好".as_bytes()).expect("valid");
+        assert_eq!(ok, "data: 你好");
+        assert!(!ok.contains('\u{FFFD}'));
+
+        let err = decode_sse_line_bytes(&[0xFF]).expect_err("bare 0xFF is invalid");
+        assert!(!err.to_string().contains('\u{FFFD}'));
+        assert_eq!(err.valid_up_to, 0);
     }
 
     #[test]

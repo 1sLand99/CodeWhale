@@ -1292,6 +1292,9 @@ impl DeepSeekClient {
             // Set when a `[DONE]` sentinel was seen, so the post-loop flush does
             // not re-process trailing post-DONE bytes.
             let mut saw_done = false;
+            // Set when a complete line or unterminated flush failed UTF-8.
+            // Skip further data-frame parsing so U+FFFD cannot enter the transcript.
+            let mut decode_failed = false;
 
             'stream: loop {
                 let chunk_result = match tokio_timeout(idle, byte_stream.next()).await {
@@ -1349,16 +1352,16 @@ impl DeepSeekClient {
                     tokio::time::sleep(Duration::from_millis(SSE_BACKPRESSURE_SLEEP_MS)).await;
                 }
 
-                // Process complete SSE lines from the buffer. Strict UTF-8:
-                // never `from_utf8_lossy` here — a mid-character TCP split
-                // stays in `byte_buf` until `\n`, and a genuinely invalid
-                // line fails closed instead of injecting U+FFFD (#5374).
+                // Process complete SSE lines from the buffer. Decode only after
+                // a `\n` so an HTTP/2 DATA split mid-character cannot become
+                // U+FFFD; genuine invalid bytes fail closed.
                 let mut lines_processed = 0usize;
                 loop {
                     let line = match super::take_sse_line(&mut byte_buf) {
                         Ok(Some(line)) => line,
                         Ok(None) => break,
                         Err(err) => {
+                            decode_failed = true;
                             yield Err(anyhow::anyhow!("{err}"));
                             break 'stream;
                         }
@@ -1429,24 +1432,25 @@ impl DeepSeekClient {
             // line (the stream closed straight after the last `data:` line, or
             // that line lacked a trailing newline). Without this the final delta
             // — last tokens, finish_reason, and usage — is silently dropped.
-            // Skipped after `[DONE]`, whose frame was already processed.
-            if !saw_done {
-                let residual = match super::flush_sse_line(&mut byte_buf) {
-                    Ok(line) => line,
+            // Skipped after `[DONE]`, whose frame was already processed, and
+            // after a fail-closed UTF-8 error.
+            if !saw_done && !decode_failed {
+                match super::flush_sse_line(&mut byte_buf) {
+                    Ok(Some(line)) => {
+                        if let Some(data) = super::extract_sse_data_value(&line) {
+                            if !line_buf.is_empty() {
+                                line_buf.push('\n');
+                            }
+                            line_buf.push_str(data);
+                        }
+                    }
+                    Ok(None) => {}
                     Err(err) => {
+                        decode_failed = true;
                         yield Err(anyhow::anyhow!("{err}"));
-                        None
                     }
-                };
-                if let Some(line) = residual
-                    && let Some(data) = super::extract_sse_data_value(&line)
-                {
-                    if !line_buf.is_empty() {
-                        line_buf.push('\n');
-                    }
-                    line_buf.push_str(data);
                 }
-                if !line_buf.is_empty() {
+                if !decode_failed && !line_buf.is_empty() {
                     let data = std::mem::take(&mut line_buf);
                     if let SseDataFrame::Events(events) = parse_sse_data_frame(
                         &data,
