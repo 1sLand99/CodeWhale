@@ -103,6 +103,15 @@ locales grow to 18 and 8.
   answered Fleet children with SSE while they call the blocking JSON path;
   the parse failure was retried and double-counted the worker on slow macOS
   runners (#5471; refs #5056).
+- Context: every web tool surface (`Web`, `web_search`, `web.run`,
+  `fetch_url`) now uses the noisy-result soft limit, so large fetches are
+  compacted like shell output instead of consuming the ordinary hard limit
+  (#5474, thanks @h3c-hexin).
+- Routing: a lowercase saved selector such as `glm-5.2` resolves against the
+  owning Z.ai / DeepSeek catalog row (case-fold fallback, only when exactly
+  one provider-owned wire id matches) instead of being classified as another
+  provider's bare model (#5475, thanks @h3c-hexin; diagnosis by @asto18089
+  in Pinvou/CodeWhale#14).
 - CI: the release workflows no longer restore npm/cargo caches after
   checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
   #88–#107 are closed with a contract test over the workflow files (#5463).
@@ -173,7 +182,11 @@ locales grow to 18 and 8.
 
 - hexin (@h3c-hexin) — a concrete route/offering output limit outranks the
   8,192-token compatibility guess for an uncatalogued model (#5461, closes
-  #5460).
+  #5460); web tool results use the noisy soft limit (#5474); owned direct
+  model casing resolves safely (#5475).
+- @asto18089 — diagnosed the Z.ai `glm-5.2` casing collision and wrote the
+  first provider-scoped fix in Pinvou/CodeWhale#14 (carried upstream in
+  #5475).
 - Reports and reproductions that shaped this release: @hardy922 (context-
   window honesty, #5239), @redstar (bwrap extra roots, #5410), @all-lopezg
   (SSE UTF-8 garbling on DeepSeek Flash, #5374), @alitvak69 (unverified live

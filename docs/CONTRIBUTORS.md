@@ -35,9 +35,15 @@ notes, and relevant issue/PR comments.
 - **[h3c-hexin](https://github.com/h3c-hexin)** — a concrete route/offering
   output limit now outranks the conservative 8,192-token compatibility guess
   for an uncatalogued model; routes that publish no limit stay fail-closed
-  (#5461, closes #5460)
+  (#5461, closes #5460); every web tool surface uses the noisy-result soft
+  limit (#5474); lowercase saved selectors resolve against the owning
+  Z.ai/DeepSeek catalog row (#5475)
 
 **Reports, reproductions, and verification**
+
+- **[asto18089](https://github.com/asto18089)** — diagnosed the Z.ai `glm-5.2`
+  casing collision and wrote the first provider-scoped fix downstream
+  (Pinvou/CodeWhale#14, carried upstream in #5475)
 
 - **[hardy922](https://github.com/hardy922)** — the context-window honesty
   report that became the every-surface labeling pass (#5239)
