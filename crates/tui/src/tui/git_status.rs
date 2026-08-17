@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitStatusSnapshot {
     pub root: Option<PathBuf>,
+    pub repository_name: Option<String>,
     pub branch: Option<String>,
     pub dirty: bool,
     pub ahead: u32,
@@ -91,6 +92,7 @@ fn probe_status(workspace: &Path) -> GitStatusSnapshot {
         return snap;
     };
     snap.root = Some(root.clone());
+    snap.repository_name = repository_name(&root);
 
     // Branch (symbolic-ref first, then short HEAD for detached).
     snap.branch = git_output(&root, &["symbolic-ref", "--short", "HEAD"])
@@ -165,11 +167,42 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Compact chrome label: `main* ↑2` or `detached`.
+fn repository_name(worktree_root: &Path) -> Option<String> {
+    let common_dir = git_output(worktree_root, &["rev-parse", "--git-common-dir"]).ok()?;
+    repository_name_from_common_dir(worktree_root, Path::new(common_dir.trim()))
+}
+
+fn repository_name_from_common_dir(worktree_root: &Path, common_dir: &Path) -> Option<String> {
+    let common_dir = if common_dir.is_absolute() {
+        common_dir.to_path_buf()
+    } else {
+        worktree_root.join(common_dir)
+    };
+    common_dir
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Compact chrome label: `CodeWhale · main* ↑2` or
+/// `CodeWhale/feature · feature*` for a linked worktree.
 #[must_use]
 pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
     let branch = snap.branch.as_deref()?;
-    let mut label = branch.to_string();
+    let worktree_name = snap
+        .root
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy());
+    let location = match (snap.repository_name.as_deref(), worktree_name.as_deref()) {
+        (Some(repository), Some(worktree)) if repository != worktree => {
+            format!("{repository}/{worktree}")
+        }
+        (Some(repository), _) => repository.to_string(),
+        (None, Some(worktree)) => worktree.to_string(),
+        (None, None) => return Some(branch.to_string()),
+    };
+    let mut label = format!("{location} · {branch}");
     if snap.dirty {
         label.push('*');
     }
@@ -236,12 +269,46 @@ locked
     #[test]
     fn chrome_label_marks_dirty_and_divergence() {
         let snap = GitStatusSnapshot {
+            root: Some("/repo".into()),
+            repository_name: Some("repo".into()),
             branch: Some("main".into()),
             dirty: true,
             ahead: 2,
             behind: 1,
             ..GitStatusSnapshot::default()
         };
-        assert_eq!(chrome_label(&snap).as_deref(), Some("main* ↑2 ↓1"));
+        assert_eq!(chrome_label(&snap).as_deref(), Some("repo · main* ↑2 ↓1"));
+    }
+
+    #[test]
+    fn chrome_label_identifies_a_linked_worktree() {
+        let snap = GitStatusSnapshot {
+            root: Some("/repo/.cw-worktrees/feature".into()),
+            repository_name: Some("repo".into()),
+            branch: Some("feature".into()),
+            dirty: true,
+            ..GitStatusSnapshot::default()
+        };
+
+        assert_eq!(
+            chrome_label(&snap).as_deref(),
+            Some("repo/feature · feature*")
+        );
+    }
+
+    #[test]
+    fn repository_name_uses_the_common_git_directory_for_worktrees() {
+        assert_eq!(
+            repository_name_from_common_dir(
+                Path::new("/repo/.cw-worktrees/feature"),
+                Path::new("/repo/.git")
+            )
+            .as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            repository_name_from_common_dir(Path::new("/repo"), Path::new(".git")).as_deref(),
+            Some("repo")
+        );
     }
 }

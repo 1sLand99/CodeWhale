@@ -181,6 +181,10 @@ locales grow to 18 and 8.
 
 ### Added
 
+- The TUI header now identifies the active repository or linked worktree before
+  the branch and dirty marker, so operators can see where the agent is working
+  without opening the worktree manager (#5437).
+
 - `[transcript] prose_measure` (positive integer, optional): caps prose
   wrap at N columns for owners who want a bounded reading measure on
   ultrawide terminals. `0` or absent keeps the full width; negative or

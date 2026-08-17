@@ -935,6 +935,16 @@ fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
 /// Render the one-line shell header. Route, mode, requested/effective effort,
 /// permission, active-agent count, and context each have exactly one owner.
 pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
+    let git_status = crate::tui::git_status::cached_status();
+    render_header_with_git_status(area, buf, app, &git_status);
+}
+
+fn render_header_with_git_status(
+    area: Rect,
+    buf: &mut Buffer,
+    app: &App,
+    git_status: &crate::tui::git_status::GitStatusSnapshot,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1103,10 +1113,19 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
             Style::default().fg(app.ui_theme.text_hint),
         )
     });
-    // Cached git branch/status only — never probe from the render path.
+    // Cached repository/worktree status only — never probe from the render path.
     // Background refresh is scheduled from the event loop / idle ticks.
-    let git_label = crate::tui::git_status::chrome_label(&crate::tui::git_status::cached_status())
-        .map(|label| Span::styled(label, Style::default().fg(app.ui_theme.text_muted)));
+    let git_label = crate::tui::git_status::chrome_label(git_status).map(|label| {
+        let max_width = match tier {
+            ShellTier::Compact => 24,
+            ShellTier::Normal => 36,
+            ShellTier::Wide => 52,
+        };
+        Span::styled(
+            truncate_to_width(&label, max_width),
+            Style::default().fg(app.ui_theme.text_muted),
+        )
+    });
 
     // Baseline right-hand chrome: git, context meter, version. Exact route
     // identity outranks this auxiliary chrome when the full line cannot fit.
@@ -1799,6 +1818,46 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_header(area, &mut buf, app);
         (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    fn header_text_with_git_status(
+        app: &App,
+        width: u16,
+        git_status: &crate::tui::git_status::GitStatusSnapshot,
+    ) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        render_header_with_git_status(area, &mut buf, app, git_status);
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn header_surfaces_repository_and_worktree_without_wrapping() {
+        let app = test_app();
+        let git_status = crate::tui::git_status::GitStatusSnapshot {
+            root: Some("/repo/.cw-worktrees/feature".into()),
+            repository_name: Some("repo".into()),
+            branch: Some("feature".into()),
+            dirty: true,
+            ..Default::default()
+        };
+
+        let wide = header_text_with_git_status(&app, 130, &git_status);
+        assert!(
+            wide.contains("repo/feature · feature*"),
+            "wide header: {wide:?}"
+        );
+
+        let narrow = header_text_with_git_status(&app, 60, &git_status);
+        assert!(!narrow.contains('\n'), "narrow header must stay one line");
+        assert!(
+            narrow.to_ascii_lowercase().contains("work"),
+            "mode: {narrow:?}"
+        );
+        assert!(
+            narrow.to_ascii_lowercase().contains("ask"),
+            "permission: {narrow:?}"
+        );
     }
 
     #[test]
