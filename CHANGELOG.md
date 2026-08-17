@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
   worker that had already completed and raced the rail's focus; it now holds
   the child's wrap-up and waits for a settled live row (refs #5056, #5403).
+- CI: the release workflows no longer restore npm/cargo caches after
+  checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
+  #88–#107 are closed with a contract test over the workflow files (#5463).
 
 ### Changed
 
@@ -108,6 +111,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference for agents/workflows/plugins/skills
   (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
   TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- Sandbox: bwrap containers get the `--dev/--proc/--tmpfs` essentials plus
+  configurable extra roots (`bwrap_ro_roots` / `bwrap_dev_roots`) so
+  toolchains that live outside the workspace stay reachable read-only
+  (#5410).
+- Tests: `crates/tui/tests/README.md` states the keyless assembled-journey
+  rule and maps the Auto-Review guardian acceptance items to the engine
+  journeys that exercise them (#5361).
 - Dependencies: ratatui 0.30.2, thiserror 2.0.20.
 
 ## [0.9.8] - 2026-08-16
