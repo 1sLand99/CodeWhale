@@ -51,8 +51,8 @@ re-roots to `~/.codewhale/memory/`:
 ```
 
 The scope directory is `workspace` (singular) — `MemoryScope::directory`,
-`crates/tui/src/native_memory.rs:29-33`. The index filename is
-`index.sqlite3` (`native_memory.rs:173`).
+`crates/tui/src/native_memory.rs:31-36`. The index filename is
+`index.sqlite3` (`native_memory.rs:175`).
 
 Markdown is the durable source of truth; `index.sqlite3` is a disposable
 full-text cache (`/memory native reindex` rebuilds it). A configured
