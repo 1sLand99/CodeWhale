@@ -5,7 +5,7 @@
 //! Plan usage is credit/quota based and is intentionally left unknown until a
 //! reliable balance endpoint exists.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Timelike, Utc};
 use codewhale_config::pricing::{
     Currency, LIVE_PRICING_MAX_AGE_SECS, LivePricingDefect, OfferingPricing, PricingProvenance,
     TokenClass, TokenUsage,
@@ -556,8 +556,8 @@ fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing>
     }
     if lower == "claude-sonnet-5" {
         // Time-aware introductory pricing; resolved ahead of the catalog so
-        // the intro rate is honored while it lasts (same pattern as
-        // deepseek_v4_pro_pricing() / #2489).
+        // the intro rate is honored while it lasts (same pattern as the
+        // recorded-time DeepSeek peak/off-peak tiers below).
         return Some(claude_sonnet_5_pricing(now));
     }
     if let Some(pricing) = known_pricing_for_model(&lower) {
@@ -565,12 +565,12 @@ fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing>
     }
     if lower.contains("deepseek") {
         if lower.contains("v4-pro") || lower.contains("v4pro") {
-            // DeepSeek's pricing page says the V4-Pro promotional 75% discount
-            // becomes the official one-quarter base price after 2026-05-31 15:59
-            // UTC. Keep using the adjusted rate after that cutoff (#2489).
-            Some(deepseek_v4_pro_pricing())
+            // First-party DeepSeek V4-Pro publishes tiered peak/off-peak
+            // rates (2026-08-17); each turn resolves its tier from its own
+            // recorded time. Supersedes the #2489 flat-rate adjustment.
+            Some(deepseek_v4_pro_pricing(now))
         } else {
-            Some(deepseek_v4_flash_pricing())
+            Some(deepseek_v4_flash_pricing(now))
         }
     } else {
         None
@@ -812,35 +812,72 @@ fn claude_sonnet_5_pricing(now: DateTime<Utc>) -> ModelPricing {
 /// context cache charges nothing extra to write: a token that misses the cache
 /// is billed once at the miss rate and is cached as a side effect. That makes
 /// the miss rate the documented write rate, not a stand-in for a missing one.
-fn deepseek_v4_pro_pricing() -> ModelPricing {
+///
+/// Peak/off-peak tiers (verified against
+/// <https://api-docs.deepseek.com/quick_start/pricing> on 2026-08-17):
+/// off-peak rates are half the peak rates, and peak hours are 01:00–04:00
+/// and 06:00–10:00 UTC (half-open). Each turn resolves its tier from its own
+/// recorded time, mirroring `claude_sonnet_5_pricing`'s time-aware precedent.
+fn deepseek_peak_hour(hour_utc: u32) -> bool {
+    (1..4).contains(&hour_utc) || (6..10).contains(&hour_utc)
+}
+
+/// Whether a turn recorded at `now` falls in DeepSeek's UTC peak window.
+fn deepseek_is_peak(now: DateTime<Utc>) -> bool {
+    deepseek_peak_hour(now.hour())
+}
+
+fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
+    let peak = deepseek_is_peak(now);
+    let (hit, miss, out) = if peak {
+        (0.044, 1.32, 3.96)
+    } else {
+        (0.022, 0.66, 1.98)
+    };
+    let (cny_hit, cny_miss, cny_out) = if peak {
+        (0.30, 9.0, 27.0)
+    } else {
+        (0.15, 4.5, 13.5)
+    };
     ModelPricing {
         usd: CurrencyPricing {
-            input_cache_hit_per_million: 0.003625,
-            input_cache_miss_per_million: 0.435,
-            output_per_million: 0.87,
+            input_cache_hit_per_million: hit,
+            input_cache_miss_per_million: miss,
+            output_per_million: out,
             cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         },
         cny: Some(CurrencyPricing {
-            input_cache_hit_per_million: 0.025,
-            input_cache_miss_per_million: 3.0,
-            output_per_million: 6.0,
+            input_cache_hit_per_million: cny_hit,
+            input_cache_miss_per_million: cny_miss,
+            output_per_million: cny_out,
             cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         }),
     }
 }
 
-fn deepseek_v4_flash_pricing() -> ModelPricing {
+fn deepseek_v4_flash_pricing(now: DateTime<Utc>) -> ModelPricing {
+    let peak = deepseek_is_peak(now);
+    let (hit, miss, out) = if peak {
+        (0.014, 0.44, 1.32)
+    } else {
+        (0.007, 0.22, 0.66)
+    };
+    let (cny_hit, cny_miss, cny_out) = if peak {
+        (0.10, 3.0, 9.0)
+    } else {
+        (0.05, 1.5, 4.5)
+    };
     ModelPricing {
         usd: CurrencyPricing {
-            input_cache_hit_per_million: 0.0028,
-            input_cache_miss_per_million: 0.14,
-            output_per_million: 0.28,
+            input_cache_hit_per_million: hit,
+            input_cache_miss_per_million: miss,
+            output_per_million: out,
             cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         },
         cny: Some(CurrencyPricing {
-            input_cache_hit_per_million: 0.02,
-            input_cache_miss_per_million: 1.0,
-            output_per_million: 2.0,
+            input_cache_hit_per_million: cny_hit,
+            input_cache_miss_per_million: cny_miss,
+            output_per_million: cny_out,
             cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         }),
     }
@@ -2019,12 +2056,16 @@ mod tests {
             prompt_cache_write_tokens: Some(100_000),
             ..Usage::default()
         };
-        let now = Utc::now();
+        // Pinned off-peak (12:00 UTC) so the DeepSeek tier is deterministic.
+        let now = Utc
+            .with_ymd_and_hms(2026, 8, 17, 12, 0, 0)
+            .single()
+            .unwrap();
 
         // DeepSeek documents that a cache miss is billed once and cached for
         // free, so the miss rate *is* the published write rate. The policy
         // carries the documentation receipt rather than being an assumption.
-        let deepseek = deepseek_v4_flash_pricing();
+        let deepseek = deepseek_v4_flash_pricing(now);
         assert_eq!(
             deepseek.usd.cache_write,
             CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE)
@@ -2036,8 +2077,8 @@ mod tests {
             now,
         );
         assert!(priced.is_priced(), "{priced:?}");
-        // 900k miss + 100k write, both at the 0.14/M miss rate.
-        let expected = (0.9 + 0.1) * 0.14;
+        // 900k miss + 100k write, both at the off-peak 0.22/M miss rate.
+        let expected = (0.9 + 0.1) * 0.22;
         assert!(
             (priced.estimate.expect("priced").usd - expected).abs() < 1e-12,
             "{priced:?}"
@@ -3596,47 +3637,190 @@ mod tests {
         assert!(has_pricing_for_model("claude-sonnet-5"));
     }
 
-    #[test]
-    fn v4_pro_uses_limited_time_discount_before_expiry() {
-        let before_expiry = Utc
-            .with_ymd_and_hms(2026, 5, 31, 15, 58, 59)
+    /// Published DeepSeek V4 rates per 1M tokens (cache-hit, cache-miss,
+    /// output), verified live on api-docs.deepseek.com/quick_start/pricing
+    /// (and /zh-cn) on 2026-08-17. Off-peak is exactly half of peak.
+    const DEEPSEEK_V4_FLASH_USD_OFF_PEAK: (f64, f64, f64) = (0.007, 0.22, 0.66);
+    const DEEPSEEK_V4_FLASH_USD_PEAK: (f64, f64, f64) = (0.014, 0.44, 1.32);
+    const DEEPSEEK_V4_FLASH_CNY_OFF_PEAK: (f64, f64, f64) = (0.05, 1.5, 4.5);
+    const DEEPSEEK_V4_FLASH_CNY_PEAK: (f64, f64, f64) = (0.10, 3.0, 9.0);
+    const DEEPSEEK_V4_PRO_USD_OFF_PEAK: (f64, f64, f64) = (0.022, 0.66, 1.98);
+    const DEEPSEEK_V4_PRO_USD_PEAK: (f64, f64, f64) = (0.044, 1.32, 3.96);
+    const DEEPSEEK_V4_PRO_CNY_OFF_PEAK: (f64, f64, f64) = (0.15, 4.5, 13.5);
+    const DEEPSEEK_V4_PRO_CNY_PEAK: (f64, f64, f64) = (0.30, 9.0, 27.0);
+
+    fn assert_currency_rates(actual: &CurrencyPricing, expected: (f64, f64, f64), ctx: &str) {
+        assert_eq!(
+            actual.input_cache_hit_per_million, expected.0,
+            "{ctx} cache-hit"
+        );
+        assert_eq!(
+            actual.input_cache_miss_per_million, expected.1,
+            "{ctx} cache-miss"
+        );
+        assert_eq!(actual.output_per_million, expected.2, "{ctx} output");
+        assert_eq!(
+            actual.cache_write,
+            CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
+            "{ctx} cache-write"
+        );
+    }
+
+    fn assert_deepseek_tier(model: &str, at: DateTime<Utc>, peak: bool) {
+        let pricing = pricing_for_model_at(model, at).expect("DeepSeek V4 pricing");
+        let (usd, cny) = match (model.contains("pro"), peak) {
+            (true, true) => (DEEPSEEK_V4_PRO_USD_PEAK, DEEPSEEK_V4_PRO_CNY_PEAK),
+            (true, false) => (DEEPSEEK_V4_PRO_USD_OFF_PEAK, DEEPSEEK_V4_PRO_CNY_OFF_PEAK),
+            (false, true) => (DEEPSEEK_V4_FLASH_USD_PEAK, DEEPSEEK_V4_FLASH_CNY_PEAK),
+            (false, false) => (
+                DEEPSEEK_V4_FLASH_USD_OFF_PEAK,
+                DEEPSEEK_V4_FLASH_CNY_OFF_PEAK,
+            ),
+        };
+        let tier = if peak { "peak" } else { "off-peak" };
+        assert_currency_rates(&pricing.usd, usd, &format!("{model} @ {at} USD {tier}"));
+        let cny_pricing = pricing.cny.expect("DeepSeek pricing has CNY");
+        assert_currency_rates(&cny_pricing, cny, &format!("{model} @ {at} CNY {tier}"));
+    }
+
+    fn utc_hm(hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 17, hour, minute, 59)
             .single()
-            .unwrap();
-        let pricing = pricing_for_model_at("deepseek-v4-pro", before_expiry).unwrap();
-
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.003625);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.435);
-        assert_eq!(pricing.usd.output_per_million, 0.87);
-        let cny = pricing.cny.expect("DeepSeek pricing has CNY");
-        assert_eq!(cny.input_cache_hit_per_million, 0.025);
-        assert_eq!(cny.input_cache_miss_per_million, 3.0);
-        assert_eq!(cny.output_per_million, 6.0);
+            .unwrap()
     }
 
     #[test]
-    fn v4_pro_keeps_adjusted_rates_after_discount_window() {
-        let after_expiry = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).single().unwrap();
-        let pricing = pricing_for_model_at("deepseek-v4-pro", after_expiry).unwrap();
-
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.003625);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.435);
-        assert_eq!(pricing.usd.output_per_million, 0.87);
-        let cny = pricing.cny.expect("DeepSeek pricing has CNY");
-        assert_eq!(cny.input_cache_hit_per_million, 0.025);
-        assert_eq!(cny.input_cache_miss_per_million, 3.0);
-        assert_eq!(cny.output_per_million, 6.0);
+    fn deepseek_peak_window_is_half_open_on_utc_hours() {
+        for hour in 0..24 {
+            let expected = matches!(hour, 1..=3 | 6..=9);
+            assert_eq!(deepseek_peak_hour(hour), expected, "hour {hour}");
+        }
     }
 
     #[test]
-    fn v4_pro_discount_still_applies_just_before_old_may5_expiry() {
-        // Regression for #267 and #2489: the adjusted V4-Pro pricing should
-        // not drift back to the original higher launch rates.
-        let after_old_expiry = Utc.with_ymd_and_hms(2026, 5, 6, 0, 0, 0).single().unwrap();
-        let pricing = pricing_for_model_at("deepseek-v4-pro", after_old_expiry).unwrap();
+    fn deepseek_v4_tiers_flip_at_each_published_utc_boundary() {
+        // Peak windows are 01:00-04:00 and 06:00-10:00 UTC, half-open: the
+        // start minute is peak, the end minute is off-peak.
+        let boundaries = [
+            (utc_hm(0, 59), false),
+            (utc_hm(1, 0), true),
+            (utc_hm(3, 59), true),
+            (utc_hm(4, 0), false),
+            (utc_hm(5, 59), false),
+            (utc_hm(6, 0), true),
+            (utc_hm(9, 59), true),
+            (utc_hm(10, 0), false),
+        ];
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            for (at, peak) in boundaries {
+                assert_deepseek_tier(model, at, peak);
+            }
+        }
+    }
 
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.003625);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.435);
-        assert_eq!(pricing.usd.output_per_million, 0.87);
+    #[test]
+    fn deepseek_v4_pro_off_peak_and_peak_rates_match_published_table() {
+        assert_deepseek_tier("deepseek-v4-pro", utc_hm(12, 0), false);
+        assert_deepseek_tier("deepseek-v4-pro", utc_hm(2, 0), true);
+        // Regression for #267 / #2489: the retired flat promo rates must not
+        // resurface in either tier.
+        for at in [utc_hm(12, 0), utc_hm(2, 0)] {
+            let pricing = pricing_for_model_at("deepseek-v4-pro", at).unwrap();
+            assert_ne!(pricing.usd.input_cache_hit_per_million, 0.003625);
+            assert_ne!(pricing.usd.input_cache_miss_per_million, 0.435);
+            assert_ne!(pricing.usd.output_per_million, 0.87);
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_flash_off_peak_and_peak_rates_match_published_table() {
+        assert_deepseek_tier("deepseek-v4-flash", utc_hm(12, 0), false);
+        assert_deepseek_tier("deepseek-v4-flash", utc_hm(7, 0), true);
+        for at in [utc_hm(12, 0), utc_hm(7, 0)] {
+            let pricing = pricing_for_model_at("deepseek-v4-flash", at).unwrap();
+            assert_ne!(pricing.usd.input_cache_hit_per_million, 0.0028);
+            assert_ne!(pricing.usd.input_cache_miss_per_million, 0.14);
+            assert_ne!(pricing.usd.output_per_million, 0.28);
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_off_peak_is_exactly_half_of_peak() {
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            let off = pricing_for_model_at(model, utc_hm(12, 0)).unwrap();
+            let peak = pricing_for_model_at(model, utc_hm(2, 0)).unwrap();
+            for (o, p) in [
+                (
+                    off.usd.input_cache_hit_per_million,
+                    peak.usd.input_cache_hit_per_million,
+                ),
+                (
+                    off.usd.input_cache_miss_per_million,
+                    peak.usd.input_cache_miss_per_million,
+                ),
+                (off.usd.output_per_million, peak.usd.output_per_million),
+            ] {
+                assert!((o * 2.0 - p).abs() < 1e-12, "{model}: {o} * 2 != {p}");
+            }
+            let (off_cny, peak_cny) = (off.cny.unwrap(), peak.cny.unwrap());
+            for (o, p) in [
+                (
+                    off_cny.input_cache_hit_per_million,
+                    peak_cny.input_cache_hit_per_million,
+                ),
+                (
+                    off_cny.input_cache_miss_per_million,
+                    peak_cny.input_cache_miss_per_million,
+                ),
+                (off_cny.output_per_million, peak_cny.output_per_million),
+            ] {
+                assert!((o * 2.0 - p).abs() < 1e-12, "{model}: CNY {o} * 2 != {p}");
+            }
+        }
+    }
+
+    /// The route audit prices a DeepSeek turn at the tier of its RECORDED
+    /// time, not the wall clock at audit time (same contract as Sonnet 5's
+    /// recorded-time introductory window).
+    #[test]
+    fn deepseek_audit_uses_recorded_time_tier_not_now() {
+        let usage = million_input_usage();
+        for (provider, model) in [
+            (ApiProvider::Deepseek, "deepseek-v4-flash"),
+            (ApiProvider::Deepseek, "deepseek-v4-pro"),
+            (ApiProvider::DeepseekCN, "deepseek-v4-flash"),
+            (ApiProvider::DeepseekAnthropic, "deepseek-v4-pro"),
+        ] {
+            let off_peak_usd = if model.contains("pro") { 0.66 } else { 0.22 };
+            let off_peak_cny = if model.contains("pro") { 4.5 } else { 1.5 };
+            let off = audit_turn_cost_for_provider_at(provider, model, &usage, utc_hm(12, 0));
+            assert!(off.is_priced(), "{provider:?}/{model}: {off:?}");
+            let off_estimate = off.estimate.expect("priced");
+            assert!(
+                (off_estimate.usd - off_peak_usd).abs() < 1e-12,
+                "{provider:?}/{model} off-peak: {}",
+                off_estimate.usd
+            );
+            assert!(
+                (off_estimate.cny - off_peak_cny).abs() < 1e-12,
+                "{provider:?}/{model} off-peak CNY: {}",
+                off_estimate.cny
+            );
+
+            let peak = audit_turn_cost_for_provider_at(provider, model, &usage, utc_hm(2, 0));
+            assert!(peak.is_priced(), "{provider:?}/{model}: {peak:?}");
+            let peak_estimate = peak.estimate.expect("priced");
+            assert!(
+                (peak_estimate.usd - 2.0 * off_peak_usd).abs() < 1e-12,
+                "{provider:?}/{model} peak: {}",
+                peak_estimate.usd
+            );
+            assert!(
+                (peak_estimate.cny - 2.0 * off_peak_cny).abs() < 1e-12,
+                "{provider:?}/{model} peak CNY: {}",
+                peak_estimate.cny
+            );
+        }
     }
 
     #[test]
@@ -3664,20 +3848,6 @@ mod tests {
     }
 
     #[test]
-    fn v4_flash_keeps_current_published_rates() {
-        let now = Utc.with_ymd_and_hms(2026, 4, 25, 0, 0, 0).single().unwrap();
-        let pricing = pricing_for_model_at("deepseek-v4-flash", now).unwrap();
-
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.0028);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 0.14);
-        assert_eq!(pricing.usd.output_per_million, 0.28);
-        let cny = pricing.cny.expect("DeepSeek pricing has CNY");
-        assert_eq!(cny.input_cache_hit_per_million, 0.02);
-        assert_eq!(cny.input_cache_miss_per_million, 1.0);
-        assert_eq!(cny.output_per_million, 2.0);
-    }
-
-    #[test]
     fn xiaomi_mimo_token_plan_models_leave_cost_unknown() {
         let now = Utc.with_ymd_and_hms(2026, 6, 4, 0, 0, 0).single().unwrap();
 
@@ -3699,11 +3869,23 @@ mod tests {
             output_tokens: 500_000,
             ..Default::default()
         };
-        let estimate =
-            calculate_turn_cost_estimate_from_usage("deepseek-v4-flash", &usage).expect("estimate");
+        // Off-peak (12:00 UTC): 1M input at 0.22 + 0.5M output at 0.66 USD;
+        // 1.5 + 0.5 * 4.5 CNY.
+        let off_peak = Utc
+            .with_ymd_and_hms(2026, 8, 17, 12, 0, 0)
+            .single()
+            .unwrap();
+        let pricing = pricing_for_model_at("deepseek-v4-flash", off_peak).expect("pricing");
+        let estimate = cost_estimate_with_pricing(pricing, &usage);
+        assert!((estimate.usd - 0.55).abs() < 1e-12, "{}", estimate.usd);
+        assert!((estimate.cny - 3.75).abs() < 1e-12, "{}", estimate.cny);
 
-        assert_eq!(estimate.usd, 0.28);
-        assert_eq!(estimate.cny, 2.0);
+        // Peak (02:00 UTC) doubles both currencies.
+        let peak = Utc.with_ymd_and_hms(2026, 8, 17, 2, 0, 0).single().unwrap();
+        let pricing = pricing_for_model_at("deepseek-v4-flash", peak).expect("pricing");
+        let estimate = cost_estimate_with_pricing(pricing, &usage);
+        assert!((estimate.usd - 1.10).abs() < 1e-12, "{}", estimate.usd);
+        assert!((estimate.cny - 7.5).abs() < 1e-12, "{}", estimate.cny);
     }
 
     #[test]
@@ -3839,15 +4021,32 @@ mod tests {
                 provider_owned_hand_pricing_at(provider, model, now).expect("bundled fallback row");
             if model.contains("flash") {
                 assert_eq!(hand.usd.input_cache_hit_per_million, 0.028);
-                assert_ne!(
-                    hand.usd.input_cache_hit_per_million, 0.0028,
-                    "must not inherit first-party DeepSeek cache-hit"
-                );
+                for first_party in [0.007, 0.014] {
+                    assert_ne!(
+                        hand.usd.input_cache_hit_per_million, first_party,
+                        "must not inherit first-party DeepSeek cache-hit"
+                    );
+                }
             }
         }
 
-        let deepseek = deepseek_v4_flash_pricing();
-        assert_eq!(deepseek.usd.input_cache_hit_per_million, 0.0028);
+        let off_peak = Utc
+            .with_ymd_and_hms(2026, 8, 17, 12, 0, 0)
+            .single()
+            .unwrap();
+        let peak = Utc.with_ymd_and_hms(2026, 8, 17, 2, 0, 0).single().unwrap();
+        assert_eq!(
+            deepseek_v4_flash_pricing(off_peak)
+                .usd
+                .input_cache_hit_per_million,
+            0.007
+        );
+        assert_eq!(
+            deepseek_v4_flash_pricing(peak)
+                .usd
+                .input_cache_hit_per_million,
+            0.014
+        );
     }
 
     #[test]
