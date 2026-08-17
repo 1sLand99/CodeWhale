@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
   worker that had already completed and raced the rail's focus; it now holds
   the child's wrap-up and waits for a settled live row (refs #5056, #5403).
+- SSE UTF-8 split across HTTP/2 DATA frames now fails closed in every
+  streaming dialect: a shared strict decoder, tail flush, and
+  `decode_failed` propagation (`InvalidSseUtf8`) replace the per-dialect
+  approximations, with byte-chunk decoder tests (#5374; supersedes draft
+  #5404).
 - CI: the release workflows no longer restore npm/cargo caches after
   checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
   #88–#107 are closed with a contract test over the workflow files (#5463).
