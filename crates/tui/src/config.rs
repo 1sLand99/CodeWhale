@@ -631,8 +631,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // their 1M windows from models.rs rows (#3014).
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(200_000),
-            // 64K is the documented Anthropic Messages floor, so it stays a
-            // known cap rather than an unknown.
+            // 64K is the documented Anthropic Messages floor. For a model
+            // the catalogue describes this carries its documented ceiling;
+            // for an unknown one it is an *assumed* floor, and
+            // `route_budget::output_ceiling_source` labels it unverified so
+            // no receipt renders it as "documented" (#5440).
             max_output: Some(
                 crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
             ),
@@ -651,7 +654,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // The OAuth cache does not publish an output ceiling. This 4K is a
             // deliberate, long-standing product decision for the Codex route
             // (not a fallback): keep the compatibility capability conservative
-            // instead of inheriting the public API model's output limit.
+            // instead of inheriting the public API model's output limit. It is
+            // an assumption, not a documented fact — receipts label it
+            // unverified (#5440).
             max_output: Some(4096),
             thinking_supported: true,
             cache_telemetry_supported: false,
