@@ -157,12 +157,7 @@ fn print_status(report: &DshStatusReport) {
         }
         if record.skin_enabled {
             println!(
-                "  skin export: {} (unsupported overlay; not injected)",
-                record
-                    .skin_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
+                "  skin: on (Codewhale palette via overrideTokens in the bundle profile; `{CLI_COMMAND} update --skin false` turns it off)"
             );
         }
     }

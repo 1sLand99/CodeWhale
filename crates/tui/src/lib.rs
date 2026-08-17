@@ -1415,7 +1415,7 @@ pub(crate) enum DshIntegrationCommand {
         /// Mirror Codewhale full access as DSH danger-full-access (only when Codewhale itself runs with full access)
         #[arg(long, default_value_t = false)]
         allow_full_access: bool,
-        /// Also export the Codewhale skin stylesheet (unsupported DSH overlay; never injected)
+        /// Record the Codewhale palette (skin) decision for the bundle profile; applied via DSH's `overrideTokens`, never through the overlay
         #[arg(long, default_value_t = false)]
         skin: bool,
     },
@@ -1437,7 +1437,7 @@ pub(crate) enum DshIntegrationCommand {
         profile: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_full_access: bool,
-        /// Keep/refresh the skin export (defaults to the previous choice)
+        /// Turn the bundle-profile skin on/off (`--skin false`; defaults to the previous choice)
         #[arg(long)]
         skin: Option<bool>,
         #[arg(long, default_value_t = false)]
