@@ -542,6 +542,22 @@ pub(crate) fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool 
             .all(|(idx, byte)| idx == 4 || idx == 7 || byte.is_ascii_digit())
 }
 
+/// The context window a model name's `_Nk` suffix advertises, when the
+/// catalog does not already describe the model (#5441).
+///
+/// Exposed separately from [`explicit_context_window_hint`] because the
+/// honesty surfaces need to know *whether the number they are holding came
+/// from the name* — a naming convention the serving engine may ignore is not
+/// a fact about the route, and every surface that shows such a window must
+/// mark it unverified.
+#[must_use]
+pub(crate) fn name_suffix_context_window_hint(model: &str) -> Option<u32> {
+    if crate::model_catalog::resolved_context_window(model).is_some() {
+        return None;
+    }
+    explicit_context_window_hint(&model.to_lowercase())
+}
+
 /// Parse an explicit `_Nk` context-window hint from a model name (vendor
 /// agnostic). Returns the window in tokens for `N` in `8..=1024`.
 fn explicit_context_window_hint(model_lower: &str) -> Option<u32> {

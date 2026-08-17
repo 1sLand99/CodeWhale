@@ -25,16 +25,24 @@ pub(crate) enum ContextWindowSource {
     ProviderReported,
     StaticKimiCodeSafeFloor,
     Catalog,
+    /// Parsed from a vendor-agnostic `_Nk` suffix in the model name
+    /// (#5441). Optimistic, unlike the conservative [`Self::Fallback`]: a
+    /// serving engine may ignore its own naming convention, so the number
+    /// drives real budgets but is never evidence about the route.
+    NameSuffixHint,
     Fallback,
 }
 
 impl ContextWindowSource {
-    /// Every rung, in precedence order.
-    pub(crate) const ALL: [Self; 5] = [
+    /// Every rung, in precedence order. The name-suffix hint sits between
+    /// catalog data and the conservative fallback: any concrete fact about
+    /// the route beats a naming convention.
+    pub(crate) const ALL: [Self; 6] = [
         Self::Configured,
         Self::ProviderReported,
         Self::StaticKimiCodeSafeFloor,
         Self::Catalog,
+        Self::NameSuffixHint,
         Self::Fallback,
     ];
 
@@ -45,6 +53,7 @@ impl ContextWindowSource {
             Self::ProviderReported => "provider-reported",
             Self::StaticKimiCodeSafeFloor => "static Kimi Code safe floor",
             Self::Catalog => "catalog",
+            Self::NameSuffixHint => "model-name hint",
             Self::Fallback => "fallback",
         }
     }
@@ -58,11 +67,31 @@ impl ContextWindowSource {
     }
 
     /// Whether the window rests on evidence about this exact route.  The
-    /// fallback rung is a guess made because nothing described the model, so
-    /// no surface may present it as a capability we checked.
+    /// name-suffix hint and the fallback rung are guesses — one parsed from a
+    /// naming convention, one made because nothing described the model — so
+    /// no surface may present either as a capability we checked (#5239,
+    /// #5441).
     #[must_use]
     pub(crate) const fn is_verified(self) -> bool {
-        !matches!(self, Self::Fallback)
+        !matches!(self, Self::NameSuffixHint | Self::Fallback)
+    }
+
+    /// Suffix every rendered window carries: verified rungs stay bare,
+    /// guesses say so next to the number that drives the budget.
+    #[must_use]
+    pub(crate) const fn honesty_suffix(self) -> &'static str {
+        if self.is_verified() {
+            ""
+        } else {
+            " (unverified)"
+        }
+    }
+
+    /// [`Self::label`] plus [`Self::honesty_suffix`], ready for inline
+    /// rendering (status line, `/status`, `/config` rows).
+    #[must_use]
+    pub(crate) fn display_label(self) -> String {
+        format!("{}{}", self.label(), self.honesty_suffix())
     }
 }
 
@@ -109,9 +138,28 @@ pub(crate) fn resolve_context_window(
             source: ContextWindowSource::Catalog,
         };
     }
+    let tokens = crate::route_budget::route_context_window_tokens(provider, model, None);
     ContextWindowResolution {
-        tokens: crate::route_budget::route_context_window_tokens(provider, model, None),
-        source: ContextWindowSource::Fallback,
+        tokens,
+        source: classify_capability_fallback_window(model, tokens),
+    }
+}
+
+/// Classify a window the provider/model capability fallback produced, so the
+/// receipt names the rung the number actually came from (#5239, #5441).
+///
+/// A value parsed from an `_Nk` model-name suffix is its own optimistic rung:
+/// the serving engine may not honor its own naming convention. Everything
+/// else the fallback produced — vendor-family heuristics, provider floors,
+/// the conservative default — is the plain fallback rung. Both are
+/// unverified; the ladder keeps them apart because they fail differently
+/// (a hint that overstates the window delays compaction past the provider's
+/// real limit).
+fn classify_capability_fallback_window(model: &str, tokens: u32) -> ContextWindowSource {
+    if crate::models::name_suffix_context_window_hint(model) == Some(tokens) {
+        ContextWindowSource::NameSuffixHint
+    } else {
+        ContextWindowSource::Fallback
     }
 }
 
@@ -571,7 +619,10 @@ fn plan_limit_overrides(
         overrides,
         context_window: ContextWindowResolution {
             tokens: fallback_tokens,
-            source: ContextWindowSource::Fallback,
+            source: classify_capability_fallback_window(
+                resolved.wire_model_id().as_str(),
+                fallback_tokens,
+            ),
         },
     }
 }
@@ -708,8 +759,8 @@ mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
 
-    /// Every rung keeps its own label and round-trips through it, and only the
-    /// fallback reads as unverified.  Two rungs sharing a label would let a
+    /// Every rung keeps its own label and round-trips through it, and only
+    /// the guesses read as unverified.  Two rungs sharing a label would let a
     /// guess be displayed as evidence.
     #[test]
     fn every_context_window_rung_round_trips_its_own_label() {
@@ -725,11 +776,60 @@ mod tests {
             assert_eq!(ContextWindowSource::from_label(label), Some(source));
             assert_eq!(
                 source.is_verified(),
-                source != ContextWindowSource::Fallback,
+                !matches!(
+                    source,
+                    ContextWindowSource::Fallback | ContextWindowSource::NameSuffixHint
+                ),
                 "{source:?} misreports whether its window rests on route evidence"
+            );
+            assert_eq!(
+                source.honesty_suffix(),
+                if source.is_verified() {
+                    ""
+                } else {
+                    " (unverified)"
+                },
+                "{source:?} must mark every guess it renders"
             );
         }
         assert_eq!(ContextWindowSource::from_label("configured "), None);
+    }
+
+    /// #5441: a window parsed from an `_Nk` model-name suffix is its own
+    /// unverified rung — optimistic, unlike the conservative fallback — and
+    /// any concrete fact about the route still beats it.
+    #[test]
+    fn name_suffix_hint_is_its_own_unverified_rung_below_catalog() {
+        let resolved = resolve_context_window(ApiProvider::Custom, "qwen3-32b-256k", None, None);
+
+        assert_eq!(resolved.tokens, 256_000);
+        assert_eq!(resolved.source, ContextWindowSource::NameSuffixHint);
+        assert!(!resolved.source.is_verified());
+        assert_eq!(resolved.source.label(), "model-name hint");
+        assert_eq!(
+            resolved.source.display_label(),
+            "model-name hint (unverified)"
+        );
+
+        // The ladder is positional and the hint sits below catalog data: an
+        // offering that describes the same id wins.
+        let offering = Some(RouteLimits {
+            context_tokens: Some(131_072),
+            ..RouteLimits::default()
+        });
+        let catalog = resolve_context_window(ApiProvider::Custom, "qwen3-32b-256k", offering, None);
+        assert_eq!(catalog.tokens, 131_072);
+        assert_eq!(catalog.source, ContextWindowSource::Catalog);
+        assert!(catalog.source.is_verified());
+
+        // An operator override beats both, exactly as before.
+        let configured = resolve_context_window(
+            ApiProvider::Custom,
+            "qwen3-32b-256k",
+            offering,
+            Some(1_048_576),
+        );
+        assert_eq!(configured.source, ContextWindowSource::Configured);
     }
 
     /// #5239: an id nothing describes must land on the fallback rung and say
