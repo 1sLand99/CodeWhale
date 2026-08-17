@@ -20,7 +20,7 @@ use codewhale_app_server::{
 };
 use codewhale_config::{
     CliRuntimeOverrides, ConfigApiKeyValueKind, ConfigStore, ConfigToml, ProviderKind,
-    ProviderSource, ResolvedRuntimeOptions, RuntimeApiKeySource, SetupState, TelemetrySource,
+    ProviderSource, ResolvedRuntimeOptions, RuntimeApiKeySource, SetupState,
     classify_config_api_key_value, provider_base_url_is_official,
 };
 use codewhale_execpolicy::{AskForApproval, ExecPolicyContext, ExecPolicyEngine};
@@ -4863,7 +4863,7 @@ mod tests {
             output_mode: None,
             log_level: None,
             telemetry: false,
-            telemetry_source: TelemetrySource::Default,
+            telemetry_source: codewhale_config::TelemetrySource::Default,
             telemetry_explicit_off: false,
             telemetry_endpoint: None,
             approval_policy: None,
