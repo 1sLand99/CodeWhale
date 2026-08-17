@@ -1349,7 +1349,26 @@ impl Respond for FleetRoleResponder {
             if raw.contains(expected_prompt) {
                 self.canonical_prompts.fetch_add(1, Ordering::SeqCst);
             }
-            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "role-launch-complete"));
+            // Children call the blocking `create_message` (`stream: false`) and
+            // parse a JSON body. An SSE body fails "Failed to parse Chat API
+            // JSON", which the sub-agent runtime classifies as transient and
+            // re-sends verbatim 250 ms later — so the worker (tool_call index
+            // 0, first launched) counted twice on a slow macOS runner before
+            // the fourth child had even sent its first request. Answer with a
+            // real non-stream chat.completion so each role launches exactly
+            // once and the counters mean what the assertions say.
+            return json_response(json!({
+                "id": "chatcmpl-role-launch",
+                "object": "chat.completion",
+                "created": 0,
+                "model": DEEPSEEK_TEST_MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "role-launch-complete"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
+            }));
         }
 
         if raw.contains("launch four canonical read-only Fleet roles") {
