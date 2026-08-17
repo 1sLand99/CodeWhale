@@ -29,6 +29,11 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) provider_display_name: &'static str,
     pub(crate) model: String,
     pub(crate) context_window: u32,
+    /// The context window came from the legacy capability fallback (an `_Nk`
+    /// name-suffix parse or a vendor-family heuristic), not a route fact
+    /// (#5441). Serialized only when true so existing payloads stay stable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) context_window_unverified: bool,
     /// Known output ceiling, or `None` when this route publishes none. The
     /// classifier is told "unknown" rather than a fabricated number.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,11 +108,19 @@ impl ModelInventory {
                 let readiness =
                     crate::provider_readiness::resolve_for_model(config, provider, &model, health);
                 let mut capability = provider_capability(provider, &model);
+                // #5239/#5441: a candidate whose window came from the legacy
+                // capability fallback (a `_Nk` name-suffix parse or a
+                // vendor-family heuristic) carries the number *and* the fact
+                // that nobody verified it — the auto-router must not read a
+                // guessed window as a route capability.
+                let mut context_window_unverified =
+                    crate::model_catalog::resolved_context_window(&model).is_none();
                 if let Ok(route) =
                     crate::route_runtime::resolve_runtime_route(config, provider, Some(&model))
                 {
                     if let Some(context_window) = route.candidate.limits().context_tokens {
                         capability.context_window = context_window.min(u64::from(u32::MAX)) as u32;
+                        context_window_unverified = false;
                     }
                     // A concrete offering maximum is a stronger fact than the
                     // static compatibility matrix — and is the only way a
@@ -163,6 +176,7 @@ impl ModelInventory {
                     default_for_provider,
                     model,
                     context_window: capability.context_window,
+                    context_window_unverified,
                     max_output: capability.max_output,
                     thinking_supported: capability.thinking_supported,
                     cache_telemetry_supported: capability.cache_telemetry_supported,
@@ -279,6 +293,8 @@ impl ModelInventory {
             provider_display_name: &'a str,
             model: &'a str,
             context_window: u32,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            context_window_unverified: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             max_output: Option<u32>,
             thinking_supported: bool,
@@ -307,6 +323,7 @@ impl ModelInventory {
                 provider_display_name: candidate.provider_display_name,
                 model: &candidate.model,
                 context_window: candidate.context_window,
+                context_window_unverified: candidate.context_window_unverified,
                 max_output: candidate.max_output,
                 thinking_supported: candidate.thinking_supported,
                 cache_telemetry_supported: candidate.cache_telemetry_supported,
@@ -614,6 +631,41 @@ mod tests {
         assert!(!candidate.tags.contains(&"long_context"));
     }
 
+    /// #5441: the auto-router inventory carries a `_Nk` name-suffix window
+    /// together with the fact that nobody verified it, so a classifier never
+    /// reads a naming convention as a route capability.
+    #[test]
+    fn router_inventory_marks_name_suffix_windows_unverified() {
+        let config = Config {
+            provider: Some("vllm".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                vllm: crate::config::ProviderConfig {
+                    base_url: Some("http://localhost:8000/v1".to_string()),
+                    model: Some("qwen3-32b-256k".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+        let candidate = inventory
+            .candidate(ApiProvider::Vllm, "qwen3-32b-256k")
+            .expect("configured self-hosted route");
+        assert_eq!(candidate.context_window, 256_000);
+        assert!(
+            candidate.context_window_unverified,
+            "a name-suffix window must not enter the router payload as a fact"
+        );
+
+        let payload = inventory.router_context_json();
+        assert!(
+            payload.contains("\"context_window_unverified\":true"),
+            "payload must serialize the marker: {payload}"
+        );
+    }
+
     #[test]
     fn inventory_includes_custom_api_key_env_route() {
         let _env_lock = crate::test_support::lock_test_env();
@@ -789,6 +841,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "gpt-5.5".to_string(),
             context_window: 128_000,
+            context_window_unverified: false,
             max_output: Some(16_384),
             thinking_supported: true,
             cache_telemetry_supported: false,
@@ -818,6 +871,7 @@ mod tests {
                 provider_display_name: "OpenAI",
                 model: "unsupported-model".to_string(),
                 context_window: 1,
+                context_window_unverified: false,
                 max_output: Some(1),
                 thinking_supported: false,
                 cache_telemetry_supported: false,
@@ -852,6 +906,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "unsupported-model".to_string(),
             context_window: 1,
+            context_window_unverified: false,
             max_output: Some(1),
             thinking_supported: false,
             cache_telemetry_supported: false,
