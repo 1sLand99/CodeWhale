@@ -28,6 +28,7 @@ path = "src/main.rs"
 ahash = "0.8"
 anyhow.workspace = true
 codewhale-config = { path = "../config", version = "0.9.9" }
+codewhale-command-contract = { path = "../command-contract", version = "0.9.9" }
 codewhale-core = { path = "../core", version = "0.9.9" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.9" }
 codewhale-lane = { path = "../lane", version = "0.9.9" }
