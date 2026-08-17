@@ -73,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode_failed` propagation (`InvalidSseUtf8`) replace the per-dialect
   approximations, with byte-chunk decoder tests (#5374; supersedes draft
   #5404).
+- CI: `release_four_read_only_fleet_roles_launch_with_canonical_prompts`
+  answered Fleet children with SSE while they call the blocking JSON path;
+  the parse failure was retried and double-counted the worker on slow macOS
+  runners (#5471; refs #5056).
 - CI: the release workflows no longer restore npm/cargo caches after
   checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
   #88–#107 are closed with a contract test over the workflow files (#5463).
