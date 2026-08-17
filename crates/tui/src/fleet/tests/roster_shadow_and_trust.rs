@@ -56,6 +56,52 @@ fn workspace_shadow_of_personal_file_is_recorded_and_reported() {
         roster.shadowed().iter().any(|s| s.id == "builder"),
         "roster-level shadow log carries the record"
     );
+
+    // The merged structure the UI and doctor read: every layer for the id,
+    // with the project copy marked as the winner.
+    let layers = roster.layers_for("builder");
+    assert_eq!(layers.len(), 3, "built-in + personal + project: {layers:?}");
+    assert!(layers[0].wins, "winner is first: {layers:?}");
+    assert_eq!(layers[0].origin, ProfileOrigin::Workspace);
+    assert!(
+        layers[0].source.ends_with("builder.toml"),
+        "winning source is the project file: {:?}",
+        layers[0].source
+    );
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer.origin == ProfileOrigin::Personal && !layer.wins),
+        "personal layer is present and ignored: {layers:?}"
+    );
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer.origin == ProfileOrigin::BuiltIn && !layer.wins),
+        "built-in layer is present and ignored: {layers:?}"
+    );
+
+    let report = roster.multi_layer_report();
+    let builder = report
+        .iter()
+        .find(|entry| entry.id == "builder")
+        .expect("multi-layer report names builder");
+    assert_eq!(builder.effective, ProfileOrigin::Workspace);
+    assert_eq!(builder.layers, layers);
+
+    let doctor = roster.doctor_layer_lines().join("\n");
+    assert!(
+        doctor.contains("builder: effective=project"),
+        "doctor names the winning layer: {doctor}"
+    );
+    assert!(
+        doctor.contains("personal ·") && doctor.contains("(ignored)"),
+        "doctor lists the ignored personal path: {doctor}"
+    );
+    assert!(
+        doctor.contains("project ·") && doctor.contains("(wins)"),
+        "doctor marks the project path as winning: {doctor}"
+    );
 }
 
 #[test]

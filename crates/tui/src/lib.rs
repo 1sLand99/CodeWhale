@@ -4253,6 +4253,7 @@ async fn run_doctor(
         (aqua_r, aqua_g, aqua_b),
         (sky_r, sky_g, sky_b),
     );
+    print_doctor_fleet_roster_layers(config, workspace);
 
     // Check API keys
     println!();
@@ -5844,6 +5845,29 @@ fn print_doctor_setup_report(
     }
 }
 
+/// #5098: print every profile id that exists in more than one roster layer
+/// so a personal/config edit that loses to project is visible without
+/// opening `/fleet`.
+fn print_doctor_fleet_roster_layers(config: &Config, workspace: &Path) {
+    use colored::Colorize;
+
+    let roster = crate::fleet::roster::FleetRoster::load(&config.fleet_config(), workspace);
+    println!();
+    println!("{}", "Fleet roster layers:".bold());
+    let lines = roster.doctor_layer_lines();
+    if lines.is_empty() {
+        println!("  · no profile id is defined in more than one layer");
+        return;
+    }
+    for line in lines {
+        if let Some(layer) = line.strip_prefix("  ") {
+            println!("      {layer}");
+        } else {
+            println!("  · {line}");
+        }
+    }
+}
+
 fn doctor_ready_label(ready: bool) -> &'static str {
     if ready { "ready" } else { "needs action" }
 }
@@ -6034,6 +6058,28 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let roster_ready = roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
+    let multi_layer: Vec<serde_json::Value> = roster
+        .multi_layer_report()
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "effective": entry.effective.to_string(),
+                "effective_path": entry.effective_path.display().to_string(),
+                "layers": entry
+                    .layers
+                    .iter()
+                    .map(|layer| {
+                        json!({
+                            "origin": layer.origin.to_string(),
+                            "path": layer.source.display().to_string(),
+                            "wins": layer.wins,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
 
     json!({
         "ready": has_credentials_or_local && runtime_ready && roster_ready,
@@ -6065,6 +6111,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "custom": custom_members,
             "starter_roster_available": built_in_members > 0,
             "readiness_rule": "built-in starter roster or custom roster",
+            "multi_layer": multi_layer,
         },
         "concurrency": {
             "launch_concurrency": launch_concurrency,
@@ -13998,6 +14045,67 @@ mod terminal_mode_tests {
         }))
         .expect("doctor JSON");
         assert!(!serialized.contains("local-test-key"));
+    }
+
+    #[test]
+    fn doctor_operate_fleet_json_lists_multi_layer_profile_paths() {
+        // #5098: doctor must name the winning layer and every losing path
+        // when project and personal both define the same id.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("workspace");
+        let personal = home.join("agents");
+        let project = workspace.join(".codewhale").join("agents");
+        std::fs::create_dir_all(&personal).expect("personal agents");
+        std::fs::create_dir_all(&project).expect("project agents");
+        std::fs::write(
+            personal.join("builder.toml"),
+            "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .expect("personal builder");
+        std::fs::write(
+            project.join("builder.toml"),
+            "id = \"builder\"\nrole_hint = \"builder\"\nmodel = \"deepseek-v4-pro\"\n",
+        )
+        .expect("project builder");
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+
+        let operate = doctor_operate_fleet_report_json(&Config::default(), &workspace);
+        let layers = operate["roster"]["multi_layer"]
+            .as_array()
+            .expect("multi_layer array");
+        let builder = layers
+            .iter()
+            .find(|entry| entry["id"] == "builder")
+            .expect("builder multi-layer entry");
+        assert_eq!(builder["effective"], "project");
+        let paths: Vec<&str> = builder["layers"]
+            .as_array()
+            .expect("layers")
+            .iter()
+            .filter_map(|layer| layer["path"].as_str())
+            .collect();
+        assert!(
+            paths.iter().any(|path| path.ends_with("builder.toml")),
+            "layer paths include the profile files: {builder}"
+        );
+        assert!(
+            builder["layers"]
+                .as_array()
+                .expect("layers")
+                .iter()
+                .any(|layer| layer["origin"] == "personal" && layer["wins"] == false),
+            "personal layer is listed as ignored: {builder}"
+        );
+        assert!(
+            builder["layers"]
+                .as_array()
+                .expect("layers")
+                .iter()
+                .any(|layer| layer["origin"] == "project" && layer["wins"] == true),
+            "project layer wins: {builder}"
+        );
     }
 
     fn saved_exec_session(provider: &str, model: &str) -> session_manager::SavedSession {
