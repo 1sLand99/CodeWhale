@@ -23,6 +23,7 @@ export const RELEASE_CONTRIBUTORS: string[] = ["@h3c-hexin"];
 
 /** Contributors who helped with reports, reproductions, and verification. */
 export const RELEASE_HELPERS: string[] = [
+  "@asto18089",
   "@hardy922",
   "@redstar",
   "@all-lopezg",
