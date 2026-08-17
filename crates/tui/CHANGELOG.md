@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.9] - 2026-08-17
 
+Codewhale v0.9.9 is a truth-and-resilience release: the shell tool can no
+longer wedge a session when the host runs out of disk or descriptors,
+unverified context windows and output ceilings are labeled honestly at every
+surface, DeepSeek V4 is priced on the published peak/off-peak tiers, SSE
+UTF-8 fails closed in every dialect, Fleet shadowing is visible, bwrap gets
+container essentials and extra roots, the `dsh` skin rides the bundle
+profile, the `agent` tool schema is down to 12 fields, and README/website
+locales grow to 18 and 8.
+
 ### Fixed
 
 - The lowercase `bash` tool no longer wedges when its complete-output spill
@@ -159,6 +168,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `dsh` integration: the exported-CSS skin file and its "skin export" status
   line (superseded by the bundle-applied `overrideTokens` skin, #5469).
+
+### Contributors
+
+- hexin (@h3c-hexin) — a concrete route/offering output limit outranks the
+  8,192-token compatibility guess for an uncatalogued model (#5461, closes
+  #5460).
+- Reports and reproductions that shaped this release: @hardy922 (context-
+  window honesty, #5239), @redstar (bwrap extra roots, #5410), @all-lopezg
+  (SSE UTF-8 garbling on DeepSeek Flash, #5374), @alitvak69 (unverified live
+  pricing, #5241), and @wuisabel-gif (the macOS filtered-suite hang
+  investigation on #5056).
 
 ## [0.9.8] - 2026-08-16
 
