@@ -7,6 +7,7 @@
 //! fall-through behaviour.
 
 pub mod discovery;
+mod contract;
 mod groups;
 pub mod traits;
 pub mod user_commands;
