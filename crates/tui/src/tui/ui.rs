@@ -709,22 +709,30 @@ async fn drain_remote_control_events(
                 account_ref,
                 runner_id,
                 attachment,
+                links,
                 ..
             } => {
                 app.remote_control
                     .upload_snapshot(&attachment.run_id, &app.api_messages);
-                let status = format!(
-                    "REMOTE CONTROL · account {account_ref} · runner {runner_id} · /rc stop returns input here"
+                let status = crate::remote_control::remote_control_banner(
+                    &account_ref,
+                    &runner_id,
+                    links.run_url.as_deref(),
                 );
                 app.add_message(HistoryCell::System {
                     content: format!(
                         "{status}\n\nThe web now owns new prompts and approvals. This terminal remains readable."
                     ),
                 });
+                if let Some(run_url) = links.run_url.as_deref() {
+                    app.add_message(HistoryCell::System {
+                        content: crate::remote_control::remote_control_link_notice(run_url),
+                    });
+                }
                 app.status_message = Some(status.clone());
                 app.sticky_status = Some(StatusToast::new(status, StatusToastLevel::Warning, None));
             }
-            crate::remote_control::RemoteEvent::Attachment { attachment } => {
+            crate::remote_control::RemoteEvent::Attachment { attachment, .. } => {
                 // Reconnect responses carry the server's current cursor and
                 // snapshot receipt. `try_next_event` applies that truth before
                 // this handler, so this is either a no-op or one bounded retry.
@@ -912,7 +920,9 @@ fn start_remote_control_session(app: &mut App) {
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     app.current_session_id = Some(session_id.clone());
-    let target_ref = crate::remote_control::target_ref(&app.workspace, &session_id);
+    // The target is the folder, not the session: repeated `/rc` runs in the
+    // same folder reuse one enrollment grant instead of minting a new one.
+    let target_ref = crate::remote_control::target_ref(&app.workspace);
     let workspace_label = app
         .workspace
         .file_name()
