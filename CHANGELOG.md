@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-08-17
+
+Codewhale v0.9.9 is a truth-and-resilience release: the shell tool can no
+longer wedge a session when the host runs out of disk or descriptors,
+unverified context windows and output ceilings are labeled honestly at every
+surface, DeepSeek V4 is priced on the published peak/off-peak tiers, SSE
+UTF-8 fails closed in every dialect, Fleet shadowing is visible, bwrap gets
+container essentials and extra roots, the `dsh` skin rides the bundle
+profile, the `agent` tool schema is down to 12 fields, and README/website
+locales grow to 18 and 8.
+
 ### Fixed
 
+- The lowercase `bash` tool no longer wedges when its complete-output spill
+  file cannot be created: a full temp volume or exhausted descriptor table
+  used to fail *every* call — `echo ok` included — with the harness-internal
+  "Failed to create streaming shell output" and never recover until the
+  host was cleaned up. The spill is now best-effort (the bounded tail is
+  still returned and the truncation notice says why the full-output path is
+  missing), and any remaining spawn/stream failure names the exhausted
+  resource — disk, file descriptors, memory — and says the next call is safe
+  to retry (#5465; the wedge that took out the owner's own 0.9.9 session).
 - A concrete route/offering output limit now outranks the conservative
   8,192-token compatibility guess for an uncatalogued model. Routes that
   publish no output limit remain fail-closed, documented model ceilings stay
@@ -37,8 +57,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codewhale config get telemetry` reports the resolved consent with its
   source instead of `key not found` on a machine whose batches ship. Truth
   change only; resolution and behavior are untouched.
+- Fleet: a scout's read-only shell carve-out (#5428) is now honored by both
+  the posture gate and the execution envelope, so `git log`, `find | head`,
+  `npm view` and the other bounded read-only commands run in-place instead
+  of being refused as "Executes" (#5426). Delegation still never widens
+  authority: the role-isolation test and docs/SUBAGENTS.md pin that a child
+  cannot exceed its parent's posture (#5426, #5435).
+- `/rename` and `/title` now apply mid-first-turn: the session file does
+  not exist until the first autosave, so the rename fell through with
+  NotFound; the shared path now prefers the per-session checkpoint and
+  rebuilds from App state, with a PTY regression test through the live
+  event loop (#5430).
+- `integrations dsh plan` no longer refuses DeepSeek's default
+  Responses-dialect route (`deepseek-v4-flash`); Responses and
+  Anthropic-Messages routes are carried through pi-ai
+  `openai-responses` / `anthropic-messages` instead of being approximated
+  or refused; only credentialed base URLs are still refused, with an error
+  that names provider and model (#5434).
+- Session cost no longer sits at `unverified_live_pricing` when live pricing
+  cannot be verified (control-plane 503, Models.dev capabilities-only
+  overlays): provider-docs bundled fallback rates for the DeepSeek V4
+  family on Fireworks / OpenCode Zen restore a usable figure, live
+  per-provider rows still win, and `kimi-k3` stays unpriced until a
+  published rate exists (#5241; harvested from #5402).
+- Release assets: `release.yml` asset-freshness checks compare against the
+  release job's own `started_at`, so job-level reruns of the npm step are no
+  longer poisoned by earlier uploads (#5429).
+- macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
+  worker that had already completed and raced the rail's focus; it now holds
+  the child's wrap-up and waits for a settled live row (refs #5056, #5403).
+- DeepSeek V4 pricing follows the published peak/off-peak tiers (peak
+  01:00–04:00 and 06:00–10:00 UTC; off-peak is half of peak) for
+  `deepseek-v4-flash` and `deepseek-v4-pro` in USD and CNY, resolved from
+  each turn's recorded time; the stale single-tier rows understated cost up
+  to ~4×. Because every direct DeepSeek first-party rate is now
+  time-windowed, the scorecard fails closed (`missing_recorded_time`) on an
+  undated DeepSeek turn instead of guessing a tier (#5470; #5241 follow-up,
+  verified against api-docs.deepseek.com on 2026-08-17).
+- SSE UTF-8 split across HTTP/2 DATA frames now fails closed in every
+  streaming dialect: a shared strict decoder, tail flush, and
+  `decode_failed` propagation (`InvalidSseUtf8`) replace the per-dialect
+  approximations, with byte-chunk decoder tests (#5374; supersedes draft
+  #5404).
+- CI: `release_four_read_only_fleet_roles_launch_with_canonical_prompts`
+  answered Fleet children with SSE while they call the blocking JSON path;
+  the parse failure was retried and double-counted the worker on slow macOS
+  runners (#5471; refs #5056).
+- CI: the release workflows no longer restore npm/cargo caches after
+  checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
+  #88–#107 are closed with a contract test over the workflow files (#5463).
 
 ### Changed
+
 
 - The model-facing `agent` tool advertises exactly 12 fields — `action`,
   `prompt`, `type`, `profile`, `name`, `agent_id`, `message`, `until`,
@@ -66,6 +136,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ultrawide terminals. `0` or absent keeps the full width; negative or
   non-integer values are rejected with a clear config error. Tool, diff,
   and status cells never inherit the cap (#5436).
+- Localization: README translations for Français, Deutsch, 繁體中文, हिन्दी,
+  Türkçe, Italiano, Polski, العربية and Català join the existing nine
+  (#5451); codewhale.net routes fr, de, ca, hi, tr, it, pl and ar (with
+  `dir="rtl"` plumbing) as partial locales (#5453).
+- Docs: README Integrations section (incl. the DeepSeek Harness `dsh` plugin
+  path, docs/INTEGRATIONS_DSH.md) localized across all READMEs; RFC keeping
+  the deterministic-first auto-review hybrid (#5427); Claude Code parity
+  reference for agents/workflows/plugins/skills
+  (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
+  TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- `dsh` integration: the Codewhale palette is applied through the bundle
+  profile via dsh's documented `overrideTokens` (on by default;
+  `codewhale integrations dsh update --skin false` turns it off), replacing
+  the 0.9.8 exported-CSS skin that dsh's inline body variables overrode
+  (docs/design/DSH_BUNDLE_SKIN.md, docs/INTEGRATIONS_DSH.md) (#5469).
+- Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
+  agent detail, and a `doctor` "Fleet roster layers" section (JSON
+  `operate_fleet.roster.multi_layer`), in all 15 TUI locales. Layer collapse
+  and `[fleet.profiles]` migration stay for 0.9.10 (#5098).
+- Sandbox: bwrap containers get the `--dev/--proc/--tmpfs` essentials plus
+  configurable extra roots (`bwrap_ro_roots` / `bwrap_dev_roots`) so
+  toolchains that live outside the workspace stay reachable read-only
+  (#5410).
+- Tests: `crates/tui/tests/README.md` states the keyless assembled-journey
+  rule and maps the Auto-Review guardian acceptance items to the engine
+  journeys that exercise them (#5361).
+- Dependencies: ratatui 0.30.2, thiserror 2.0.20.
+
+### Removed
+
+- `dsh` integration: the exported-CSS skin file and its "skin export" status
+  line (superseded by the bundle-applied `overrideTokens` skin, #5469).
+
+### Contributors
+
+- hexin (@h3c-hexin) — a concrete route/offering output limit outranks the
+  8,192-token compatibility guess for an uncatalogued model (#5461, closes
+  #5460).
+- Reports and reproductions that shaped this release: @hardy922 (context-
+  window honesty, #5239), @redstar (bwrap extra roots, #5410), @all-lopezg
+  (SSE UTF-8 garbling on DeepSeek Flash, #5374), @alitvak69 (unverified live
+  pricing, #5241), and @wuisabel-gif (the macOS filtered-suite hang
+  investigation on #5056).
 
 ## [0.9.8] - 2026-08-16
 
@@ -6003,7 +6116,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/Hmbown/CodeWhale/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/Hmbown/CodeWhale/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/Hmbown/CodeWhale/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/Hmbown/CodeWhale/compare/v0.9.5...v0.9.6

@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-08-17
+
+Codewhale v0.9.9 is a truth-and-resilience release: the shell tool can no
+longer wedge a session when the host runs out of disk or descriptors,
+unverified context windows and output ceilings are labeled honestly at every
+surface, DeepSeek V4 is priced on the published peak/off-peak tiers, SSE
+UTF-8 fails closed in every dialect, Fleet shadowing is visible, bwrap gets
+container essentials and extra roots, the `dsh` skin rides the bundle
+profile, the `agent` tool schema is down to 12 fields, and README/website
+locales grow to 18 and 8.
+
 ### Fixed
 
+- The lowercase `bash` tool no longer wedges when its complete-output spill
+  file cannot be created: a full temp volume or exhausted descriptor table
+  used to fail *every* call — `echo ok` included — with the harness-internal
+  "Failed to create streaming shell output" and never recover until the
+  host was cleaned up. The spill is now best-effort (the bounded tail is
+  still returned and the truncation notice says why the full-output path is
+  missing), and any remaining spawn/stream failure names the exhausted
+  resource — disk, file descriptors, memory — and says the next call is safe
+  to retry (#5465; the wedge that took out the owner's own 0.9.9 session).
 - A concrete route/offering output limit now outranks the conservative
   8,192-token compatibility guess for an uncatalogued model. Routes that
   publish no output limit remain fail-closed, documented model ceilings stay
@@ -37,8 +57,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codewhale config get telemetry` reports the resolved consent with its
   source instead of `key not found` on a machine whose batches ship. Truth
   change only; resolution and behavior are untouched.
+- Fleet: a scout's read-only shell carve-out (#5428) is now honored by both
+  the posture gate and the execution envelope, so `git log`, `find | head`,
+  `npm view` and the other bounded read-only commands run in-place instead
+  of being refused as "Executes" (#5426). Delegation still never widens
+  authority: the role-isolation test and docs/SUBAGENTS.md pin that a child
+  cannot exceed its parent's posture (#5426, #5435).
+- `/rename` and `/title` now apply mid-first-turn: the session file does
+  not exist until the first autosave, so the rename fell through with
+  NotFound; the shared path now prefers the per-session checkpoint and
+  rebuilds from App state, with a PTY regression test through the live
+  event loop (#5430).
+- `integrations dsh plan` no longer refuses DeepSeek's default
+  Responses-dialect route (`deepseek-v4-flash`); Responses and
+  Anthropic-Messages routes are carried through pi-ai
+  `openai-responses` / `anthropic-messages` instead of being approximated
+  or refused; only credentialed base URLs are still refused, with an error
+  that names provider and model (#5434).
+- Session cost no longer sits at `unverified_live_pricing` when live pricing
+  cannot be verified (control-plane 503, Models.dev capabilities-only
+  overlays): provider-docs bundled fallback rates for the DeepSeek V4
+  family on Fireworks / OpenCode Zen restore a usable figure, live
+  per-provider rows still win, and `kimi-k3` stays unpriced until a
+  published rate exists (#5241; harvested from #5402).
+- Release assets: `release.yml` asset-freshness checks compare against the
+  release job's own `started_at`, so job-level reruns of the npm step are no
+  longer poisoned by earlier uploads (#5429).
+- macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
+  worker that had already completed and raced the rail's focus; it now holds
+  the child's wrap-up and waits for a settled live row (refs #5056, #5403).
+- DeepSeek V4 pricing follows the published peak/off-peak tiers (peak
+  01:00–04:00 and 06:00–10:00 UTC; off-peak is half of peak) for
+  `deepseek-v4-flash` and `deepseek-v4-pro` in USD and CNY, resolved from
+  each turn's recorded time; the stale single-tier rows understated cost up
+  to ~4×. Because every direct DeepSeek first-party rate is now
+  time-windowed, the scorecard fails closed (`missing_recorded_time`) on an
+  undated DeepSeek turn instead of guessing a tier (#5470; #5241 follow-up,
+  verified against api-docs.deepseek.com on 2026-08-17).
+- SSE UTF-8 split across HTTP/2 DATA frames now fails closed in every
+  streaming dialect: a shared strict decoder, tail flush, and
+  `decode_failed` propagation (`InvalidSseUtf8`) replace the per-dialect
+  approximations, with byte-chunk decoder tests (#5374; supersedes draft
+  #5404).
+- CI: `release_four_read_only_fleet_roles_launch_with_canonical_prompts`
+  answered Fleet children with SSE while they call the blocking JSON path;
+  the parse failure was retried and double-counted the worker on slow macOS
+  runners (#5471; refs #5056).
+- CI: the release workflows no longer restore npm/cargo caches after
+  checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
+  #88–#107 are closed with a contract test over the workflow files (#5463).
 
 ### Changed
+
 
 - The model-facing `agent` tool advertises exactly 12 fields — `action`,
   `prompt`, `type`, `profile`, `name`, `agent_id`, `message`, `until`,
@@ -66,6 +136,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ultrawide terminals. `0` or absent keeps the full width; negative or
   non-integer values are rejected with a clear config error. Tool, diff,
   and status cells never inherit the cap (#5436).
+- Localization: README translations for Français, Deutsch, 繁體中文, हिन्दी,
+  Türkçe, Italiano, Polski, العربية and Català join the existing nine
+  (#5451); codewhale.net routes fr, de, ca, hi, tr, it, pl and ar (with
+  `dir="rtl"` plumbing) as partial locales (#5453).
+- Docs: README Integrations section (incl. the DeepSeek Harness `dsh` plugin
+  path, docs/INTEGRATIONS_DSH.md) localized across all READMEs; RFC keeping
+  the deterministic-first auto-review hybrid (#5427); Claude Code parity
+  reference for agents/workflows/plugins/skills
+  (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
+  TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- `dsh` integration: the Codewhale palette is applied through the bundle
+  profile via dsh's documented `overrideTokens` (on by default;
+  `codewhale integrations dsh update --skin false` turns it off), replacing
+  the 0.9.8 exported-CSS skin that dsh's inline body variables overrode
+  (docs/design/DSH_BUNDLE_SKIN.md, docs/INTEGRATIONS_DSH.md) (#5469).
+- Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
+  agent detail, and a `doctor` "Fleet roster layers" section (JSON
+  `operate_fleet.roster.multi_layer`), in all 15 TUI locales. Layer collapse
+  and `[fleet.profiles]` migration stay for 0.9.10 (#5098).
+- Sandbox: bwrap containers get the `--dev/--proc/--tmpfs` essentials plus
+  configurable extra roots (`bwrap_ro_roots` / `bwrap_dev_roots`) so
+  toolchains that live outside the workspace stay reachable read-only
+  (#5410).
+- Tests: `crates/tui/tests/README.md` states the keyless assembled-journey
+  rule and maps the Auto-Review guardian acceptance items to the engine
+  journeys that exercise them (#5361).
+- Dependencies: ratatui 0.30.2, thiserror 2.0.20.
+
+### Removed
+
+- `dsh` integration: the exported-CSS skin file and its "skin export" status
+  line (superseded by the bundle-applied `overrideTokens` skin, #5469).
+
+### Contributors
+
+- hexin (@h3c-hexin) — a concrete route/offering output limit outranks the
+  8,192-token compatibility guess for an uncatalogued model (#5461, closes
+  #5460).
+- Reports and reproductions that shaped this release: @hardy922 (context-
+  window honesty, #5239), @redstar (bwrap extra roots, #5410), @all-lopezg
+  (SSE UTF-8 garbling on DeepSeek Flash, #5374), @alitvak69 (unverified live
+  pricing, #5241), and @wuisabel-gif (the macOS filtered-suite hang
+  investigation on #5056).
 
 ## [0.9.8] - 2026-08-16
 
@@ -3704,96 +3817,6 @@ reproductions shaped v0.9.0:
 - **Public release surface cleanup.** Benchmark-specific materials were kept
   out of the public release repo; benchmark source fragments belong in the
   separate `codewhale-bench` lane.
-
-## [0.8.63] - 2026-06-19
-
-### Added
-
-- **Sub-agent fanout safeguards (#3318, #3319).** High-fanout Workflow runs can
-  now queue and drain more agents than the instantaneous concurrency cap by
-  default, with `[subagents] max_admitted` available to tune that bounded
-  admission population. Distinct `agent` calls are no longer capped by the
-  per-turn loop guard before runtime launch concurrency and provider
-  rate-limit backoff can apply. `[subagents] token_budget` applies a shared
-  aggregate token ceiling to a root `agent` run and its descendants.
-- **Per-worker sub-agent token enforcement (#3321).** A `token_budget` /
-  `max_tokens` set on an individual `agent` call now bounds that single worker
-  mid-run: once its accumulated model tokens exceed the cap it stops cleanly
-  with a `budget_exhausted` status instead of running to `max_steps`. This
-  complements the scope-level admission gate (#3319) — the per-worker cap stops
-  one runaway worker, the scope cap bounds total fan-out — without
-  double-counting. Harvested from #3321 by @donglovejava.
-- **Provider-specific sub-agent fanout config.** `[subagents.providers.<provider>]`
-  profiles now override `enabled`, `max_concurrent`, `max_admitted`,
-  `launch_concurrency`, `max_depth`, token budget, API timeout, and heartbeat
-  timeout for the active provider. Use broad direct-API profiles such as
-  `[subagents.providers.deepseek]` and tighter subscription profiles such as
-  `[subagents.providers.glm]`; `/config subagents status` shows both global
-  and active-provider resolved values.
-- **Sub-agent control and isolation.** The single `agent` tool now exposes
-  status, peek, and cancel actions for running children, and accepts
-  `worktree: true` to create an isolated git worktree/branch for parallel edit
-  lanes instead of requiring callers to hand-roll a `cwd`.
-
-### Fixed
-
-- **Mode and tool catalog correctness.** Core action tools remain discoverable
-  in the model-facing catalog/tool search, and a consistency self-check flags
-  registered handlers that drift out of the advertised catalog. Review-looking
-  prompts in explicit Agent/YOLO mode now keep the requested mode and tools,
-  with only an advisory review hint.
-- **Sub-agent orchestration recovery.** Child agents now retry transient
-  provider header/SSE timeouts before failing, and parent runs synthesize missed
-  child completions from terminal child state so orchestration cannot hang on a
-  lost completion event.
-- **DeepSeek thinking tool calls.** DeepSeek chat-completions requests now omit
-  explicit `tool_choice` whenever reasoning/thinking is enabled, avoiding
-  provider rejections while leaving no-thinking routes unchanged.
-- **Task sidebar shortcuts and attribution.** Ctrl-K stays palette/emacs-kill,
-  while Ctrl-X is scoped to Tasks-sidebar background shell cancellation. Shell
-  jobs launched by sub-agents now render with their child-agent owner in the
-  Tasks sidebar and transcript.
-- **Long-turn recovery and context economy.** Repeated read-only search
-  loop blocks now return guidance instead of fatal tool failures, Python build
-  failures that are missing `setuptools` include an install/retry hint, long
-  foreground shell timeouts steer models toward background execution, and noisy
-  shell/test/web outputs are compacted earlier for large-context routes.
-- **Config display redaction.** `codew config get/list` now recursively masks
-  token-, secret-, password-, credential-, and authorization-like keys inside
-  unknown `extras` tables and redacts sensitive HTTP header values before
-  printing config output.
-- **Queued follow-up hints and force-steer keys.** The pending-input preview now
-  advertises `Ctrl+S send now` whenever queued follow-ups exist, and
-  Ctrl/Cmd+Enter force-steering also accepts the common Ctrl+J terminal
-  encoding while a turn is running.
-- **Sidebar default visibility restored (#3328).** New and upgraded sessions
-  now use a pinned composed sidebar by default when the terminal is wide
-  enough, so live Agents and Tasks surface without opting back into idle
-  auto-collapse. Older settings files that captured the v0.8.62 auto-collapse
-  default now migrate to `pinned` unless `/sidebar auto --save` records an
-  explicit opt-in. `/sidebar` now reports when width or auto-collapse
-  suppresses rendering instead of saying the sidebar is visible. Reported by
-  @dxfq.
-- **JavaScript execution proxy env handling (#3273, #3331).** `js_execution`
-  now enables Node's environment-proxy mode when proxy variables are present,
-  mirrors lowercase proxy variables for the child process, and backfills
-  `HTTP_PROXY` / `HTTPS_PROXY` from `ALL_PROXY`. Reported by @lordwedggie and
-  harvested from #3331 by @cyq1017.
-- **Legacy app-server non-loopback auth hardening (#3258).** Bare
-  `codewhale app-server --host 0.0.0.0` now fails fast unless an explicit
-  `--auth-token` or `CODEWHALE_APP_SERVER_TOKEN` is supplied, keeping generated
-  one-time `cwapp_*` tokens loopback-only.
-- **Legacy `.deepseek` state write-path migration (#3240).** State subdirectories
-  (`sessions`, `slop_ledger`, `trophies`, `catalog`) are now always written under
-  `~/.codewhale/`, and the first write of a subdir relocates any pre-existing
-  `~/.deepseek/<sub>` contents into the primary location so the legacy tree stops
-  growing while old data is preserved. The read resolver still finds legacy data
-  for backfill until each subdir migrates. Reported by @Final527; onboarding
-  marker slice from #3302 by @nightt5879.
-- **State subdir validation on Windows (#3240).** State path hardening now
-  rejects rooted/prefixed subdir strings such as `/etc` before resolving or
-  migrating state directories, keeping the `.codewhale` write resolver inside
-  its state root across platforms.
 
 ---
 

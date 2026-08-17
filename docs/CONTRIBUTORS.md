@@ -28,6 +28,31 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.9 — truth and resilience</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[h3c-hexin](https://github.com/h3c-hexin)** — a concrete route/offering
+  output limit now outranks the conservative 8,192-token compatibility guess
+  for an uncatalogued model; routes that publish no limit stay fail-closed
+  (#5461, closes #5460)
+
+**Reports, reproductions, and verification**
+
+- **[hardy922](https://github.com/hardy922)** — the context-window honesty
+  report that became the every-surface labeling pass (#5239)
+- **[redstar](https://github.com/redstar)** — bwrap container essentials and
+  configurable extra roots (#5410)
+- **[all-lopezg](https://github.com/all-lopezg)** — SSE UTF-8 garbling on
+  DeepSeek Flash with screenshots, fixed fail-closed in every dialect (#5374)
+- **[alitvak69](https://github.com/alitvak69)** — the unverified-live-pricing
+  report behind the bundled fallback rates and DeepSeek V4 tiers (#5241)
+- **[wuisabel-gif](https://github.com/wuisabel-gif)** — bounded reproduction
+  attempts for the macOS filtered-suite hang note on #5056
+
+</details>
+
+<details>
 <summary><strong>v0.9.8 — marketplace, Google, Ollama Cloud</strong></summary>
 
 **Merged or adapted contributions**
