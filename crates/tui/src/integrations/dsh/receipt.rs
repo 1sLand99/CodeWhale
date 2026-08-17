@@ -53,8 +53,13 @@ pub(crate) struct DshConnectionRecord {
     pub(crate) profile: String,
     pub(crate) overlay_path: PathBuf,
     pub(crate) overlay_sha256: String,
+    /// Palette applied through the bundle profile via `overrideTokens`.
+    /// Serialized as `skin` (the receipt field the spec names); older
+    /// documents that wrote `skin_enabled` still load.
+    #[serde(default, rename = "skin", alias = "skin_enabled")]
     pub(crate) skin_enabled: bool,
     pub(crate) skin_path: Option<PathBuf>,
+    /// SHA-256 of the rendered TOKENS JSON (not of a stylesheet).
     pub(crate) skin_sha256: Option<String>,
     pub(crate) disabled: bool,
     /// Documented plugin path, when installed into the dedicated profile.

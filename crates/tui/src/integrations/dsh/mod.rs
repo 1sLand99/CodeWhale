@@ -4,8 +4,9 @@
 //!
 //! - detection reads `dsh --version` / `--help`, `$DSH_HOME` inventory;
 //! - connection writes only under `$CODEWHALE_HOME/integrations/dsh/`: a
-//!   `--patch` overlay pinning the exact Codewhale route identity, an
-//!   append-only receipt, and (opt-in) an exported skin stylesheet;
+//!   `--patch` overlay pinning the exact Codewhale route identity and an
+//!   append-only receipt; the Codewhale palette rides the bundle profile
+//!   via `overrideTokens`, never the overlay;
 //! - launch runs `dsh --profile <web|headless> --patch <overlay>` with the
 //!   permission posture exported as `DSH_PERMISSION_MODE`, keeping the
 //!   user's own `$DSH_HOME` (credentials, sessions, profiles) untouched;
@@ -159,6 +160,31 @@ pub(crate) fn shadowing_namespaces(detection: &DshDetection) -> Vec<String> {
         .collect()
 }
 
+/// Drifted client half or a `cordis.patch.yml` that no longer matches the
+/// identity overlay plus the optional skin insert row.
+fn client_or_patch_stale(
+    record: &DshConnectionRecord,
+    overlay_bytes: Option<&[u8]>,
+    disk_patch_sha256: Option<&str>,
+    bundle: &bundle::DshBundleRecord,
+) -> Option<String> {
+    if let Some(reason) = bundle::client_half_stale(&bundle.bundle_dir, record.skin_enabled) {
+        return Some(reason);
+    }
+    let overlay_text = overlay_bytes.and_then(|b| std::str::from_utf8(b).ok());
+    let expected_patch =
+        overlay_text.map(|text| bundle::render_bundle_patch(text, record.skin_enabled));
+    let expected_sha = expected_patch
+        .as_ref()
+        .map(|text| sha256_hex(text.as_bytes()));
+    if disk_patch_sha256 != expected_sha.as_deref() {
+        return Some(
+            "bundle cordis.patch.yml was modified outside Codewhale; run `update`".to_string(),
+        );
+    }
+    None
+}
+
 pub(crate) fn compute_status(
     paths: &DshPaths,
     detection: DshDetection,
@@ -209,8 +235,10 @@ pub(crate) fn compute_status(
                         let bundle_stale = record.bundle.as_ref().and_then(|b| {
                             if !bundle_patch_present {
                                 Some("bundle cordis.patch.yml is missing; run `update`".to_string())
-                            } else if bundle_patch_sha256.as_deref() != Some(b.patch_sha256.as_str()) {
-                                Some("bundle cordis.patch.yml was modified outside Codewhale; run `update`".to_string())
+                            } else if let Some(reason) =
+                                client_or_patch_stale(record, overlay_bytes.as_deref(), bundle_patch_sha256.as_deref(), b)
+                            {
+                                Some(reason)
                             } else if b.patch_sha256 != record.overlay_sha256 {
                                 Some("bundle and overlay identities differ; run `update`".to_string())
                             } else if !bundle_profile_bundles
@@ -307,6 +335,9 @@ pub(crate) struct DshPlan {
     pub(crate) overlay_text: String,
     pub(crate) overlay_sha256: String,
     pub(crate) receipt_path: PathBuf,
+    /// Palette decision for the bundle profile. The `--patch` overlay never
+    /// carries skin code; `skin_path` stays unset (no CSS export).
+    pub(crate) skin: bool,
     pub(crate) skin_path: Option<PathBuf>,
     pub(crate) profile: String,
     pub(crate) launch_command: String,
@@ -348,7 +379,7 @@ pub(crate) fn plan(
     }
     if skin {
         disclosures.push(
-            "Skin: DSH has no custom-theme API; the exported stylesheet is an unsupported overlay you must apply yourself. Nothing is injected."
+            "Skin: Codewhale palette is applied through the bundle profile via overrideTokens (on by default for install-bundle). The --patch overlay path is unchanged; launch --profile web|headless stays overlay-only."
                 .to_string(),
         );
     }
@@ -367,7 +398,8 @@ pub(crate) fn plan(
         overlay_text,
         overlay_sha256,
         receipt_path: paths.receipt.clone(),
-        skin_path: skin.then(|| paths.skin.clone()),
+        skin,
+        skin_path: None,
         profile: profile.to_string(),
         launch_command,
         env_exports,
@@ -389,8 +421,9 @@ fn identity_summary(mapped: &MappedIdentity) -> String {
     )
 }
 
-/// Write the overlay (+ optional skin) and the receipt. `event` is
-/// `Connect` for a first connection or `Update` for a rewrite.
+/// Write the overlay and the receipt. `event` is `Connect` for a first
+/// connection or `Update` for a rewrite. Skin is a receipt decision for the
+/// bundle profile; no stylesheet is written.
 pub(crate) fn apply_plan(
     paths: &DshPaths,
     detection: &DshDetection,
@@ -405,14 +438,12 @@ pub(crate) fn apply_plan(
         let _ = std::fs::set_permissions(&paths.root, std::fs::Permissions::from_mode(0o700));
     }
     write_atomic(&paths.overlay, plan.overlay_text.as_bytes())?;
-    let (skin_path, skin_sha256) = if plan.skin_path.is_some() {
-        let css = skin::skin_css();
-        write_atomic(&paths.skin, css.as_bytes())?;
-        write_atomic(&paths.skin_preview, skin::skin_preview_html().as_bytes())?;
-        (Some(paths.skin.clone()), Some(sha256_hex(css.as_bytes())))
-    } else {
-        (None, None)
-    };
+    // The 0.9.8 CSS/preview export is gone; drop leftovers so `remove` stays
+    // the only cleanup path for those names.
+    for leftover in [&paths.skin, &paths.skin_preview] {
+        let _ = std::fs::remove_file(leftover);
+    }
+    let skin_sha256 = plan.skin.then(skin::skin_tokens_sha256);
     let mut doc = DshReceiptDocument::load(&paths.receipt)?;
     let now = now_rfc3339();
     let connected_at = doc
@@ -425,8 +456,12 @@ pub(crate) fn apply_plan(
     // is the whole update, no pnpm needed.
     let bundle_record = match doc.current.as_ref().and_then(|r| r.bundle.clone()) {
         Some(mut b) if event == DshReceiptEvent::Update => {
-            let sha =
-                bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &plan.overlay_text)?;
+            let sha = bundle::write_bundle(
+                &paths.bundle_dir,
+                &codewhale_version(),
+                &plan.overlay_text,
+                plan.skin,
+            )?;
             b.patch_sha256 = sha.clone();
             b.package_version = bundle::bundle_version(&codewhale_version(), &sha);
             b.updated_at = now.clone();
@@ -443,8 +478,8 @@ pub(crate) fn apply_plan(
         profile: plan.profile.clone(),
         overlay_path: paths.overlay.clone(),
         overlay_sha256: plan.overlay_sha256.clone(),
-        skin_enabled: plan.skin_path.is_some(),
-        skin_path,
+        skin_enabled: plan.skin,
+        skin_path: None,
         skin_sha256: skin_sha256.clone(),
         disabled: false,
         bundle: bundle_record,
@@ -471,7 +506,7 @@ pub(crate) fn apply_plan(
             "overlay_sha256": plan.overlay_sha256,
             "identity": identity_summary(&plan.mapped),
             "permission_mode": plan.mapped.permission_mode.as_str(),
-            "skin": plan.skin_path.is_some(),
+            "skin": plan.skin,
         }),
     );
     Ok(record)
@@ -735,7 +770,11 @@ pub(crate) fn install_bundle(
     if sha256_hex(overlay_text.as_bytes()) != record.overlay_sha256 {
         anyhow::bail!("overlay is stale; run `{CLI_COMMAND} update` before install-bundle");
     }
-    let patch_sha = bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &overlay_text)?;
+    // install-bundle defaults the palette on; `update --skin false` is the
+    // off switch. `connect --skin` records the same decision for a later update.
+    let skin = true;
+    let patch_sha =
+        bundle::write_bundle(&paths.bundle_dir, &codewhale_version(), &overlay_text, skin)?;
     let (app_source, outcomes) =
         match bundle::install_into_profile(runner, detection, app, &paths.bundle_dir) {
             Ok(ok) => ok,
@@ -769,6 +808,9 @@ pub(crate) fn install_bundle(
         pnpm_output_sha256: sha256_hex(digest_input.as_bytes()),
     };
     record.bundle = Some(bundle_record.clone());
+    record.skin_enabled = skin;
+    record.skin_path = None;
+    record.skin_sha256 = Some(skin::skin_tokens_sha256());
     record.updated_at = now.clone();
     doc.push(DshReceiptEntry {
         event: DshReceiptEvent::InstallBundle,
