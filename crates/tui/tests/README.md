@@ -59,7 +59,21 @@ over large full-screen goldens; pin only the durable events, protocol text,
 side effects, accounting, and next request whose exact shape is the feature.
 Do not add a new snapshot framework, network call, provider key, timing sleep,
 or platform shell merely to cover the journey. The Auto-Review guardian
-journeys in `src/core/engine/tests.rs` are the first fixture.
+journeys in `src/core/engine/tests.rs` are the first fixture (#5361); each
+drives one mock-model tool turn through `Engine::run` and pins:
+
+- `auto_review_guardian_allow_executes_once_and_accounts_usage_without_prompt_leak`
+  — allow executes the tool exactly once, reviewer usage reaches `TurnUsage`
+  and `TurnComplete`, and the reviewer rationale/audit fields never appear in
+  the follow-up model request
+- `auto_review_guardian_deny_returns_one_paired_failed_result` — deny yields
+  one paired `is_error` tool result carrying the rationale, no orphaned call,
+  no side effect
+- `auto_review_guardian_parse_and_transport_failures_deny_closed` — reviewer
+  parse or transport failure denies fail-closed with an `Unavailable` receipt
+- `auto_review_cancellation_promptly_drops_the_guardian_request` — cancel
+  drops the in-flight guardian future and interrupts the turn without a
+  follow-up model request
 
 ## `--record` mode for `deepseek eval`
 
