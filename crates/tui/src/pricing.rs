@@ -1752,7 +1752,8 @@ fn fireworks_bundled_fallback_pricing(model_lower: &str) -> Option<ModelPricing>
             Some(hosted_deepseek_v4_flash_standard_pricing())
         }
         "deepseek-v4-pro" => Some(hosted_deepseek_v4_pro_standard_pricing()),
-        "kimi-k3" => Some(usd_only_pricing(0.30, 3.00, 15.00)),
+        // kimi-k3 stays unpriced until Fireworks publishes a rate for it
+        // (see `fireworks_and_zen_flash_use_bundled_family_rates`).
         _ => None,
     }
 }
@@ -3784,11 +3785,11 @@ mod tests {
         }
     }
 
-    /// #5241: Fireworks flash / kimi-k3 and OpenCode Zen flash must leave
+    /// #5241: Fireworks flash / pro and OpenCode Zen flash must leave
     /// `unverified_live_pricing` via provider-docs bundled rates when live
     /// control-plane / Models.dev pricing is not a usable rate source.
     #[test]
-    fn hosted_flash_and_kimi_k3_routes_price_from_bundled_docs_rates() {
+    fn hosted_flash_and_pro_routes_price_from_bundled_docs_rates() {
         let usage = million_input_usage();
         let now = Utc::now();
         let cases = [
@@ -3803,12 +3804,6 @@ mod tests {
                 0.14,
             ),
             (ApiProvider::Fireworks, "deepseek-v4-flash", 0.14),
-            (
-                ApiProvider::Fireworks,
-                "accounts/fireworks/models/kimi-k3",
-                3.00,
-            ),
-            (ApiProvider::Fireworks, "kimi-k3", 3.00),
             (
                 ApiProvider::Fireworks,
                 "accounts/fireworks/models/deepseek-v4-pro",
