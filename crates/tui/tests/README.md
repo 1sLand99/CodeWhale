@@ -53,12 +53,13 @@ Coverage today exercises the trait surface end-to-end:
 - capacity-gate observation of a captured request before stream drain
 
 Full-engine journeys use `Engine::new_with_model_client` and the same mock.
-When a model-visible behavior crosses prompt assembly, a provider call, a tool
-gate or execution, and the follow-up prompt, add a keyless assembled journey to
-the existing engine harness. Assert the externally meaningful events, exact
-side effects, accounting, and next request. Do not add a new snapshot framework,
-network call, provider key, timing sleep, or platform shell merely to cover the
-journey.
+A non-trivial model/protocol/user-visible behavior change needs one keyless
+assembled journey at the nearest real entry path. Prefer semantic assertions
+over large full-screen goldens; pin only the durable events, protocol text,
+side effects, accounting, and next request whose exact shape is the feature.
+Do not add a new snapshot framework, network call, provider key, timing sleep,
+or platform shell merely to cover the journey. The Auto-Review guardian
+journeys in `src/core/engine/tests.rs` are the first fixture.
 
 ## `--record` mode for `deepseek eval`
 
