@@ -142,16 +142,26 @@ file in the bundle. `overrideTokens` validates only the `{light, dark}`
 shape, not the token name, so `--dsw-specific-sidebar-fill` can ride the same
 layer as the alias tokens.
 
-Design: one near whale (≈0.30 × viewport width, clamped 220–520 px) and one
-far, smaller, fainter whale on cubic bezier crossings (70–105 s), pitch
-clamped to ±0.28 rad, slow tail stroke with a periodic deeper flick (the
-fluke is added to the path under a rotation about the tail stock, so the
-flick needs no point math); a 14-fish school of `><>` / `><o>` glyphs in
-the code font following a lissajous leader with damped steering and facing
+Design: one near whale (≈0.34 × viewport width, clamped 240–560 px) and one
+far, smaller, fainter whale on slow linear crossings (75–110 s) with a
+gentle sine in Y, pitch clamped to ±0.12 rad; paths are biased to the lower
+half (near) and the top edge (far) so neither crosses the composer card. The
+silhouette is a single filled shape (no eye) at ~5:1 length:height: blunt
+rounded head, long back with a low soft dorsal hump about two thirds back,
+slightly convex belly, thin tail stock, a HORIZONTAL fluke drawn as a wide,
+low, notched T seen with a hint of perspective (lobes sweep back, the lower
+one a touch longer for the downward curl — never a vertical fish tail), and
+one long pectoral flipper (~1/3 body length) sweeping down and back from a
+third of the way along the body. The fluke flexes ±10° about the tail stock
+(added to the path under a rotation, so no point math); when a whale is in
+the top third it occasionally releases a short bubble stream from the head.
+A 16-fish school of `><>` / `><o>` glyphs (14 px code font, scaled
+0.85–1.25) follows a lissajous leader with damped steering and facing
 hysteresis; 26 stroked bubbles; a two-stop depth gradient. Layer order:
-gradient, far whale, bubbles, fish, near whale. Palette per scheme is
-derived from the skin's `surface_bg` / `accent_primary` / `text_body` /
-`text_dim`.
+gradient, far whale, bubbles, spouts, fish, near whale. Palette per scheme
+is derived from the skin's `surface_bg` / `accent_primary` / `text_body` /
+`text_dim`; canvas alphas (near 0.5 light / 0.62 dark, far 0.3 / 0.34) land
+at roughly 10–12 % apparent under the veil.
 
 Visibility: `--dsw-alias-bg-base` → rgba α 0.55 and
 `--dsw-specific-sidebar-fill` → rgba α 0.72 (`scene::ocean_veil_tokens`),

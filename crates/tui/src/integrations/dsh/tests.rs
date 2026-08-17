@@ -1348,6 +1348,8 @@ fn ocean_scene_fragment_mounts_a_canvas_and_honours_the_guards() {
     assert!(js.contains("><>"));
     assert!(js.contains("><o>"));
     assert!(js.contains("drawBubbles"));
+    assert!(js.contains("drawSpout"));
+    assert!(!js.contains("eye"), "silhouette only, no eye dot");
     assert_eq!(scene::scene_sha256().len(), 64);
 }
 

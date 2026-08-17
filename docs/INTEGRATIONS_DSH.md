@@ -216,10 +216,13 @@ carries the same hash under `codewhale.skin_sha256`.
 With the skin on, `lib/client.js` also carries an ambient ocean: a
 full-viewport `<canvas>` (`position: fixed; inset: 0; z-index: -1;
 pointer-events: none`, painted below `#root` and above the body background)
-with a subtle depth gradient, one near and one far whale silhouette gliding
-across on bezier paths with a slow tail stroke and an occasional deeper
-flick, a small school of Codewhale glyph fish (`><>` / `><o>` in the code
-font, flocking-lite behind a wandering leader) and faint rising bubbles. The
+with a subtle depth gradient, one near and one far whale silhouette (blunt
+head, low dorsal hump, long pectoral flipper, horizontal fluke flexing ±10°)
+gliding slowly across on a gentle sine, biased to the lower half and the top
+edge so they never cross the composer card, an occasional short spout of
+bubbles from the head, a small school of Codewhale glyph fish (`><>` /
+`><o>` in the code font, flocking-lite behind a wandering leader) and faint
+rising bubbles. The
 palette is the skin's own (`surface_bg`, `accent_primary`, `text_body`,
 `text_dim` for light and dark); the scene follows DSH's `theme/change` event
 so it flips with the app.
