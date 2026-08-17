@@ -13440,6 +13440,26 @@ fn v4_keeps_large_file_reads_but_compacts_noisy_shell_output() {
 }
 
 #[test]
+fn web_tool_surfaces_use_the_noisy_soft_limit() {
+    // This stays below the ordinary 12K hard limit but exceeds the 2K noisy
+    // soft limit, so the assertion proves the tool name triggered compaction.
+    let content = "w".repeat(4_000);
+    let output = ToolResult::success(content.clone());
+
+    let file_context = compact_tool_result_for_context("deepseek-v3.2-128k", "read_file", &output);
+    assert_eq!(file_context, content);
+
+    for tool_name in ["Web", "web_search", "web.run", "fetch_url"] {
+        let web_context = compact_tool_result_for_context("deepseek-v3.2-128k", tool_name, &output);
+        assert!(
+            web_context.contains(&format!("{tool_name} output compacted to protect context")),
+            "{tool_name} did not use the noisy soft limit: {web_context}"
+        );
+        assert!(web_context.len() < file_context.len());
+    }
+}
+
+#[test]
 fn evidence_bounded_preview_is_not_recompacted() {
     // The adaptive evidence envelope already produced an honest bounded
     // preview (head + footer with the recovery path + tail). The context
