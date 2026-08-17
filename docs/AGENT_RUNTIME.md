@@ -297,7 +297,7 @@ is the provider-free acceptance lock for this contract.
 
 Actually adding CodeWhale as a built-in harness lives in the external Verifiers
 repository; the public, immutable CodeWhale GitHub Releases with checksum
-manifests it needs have existed since v0.9.1 (current release line is v0.9.7).
+manifests it needs have existed since v0.9.1 (current release line is v0.9.9).
 That upstream change is expected to be limited to a new
 `verifiers/v1/harnesses/codewhale/` package plus its test-matrix and docs
 registration, with `CodewhaleHarnessConfig` pinning the target release,

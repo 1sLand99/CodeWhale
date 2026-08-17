@@ -11,7 +11,7 @@ surface — one identity per vendor. Dual-wire dialect kinds (`*Anthropic`, e.g.
 `deepseek-anthropic`) and the Model Studio plan variants stay on the enum for
 serde and `provider_for_kind` but are deliberately **not** catalog rows:
 a plan is `mode`/`base_url` and a dialect is `wire = openai|anthropic` on the
-primary provider config (`crates/config/src/provider_kind.rs:186-197`). Hosted
+primary provider config (`crates/config/src/provider_kind.rs:221-226`). Hosted
 routes, generic OpenAI-compatible endpoints, the OpenAI Codex/ChatGPT route,
 native Anthropic, and local runtimes all run the same terminal harness against
 the selected provider/model/base URL.

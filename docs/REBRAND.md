@@ -130,7 +130,7 @@ to `npm install -g codewhale`.
 
 ### Homebrew
 
-**Current state (v0.9.8):** The formula is `codewhale`. New installs:
+**Current state (v0.9.9):** The formula is `codewhale`. New installs:
 
 ```bash
 brew tap Hmbown/deepseek-tui
