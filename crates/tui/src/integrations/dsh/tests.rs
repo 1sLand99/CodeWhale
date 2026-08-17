@@ -501,8 +501,17 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     assert!(plan.overlay_text.contains("deepseek-official"));
     let record = apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
     assert!(paths.overlay.is_file());
-    assert!(paths.skin.is_file());
+    assert!(
+        !paths.skin.is_file(),
+        "connect --skin records the palette decision; it does not write a stylesheet"
+    );
+    assert!(!paths.skin_preview.is_file());
     assert!(paths.receipt.is_file());
+    assert!(record.skin_enabled);
+    assert_eq!(
+        record.skin_sha256.as_deref(),
+        Some(skin::skin_tokens_sha256().as_str())
+    );
     assert_eq!(record.overlay_sha256, plan.overlay_sha256);
 
     let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
@@ -585,6 +594,7 @@ fn connect_update_disable_enable_remove_lifecycle_writes_only_owned_files() {
     assert!(removed.contains(&paths.overlay));
     assert!(!paths.overlay.exists());
     assert!(!paths.skin.exists());
+    assert!(!paths.skin_preview.exists());
     let doc = DshReceiptDocument::load(&paths.receipt).unwrap();
     assert!(doc.current.is_none());
     let events: Vec<_> = doc.history.iter().map(|e| e.event.as_str()).collect();
@@ -688,23 +698,98 @@ fn plan_discloses_shadowing_settings_namespaces() {
 }
 
 #[test]
-fn skin_css_is_generated_from_palette_and_labels_itself_unsupported() {
-    let css = skin::skin_css();
-    assert!(css.contains("--cw-surface-bg: #03070d"));
-    assert!(css.contains("--cw-accent-action: #f6c453"));
-    assert!(css.contains("--cw-water-surface: #102a45"));
-    assert!(css.contains("--cw-water-middle: #0a1e33"));
-    assert!(css.contains("--cw-water-deep: #061320"));
-    assert!(css.contains("--cw-permission-full-access: #ff7a59"));
-    assert!(css.contains("--cw-mode-plan: #b9dcec"));
-    assert!(css.contains("--dsw-alias-bg-base: var(--cw-surface-bg)"));
-    assert!(css.contains("prefers-reduced-motion: reduce"));
-    assert!(css.contains("UNSUPPORTED OVERLAY"));
-    assert!(css.contains("DeepSeek Harness connected through Codewhale"));
-    assert!(css.contains("MIT"));
-    assert!(css.contains("data:image/svg+xml"));
-    let preview = skin::skin_preview_html();
-    assert!(preview.contains("PREVIEW ONLY"));
+fn skin_token_table_is_alias_pairs_that_round_trip_json() {
+    let table = skin::skin_tokens();
+    assert!(!table.is_empty());
+    for (key, (light, dark)) in &table {
+        assert!(
+            key.starts_with("--dsw-alias-"),
+            "token key must be a DSH alias, got {key}"
+        );
+        assert!(!light.is_empty(), "{key} light is empty");
+        assert!(!dark.is_empty(), "{key} dark is empty");
+    }
+    let bg = table.get("--dsw-alias-bg-base").expect("bg-base is mapped");
+    let label = table
+        .get("--dsw-alias-label-primary")
+        .expect("label-primary is mapped");
+    assert_ne!(bg.0, bg.1, "light and dark surface colors must differ");
+    assert_ne!(
+        label.0, label.1,
+        "light and dark primary labels must differ"
+    );
+    let parsed: std::collections::BTreeMap<String, skin::SkinTokens> =
+        serde_json::from_str(&skin::skin_tokens_json()).unwrap();
+    let round_trip: std::collections::BTreeMap<String, (String, String)> = parsed
+        .into_iter()
+        .map(|(k, v)| (k, (v.light, v.dark)))
+        .collect();
+    assert_eq!(round_trip, table);
+}
+
+#[test]
+fn skin_flag_does_not_change_the_patch_overlay_bytes() {
+    let (_dir, paths) = lab_paths();
+    let detection = detection_ok();
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+    let on = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    let off = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    assert_eq!(on.overlay_text, off.overlay_text);
+    assert_eq!(on.overlay_sha256, off.overlay_sha256);
+    assert!(on.skin);
+    assert!(!off.skin);
+    assert!(on.skin_path.is_none());
+    assert!(off.skin_path.is_none());
+}
+
+#[test]
+fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
+    let a = skin::bundle_client_js();
+    let b = skin::bundle_client_js();
+    assert_eq!(a, b);
+    assert!(a.contains(&format!("codewhale-skin/{}", env!("CARGO_PKG_VERSION"))));
+    assert!(a.contains(skin::SKIN_SOURCE));
+    assert!(a.contains("ctx.effect"));
+    assert!(a.contains("overrideTokens"));
+    assert!(a.contains("if (!ctx.theme) return;"));
+    assert!(
+        a.contains("exports.inject = [\"theme\"];"),
+        "cordis exposes ctx.theme only through inject"
+    );
+    assert!(
+        a.contains("ctx.theme?.overrideTokens"),
+        "disposal shape: effect callback returns the overrideTokens disposer"
+    );
+    assert!(!a.contains("skin_css"));
+    assert!(!a.contains("<style"));
+    assert!(!a.contains("skin_preview"));
+    // TOKENS JSON inside the script is the same table.
+    let start = a.find("const TOKENS = ").expect("TOKENS literal");
+    let json_start = a[start..].find('{').expect("{") + start;
+    let mut depth = 0i32;
+    let mut json_end = json_start;
+    for (i, ch) in a[json_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    json_end = json_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let tokens_json = &a[json_start..json_end];
+    let parsed: std::collections::BTreeMap<String, skin::SkinTokens> =
+        serde_json::from_str(tokens_json).unwrap();
+    assert_eq!(parsed, skin::skin_token_objects());
 }
 
 #[test]
@@ -858,7 +943,7 @@ fn bundle_availability_reports_pnpm_truthfully() {
 
 #[test]
 fn bundle_files_are_npm_shaped_and_carry_the_overlay_rows() {
-    let files = bundle::render_bundle_files("0.9.8", "- id: agent-default-model\n");
+    let files = bundle::render_bundle_files("0.9.8", "- id: agent-default-model\n", false);
     let names: Vec<_> = files.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         names,
@@ -869,9 +954,43 @@ fn bundle_files_are_npm_shaped_and_carry_the_overlay_rows() {
     assert_eq!(pkg["private"], true);
     assert_eq!(pkg["license"], "MIT");
     assert_eq!(pkg["dsh"]["bundle"]["patch"], "./cordis.patch.yml");
+    assert!(pkg["dsh"].get("client").is_none());
+    assert!(pkg.get("exports").is_none());
     assert!(pkg["version"].as_str().unwrap().starts_with("0.9.8+dsh."));
     assert_eq!(files[1].1, "- id: agent-default-model\n");
+    assert!(!files[1].1.contains("insert:"));
     assert!(files[3].1.contains("Copyright (c) 2026 DeepSeek"));
+}
+
+#[test]
+fn bundle_files_with_skin_carry_client_half_and_insert_row() {
+    let overlay = "- id: agent-default-model\n";
+    let files = bundle::render_bundle_files("0.9.8", overlay, true);
+    let by_name: std::collections::BTreeMap<&str, &str> =
+        files.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let pkg: serde_json::Value = serde_json::from_str(by_name["package.json"]).unwrap();
+    let inject = pkg["dsh"]["client"]["inject"]
+        .as_array()
+        .expect("dsh.client.inject");
+    assert!(
+        inject
+            .iter()
+            .any(|v| v.as_str() == Some("@deepseek-ai/dsh-client-ui-theme"))
+    );
+    assert_eq!(pkg["dsh"]["client"]["platform"], "web");
+    assert_eq!(pkg["dsh"]["client"]["immediately"], true);
+    assert_eq!(pkg["exports"]["./client"]["default"], "./lib/client.js");
+    // Node's exports map is exhaustive: the loader imports the bare name and
+    // dsh-client-modules resolves `<name>/package.json`.
+    assert_eq!(pkg["exports"]["."]["default"], "./lib/index.js");
+    assert_eq!(pkg["exports"]["./package.json"], "./package.json");
+    assert!(by_name[bundle::BUNDLE_PATCH_FILE].ends_with(bundle::SKIN_INSERT_YAML));
+    assert_eq!(
+        by_name[bundle::BUNDLE_CLIENT_FILE],
+        skin::bundle_client_js()
+    );
+    assert_eq!(by_name[bundle::BUNDLE_INDEX_FILE], skin::bundle_index_js());
+    assert!(!by_name[bundle::BUNDLE_CLIENT_FILE].contains("<style"));
 }
 
 #[test]
@@ -920,7 +1039,20 @@ fn install_update_remove_bundle_lifecycle_uses_documented_plugin_commands() {
     assert!(paths.bundle_dir.join("cordis.patch.yml").is_file());
     assert_eq!(
         std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml")).unwrap(),
-        plan.overlay_text
+        bundle::render_bundle_patch(&plan.overlay_text, true)
+    );
+    assert!(paths.bundle_dir.join(bundle::BUNDLE_CLIENT_FILE).is_file());
+    let installed = DshReceiptDocument::load(&paths.receipt)
+        .unwrap()
+        .current
+        .unwrap();
+    let installed_json = serde_json::to_value(&installed).unwrap();
+    assert_eq!(installed_json["skin"], true);
+    assert_eq!(installed_json["skin_sha256"], skin::skin_tokens_sha256());
+    assert!(installed.skin_enabled);
+    assert_eq!(
+        installed.skin_sha256.as_deref(),
+        Some(skin::skin_tokens_sha256().as_str())
     );
     let calls = runner.calls.borrow().clone();
     let plugin_calls: Vec<_> = calls.iter().filter(|c| c[0] == "plugin").collect();
@@ -966,6 +1098,15 @@ fn install_update_remove_bundle_lifecycle_uses_documented_plugin_commands() {
     assert_eq!(
         std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml")).unwrap(),
         plan2.overlay_text
+    );
+    assert!(
+        !paths.bundle_dir.join(bundle::BUNDLE_CLIENT_FILE).exists(),
+        "update --skin false drops the client half"
+    );
+    assert!(
+        !std::fs::read_to_string(paths.bundle_dir.join("cordis.patch.yml"))
+            .unwrap()
+            .contains("insert:")
     );
     let report =
         compute_status(&paths, detection.clone(), Ok(moved.clone()), false, avail()).unwrap();
@@ -1071,4 +1212,106 @@ fn failed_plugin_add_leaves_no_bundle_record_or_files() {
     assert!(!paths.bundle_dir.join("package.json").exists());
     let doc = DshReceiptDocument::load(&paths.receipt).unwrap();
     assert!(doc.current.as_ref().unwrap().bundle.is_none());
+}
+
+#[test]
+fn client_half_stale_covers_present_absent_and_modified() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle_dir = dir.path().join("bundle");
+    std::fs::create_dir_all(bundle_dir.join("lib")).unwrap();
+
+    assert!(
+        bundle::client_half_stale(&bundle_dir, true)
+            .unwrap()
+            .contains("missing")
+    );
+    assert!(bundle::client_half_stale(&bundle_dir, false).is_none());
+
+    std::fs::write(bundle_dir.join(bundle::BUNDLE_CLIENT_FILE), "nope\n").unwrap();
+    assert!(
+        bundle::client_half_stale(&bundle_dir, true)
+            .unwrap()
+            .contains("modified")
+    );
+    assert!(
+        bundle::client_half_stale(&bundle_dir, false)
+            .unwrap()
+            .contains("present")
+    );
+
+    std::fs::write(
+        bundle_dir.join(bundle::BUNDLE_CLIENT_FILE),
+        skin::bundle_client_js(),
+    )
+    .unwrap();
+    assert!(bundle::client_half_stale(&bundle_dir, true).is_none());
+}
+
+#[test]
+fn compute_status_reports_stale_config_when_client_half_drifts() {
+    let (dir, paths) = lab_paths();
+    let dsh_bin = fake_launcher(dir.path());
+    let mut detection = detection_ok();
+    detection.binary = Some(dsh_bin);
+    detection.dsh_home = dir.path().join("dsh-home");
+    let profile_dir = detection.dsh_home.join("profiles").join("codewhale");
+    let runner = PluginRunner {
+        profile_dir: profile_dir.clone(),
+        calls: Default::default(),
+        fail_add: false,
+    };
+    let id = identity(
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        WireProtocol::ChatCompletions,
+    );
+    let plan = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    apply_plan(&paths, &detection, &plan, DshReceiptEvent::Connect).unwrap();
+    install_bundle(&paths, &detection, &runner, &avail(), DshAppBundle::Web).unwrap();
+
+    let client = paths.bundle_dir.join(bundle::BUNDLE_CLIENT_FILE);
+    std::fs::remove_file(&client).unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::StaleConfig { ref reason, .. } if reason.contains("lib/client.js") && reason.contains("missing")),
+        "{:?}",
+        report.state
+    );
+
+    let plan_on = super::plan(&paths, &detection, &id, "web", false, true).unwrap();
+    apply_plan(&paths, &detection, &plan_on, DshReceiptEvent::Update).unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+
+    std::fs::write(&client, "/* tampered */\n").unwrap();
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::StaleConfig { ref reason, .. } if reason.contains("modified")),
+        "{:?}",
+        report.state
+    );
+
+    let plan_off = super::plan(&paths, &detection, &id, "web", false, false).unwrap();
+    apply_plan(&paths, &detection, &plan_off, DshReceiptEvent::Update).unwrap();
+    assert!(!client.exists());
+    let report = compute_status(&paths, detection.clone(), Ok(id.clone()), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::Connected { .. }),
+        "{:?}",
+        report.state
+    );
+
+    std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+    std::fs::write(&client, skin::bundle_client_js()).unwrap();
+    let report = compute_status(&paths, detection, Ok(id), false, avail()).unwrap();
+    assert!(
+        matches!(report.state, DshIntegrationState::StaleConfig { ref reason, .. } if reason.contains("present") && reason.contains("disabled")),
+        "{:?}",
+        report.state
+    );
 }

@@ -41,9 +41,8 @@ the dedicated `codewhale` DSH profile):
   overlay SHA-256, dsh version, `$DSH_HOME`, mapped identity, permission mode,
   and timestamps (see `docs/RECEIPTS.md`). Every event is also appended to
   `$CODEWHALE_HOME/audit.log`.
-- `codewhale-dsh-skin.css` and `codewhale-dsh-skin-preview.html` — only with
-  `--skin`; see below.
-- `bundle/` — only after `install-bundle`; see below.
+- `bundle/` — only after `install-bundle`; see below. The Codewhale palette
+  (skin) lives here, in the bundle's client half — no stylesheet is exported.
 
 Codewhale **never**:
 
@@ -141,8 +140,10 @@ shells out to it); without pnpm the status reads
    `$CODEWHALE_HOME/integrations/dsh/bundle/` — `package.json`
    (`codewhale-dsh-bundle`, private, MIT, version
    `<codewhale version>+dsh.<patch sha12>`, `"dsh": {"bundle": {"patch":
-   "./cordis.patch.yml"}}`), `cordis.patch.yml` (byte-identical to the
-   overlay), `README.md`, `NOTICE.md` (DSH MIT notice retained);
+   "./cordis.patch.yml"}}`), `cordis.patch.yml` (the identity overlay,
+   plus one trailing skin insert row when the skin is on — see below),
+   `README.md`, `NOTICE.md` (DSH MIT notice retained), and, with the skin
+   on, `lib/index.js` + `lib/client.js` (the palette plugin);
 2. runs the documented `dsh plugin --profile codewhale add <path>` twice: first
    for DSH's own shipped app bundle (`@deepseek-ai/dsh-web-app` or
    `dsh-headless`, linked from the installed launcher so the profile can boot;
@@ -159,10 +160,12 @@ Afterwards `dsh --profile codewhale` alone carries the identity (verified with
 `dsh --profile codewhale --dump-config`), and `launch` prefers that profile
 without `--patch`; `launch --profile web|headless` still uses the overlay.
 Because the profile dependency is a `link:` to the Codewhale-owned directory,
-`update` regenerates `cordis.patch.yml` in place — no pnpm run. Stale
-detection covers the bundle: a modified or missing bundle patch, a bundle
-that no longer matches the overlay, or a profile manifest that stopped
-listing `codewhale-dsh-bundle` all report `stale-config`.
+`update` regenerates `cordis.patch.yml` (and the skin files) in place — no
+pnpm run. Stale detection covers the bundle: a modified or missing bundle
+patch, a bundle that no longer matches the overlay, a `lib/client.js` that
+is missing, modified, or present while the receipt says the skin is off, or
+a profile manifest that stopped listing `codewhale-dsh-bundle` all report
+`stale-config`.
 
 `remove-bundle` runs `dsh plugin --profile codewhale remove
 codewhale-dsh-bundle` and deletes only the Codewhale-owned bundle files. The
@@ -170,30 +173,62 @@ profile directory itself (and the app bundle link dsh recorded there) is
 DSH-owned and is left in place; the receipt says so. `remove` refuses while a
 bundle is installed.
 
-## Skin (unsupported overlay)
+## Skin (bundle profile, `overrideTokens`)
 
-DSH 0.1.0-rc.6 has no supported custom-theme API — only the built-in
-`ui-theme.preference` (`light|dark|system`). Its theme package documents
-third-party themes as "an extension point, not a product": overriding
-same-named `--dsw-alias-*` CSS variables, with no validation.
+DSH 0.1.0-rc.6 has one documented token-level theming seam:
+`ThemeService.overrideTokens(source, tokens)` in
+`@deepseek-ai/dsh-client-ui-theme`, which stacks a partial `--dsw-alias-*`
+layer over the active theme (per-token, later layers win) and returns a
+disposer. That is the mechanism the Codewhale skin uses. It is **applied only
+through the bundle profile** (`dsh --profile codewhale`); the `--patch`
+overlay never carries skin code, so `launch --profile web|headless` stays
+overlay-only and stock-themed.
 
-`--skin` therefore exports `codewhale-dsh-skin.css`, generated from the TUI's
-real palette (`crates/tui/src/palette`, Blue Stage dark and light), including
-the ombre water column, semantic role/permission/mode colors, focus,
-selection, error, waiting, and working states, the crown-fluke mark as an
-inline SVG, typography sizing, and `prefers-reduced-motion` fallbacks, and
-maps a bounded set of `--dsw-alias-*` variables onto them. **It is never
-injected**: applying it to a running DSH page (browser user stylesheet or a
-future DSH plugin) is an unsupported overlay you enable yourself. The
-attribution chip in the sheet reads "DeepSeek Harness connected through
-Codewhale". `codewhale-dsh-skin-preview.html` renders the tokens for
-inspection and is explicitly not the DSH UI.
+`install-bundle` turns the skin **on by default**. With the skin on, the
+bundle is a dual-face DSH plugin:
+
+- `package.json` gains `"dsh": {"client": {"platform": "web", "immediately":
+  true, "inject": ["@deepseek-ai/dsh-client-ui-theme"]}}` and
+  `"exports": {".": …, "./client": …, "./package.json": …}` (Node exports maps are exhaustive; the loader imports the bare name and dsh-client-modules resolves `<name>/package.json`);
+- `lib/index.js` is a no-op Node cordis entry (so the row mounts) and
+  `lib/client.js` is a plain `window.__ModuleLoader__.load({ id, factory })`
+  script whose factory calls
+  `ctx.theme.overrideTokens("codewhale-dsh-bundle", TOKENS)` inside
+  `ctx.effect` and returns the disposer (`inject: ["theme"]` defers it until
+  the theme service exists);
+- `cordis.patch.yml` ends with
+  `- insert: [{ id: codewhale-skin, name: codewhale-dsh-bundle }]` after the
+  identity rows.
+
+`TOKENS` is a bounded map of `--dsw-alias-*` names (backgrounds, borders,
+brand, buttons, labels, error/success/warn states, code blocks, scrollbar,
+toast, tooltip) onto light/dark values rendered from the TUI's real palette
+(`crates/tui/src/palette`, Blue Stage dark and light) — palette constants
+only, no user data or environment. The receipt records `skin: true|false`
+and `skin_sha256` (SHA-256 of the rendered `TOKENS` JSON); `package.json`
+carries the same hash under `codewhale.skin_sha256`.
+
+Escape hatch: `codewhale integrations dsh update --skin false` regenerates
+the bundle without the client half and without the insert row (no pnpm run;
+the `link:` dependency picks the files up in place); `update --skin true`
+turns it back on, and a bare `update` keeps the previous choice.
+`install-bundle` itself takes no `--skin` flag. `connect --skin` / `plan
+--skin` record the same decision ahead of a later bundle install and write
+no extra files. `remove-bundle` deletes the client half with the rest of the
+Codewhale-owned bundle files, and the `overrideTokens` layer is disposed
+with the plugin, so stock DSH theming returns.
+
+The 0.9.8 `--skin` CSS/preview export (`codewhale-dsh-skin.css`,
+`codewhale-dsh-skin-preview.html`) is gone: `dsh-client-ui-layout` writes
+the alias tokens as inline `body.style` properties, so any stylesheet rule
+lost to them by construction. `connect`/`update` delete those leftover files
+if present.
 
 ## Removal
 
-`remove` deletes only the overlay, skin, and preview under
-`$CODEWHALE_HOME/integrations/dsh/`, appends a `remove` receipt, and never
-touches `$DSH_HOME` or the installed package. DSH keeps working exactly as
+`remove` deletes only the overlay (and any 0.9.8 skin/preview leftovers)
+under `$CODEWHALE_HOME/integrations/dsh/`, appends a `remove` receipt, and
+never touches `$DSH_HOME` or the installed package. DSH keeps working exactly as
 before the connection.
 
 ## Attribution
