@@ -33,11 +33,42 @@ pub(super) struct BoundedOutputAccumulator {
     stream_error: Option<String>,
     temp: Option<tempfile::NamedTempFile>,
     full_output_path: Option<PathBuf>,
+    /// Why the on-disk spill file could not be created (disk full, descriptor
+    /// exhaustion, unwritable temp dir). The stream still runs and the bounded
+    /// tail is still delivered; only "Full output: <path>" is unavailable.
+    spill_unavailable: Option<String>,
 }
 
 impl BoundedOutputAccumulator {
-    pub(super) fn new() -> io::Result<Self> {
-        Ok(Self {
+    /// Build an accumulator whose complete-output spill file lives in the
+    /// process temp dir. Never fails: when the spill file cannot be created
+    /// (disk full, `EMFILE`, missing temp dir) the command still runs and the
+    /// bounded tail is still returned — the spill is a convenience, not a
+    /// precondition for executing `echo ok`.
+    pub(super) fn new() -> Self {
+        Self::new_in(None)
+    }
+
+    /// Like [`Self::new`], with an explicit spill directory (`None` = process
+    /// temp dir). Used to fault-inject spill failure in tests.
+    pub(super) fn new_in(spill_dir: Option<&std::path::Path>) -> Self {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("codewhale-bash-");
+        let temp = match spill_dir {
+            Some(dir) => builder.tempfile_in(dir),
+            None => builder.tempfile(),
+        };
+        let (temp, spill_unavailable) = match temp {
+            Ok(temp) => (Some(temp), None),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "shell output spill file unavailable; continuing with the in-memory tail only"
+                );
+                (None, Some(spill_unavailable_reason(&error)))
+            }
+        };
+        Self {
             tail: VecDeque::with_capacity(BOUNDED_OUTPUT_RETAIN_BYTES),
             tail_newlines: 0,
             total_bytes: 0,
@@ -49,13 +80,15 @@ impl BoundedOutputAccumulator {
             decoder: UTF_8.new_decoder_without_bom_handling(),
             stream_finished: false,
             stream_error: None,
-            temp: Some(
-                tempfile::Builder::new()
-                    .prefix("codewhale-bash-")
-                    .tempfile()?,
-            ),
+            temp,
             full_output_path: None,
-        })
+            spill_unavailable,
+        }
+    }
+
+    /// Why the complete output is not being persisted, if it is not.
+    pub(super) fn spill_unavailable(&self) -> Option<&str> {
+        self.spill_unavailable.as_deref()
     }
 
     fn decode(&mut self, bytes: &[u8], last: bool) -> String {
@@ -212,7 +245,17 @@ impl BoundedOutputAccumulator {
                 self.temp.take();
             }
         }
-        if truncated
+        if truncated && finalize && self.full_output_path.is_none() {
+            let reason = self.spill_unavailable.as_deref().unwrap_or(
+                "the output stream did not close cleanly, so the spill file was not kept",
+            );
+            content.push_str(&format!(
+                "\n\n[Showing the last {} of {} lines ({} limit). Full output was not persisted: {reason}]",
+                Self::format_size(retained_bytes),
+                total_lines,
+                Self::format_size(BOUNDED_OUTPUT_MAX_BYTES),
+            ));
+        } else if truncated
             && finalize
             && let Some(path) = self.full_output_path.as_ref()
         {
@@ -254,6 +297,68 @@ impl BoundedOutputAccumulator {
     pub(super) fn full_output_path(&self) -> Option<&std::path::Path> {
         self.full_output_path.as_deref()
     }
+}
+
+/// Human-readable, actionable reason for a failed spill-file creation.
+pub(super) fn spill_unavailable_reason(error: &io::Error) -> String {
+    match resource_exhaustion_hint(error) {
+        Some(hint) => format!("{error} ({hint})"),
+        None => error.to_string(),
+    }
+}
+
+/// When an I/O error looks like host resource exhaustion, name the likely
+/// cause and the remedy. Returns `None` for ordinary errors.
+pub(super) fn resource_exhaustion_hint(error: &io::Error) -> Option<&'static str> {
+    use io::ErrorKind;
+    match error.kind() {
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => {
+            return Some("the disk holding the temp dir is full; free space and retry");
+        }
+        ErrorKind::OutOfMemory => {
+            return Some("the host is out of memory; close heavy processes and retry");
+        }
+        _ => {}
+    }
+    let code = error.raw_os_error()?;
+    // ENOSPC / EDQUOT / EMFILE / ENFILE / ENOMEM / EAGAIN — the codes fork(2),
+    // pipe(2), and open(2) return when the machine is thrashing.
+    #[cfg(unix)]
+    {
+        if code == libc::ENOSPC || code == libc::EDQUOT {
+            return Some("the disk holding the temp dir is full; free space and retry");
+        }
+        if code == libc::EMFILE || code == libc::ENFILE {
+            return Some(
+                "the process or host has run out of file descriptors; close background jobs or raise `ulimit -n` and retry",
+            );
+        }
+        if code == libc::ENOMEM {
+            return Some("the host is out of memory; close heavy processes and retry");
+        }
+        if code == libc::EAGAIN {
+            return Some(
+                "the host refused to create a process, thread, or pipe (resource limit reached); close heavy processes and retry",
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_NOT_ENOUGH_MEMORY, ERROR_TOO_MANY_OPEN_FILES
+        if code == 112 || code == 39 {
+            return Some("the disk holding the temp dir is full; free space and retry");
+        }
+        if code == 8 {
+            return Some("the host is out of memory; close heavy processes and retry");
+        }
+        if code == 4 {
+            return Some(
+                "the process has run out of file handles; close background jobs and retry",
+            );
+        }
+    }
+    let _ = code;
+    None
 }
 
 pub(super) fn take_delta_from_buffer(
@@ -372,7 +477,7 @@ mod tests {
             .map(|index| format!("line-{index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new();
         output.append(source.as_bytes()).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
@@ -384,7 +489,7 @@ mod tests {
     #[test]
     fn bounded_output_streams_raw_full_output_and_bounds_decoded_tail() {
         let raw = vec![0xFF; 2 * 1024 * 1024];
-        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new();
         for chunk in raw.chunks(4_096) {
             output.append(chunk).expect("append");
             assert!(output.retained_memory_bytes() <= BOUNDED_OUTPUT_MAX_BYTES + 4);
@@ -407,7 +512,7 @@ mod tests {
     fn bounded_output_huge_terminal_line_matches_upstream_notice() {
         let mut source = vec![b'x'; BOUNDED_OUTPUT_MAX_BYTES + 1_024];
         source.push(b'\n');
-        let mut output = BoundedOutputAccumulator::new().expect("accumulator");
+        let mut output = BoundedOutputAccumulator::new();
         output.append(&source).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
@@ -419,5 +524,79 @@ mod tests {
             .to_path_buf();
         drop(output);
         std::fs::remove_file(path).expect("remove full output");
+    }
+
+    #[test]
+    fn spill_failure_is_soft_and_names_the_reason() {
+        // A missing spill dir simulates a full or broken temp volume: the
+        // stream still runs, the tail is still delivered, and the notice says
+        // why "Full output: <path>" is absent instead of failing the command.
+        let missing =
+            std::env::temp_dir().join(format!("codewhale-missing-spill-{}", std::process::id()));
+        let mut output = BoundedOutputAccumulator::new_in(Some(&missing));
+        let reason = output.spill_unavailable().expect("spill unavailable");
+        assert!(!reason.is_empty(), "reason must name the io error");
+
+        output.append(b"ok\n").expect("append works without spill");
+        output.finish().expect("finish works without spill");
+        let short = output.snapshot(true).expect("snapshot");
+        assert_eq!(short.content, "ok\n");
+        assert!(!short.truncated);
+        assert!(output.full_output_path().is_none());
+
+        let source = (0..=BOUNDED_OUTPUT_MAX_LINES)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut output = BoundedOutputAccumulator::new_in(Some(&missing));
+        output.append(source.as_bytes()).expect("append");
+        output.finish().expect("finish");
+        let snapshot = output.snapshot(true).expect("snapshot");
+        assert!(snapshot.truncated);
+        assert!(snapshot.content.starts_with("line-1\n"));
+        assert!(
+            snapshot.content.contains("Full output was not persisted:"),
+            "{}",
+            snapshot.content
+        );
+        assert!(!snapshot.content.contains("Full output: "));
+        assert!(output.full_output_path().is_none());
+    }
+
+    #[test]
+    fn resource_exhaustion_hint_names_disk_descriptors_and_memory() {
+        use std::io::{Error, ErrorKind};
+        assert!(
+            super::resource_exhaustion_hint(&Error::from(ErrorKind::StorageFull))
+                .expect("storage full")
+                .contains("disk")
+        );
+        assert!(
+            super::resource_exhaustion_hint(&Error::from(ErrorKind::OutOfMemory))
+                .expect("oom")
+                .contains("memory")
+        );
+        #[cfg(unix)]
+        {
+            assert!(
+                super::resource_exhaustion_hint(&Error::from_raw_os_error(libc::ENOSPC))
+                    .expect("enospc")
+                    .contains("disk")
+            );
+            assert!(
+                super::resource_exhaustion_hint(&Error::from_raw_os_error(libc::EMFILE))
+                    .expect("emfile")
+                    .contains("file descriptors")
+            );
+            assert!(
+                super::resource_exhaustion_hint(&Error::from_raw_os_error(libc::EAGAIN))
+                    .expect("eagain")
+                    .contains("retry")
+            );
+        }
+        assert!(super::resource_exhaustion_hint(&Error::from(ErrorKind::NotFound)).is_none());
+        assert!(
+            super::resource_exhaustion_hint(&Error::from(ErrorKind::PermissionDenied)).is_none()
+        );
     }
 }

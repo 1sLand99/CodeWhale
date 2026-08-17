@@ -1519,6 +1519,10 @@ pub struct ShellManager {
     sandbox_manager: SandboxManager,
     sandbox_policy: ExecutionSandboxPolicy,
     foreground_background_requested: bool,
+    /// Directory for lowercase-`bash` complete-output spill files
+    /// (`None` = process temp dir). Overridable so tests can fault-inject a
+    /// missing/unwritable spill location.
+    output_spill_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ShellManager {
@@ -1546,7 +1550,16 @@ impl ShellManager {
             sandbox_manager: SandboxManager::new(),
             sandbox_policy: ExecutionSandboxPolicy::default(),
             foreground_background_requested: false,
+            output_spill_dir: None,
         }
+    }
+
+    /// Point lowercase-`bash` complete-output spill files at `dir` instead of
+    /// the process temp dir. Tests use a nonexistent dir to simulate a full or
+    /// broken temp volume.
+    #[cfg(test)]
+    pub(crate) fn set_output_spill_dir_for_test(&mut self, dir: Option<PathBuf>) {
+        self.output_spill_dir = dir;
     }
 
     /// Test-only observation of the workspace selected by runtime rebuilds.
@@ -2088,11 +2101,14 @@ impl ShellManager {
         } else {
             Some(Arc::new(Mutex::new(Vec::new())))
         };
-        let bounded_output = small_contract_mode
-            .then(BoundedOutputAccumulator::new)
-            .transpose()
-            .context("Failed to create streaming shell output")?
-            .map(|output| Arc::new(Mutex::new(output)));
+        // The spill file is best-effort: a full disk or exhausted descriptor
+        // table must not make `echo ok` unrunnable (that is exactly how the
+        // owner's session got wedged under swap exhaustion).
+        let bounded_output = small_contract_mode.then(|| {
+            Arc::new(Mutex::new(BoundedOutputAccumulator::new_in(
+                self.output_spill_dir.as_deref(),
+            )))
+        });
 
         #[cfg(windows)]
         let mut windows_job = None;
@@ -4646,8 +4662,26 @@ impl ToolSpec for BashTool {
                     metadata: Some(metadata),
                 })
             }
-            Err(e) => Ok(ToolResult::error(format!("Shell execution failed: {e}"))),
+            Err(e) => Ok(ToolResult::error(shell_execution_failed_message(&e))),
         }
+    }
+}
+
+/// Render a spawn/stream failure for the model and the user: the full cause
+/// chain (an anyhow context alone hides the `ENOSPC`/`EMFILE` underneath) plus,
+/// when the innermost error looks like host resource exhaustion, what to do
+/// about it. The shell tool keeps no state from a failed spawn, so retrying is
+/// always safe.
+fn shell_execution_failed_message(error: &anyhow::Error) -> String {
+    let hint = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<io::Error>())
+        .find_map(output::resource_exhaustion_hint);
+    match hint {
+        Some(hint) => format!(
+            "Shell execution failed: {error:#}. Likely host resource exhaustion — {hint}. The shell tool itself is still usable; the next call starts fresh."
+        ),
+        None => format!("Shell execution failed: {error:#}"),
     }
 }
 
