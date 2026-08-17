@@ -116,8 +116,9 @@ boundary has held since v0.9.1):
   and Responses wire adapters, DeepSeek request-boundary handling, retry
   policy, and streaming. Provider routes land here through the shared config
   and catalog layers.
-- **`llm_client/`** - test-only mock client infrastructure (`mock.rs`); the
-  live client is `client.rs`.
+- **`llm_client/`** - LLM client trait, retry logic, and error classification
+  (`LlmClient`, `RetryConfig`, `with_retry`) consumed by `client.rs`; `mock.rs`
+  is test-only (`#[cfg(test)]`).
 - **`models.rs`** - Data structures for API requests/responses
 
 #### DeepSeek API Endpoints
@@ -143,6 +144,9 @@ drives turns through Chat Completions.
   - `git.rs` - Read-only `git_status` / `git_diff` inspection wrappers
   - `git_tool.rs` - The canonical action-based `Git` tool (`status | diff | log | show | blame`); per-action legacy aliases were removed in v0.9.3
   - `git_history.rs` - Read-only `git_log` / `git_show` / `git_blame`
+  - `github/` - Unified `github` tool family (read-only context plus guarded
+    comment/closure actions backed by `gh`); deferred by default and
+    discoverable through `tool_search`
   - `automation.rs` - Model-visible scheduling tools over `AutomationManager`
   - `plan.rs` - Planning tools
   - `subagent/` - Sub-agent launch and supervision. The one model-facing tool
