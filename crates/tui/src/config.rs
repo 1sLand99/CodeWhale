@@ -2551,6 +2551,67 @@ pub struct ApprovalConfig {
     pub default_selection: ApprovalDefaultSelection,
 }
 
+/// `transcript.prose_measure` exactly as written in `config.toml`.
+///
+/// Parsed permissively (any scalar shape) so an invalid value can surface as
+/// a targeted `transcript.prose_measure` config error via [`Config::validate`]
+/// instead of a generic whole-file parse failure that names no key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawProseMeasure {
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    Text(String),
+}
+
+impl RawProseMeasure {
+    /// Render the raw file value for config diagnostics.
+    fn describe(&self) -> String {
+        match self {
+            Self::Integer(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::Boolean(value) => value.to_string(),
+            Self::Text(value) => format!("'{value}'"),
+        }
+    }
+}
+
+/// Transcript rendering controls (`[transcript]` table in config.toml).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptConfig {
+    /// Wrap cap, in terminal columns, for prose cells — user messages,
+    /// assistant answers, and reasoning/thinking blocks — in the live
+    /// transcript (#5436). Absent or `0` spends the full content width,
+    /// matching tool/status cells and the #5322 wide-frame decision. A
+    /// positive integer caps prose at that many columns for owners who
+    /// want a bounded reading measure on ultrawide displays. Tool, diff,
+    /// and status cells never inherit this cap.
+    #[serde(default)]
+    pub(crate) prose_measure: Option<RawProseMeasure>,
+}
+
+impl TranscriptConfig {
+    /// Resolve the raw file value into a prose wrap cap.
+    ///
+    /// `Ok(None)` means full content width. Errors describe the raw value so
+    /// [`Config::validate`] can name the offending key and setting.
+    fn prose_measure_columns(&self) -> Result<Option<u16>, String> {
+        match &self.prose_measure {
+            None | Some(RawProseMeasure::Integer(0)) => Ok(None),
+            Some(RawProseMeasure::Integer(columns)) if *columns > 0 => {
+                Ok(Some((*columns).min(i64::from(u16::MAX)) as u16))
+            }
+            Some(raw) => Err(format!(
+                "expected a positive whole number of columns \
+                 (0 or absent = full width), got {}",
+                raw.describe()
+            )),
+        }
+    }
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -2659,6 +2720,11 @@ pub struct Config {
 
     /// TUI configuration (alternate screen, etc.)
     pub tui: Option<TuiConfig>,
+
+    /// Transcript rendering controls (`[transcript]` table). Absent means
+    /// prose uses the full content width (#5436).
+    #[serde(default)]
+    pub transcript: Option<TranscriptConfig>,
 
     /// Lifecycle hooks configuration
     #[serde(default)]
@@ -4450,6 +4516,11 @@ impl Config {
                 );
             }
         }
+        if let Some(transcript) = &self.transcript
+            && let Err(detail) = transcript.prose_measure_columns()
+        {
+            anyhow::bail!("Invalid transcript.prose_measure: {detail}.");
+        }
         if let Some(auto_review) = &self.auto_review {
             auto_review.validate()?;
         }
@@ -4457,6 +4528,19 @@ impl Config {
             providers.validate()?;
         }
         Ok(())
+    }
+
+    /// Resolved prose wrap cap from `[transcript] prose_measure` (#5436).
+    ///
+    /// `None` (absent or `0`) means prose uses the full content width,
+    /// consistent with tool/status cells. Invalid values are rejected by
+    /// [`Config::validate`], which every load path runs, so this resolver
+    /// cannot fail here.
+    #[must_use]
+    pub fn prose_measure(&self) -> Option<u16> {
+        self.transcript
+            .as_ref()
+            .and_then(|transcript| transcript.prose_measure_columns().ok().flatten())
     }
 
     #[must_use]
@@ -9704,6 +9788,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         retry: override_cfg.retry.or(base.retry),
         auto_review: override_cfg.auto_review.or(base.auto_review),
         tui: override_cfg.tui.or(base.tui),
+        transcript: override_cfg.transcript.or(base.transcript),
         hooks: override_cfg.hooks.or(base.hooks),
         providers: merge_providers(base.providers, override_cfg.providers),
         features: merge_features(base.features, override_cfg.features),
