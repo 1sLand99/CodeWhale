@@ -5988,10 +5988,22 @@ fn doctor_runtime_posture_line(config: &Config, workspace: &Path) -> String {
     } else {
         "workspace trusted"
     };
+    let (telemetry_on, telemetry_source) = doctor_runtime_telemetry(config);
+    let telemetry = if telemetry_on { "on" } else { "off" };
 
     format!(
-        "default_mode={default_mode} ({default_mode_source}), permission_posture={permission_posture} ({permission_posture_source}), approval_policy={approval} ({approval_source}), allow_shell={allow_shell} ({allow_shell_source}), sandbox={sandbox} ({sandbox_source}), network.default={network} ({network_source}), trust={trust}"
+        "default_mode={default_mode} ({default_mode_source}), permission_posture={permission_posture} ({permission_posture_source}), approval_policy={approval} ({approval_source}), allow_shell={allow_shell} ({allow_shell_source}), sandbox={sandbox} ({sandbox_source}), network.default={network} ({network_source}), telemetry={telemetry} ({telemetry_source}), trust={trust}"
     )
+}
+
+/// Resolved telemetry consent and where it came from (#5441).
+///
+/// Telemetry ships ON by default, and no posture surface reported that — a
+/// user who never opted in saw nothing saying "telemetry: on (default)".
+/// Truth change only: the resolution itself is [`codewhale_config`]'s.
+fn doctor_runtime_telemetry(config: &Config) -> (bool, &'static str) {
+    let (on, source) = codewhale_config::resolved_telemetry_consent(config.telemetry);
+    (on, source.as_str())
 }
 
 fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
@@ -6277,6 +6289,7 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
     } else {
         "default"
     };
+    let (telemetry_value, telemetry_source) = doctor_runtime_telemetry(config);
     let workspace_trusted = !crate::tui::onboarding::needs_trust(workspace);
     let credential = resolve_credential_diagnostic(config);
     let credential_ready = credential.availability.certifies_ready();
@@ -6343,6 +6356,10 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
             "network_default": {
                 "value": network_default,
                 "source": network_source,
+            },
+            "telemetry": {
+                "value": telemetry_value,
+                "source": telemetry_source,
             },
             "workspace_trust": {
                 "trusted": workspace_trusted,
@@ -13261,6 +13278,49 @@ mod doctor_setup_state_tests {
             report["runtime_posture"]["approval_policy"]["source"],
             "default"
         );
+    }
+
+    /// #5441: telemetry ships ON by default, and the runtime-posture doctor
+    /// section must say so — with the source that decided it — instead of
+    /// staying silent about the one default users never opted into.
+    #[test]
+    fn doctor_reports_resolved_telemetry_with_its_source() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let (_home_guard, _codewhale_home) = prepare_env(&tmp);
+        let _telemetry_env = crate::test_support::EnvVarGuard::remove("CODEWHALE_TELEMETRY");
+        let _telemetry_alias_env = crate::test_support::EnvVarGuard::remove("DEEPSEEK_TELEMETRY");
+        let _telemetry_floor =
+            crate::test_support::EnvVarGuard::remove("CODEWHALE_TELEMETRY_FLOOR");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        // Nothing configured anywhere: the shipped default applies and is
+        // named, in both the text line and the JSON posture section.
+        let config = Config::default();
+        assert!(config.telemetry.is_none());
+        let line = doctor_runtime_posture_line(&config, &workspace);
+        assert!(
+            line.contains("telemetry=on (default)"),
+            "doctor line should name the defaulted consent: {line}"
+        );
+        let report = doctor_setup_report_json(&config, &workspace);
+        assert_eq!(report["runtime_posture"]["telemetry"]["value"], true);
+        assert_eq!(report["runtime_posture"]["telemetry"]["source"], "default");
+
+        // A persisted opt-out is reported as the config file's decision.
+        let config = Config {
+            telemetry: Some(false),
+            ..Config::default()
+        };
+        let line = doctor_runtime_posture_line(&config, &workspace);
+        assert!(
+            line.contains("telemetry=off (config)"),
+            "doctor line should name the persisted opt-out: {line}"
+        );
+        let report = doctor_setup_report_json(&config, &workspace);
+        assert_eq!(report["runtime_posture"]["telemetry"]["value"], false);
+        assert_eq!(report["runtime_posture"]["telemetry"]["source"], "config");
     }
 
     #[test]
