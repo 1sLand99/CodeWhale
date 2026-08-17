@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The model-facing `agent` tool advertises exactly 12 fields — `action`,
+  `prompt`, `type`, `profile`, `name`, `agent_id`, `message`, `until`,
+  `detached`, `worktree`, `write_roots`, `resume_from` — down from 33
+  (#5324, refs #5123). Budgets (`max_steps`, `wall_time_secs`, `max_depth`),
+  routing overrides (`model`, `model_strength`, `thinking`), worktree-path
+  knobs, the deliberate/spawn-contract fields and the wait/status/interrupt
+  extras moved off the advertised schema. Every removed field stays
+  parse-accepted and honored unchanged (same contract as `token_budget`), so
+  saved transcripts, ACP/MCP clients and Fleet configs replay as-is; the
+  #5426/#5435 containment clamps are untouched. Child budgets now resolve
+  from role defaults (60/120 turns, 1800 s wall time, unchanged clamps) and
+  new `[subagents]` keys `default_max_steps` / `default_wall_time_secs`.
+  Because the tool catalog is part of the session-pinned prompt prefix
+  (docs/CACHE.md), upgrading re-fills the KV prefix once per session.
 - TUI prose — user messages, assistant answers, and reasoning/thinking —
   now wraps at the full content width on wide terminals, matching
   tool/status cells, instead of stopping at a 105-column rail that left a

@@ -1973,6 +1973,40 @@ fn launch_concurrency_defaults_and_clamps_to_max_subagents() {
 }
 
 #[test]
+fn subagent_budget_defaults_read_the_subagents_table() {
+    // #5324: per-child step/wall-time defaults are operator config
+    // (`[subagents]`), not per-call schema fields. `0` means unset (keep the
+    // role / 1800s defaults).
+    let cfg: SubagentsConfig =
+        toml::from_str("default_max_steps = 90\ndefault_wall_time_secs = 600")
+            .expect("parse [subagents] budget keys");
+    assert_eq!(cfg.default_max_steps, Some(90));
+    assert_eq!(cfg.default_wall_time_secs, Some(600));
+
+    let mut config = Config {
+        subagents: Some(SubagentsConfig {
+            default_max_steps: Some(240),
+            default_wall_time_secs: Some(2700),
+            ..SubagentsConfig::default()
+        }),
+        ..Config::default()
+    };
+    assert_eq!(config.subagent_default_max_steps(), Some(240));
+    assert_eq!(config.subagent_default_wall_time_secs(), Some(2700));
+
+    config.subagents = Some(SubagentsConfig {
+        default_max_steps: Some(0),
+        default_wall_time_secs: Some(0),
+        ..SubagentsConfig::default()
+    });
+    assert_eq!(config.subagent_default_max_steps(), None);
+    assert_eq!(config.subagent_default_wall_time_secs(), None);
+
+    assert_eq!(Config::default().subagent_default_max_steps(), None);
+    assert_eq!(Config::default().subagent_default_wall_time_secs(), None);
+}
+
+#[test]
 fn launch_concurrency_honors_deprecated_interactive_max_launch_alias() {
     // The old TOML key `interactive_max_launch` still deserializes, via
     // #[serde(rename)], into the hidden legacy field, and the resolver
