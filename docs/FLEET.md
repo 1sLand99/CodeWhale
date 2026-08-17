@@ -367,7 +367,7 @@ Default Workflow-to-Fleet validation is intentionally bounded:
 - 1,000 total worker agents per Workflow run;
 - 16 live worker agents at once; larger populations queue (block) on the host's
   per-run concurrency gate until a live slot frees, then route through Fleet;
-- 5 recursive Fleet rings as the hard ceiling (default user configuration: 2);
+- 8 recursive Fleet rings as the opt-in ceiling (default user configuration: 3);
 - bounded loops only (`max_iterations` required);
 - bounded dynamic expansion only (`max_children` plus a template required).
 

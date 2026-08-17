@@ -86,8 +86,8 @@ not encrypted at rest.
 
 ### Self-update
 
-`codewhale update` on Android requests `codewhale-android-arm64` and
-`codewhale-tui-android-arm64` release assets — never the Linux arm64
+`codewhale update` on Android requests the `codewhale-android-arm64`
+release asset — never the Linux arm64
 assets. The GNU libc (glibc) compatibility preflight is Linux-only and is
 skipped entirely on Android (Bionic libc).
 

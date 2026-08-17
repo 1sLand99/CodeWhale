@@ -188,15 +188,15 @@ runtime, or does it invent a second one?* Only the former is allowed.
 
 ## What remains after v0.9.0
 
-Refreshed 2026-07-15 from a full audit of the older 0.9-era documents. Those
-plans are evidence, not a second source of truth. v0.9.0 consolidates the
+Refreshed 2026-08-17 from a full audit of the older 0.9-era documents. Those
+plans are evidence, not a second source of truth. v0.9.0 consolidated the
 underwater shell, message-first Operate, permission postures, the wired
 Workflow engine and durable run journal, Lane CLI/runtime, setup with
 `operate_ready`, constitution rebalance, and ProviderLake/Models.dev. The
 remaining work belongs to later releases:
 
-1. **Rebrand completion** — the only hard-dated obligations: remove the
-   `deepseek`/`deepseek-tui` binary shims and shim release assets; finish the
+1. **Rebrand completion** — the `deepseek`/`deepseek-tui` binary shims and
+   shim release assets were removed in v0.9.0; the remaining obligation is the
    Homebrew `codewhale` formula rollout (`docs/REBRAND.md`).
 2. **Operate as a value stream** — a control-board surface over the underwater
    shell (WIP, queue age, bottleneck); phase history (#4039); Workrooms Phase 2
@@ -210,10 +210,12 @@ remaining work belongs to later releases:
 5. **TTC design implementation** (design doc in `codewhale-ops`) — approved and now unblocked after v0.9.0.
 6. **HarnessProfile completion** — the status/UX display lane
    (`docs/rfcs/HARNESS_PROFILE_CUTLINE.md`).
-7. **File decomposition, re-scoped** — `ui.rs` (~19.1k lines) and `main.rs`
-   (~17.6k) are the current offenders (`docs/rfcs/FILE_DECOMPOSITION_0_9_0.md`,
-   whose own ~13.6k/~12.1k figures are the 0.9.0-era snapshot). Both have grown
-   since; measure before quoting.
+7. **File decomposition, landed** — the v0.9.0-era offenders were split out:
+   `main.rs` is now a thin stub and `ui.rs` has been decomposed into focused
+   modules under `crates/tui/src/tui/` (~3.9k lines today; the
+   `docs/rfcs/FILE_DECOMPOSITION_0_9_0.md` figures are the 0.9.0-era snapshot).
+   The remaining work is the "thin TUI over core" north star tracked in
+   `POST_0_9_1_SEAMS.md`.
 
 Explicitly deferred by their own documents: external workflow memory (boundary
 only), automatic harness evolution, hosted workrooms, `constitution_modules`
@@ -288,18 +290,19 @@ codewhale \
 `--skip-onboarding`). The public dispatcher parses it and forwards it ahead of
 the TUI subcommand; `Exec` then skips the workspace-specific
 `[workspace]`/`[projects]` user-config overlay so the config surface depends
-only on the explicit `--config`. `crates/tui/tests/verifiers_harness_contract.rs`
+only on the explicit `--config`. `crates/tui/tests/integration/verifiers_harness_contract.rs`
 is the provider-free acceptance lock for this contract.
 
 ### Future upstream checklist (out of scope here — do not run)
 
 Actually adding CodeWhale as a built-in harness lives in the external Verifiers
-repository, **after** a public, immutable CodeWhale `v0.9.1` GitHub Release and
-checksum manifest exist. That upstream change is expected to be limited to a new
+repository; the public, immutable CodeWhale GitHub Releases with checksum
+manifests it needs have existed since v0.9.1 (current release line is v0.9.7).
+That upstream change is expected to be limited to a new
 `verifiers/v1/harnesses/codewhale/` package plus its test-matrix and docs
-registration, with `CodewhaleHarnessConfig` pinning `0.9.1`, `setup()`
-downloading and verifying the released archive, and `launch()` writing the
-temporary route/MCP files above and calling `runtime.run_program(...)`.
+registration, with `CodewhaleHarnessConfig` pinning the target release,
+`setup()` downloading and verifying the released archive, and `launch()`
+writing the temporary route/MCP files above and calling `runtime.run_program(...)`.
 
 Holdouts, explicitly **not** performed by this contract work: tagging,
 publishing, or creating a CodeWhale release; opening or submitting the upstream

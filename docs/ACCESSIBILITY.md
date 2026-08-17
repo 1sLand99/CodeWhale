@@ -1,6 +1,6 @@
 # Accessibility
 
-DeepSeek-TUI runs in a terminal, so the platform's own accessibility
+Codewhale runs in a terminal, so the platform's own accessibility
 stack (screen readers, magnifiers, terminal-level themes) does most
 of the work. The TUI provides a small set of toggles that reduce
 visual motion and density for screen-reader and low-motion users.
@@ -73,14 +73,14 @@ The override is applied once at startup. Changing the env var
 mid-session has no effect — settings are only re-read on the next
 launch.
 
-## Configuring via `/settings`
+## Configuring via `/config`
 
 The same toggles are reachable from the command palette:
 
-* `/settings set low_motion on`
-* `/settings set fancy_animations off`
-* `/settings set calm_mode on`
-* `/settings set status_indicator off`
+* `/config low_motion on --save`
+* `/config fancy_animations off --save`
+* `/config calm_mode on --save`
+* `/config status_indicator off --save`
 
 Settings written this way persist to `~/.codewhale/settings.toml` on new
 installs, with legacy `~/.deepseek/settings.toml` and platform config-dir

@@ -29,7 +29,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode work`,
 `/mode plan`, or `/mode operate`.
 
 - **Plan**: design-first prompting. The stable primitive names remain familiar, but the runtime centrally refuses file mutation and shell execution. Read-only inspection and policy-allowed research, including deferred Web search/fetch, remain available.
-- **Work** (internally `agent`): ordinary multi-step execution. The small first-turn toolbox is `read`, `write`, `edit`, `bash`, `agent`, and `tool_search`; approval, sandbox, repository law, and managed policy still decide what may execute.
+- **Work** (internally `agent`): ordinary multi-step execution. The small first-turn toolbox is `read`, `write`, `edit`, `bash`, `agent`, and `todo_write`; approval, sandbox, repository law, and managed policy still decide what may execute.
 - **Operate**: multitask conductor posture. It has the same primitive identities and execution authority as Work. The parent session is the **operator**: dispatching background workers is the default for independent or parallel work. Handle small or tightly coupled tasks in the parent; use background `agent` workers for separable streams, and use Workflow when order, phases, gates, shared budgets, or deterministic fan-in matter. **Dispatch is not completion** — write-capable children must return real verification evidence.
 
 `Act` and `/mode act` remain compatibility aliases for Work. Saved settings
@@ -136,8 +136,8 @@ live mode again is how you make it durable; Codewhale confirms with a
 
 While a turn is running, every change to the live route is refused — mode,
 model, thinking level, and provider — no matter which surface you use. That
-now includes the slash surfaces (`/mode`, `/model`, `/set <key> <value>`,
-`/config <key> <value>`, `/config preset`), which are reachable mid-turn. Press
+now includes the slash surfaces (`/mode`, `/model`, `/config <key> <value>`,
+`/config preset`), which are reachable mid-turn. Press
 Esc to interrupt first. The restart-only `default_mode` key is exempt, because
 it does not touch the running turn.
 
