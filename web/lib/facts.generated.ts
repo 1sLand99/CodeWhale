@@ -30,7 +30,7 @@ export const FACTS: RepoFacts = {
   "generatedAt": "2026-08-17T06:09:37.228Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
-  "version": "0.9.8",
+  "version": "0.9.9",
   "crates": [
     "agent",
     "app-server",
