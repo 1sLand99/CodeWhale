@@ -275,6 +275,11 @@ jobs:
         run: |
           python3 scripts/test_check_command_crate_boundaries.py
           python3 scripts/check-command-crate-boundaries.py
+      - name: Check command migration manifest
+        if: needs.changes.outputs.heavy == 'true'
+        run: |
+          python3 scripts/test_check_command_migration_manifest.py
+          python3 scripts/check-command-migration-manifest.py
       # Clippy above runs without `--all-targets`, so it cannot see dead code
       # that only tests keep alive. This ratchet covers that blind spot by
       # refusing to let the `#[allow(dead_code)]` total rise (#4785).
