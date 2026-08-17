@@ -36,11 +36,11 @@ export const home: HomeDict = {
 
   latestRelease: "最新リリース {tag}",
   releaseUnavailable: "リリース情報を取得できません",
-  currentSource: "現在のソース",
-  sourceCandidate: "ソース候補",
-  providerRoutes: "{count} 件のプロバイダールート",
-  publishedRelease: "公開済みリリース",
-  figcaptionSourceCandidate: "ソース候補",
+  currentSource: "ソース",
+  sourceCandidate: "未リリース",
+  providerRoutes: "{count} プロバイダー",
+  publishedRelease: "リリース済み",
+  figcaptionSourceCandidate: "未リリース",
 
   shotSession: "現在のセッション",
   screenshotAlt:

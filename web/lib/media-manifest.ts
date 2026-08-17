@@ -96,8 +96,8 @@ export const MEDIA_ASSETS: MediaAsset[] = [
       zh: "一次真实的 Codewhale 端到端会话",
     },
     description: {
-      en: "Will be recorded from the v0.9.4 release candidate during dogfood: install, first offline session, provider connection, and one Fleet workflow on a sealed local route. Until that recording exists, no footage is shown here — the manifest and budgets above are the contract it must satisfy.",
-      zh: "将在 dogfood 期间从 v0.9.4 发布候选版录制：安装、首次离线会话、连接提供商，以及在密封本地路由上运行一次 Fleet Workflow。在录制完成之前，这里不展示任何影像——上面的清单与预算就是它必须满足的契约。",
+      en: "Install, a first session with no key, connecting a provider, and one Fleet workflow on a local model. To be recorded from a release build.",
+      zh: "安装、无密钥的首次会话、接入提供商，以及在本地模型上跑一次 Fleet workflow。将从发布版本录制。",
     },
     status: "pending",
     pendingLabel: {

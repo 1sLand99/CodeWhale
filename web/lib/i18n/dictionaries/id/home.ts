@@ -35,11 +35,11 @@ export const home: HomeDict = {
 
   latestRelease: "Rilis terbaru {tag}",
   releaseUnavailable: "Status rilis tidak tersedia",
-  currentSource: "Sumber saat ini",
-  sourceCandidate: "Kandidat sumber",
-  providerRoutes: "{count} rute penyedia",
-  publishedRelease: "rilis yang diterbitkan",
-  figcaptionSourceCandidate: "kandidat sumber",
+  currentSource: "Sumber",
+  sourceCandidate: "Belum dirilis",
+  providerRoutes: "{count} penyedia",
+  publishedRelease: "dirilis",
+  figcaptionSourceCandidate: "belum dirilis",
 
   shotSession: "Sesi saat ini",
   screenshotAlt:

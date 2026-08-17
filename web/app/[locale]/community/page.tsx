@@ -14,7 +14,7 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     title: isZh ? "社区 · Codewhale" : "Community · Codewhale",
     description: isZh
       ? "了解 Codewhale 的国际开源社区，提交 issue、发送 pull request、改进翻译并查看版本贡献者。"
-      : "Meet Codewhale's international open-source community, file issues, send pull requests, improve translations, and see release contributors.",
+      : "File issues, send pull requests, improve translations, and see who contributed to each Codewhale release.",
   });
 }
 
@@ -35,13 +35,13 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
         },
         {
           title: "改进代码或测试",
-          description: "选择一个范围清晰的问题，提交尽可能小的有效补丁，并添加能够证明行为变化的回归测试。",
+          description: "挑一个范围清楚的问题，写最小的补丁，加一个覆盖改动的回归测试。",
           cta: "查看开放 issues →",
           href: "https://github.com/Hmbown/CodeWhale/issues",
         },
         {
           title: "改进文档或翻译",
-          description: "修正不准确的说明、补充实际示例，或帮助完成新的语言包，让文档在不同地区都自然准确。",
+          description: "改正说错的地方，补一个示例，或者帮忙完成一个语言包。",
           cta: "查看本地化指南 ↗",
           href: "https://github.com/Hmbown/CodeWhale/blob/main/docs/LOCALIZATION.md",
         },
@@ -61,19 +61,19 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
         },
         {
           title: "Improve code or tests",
-          description: "Choose one well-bounded problem, make the smallest useful patch, and add a regression test that proves the changed behavior.",
+          description: "Pick one problem with clear edges, write the smallest patch that fixes it, and add a regression test that covers it.",
           cta: "Browse open issues →",
           href: "https://github.com/Hmbown/CodeWhale/issues",
         },
         {
           title: "Improve documentation or translations",
-          description: "Correct inaccurate guidance, add a practical example, or help complete a language pack so the project reads naturally in more regions.",
+          description: "Fix a wrong sentence, add an example, or help finish a language pack.",
           cta: "Open the localization guide ↗",
           href: "https://github.com/Hmbown/CodeWhale/blob/main/docs/LOCALIZATION.md",
         },
         {
           title: "Reproduce and review existing work",
-          description: "Verify an issue or pull request with your platform and provider, then share the commands you ran, the result, and any remaining problem.",
+          description: "Try an issue or pull request on your platform and provider. Post the commands you ran, what happened, and what is still wrong.",
           cta: "Browse pull requests →",
           href: "https://github.com/Hmbown/CodeWhale/pulls",
         },
@@ -87,7 +87,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
       ]
     : [
         { title: "Repository activity", description: "Recent issues and pull requests.", href: p("/feed") },
-        { title: "Community digest", description: "The maintainer-reviewed weekly project record.", href: p("/digest") },
+        { title: "Community digest", description: "The weekly project record, reviewed by a maintainer.", href: p("/digest") },
         { title: "Public roadmap", description: "Shipped, underway, considered, and ruled-out work.", href: p("/roadmap") },
       ];
 
@@ -100,8 +100,8 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
           <h1>{isZh ? "与世界各地的贡献者一起构建 Codewhale。" : "Build Codewhale with contributors around the world."}</h1>
           <p>
             {isZh
-              ? "Codewhale 的运行时、文档、测试和翻译由不同国家、语言、平台和技术背景的贡献者共同改进。第一次参与不需要从大功能开始；清楚的 bug 报告、准确的文档修正或带测试的小补丁都是重要的项目工作。"
-              : "Codewhale's runtime, documentation, tests, and translations improve through contributors across countries, languages, platforms, and technical backgrounds. A first contribution does not need to be a large feature; a clear bug report, an accurate documentation correction, or a small tested patch is valuable project work."}
+              ? "运行时、文档、测试和翻译，来自不同国家、语言和平台的贡献者。第一次参与不必是大功能。一份清楚的 bug 报告、一处文档修正、或一个带测试的小补丁，都算。"
+              : "The runtime, docs, tests, and translations come from contributors across countries, languages, and platforms. A first contribution does not have to be a feature. A clear bug report, a documentation fix, or a small tested patch counts."}
           </p>
           <div className="portal-actions">
             <Link href="https://github.com/Hmbown/CodeWhale/issues/new/choose" className="portal-button portal-button-primary">
@@ -121,11 +121,11 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
         <div className="portal-container portal-section-grid">
           <div className="portal-section-copy">
             <span>{isZh ? "参与方式" : "Ways to contribute"}</span>
-            <h2>{isZh ? "从一个具体、可验证的改进开始。" : "Start with one concrete, verifiable improvement."}</h2>
+            <h2>{isZh ? "从一件小事开始。" : "Start with one small thing."}</h2>
             <p>
               {isZh
-                ? "问题报告、代码、测试、文档、翻译和审查都会推进项目。请选择最适合你当前经验和时间的一种方式。"
-                : "Issue reports, code, tests, documentation, translations, and review all move the project forward. Choose the path that fits your experience and available time."}
+                ? "报 bug、写代码、写测试、改文档、翻译、审查，都有用。选一样适合你时间的。"
+                : "Bug reports, code, tests, docs, translations, and review all help. Pick the one that fits the time you have."}
             </p>
           </div>
           <div className="contribute-path-grid">
@@ -144,11 +144,11 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
         <div className="portal-container portal-section-grid">
           <div className="portal-section-copy">
             <span>{isZh ? "公开项目记录" : "Public project record"}</span>
-            <h2>{isZh ? "从提案到发布，项目工作保持公开。" : "Follow the repository work from proposal to release."}</h2>
+            <h2>{isZh ? "从提案到发布，都是公开的。" : "From proposal to release, in the open."}</h2>
             <p>
               {isZh
-                ? "动态页面汇总最近的仓库活动，社区摘要保留每周存档，路线图区分已发布的能力与仍在讨论的方向。"
-                : "The activity feed collects recent repository work, the community digest keeps the weekly archive of repository activity, and the roadmap separates shipped capabilities from work that is still being discussed."}
+                ? "动态页显示最近的仓库活动。社区摘要保留每周存档。路线图区分已发布的和还在讨论的。"
+                : "The activity feed shows recent repository work. The community digest keeps the weekly archive of repository activity. The roadmap separates what shipped from what is still being discussed."}
             </p>
           </div>
           <div className="portal-topic-list">
@@ -172,14 +172,14 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
                   ? `v${facts.version} 版本致谢`
                   : `v${facts.version} release credit`
                 : isZh
-                  ? `v${facts.version} 候选版致谢`
-                  : `v${facts.version} candidate credit`}
+                  ? `v${facts.version} 致谢（未发布）`
+                  : `v${facts.version} credit (unreleased)`}
             </span>
             <h2>{isZh ? "贡献者署名是版本记录的一部分。" : "Contributor credit is part of the release record."}</h2>
             <p>
               {isZh
-                ? `${sourceIsPublished ? "这一版本" : "这一候选版"}包含社区提交的代码、测试、复现和验证。即使维护者需要调整补丁后再合入，原始贡献者的署名也会保留在提交、更新日志和贡献者名单中。`
-                : `This ${sourceIsPublished ? "release" : "candidate"} includes code, tests, reproductions, and verification from the community. When a maintainer needs to adapt a patch before it lands, the original contributor remains credited in the commit, changelog, and contributor record.`}
+                ? `${sourceIsPublished ? "这一版本" : "这一版"}包含社区提交的代码、测试、复现和验证。即使维护者改过补丁再合入，原作者的署名也保留在提交、更新日志和贡献者名单中。`
+                : `This ${sourceIsPublished ? "release" : "version"} includes code, tests, reproductions, and verification from the community. If a maintainer reworks a patch before it lands, the original author stays credited in the commit, the changelog, and the contributor record.`}
             </p>
             <div className="community-record-links">
               <Link href="https://github.com/Hmbown/CodeWhale/blob/main/docs/CONTRIBUTORS.md">

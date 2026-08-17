@@ -12,10 +12,10 @@ export const docsGuide: DocsGuideDict = {
   bodyClassName: "text-ink-soft leading-loose",
   overviewTitle: "البداية",
   overviewLead:
-    "أربع خطوات من أمر تثبيت واحد إلى أسطول جاهز لعملك. كل خطوة تذكر فقط ما يفعله المرشّح الحالي فعلًا؛ وكل ما هو غير منشور أو غير مسجّل موسوم بذلك.",
+    "أربع خطوات من أمر تثبيت واحد إلى أسطول جاهز لعملك.",
   sessionTitle: "شاهد جلسة حقيقية",
   sessionLead:
-    "أدناه موضع وسائط الجلسة الحقيقية. هو عمدًا في حالة الانتظار: إلى أن توجد تسجيلة dogfood لمرشّح v0.9.2، لا يعرض هذا الموقع أي بديل أو مشاهد مفبركة.",
+    "سيوضع هنا تسجيل لجلسة حقيقية. لا يوجد تسجيل بعد، لذا لا يُعرض شيء.",
   nextTitle: "إلى أين بعد ذلك",
   sourceNote:
     "المستندات المصدر: docs/GUIDE.md، docs/KEYBINDINGS.md · نصوص الخطوات في web/lib/content/getting-started.ts؛ حدّث docs-map.ts عند أي تغيير.",

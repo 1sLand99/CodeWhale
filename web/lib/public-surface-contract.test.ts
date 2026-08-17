@@ -599,7 +599,7 @@ done
     expect(homepage).toContain("alt={d.screenshotAlt}");
     expect(homepage).toContain("<figcaption>{d.figcaption}</figcaption>");
     expect(getHome("en").figcaption).toBe(
-      "Current Codewhale session · Operate mode · Ask permission posture",
+      "Codewhale session · Operate mode · permissions: Ask",
     );
     expect(getHome("en").screenshotAlt).toContain("Operate mode");
     for (const locale of ["zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id"]) {

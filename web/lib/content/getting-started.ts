@@ -34,8 +34,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "install",
     title: { en: "Install Codewhale", zh: "安装 Codewhale" },
     body: {
-      en: "One npm command installs the dispatcher and terminal runtime. Cargo, archives, Docker, Nix, and China mirrors are documented alternatives — published releases only.",
-      zh: "一条 npm 命令即可安装调度器和终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像是有文档的备选渠道——只提供已发布版本。",
+      en: "One npm command installs the terminal runtime. Cargo, prebuilt archives, Docker, Nix, and China mirrors also work. All of them install published releases.",
+      zh: "一条 npm 命令即可安装终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像也可以。它们安装的都是已发布版本。",
     },
     commands: ["npm install -g codewhale", "codewhale doctor"],
     link: {
@@ -47,8 +47,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "first-session",
     title: { en: "Open a first session — no key needed", zh: "打开第一个会话——无需密钥" },
     body: {
-      en: "Launches without any API key: short constitution-first setup, then the full interface. Explore in Plan mode — always read-only. Model replies need a provider; that's the next step.",
-      zh: "无需任何 API 密钥即可启动：简短的宪章优先设置，然后进入完整界面。在 Plan 模式中探索——始终只读。模型回复需要提供商；这正是下一步。",
+      en: "Starts without any API key. A short setup, then the full interface. Look around in Plan mode, which is read-only. Model replies need a provider — that's the next step.",
+      zh: "无需任何 API 密钥即可启动。简短设置后进入完整界面。先在只读的 Plan 模式里看看。模型回复需要提供商——那是下一步。",
     },
     commands: ["codewhale"],
     link: {
@@ -60,8 +60,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "connect-provider",
     title: { en: "Connect a provider", zh: "连接提供商" },
     body: {
-      en: "Pick a supported route — hosted key, gateway, or keyless local runtime (Ollama, vLLM, SGLang). Provider and model stay explicit; reasoning and routing provenance stay separate, and unavailable values stay unavailable.",
-      zh: "任选受支持的路由——托管密钥、网关，或 Ollama、vLLM、SGLang 等免密钥本地运行时。Provider 与模型始终明确；思考档位与路由来源分开记录，暂不可用的值保持暂不可用。",
+      en: "Use a hosted API key, a gateway, or a local runtime with no key (Ollama, vLLM, SGLang). You pick the provider and the model. A model name never switches the provider for you.",
+      zh: "用托管 API 密钥、网关，或不需要密钥的本地运行时（Ollama、vLLM、SGLang）。提供商和模型都由你来选。模型名不会替你切换提供商。",
     },
     commands: ["codewhale auth set --provider deepseek"],
     link: {
@@ -73,8 +73,8 @@ export const GETTING_STARTED_STEPS: GuideStep[] = [
     id: "fleet-workflow",
     title: { en: "Set up your ideal fleet", zh: "配置你的理想 Fleet" },
     body: {
-      en: "Add every provider you use — one auth set per hosted route; keyless local runtimes need nothing — then author the team: /fleet setup walks one role at a time (a model from any configured provider, a thinking tier, permissions) and saves a reusable profile for this repo or every repo on this machine. Fleet state lives in the workspace ledger; ordinary single tasks need none of this.",
-      zh: "把你用的每个提供商都接进来——每条托管路由执行一次 auth set，免密钥本地运行时无需配置——然后编写团队：/fleet setup 一次聚焦一个角色（可选任意已配置提供商的模型、思考档位与权限），保存为可复用档案，可仅用于本仓库或本机所有仓库。Fleet 状态保存在工作区台账中；普通单一任务不需要这些。",
+      en: "Add each provider you use with one auth set (local runtimes need none). Then run /fleet setup. It goes one role at a time — a model from any configured provider, a thinking tier, permissions — and saves a profile for this repo or for every repo on this machine. A single task needs none of this.",
+      zh: "每个要用的提供商执行一次 auth set（本地运行时不需要）。然后运行 /fleet setup。它一次配置一个角色——任意已配置提供商的模型、思考档位、权限——并保存为档案，可只用于本仓库或本机所有仓库。单个任务不需要这些。",
     },
     commands: ["/fleet setup", "codewhale fleet status"],
     link: {
@@ -94,24 +94,24 @@ export const GUIDE_NEXT_LINKS: { href: string; label: LocalizedText; note: Local
     href: "/docs/hooks",
     label: { en: "Hooks", zh: "钩子" },
     note: {
-      en: "React to lifecycle events — before and after tool calls, on turn end, on session events — with project-local trust rules.",
+      en: "Run your own commands before and after tool calls, at turn end, and on session events, with per-project trust rules.",
       zh: "借助项目级信任规则，响应生命周期事件——工具调用前后、回合结束、会话事件。",
     },
   },
   {
     href: "/docs/modes",
-    label: { en: "Modes and permission postures", zh: "模式与权限姿态" },
+    label: { en: "Modes and permissions", zh: "模式与权限" },
     note: {
-      en: "Plan / Work / Operate and Ask / Auto-Review / Full Access, exactly as the runtime enforces them.",
-      zh: "Plan / Work / Operate 与 Ask / Auto-Review / Full Access，与运行时实际执行的一致。",
+      en: "Plan / Work / Operate and Ask / Auto-Review / Full Access: what each one allows.",
+      zh: "Plan / Work / Operate 与 Ask / Auto-Review / Full Access：各自允许做什么。",
     },
   },
   {
     href: "/docs",
     label: { en: "Documentation hub", zh: "文档中心" },
     note: {
-      en: "Every topic, searchable, each page citing its source document in the repository.",
-      zh: "所有主题均可搜索，每个页面都注明仓库中的源文档。",
+      en: "Every topic, searchable. Each page links to its source document in the repository.",
+      zh: "所有主题均可搜索。每页都链接到仓库中的源文档。",
     },
   },
 ];

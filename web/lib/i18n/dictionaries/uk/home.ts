@@ -31,11 +31,11 @@ export const home: HomeDict = {
 
   latestRelease: "Останній реліз {tag}",
   releaseUnavailable: "Статус релізу недоступний",
-  currentSource: "Поточне джерело",
-  sourceCandidate: "Кандидат із джерела",
-  providerRoutes: "Маршрути провайдерів: {count}",
-  publishedRelease: "опублікований реліз",
-  figcaptionSourceCandidate: "кандидат із джерела",
+  currentSource: "Джерело",
+  sourceCandidate: "Не випущено",
+  providerRoutes: "Провайдерів: {count}",
+  publishedRelease: "випущено",
+  figcaptionSourceCandidate: "не випущено",
 
   shotSession: "Поточний сеанс",
   screenshotAlt:

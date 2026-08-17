@@ -34,11 +34,11 @@ export const home: HomeDict = {
 
   latestRelease: "Bản phát hành mới nhất {tag}",
   releaseUnavailable: "Không có trạng thái phát hành",
-  currentSource: "Mã nguồn hiện tại",
-  sourceCandidate: "Ứng viên từ mã nguồn",
-  providerRoutes: "{count} tuyến nhà cung cấp",
-  publishedRelease: "bản phát hành chính thức",
-  figcaptionSourceCandidate: "ứng viên từ mã nguồn",
+  currentSource: "Mã nguồn",
+  sourceCandidate: "Chưa phát hành",
+  providerRoutes: "{count} nhà cung cấp",
+  publishedRelease: "đã phát hành",
+  figcaptionSourceCandidate: "chưa phát hành",
 
   shotSession: "Phiên hiện tại",
   screenshotAlt:

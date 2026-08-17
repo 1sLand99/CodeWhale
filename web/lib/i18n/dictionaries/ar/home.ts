@@ -32,11 +32,11 @@ export const home: HomeDict = {
 
   latestRelease: "أحدث إصدار {tag}",
   releaseUnavailable: "حالة الإصدار غير متاحة",
-  currentSource: "المصدر الحالي",
-  sourceCandidate: "مصدر مرشّح",
-  providerRoutes: "{count} مسار مزوّد",
-  publishedRelease: "إصدار منشور",
-  figcaptionSourceCandidate: "مصدر مرشّح",
+  currentSource: "المصدر",
+  sourceCandidate: "غير منشور",
+  providerRoutes: "{count} مزوّد",
+  publishedRelease: "منشور",
+  figcaptionSourceCandidate: "غير منشور",
 
   shotSession: "الجلسة الحالية",
   screenshotAlt:

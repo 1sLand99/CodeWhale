@@ -267,7 +267,7 @@ codewhale doctor`;
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
                   循环 Plan → Act → Operate；按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
-                  循环 Ask → Auto-Review → Full Access 权限姿态。也可以运行{" "}
+                  循环 Ask → Auto-Review → Full Access。也可以运行{" "}
                   <code className="inline">/mode</code> 选择模式或运行 <code className="inline">/config</code>{" "}
                   查看权限。Plan 始终只读；Full Access 仅应用于你信任的工作区。
                 </>
@@ -277,7 +277,7 @@ codewhale doctor`;
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
                   to cycle Plan → Act → Operate; press{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
-                  to cycle Ask → Auto-Review → Full Access permission postures. You can also run{" "}
+                  to cycle Ask → Auto-Review → Full Access. You can also run{" "}
                   <code className="inline">/mode</code> to choose a mode or <code className="inline">/config</code>{" "}
                   to inspect permissions. Plan stays read-only; use Full Access only in a workspace you trust.
                 </>
@@ -299,15 +299,15 @@ codewhale doctor`;
           </h2>
           <p className="text-sm text-ink-soft max-w-2xl mb-4">
             {isZh
-              ? "如果上面的脚本路径不适合你，请从下面选择匹配你环境的方式。各渠道的命令和打包形式有所不同，说明会明确列出安装内容。"
-              : "If the script above doesn't fit your setup, choose the channel that matches your environment. Command availability and packaging differ by channel, and each description states exactly what it installs."}
+              ? "如果上面的脚本不适合你的环境，从下面选一种。每种方式都写明了它安装什么。"
+              : "If the script above doesn't fit your setup, pick one of these. Each one says what it installs."}
           </p>
 
           <p className="text-sm text-ink-soft max-w-2xl mb-10">
             {publishedRelease
               ? isZh
-                ? `下方的发布命令以 ${publishedRelease.tag} 为准；它是 GitHub 上最新的已发布版本。${sourceIsPublished ? "当前源码与该发布版一致。" : `当前源码候选版为 v${facts.version}，发布前不会被安装命令当作正式版本。`}`
-                : `Release-backed commands below use ${publishedRelease.tag}, the latest version published on GitHub. ${sourceIsPublished ? "The current source matches that release." : `The current source candidate is v${facts.version}; install commands do not advertise it before publication.`}`
+                ? `下方的命令安装 ${publishedRelease.tag}，即 GitHub 上最新的发布版本。${sourceIsPublished ? "源码与该版本一致。" : `源码已到 v${facts.version}，尚未发布。`}`
+                : `The commands below install ${publishedRelease.tag}, the latest release on GitHub. ${sourceIsPublished ? "The source matches that release." : `Source is at v${facts.version}, not yet released.`}`
               : isZh
                 ? "暂时无法验证最新的 GitHub 发布标签；请先查看 Releases，再运行需要固定标签的命令。"
                 : "The latest GitHub release tag could not be verified. Check Releases before running a command that requires a pinned tag."}

@@ -12,8 +12,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "模型与提供商 · Codewhale" : "Models & providers · Codewhale",
     description: isZh
-      ? "Codewhale 托管与本地提供商路由的配置方式和完整注册表。"
-      : "Configuration guidance and the full registry for Codewhale's hosted and local provider routes.",
+      ? "Codewhale 支持的托管与本地提供商：如何配置，以及完整列表。"
+      : "Every hosted and local provider Codewhale supports, and how to configure one.",
   });
 }
 
@@ -28,34 +28,34 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
     ? [
         {
           title: "DeepSeek",
-          detail: `新配置默认使用 ${facts.defaultModel ?? "deepseek-v4-pro"}。可以通过 --provider、/provider 或 CODEWHALE_PROVIDER 明确选择其他路由。`,
+          detail: `新配置默认使用 ${facts.defaultModel ?? "deepseek-v4-pro"}。用 --provider、/provider 或 CODEWHALE_PROVIDER 换成别的提供商。`,
           reference: "DEEPSEEK_API_KEY",
         },
         {
           title: "本地运行时",
-          detail: "vLLM、SGLang 和 Ollama 可以直连 localhost。按需配置端点和模型；本地部署通常不需要 API 密钥。",
+          detail: "vLLM、SGLang 和 Ollama 直连 localhost。设置端点和模型即可；本地部署通常不需要 API 密钥。",
           reference: "vllm · sglang · ollama",
         },
         {
           title: "OpenRouter",
-          detail: "OpenRouter 用一个托管端点访问多个模型。提供商和模型仍由你明确选择，不会根据模型名称或提示词自动切换。",
+          detail: "OpenRouter 用一个托管端点访问多个模型。提供商和模型仍由你来选；模型名不会替你切换提供商。",
           reference: "OPENROUTER_API_KEY",
         },
       ]
     : [
         {
           title: "DeepSeek",
-          detail: `New configurations default to ${facts.defaultModel ?? "deepseek-v4-pro"}. Select another route explicitly with --provider, /provider, or CODEWHALE_PROVIDER.`,
+          detail: `New installs default to ${facts.defaultModel ?? "deepseek-v4-pro"}. Switch with --provider, /provider, or CODEWHALE_PROVIDER.`,
           reference: "DEEPSEEK_API_KEY",
         },
         {
           title: "Local runtimes",
-          detail: "vLLM, SGLang, and Ollama can connect directly to localhost. Set an endpoint and model as needed; local deployments usually require no API key.",
+          detail: "vLLM, SGLang, and Ollama connect to localhost. Set an endpoint and a model; local deployments usually need no API key.",
           reference: "vllm · sglang · ollama",
         },
         {
           title: "OpenRouter",
-          detail: "OpenRouter provides one hosted endpoint for many models. You still select the provider and model explicitly; model names and prompts do not switch routes.",
+          detail: "OpenRouter is one hosted endpoint for many models. You still pick the provider and the model; a model name never switches the provider for you.",
           reference: "OPENROUTER_API_KEY",
         },
       ];
@@ -69,8 +69,8 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
           <h1>{isZh ? "选择模型和提供商。" : "Choose a model and provider."}</h1>
           <p>
             {isZh
-              ? `Codewhale 包含 ${facts.providers.length} 条提供商路由。提供商、模型和端点都是明确的配置；每条路由使用同一个本地运行时、工具和审批边界。托管提供商使用你配置的凭据，本地 vLLM、SGLang 和 Ollama 端点通常不需要密钥。`
-              : `Codewhale includes ${facts.providers.length} provider routes. The provider, model, and endpoint are explicit configuration, and every route uses the same local runtime, tools, and approval boundaries. Hosted providers use credentials you configure; local vLLM, SGLang, and Ollama endpoints usually require no key.`}
+              ? `Codewhale 内置 ${facts.providers.length} 个提供商。你来选提供商、模型和端点；每一个都跑同一套本地运行时、工具和权限。托管提供商用你的凭据；本地 vLLM、SGLang 和 Ollama 通常不需要密钥。`
+              : `Codewhale ships with ${facts.providers.length} providers. You set the provider, model, and endpoint. Every one runs through the same local runtime, tools, and permissions. Hosted providers use your credentials; local vLLM, SGLang, and Ollama usually need no key.`}
           </p>
           <div className="portal-actions">
             <Link href={providerDocs} className="portal-button portal-button-primary">
@@ -86,12 +86,12 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
       <section className="portal-section">
         <div className="portal-container portal-section-grid">
           <div className="portal-section-copy">
-            <span>{isZh ? "配置方式" : "Configuration paths"}</span>
-            <h2>{isZh ? "常用提供商路由" : "Common provider routes"}</h2>
+            <span>{isZh ? "配置" : "Configuration"}</span>
+            <h2>{isZh ? "常用提供商" : "Common providers"}</h2>
             <p>
               {isZh
-                ? "托管提供商的密钥可以通过 codewhale auth set 保存，也可以使用文档中列出的配置项或环境变量。提供商和模型分别选择；模型名称不会隐式改变提供商。"
-                : "Hosted-provider credentials can be saved with codewhale auth set or supplied through documented configuration and environment variables. Provider and model selection remain separate; a model name never changes the provider implicitly."}
+                ? "托管提供商的密钥用 codewhale auth set 保存，或放进配置文件或环境变量。提供商和模型分开选；模型名不会改变提供商。"
+                : "Save a hosted provider's key with codewhale auth set, or set it in config or an environment variable. Provider and model are chosen separately; a model name never changes the provider."}
             </p>
           </div>
           <div className="portal-topic-list">
@@ -117,8 +117,8 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
             </div>
             <p>
               {isZh
-                ? "这是 Codewhale 本地配置界面的只读说明，不会更改你的本地配置。"
-                : "This is a read-only guide to Codewhale's local configuration and does not change your local configuration."}
+                ? "这是 Codewhale 本地设置的只读预览，不会更改你的本地配置。"
+                : "A read-only view of Codewhale's local settings. It does not change your local configuration."}
             </p>
           </div>
 
@@ -140,7 +140,7 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
             <div className="settings-pane">
               <div className="settings-pane-heading">
                 <div>
-                  <span>{isZh ? "本地工具链" : "Local harness"}</span>
+                  <span>{isZh ? "本地设置" : "Local settings"}</span>
                   <h3>{isZh ? "模型与提供商" : "Models & providers"}</h3>
                 </div>
                 <span className="settings-readonly-badge">{isZh ? "只读" : "Read only"}</span>
@@ -154,14 +154,14 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
                   </dd>
                 </div>
                 <div>
-                  <dt>{isZh ? "提供商路由" : "Provider routes"}</dt>
+                  <dt>{isZh ? "提供商" : "Providers"}</dt>
                   <dd>{facts.providers.length}</dd>
                 </div>
               </dl>
 
               <div className="settings-provider-heading">
-                <span>{isZh ? "仓库注册表" : "Repository registry"}</span>
-                <span>{isZh ? "认证环境变量" : "Authentication environment"}</span>
+                <span>{isZh ? "提供商" : "Provider"}</span>
+                <span>{isZh ? "环境变量" : "Environment variable"}</span>
               </div>
               <ul className="settings-provider-list">
                 {facts.providers.map((provider) => (
@@ -181,8 +181,8 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
               <div className="settings-docs-action">
                 <p>
                   {isZh
-                    ? "要在你的机器上选择路由、模型、端点或凭据，请按照配置文档操作。"
-                    : "To choose a route, model, endpoint, or credentials on your machine, follow the configuration documentation."}
+                    ? "要在你的机器上设置提供商、模型、端点或凭据，请看配置文档。"
+                    : "To set a provider, model, endpoint, or credentials on your machine, see the configuration docs."}
                 </p>
                 <Link href={p("/docs/configuration")}>
                   {isZh ? "打开配置文档 ↗" : "Open configuration docs ↗"}
@@ -197,15 +197,15 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
         <div className="portal-container">
           <div className="portal-docs-heading">
             <div>
-              <span>{isZh ? "仓库数据" : "Repository data"}</span>
-              <h2>{isZh ? "内置提供商注册表" : "Built-in provider registry"}</h2>
+              <span>{isZh ? "完整列表" : "Full list"}</span>
+              <h2>{isZh ? "内置提供商" : "Built-in providers"}</h2>
             </div>
             <Link href={providerDocs}>{isZh ? "打开源文档 ↗" : "Open the source document ↗"}</Link>
           </div>
           <p className={`mb-6 max-w-3xl text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
             {isZh
-              ? "下面的列表由仓库中的提供商注册表生成，并随发布更新。这里列出路由 ID 和常用认证环境变量；传输协议、默认端点、模型解析和完整认证优先级以 docs/PROVIDERS.md 为准。"
-              : "This list is generated from the provider registry in the repository and updated with releases. It shows route IDs and common authentication environment variables; docs/PROVIDERS.md is the source for wire protocols, default endpoints, model resolution, and full authentication precedence."}
+              ? "此列表由仓库中的提供商注册表生成，随发布更新。这里列出提供商 ID 和对应的环境变量；协议、默认端点、模型解析和认证优先级见 docs/PROVIDERS.md。"
+              : "Generated from the provider registry in the repository and updated with each release. It lists each provider ID and its environment variable. docs/PROVIDERS.md covers wire protocols, default endpoints, model resolution, and authentication precedence."}
           </p>
           <ul className="grid gap-3 sm:grid-cols-2">
             {facts.providers.map((provider) => (
@@ -223,15 +223,15 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
           <p className={`mt-6 max-w-3xl text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
             {isZh ? (
               <>
-                如果需要的提供商尚未列出，请先{" "}
+                缺你要的提供商？{" "}
                 <Link href="https://github.com/Hmbown/CodeWhale/issues/new/choose" className="body-link">提交 issue</Link>
-                ，说明端点、认证方式和模型能力；也欢迎发送包含注册表、文档和测试的 pull request。
+                ，写明端点、认证方式和模型能力。带注册表、文档和测试的 pull request 也欢迎。
               </>
             ) : (
               <>
-                If a provider is missing, please{" "}
-                <Link href="https://github.com/Hmbown/CodeWhale/issues/new/choose" className="body-link">file an issue</Link>
-                {" "}with its endpoint, authentication method, and model capabilities. Pull requests that update the registry, documentation, and tests are welcome too.
+                Missing a provider?{" "}
+                <Link href="https://github.com/Hmbown/CodeWhale/issues/new/choose" className="body-link">File an issue</Link>
+                {" "}with its endpoint, authentication method, and model capabilities. Pull requests that update the registry, docs, and tests are welcome.
               </>
             )}
           </p>
@@ -242,8 +242,8 @@ export default async function ModelsPage({ params }: { params: Promise<{ locale:
         <div className="portal-container">
           <div className="portal-docs-heading">
             <div>
-              <span>{isZh ? "模型目录" : "Model catalog"}</span>
-              <h2>{isZh ? "默认模型与 crate 清单" : "Default model & crate inventory"}</h2>
+              <span>{isZh ? "默认值" : "Defaults"}</span>
+              <h2>{isZh ? "默认模型与 crate" : "Default model and crates"}</h2>
             </div>
           </div>
           <div className="grid gap-8 sm:grid-cols-2">

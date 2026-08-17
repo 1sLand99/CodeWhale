@@ -151,9 +151,9 @@ describe("session media component contract", () => {
     expect(component).toContain('asset.status === "pending"');
     expect(component).toContain("session-media-pending");
     expect(component).toContain("asset.pendingLabel");
-    // Pending copy must explicitly refuse placeholder footage, both locales.
-    expect(component).toContain("No placeholder or staged footage");
-    expect(component).toContain("占位或摆拍影像");
+    // Pending copy states plainly that nothing is recorded yet, both locales.
+    expect(component).toContain("There is no recording yet");
+    expect(component).toContain("还没有录像");
   });
 
   it("carries the structural reduced-motion contract: no autoplay, ever", () => {
