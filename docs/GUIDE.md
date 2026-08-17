@@ -626,10 +626,14 @@ with last-updated timestamps before resuming a specific id.
 To continue the exact running session from the web app, type `/rc` or launch
 with `codewhale rc`. Approve the one-time code in the system browser. While the
 lease is active, the browser owns new prompts and approvals and the terminal is
-a readable safety surface; `/rc status` shows ownership, `/rc stop` returns it
-to the terminal, and interrupt remains available. A dropped connection keeps
-local input locked until the last web lease expires so two controllers never
-race.
+a readable safety surface. Once connected, the banner and a transcript note
+show the live session link (`https://app.codewhale.net/session?run=…`);
+`/rc open` opens it in your browser and `/rc link` prints it. `/rc status`
+shows ownership, `/rc stop` returns it to the terminal, and interrupt remains
+available. A dropped connection keeps local input locked until the last web
+lease expires so two controllers never race. Every folder you enroll from one
+terminal shares a single stable device id, so the web app lists one computer
+per machine rather than one per session.
 
 ### What should I do when the model gets confused?
 

@@ -26,6 +26,12 @@ use crate::{
 
 const PRODUCTION_CONTROL_PLANE: &str = "https://api.codewhale.net/";
 const ENROLLMENT_SECRET_SLOT: &str = "cwc-remote-control-enrollment-v1";
+/// Machine-stable device identity. It outlives individual enrollments so the
+/// control plane can fold every folder enrolled from this terminal into one
+/// computer instead of one row per `/rc`.
+const DEVICE_IDENTITY_SECRET_SLOT: &str = "cwc-remote-control-device-v1";
+/// The only web origin whose session links the terminal will surface or open.
+const APP_ORIGIN_HOST: &str = "app.codewhale.net";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const SYNC_INTERVAL: Duration = Duration::from_millis(1_200);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -110,9 +116,11 @@ pub enum RemoteEvent {
         runner_id: String,
         target_ref: String,
         attachment: RemoteAttachment,
+        links: RemoteLinks,
     },
     Attachment {
         attachment: RemoteAttachment,
+        links: RemoteLinks,
     },
     RuntimeCursor {
         run_id: String,
@@ -138,10 +146,23 @@ pub struct RemoteAttachment {
     pub snapshot_present: bool,
 }
 
+/// Web links the control plane advertises for the attached session. Both are
+/// optional: an older control plane omits them and the terminal then simply
+/// shows no link. Links are validated against the Codewhale app origin before
+/// they are ever displayed or opened; the terminal never invents one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteLinks {
+    /// `https://app.codewhale.net/session?run=<runId>` for the live run.
+    pub run_url: Option<String>,
+    /// `https://app.codewhale.net/settings?section=workspaces` for this computer.
+    pub computer_url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunnerConnection {
     runner_id: String,
     attachment: RemoteAttachment,
+    links: RemoteLinks,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +410,40 @@ struct PersistedEnrollment {
     bootstrap_secret: String,
 }
 
+/// The machine-stable device identity persisted independently of any
+/// enrollment. Enrollments are deleted and re-created when the target or
+/// runtime changes; this record is only ever created once per keychain.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedDeviceIdentity {
+    schema_version: u64,
+    device_id: String,
+}
+
+impl PersistedDeviceIdentity {
+    fn valid(&self) -> bool {
+        self.schema_version == 1 && valid_opaque_ref(&self.device_id)
+    }
+}
+
+/// Pick the device id this terminal presents to the control plane. A valid
+/// saved identity always wins; otherwise the device id of an existing
+/// enrollment is adopted (so upgrading terminals keep their computer row);
+/// otherwise a fresh id is minted. Returns the id and whether it must be
+/// saved.
+fn resolve_device_identity(
+    saved: Option<PersistedDeviceIdentity>,
+    enrollment_device_id: Option<&str>,
+) -> (String, bool) {
+    if let Some(saved) = saved.filter(PersistedDeviceIdentity::valid) {
+        return (saved.device_id, false);
+    }
+    if let Some(existing) = enrollment_device_id.filter(|value| valid_opaque_ref(value)) {
+        return (existing.to_string(), true);
+    }
+    (format!("device_{}", uuid::Uuid::new_v4().simple()), true)
+}
+
 #[derive(Debug, Clone)]
 struct LiveEnrollment {
     persisted: PersistedEnrollment,
@@ -427,6 +482,7 @@ pub struct RemoteControlController {
     status_detail: String,
     account_ref: Option<String>,
     target_ref: Option<String>,
+    links: RemoteLinks,
     active_run: Option<ActiveRelayRun>,
     event_seq: HashMap<String, u64>,
     uploaded_snapshots: HashSet<String>,
@@ -458,6 +514,7 @@ impl Default for RemoteControlController {
             status_detail: "off".to_string(),
             account_ref: None,
             target_ref: None,
+            links: RemoteLinks::default(),
             active_run: None,
             event_seq: HashMap::new(),
             uploaded_snapshots: HashSet::new(),
@@ -600,6 +657,7 @@ impl RemoteControlController {
         }
         if self.status == Status::Off {
             self.account_ref = None;
+            self.links = RemoteLinks::default();
             self.active_run = None;
             self.pending_approvals.clear();
             self.command_fingerprints.clear();
@@ -641,9 +699,11 @@ impl RemoteControlController {
                 account_ref,
                 target_ref,
                 attachment,
+                links,
                 ..
             } => {
                 self.apply_attachment(attachment);
+                self.links = links.clone();
                 // Journal recovery may hold unacknowledged envelopes for runs
                 // beyond this attachment; resend every pending run now.
                 self.flush_all_pending();
@@ -653,8 +713,9 @@ impl RemoteControlController {
                 self.account_ref = Some(account_ref.clone());
                 self.target_ref = Some(target_ref.clone());
             }
-            RemoteEvent::Attachment { attachment } => {
+            RemoteEvent::Attachment { attachment, links } => {
                 self.apply_attachment(attachment);
+                self.links = links.clone();
             }
             RemoteEvent::RuntimeCursor { run_id, cursor } => {
                 self.reconcile_runtime_cursor(run_id, *cursor);
@@ -673,6 +734,7 @@ impl RemoteControlController {
                 self.status = Status::Off;
                 self.status_detail = "off".to_string();
                 self.active_run = None;
+                self.links = RemoteLinks::default();
                 self.ownership_blocked_until = None;
                 // The worker only reports Stopped after draining through the
                 // server-confirmed cursor and posting the offline heartbeat,
@@ -698,15 +760,41 @@ impl RemoteControlController {
         Some(event)
     }
 
+    /// The validated web link for the live session, once the control plane
+    /// has advertised one.
+    pub fn run_url(&self) -> Option<&str> {
+        if matches!(self.status, Status::Connected | Status::Stopping) {
+            self.links.run_url.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The validated web link for this computer's settings row, if advertised.
+    pub fn computer_url(&self) -> Option<&str> {
+        if matches!(self.status, Status::Connected | Status::Stopping) {
+            self.links.computer_url.as_deref()
+        } else {
+            None
+        }
+    }
+
     pub fn status_line(&self) -> String {
         match self.status {
             Status::Off => "Remote control: off".to_string(),
             Status::Connecting => format!("Remote control: connecting · {}", self.status_detail),
-            Status::Connected => format!(
-                "Remote control: connected · account {} · {}",
-                self.account_ref.as_deref().unwrap_or("account"),
-                self.status_detail
-            ),
+            Status::Connected => match self.links.run_url.as_deref() {
+                Some(url) => format!(
+                    "Remote control: connected · account {} · {} · open {url}",
+                    self.account_ref.as_deref().unwrap_or("account"),
+                    self.status_detail
+                ),
+                None => format!(
+                    "Remote control: connected · account {} · {}",
+                    self.account_ref.as_deref().unwrap_or("account"),
+                    self.status_detail
+                ),
+            },
             Status::Stopping => {
                 "Remote control: stopping · confirming the runner is offline".to_string()
             }
@@ -1373,12 +1461,34 @@ impl RemoteCommand {
     }
 }
 
-pub fn target_ref(workspace: &Path, session_id: &str) -> String {
+/// Opaque identity for the enrolled folder. It is a hash of the workspace
+/// path only: every session opened in the same folder shares one target, so
+/// the control plane sees one grant per folder rather than one per session
+/// (the session itself travels separately as `sessionRef`).
+pub fn target_ref(workspace: &Path) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"codewhale-remote-target:v2\0");
     hasher.update(workspace.to_string_lossy().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(session_id.as_bytes());
     format!("target_{}", &bytes_to_hex(&hasher.finalize())[..32])
+}
+
+/// Status-bar banner shown while the web owns this session. When the control
+/// plane advertised a session link the banner leads with it; otherwise it
+/// falls back to the opaque account and runner receipts.
+pub fn remote_control_banner(account_ref: &str, runner_id: &str, run_url: Option<&str>) -> String {
+    match run_url {
+        Some(url) => format!("REMOTE CONTROL · {url} · /rc stop returns input here"),
+        None => format!(
+            "REMOTE CONTROL · account {account_ref} · runner {runner_id} · /rc stop returns input here"
+        ),
+    }
+}
+
+/// Transcript note announcing where the live session can be followed.
+pub fn remote_control_link_notice(run_url: &str) -> String {
+    format!(
+        "Remote control is live at {run_url} — run /rc open to open it in your browser, or /rc link to print it."
+    )
 }
 
 fn runtime_envelope(
@@ -1551,22 +1661,30 @@ async fn relay_worker(
         .build()
         .map_err(|_| "Remote control could not initialize secure networking.".to_string())?;
 
-    let mut enrollment = match load_persisted_enrollment()? {
+    let saved_enrollment = load_persisted_enrollment()?;
+    // The device id is stable across enrollments: it is what lets the control
+    // plane fold every folder enrolled from this terminal into one computer.
+    let device_id = stable_device_id(
+        saved_enrollment
+            .as_ref()
+            .map(|saved| saved.device_id.as_str()),
+    )?;
+    let mut enrollment = match saved_enrollment {
         Some(saved) if saved.matches(&start, &base) => {
             match refresh_enrollment(&client, saved).await {
                 Ok(enrollment) => enrollment,
                 Err(error) if error == "runner_enrollment_revoked" => {
                     delete_persisted_enrollment();
-                    enroll_device(&client, &base, &start, &event_tx).await?
+                    enroll_device(&client, &base, &start, &device_id, &event_tx).await?
                 }
                 Err(error) => return Err(error),
             }
         }
         Some(_) => {
             delete_persisted_enrollment();
-            enroll_device(&client, &base, &start, &event_tx).await?
+            enroll_device(&client, &base, &start, &device_id, &event_tx).await?
         }
-        None => enroll_device(&client, &base, &start, &event_tx).await?,
+        None => enroll_device(&client, &base, &start, &device_id, &event_tx).await?,
     };
 
     let connection = connect_runner(&client, &enrollment, &start).await?;
@@ -1577,6 +1695,7 @@ async fn relay_worker(
             runner_id: runner_id.clone(),
             target_ref: start.target_ref.clone(),
             attachment: connection.attachment,
+            links: connection.links,
         })
         .map_err(|_| "The terminal remote-control owner stopped.".to_string())?;
     let mut last_heartbeat = Instant::now() - HEARTBEAT_INTERVAL;
@@ -1729,7 +1848,9 @@ async fn relay_worker(
                         }
                         Err(err) if err == "runner_enrollment_revoked" => {
                             delete_persisted_enrollment();
-                            enrollment = enroll_device(&client, &base, &start, &event_tx).await?;
+                            let device_id = enrollment.persisted.device_id.clone();
+                            enrollment =
+                                enroll_device(&client, &base, &start, &device_id, &event_tx).await?;
                             reconnect_runner(
                                 &client,
                                 &enrollment,
@@ -2064,9 +2185,9 @@ async fn enroll_device(
     client: &Client,
     base: &str,
     start: &RemoteStart,
+    device_id: &str,
     event_tx: &mpsc::UnboundedSender<RemoteEvent>,
 ) -> Result<LiveEnrollment, String> {
-    let device_id = format!("device_{}", uuid::Uuid::new_v4().simple());
     let value = public_request(
         client,
         Method::POST,
@@ -2125,7 +2246,7 @@ async fn enroll_device(
             return Err("Remote-control authorization was rejected.".to_string());
         }
         let exchange = read_bounded_json(response).await?;
-        let enrollment = enrollment_from_exchange(exchange, base, &device_id, start)?;
+        let enrollment = enrollment_from_exchange(exchange, base, device_id, start)?;
         save_persisted_enrollment(&enrollment.persisted)?;
         return Ok(enrollment);
     }
@@ -2408,6 +2529,8 @@ fn parse_runner_connection(
         .and_then(Value::as_bool)
         .ok_or_else(|| "Codewhale returned an invalid snapshot receipt.".to_string())?;
 
+    let links = parse_remote_links(runner, &run_id);
+
     Ok(RunnerConnection {
         runner_id,
         attachment: RemoteAttachment {
@@ -2416,7 +2539,75 @@ fn parse_runner_connection(
             runtime_cursor,
             snapshot_present,
         },
+        links,
     })
+}
+
+/// Read the optional `runUrl` / `computerUrl` advertised on the runner lease.
+/// Absent fields yield `None`; present-but-invalid values are dropped (never
+/// displayed, never opened) rather than failing the attachment, because a
+/// link is a convenience receipt and not part of the ownership contract.
+fn parse_remote_links(runner: &serde_json::Map<String, Value>, run_id: &str) -> RemoteLinks {
+    let run_url = runner
+        .get("runUrl")
+        .and_then(Value::as_str)
+        .and_then(|value| validate_run_url(value, run_id));
+    let computer_url = runner
+        .get("computerUrl")
+        .and_then(Value::as_str)
+        .and_then(validate_computer_url);
+    RemoteLinks {
+        run_url,
+        computer_url,
+    }
+}
+
+/// Parse a web link and accept it only on the Codewhale app origin (or, in
+/// debug builds only, a loopback development origin) with no credentials,
+/// port, or fragment — the same shape `validate_authorization_url` enforces.
+fn app_link_url(value: &str) -> Option<Url> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 {
+        return None;
+    }
+    let url = Url::parse(trimmed).ok()?;
+    let production_origin =
+        url.scheme() == "https" && url.host_str() == Some(APP_ORIGIN_HOST) && url.port().is_none();
+    let debug_loopback = cfg!(debug_assertions)
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"));
+    if !(production_origin || debug_loopback)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url)
+}
+
+/// `/session?run=<runId>` for exactly the attached run; anything else is
+/// dropped so the terminal can never send the user to a different session.
+fn validate_run_url(value: &str, run_id: &str) -> Option<String> {
+    let url = app_link_url(value)?;
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    if url.path() != "/session" || pairs.len() != 1 || pairs[0].0 != "run" || pairs[0].1 != run_id {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// `/settings` (optionally `?section=…`) on the app origin.
+fn validate_computer_url(value: &str) -> Option<String> {
+    let url = app_link_url(value)?;
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    if url.path() != "/settings"
+        || pairs.len() > 1
+        || pairs.iter().any(|(key, _)| *key != "section")
+    {
+        return None;
+    }
+    Some(url.to_string())
 }
 
 async fn post_heartbeat(
@@ -2783,6 +2974,39 @@ fn save_persisted_enrollment(enrollment: &PersistedEnrollment) -> Result<(), Str
         .map_err(|error| format!("Could not securely save the remote-control enrollment: {error}"))
 }
 
+fn load_persisted_device_identity() -> Result<Option<PersistedDeviceIdentity>, String> {
+    let Some(raw) = codewhale_secrets::Secrets::auto_detect()
+        .get(DEVICE_IDENTITY_SECRET_SLOT)
+        .map_err(|error| format!("Could not read the saved remote-control device id: {error}"))?
+    else {
+        return Ok(None);
+    };
+    // An unreadable identity is replaced rather than fatal: the worst case is
+    // one extra computer row, never a lost session.
+    Ok(serde_json::from_str(&raw).ok())
+}
+
+fn save_persisted_device_identity(identity: &PersistedDeviceIdentity) -> Result<(), String> {
+    let raw = serde_json::to_string(identity)
+        .map_err(|_| "Could not encode the remote-control device id.".to_string())?;
+    codewhale_secrets::Secrets::auto_detect()
+        .set(DEVICE_IDENTITY_SECRET_SLOT, &raw)
+        .map_err(|error| format!("Could not securely save the remote-control device id: {error}"))
+}
+
+/// Load (or mint and persist) the machine-stable device id.
+fn stable_device_id(enrollment_device_id: Option<&str>) -> Result<String, String> {
+    let saved = load_persisted_device_identity()?;
+    let (device_id, needs_save) = resolve_device_identity(saved, enrollment_device_id);
+    if needs_save {
+        save_persisted_device_identity(&PersistedDeviceIdentity {
+            schema_version: 1,
+            device_id: device_id.clone(),
+        })?;
+    }
+    Ok(device_id)
+}
+
 fn delete_persisted_enrollment() {
     if let Err(error) = codewhale_secrets::Secrets::auto_detect().delete(ENROLLMENT_SECRET_SLOT) {
         tracing::warn!("could not delete revoked remote-control enrollment: {error}");
@@ -2804,7 +3028,8 @@ async fn refresh_enrollment_and_reconnect(
         }
         Err(err) if err == "runner_enrollment_revoked" => {
             delete_persisted_enrollment();
-            *enrollment = enroll_device(client, &base, start, event_tx).await?;
+            let device_id = enrollment.persisted.device_id.clone();
+            *enrollment = enroll_device(client, &base, start, &device_id, event_tx).await?;
             reconnect_runner(client, enrollment, runner_id, start, event_tx).await
         }
         Err(err) => Err(err),
@@ -2823,6 +3048,7 @@ async fn reconnect_runner(
     event_tx
         .send(RemoteEvent::Attachment {
             attachment: connection.attachment,
+            links: connection.links,
         })
         .map_err(|_| "The terminal remote-control owner stopped.".to_string())
 }
@@ -3084,14 +3310,17 @@ mod tests {
 
     #[test]
     fn target_identity_is_stable_without_exposing_the_path() {
-        let target = target_ref(Path::new("/Users/alice/private/project"), "session-123");
+        let target = target_ref(Path::new("/Users/alice/private/project"));
         assert!(target.starts_with("target_"));
         assert_eq!(target.len(), 39);
         assert!(!target.contains("alice"));
+        // Every session opened in the same folder shares one target, so the
+        // control plane keeps one grant per folder rather than one per `/rc`.
         assert_eq!(
             target,
-            target_ref(Path::new("/Users/alice/private/project"), "session-123")
+            target_ref(Path::new("/Users/alice/private/project"))
         );
+        assert_ne!(target, target_ref(Path::new("/Users/alice/private/other")));
     }
 
     #[tokio::test]
@@ -3146,6 +3375,188 @@ mod tests {
     }
 
     #[test]
+    fn connection_without_links_yields_no_urls() {
+        let enrollment = fixture_enrollment("https://api.codewhale.net/");
+        let start = fixture_start();
+        let connection =
+            parse_runner_connection(&fixture_connection_response(), &enrollment, &start)
+                .expect("legacy lease without links still attaches");
+        assert_eq!(connection.links, RemoteLinks::default());
+        assert!(connection.links.run_url.is_none());
+        assert!(connection.links.computer_url.is_none());
+    }
+
+    #[test]
+    fn connection_links_are_parsed_from_the_runner_lease() {
+        let enrollment = fixture_enrollment("https://api.codewhale.net/");
+        let start = fixture_start();
+        let mut value = fixture_connection_response();
+        value["runner"]["runUrl"] = json!("https://app.codewhale.net/session?run=run_fixture");
+        value["runner"]["computerUrl"] =
+            json!("https://app.codewhale.net/settings?section=workspaces");
+        let connection = parse_runner_connection(&value, &enrollment, &start)
+            .expect("lease with links attaches");
+        assert_eq!(
+            connection.links.run_url.as_deref(),
+            Some("https://app.codewhale.net/session?run=run_fixture")
+        );
+        assert_eq!(
+            connection.links.computer_url.as_deref(),
+            Some("https://app.codewhale.net/settings?section=workspaces")
+        );
+    }
+
+    #[test]
+    fn connection_links_off_origin_or_for_another_run_are_dropped_not_fatal() {
+        let enrollment = fixture_enrollment("https://api.codewhale.net/");
+        let start = fixture_start();
+        for spoofed in [
+            "http://app.codewhale.net/session?run=run_fixture",
+            "https://app.codewhale.net.evil.example/session?run=run_fixture",
+            "https://evil.example/session?run=run_fixture",
+            "https://user:pw@app.codewhale.net/session?run=run_fixture",
+            "https://app.codewhale.net:8443/session?run=run_fixture",
+            "https://app.codewhale.net/session?run=run_fixture#token=abc",
+            "https://app.codewhale.net/session?run=run_other",
+            "https://app.codewhale.net/session?run=run_fixture&next=https://evil.example",
+            "https://app.codewhale.net/logout?run=run_fixture",
+            "",
+            "not a url",
+        ] {
+            let mut value = fixture_connection_response();
+            value["runner"]["runUrl"] = json!(spoofed);
+            value["runner"]["computerUrl"] = json!(spoofed);
+            let connection = parse_runner_connection(&value, &enrollment, &start)
+                .expect("a bad link must not break the attachment");
+            assert!(
+                connection.links.run_url.is_none(),
+                "run link accepted: {spoofed}"
+            );
+            assert!(
+                connection.links.computer_url.is_none(),
+                "computer link accepted: {spoofed}"
+            );
+        }
+        // A non-string value is treated as absent.
+        let mut value = fixture_connection_response();
+        value["runner"]["runUrl"] = json!(42);
+        let connection = parse_runner_connection(&value, &enrollment, &start).unwrap();
+        assert!(connection.links.run_url.is_none());
+    }
+
+    #[test]
+    fn banner_leads_with_the_session_link_when_present() {
+        let with_link = remote_control_banner(
+            "account_fixture",
+            "runner_fixture",
+            Some("https://app.codewhale.net/session?run=run_fixture"),
+        );
+        assert_eq!(
+            with_link,
+            "REMOTE CONTROL · https://app.codewhale.net/session?run=run_fixture · /rc stop returns input here"
+        );
+        let without_link = remote_control_banner("account_fixture", "runner_fixture", None);
+        assert_eq!(
+            without_link,
+            "REMOTE CONTROL · account account_fixture · runner runner_fixture · /rc stop returns input here"
+        );
+        let notice =
+            remote_control_link_notice("https://app.codewhale.net/session?run=run_fixture");
+        assert!(notice.starts_with(
+            "Remote control is live at https://app.codewhale.net/session?run=run_fixture"
+        ));
+        assert!(notice.contains("/rc open"));
+        assert!(notice.contains("/rc link"));
+    }
+
+    #[test]
+    fn controller_exposes_links_only_while_connected() {
+        let mut controller = RemoteControlController::default();
+        assert!(controller.run_url().is_none());
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        controller.worker_tx = Some(worker_tx);
+        controller.event_rx = Some(event_rx);
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 0,
+                    snapshot_present: false,
+                },
+                links: RemoteLinks {
+                    run_url: Some("https://app.codewhale.net/session?run=run_fixture".to_string()),
+                    computer_url: Some(
+                        "https://app.codewhale.net/settings?section=workspaces".to_string(),
+                    ),
+                },
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        assert_eq!(
+            controller.run_url(),
+            Some("https://app.codewhale.net/session?run=run_fixture")
+        );
+        assert_eq!(
+            controller.computer_url(),
+            Some("https://app.codewhale.net/settings?section=workspaces")
+        );
+        assert!(
+            controller
+                .status_line()
+                .contains("open https://app.codewhale.net/session?run=run_fixture")
+        );
+
+        event_tx.send(RemoteEvent::Stopped).unwrap();
+        controller.try_next_event().unwrap();
+        assert!(controller.run_url().is_none());
+        assert!(controller.computer_url().is_none());
+    }
+
+    #[test]
+    fn persisted_device_identity_survives_a_reload_and_outlives_enrollments() {
+        let (minted, needs_save) = resolve_device_identity(None, None);
+        assert!(needs_save);
+        assert!(minted.starts_with("device_"));
+        assert!(valid_opaque_ref(&minted));
+
+        let identity = PersistedDeviceIdentity {
+            schema_version: 1,
+            device_id: minted.clone(),
+        };
+        let raw = serde_json::to_string(&identity).expect("encode device identity");
+        let reloaded: PersistedDeviceIdentity =
+            serde_json::from_str(&raw).expect("decode device identity");
+        assert_eq!(reloaded, identity);
+
+        // A saved identity wins over any enrollment's id and needs no re-save.
+        let (resolved, needs_save) =
+            resolve_device_identity(Some(reloaded.clone()), Some("device_enrolled"));
+        assert_eq!(resolved, minted);
+        assert!(!needs_save);
+
+        // Without a saved identity, an existing enrollment's device id is
+        // adopted (upgrading terminals keep their computer row) and persisted.
+        let (adopted, needs_save) = resolve_device_identity(None, Some("device_enrolled"));
+        assert_eq!(adopted, "device_enrolled");
+        assert!(needs_save);
+
+        // An unreadable identity is replaced, never fatal.
+        let broken = PersistedDeviceIdentity {
+            schema_version: 2,
+            device_id: "x".to_string(),
+        };
+        let (replaced, needs_save) = resolve_device_identity(Some(broken), None);
+        assert_ne!(replaced, "x");
+        assert!(needs_save);
+        assert!(serde_json::from_str::<PersistedDeviceIdentity>("{\"deviceId\":\"a\"}").is_err());
+    }
+
+    #[test]
     fn attachment_response_validation_fails_closed() {
         let enrollment = fixture_enrollment("https://api.codewhale.net/");
         let start = fixture_start();
@@ -3191,6 +3602,7 @@ mod tests {
                     runtime_cursor: 41,
                     snapshot_present: false,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
 
@@ -3226,6 +3638,7 @@ mod tests {
                     runtime_cursor: 7,
                     snapshot_present: true,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
@@ -3244,6 +3657,7 @@ mod tests {
                     runtime_cursor: 7,
                     snapshot_present: false,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
@@ -3263,6 +3677,7 @@ mod tests {
                     runtime_cursor: 8,
                     snapshot_present: true,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
@@ -3301,6 +3716,7 @@ mod tests {
                     runtime_cursor: 7,
                     snapshot_present: false,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
@@ -3329,6 +3745,7 @@ mod tests {
                     runtime_cursor: 6,
                     snapshot_present: false,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
@@ -4257,6 +4674,7 @@ mod tests {
                     runtime_cursor: 0,
                     snapshot_present: false,
                 },
+                links: RemoteLinks::default(),
             })
             .unwrap();
         controller.try_next_event().unwrap();
