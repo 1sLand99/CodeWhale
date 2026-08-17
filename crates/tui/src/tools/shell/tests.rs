@@ -124,6 +124,116 @@ async fn lowercase_bash_readonly_refusal_names_work_mode() {
     assert!(!workspace.path().join("blocked-by-plan").exists());
 }
 
+/// Regression for the wedge that took out the owner's own session under swap
+/// exhaustion: the lowercase `bash` spill file could not be created (full temp
+/// volume), every call — including `echo ok` — failed with the harness-internal
+/// "Failed to create streaming shell output", and nothing recovered. Spill
+/// failure must be soft: the command still runs, the tail is still returned,
+/// the next call still works, and no job state leaks.
+#[cfg(unix)]
+#[tokio::test]
+async fn lowercase_bash_survives_spill_file_failure_and_stays_usable() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path());
+    let missing_spill_dir = workspace.path().join("no-such-temp-volume");
+    assert!(!missing_spill_dir.exists());
+    context
+        .shell_manager
+        .lock()
+        .expect("shell manager")
+        .set_output_spill_dir_for_test(Some(missing_spill_dir.clone()));
+
+    // (ii) the command runs and (i) no harness-internal error leaks.
+    let first = LowercaseBashTool
+        .execute(json!({"command": echo_command("ok")}), &context)
+        .await
+        .expect("bash runs even when the spill file cannot be created");
+    assert!(first.success, "{}", first.content);
+    assert_eq!(first.content.trim(), "ok");
+    assert!(
+        !first
+            .content
+            .contains("Failed to create streaming shell output")
+    );
+
+    // The next call must work too — the whole point of the fix.
+    let second = LowercaseBashTool
+        .execute(json!({"command": echo_command("still-ok")}), &context)
+        .await
+        .expect("second bash call after a spill failure");
+    assert!(second.success, "{}", second.content);
+    assert_eq!(second.content.trim(), "still-ok");
+
+    // Output past the bound is still delivered, and the notice explains why the
+    // full-output path is missing instead of pointing at a file that was never
+    // written.
+    let long = LowercaseBashTool
+        .execute(
+            json!({"command": "i=0; while [ $i -lt 2100 ]; do echo line-$i; i=$((i+1)); done"}),
+            &context,
+        )
+        .await
+        .expect("long bash output without a spill file");
+    assert!(long.success, "{}", long.content);
+    assert!(long.content.contains("line-2099"));
+    assert!(
+        long.content.contains("Full output was not persisted:"),
+        "{}",
+        long.content
+    );
+    assert!(!long.content.contains("Full output: "));
+
+    // (iii) no leaked session state: nothing is still running or unowned-pending.
+    let mut manager = context.shell_manager.lock().expect("shell manager");
+    let running = manager
+        .list_jobs()
+        .into_iter()
+        .filter(|job| job.status == ShellStatus::Running)
+        .count();
+    assert_eq!(running, 0, "no shell job may be left running");
+    assert!(
+        !missing_spill_dir.exists(),
+        "fail-soft must not create the dir"
+    );
+}
+
+/// A spawn/stream failure caused by host exhaustion must reach the model as
+/// an actionable message (cause chain + likely reason + retry), never as a
+/// bare harness-internal context string.
+#[test]
+fn shell_execution_failure_names_resource_exhaustion_and_says_retry() {
+    let error = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        .context("Failed to open PTY");
+    let message = shell_execution_failed_message(&error);
+    assert!(
+        message.starts_with("Shell execution failed: Failed to open PTY"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Likely host resource exhaustion"),
+        "{message}"
+    );
+    assert!(message.contains("disk"), "{message}");
+    assert!(message.contains("retry"), "{message}");
+    assert!(message.contains("still usable"), "{message}");
+
+    #[cfg(unix)]
+    {
+        let error = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::EMFILE))
+            .context("Failed to spawn PTY command: echo ok");
+        let message = shell_execution_failed_message(&error);
+        assert!(message.contains("file descriptors"), "{message}");
+        assert!(message.contains("echo ok"), "{message}");
+    }
+
+    let plain = anyhow::anyhow!("working directory does not exist");
+    let message = shell_execution_failed_message(&plain);
+    assert_eq!(
+        message,
+        "Shell execution failed: working directory does not exist"
+    );
+}
+
 #[tokio::test]
 async fn lowercase_bash_timeout_uses_seconds_and_fails() {
     let workspace = tempdir().expect("workspace");
