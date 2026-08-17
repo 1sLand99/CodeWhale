@@ -112,6 +112,17 @@ locales grow to 18 and 8.
   one provider-owned wire id matches) instead of being classified as another
   provider's bare model (#5475, thanks @h3c-hexin; diagnosis by @asto18089
   in Pinvou/CodeWhale#14).
+- Model catalog brought current as of 2026-08-17 against the official
+  pricing pages: gpt-5.6-terra / gpt-5.6-luna rates, `claude-sonnet-5` keeps
+  $2/$10 (the announced September increase was withdrawn), `claude-opus-5`
+  added, `kimi-k3` and `kimi-k2.7-code-highspeed`, `MiniMax-M2.7-highspeed`,
+  Mistral first-party rows, xAI `grok-4.5` / `grok-4.3` with long-context
+  tiers, Gemini and Qwen limits, and RedNote's `dots3-note` preview as an
+  OpenRouter row (no first-party API exists yet) — every number carries its
+  source and a pinned test (#5485).
+- Website: copy on codewhale.net rewritten in plain declarative sentences —
+  one idea per sentence, numbers from the generated facts, no self-narration
+  — with a voice sheet at docs/design/WEB_VOICE.md (#5483).
 - CI: the release workflows no longer restore npm/cargo caches after
   checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
   #88–#107 are closed with a contract test over the workflow files (#5463).
@@ -160,6 +171,12 @@ locales grow to 18 and 8.
   `codewhale integrations dsh update --skin false` turns it off), replacing
   the 0.9.8 exported-CSS skin that dsh's inline body variables overrode
   (docs/design/DSH_BUNDLE_SKIN.md, docs/INTEGRATIONS_DSH.md) (#5469).
+- `dsh` integration: an ambient ocean scene behind the DSH web UI — slow
+  whale silhouettes, a school of `><>` glyph fish, bubbles — drawn on a
+  canvas under a translucent veil of the Codewhale palette; light and dark,
+  ~30 fps capped, paused when hidden, a static frame under
+  `prefers-reduced-motion`; on by default with the skin,
+  `codewhale integrations dsh update --ocean false` turns it off (#5484).
 - Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
   agent detail, and a `doctor` "Fleet roster layers" section (JSON
   `operate_fleet.roster.multi_layer`), in all 15 TUI locales. Layer collapse
