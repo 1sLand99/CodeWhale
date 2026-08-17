@@ -40,17 +40,12 @@ pub(super) struct BoundedOutputAccumulator {
 }
 
 impl BoundedOutputAccumulator {
-    /// Build an accumulator whose complete-output spill file lives in the
-    /// process temp dir. Never fails: when the spill file cannot be created
-    /// (disk full, `EMFILE`, missing temp dir) the command still runs and the
-    /// bounded tail is still returned — the spill is a convenience, not a
-    /// precondition for executing `echo ok`.
-    pub(super) fn new() -> Self {
-        Self::new_in(None)
-    }
-
-    /// Like [`Self::new`], with an explicit spill directory (`None` = process
-    /// temp dir). Used to fault-inject spill failure in tests.
+    /// Build an accumulator whose complete-output spill file lives in
+    /// `spill_dir` (`None` = process temp dir). Never fails: when the spill
+    /// file cannot be created (disk full, `EMFILE`, missing temp dir) the
+    /// command still runs and the bounded tail is still returned — the spill
+    /// is a convenience, not a precondition for executing `echo ok`. Tests
+    /// pass a nonexistent dir to fault-inject the failure.
     pub(super) fn new_in(spill_dir: Option<&std::path::Path>) -> Self {
         let mut builder = tempfile::Builder::new();
         builder.prefix("codewhale-bash-");
@@ -87,6 +82,7 @@ impl BoundedOutputAccumulator {
     }
 
     /// Why the complete output is not being persisted, if it is not.
+    #[cfg(test)]
     pub(super) fn spill_unavailable(&self) -> Option<&str> {
         self.spill_unavailable.as_deref()
     }
@@ -477,7 +473,7 @@ mod tests {
             .map(|index| format!("line-{index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut output = BoundedOutputAccumulator::new();
+        let mut output = BoundedOutputAccumulator::new_in(None);
         output.append(source.as_bytes()).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
@@ -489,7 +485,7 @@ mod tests {
     #[test]
     fn bounded_output_streams_raw_full_output_and_bounds_decoded_tail() {
         let raw = vec![0xFF; 2 * 1024 * 1024];
-        let mut output = BoundedOutputAccumulator::new();
+        let mut output = BoundedOutputAccumulator::new_in(None);
         for chunk in raw.chunks(4_096) {
             output.append(chunk).expect("append");
             assert!(output.retained_memory_bytes() <= BOUNDED_OUTPUT_MAX_BYTES + 4);
@@ -512,7 +508,7 @@ mod tests {
     fn bounded_output_huge_terminal_line_matches_upstream_notice() {
         let mut source = vec![b'x'; BOUNDED_OUTPUT_MAX_BYTES + 1_024];
         source.push(b'\n');
-        let mut output = BoundedOutputAccumulator::new();
+        let mut output = BoundedOutputAccumulator::new_in(None);
         output.append(&source).expect("append");
         output.finish().expect("finish");
         let snapshot = output.snapshot(true).expect("snapshot");
