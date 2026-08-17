@@ -46,22 +46,6 @@ def die(msg: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 
-def _safe_catalog_path(path: str) -> str:
-    """Catalog id path only — never a URL, token, or raw JSON value."""
-    return "".join(ch if ch.isalnum() or ch in ".-_/" else "?" for ch in path)[:200]
-
-
-def _safe_source_label(source: str) -> str:
-    """Log scheme + host (or file name), never query strings or credentials."""
-    if source.startswith("file:"):
-        return "file:<local>"
-    if source.startswith("url:"):
-        rest = source[4:]
-        host = rest.split("://", 1)[-1].split("/", 1)[0].split("@")[-1]
-        return f"url:https://{host}/" if host else "url:<redacted>"
-    return "source:<redacted>"
-
-
 def load_json_bytes(raw: bytes, source: str) -> Any:
     try:
         text = raw.decode("utf-8")
@@ -184,6 +168,34 @@ def public_models_dev_document(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data.get("providers"), dict):
         out["providers"] = scrub_secrets(data["providers"])
     return out
+
+
+def public_source_label(source: str) -> str:
+    """Log a catalog origin without query/fragment (tokens live there)."""
+    if source.startswith("url:"):
+        url = source[4:]
+        for sep in ("?", "#"):
+            url = url.split(sep, 1)[0]
+        return f"url:{url}"
+    return source
+
+
+def public_limit_value(value: Any) -> str:
+    """Format a catalog limit for logs. Never print credential-shaped strings.
+
+    Remote catalog JSON is tainted for clear-text-logging rules. Only numeric
+    limits are meaningful here; anything else (including token-shaped strings)
+    is replaced with a constant so the raw value cannot reach stdout.
+    """
+    if isinstance(value, bool):
+        return "redacted"
+    if value is None:
+        return "null"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return format(value, ".6g")
+    return "redacted"
 
 
 def catalog_stats(data: dict[str, Any]) -> str:
@@ -338,9 +350,11 @@ def _collect_limit_drift(
         bundled = seed_limit.get(field)
         upstream = upstream_limit.get(field)
         if bundled != upstream:
-            # Log only the catalog path and field name. Never print raw
-            # upstream/bundled values — CodeQL #107 (clear-text logging).
-            drift.append(f"{_safe_catalog_path(path)}: limit.{field} differs")
+            drift.append(
+                f"{path}: limit.{field} "
+                f"bundled={public_limit_value(bundled)} "
+                f"upstream={public_limit_value(upstream)}"
+            )
 
 
 def cmd_drift(args: argparse.Namespace) -> None:
@@ -406,12 +420,12 @@ def cmd_drift(args: argparse.Namespace) -> None:
                     drift,
                 )
 
-    print(f"bundled seed: {seed_path.name}")
-    print(f"upstream: {_safe_source_label(source)}")
+    print(f"bundled seed: {seed_path}")
+    print(f"upstream: {public_source_label(source)}")
     if missing_upstream:
         print("removed upstream (bundled id no longer present):")
         for path in missing_upstream:
-            print(f"  - {_safe_catalog_path(path)}")
+            print(f"  - {path}")
     if drift:
         print(f"limit drift detected ({len(drift)}):")
         for path in drift:
