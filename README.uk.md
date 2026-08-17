@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:4fc19c5f9596 -->
 # Codewhale
 
 Агент для програмування з відкритим кодом у вашому терміналі — модель приносите ви.
@@ -28,7 +28,7 @@ Codewhale починався як нативний інструмент для D
 це — одна з найкорисніших речей, які ви можете зробити — див.
 [Участь у проєкті](#участь-у-проєкті).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [codewhale.net](https://codewhale.net/) · [Документація](docs) · [Журнал змін](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Документація](docs) · [Журнал змін](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -89,6 +89,21 @@ Operate; якщо в полі є текст, `Tab` доповнює слеш-к�
   компілюється у блокування запису, які не може обійти навіть Full Access.
 - **Робота, яку можна відновити.** Флот записує кожен крок до журналу, що лише
   доповнюється, тож `fleet resume` підхоплює роботу з місця, де ви зупинились.
+
+## Інтеграції
+
+- **DeepSeek Harness (dsh) — підключається через Codewhale.**
+  `codewhale integrations dsh connect` зв'язує наявну інсталяцію
+  `@deepseek-ai/dsh` з вашим маршрутом провайдера, дозволами та робочою
+  областю Codewhale; `integrations dsh install-bundle` додає опціональний
+  бандл-плагін DSH, щоб `dsh --profile codewhale` ніс цю ідентичність
+  самостійно. Дозволи та життєвий цикл лишаються за Codewhale; сесії,
+  профілі та облікові дані dsh не зачіпаються. Див.
+  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
+- **VS Code.** Офіційний каркас розширення (`extensions/vscode`) відкриває
+  Codewhale у вбудованому терміналі та дає Agent View лише для читання
+  поверх локального рантайму. Це прев'ю для локальної розробки, а не реліз
+  у маркетплейсі.
 
 ## Дізнатися більше
 

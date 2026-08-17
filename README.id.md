@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:4fc19c5f9596 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -11,7 +11,7 @@ Yang membedakannya dari harness lain: **Anda memilih model untuk setiap peran, d
 
 Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkembang. Jika model atau penyedia yang Anda gunakan belum tersedia, atau ada hal yang tidak berjalan semestinya, memberi tahu kami adalah salah satu kontribusi paling berharga yang bisa Anda lakukan — lihat [Kontribusi](#kontribusi).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -46,6 +46,21 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 - **Harness yang Anda tulis sendiri.** Peran adalah berkas yang bisa Anda baca dan sunting — satu model, satu sikap perkakas, dan instruksi tetap untuk tiap peran — disimpan di dalam proyek agar tim berbagi, atau di samping pengaturan pribadi Anda agar ikut berpindah antar repo. Constitution mencatat bagaimana Anda ingin agen berperilaku di setiap sesi, sehingga harness mengikuti cara kerja Anda, bukan cara kami.
 - **Read-only sampai Anda memberi izin lebih.** Mode Plan tidak dapat mengubah berkas, dan gerbang persetujuan memproteksi perintah berisiko. Ketika sandbox OS membungkus perintah, Codewhale akan menginformasikannya: Seatbelt pada macOS (jika tersedia), serta opsi bubblewrap di Linux. Berkas `constitution.json` repositori dikompilasi menjadi pembatas penulisan yang bahkan tidak dapat dilewati oleh mode Full Access.
 - **Pekerjaan yang dapat dilanjutkan.** Fleet mencatat setiap langkah ke ledger bertipe append-only, sehingga `fleet resume` dapat melanjutkan pekerjaan tepat di mana Anda meninggalkannya.
+
+## Integrasi
+
+- **DeepSeek Harness (dsh) — terhubung melalui Codewhale.**
+  `codewhale integrations dsh connect` menghubungkan instalasi
+  `@deepseek-ai/dsh` yang sudah ada ke rute provider, izin, dan ruang kerja
+  Codewhale Anda; `integrations dsh install-bundle` menambahkan bundel plugin
+  DSH opsional sehingga `dsh --profile codewhale` membawa identitas itu secara
+  mandiri. Codewhale memegang izin dan otoritas siklus hidup; dsh tetap
+  mempertahankan sesi, profil, dan kredensialnya sendiri tanpa tersentuh.
+  Lihat [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
+- **VS Code.** Kerangka ekstensi resmi (`extensions/vscode`) membuka
+  Codewhale di terminal terintegrasi dan menyajikan Agent View hanya-baca
+  melalui runtime lokal. Ini adalah pratinjau pengembangan lokal, bukan rilis
+  marketplace.
 
 ## Pelajari Lebih Lanjut
 

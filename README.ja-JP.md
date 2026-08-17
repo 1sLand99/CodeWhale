@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:4fc19c5f9596 -->
 # Codewhale
 
 ターミナルで動くオープンソースのコーディングエージェント — モデルはあなたが持ち込む。
@@ -11,7 +11,7 @@ Codewhale は DeepSeek のためのネイティブ体験として始まりまし
 
 私たちは常にコントリビューターと改善の方法を探しています。使っているモデルやプロバイダが見当たらないとき、あるいは何かが壊れたときは、それを知らせてもらえることが最も役に立つことのひとつです — [コントリビューション](#コントリビューション)を見てください。
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -46,6 +46,21 @@ TUI では、`/model` がプロバイダとモデルをまとめて切り替え�
 - **あなたが書くハーネス。** 役割は読んで編集できるファイルです。役割ごとにモデル、ツールの姿勢、常設の指示を持ち、チームで共有するならプロジェクトに、リポジトリをまたいで持ち歩くなら個人設定の隣に置きます。constitution はすべてのセッションを通じてエージェントにどう振る舞ってほしいかを記録し、ハーネスを私たちのやり方ではなくあなたのやり方に合わせます。
 - **許可するまでは読み取り専用。** Plan モードはファイルを変更せず、リスクのあるコマンドは承認でゲートされます。OS サンドボックスが実際にコマンドをラップするとき、Codewhale はそれを明示します。macOS では利用可能な Seatbelt、Linux ではオプトインの bubblewrap です。リポジトリの `constitution.json` は書き込みホールドへとコンパイルされ、Full Access でもスキップできません。
 - **再開できる作業。** Fleet はすべてのステップを追記専用の台帳に記録するので、`fleet resume` で止めたところから再開できます。
+
+## インテグレーション
+
+- **DeepSeek Harness（dsh）— Codewhale 経由で接続。**
+  `codewhale integrations dsh connect` は既存の `@deepseek-ai/dsh`
+  インストールを Codewhale のプロバイダールート、権限、ワークスペースに
+  接続し、`integrations dsh install-bundle` はオプトインの DSH プラグイン
+  バンドルを追加して、`dsh --profile codewhale` が単独で同じ ID を持てる
+  ようにします。権限とライフサイクルは Codewhale が管理し、dsh の
+  セッション、プロファイル、認証情報は一切変更されません。
+  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md) を参照。
+- **VS Code。** 公式拡張機能の雛形（`extensions/vscode`）は Codewhale を
+  統合ターミナルで開き、ローカルランタイム経由の読み取り専用 Agent View
+  を提供します。現在はローカル開発プレビューであり、マーケットプレイス
+  版ではありません。
 
 ## さらに詳しく
 

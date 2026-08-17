@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:4fc19c5f9596 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -26,7 +26,7 @@ Chúng tôi luôn tìm kiếm người đóng góp và cách cải thiện. Nế
 provider bạn dùng còn thiếu, hoặc có gì đó hỏng, báo cho chúng tôi biết là một
 trong những điều hữu ích nhất bạn có thể làm — xem [Đóng góp](#đóng-góp).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Bahasa Indonesia](README.id.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Bahasa Indonesia](README.id.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -82,6 +82,20 @@ shell qua đường phê duyệt bình thường.
   chốt chặn ghi mà ngay cả Full Access cũng không thể bỏ qua.
 - **Công việc bạn có thể tiếp tục.** Fleet ghi lại từng bước vào sổ cái chỉ ghi
   thêm, nên `fleet resume` tiếp tục từ chỗ bạn dừng.
+
+## Tích hợp
+
+- **DeepSeek Harness (dsh) — kết nối qua Codewhale.**
+  `codewhale integrations dsh connect` liên kết bản cài `@deepseek-ai/dsh`
+  hiện có với tuyến provider, quyền và workspace Codewhale của bạn;
+  `integrations dsh install-bundle` thêm gói plugin DSH tùy chọn để
+  `dsh --profile codewhale` tự mang danh tính đó. Codewhale nắm quyền và
+  vòng đời; dsh giữ nguyên phiên, profile và thông tin xác thực của riêng nó.
+  Xem [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
+- **VS Code.** Bộ khung extension chính thức (`extensions/vscode`) mở
+  Codewhale trong terminal tích hợp và cung cấp Agent View chỉ đọc qua
+  runtime cục bộ. Đây là bản xem trước phát triển cục bộ, chưa phải bản phát
+  hành marketplace.
 
 ## Tìm hiểu thêm
 

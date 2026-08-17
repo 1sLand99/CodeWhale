@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:3adc6177fbcf -->
+<!-- source: README.md sha256:4fc19c5f9596 -->
 # Codewhale
 
 터미널에서 쓰는 오픈소스 코딩 에이전트 — 모델은 당신이 가져옵니다.
@@ -11,7 +11,7 @@ Codewhale은 DeepSeek을 위한 네이티브 경험으로 시작했습니다. �
 
 우리는 항상 기여자와 개선할 방법을 찾고 있습니다. 사용하는 모델이나 프로바이더가 빠져 있거나 무언가가 깨진다면, 그것을 알려 주는 일이 할 수 있는 가장 유용한 일 중 하나입니다 — [기여](#기여)를 참고하세요.
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -46,6 +46,20 @@ TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/f
 - **당신이 직접 쓰는 하네스.** 역할은 읽고 수정할 수 있는 파일입니다. 역할마다 모델, 도구 태세, 상시 지시를 담아 팀과 공유하려면 프로젝트에, 저장소를 옮겨 다니며 쓰려면 개인 설정 옆에 둡니다. constitution은 모든 세션에서 에이전트가 어떻게 행동하기를 바라는지 기록해, 하네스가 우리 방식이 아니라 당신의 방식에 맞도록 합니다.
 - **허용하기 전까지는 읽기 전용.** Plan 모드는 파일을 바꾸지 않고, 위험한 명령은 승인을 거칩니다. OS 샌드박스가 실제로 명령을 래핑할 때 Codewhale은 이를 그대로 표시합니다. macOS에서는 사용 가능한 Seatbelt, Linux에서는 옵트인 bubblewrap입니다. 저장소의 `constitution.json`은 Full Access조차 건너뛸 수 없는 쓰기 홀드로 컴파일됩니다.
 - **이어서 할 수 있는 작업.** Fleet은 모든 단계를 추가 전용 원장에 기록하므로, `fleet resume`으로 멈춘 지점부터 이어갈 수 있습니다.
+
+## 통합
+
+- **DeepSeek Harness(dsh) — Codewhale로 연결.**
+  `codewhale integrations dsh connect`는 기존 `@deepseek-ai/dsh` 설치를
+  Codewhale의 제공자 라우트·권한·작업 공간에 연결하고,
+  `integrations dsh install-bundle`은 옵트인 DSH 플러그인 번들을 추가해
+  `dsh --profile codewhale`이 해당 정체성을 단독으로 유지하게 합니다.
+  권한과 수명 주기는 Codewhale이 담당하며, dsh 고유의 세션·프로필·자격
+  증명은 그대로 유지됩니다.
+  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md) 참조.
+- **VS Code.** 공식 확장 스캐폴드(`extensions/vscode`)는 통합 터미널에서
+  Codewhale을 열고 로컬 런타임 기반의 읽기 전용 Agent View를 제공합니다.
+  현재는 로컬 개발 프리뷰이며 마켓플레이스 릴리스가 아닙니다.
 
 ## 더 알아보기
 
