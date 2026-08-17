@@ -2406,6 +2406,19 @@ pub struct SubagentsConfig {
     /// cancelled before their request timeout can fire (#2614).
     #[serde(default)]
     pub heartbeat_timeout_secs: Option<u64>,
+    /// Default per-child model-turn budget applied when an `agent` start
+    /// carries no explicit `max_steps` (#5324). When unset, the Fleet role
+    /// default applies (60 turns for read-only roles, 120 for
+    /// builder/worker/custom); values are clamped to the runtime ceiling
+    /// (2000) at resolution.
+    #[serde(default)]
+    pub default_max_steps: Option<u32>,
+    /// Default per-child wall-clock budget in seconds applied when an
+    /// `agent` start carries no explicit `wall_time_secs` (#5324). When
+    /// unset, children get 1800s; values are clamped to 1..=86400 at
+    /// resolution.
+    #[serde(default)]
+    pub default_wall_time_secs: Option<u64>,
     /// Per-provider overrides for sub-agent fanout and budget knobs. Keys are
     /// provider names such as `deepseek`, `zai`, `openrouter`, or `anthropic`.
     #[serde(default)]
@@ -6919,6 +6932,31 @@ impl Config {
             .and_then(|cfg| cfg.token_budget)
             .or_else(|| self.subagents.as_ref().and_then(|cfg| cfg.token_budget))
             .filter(|budget| *budget > 0)
+    }
+
+    /// Default per-child model-turn budget from `[subagents]
+    /// default_max_steps`, applied when an `agent` start carries no explicit
+    /// `max_steps` (#5324). `None` or `0` keep the Fleet role defaults
+    /// (60 read-only roles / 120 builder/worker/custom); the resolved value
+    /// is clamped to the runtime ceiling when applied.
+    #[must_use]
+    pub fn subagent_default_max_steps(&self) -> Option<u32> {
+        self.subagents
+            .as_ref()
+            .and_then(|cfg| cfg.default_max_steps)
+            .filter(|steps| *steps > 0)
+    }
+
+    /// Default per-child wall-clock budget in seconds from `[subagents]
+    /// default_wall_time_secs`, applied when an `agent` start carries no
+    /// explicit `wall_time_secs` (#5324). `None` or `0` keep the 1800s
+    /// default; the resolved value is clamped to 1..=86400 when applied.
+    #[must_use]
+    pub fn subagent_default_wall_time_secs(&self) -> Option<u64> {
+        self.subagents
+            .as_ref()
+            .and_then(|cfg| cfg.default_wall_time_secs)
+            .filter(|secs| *secs > 0)
     }
 
     /// Resolved per-step DeepSeek API timeout for sub-agents, in seconds.
