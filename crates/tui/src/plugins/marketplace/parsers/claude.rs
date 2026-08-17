@@ -1,6 +1,6 @@
 //! Claude `.claude-plugin/marketplace.json` parser.
 //!
-//! Schema source: https://code.claude.com/docs/en/plugin-marketplaces
+//! Schema source: <https://code.claude.com/docs/en/plugin-marketplaces>
 //!
 //! Top level: `name` (kebab-case, required), `owner` (`{name`, `email?`,
 //! `url?}`, required), `plugins[]` (required); optional `$schema`,

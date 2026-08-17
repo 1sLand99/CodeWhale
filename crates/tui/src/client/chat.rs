@@ -4483,7 +4483,7 @@ mod alias_thinking_detection_tests {
     //! assistant messages and DeepSeek returns a 400 ("the `reasoning_content`
     //! in the thinking mode must be passed back to the API") on the second
     //! turn. See upstream API docs:
-    //! https://api-docs.deepseek.com/guides/thinking_mode
+    //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
         ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
         apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
