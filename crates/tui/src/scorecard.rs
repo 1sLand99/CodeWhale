@@ -345,7 +345,10 @@ fn provider_scoped_cost(
     // V4 flash/pro rows carry peak/off-peak tiers (01:00–04:00 and
     // 06:00–10:00 UTC), and the retired `deepseek-chat` / `deepseek-reasoner`
     // aliases price through them — so an undated DeepSeek turn cannot be
-    // resolved to one price any more than an undated `claude-sonnet-5` turn.
+    // resolved to one price. `claude-sonnet-5` keeps the same recorded-time
+    // contract it had during its introductory window (Anthropic later made
+    // that $2/$10 rate permanent; the row still prices at the turn's own time
+    // rather than the wall clock, and undated turns still fail closed).
     let needs_recorded_time =
         direct_deepseek || (provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5");
     let recorded_at = match (created_at, needs_recorded_time) {
@@ -1323,20 +1326,26 @@ mod tests {
             prompt_cache_write_tokens: Some(100_000),
             ..Default::default()
         };
-        let intro_at: DateTime<Utc> = "2026-08-31T23:59:59Z".parse().expect("intro time");
-        let standard_at: DateTime<Utc> = "2026-09-01T00:00:00Z".parse().expect("standard time");
+        // Sonnet 5's $2/$10 launch rate became the standard price (Anthropic
+        // pricing page, 2026-08-17: the 2026-09-01 increase "will not
+        // occur"), so both sides of the former boundary price identically:
+        // 650K miss * 2.00 + 250K hit * 0.20 + 100K write * 2.50 + 500K out
+        // * 10.00 = 1.30 + 0.05 + 0.25 + 5.00 = 6.60. A turn with no recorded
+        // time still fails closed rather than guessing a window.
+        let before_boundary: DateTime<Utc> = "2026-08-31T23:59:59Z".parse().expect("time");
+        let after_boundary: DateTime<Utc> = "2026-09-01T00:00:00Z".parse().expect("time");
         let turns = [
             TurnInput {
-                turn_id: "sonnet-intro".into(),
-                created_at: Some(&intro_at),
+                turn_id: "sonnet-before".into(),
+                created_at: Some(&before_boundary),
                 provider: Some("anthropic"),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: " claude-sonnet-5 ".into(),
                 usage: &u,
             },
             TurnInput {
-                turn_id: "sonnet-standard".into(),
-                created_at: Some(&standard_at),
+                turn_id: "sonnet-after".into(),
+                created_at: Some(&after_boundary),
                 provider: Some("anthropic"),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-sonnet-5".into(),
@@ -1356,10 +1365,10 @@ mod tests {
 
         assert!(!card.per_turn[0].cost_unpriced);
         assert!((card.per_turn[0].cost_usd - 6.60).abs() < 1e-12);
-        assert_eq!(card.per_turn[0].created_at.as_ref(), Some(&intro_at));
+        assert_eq!(card.per_turn[0].created_at.as_ref(), Some(&before_boundary));
         assert!(card.per_turn[0].cost_cny_unpriced);
         assert!(!card.per_turn[1].cost_unpriced);
-        assert!((card.per_turn[1].cost_usd - 9.90).abs() < 1e-12);
+        assert!((card.per_turn[1].cost_usd - 6.60).abs() < 1e-12);
         assert!(card.per_turn[1].cost_cny_unpriced);
         assert!(card.per_turn[2].cost_unpriced);
     }

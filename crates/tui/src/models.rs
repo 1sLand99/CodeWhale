@@ -203,9 +203,10 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         // https://developers.openai.com/api/docs/models/gpt-5.3-codex
         "gpt-5-codex" | "gpt-5.3-codex" => Some(400_000),
         // Anthropic 4.6+ models carry a 1M window; Haiku stays at 200K (#3014).
-        "claude-opus-4-8" | "claude-sonnet-4-6" | "claude-sonnet-5" | "claude-fable-5" => {
-            Some(1_000_000)
-        }
+        // Opus 5 (GA 2026-07-24) is 1M / 128K per
+        // https://platform.claude.com/docs/en/about-claude/models/overview.
+        "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-4-6" | "claude-sonnet-5"
+        | "claude-fable-5" => Some(1_000_000),
         "claude-haiku-4-5" => Some(200_000),
         "trinity-mini" => Some(128_000),
         "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" | "trinity-large-preview" => {
@@ -231,10 +232,15 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         // — keep the safe floor, and never fall through to the 128K legacy
         // default.
         "k3" => Some(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS),
+        // `kimi-k2.7-code-highspeed` is the same model on the direct
+        // platform's high-speed tier (262,144 context), per
+        // https://platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-17).
         "moonshotai/kimi-k2.7-code"
+        | "moonshotai/kimi-k2.7-code-highspeed"
         | "moonshotai/kimi-k2.6"
         | "moonshotai/kimi-k2.6:free"
         | "kimi-k2.7-code"
+        | "kimi-k2.7-code-highspeed"
         | "kimi-k2.6"
         | "kimi-for-coding"
         | "kimi-for-coding-highspeed" => Some(262_144),
@@ -297,6 +303,32 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         | "mistral-large-latest"
         | "mistral-large-2512" => Some(262_144),
         "mistral-code-latest" | "codestral-latest" | "codestral" | "mistral-code" => Some(256_000),
+        // Google Gemini API model pages (verified 2026-08-17): every current
+        // Gemini 3.x / 2.5 text model lists a 1,048,576-token input limit and
+        // a 65,536-token output limit.
+        // https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash
+        // https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash
+        // https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash
+        // https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+        // https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview
+        // https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro
+        // https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash
+        // (gemini-3-pro-preview's page carries the same limits but is marked
+        // shut down since 2026-03-09 on the Gemini API; it stays here only
+        // because other routes still name it.)
+        "gemini-3.7-flash"
+        | "gemini-3.6-flash"
+        | "gemini-3.5-flash"
+        | "gemini-3.5-flash-lite"
+        | "gemini-3.1-pro-preview"
+        | "gemini-3-pro-preview"
+        | "gemini-2.5-pro"
+        | "gemini-2.5-flash" => Some(1_048_576),
+        // OpenRouter-hosted Dots Studio (RedNote) Dots3-Note preview: the only
+        // hosted route (single AtlasCloud endpoint) reports 512,000 context /
+        // 512,000 max completion tokens, https://openrouter.ai/api/v1/models/
+        // dots-studio/dots-3-note-preview:free/endpoints (2026-08-17).
+        "dots-studio/dots-3-note-preview:free" => Some(512_000),
         _ => None,
     }
 }
@@ -321,9 +353,8 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         // claude-sonnet-4-6 max output raised 64K -> 128K per
         // https://platform.claude.com/docs/en/about-claude/models/overview
         // (2026-07-09 audit).
-        "claude-opus-4-8" | "claude-sonnet-4-6" | "claude-sonnet-5" | "claude-fable-5" => {
-            Some(128_000)
-        }
+        "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-4-6" | "claude-sonnet-5"
+        | "claude-fable-5" => Some(128_000),
         "claude-haiku-4-5" => Some(64_000),
         "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => Some(262_144),
         // Keep the generic/model-id lookup at K3's conservative documented
@@ -341,9 +372,12 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         // are deliberately absent here: the membership catalog is the source
         // of truth for their limits and no client-side output ceiling is
         // claimed, so they fall back to the generic default.
-        "moonshotai/kimi-k2.7-code" | "moonshotai/kimi-k2.6" | "kimi-k2.7-code" | "kimi-k2.6" => {
-            Some(32_768)
-        }
+        "moonshotai/kimi-k2.7-code"
+        | "moonshotai/kimi-k2.7-code-highspeed"
+        | "moonshotai/kimi-k2.6"
+        | "kimi-k2.7-code"
+        | "kimi-k2.7-code-highspeed"
+        | "kimi-k2.6" => Some(32_768),
         "minimax/minimax-m3" | "minimax-m3" => Some(524_288),
         // Alibaba's published limit is 65,536 output tokens; the earlier
         // 262,140 mirrored the context window (data-entry smell flagged by
@@ -374,6 +408,16 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         "google/gemma-4-31b-it" => Some(16_384),
         "google/gemma-4-31b-it:free" | "google/gemma-4-26b-a4b-it:free" => Some(32_768),
         "muse-spark-1.1" | "muse-spark-1.2" | "muse-spark-1.2-contributor" => Some(32_000),
+        // Gemini API output token limit (see `known_context_window_for_model`).
+        "gemini-3.7-flash"
+        | "gemini-3.6-flash"
+        | "gemini-3.5-flash"
+        | "gemini-3.5-flash-lite"
+        | "gemini-3.1-pro-preview"
+        | "gemini-3-pro-preview"
+        | "gemini-2.5-pro"
+        | "gemini-2.5-flash" => Some(65_536),
+        "dots-studio/dots-3-note-preview:free" => Some(512_000),
         _ => None,
     }
 }
@@ -402,6 +446,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     matches!(
         lower.as_str(),
         "claude-opus-4-8"
+            | "claude-opus-5"
             | "claude-sonnet-4-6"
             | "claude-sonnet-5"
             | "claude-fable-5"
@@ -416,6 +461,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "google/gemma-4-26b-a4b-it"
             | "google/gemma-4-26b-a4b-it:free"
             | "moonshotai/kimi-k2.7-code"
+            | "moonshotai/kimi-k2.7-code-highspeed"
             | "moonshotai/kimi-k2.6"
             | "moonshotai/kimi-k2.6:free"
             | "kimi-k2.7-code"
@@ -946,6 +992,50 @@ mod tests {
             assert_eq!(context_window_for_model(model), Some(1_000_000), "{model}");
             assert_eq!(max_output_tokens_for_model(model), Some(128_000), "{model}");
             assert!(model_supports_reasoning(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn claude_opus_5_has_verified_metadata() {
+        // 1M context / 128K output, adaptive thinking, per
+        // https://platform.claude.com/docs/en/about-claude/models/overview
+        // (2026-08-17).
+        assert_eq!(context_window_for_model("claude-opus-5"), Some(1_000_000));
+        assert_eq!(max_output_tokens_for_model("claude-opus-5"), Some(128_000));
+        assert!(model_supports_reasoning("claude-opus-5"));
+    }
+
+    #[test]
+    fn kimi_k2_7_code_highspeed_shares_the_k2_7_code_limits() {
+        // https://platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-17):
+        // same model as kimi-k2.7-code, 262,144 context.
+        for model in [
+            "kimi-k2.7-code-highspeed",
+            "moonshotai/kimi-k2.7-code-highspeed",
+        ] {
+            assert_eq!(context_window_for_model(model), Some(262_144), "{model}");
+            assert_eq!(max_output_tokens_for_model(model), Some(32_768), "{model}");
+            assert!(model_supports_reasoning(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn gemini_api_models_have_documented_token_limits() {
+        // Every current Gemini API text model page lists 1,048,576 input /
+        // 65,536 output (verified 2026-08-17, see
+        // `known_context_window_for_model`).
+        for model in [
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ] {
+            assert_eq!(context_window_for_model(model), Some(1_048_576), "{model}");
+            assert_eq!(max_output_tokens_for_model(model), Some(65_536), "{model}");
         }
     }
 

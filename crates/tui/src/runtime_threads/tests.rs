@@ -2032,9 +2032,16 @@ async fn aggregate_usage_marks_unknown_cost_as_subtotal_and_keeps_cache_writes()
 
 #[tokio::test]
 async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> Result<()> {
+    // The pricing tier is chosen at the turn's *dispatch* time, not its
+    // creation time. Sonnet 5's intro window used to exercise this; that
+    // increase was cancelled upstream (the $2/$10 rate is now standard), so
+    // the DeepSeek V4 Flash off-peak -> peak boundary at 01:00 UTC is the
+    // recorded-time rate flip this test now rides: 1M cache-miss input costs
+    // $0.22 off-peak and $0.44 in the peak window
+    // (https://api-docs.deepseek.com/quick_start/pricing, 2026-08-17).
     let manager = test_manager(test_runtime_dir())?;
     let mut thread = sample_thread("thr_historical_pricing");
-    thread.model = "claude-sonnet-5".to_string();
+    thread.model = "deepseek-v4-flash".to_string();
     manager.store.save_thread(&thread)?;
 
     let usage = Usage {
@@ -2043,11 +2050,15 @@ async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> 
         ..Usage::default()
     };
     for (turn_id, created_at, dispatched_at) in [
-        ("turn_intro", "2026-08-31T23:59:58Z", "2026-08-31T23:59:59Z"),
+        (
+            "turn_off_peak",
+            "2026-08-17T00:59:58Z",
+            "2026-08-17T00:59:59Z",
+        ),
         (
             "turn_slow_snapshot",
-            "2026-08-31T23:59:59Z",
-            "2026-09-01T00:00:00Z",
+            "2026-08-17T00:59:59Z",
+            "2026-08-17T01:00:00Z",
         ),
     ] {
         let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
@@ -2056,9 +2067,9 @@ async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> 
         turn.usage = Some(usage.clone());
         set_test_turn_route(
             &mut turn,
-            ApiProvider::Anthropic,
-            ApiProvider::Anthropic.as_str(),
-            "claude-sonnet-5",
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek.as_str(),
+            "deepseek-v4-flash",
             Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             crate::cost_status::RouteBillingMode::Metered,
         );
@@ -2071,9 +2082,14 @@ async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> 
         .await?;
 
     assert_eq!(report.totals.turns, 2);
-    assert!((report.totals.cost_usd - 5.0).abs() < f64::EPSILON);
+    // 0.22 (off-peak) + 0.44 (peak, priced at the dispatch minute).
+    assert!(
+        (report.totals.cost_usd - 0.66).abs() < 1e-9,
+        "{}",
+        report.totals.cost_usd
+    );
     assert_eq!(report.buckets.len(), 1);
-    assert!((report.buckets[0].cost_usd - 5.0).abs() < f64::EPSILON);
+    assert!((report.buckets[0].cost_usd - 0.66).abs() < 1e-9);
     Ok(())
 }
 
