@@ -14,13 +14,16 @@ describes *what will be done* and the invariants any future diet PR must hold.
 - PR **#2685** — git-history active + RLM/field errors.
 
 **What actually happened, so you can read the rest as history:** the "hidden
-compatibility" plan below was *not* what shipped. The v0.9.x cutover **removed**
-almost every alias this document promises to keep dispatchable. `exec_wait`,
-`exec_interact`, all `checklist_*` and all `todo_*` are gone from the registry
-and hard-error if called; only `tts`/`speech` survives as this document
-describes, and `apply_patch` as the single replay-only alias.
-[`TOOL_SURFACE.md`](TOOL_SURFACE.md) has the shipped contract and the tests that
-pin it. Read §4 and §8 below as a rejected proposal, not as a guarantee.
+compatibility" plan below was *not* what shipped in full. `exec_wait` and
+`exec_interact` were removed rather than kept dispatchable. The work-progress
+surface is different: `todo_write` is the sole model-visible name, while
+`work_update`, `TodoWrite`, `todo`, `checklist_write`, and `checklist_update`
+stay registered as hidden-compatibility aliases of `TodoWriteTool` so old
+transcripts replay; `checklist_add`, `checklist_list`, `todo_add`,
+`todo_update`, and `todo_list` are not registered and are not callable.
+`tts`/`speech` remain dispatchable. See [`TOOL_SURFACE.md`](TOOL_SURFACE.md)
+for the shipped contract. Read §4 and §8 as a rejected catalog-diet proposal,
+not as a guarantee that every listed alias is gone.
 
 **All file:line citations here were correct at v0.8.52/0.8.53 and are now
 expired.** They have not been rewritten, because renumbering a historical
@@ -111,10 +114,13 @@ guarantees that item text cannot close the wrapper early, cannot forge the line
 format with control characters, and cannot exceed the item/character bounds —
 not that arbitrary item text is safe to follow as instructions.
 
-The legacy `checklist_*` and older `todo_*` names are hidden compatibility
-aliases. They remain registered and dispatchable against the same To-do state
-so old transcripts replay without data loss, but they are not advertised to the
-model catalog.
+The registered hidden compatibility aliases of `todo_write` are `work_update`,
+`TodoWrite`, `todo`, `checklist_write`, and `checklist_update`
+(`ToolRegistryBuilder::with_todo_tool`). They remain dispatchable against the
+same To-do state so old transcripts replay without data loss, but they are not
+advertised to the model catalog (`TodoWriteTool::model_visible` is true only
+for the canonical name). `checklist_add`, `checklist_list`, `todo_add`,
+`todo_update`, and `todo_list` are not registered and are not callable.
 
 ---
 
@@ -240,11 +246,20 @@ A per-`ToolSpec` `lifecycle: Lifecycle` field was rejected for three reasons:
 This was the proposed manifest. Columns are the #2681 AC columns. No entry was
 "removed" in 0.8.53; replay was to be supported for everything listed.
 
-> **Superseded.** Ten of the eleven rows below were removed rather than kept
-> hidden-compatible. `exec_wait` and `exec_interact` are asserted absent at
-> `registry.rs:2290-2331`; `checklist_*` and `todo_*` at `registry.rs:1476-1490`
-> ("must no longer be callable"). Only `tts` is still dispatchable. The
-> `replay_supported = Yes` column is false for everything except `tts`.
+> **Superseded in part.** `exec_wait` and `exec_interact` were removed
+> (`shell_surface_exposes_lowercase_bash_and_hides_legacy_handler` in
+> `crates/tui/src/tools/registry/tests.rs`); they are not callable. The
+> work-progress rows are not uniformly removed. `todo_write` is the canonical
+> model-visible `TodoWriteTool`; `ToolRegistryBuilder::with_todo_tool` also
+> registers hidden replay aliases `work_update`, `TodoWrite`, `todo`,
+> `checklist_write`, and `checklist_update`. `checklist_add`, `checklist_list`,
+> `todo_add`, `todo_update`, and `todo_list` are not registered (engine tests
+> assert they "must not be callable"). The `"must no longer be callable"`
+> assertion in `registry/tests.rs` (`rlm_is_the_only_registered_session_surface`)
+> applies to the old `rlm_*` session names, not to checklist/todo. `tts`
+> remains dispatchable via `with_speech_tools`. The `replay_supported = Yes`
+> column is true for `tts` and for the registered todo/checklist aliases; false
+> for `exec_wait`/`exec_interact` and for the unregistered checklist/todo names.
 
 | Alias | Replacement (canonical) | Lifecycle state | first_deprecated_version | planned_removal_version | replay_supported |
 |---|---|---|---|---|---|
@@ -330,7 +345,7 @@ else or an explicit budget bump in this doc.
 |---|---|---|---|
 | **Shell wait** | `exec_shell_wait` | `exec_wait` → hidden-compat | Same `ShellWaitTool` (`registry.rs:526,529`); router already unifies (`tool_routing.rs:1139`) |
 | **Shell interact** | `exec_shell_interact` | `exec_interact` → hidden-compat | Same `ShellInteractTool` (`registry.rs:527,530`) |
-| **Work progress / checklist / todo** | `todo_write` | `checklist_write/add/update/list`, `todo_write/add/update/list` → hidden-compat | Same `TodoWriteTool`; compatibility names replay old transcripts only |
+| **Work progress / checklist / todo** | `todo_write` | registered hidden-compat: `work_update`, `TodoWrite`, `todo`, `checklist_write`, `checklist_update`; not registered: `checklist_add`/`list`, `todo_add`/`update`/`list` | Same `TodoWriteTool`; registered aliases replay old transcripts only |
 | **Speech / tts** | `speech` | `tts` → hidden-compat | Same `SpeechTool` (`registry.rs:787-792`) |
 | **Subagent lifecycle** | `agent` | old lifecycle names and tool-agent lane removed | Single async launcher. (The "child agents are leaf workers" note here did not ship — see §7.) |
 | **Edit family** | `apply_patch`, `edit_file`, `write_file`, `fim_edit` | none — **all distinct niches** | NOT touched (per #2681 non-goals); doc-only canonical guidance |
@@ -398,11 +413,13 @@ byte-stability invariant (`tool_catalog.rs:169-196`) is binding:
 
 ### Old-transcript replay guarantee (not adopted)
 
-The guarantee below was proposed, not shipped. Of the names it calls out by
-hand, only `tts` is still dispatchable; `exec_wait`, `exec_interact`, and every
-`todo_*` were removed outright. Replaying an old transcript that calls one of
-those does *not* produce the same result it always did — it fails as an unknown
-tool. The shipped replay surface is a single alias, `apply_patch`; see
+The blanket guarantee below was proposed, not shipped as written. `exec_wait`
+and `exec_interact` were removed and fail as unknown tools. Work-progress
+replay is narrower: `todo_write` plus the hidden aliases registered by
+`with_todo_tool` (`work_update`, `TodoWrite`, `todo`, `checklist_write`,
+`checklist_update`) still dispatch; `checklist_add`, `checklist_list`,
+`todo_add`, `todo_update`, and `todo_list` do not. `tts` remains
+dispatchable. `apply_patch` is a separate replay-only edit alias; see
 [`TOOL_SURFACE.md`](TOOL_SURFACE.md).
 
 > For every name in the deprecation manifest with `replay_supported = Yes`, the
