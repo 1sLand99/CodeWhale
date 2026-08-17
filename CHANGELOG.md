@@ -137,6 +137,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference for agents/workflows/plugins/skills
   (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
   TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- `dsh` integration: the Codewhale palette is applied through the bundle
+  profile via dsh's documented `overrideTokens` (on by default;
+  `codewhale integrations dsh update --skin false` turns it off), replacing
+  the 0.9.8 exported-CSS skin that dsh's inline body variables overrode
+  (docs/design/DSH_BUNDLE_SKIN.md, docs/INTEGRATIONS_DSH.md) (#5469).
 - Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
   agent detail, and a `doctor` "Fleet roster layers" section (JSON
   `operate_fleet.roster.multi_layer`), in all 15 TUI locales. Layer collapse
@@ -149,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule and maps the Auto-Review guardian acceptance items to the engine
   journeys that exercise them (#5361).
 - Dependencies: ratatui 0.30.2, thiserror 2.0.20.
+
+### Removed
+
+- `dsh` integration: the exported-CSS skin file and its "skin export" status
+  line (superseded by the bundle-applied `overrideTokens` skin, #5469).
 
 ## [0.9.8] - 2026-08-16
 
