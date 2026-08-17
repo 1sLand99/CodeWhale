@@ -3096,6 +3096,16 @@ fn exec_shell_input_agent_readonly(input: &serde_json::Value) -> bool {
     is_agent_readonly_shell_command(command)
 }
 
+/// `exec_shell_input_agent_readonly` is also the gate-side predicate for the
+/// subagent posture check (#5426): the catalog carve-out that admits
+/// canonical `bash` to Scout/Reviewer/Planner must judge the same call the
+/// `BashTool::execute` `ShellPolicy::ReadOnly` branch will judge, so the
+/// posture gate can admit a proven-readonly call without ever widening past
+/// the execute-time refusal.
+pub(crate) fn agent_readonly_bash_input(input: &serde_json::Value) -> bool {
+    exec_shell_input_agent_readonly(input)
+}
+
 fn exec_shell_input_is_parallel_readonly(input: &serde_json::Value) -> bool {
     if !exec_shell_input_is_parallel_readonly_shape(input) {
         return false;
