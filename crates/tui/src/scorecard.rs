@@ -341,9 +341,13 @@ fn provider_scoped_cost(
     );
     let normalized_model = model.trim();
     let model_lower = normalized_model.to_ascii_lowercase();
-    let needs_recorded_time = (direct_deepseek
-        && matches!(model_lower.as_str(), "deepseek-chat" | "deepseek-reasoner"))
-        || (provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5");
+    // Every direct DeepSeek first-party rate is time-windowed now — the
+    // V4 flash/pro rows carry peak/off-peak tiers (01:00–04:00 and
+    // 06:00–10:00 UTC), and the retired `deepseek-chat` / `deepseek-reasoner`
+    // aliases price through them — so an undated DeepSeek turn cannot be
+    // resolved to one price any more than an undated `claude-sonnet-5` turn.
+    let needs_recorded_time =
+        direct_deepseek || (provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5");
     let recorded_at = match (created_at, needs_recorded_time) {
         (Some(recorded_at), _) => recorded_at.to_owned(),
         // A time-windowed rate without a recorded time cannot be resolved to a
@@ -1388,9 +1392,10 @@ mod tests {
     #[test]
     fn direct_deepseek_route_keeps_authoritative_dual_currency_pricing() {
         let u = usage(1000, 500, 0);
+        let recorded_at: DateTime<Utc> = "2026-08-17T15:00:00Z".parse().expect("recorded time");
         let turns = [TurnInput {
             turn_id: "deepseek".into(),
-            created_at: None,
+            created_at: Some(&recorded_at),
             provider: Some("deepseek"),
             billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "deepseek-v4-pro".into(),
@@ -1408,8 +1413,41 @@ mod tests {
     }
 
     #[test]
+    fn undated_direct_deepseek_v4_turns_fail_closed_on_the_time_window() {
+        // V4 flash/pro are peak/off-peak tiered by the turn's recorded time; a
+        // turn the recorder did not date cannot be resolved to one price and
+        // must not be silently priced at whatever tier `now` happens to be.
+        let u = usage(1000, 500, 0);
+        let turns = [
+            TurnInput {
+                turn_id: "undated-pro".into(),
+                created_at: None,
+                provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "deepseek-v4-pro".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "undated-flash".into(),
+                created_at: None,
+                provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "deepseek-v4-flash".into(),
+                usage: &u,
+            },
+        ];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(card.per_turn.iter().all(|turn| turn.cost_unpriced));
+        assert!(card.per_turn.iter().all(|turn| turn.cost_cny_unpriced));
+        assert!(!card.metrics.cost_complete);
+    }
+
+    #[test]
     fn direct_deepseek_compact_aliases_use_canonical_pricing() {
         let u = usage(1000, 500, 100);
+        let recorded_at: DateTime<Utc> = "2026-08-17T15:00:00Z".parse().expect("recorded time");
         let models = [
             "deepseek-v4-pro",
             "pro",
@@ -1422,7 +1460,7 @@ mod tests {
             .iter()
             .map(|model| TurnInput {
                 turn_id: (*model).into(),
-                created_at: None,
+                created_at: Some(&recorded_at),
                 provider: Some("deepseek"),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: (*model).into(),
@@ -1471,7 +1509,7 @@ mod tests {
             },
             TurnInput {
                 turn_id: "canonical".into(),
-                created_at: None,
+                created_at: Some(&before_retirement),
                 provider: Some("deepseek"),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: DEEPSEEK_ALIAS_REPLACEMENT.into(),
