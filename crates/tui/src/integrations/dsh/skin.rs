@@ -112,7 +112,11 @@ fn indent_json_block(json: &str, indent: &str) -> String {
 }
 
 /// Client half: `__ModuleLoader__.load` wrapper + factory that applies
-/// `overrideTokens` inside `ctx.effect` and returns the disposer.
+/// `overrideTokens` inside `ctx.effect` and returns the disposer. `inject:
+/// ["theme"]` is required: cordis 4 only exposes injected (or self/ancestor
+/// provided) services on `ctx`; reading `ctx.theme` from a sibling plugin
+/// without it throws `cannot get property "theme" without inject`, which
+/// fails the whole web boot.
 pub(crate) fn bundle_client_js() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let tokens = indent_json_block(&skin_tokens_json(), "\t\t");
@@ -130,6 +134,7 @@ window.__ModuleLoader__.load({{\n\
 \t\t\tctx.effect(() => ctx.theme?.overrideTokens(\"{SKIN_SOURCE}\", TOKENS));\n\
 \t\t}}\n\
 \t\texports.apply = apply;\n\
+\t\texports.inject = [\"theme\"];\n\
 \t\treturn module.exports;\n\
 \t}}\n\
 }});\n"

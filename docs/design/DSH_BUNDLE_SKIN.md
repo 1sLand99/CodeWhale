@@ -29,7 +29,11 @@ injection hacks.
    `lib/client.js` is a plain script of the form
    `window.__ModuleLoader__.load({ id, factory })` — mirror the wrapper
    boilerplate from `dsh-client-ui-theme/lib/client.js` verbatim.
-   `inject` ordering guarantees `ctx.theme` exists when our plugin applies.
+   The module must also export `inject = ["theme"]`: cordis 4 exposes a
+   sibling plugin's service on `ctx` only through the plugin's own `inject`
+   (reading `ctx.theme` without it throws `cannot get property "theme"
+   without inject`, which fails the web boot). The package-level
+   `dsh.client.inject` only orders the boot manifest.
 3. Overlay row insert: `cordis.patch.yml` gains
    `- insert: [{ id: codewhale-skin, name: codewhale-dsh-bundle }]` under
    the existing root-entry list, appending our entry last (patch rows apply
@@ -50,8 +54,10 @@ injection hacks.
 - New: `pub(crate) fn bundle_client_js() -> String` — renders the client
   half: `__ModuleLoader__.load` wrapper + `factory` whose module applies
   `ctx.theme?.overrideTokens("codewhale-dsh-bundle", TOKENS)` inside
-  `ctx.effect(() => ...)` and returns the disposer. Guard
-  `if (!ctx.theme) return;` (headless/unknown future). TOKENS is a JSON
+  `ctx.effect(() => ...)` and returns the disposer, with
+  `exports.inject = ["theme"]` so cordis defers `apply` until the theme
+  service exists (plus a belt-and-braces `if (!ctx.theme) return;`).
+  TOKENS is a JSON
   literal rendered from `skin_tokens()`; values are palette constants only —
   no secrets, no user data, no environment. Include a
   `codewhale-skin/<version>` comment header for diffability.
@@ -64,7 +70,7 @@ injection hacks.
 `bundle.rs::render_bundle_files`:
 
 - `package.json` gains `dsh.client` (per seam 2) and
-  `exports["./client"]: { default: "./lib/client.js" }`.
+  `exports` covering `"."` (`./lib/index.js`), `"./client"` (`./lib/client.js`) and `"./package.json"` — Node exports maps are exhaustive, and both the cordis loader (bare import) and `dsh-client-modules` (`require.resolve("<name>/package.json")`) need their subpath.
 - Emits `lib/index.js` (trivial Node cordis plugin: `apply` is a no-op; it
   exists so the entry mounts) and `lib/client.js`
   (`bundle_client_js()`).
@@ -83,7 +89,8 @@ injection hacks.
 
 ### Failure handling
 
-- `ctx.theme` absent → factory no-ops; Node half never throws.
+- `theme` service never provided (non-web composition) → the client entry
+  stays pending on its `inject`; the Node half never throws.
 - `overrideTokens` validation errors surface in the browser console with
   source id `codewhale-dsh-bundle` (dsh behavior; we do not catch/swallow).
 - pnpm missing → unchanged refusal (existing behavior).

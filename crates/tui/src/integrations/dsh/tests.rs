@@ -758,6 +758,10 @@ fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
     assert!(a.contains("overrideTokens"));
     assert!(a.contains("if (!ctx.theme) return;"));
     assert!(
+        a.contains("exports.inject = [\"theme\"];"),
+        "cordis exposes ctx.theme only through inject"
+    );
+    assert!(
         a.contains("ctx.theme?.overrideTokens"),
         "disposal shape: effect callback returns the overrideTokens disposer"
     );
@@ -976,6 +980,10 @@ fn bundle_files_with_skin_carry_client_half_and_insert_row() {
     assert_eq!(pkg["dsh"]["client"]["platform"], "web");
     assert_eq!(pkg["dsh"]["client"]["immediately"], true);
     assert_eq!(pkg["exports"]["./client"]["default"], "./lib/client.js");
+    // Node's exports map is exhaustive: the loader imports the bare name and
+    // dsh-client-modules resolves `<name>/package.json`.
+    assert_eq!(pkg["exports"]["."]["default"], "./lib/index.js");
+    assert_eq!(pkg["exports"]["./package.json"], "./package.json");
     assert!(by_name[bundle::BUNDLE_PATCH_FILE].ends_with(bundle::SKIN_INSERT_YAML));
     assert_eq!(
         by_name[bundle::BUNDLE_CLIENT_FILE],

@@ -256,8 +256,15 @@ pub(crate) fn render_bundle_files(
         package_json["dsh"] = dsh;
         package_json["type"] = serde_json::json!("module");
         package_json["main"] = serde_json::json!("./lib/index.js");
+        // Node's exports map is exhaustive: the cordis loader imports the bare
+        // package name (needs ".") and dsh-client-modules resolves
+        // `<name>/package.json` (needs "./package.json"); without both, the
+        // insert row fails with ERR_PACKAGE_PATH_NOT_EXPORTED and the client
+        // half is silently never served.
         package_json["exports"] = serde_json::json!({
-            "./client": { "default": "./lib/client.js" }
+            ".": { "default": format!("./{BUNDLE_INDEX_FILE}") },
+            "./client": { "default": format!("./{BUNDLE_CLIENT_FILE}") },
+            "./package.json": "./package.json"
         });
         package_json["codewhale"]["skin_sha256"] = serde_json::json!(skin::skin_tokens_sha256());
         package_json["codewhale"]["skin_source"] = serde_json::json!(SKIN_SOURCE);

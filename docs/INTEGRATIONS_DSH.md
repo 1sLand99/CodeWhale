@@ -189,12 +189,13 @@ bundle is a dual-face DSH plugin:
 
 - `package.json` gains `"dsh": {"client": {"platform": "web", "immediately":
   true, "inject": ["@deepseek-ai/dsh-client-ui-theme"]}}` and
-  `"exports": {"./client": …}`;
+  `"exports": {".": …, "./client": …, "./package.json": …}` (Node exports maps are exhaustive; the loader imports the bare name and dsh-client-modules resolves `<name>/package.json`);
 - `lib/index.js` is a no-op Node cordis entry (so the row mounts) and
   `lib/client.js` is a plain `window.__ModuleLoader__.load({ id, factory })`
   script whose factory calls
   `ctx.theme.overrideTokens("codewhale-dsh-bundle", TOKENS)` inside
-  `ctx.effect` and returns the disposer (no-op if `ctx.theme` is absent);
+  `ctx.effect` and returns the disposer (`inject: ["theme"]` defers it until
+  the theme service exists);
 - `cordis.patch.yml` ends with
   `- insert: [{ id: codewhale-skin, name: codewhale-dsh-bundle }]` after the
   identity rows.
