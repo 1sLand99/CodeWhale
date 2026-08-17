@@ -126,6 +126,56 @@ injection hacks.
   theme API) + `Removed` (dead CSS/preview export, with the inline-vars
   reason).
 
+## Ocean scene (v0.9.9 addendum, owner request 2026-08-17)
+
+The palette alone recolors DSH; it does not make it *look* like Codewhale.
+`crates/tui/src/integrations/dsh/scene.js` (owned by `scene.rs`,
+`include_str!`) is a plain-script fragment that `skin::bundle_client_js(true)`
+splices into the client half. It defines `createOcean(palette)`; the client
+module calls it inside a second `ctx.effect`, starts it, follows
+`theme/change`, and stops/unmounts on dispose.
+
+Verified seam: `dsh-client-modules` serves only `/plugins/<id>/client.js`
+(+ `.map`) per client package (`lib/index.js:321-327`), so a sibling
+`lib/scene.js` would never be fetched — hence the splice, and no separate
+file in the bundle. `overrideTokens` validates only the `{light, dark}`
+shape, not the token name, so `--dsw-specific-sidebar-fill` can ride the same
+layer as the alias tokens.
+
+Design: one near whale (≈0.30 × viewport width, clamped 220–520 px) and one
+far, smaller, fainter whale on cubic bezier crossings (70–105 s), pitch
+clamped to ±0.28 rad, slow tail stroke with a periodic deeper flick (the
+fluke is added to the path under a rotation about the tail stock, so the
+flick needs no point math); a 14-fish school of `><>` / `><o>` glyphs in
+the code font following a lissajous leader with damped steering and facing
+hysteresis; 26 stroked bubbles; a two-stop depth gradient. Layer order:
+gradient, far whale, bubbles, fish, near whale. Palette per scheme is
+derived from the skin's `surface_bg` / `accent_primary` / `text_body` /
+`text_dim`.
+
+Visibility: `--dsw-alias-bg-base` → rgba α 0.55 and
+`--dsw-specific-sidebar-fill` → rgba α 0.72 (`scene::ocean_veil_tokens`),
+merged over the opaque `TOKENS` only when the scene is on. The frame and the
+centre column both paint `bg-base`, so the effective veil over the main area
+is `1 − 0.45² ≈ 0.80`; the canvas is opaque and the same base colour, so text
+contrast is unchanged in practice. Every other layer stays opaque.
+
+Budget and guards: rAF capped at ~30 fps, `visibilitychange` pause,
+`prefers-reduced-motion: reduce` → one settled static frame, DPR ≤ 2,
+typed arrays reused, no per-frame string/array allocation. Off switch:
+`localStorage["codewhale.ocean"] = "off"` or body class
+`codewhale-ocean-off` (both also skip the veil); `window.__codewhaleOcean`
+exposes `start/stop/setIntensity/setScheme`. Config: `update --ocean
+true|false` (default on; receipt `ocean`, package.json `codewhale.ocean` +
+`codewhale.ocean_scene_sha256`); the client-half byte check makes an ocean
+toggle or a drifted scene report `stale-config`.
+
+Live check (this machine, dsh 0.1.0-rc.6, headless Chromium): canvas
+present (`fixed`, `z-index:-1`, `pointer-events:none`), two frames 700 ms
+apart differ, console clean, dark via `prefers-color-scheme` follows through
+`theme/change`, reduced-motion frame is static. Screenshots:
+`docs/design/assets/dsh-ocean-light.png`, `docs/design/assets/dsh-ocean-dark.png`.
+
 ## Out of scope (decided)
 
 Wordmark/whale mark, title/favicon, persona text, layout, any non-bundle

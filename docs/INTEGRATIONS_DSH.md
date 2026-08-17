@@ -42,7 +42,8 @@ the dedicated `codewhale` DSH profile):
   and timestamps (see `docs/RECEIPTS.md`). Every event is also appended to
   `$CODEWHALE_HOME/audit.log`.
 - `bundle/` — only after `install-bundle`; see below. The Codewhale palette
-  (skin) lives here, in the bundle's client half — no stylesheet is exported.
+  (skin) and the ambient ocean scene live here, in the bundle's client half —
+  no stylesheet is exported.
 
 Codewhale **never**:
 
@@ -79,7 +80,7 @@ are side-effect free.
 codewhale integrations dsh status [--json]
 codewhale integrations dsh plan [--profile web|headless] [--allow-full-access] [--skin] [--json]
 codewhale integrations dsh connect [--profile web|headless] [--allow-full-access] [--skin] [--yes]
-codewhale integrations dsh update  [--profile …] [--allow-full-access] [--skin true|false] [--yes]
+codewhale integrations dsh update  [--profile …] [--allow-full-access] [--skin true|false] [--ocean true|false] [--yes]
 codewhale integrations dsh launch  [--profile web|headless] [--dry-run] [-- <dsh app args>]
 codewhale integrations dsh disable
 codewhale integrations dsh enable
@@ -143,7 +144,8 @@ shells out to it); without pnpm the status reads
    "./cordis.patch.yml"}}`), `cordis.patch.yml` (the identity overlay,
    plus one trailing skin insert row when the skin is on — see below),
    `README.md`, `NOTICE.md` (DSH MIT notice retained), and, with the skin
-   on, `lib/index.js` + `lib/client.js` (the palette plugin);
+   on, `lib/index.js` + `lib/client.js` (the palette plugin, with the ocean
+   scene spliced in unless `--ocean false`);
 2. runs the documented `dsh plugin --profile codewhale add <path>` twice: first
    for DSH's own shipped app bundle (`@deepseek-ai/dsh-web-app` or
    `dsh-headless`, linked from the installed launcher so the profile can boot;
@@ -163,7 +165,8 @@ Because the profile dependency is a `link:` to the Codewhale-owned directory,
 `update` regenerates `cordis.patch.yml` (and the skin files) in place — no
 pnpm run. Stale detection covers the bundle: a modified or missing bundle
 patch, a bundle that no longer matches the overlay, a `lib/client.js` that
-is missing, modified, or present while the receipt says the skin is off, or
+is missing, modified, present while the receipt says the skin is off, or
+carrying/lacking the ocean scene against the receipt's `ocean` decision, or
 a profile manifest that stopped listing `codewhale-dsh-bundle` all report
 `stale-config`.
 
@@ -207,6 +210,44 @@ toast, tooltip) onto light/dark values rendered from the TUI's real palette
 only, no user data or environment. The receipt records `skin: true|false`
 and `skin_sha256` (SHA-256 of the rendered `TOKENS` JSON); `package.json`
 carries the same hash under `codewhale.skin_sha256`.
+
+### Ocean scene (whales and glyph fish)
+
+With the skin on, `lib/client.js` also carries an ambient ocean: a
+full-viewport `<canvas>` (`position: fixed; inset: 0; z-index: -1;
+pointer-events: none`, painted below `#root` and above the body background)
+with a subtle depth gradient, one near and one far whale silhouette gliding
+across on bezier paths with a slow tail stroke and an occasional deeper
+flick, a small school of Codewhale glyph fish (`><>` / `><o>` in the code
+font, flocking-lite behind a wandering leader) and faint rising bubbles. The
+palette is the skin's own (`surface_bg`, `accent_primary`, `text_body`,
+`text_dim` for light and dark); the scene follows DSH's `theme/change` event
+so it flips with the app.
+
+To let the canvas show through, the client re-issues two background tokens
+as translucent rgba over the opaque table while the scene is on:
+`--dsw-alias-bg-base` (α 0.55; the frame and the centre column both paint
+it, so the main area sits under an ~0.80 veil) and
+`--dsw-specific-sidebar-fill` (α 0.72, stacked over the frame). Panels,
+composer, code blocks and every other layer stay opaque. Verified live on
+dsh 0.1.0-rc.6 in both schemes: no console errors, frames differ, and text
+stays legible (see `docs/design/assets/dsh-ocean-{light,dark}.png`).
+
+Budget: `requestAnimationFrame` capped at ~30 fps, paused while
+`document.hidden`, one static frame under `prefers-reduced-motion: reduce`,
+device-pixel-ratio aware, no per-frame allocations (typed arrays reused).
+The scene ships inside `client.js` because dsh-client-modules serves exactly
+one file per client plugin (`/plugins/<id>/client.js`); there is no
+`lib/scene.js`. `package.json` records `codewhale.ocean` and
+`codewhale.ocean_scene_sha256`; the receipt records `ocean: true|false`.
+
+Off switches, smallest first: in the browser `localStorage["codewhale.ocean"]
+= "off"` (or body class `codewhale-ocean-off`) skips both the canvas and the
+translucent tokens on that machine; `window.__codewhaleOcean.stop()` /
+`.start()` / `.setIntensity(0..1)` are exposed for the console; and
+`codewhale integrations dsh update --ocean false` regenerates `client.js`
+without the scene (default on; a bare `update` keeps the previous choice;
+`--skin false` implies no scene).
 
 Escape hatch: `codewhale integrations dsh update --skin false` regenerates
 the bundle without the client half and without the insert row (no pnpm run;

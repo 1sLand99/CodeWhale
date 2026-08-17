@@ -159,6 +159,15 @@ fn print_status(report: &DshStatusReport) {
             println!(
                 "  skin: on (Codewhale palette via overrideTokens in the bundle profile; `{CLI_COMMAND} update --skin false` turns it off)"
             );
+            if record.ocean_enabled {
+                println!(
+                    "  ocean: on (ambient whales + glyph fish canvas behind the DSH web UI; `{CLI_COMMAND} update --ocean false` turns it off; in the browser localStorage[\"{}\"] = \"off\" or window.{}.stop())",
+                    dsh::scene::OCEAN_STORAGE_KEY,
+                    dsh::scene::OCEAN_WINDOW_HANDLE
+                );
+            } else {
+                println!("  ocean: off (`{CLI_COMMAND} update --ocean true` turns it on)");
+            }
         }
     }
     match (&report.current_identity, &report.current_identity_error) {
@@ -267,6 +276,7 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
                 &profile,
                 allow_full_access,
                 skin,
+                true,
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -302,6 +312,7 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
                 &profile,
                 allow_full_access,
                 skin,
+                true,
             )?;
             print_plan(&plan, "connect");
             confirm(yes, "Write these Codewhale-owned files and connect DSH?")?;
@@ -319,6 +330,7 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
             profile,
             allow_full_access,
             skin,
+            ocean,
             yes,
         } => {
             let (paths, report) = status_report(config, workspace, allow_full_access)?;
@@ -328,6 +340,7 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
             })?;
             let profile = profile.unwrap_or_else(|| record.profile.clone());
             let skin = skin.unwrap_or(record.skin_enabled);
+            let ocean = ocean.unwrap_or(record.ocean_enabled);
             let identity = dsh::codewhale_route_identity(config, workspace)
                 .map_err(|e| anyhow::anyhow!("cannot resolve the current Codewhale route: {e}"))?;
             let plan = dsh::plan(
@@ -337,6 +350,7 @@ fn run_dsh(config: &Config, workspace: &Path, command: DshIntegrationCommand) ->
                 &profile,
                 allow_full_access,
                 skin,
+                ocean,
             )?;
             print_plan(&plan, "update");
             confirm(yes, "Rewrite the Codewhale overlay for DSH?")?;

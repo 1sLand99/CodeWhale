@@ -1440,6 +1440,9 @@ pub(crate) enum DshIntegrationCommand {
         /// Turn the bundle-profile skin on/off (`--skin false`; defaults to the previous choice)
         #[arg(long)]
         skin: Option<bool>,
+        /// Turn the ambient ocean scene behind the DSH web UI on/off (`--ocean false`; defaults to the previous choice, initially on; needs the skin)
+        #[arg(long)]
+        ocean: Option<bool>,
         #[arg(long, default_value_t = false)]
         yes: bool,
     },

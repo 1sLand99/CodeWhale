@@ -117,9 +117,33 @@ fn indent_json_block(json: &str, indent: &str) -> String {
 /// provided) services on `ctx`; reading `ctx.theme` from a sibling plugin
 /// without it throws `cannot get property "theme" without inject`, which
 /// fails the whole web boot.
-pub(crate) fn bundle_client_js() -> String {
+///
+/// With `ocean` the ambient scene (`scene::bundle_scene_js`) is spliced in:
+/// the module mounts the canvas inside a second `ctx.effect`, follows
+/// `theme/change` for light/dark, and re-issues the veil tokens
+/// (`scene::ocean_veil_tokens`) as translucent rgba over the opaque table.
+/// The browser-side off switch (`localStorage["codewhale.ocean"] = "off"`
+/// or body class `codewhale-ocean-off`) skips both the canvas and the veil.
+pub(crate) fn bundle_client_js(ocean: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let tokens = indent_json_block(&skin_tokens_json(), "\t\t");
+    let ocean_block = if ocean {
+        let veil = indent_json_block(&super::scene::ocean_veil_json(), "\t\t");
+        let palette = indent_json_block(&super::scene::ocean_palette_json(), "\t\t");
+        let scene = indent_json_block(super::scene::bundle_scene_js().trim_end(), "\t\t");
+        format!(
+            "\t\tconst OCEAN = true;\n\
+\t\tconst OCEAN_VEIL = {veil};\n\
+\t\tconst OCEAN_PALETTE = {palette};\n\
+\t\t{scene}\n"
+        )
+    } else {
+        "\t\tconst OCEAN = false;\n\
+\t\tconst OCEAN_VEIL = null;\n\
+\t\tconst OCEAN_PALETTE = null;\n\
+\t\tfunction createOcean() { return null; }\n"
+            .to_string()
+    };
     format!(
         "/* codewhale-skin/{version} */\n\
 window.__ModuleLoader__.load({{\n\
@@ -129,9 +153,21 @@ window.__ModuleLoader__.load({{\n\
 \t\tvar exports = module.exports;\n\
 \t\tObject.defineProperty(exports, Symbol.toStringTag, {{ value: \"Module\" }});\n\
 \t\tconst TOKENS = {tokens};\n\
+{ocean_block}\
 \t\tfunction apply(ctx) {{\n\
 \t\t\tif (!ctx.theme) return;\n\
-\t\t\tctx.effect(() => ctx.theme?.overrideTokens(\"{SKIN_SOURCE}\", TOKENS));\n\
+\t\t\tvar ocean = OCEAN ? createOcean(OCEAN_PALETTE) : null;\n\
+\t\t\tvar oceanOn = ocean !== null && !ocean.isOff();\n\
+\t\t\tvar tokens = oceanOn ? Object.assign({{}}, TOKENS, OCEAN_VEIL) : TOKENS;\n\
+\t\t\tctx.effect(() => ctx.theme?.overrideTokens(\"{SKIN_SOURCE}\", tokens));\n\
+\t\t\tif (oceanOn) {{\n\
+\t\t\t\tctx.effect(() => {{\n\
+\t\t\t\t\tocean.setScheme(ctx.theme.getTheme().active.colorScheme);\n\
+\t\t\t\t\tocean.start();\n\
+\t\t\t\t\tvar off = ctx.on(\"theme/change\", (snapshot) => ocean.setScheme(snapshot.active.colorScheme));\n\
+\t\t\t\t\treturn () => {{ off(); ocean.stop(); }};\n\
+\t\t\t\t}});\n\
+\t\t\t}}\n\
 \t\t}}\n\
 \t\texports.apply = apply;\n\
 \t\texports.inject = [\"theme\"];\n\
