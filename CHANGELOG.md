@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-08-17
+
 ### Fixed
 
 - A concrete route/offering output limit now outranks the conservative
@@ -37,8 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codewhale config get telemetry` reports the resolved consent with its
   source instead of `key not found` on a machine whose batches ship. Truth
   change only; resolution and behavior are untouched.
+- Fleet: a scout's read-only shell carve-out (#5428) is now honored by both
+  the posture gate and the execution envelope, so `git log`, `find | head`,
+  `npm view` and the other bounded read-only commands run in-place instead
+  of being refused as "Executes" (#5426). Delegation still never widens
+  authority: the role-isolation test and docs/SUBAGENTS.md pin that a child
+  cannot exceed its parent's posture (#5426, #5435).
+- `/rename` and `/title` now apply mid-first-turn: the session file does
+  not exist until the first autosave, so the rename fell through with
+  NotFound; the shared path now prefers the per-session checkpoint and
+  rebuilds from App state, with a PTY regression test through the live
+  event loop (#5430).
+- `integrations dsh plan` no longer refuses DeepSeek's default
+  Responses-dialect route (`deepseek-v4-flash`); Responses and
+  Anthropic-Messages routes are carried through pi-ai
+  `openai-responses` / `anthropic-messages` instead of being approximated
+  or refused; only credentialed base URLs are still refused, with an error
+  that names provider and model (#5434).
+- Session cost no longer sits at `unverified_live_pricing` when live pricing
+  cannot be verified (control-plane 503, Models.dev capabilities-only
+  overlays): provider-docs bundled fallback rates for the DeepSeek V4
+  family on Fireworks / OpenCode Zen restore a usable figure, live
+  per-provider rows still win, and `kimi-k3` stays unpriced until a
+  published rate exists (#5241; harvested from #5402).
+- Release assets: `release.yml` asset-freshness checks compare against the
+  release job's own `started_at`, so job-level reruns of the npm step are no
+  longer poisoned by earlier uploads (#5429).
+- macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
+  worker that had already completed and raced the rail's focus; it now holds
+  the child's wrap-up and waits for a settled live row (refs #5056, #5403).
 
 ### Changed
+
 
 - The model-facing `agent` tool advertises exactly 12 fields — `action`,
   `prompt`, `type`, `profile`, `name`, `agent_id`, `message`, `until`,
@@ -66,6 +98,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ultrawide terminals. `0` or absent keeps the full width; negative or
   non-integer values are rejected with a clear config error. Tool, diff,
   and status cells never inherit the cap (#5436).
+- Localization: README translations for Français, Deutsch, 繁體中文, हिन्दी,
+  Türkçe, Italiano, Polski, العربية and Català join the existing nine
+  (#5451); codewhale.net routes fr, de, ca, hi, tr, it, pl and ar (with
+  `dir="rtl"` plumbing) as partial locales (#5453).
+- Docs: README Integrations section (incl. the DeepSeek Harness `dsh` plugin
+  path, docs/INTEGRATIONS_DSH.md) localized across all READMEs; RFC keeping
+  the deterministic-first auto-review hybrid (#5427); Claude Code parity
+  reference for agents/workflows/plugins/skills
+  (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
+  TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- Dependencies: ratatui 0.30.2, thiserror 2.0.20.
 
 ## [0.9.8] - 2026-08-16
 
