@@ -37,11 +37,11 @@ export const home: HomeDict = {
 
   latestRelease: "최신 릴리스 {tag}",
   releaseUnavailable: "릴리스 상태를 확인할 수 없음",
-  currentSource: "현재 소스",
-  sourceCandidate: "소스 후보",
-  providerRoutes: "프로바이더 경로 {count}개",
-  publishedRelease: "정식 릴리스",
-  figcaptionSourceCandidate: "소스 후보",
+  currentSource: "소스",
+  sourceCandidate: "미공개",
+  providerRoutes: "프로바이더 {count}개",
+  publishedRelease: "공개됨",
+  figcaptionSourceCandidate: "미공개",
 
   shotSession: "현재 세션",
   screenshotAlt:

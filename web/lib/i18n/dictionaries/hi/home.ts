@@ -32,11 +32,11 @@ export const home: HomeDict = {
 
   latestRelease: "नवीनतम रिलीज़ {tag}",
   releaseUnavailable: "रिलीज़ स्थिति उपलब्ध नहीं",
-  currentSource: "वर्तमान सोर्स",
-  sourceCandidate: "सोर्स कैंडिडेट",
-  providerRoutes: "{count} प्रोवाइडर रूट",
-  publishedRelease: "प्रकाशित रिलीज़",
-  figcaptionSourceCandidate: "सोर्स कैंडिडेट",
+  currentSource: "सोर्स",
+  sourceCandidate: "अप्रकाशित",
+  providerRoutes: "{count} प्रोवाइडर",
+  publishedRelease: "प्रकाशित",
+  figcaptionSourceCandidate: "अप्रकाशित",
 
   shotSession: "वर्तमान सेशन",
   screenshotAlt:

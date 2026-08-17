@@ -11,10 +11,10 @@ export const docsGuide: DocsGuideDict = {
   bodyClassName: "text-ink-soft leading-relaxed",
   overviewTitle: "Primers passos",
   overviewLead:
-    "Quatre passos d’una ordre d’instal·lació a una Fleet a punt per a la teva feina. Cada pas només afirma el que el candidat actual fa realment; allò no publicat o no enregistrat es marca com a tal.",
+    "Quatre passos d’una ordre d’instal·lació a una Fleet a punt per a la teva feina.",
   sessionTitle: "Mira una sessió real",
   sessionLead:
-    "A sota hi ha l’espai reservat al material de sessió real. És deliberadament en estat pendent: fins que existeixi l’enregistrament dogfood del candidat v0.9.2, aquest lloc no mostra cap peça de substitució ni cap escena muntada.",
+    "Aquí hi anirà l’enregistrament d’una sessió real. Encara no n’hi ha cap, per això no es mostra res.",
   nextTitle: "I ara què",
   sourceNote:
     "Documents font: docs/GUIDE.md, docs/KEYBINDINGS.md · El text dels passos viu a web/lib/content/getting-started.ts; actualitza docs-map.ts en fer canvis.",

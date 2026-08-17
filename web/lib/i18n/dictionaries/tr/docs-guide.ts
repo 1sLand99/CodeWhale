@@ -11,10 +11,10 @@ export const docsGuide: DocsGuideDict = {
   bodyClassName: "text-ink-soft leading-relaxed",
   overviewTitle: "Başlangıç",
   overviewLead:
-    "Tek bir kurulum komutundan işine hazır bir Fleet'e dört adım. Her adım yalnızca geçerli adayın gerçekten yaptığını söyler; yayımlanmamış ya da kaydedilmemiş her şey böyle etiketlenir.",
+    "Tek bir kurulum komutundan işine hazır bir Fleet'e dört adım.",
   sessionTitle: "Gerçek bir oturum izle",
   sessionLead:
-    "Aşağıda gerçek oturum medyası için ayrılmış yer var. Bilerek bekleme durumunda: v0.9.2 adayının dogfood kaydı var olana dek bu site yer tutucu ya da sahne görüntüsü göstermez.",
+    "Buraya gerçek bir oturumun kaydı gelecek. Henüz kayıt yok, bu yüzden hiçbir şey gösterilmiyor.",
   nextTitle: "Sıradaki adım",
   sourceNote:
     "Kaynak belgeler: docs/GUIDE.md, docs/KEYBINDINGS.md · Adım metinleri web/lib/content/getting-started.ts içinde; değişiklikte docs-map.ts'i güncelle.",

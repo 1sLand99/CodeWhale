@@ -113,10 +113,13 @@ describe("public website copy contracts", () => {
     // instead of a raw TSX string, and hold every locale to a real value.
     expect(homepage).toContain("d.sourceCandidate");
     expect(homepage).toContain("d.currentSource");
-    expect(EN_HOME.sourceCandidate).toBe("Source candidate");
-    expect(EN_HOME.currentSource).toBe("Current source");
+    // Plain words on the marketing surface (docs/design/WEB_VOICE.md): the
+    // reader sees "Unreleased v0.9.x" next to "Latest release v0.9.y", not
+    // the internal "source candidate" / "provider routes" vocabulary.
+    expect(EN_HOME.sourceCandidate).toBe("Unreleased");
+    expect(EN_HOME.currentSource).toBe("Source");
     expect(homepage).toContain("fill(d.providerRoutes, { count: providerCount })");
-    expect(EN_HOME.providerRoutes).toBe("{count} provider routes");
+    expect(EN_HOME.providerRoutes).toBe("{count} providers");
     for (const locale of ["zh", "ja", "ru", "pt-BR"]) {
       expect(getHome(locale).providerRoutes, `${locale} providerRoutes`).toContain("{count}");
       expect(getHome(locale).sourceCandidate.trim().length).toBeGreaterThan(0);
@@ -126,7 +129,7 @@ describe("public website copy contracts", () => {
     expect(install).toContain("publishedRelease.tag");
     expect(install).not.toContain('"v0.8.x"');
     expect(install).not.toContain("cnbInstall(facts.version");
-    expect(community).toContain("candidate credit");
+    expect(community).toContain("credit (unreleased)");
   });
 
   it("presents providers as peers and puts contributor actions near the top", () => {

@@ -233,9 +233,10 @@ describe("homepage integration", () => {
     // Guard against the new band accidentally displacing the public-copy
     // gate's required surface (the full contract lives in public-copy.test.ts).
     expect(homepage).toContain("facts.latestPublishedRelease");
-    // "Source candidate" is now the EN dictionary value the page renders.
+    // The unreleased-source label is the EN dictionary value the page renders
+    // (plain "Unreleased", per docs/design/WEB_VOICE.md).
     expect(homepage).toContain("d.sourceCandidate");
-    expect(getHome("en").sourceCandidate).toBe("Source candidate");
+    expect(getHome("en").sourceCandidate).toBe("Unreleased");
     expect(homepage).toContain('src="/codewhale-tui.png"');
     for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
       expect(homepage).toContain(label);

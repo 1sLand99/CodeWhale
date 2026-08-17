@@ -33,11 +33,11 @@ export const home: HomeDict = {
 
   latestRelease: "Última versió {tag}",
   releaseUnavailable: "Estat de la versió no disponible",
-  currentSource: "Font actual",
-  sourceCandidate: "Font candidata",
-  providerRoutes: "{count} rutes de proveïdors",
-  publishedRelease: "versió publicada",
-  figcaptionSourceCandidate: "font candidata",
+  currentSource: "Font",
+  sourceCandidate: "Sense publicar",
+  providerRoutes: "{count} proveïdors",
+  publishedRelease: "publicada",
+  figcaptionSourceCandidate: "sense publicar",
 
   shotSession: "Sessió actual",
   screenshotAlt:

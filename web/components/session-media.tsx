@@ -40,8 +40,8 @@ export function SessionMedia({ asset, locale = "en" }: { asset: MediaAsset; loca
           <StatusBadge kind="pending" locale={locale} label={asset.pendingLabel} />
           <p className="session-media-pending-note">
             {isZh
-              ? "此处不展示占位或摆拍影像。录制完成后，这段真实会话将带海报帧、双语字幕、文字稿和可选的 GIF 回退下载一同发布。"
-              : "No placeholder or staged footage is shown here. When the recording exists, the real session ships with a poster frame, bilingual captions, a transcript, and an optional GIF fallback download."}
+              ? "还没有录像。录好之后会放在这里，附字幕、文字稿和可选的 GIF 下载。"
+              : "There is no recording yet. When there is, it goes here with captions, a transcript, and an optional GIF download."}
           </p>
         </div>
         <figcaption className="session-media-caption">

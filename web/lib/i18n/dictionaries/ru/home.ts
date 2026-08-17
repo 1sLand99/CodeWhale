@@ -32,11 +32,11 @@ export const home: HomeDict = {
 
   latestRelease: "Последний релиз {tag}",
   releaseUnavailable: "Статус релиза недоступен",
-  currentSource: "Текущие исходники",
-  sourceCandidate: "Кандидат из исходников",
-  providerRoutes: "маршрутов провайдеров — {count}",
-  publishedRelease: "опубликованный релиз",
-  figcaptionSourceCandidate: "кандидат из исходников",
+  currentSource: "Исходники",
+  sourceCandidate: "Не выпущено",
+  providerRoutes: "провайдеров — {count}",
+  publishedRelease: "выпущено",
+  figcaptionSourceCandidate: "не выпущено",
 
   shotSession: "Текущий сеанс",
   screenshotAlt:

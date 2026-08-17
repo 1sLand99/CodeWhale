@@ -11,10 +11,10 @@ export const docsGuide: DocsGuideDict = {
   bodyClassName: "text-ink-soft leading-relaxed",
   overviewTitle: "Erste Schritte",
   overviewLead:
-    "Vier Schritte von einem Installationsbefehl bis zur einsatzbereiten Fleet. Jeder Schritt beschreibt nur, was der aktuelle Kandidat wirklich tut; alles Unveröffentlichte oder nicht Aufgezeichnete ist als solches gekennzeichnet.",
+    "Vier Schritte von einem Installationsbefehl bis zur einsatzbereiten Fleet.",
   sessionTitle: "Eine echte Sitzung ansehen",
   sessionLead:
-    "Unten ist der Slot für echtes Sitzungsmaterial. Er ist bewusst im Status „ausstehend“: Solange die Dogfood-Aufnahme des v0.9.2-Kandidaten nicht existiert, zeigt diese Seite kein Platzhalter- oder gestellt Material.",
+    "Hier erscheint die Aufnahme einer echten Sitzung. Es gibt noch keine Aufnahme, daher wird nichts angezeigt.",
   nextTitle: "Wie geht es weiter",
   sourceNote:
     "Quelldokumente: docs/GUIDE.md, docs/KEYBINDINGS.md · Der Schritttext lebt in web/lib/content/getting-started.ts; bei Änderungen docs-map.ts mitpflegen.",

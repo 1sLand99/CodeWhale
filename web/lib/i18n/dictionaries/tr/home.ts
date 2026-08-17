@@ -32,11 +32,11 @@ export const home: HomeDict = {
 
   latestRelease: "En yeni sürüm {tag}",
   releaseUnavailable: "Sürüm durumu kullanılamıyor",
-  currentSource: "Geçerli kaynak",
-  sourceCandidate: "Kaynak adayı",
-  providerRoutes: "{count} sağlayıcı yolu",
-  publishedRelease: "yayımlanmış sürüm",
-  figcaptionSourceCandidate: "kaynak adayı",
+  currentSource: "Kaynak",
+  sourceCandidate: "Yayımlanmadı",
+  providerRoutes: "{count} sağlayıcı",
+  publishedRelease: "yayımlandı",
+  figcaptionSourceCandidate: "yayımlanmadı",
 
   shotSession: "Geçerli oturum",
   screenshotAlt:

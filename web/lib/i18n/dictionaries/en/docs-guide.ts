@@ -12,10 +12,10 @@ export const docsGuide: DocsGuideDict = {
   bodyClassName: "text-ink-soft leading-relaxed",
   overviewTitle: "Getting started",
   overviewLead:
-    "Four steps from one install command to a fleet set up for your work. Every step states only what the current candidate actually does; anything unreleased or unrecorded is labeled as such.",
+    "Four steps from one install command to a fleet set up for your work.",
   sessionTitle: "Watch a real session",
   sessionLead:
-    "Below is the real-session media slot. It is deliberately in the pending state: until the v0.9.2 candidate dogfood recording exists, this site shows no placeholder or staged footage.",
+    "A recording of a real session will go here. There is no recording yet, so nothing is shown.",
   nextTitle: "Where next",
   sourceNote:
     "Source documents: docs/GUIDE.md, docs/KEYBINDINGS.md · Step copy lives in web/lib/content/getting-started.ts; update docs-map.ts when changing.",
