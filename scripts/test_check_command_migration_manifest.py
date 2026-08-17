@@ -313,5 +313,154 @@ class LiveGateTests(unittest.TestCase):
         self.assertEqual(set(frontier), {"utility", "memory", "plugins", "project", "skills", "session", "config", "debug", "core"})
 
 
+class SourceScanTests(unittest.TestCase):
+    """Hermetic fixtures for the AST-resolved source scan (Task 3.5/3.6)."""
+
+    def _write_group(self, tmpdir: Path, group: str, files: dict[str, str]) -> Path:
+        """Write a synthetic group tree under a temp groups root."""
+        base = tmpdir / group
+        base.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            (base / name).write_text(content, encoding="utf-8")
+        return tmpdir
+
+    def test_parse_finds_concrete_app_free_fn(self) -> None:
+        source = (
+            "use crate::tui::app::App;\n"
+            "pub fn run_config(app: &mut App, arg: Option<&str>) -> CommandResult {\n"
+            "    CommandResult::ok()\n"
+            "}\n"
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "config").mkdir()
+            (root / "config" / "mod.rs").write_text(source, encoding="utf-8")
+            items = mod.parse_rust_file(root / "config" / "mod.rs", root)
+            apps = [it for it in items if it.is_concrete_app]
+            self.assertEqual(len(apps), 1)
+            self.assertEqual(apps[0].kind, "free")
+            self.assertEqual(apps[0].qual_path, "crate::commands::groups::config::run_config")
+
+    def test_parse_ignores_non_app_fns(self) -> None:
+        source = (
+            "fn helper(value: u32) -> u32 { value }\n"
+            "fn run(app: &mut crate::tui::app::App, arg: Option<&str>) -> CommandResult {\n"
+            "    CommandResult::ok()\n"
+            "}\n"
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "core").mkdir()
+            (root / "core" / "mod.rs").write_text(source, encoding="utf-8")
+            items = mod.parse_rust_file(root / "core" / "mod.rs", root)
+            self.assertEqual(sum(1 for it in items if it.is_concrete_app), 1)
+
+    def test_parse_finds_trait_impl_and_inherent_methods(self) -> None:
+        source = (
+            "pub struct BranchCmd;\n"
+            "impl RegisterCommand for BranchCmd {\n"
+            "    fn info() -> &'static CommandInfo { &INFO }\n"
+            "    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {\n"
+            "        branch(app, arg)\n"
+            "    }\n"
+            "}\n"
+            "impl BranchCmd {\n"
+            "    pub fn helper(&self) -> u32 { 1 }\n"
+            "}\n"
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "session").mkdir()
+            (root / "session" / "mod.rs").write_text(source, encoding="utf-8")
+            items = mod.parse_rust_file(root / "session" / "mod.rs", root)
+            trait_exec = [it for it in items if it.kind == "trait_impl" and it.name == "execute"]
+            self.assertEqual(len(trait_exec), 1)
+            self.assertTrue(trait_exec[0].is_concrete_app)
+            inherent = [it for it in items if it.kind == "inherent"]
+            self.assertEqual(len(inherent), 1)
+            self.assertEqual(inherent[0].name, "helper")
+            self.assertFalse(inherent[0].is_concrete_app)
+
+    def test_scope_file_missing_fails(self) -> None:
+        violations = mod.scan_leaf_handlers(["crates/tui/src/commands/groups/core/ghost.rs"], Path("/nonexistent"))[1]
+        self.assertTrue(any("missing" in str(v) for v in violations))
+
+    def test_frontier_matches_group_source(self) -> None:
+        doc = sample_topology()
+        # utility scope has one concrete-App handler; session scope has one.
+        doc["topology"]["utility"]["scope"] = ["utility/mod.rs"]
+        doc["topology"]["session"]["scope"] = ["session/mod.rs"]
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "utility").mkdir(parents=True)
+            (root / "session").mkdir(parents=True)
+            (root / "utility" / "mod.rs").write_text(
+                "use crate::tui::app::App;\n"
+                "fn run_util(app: &mut App, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            (root / "session" / "mod.rs").write_text(
+                "use crate::tui::app::App;\n"
+                "fn run_save(app: &mut App, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            violations = mod.check_source_frontier(doc["topology"], doc["frontier"], root)
+            self.assertEqual(violations, [])
+
+    def test_cheating_removal_fails(self) -> None:
+        doc = sample_topology()
+        doc["topology"]["utility"]["scope"] = ["utility/mod.rs"]
+        doc["topology"]["session"]["scope"] = ["session/mod.rs"]
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "utility").mkdir(parents=True)
+            (root / "session").mkdir(parents=True)
+            (root / "utility" / "mod.rs").write_text(
+                "use crate::tui::app::App;\n"
+                "fn run_util(app: &mut App, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            (root / "session" / "mod.rs").write_text(
+                "use crate::tui::app::App;\n"
+                "fn run_save(app: &mut App, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            # Cheat: remove utility from the frontier while its handler remains.
+            violations = mod.check_source_frontier(doc["topology"], ["session"], root)
+            self.assertTrue(any("stale-removal" in str(v) for v in violations))
+
+    def test_stale_frontier_entry_fails(self) -> None:
+        doc = sample_topology()
+        doc["topology"]["utility"]["scope"] = ["utility/mod.rs"]
+        doc["topology"]["session"]["scope"] = ["session/mod.rs"]
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "utility").mkdir(parents=True)
+            (root / "session").mkdir(parents=True)
+            # utility has NO concrete-App handler (migrated: uses a context)
+            (root / "utility" / "mod.rs").write_text(
+                "fn run_util(contexts: CommandContexts<'_>, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            (root / "session" / "mod.rs").write_text(
+                "use crate::tui::app::App;\n"
+                "fn run_save(app: &mut App, arg: Option<&str>) -> CommandResult { CommandResult::ok() }\n",
+                encoding="utf-8",
+            )
+            violations = mod.check_source_frontier(doc["topology"], ["session", "utility"], root)
+            self.assertTrue(any("stale-entry" in str(v) for v in violations))
+
+    def test_live_source_gate_passes(self) -> None:
+        doc = mod.load_topology()
+        violations = mod.check_source_frontier(doc["topology"], doc["frontier"])
+        self.assertEqual(violations, [])
+
+
 if __name__ == "__main__":
     unittest.main()

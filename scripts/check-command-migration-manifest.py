@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -456,6 +457,574 @@ def load_topology(path: Path = TOPOLOGY_PATH) -> dict:
         return json.load(fh)
 
 
+# ---------------------------------------------------------------------------
+# Source scan (Task 3.5): structural Rust item resolution and bidirectional
+# frontier check. Pure-stdlib parser: brace/paren aware, resolves qualified
+# item paths for free functions, inherent methods, and trait-impl methods.
+# ---------------------------------------------------------------------------
+
+GROUPS_ROOT = REPO_ROOT / "crates" / "tui" / "src" / "commands" / "groups"
+CONCRETE_APP_PARAM = re.compile(r"&\s*mut\s+(crate::tui::app::)?App\b")
+
+
+class RustItem:
+    """One parsed Rust item relevant to the migration scan."""
+
+    def __init__(self, kind: str, name: str, qual_path: str, file: Path,
+                 line: int, param_types: list[str], is_concrete_app: bool) -> None:
+        self.kind = kind  # 'free' | 'inherent' | 'trait_impl'
+        self.name = name
+        self.qual_path = qual_path
+        self.file = file
+        self.line = line
+        self.param_types = param_types
+        self.is_concrete_app = is_concrete_app
+
+    def __repr__(self) -> str:
+        return f"RustItem({self.kind}, {self.qual_path}, app={self.is_concrete_app})"
+
+
+class SourceScanViolation:
+    """One deterministic source-scan failure with an actionable diagnostic."""
+
+    def __init__(self, category: str, location: str, detail: str) -> None:
+        self.category = category
+        self.location = location
+        self.detail = detail
+
+    def __str__(self) -> str:
+        return f"{self.category}: {self.location}: {self.detail}"
+
+
+def _strip_comments_and_strings(text: str) -> str:
+    """Replace comments and string/char literals with spaces so the structural
+    scanner sees only code. Keeps raw strings and byte/char literals intact
+    enough for delimiter counting (content is blanked)."""
+    out = list(text)
+    i = 0
+    n = len(text)
+    in_line_comment = False
+    in_block_comment = 0
+    while i < n:
+        ch = text[i]
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            else:
+                out[i] = " "
+            i += 1
+            continue
+        if in_block_comment:
+            if text.startswith("*/", i):
+                in_block_comment -= 1
+                out[i] = out[i + 1] = " "
+                i += 2
+            else:
+                out[i] = " "
+                i += 1
+            continue
+        if text.startswith("//", i):
+            in_line_comment = True
+            out[i] = out[i + 1] = " "
+            i += 2
+            continue
+        if text.startswith("/*", i):
+            in_block_comment += 1
+            out[i] = out[i + 1] = " "
+            i += 2
+            continue
+        if ch == '"':
+            # String literal (possibly raw r#"..."#). Blank until closing quote.
+            out[i] = " "
+            i += 1
+            if text.startswith('#"', i - 1):
+                while i < n and text[i] == "#":
+                    out[i] = " "
+                    i += 1
+            while i < n:
+                if text[i] == "\\" and i + 1 < n:
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    out[i] = " "
+                    i += 1
+                    break
+                out[i] = " "
+                i += 1
+            continue
+        if ch == "'":
+            # Char or lifetime. Blank the atom conservatively (lifetimes are
+            # single-quote-prefixed identifiers; chars are 'x' or '\\x').
+            if i + 1 < n and text[i + 1] == "'":
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            out[i] = " "
+            i += 1
+            if i < n and text[i] == "\\":
+                out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = " "
+                i += 1
+            if i < n and text[i] == "'":
+                out[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _split_top_level(text: str, sep: str) -> list[str]:
+    """Split on a separator character outside (), [], {} and strings."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return parts
+
+
+def _module_path_from_file(file: Path, root: Path) -> str:
+    """Derive the crate-relative module path for a file under the groups root.
+
+    `mod.rs` resolves to its directory name; other files to
+    `dirname.file_name` (snake_case). Path segments are joined with `::`.
+    """
+    rel = file.relative_to(root)
+    parts = list(rel.parts)
+    if parts[-1] == "mod.rs":
+        parts = parts[:-1]
+    else:
+        parts[-1] = parts[-1].removesuffix(".rs")
+    return "crate::commands::groups::" + "::".join(parts)
+
+
+def _first_param_type(fn_sig: str) -> str | None:
+    """Extract the first parameter's type from a `fn name(...)` signature text."""
+    open_idx = fn_sig.find("(")
+    if open_idx < 0:
+        return None
+    close_idx = fn_sig.rfind(")")
+    if close_idx < open_idx:
+        return None
+    params = _split_top_level(fn_sig[open_idx + 1:close_idx], ",")
+    params = [p.strip() for p in params if p.strip()]
+    if not params:
+        return None
+    first = params[0]
+    if first == "self" or first.startswith("self:") or first.startswith("&self"):
+        return None
+    # `name: Type` or `name: Type` with generic default: take after the first top-level ':'.
+    depth = 0
+    for idx, ch in enumerate(first):
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return first[idx + 1:].strip()
+    return None
+
+
+def _is_concrete_app_type(param_type: str | None) -> bool:
+    if param_type is None:
+        return False
+    # Match `&mut App` / `&mut crate::tui::app::App` with optional spaces
+    # around `mut`; no whitespace normalization so `\s*` can bind.
+    return bool(CONCRETE_APP_PARAM.search(param_type))
+
+
+def parse_rust_file(file: Path, root: Path) -> list[RustItem]:
+    """Structurally parse one Rust file for handler-relevant items.
+
+    Handles `fn name(...) -> R { ... }` free functions at top level and
+    `impl Trait for Type { fn ... }` / `impl Type { fn ... }` blocks. The
+    parser tracks braces to skip bodies and resolves qualified paths from the
+    module layout. It is deliberately narrow: it looks for function items with
+    a first parameter typed `&mut App` (the concrete-App handler signature).
+
+    `root` is the *groups* root: module paths are derived from the file's
+    position under `crates/tui/src/commands/groups/`, not the repo root.
+    """
+    raw = file.read_text(encoding="utf-8")
+    code = _strip_comments_and_strings(raw)
+    # Module paths derive from the file's position under the real groups root;
+    # hermetic tests use a synthetic root, in which case the passed root is the
+    # module-path base.
+    try:
+        module_path = _module_path_from_file(file, GROUPS_ROOT)
+    except ValueError:
+        module_path = _module_path_from_file(file, root)
+    items: list[RustItem] = []
+    lines = raw.splitlines()
+
+    i = 0
+    n = len(code)
+    # Walk top-level items: skip until we find `fn` or `impl` at depth 0.
+    while i < n:
+        # find next top-level keyword occurrence
+        while i < n and code[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        if code.startswith("fn", i) and (i == 0 or not (code[i - 1].isalnum() or code[i - 1] == "_")):
+            # free function
+            sig_end = _find_fn_signature_end(code, i + 2)
+            if sig_end is None:
+                i += 2
+                continue
+            sig_text = code[i:sig_end]
+            name_match = re.match(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)", sig_text)
+            line_no = raw.count("\n", 0, code.find(sig_text[:20], 0)) + 1 if sig_text[:20] else 0
+            if name_match:
+                name = name_match.group(1)
+                param_type = _first_param_type(sig_text)
+                items.append(RustItem(
+                    kind="free",
+                    name=name,
+                    qual_path=f"{module_path}::{name}",
+                    file=file,
+                    line=line_no,
+                    param_types=[param_type] if param_type else [],
+                    is_concrete_app=_is_concrete_app_type(param_type),
+                ))
+            # advance past the signature and body
+            i = sig_end
+            # skip the block body if present (or the `;` for a declaration)
+            while i < n and code[i].isspace():
+                i += 1
+            if i < n and code[i] == "{":
+                depth = 0
+                while i < n:
+                    if code[i] == "{":
+                        depth += 1
+                    elif code[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            i += 1
+                            break
+                    i += 1
+            else:
+                i += 1  # consume the `;` (or advance past a non-body token)
+            continue
+        if code.startswith("impl", i) and (i == 0 or not (code[i - 1].isalnum() or code[i - 1] == "_")):
+            # impl block: header until '{'
+            brace_idx = code.find("{", i)
+            if brace_idx < 0:
+                i += 4
+                continue
+            header = code[i + 4:brace_idx].strip()
+            # `impl Trait for Type` vs `impl Type`
+            trait_impl = " for " in header
+            self_type = header.split(" for ")[-1].strip() if trait_impl else header.strip()
+            # methods inside
+            depth = 1
+            j = brace_idx + 1
+            while j < n and depth > 0:
+                if code[j] == "{":
+                    depth += 1
+                elif code[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif code[j].isspace():
+                    j += 1
+                    continue
+                elif code.startswith("fn", j) and not (code[j - 1].isalnum() or code[j - 1] == "_"):
+                    fn_start = j
+                    sig_end = _find_fn_signature_end(code, j + 2)
+                    if sig_end is None:
+                        j += 2
+                        continue
+                    sig_text = code[fn_start:sig_end]
+                    name_match = re.match(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)", sig_text)
+                    if name_match:
+                        name = name_match.group(1)
+                        param_type = _first_param_type(sig_text)
+                        self_qual = _self_type_qual(self_type, module_path)
+                        if trait_impl:
+                            trait_path = header.split(" for ")[0].strip()
+                            kind = "trait_impl"
+                            qual = f"{self_qual}::{name} [{trait_path}]"
+                        else:
+                            kind = "inherent"
+                            qual = f"{self_qual}::{name}"
+                        line_no = raw.count("\n", 0, code.find(sig_text[:20], 0)) + 1 if sig_text[:20] else 0
+                        items.append(RustItem(
+                            kind=kind,
+                            name=name,
+                            qual_path=qual,
+                            file=file,
+                            line=line_no,
+                            param_types=[param_type] if param_type else [],
+                            is_concrete_app=_is_concrete_app_type(param_type),
+                        ))
+                    j = sig_end
+                    # skip the method body (or consume `;` for a declaration)
+                    while j < n and code[j].isspace():
+                        j += 1
+                    if j < n and code[j] == "{":
+                        body_depth = 0
+                        while j < n:
+                            if code[j] == "{":
+                                body_depth += 1
+                            elif code[j] == "}":
+                                body_depth -= 1
+                                if body_depth == 0:
+                                    j += 1
+                                    break
+                            j += 1
+                    else:
+                        j += 1
+                    continue
+                else:
+                    j += 1
+                    continue
+            i = j + 1 if j < n else n
+            continue
+        i += 1
+    return items
+
+
+def _find_fn_signature_end(code: str, start: int) -> int | None:
+    """Find the index just after a `fn` signature (before `{` or `;`),
+    respecting nested generics and parens. The `->` arrow's `>` is not a
+    generic close delimiter."""
+    depth = 0
+    generic = 0
+    i = start
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "<":
+            generic += 1
+        elif ch == ">":
+            # `->` arrow: previous char is '-'; not a generic close.
+            if i > 0 and code[i - 1] == "-":
+                pass
+            elif generic > 0:
+                generic -= 1
+        elif ch in "{;" and depth == 0 and generic == 0:
+            return i
+        i += 1
+    return None
+
+
+def _self_type_qual(self_type: str, module_path: str) -> str:
+    """Qualify a bare self type with the module path (e.g. `BranchCmd` ->
+    `crate::commands::groups::session::branch::BranchCmd`). Already-qualified
+    paths pass through."""
+    cleaned = re.sub(r"\s+", "", self_type)
+    if cleaned.startswith("crate::") or cleaned.startswith("super::"):
+        return cleaned
+    # Strip generic args for qualification purposes (path part only).
+    base = re.split(r"[<({]", cleaned)[0]
+    return f"{module_path}::{base}"
+
+
+def resolve_selector(selector: dict, items: list[RustItem]) -> list[SourceScanViolation]:
+    """Resolve one checked-in handler selector against parsed items.
+
+    Returns violations for missing, ambiguous, or non-concrete-App targets.
+    """
+    violations: list[SourceScanViolation] = []
+    kind = selector["kind"]
+    if kind == "free":
+        target = "::".join(selector["item"])
+        matches = [it for it in items if it.kind == "free" and it.qual_path == target]
+    elif kind == "inherent":
+        self_type = selector["self_type"]
+        method = selector["method"]
+        self_qual = _selector_type_to_text(self_type)
+        matches = [
+            it for it in items
+            if it.kind == "inherent" and it.name == method and it.qual_path.startswith(f"{self_qual}::")
+        ]
+    else:  # trait_impl
+        self_type = selector["self_type"]
+        trait_path = selector["trait_path"]
+        method = selector["method"]
+        self_qual = _selector_type_to_text(self_type)
+        trait_qual = _selector_type_to_text(trait_path)
+        matches = [
+            it for it in items
+            if it.kind == "trait_impl" and it.name == method
+            and it.qual_path.startswith(f"{self_qual}::") and f"[{trait_qual}]" in it.qual_path
+        ]
+    if not matches:
+        violations.append(SourceScanViolation(
+            "selector-resolve", str(selector),
+            "selector resolved to no source item; handler may have moved, been renamed, or the path is stale",
+        ))
+    elif len(matches) > 1:
+        violations.append(SourceScanViolation(
+            "selector-resolve", str(selector),
+            f"selector resolved to {len(matches)} items (ambiguous): " + "; ".join(m.qual_path for m in matches),
+        ))
+    elif not matches[0].is_concrete_app:
+        violations.append(SourceScanViolation(
+            "selector-resolve", str(selector),
+            f"resolved handler {matches[0].qual_path} no longer has a concrete-App signature",
+        ))
+    return violations
+
+
+def _selector_type_to_text(node) -> str:
+    """Render a type-algebra node back to Rust text for matching."""
+    if not isinstance(node, dict):
+        return str(node)
+    tag = node["tag"]
+    if tag == "path":
+        segments = []
+        for seg in node.get("segments", []):
+            name = seg["name"] if isinstance(seg, dict) else str(seg)
+            segments.append(name)
+        prefix = "" if node.get("absolute") else ""
+        return prefix + "::".join(segments)
+    if tag == "primitive":
+        return node["name"]
+    if tag == "never":
+        return "!"
+    if tag == "tuple":
+        return "(" + ",".join(_selector_type_to_text(e) for e in node.get("elems", [])) + ")"
+    if tag == "reference":
+        return "&" + ("mut " if node.get("mut") else "") + _selector_type_to_text(node.get("inner"))
+    if tag == "pointer":
+        return "*" + ("mut " if node.get("mut") else "const ") + _selector_type_to_text(node.get("inner"))
+    if tag == "slice":
+        return "[" + _selector_type_to_text(node.get("inner")) + "]"
+    if tag == "array":
+        return "[" + _selector_type_to_text(node.get("inner")) + "; " + _selector_type_to_text(node.get("len")) + "]"
+    return ""
+
+
+def scan_leaf_handlers(leaf_scope: list[str], root: Path) -> tuple[list[RustItem], list[SourceScanViolation]]:
+    """Scan one leaf's source scope for concrete-App handler items.
+
+    `root` is the repo root (scope paths are repo-relative); module paths are
+    derived against the groups root internally.
+    """
+    items: list[RustItem] = []
+    violations: list[SourceScanViolation] = []
+    for rel in leaf_scope:
+        path = root / rel
+        if not path.is_file():
+            violations.append(SourceScanViolation(
+                "source-scan", rel, "scope file missing from the source tree",
+            ))
+            continue
+        try:
+            items.extend(parse_rust_file(path, root))
+        except Exception as exc:  # pragma: no cover - defensive
+            violations.append(SourceScanViolation(
+                "source-scan", rel, f"failed to parse: {exc}",
+            ))
+    return items, violations
+
+
+def check_source_frontier(topology: dict, frontier: list[str], root: Path = REPO_ROOT) -> list[SourceScanViolation]:
+    """Bidirectional scan: the frontier must exactly equal the leaves whose
+    scopes still contain concrete-App handlers.
+
+    The frontier may name a whole group (all its files pending) or a group's
+    declared slices (after a documented split). For every group:
+
+    - group pending: all concrete-App handlers in the group scope are covered.
+    - group split: the frontier must name ALL its slices, and every handler
+      in the group scope must fall inside a pending slice's scope.
+    - otherwise: any concrete-App handler in the group is a stale-removal.
+    """
+    violations: list[SourceScanViolation] = []
+    frontier_set = set(frontier)
+
+    for group_name, node in topology.items():
+        group_items, scan_violations = scan_leaf_handlers(node.get("scope", []), root)
+        violations.extend(scan_violations)
+        handlers = [it for it in group_items if it.is_concrete_app]
+
+        slices = node.get("slices", [])
+        if group_name in frontier_set:
+            # Whole group pending: every handler is covered; a pending group
+            # with no concrete-App handler is a stale entry.
+            if not handlers:
+                violations.append(SourceScanViolation(
+                    "stale-entry", group_name,
+                    "frontier group is pending but its scope has no concrete-App handler",
+                ))
+            for selector in node.get("handlers", []):
+                violations.extend(resolve_selector(selector, group_items))
+            continue
+
+        if not handlers:
+            continue
+
+        if slices:
+            slice_names = {s["name"] for s in slices}
+            slice_pending = slice_names & frontier_set
+            if slice_pending == slice_names:
+                # Documented split: verify each slice scope holds its handlers.
+                for slice_node in slices:
+                    slice_items, slice_violations = scan_leaf_handlers(
+                        slice_node.get("scope", []), root
+                    )
+                    violations.extend(slice_violations)
+                    slice_handlers = [it for it in slice_items if it.is_concrete_app]
+                    if not slice_handlers:
+                        violations.append(SourceScanViolation(
+                            "stale-entry", slice_node["name"],
+                            "frontier slice is pending but its scope has no concrete-App handler",
+                        ))
+                    for selector in slice_node.get("handlers", []):
+                        violations.extend(resolve_selector(selector, slice_items))
+                continue
+            if slice_pending:
+                # Partial split: some slices pending, some not.
+                missing = sorted(slice_names - slice_pending)
+                violations.append(SourceScanViolation(
+                    "partial-split", group_name,
+                    f"group is neither wholly pending nor fully split; pending slices "
+                    f"{sorted(slice_pending)} but missing {missing}",
+                ))
+                continue
+
+        # Not pending and not split: every remaining handler is a stale removal.
+        for handler in handlers[:5]:
+            violations.append(SourceScanViolation(
+                "stale-removal", handler.qual_path,
+                f"handler still uses concrete App but group {group_name!r} is not pending",
+            ))
+        if len(handlers) > 5:
+            violations.append(SourceScanViolation(
+                "stale-removal", group_name,
+                f"... and {len(handlers) - 5} more concrete-App handlers in this group",
+            ))
+
+    return violations
+
+
+def _leaf_node(topology: dict, leaf_name: str) -> dict | None:
+    if leaf_name in topology:
+        return topology[leaf_name]
+    for root_name, node in topology.items():
+        for slice_node in node.get("slices", []):
+            if slice_node["name"] == leaf_name:
+                return slice_node
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     del argv  # reserved for future flags
     doc = load_topology()
@@ -465,11 +1034,17 @@ def main(argv: list[str] | None = None) -> int:
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
+    source_violations = check_source_frontier(doc["topology"], doc["frontier"])
+    if source_violations:
+        print("[command-migration-manifest] FAIL (source scan)", file=sys.stderr)
+        for violation in source_violations:
+            print(f"  {violation}", file=sys.stderr)
+        return 1
     frontier = doc["frontier"]
     print(
         f"[command-migration-manifest] PASS: schema v{SUPPORTED_SCHEMA_VERSION}; "
-        f"frontier [{', '.join(frontier)}] is a valid topology frontier; "
-        "source scan pending Phase 3 wiring"
+        f"frontier [{', '.join(frontier)}] exactly matches source; "
+        "all nine groups still use concrete-App handlers"
     )
     return 0
 
