@@ -5,7 +5,7 @@
 //! Plan usage is credit/quota based and is intentionally left unknown until a
 //! reliable balance endpoint exists.
 
-use chrono::{DateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use codewhale_config::pricing::{
     Currency, LIVE_PRICING_MAX_AGE_SECS, LivePricingDefect, OfferingPricing, PricingProvenance,
     TokenClass, TokenUsage,
@@ -555,9 +555,10 @@ fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing>
         return None;
     }
     if lower == "claude-sonnet-5" {
-        // Time-aware introductory pricing; resolved ahead of the catalog so
-        // the intro rate is honored while it lasts (same pattern as the
-        // recorded-time DeepSeek peak/off-peak tiers below).
+        // Resolved ahead of the catalog through the recorded-time helper so
+        // the first-party Anthropic override path (`hand_priced_audit`)
+        // and this metadata lookup stay one contract (see
+        // `claude_sonnet_5_pricing`).
         return Some(claude_sonnet_5_pricing(now));
     }
     if let Some(pricing) = known_pricing_for_model(&lower) {
@@ -582,17 +583,22 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "openai/gpt-5.6" | "openai/gpt-5.6-sol" | "gpt-5.6" | "gpt-5.6-sol" => {
             Some(usd_only_pricing(0.50, 5.00, 30.00))
         }
-        "openai/gpt-5.6-terra" | "gpt-5.6-terra" => Some(usd_only_pricing(0.25, 2.50, 15.00)),
-        "openai/gpt-5.6-luna" | "gpt-5.6-luna" => Some(usd_only_pricing(0.10, 1.00, 6.00)),
+        // GPT-5.6 Terra / Luna short-context (<=272K) rates, re-verified
+        // 2026-08-17 against the model pages (Input / Cached / Output):
+        // https://developers.openai.com/api/docs/models/gpt-5.6-terra
+        // https://developers.openai.com/api/docs/models/gpt-5.6-luna
+        // The >272K tier is refused by `direct_openai_long_context_tier_is_unpriced`.
+        "openai/gpt-5.6-terra" | "gpt-5.6-terra" => Some(usd_only_pricing(0.20, 2.00, 12.00)),
+        "openai/gpt-5.6-luna" | "gpt-5.6-luna" => Some(usd_only_pricing(0.02, 0.20, 1.20)),
         "meta/muse-spark-1.1" | "muse-spark-1.1" => Some(usd_only_pricing(0.15, 1.25, 4.25)),
         "meta/muse-spark-1.2" | "muse-spark-1.2" => Some(usd_only_pricing(0.15, 1.25, 4.25)),
         "meta/muse-spark-1.2-contributor" | "muse-spark-1.2-contributor" => {
             Some(usd_only_pricing(0.002, 0.10, 0.20))
         }
-        // Grok 4.6 doubles all token rates when the prompt reaches 200K.
-        // Metadata-only lookups use the standard tier; turn auditing below
-        // selects the exact usage-aware tier for the direct xAI route.
-        "grok-4.6" => Some(grok_4_6_pricing(false)),
+        // Grok 4.6 / 4.5 / 4.3 double all token rates when the prompt reaches
+        // 200K. Metadata-only lookups use the standard tier; turn auditing
+        // below selects the exact usage-aware tier for the direct xAI route.
+        "grok-4.6" | "grok-4.5" | "grok-4.3" => grok_tiered_pricing(model_lower, false),
         // Anthropic first-party rates including the published cache-read
         // discounts and 5-minute cache-write rates (2026-07-09 audit,
         // https://platform.claude.com/docs/en/about-claude/pricing). These sit
@@ -600,6 +606,12 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // cache-read/write rates yet. 1h write is 2x input; we price the
         // common 5m tier (1.25x input) here (#4318).
         "claude-opus-4-8" => Some(usd_pricing_with_write(0.50, 5.00, 25.00, 6.25)),
+        // Claude Opus 5 (GA 2026-07-24): same card as Opus 4.8 — $5 in /
+        // $25 out, cache read 0.50, 5m cache write 6.25 (1h write 10.00).
+        // Re-verified 2026-08-17 against
+        // https://platform.claude.com/docs/en/about-claude/pricing and
+        // https://platform.claude.com/docs/en/about-claude/models/overview.
+        "claude-opus-5" => Some(usd_pricing_with_write(0.50, 5.00, 25.00, 6.25)),
         "claude-sonnet-4-6" => Some(usd_pricing_with_write(0.30, 3.00, 15.00, 3.75)),
         "claude-haiku-4-5" => Some(usd_pricing_with_write(0.10, 1.00, 5.00, 1.25)),
         // Claude Fable 5 (GA 2026-06-09). Its newer tokenizer produces ~30%
@@ -613,10 +625,25 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // Moonshot K2.7 Code cache-read rate per
         // https://platform.kimi.ai/docs/pricing/chat-k27-code
         "moonshotai/kimi-k2.7-code" | "kimi-k2.7-code" => Some(usd_only_pricing(0.19, 0.95, 4.00)),
+        // Moonshot K2.7 Code high-speed tier (same model, ~2x rates), per the
+        // same page (re-verified 2026-08-17: cache-hit 0.38 / cache-miss 1.90
+        // / output 8.00 per 1M).
+        "moonshotai/kimi-k2.7-code-highspeed" | "kimi-k2.7-code-highspeed" => {
+            Some(usd_only_pricing(0.38, 1.90, 8.00))
+        }
+        // Moonshot K3 direct pay-as-you-go platform rate (re-verified
+        // 2026-08-17): cache-hit 0.30 / cache-miss 3.00 / output 15.00 per 1M,
+        // https://platform.kimi.ai/docs/pricing/chat-k3. The Kimi Code
+        // membership id `k3` is quota-billed and deliberately has no row.
+        "moonshotai/kimi-k3" | "kimi-k3" => Some(usd_only_pricing(0.30, 3.00, 15.00)),
         // MiniMax-M3 uses the lower standard tier for metadata-only lookups;
         // cost estimation selects the correct tier from total input usage.
         "minimax-m3" => Some(minimax_m3_standard_pricing(false)),
         "minimax-m2.7" => Some(usd_pricing_with_write(0.06, 0.30, 1.20, 0.375)),
+        // MiniMax-M2.7-highspeed: input 0.6 / output 2.4 / cache read 0.06 /
+        // cache write 0.375 per 1M (re-verified 2026-08-17),
+        // https://platform.minimax.io/docs/guides/pricing-paygo
+        "minimax-m2.7-highspeed" => Some(usd_pricing_with_write(0.06, 0.60, 2.40, 0.375)),
         // gpt-5-codex is deprecated upstream on the ChatGPT-OAuth path
         // (successor: gpt-5.3-codex); API usage is still billed at these rates.
         // https://developers.openai.com/api/docs/models/gpt-5.3-codex
@@ -652,6 +679,23 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // rate equals the input rate.
         // https://developers.openai.com/api/docs/models/gpt-5.5-pro
         "openai/gpt-5.5-pro" | "gpt-5.5-pro" => Some(usd_only_pricing(30.00, 30.00, 180.00)),
+        // Mistral la Plateforme standard rates (Input / Cached input /
+        // Output per 1M), re-verified 2026-08-17 against
+        // https://docs.mistral.ai/inference/pricing: Mistral Medium 3.5
+        // $1.5 / $0.15 / $7.5, Mistral Large 3 $0.5 / $0.05 / $1.5, Mistral
+        // Small 4 $0.15 / $0.015 / $0.6, Codestral $0.3 / $0.03 / $0.9. The
+        // `-latest` ids resolve to those generations on /v1/models (see
+        // `models.rs`); no cache-write rate is published, so it stays
+        // unpriced rather than assumed.
+        "mistral-medium-latest"
+        | "mistral-medium-3-5"
+        | "mistral-medium-3.5"
+        | "mistral-medium-2604" => Some(usd_only_pricing(0.15, 1.50, 7.50)),
+        "mistral-large-latest" | "mistral-large-2512" => Some(usd_only_pricing(0.05, 0.50, 1.50)),
+        "mistral-small-latest" | "mistral-small-2603" => Some(usd_only_pricing(0.015, 0.15, 0.60)),
+        "mistral-code-latest" | "codestral-latest" | "codestral" => {
+            Some(usd_only_pricing(0.03, 0.30, 0.90))
+        }
         "qwen/qwen3.6-flash" => Some(usd_only_pricing(0.1875, 0.1875, 1.125)),
         "qwen/qwen3.6-35b-a3b" => Some(usd_only_pricing(0.05, 0.14, 1.00)),
         "qwen/qwen3.6-max-preview" => Some(usd_only_pricing(1.04, 1.04, 6.24)),
@@ -766,16 +810,33 @@ fn is_minimax_m3(model: &str) -> bool {
     )
 }
 
-fn grok_4_6_pricing(long_context: bool) -> ModelPricing {
-    if long_context {
-        usd_only_pricing(1.00, 4.00, 12.00)
-    } else {
-        usd_only_pricing(0.50, 2.00, 6.00)
-    }
+/// xAI Grok standard-tier rates (cache-read, input, output per 1M) and the
+/// doubled tier once a prompt reaches 200K tokens. Verified 2026-08-17 against
+/// the model pages, whose embedded price tables carry both the standard and
+/// `LongContext` columns at exactly 2x:
+/// - <https://docs.x.ai/docs/models/grok-4.6>: 0.50 / 2.00 / 6.00
+/// - <https://docs.x.ai/docs/models/grok-4.5>: 0.30 / 2.00 / 6.00
+/// - <https://docs.x.ai/docs/models/grok-4.3>: 0.20 / 1.25 / 2.50
+fn grok_tiered_pricing(model_lower: &str, long_context: bool) -> Option<ModelPricing> {
+    let (cache_read, input, output) = match model_lower {
+        "grok-4.6" => (0.50, 2.00, 6.00),
+        "grok-4.5" => (0.30, 2.00, 6.00),
+        "grok-4.3" => (0.20, 1.25, 2.50),
+        _ => return None,
+    };
+    let multiplier = if long_context { 2.0 } else { 1.0 };
+    Some(usd_only_pricing(
+        cache_read * multiplier,
+        input * multiplier,
+        output * multiplier,
+    ))
 }
 
-fn is_grok_4_6(model: &str) -> bool {
-    model.trim().eq_ignore_ascii_case("grok-4.6")
+fn is_grok_tiered(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "grok-4.6" | "grok-4.5" | "grok-4.3"
+    )
 }
 
 fn pricing_for_model_and_usage(model: &str, usage: &Usage) -> Option<ModelPricing> {
@@ -784,28 +845,25 @@ fn pricing_for_model_and_usage(model: &str, usage: &Usage) -> Option<ModelPricin
             usage.input_tokens > MINIMAX_M3_LONG_CONTEXT_THRESHOLD,
         ));
     }
-    if is_grok_4_6(model) {
-        return Some(grok_4_6_pricing(
+    if is_grok_tiered(model) {
+        return grok_tiered_pricing(
+            &model.trim().to_ascii_lowercase(),
             usage.input_tokens >= GROK_4_6_LONG_CONTEXT_THRESHOLD,
-        ));
+        );
     }
     pricing_for_model(model)
 }
 
-/// Claude Sonnet 5 pricing (<https://platform.claude.com/docs/en/about-claude/pricing>):
-/// introductory 2.00 / 10.00 (cache-read 0.20, cache-write 2.50) through
-/// 2026-08-31 UTC, then the standard 3.00 / 15.00 (cache-read 0.30,
-/// cache-write 3.75). Write rates are the published 5-minute tier (#4318).
-fn claude_sonnet_5_pricing(now: DateTime<Utc>) -> ModelPricing {
-    let intro_ends = Utc
-        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
-        .single()
-        .expect("valid intro-pricing cutoff");
-    if now < intro_ends {
-        usd_pricing_with_write(0.20, 2.00, 10.00, 2.50)
-    } else {
-        usd_pricing_with_write(0.30, 3.00, 15.00, 3.75)
-    }
+/// Claude Sonnet 5 pricing (<https://platform.claude.com/docs/en/about-claude/pricing>,
+/// re-verified 2026-08-17): 2.00 / 10.00 (cache-read 0.20, 5m cache-write
+/// 2.50) is now the standard price. Anthropic's pricing page states the
+/// previously scheduled increase to 3.00 / 15.00 on 2026-09-01 "will not
+/// occur" (release notes, 2026-08-10), so the former time-windowed flip is
+/// gone; the recorded-time signature is kept so callers that price turns at
+/// their recorded time (scorecard, usage aggregation) keep one contract for
+/// every first-party time-aware row.
+fn claude_sonnet_5_pricing(_now: DateTime<Utc>) -> ModelPricing {
+    usd_pricing_with_write(0.20, 2.00, 10.00, 2.50)
 }
 
 /// DeepSeek publishes only cache-hit and cache-miss input rates *because* its
@@ -1291,17 +1349,21 @@ pub(crate) fn audit_turn_cost_for_provider_on_endpoint_at(
         return hand_priced_audit(pricing_for_model_and_usage(&catalog_model, usage), usage);
     }
 
-    // xAI doubles Grok 4.6 input, cached-input, and output rates once the
-    // prompt reaches 200K tokens. Keep this provider-owned and usage-aware so
-    // a third-party route reusing the model slug never inherits xAI billing.
-    if provider == ApiProvider::Xai && catalog_model.eq_ignore_ascii_case("grok-4.6") {
+    // xAI doubles Grok 4.6 / 4.5 / 4.3 input, cached-input, and output rates
+    // once the prompt reaches 200K tokens. Keep this provider-owned and
+    // usage-aware so a third-party route reusing the model slug never
+    // inherits xAI billing.
+    if provider == ApiProvider::Xai && is_grok_tiered(&catalog_model) {
         return hand_priced_audit(pricing_for_model_and_usage(&catalog_model, usage), usage);
     }
 
-    // Direct DeepSeek pricing carries an authoritative CNY row, and Sonnet 5
-    // has a recorded-time introductory window that a static catalog row cannot
-    // represent. These exact first-party routes intentionally override the
-    // catalog; no other provider/model text match is allowed to do so.
+    // Direct DeepSeek pricing carries an authoritative CNY row and recorded-time
+    // peak/off-peak tiers that a static catalog row cannot represent; Sonnet 5
+    // keeps riding the same recorded-time hand row (its rate is flat again
+    // since Anthropic cancelled the 2026-09-01 increase, but the contract that
+    // first-party Anthropic prices Sonnet 5 from its own row stays). These
+    // exact first-party routes intentionally override the catalog; no other
+    // provider/model text match is allowed to do so.
     if direct_deepseek
         || (provider == ApiProvider::Anthropic
             && catalog_model.eq_ignore_ascii_case("claude-sonnet-5"))
@@ -1725,19 +1787,38 @@ fn provider_owned_hand_pricing_at(
                 | "claude-haiku-4-5"
                 | "claude-fable-5"
                 | "claude-sonnet-5"
+                | "claude-opus-5"
         ),
-        ApiProvider::Xai => model_lower == "grok-4.6",
+        ApiProvider::Xai => is_grok_tiered(&model_lower),
         // GLM-5.3 is deliberately absent: this allowlist declares that Z.ai
         // owns a *hand-written price row* for the model, and no GLM-5.3 rate
         // has been published. An absent price is honest; an owned-but-empty
         // row is not. See `glm_5_3_has_no_hardcoded_price` below.
         ApiProvider::Zai => matches!(model_lower.as_str(), "glm-5.1" | "glm-5.2" | "glm-5-turbo"),
-        ApiProvider::Moonshot => {
-            matches!(model_lower.as_str(), "kimi-k2.6" | "kimi-k2.7-code")
-        }
-        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
-            matches!(model_lower.as_str(), "minimax-m3" | "minimax-m2.7")
-        }
+        // `k3` (Kimi Code membership) is deliberately absent: it is quota
+        // billed and must never inherit the direct-platform kimi-k3 rate.
+        ApiProvider::Moonshot => matches!(
+            model_lower.as_str(),
+            "kimi-k2.6" | "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" | "kimi-k3"
+        ),
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => matches!(
+            model_lower.as_str(),
+            "minimax-m3" | "minimax-m2.7" | "minimax-m2.7-highspeed"
+        ),
+        ApiProvider::Mistral => matches!(
+            model_lower.as_str(),
+            "mistral-medium-latest"
+                | "mistral-medium-3-5"
+                | "mistral-medium-3.5"
+                | "mistral-medium-2604"
+                | "mistral-large-latest"
+                | "mistral-large-2512"
+                | "mistral-small-latest"
+                | "mistral-small-2603"
+                | "mistral-code-latest"
+                | "codestral-latest"
+                | "codestral"
+        ),
         ApiProvider::Arcee => model_lower == "trinity-large-thinking",
         // 1.2 and its contributor tier own hand-written rows the same way 1.1
         // does (see `pricing_for_model_at`). 1.2 is now `DEFAULT_META_MODEL`,
@@ -2011,6 +2092,7 @@ pub fn format_cost_estimate(estimate: CostEstimate, currency: CostCurrency) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::collections::BTreeMap;
 
     #[test]
@@ -2838,6 +2920,80 @@ mod tests {
         }
     }
 
+    /// Published xAI rates per 1M tokens (cache-read, input, output) at the
+    /// standard tier, verified 2026-08-17 on docs.x.ai/docs/models/grok-4.5
+    /// and /grok-4.3; the pages' embedded price tables carry a `LongContext`
+    /// column at exactly 2x for prompts past 200K.
+    const GROK_4_5_USD_STANDARD: (f64, f64, f64) = (0.30, 2.00, 6.00);
+    const GROK_4_5_USD_LONG_CONTEXT: (f64, f64, f64) = (0.60, 4.00, 12.00);
+    const GROK_4_3_USD_STANDARD: (f64, f64, f64) = (0.20, 1.25, 2.50);
+    const GROK_4_3_USD_LONG_CONTEXT: (f64, f64, f64) = (0.40, 2.50, 5.00);
+
+    #[test]
+    fn grok_45_and_43_pricing_track_the_200k_prompt_boundary() {
+        for (model, standard, long_context) in [
+            ("grok-4.5", GROK_4_5_USD_STANDARD, GROK_4_5_USD_LONG_CONTEXT),
+            ("grok-4.3", GROK_4_3_USD_STANDARD, GROK_4_3_USD_LONG_CONTEXT),
+        ] {
+            for (input_tokens, expected) in [(199_999, standard), (200_000, long_context)] {
+                let usage = Usage {
+                    input_tokens,
+                    ..Usage::default()
+                };
+                let pricing = pricing_for_model_and_usage(model, &usage)
+                    .unwrap_or_else(|| panic!("{model} pricing"));
+                assert_eq!(
+                    pricing.usd.input_cache_hit_per_million, expected.0,
+                    "{model} @ {input_tokens} cache-read"
+                );
+                assert_eq!(
+                    pricing.usd.input_cache_miss_per_million, expected.1,
+                    "{model} @ {input_tokens} input"
+                );
+                assert_eq!(
+                    pricing.usd.output_per_million, expected.2,
+                    "{model} @ {input_tokens} output"
+                );
+                assert!(pricing.cny.is_none());
+            }
+            // Metadata-only lookups report the standard tier.
+            let metadata = pricing_for_model_at(model, Utc::now()).unwrap();
+            assert_eq!(metadata.usd.input_cache_miss_per_million, standard.1);
+        }
+    }
+
+    #[test]
+    fn direct_xai_grok_45_and_43_own_usage_tier_without_leaking_to_other_providers() {
+        for (model, standard_input, long_input) in
+            [("grok-4.5", 2.00, 4.00), ("grok-4.3", 1.25, 2.50)]
+        {
+            for (input_tokens, input_rate) in [(199_999, standard_input), (200_000, long_input)] {
+                let usage = Usage {
+                    input_tokens,
+                    ..Usage::default()
+                };
+                let estimate = calculate_turn_cost_estimate_for_provider_at(
+                    ApiProvider::Xai,
+                    model,
+                    &usage,
+                    Utc::now(),
+                )
+                .unwrap_or_else(|| panic!("direct xAI {model} has tiered pricing"));
+                let expected = f64::from(input_tokens) / 1_000_000.0 * input_rate;
+                assert!(
+                    (estimate.usd - expected).abs() < 1e-12,
+                    "{model} @ {input_tokens}: {} != {expected}",
+                    estimate.usd
+                );
+            }
+            assert!(
+                provider_owned_hand_pricing_at(ApiProvider::Openrouter, model, Utc::now())
+                    .is_none(),
+                "{model}: OpenRouter must not inherit xAI billing"
+            );
+        }
+    }
+
     #[test]
     fn direct_xai_grok_46_owns_usage_tier_without_leaking_to_other_providers() {
         for (input_tokens, input_rate) in [(199_999, 2.00), (200_000, 4.00)] {
@@ -3088,6 +3244,10 @@ mod tests {
             ("kimi-k2.6", 0.16, 0.95, 4.00),
             ("kimi-k2.7-code", 0.19, 0.95, 4.00),
             ("moonshotai/kimi-k2.7-code", 0.19, 0.95, 4.00),
+            ("kimi-k2.7-code-highspeed", 0.38, 1.90, 8.00),
+            ("moonshotai/kimi-k2.7-code-highspeed", 0.38, 1.90, 8.00),
+            ("kimi-k3", 0.30, 3.00, 15.00),
+            ("moonshotai/kimi-k3", 0.30, 3.00, 15.00),
             ("z-ai/glm-5.1", 0.26, 1.40, 4.40),
             ("glm-5.2", 0.26, 1.40, 4.40),
             ("z-ai/glm-5.2", 0.26, 1.40, 4.40),
@@ -3100,6 +3260,7 @@ mod tests {
             ("trinity-large-thinking", 0.25, 0.25, 0.80),
             ("nvidia/nemotron-3-ultra-550b-a55b", 0.10, 0.50, 2.20),
             ("claude-opus-4-8", 0.50, 5.00, 25.00),
+            ("claude-opus-5", 0.50, 5.00, 25.00),
             ("claude-sonnet-4-6", 0.30, 3.00, 15.00),
             ("claude-haiku-4-5", 0.10, 1.00, 5.00),
             ("claude-fable-5", 1.00, 10.00, 50.00),
@@ -3107,10 +3268,18 @@ mod tests {
             // GPT-5.5 Pro has no cached-input discount: cache-hit == input.
             ("gpt-5.5-pro", 30.00, 30.00, 180.00),
             ("gpt-5.6-sol", 0.50, 5.00, 30.00),
-            ("gpt-5.6-terra", 0.25, 2.50, 15.00),
-            ("gpt-5.6-luna", 0.10, 1.00, 6.00),
+            ("gpt-5.6-terra", 0.20, 2.00, 12.00),
+            ("gpt-5.6-luna", 0.02, 0.20, 1.20),
             ("gpt-5-codex", 0.125, 1.25, 10.00),
             ("gpt-5.3-codex", 0.175, 1.75, 14.00),
+            ("mistral-medium-latest", 0.15, 1.50, 7.50),
+            ("mistral-medium-3-5", 0.15, 1.50, 7.50),
+            ("mistral-large-latest", 0.05, 0.50, 1.50),
+            ("mistral-large-2512", 0.05, 0.50, 1.50),
+            ("mistral-small-latest", 0.015, 0.15, 0.60),
+            ("mistral-small-2603", 0.015, 0.15, 0.60),
+            ("mistral-code-latest", 0.03, 0.30, 0.90),
+            ("codestral-latest", 0.03, 0.30, 0.90),
             ("qwen/qwen3.7-plus", 0.064, 0.32, 1.28),
             ("muse-spark-1.1", 0.15, 1.25, 4.25),
             ("muse-spark-1.2", 0.15, 1.25, 4.25),
@@ -3609,32 +3778,193 @@ mod tests {
         assert!(pricing.cny.is_none());
     }
 
-    #[test]
-    fn sonnet_5_uses_intro_pricing_before_2026_08_31_expiry() {
-        let before_expiry = Utc
-            .with_ymd_and_hms(2026, 8, 31, 23, 59, 59)
-            .single()
-            .unwrap();
-        let pricing = pricing_for_model_at("claude-sonnet-5", before_expiry).unwrap();
+    /// Published Claude Sonnet 5 rates per 1M tokens (cache-hit, cache-miss,
+    /// output, 5m cache-write), verified live on
+    /// platform.claude.com/docs/en/about-claude/pricing on 2026-08-17: the
+    /// $2/$10 launch rate is now standard and the 2026-09-01 increase to
+    /// $3/$15 "will not occur".
+    const CLAUDE_SONNET_5_USD: (f64, f64, f64, f64) = (0.20, 2.00, 10.00, 2.50);
 
-        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.20);
-        assert_eq!(pricing.usd.input_cache_miss_per_million, 2.00);
-        assert_eq!(pricing.usd.output_per_million, 10.00);
-        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(2.50));
+    fn assert_sonnet_5_standard_rate(at: DateTime<Utc>) {
+        let pricing = pricing_for_model_at("claude-sonnet-5", at).unwrap();
+        let (hit, miss, out, write) = CLAUDE_SONNET_5_USD;
+        assert_eq!(pricing.usd.input_cache_hit_per_million, hit, "{at} hit");
+        assert_eq!(pricing.usd.input_cache_miss_per_million, miss, "{at} miss");
+        assert_eq!(pricing.usd.output_per_million, out, "{at} output");
+        assert_eq!(
+            pricing.usd.cache_write,
+            CacheWritePolicy::Rate(write),
+            "{at} write"
+        );
         assert!(pricing.cny.is_none());
     }
 
     #[test]
-    fn sonnet_5_uses_standard_pricing_after_intro_window() {
-        let after_expiry = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).single().unwrap();
-        let pricing = pricing_for_model_at("claude-sonnet-5", after_expiry).unwrap();
+    fn sonnet_5_keeps_the_2_10_rate_before_the_former_2026_08_31_boundary() {
+        assert_sonnet_5_standard_rate(
+            Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59)
+                .single()
+                .unwrap(),
+        );
+        assert!(has_pricing_for_model("claude-sonnet-5"));
+    }
 
+    #[test]
+    fn sonnet_5_does_not_flip_to_3_15_on_2026_09_01() {
+        // Regression for the retired intro window: the scheduled increase was
+        // cancelled upstream, so neither boundary minute nor any later time
+        // may resurface 0.30 / 3.00 / 15.00 / 3.75.
+        for at in [
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).single().unwrap(),
+            Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).single().unwrap(),
+        ] {
+            assert_sonnet_5_standard_rate(at);
+            let pricing = pricing_for_model_at("claude-sonnet-5", at).unwrap();
+            assert_ne!(pricing.usd.input_cache_hit_per_million, 0.30);
+            assert_ne!(pricing.usd.input_cache_miss_per_million, 3.00);
+            assert_ne!(pricing.usd.output_per_million, 15.00);
+            assert_ne!(pricing.usd.cache_write, CacheWritePolicy::Rate(3.75));
+        }
+    }
+
+    #[test]
+    fn claude_opus_5_matches_published_first_party_card() {
+        // https://platform.claude.com/docs/en/about-claude/pricing (2026-08-17):
+        // $5 in / $25 out, cache read 0.50, 5m cache write 6.25.
+        let pricing = pricing_for_model_at("claude-opus-5", Utc::now()).expect("Opus 5 pricing");
+        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.50);
+        assert_eq!(pricing.usd.input_cache_miss_per_million, 5.00);
+        assert_eq!(pricing.usd.output_per_million, 25.00);
+        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(6.25));
+        assert!(pricing.cny.is_none());
+        assert!(
+            provider_owned_hand_pricing_at(ApiProvider::Anthropic, "claude-opus-5", Utc::now())
+                .is_some(),
+            "direct Anthropic owns the Opus 5 row"
+        );
+        assert!(
+            provider_owned_hand_pricing_at(ApiProvider::Openrouter, "claude-opus-5", Utc::now())
+                .is_none(),
+            "an aggregator must not inherit the first-party Opus 5 row"
+        );
+    }
+
+    #[test]
+    fn gpt_5_6_terra_and_luna_use_current_short_context_rates() {
+        // https://developers.openai.com/api/docs/models/gpt-5.6-terra and
+        // /gpt-5.6-luna (2026-08-17): Terra $2.00 / $0.20 / $12.00, Luna
+        // $0.20 / $0.02 / $1.20 per 1M. The retired launch cards must not
+        // resurface.
+        for (model, hit, miss, out, stale) in [
+            ("gpt-5.6-terra", 0.20, 2.00, 12.00, (0.25, 2.50, 15.00)),
+            ("gpt-5.6-luna", 0.02, 0.20, 1.20, (0.10, 1.00, 6.00)),
+        ] {
+            let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
+            assert_eq!(pricing.usd.input_cache_hit_per_million, hit, "{model}");
+            assert_eq!(pricing.usd.input_cache_miss_per_million, miss, "{model}");
+            assert_eq!(pricing.usd.output_per_million, out, "{model}");
+            assert_ne!(pricing.usd.input_cache_hit_per_million, stale.0);
+            assert_ne!(pricing.usd.input_cache_miss_per_million, stale.1);
+            assert_ne!(pricing.usd.output_per_million, stale.2);
+        }
+    }
+
+    #[test]
+    fn moonshot_direct_kimi_k3_is_priced_but_membership_k3_is_not() {
+        // https://platform.kimi.ai/docs/pricing/chat-k3 (2026-08-17):
+        // cache-hit 0.30 / cache-miss 3.00 / output 15.00 per 1M.
+        let now = Utc::now();
+        let pricing = provider_owned_hand_pricing_at(ApiProvider::Moonshot, "kimi-k3", now)
+            .expect("direct Moonshot owns the kimi-k3 row");
         assert_eq!(pricing.usd.input_cache_hit_per_million, 0.30);
         assert_eq!(pricing.usd.input_cache_miss_per_million, 3.00);
         assert_eq!(pricing.usd.output_per_million, 15.00);
-        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(3.75));
-        assert!(pricing.cny.is_none());
-        assert!(has_pricing_for_model("claude-sonnet-5"));
+        assert!(
+            provider_owned_hand_pricing_at(ApiProvider::Moonshot, "k3", now).is_none(),
+            "Kimi Code membership `k3` is quota billed"
+        );
+        assert!(pricing_for_model_at("k3", now).is_none());
+        // Fireworks-hosted K3 keeps its own (still unpublished) rate card.
+        assert!(
+            provider_owned_hand_pricing_at(
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/kimi-k3",
+                now
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn kimi_k2_7_code_highspeed_matches_published_rates() {
+        // https://platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-17).
+        let now = Utc::now();
+        let pricing =
+            provider_owned_hand_pricing_at(ApiProvider::Moonshot, "kimi-k2.7-code-highspeed", now)
+                .expect("direct Moonshot owns the K2.7 Code high-speed row");
+        assert_eq!(pricing.usd.input_cache_hit_per_million, 0.38);
+        assert_eq!(pricing.usd.input_cache_miss_per_million, 1.90);
+        assert_eq!(pricing.usd.output_per_million, 8.00);
+        // Exactly 2x the standard K2.7 Code card.
+        let standard = pricing_for_model_at("kimi-k2.7-code", now).unwrap();
+        assert!((standard.usd.input_cache_hit_per_million * 2.0 - 0.38).abs() < 1e-12);
+        assert!((standard.usd.input_cache_miss_per_million * 2.0 - 1.90).abs() < 1e-12);
+        assert!((standard.usd.output_per_million * 2.0 - 8.00).abs() < 1e-12);
+    }
+
+    #[test]
+    fn minimax_m2_7_highspeed_preserves_cache_read_and_write_rates() {
+        // https://platform.minimax.io/docs/guides/pricing-paygo (2026-08-17):
+        // $0.6 in / $2.4 out / $0.06 cache read / $0.375 cache write.
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            let pricing =
+                provider_owned_hand_pricing_at(provider, "MiniMax-M2.7-highspeed", Utc::now())
+                    .expect("direct MiniMax owns the M2.7 high-speed row");
+            assert_eq!(
+                pricing.usd.input_cache_hit_per_million, 0.06,
+                "{provider:?}"
+            );
+            assert_eq!(
+                pricing.usd.input_cache_miss_per_million, 0.60,
+                "{provider:?}"
+            );
+            assert_eq!(pricing.usd.output_per_million, 2.40, "{provider:?}");
+            assert_eq!(
+                pricing.usd.cache_write,
+                CacheWritePolicy::Rate(0.375),
+                "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mistral_first_party_rows_match_published_table_and_stay_provider_owned() {
+        // https://docs.mistral.ai/inference/pricing (2026-08-17): Medium 3.5
+        // 1.5 / 0.15 / 7.5, Large 3 0.5 / 0.05 / 1.5, Small 4 0.15 / 0.015 /
+        // 0.6, Codestral 0.3 / 0.03 / 0.9 (input / cached input / output).
+        let now = Utc::now();
+        for (model, hit, miss, out) in [
+            ("mistral-medium-latest", 0.15, 1.50, 7.50),
+            ("mistral-large-latest", 0.05, 0.50, 1.50),
+            ("mistral-small-latest", 0.015, 0.15, 0.60),
+            ("mistral-code-latest", 0.03, 0.30, 0.90),
+        ] {
+            let pricing = provider_owned_hand_pricing_at(ApiProvider::Mistral, model, now)
+                .unwrap_or_else(|| panic!("direct Mistral owns {model}"));
+            assert_eq!(pricing.usd.input_cache_hit_per_million, hit, "{model}");
+            assert_eq!(pricing.usd.input_cache_miss_per_million, miss, "{model}");
+            assert_eq!(pricing.usd.output_per_million, out, "{model}");
+            // No published cache-write rate: unpriced, never assumed.
+            assert_eq!(
+                pricing.usd.cache_write,
+                CacheWritePolicy::Unpublished,
+                "{model}"
+            );
+            assert!(
+                provider_owned_hand_pricing_at(ApiProvider::Openrouter, model, now).is_none(),
+                "{model}: aggregators must not inherit first-party Mistral rates"
+            );
+        }
     }
 
     /// Published DeepSeek V4 rates per 1M tokens (cache-hit, cache-miss,

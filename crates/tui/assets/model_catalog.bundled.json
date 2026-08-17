@@ -113,6 +113,8 @@
       "context_window": 1048576,
       "max_output": 131072,
       "supports_reasoning": true,
+      "input_usd_per_million": 3.0,
+      "output_usd_per_million": 15.0,
       "modalities": ["text", "image", "video"],
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
@@ -247,13 +249,24 @@
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
     },
+    "claude-opus-5": {
+      "id": "claude-opus-5",
+      "context_window": 1000000,
+      "max_output": 128000,
+      "supports_reasoning": true,
+      "input_usd_per_million": 5.0,
+      "output_usd_per_million": 25.0,
+      "modalities": ["text"],
+      "supported_parameters": ["reasoning"],
+      "provenance": "bundled"
+    },
     "claude-sonnet-5": {
       "id": "claude-sonnet-5",
       "context_window": 1000000,
       "max_output": 128000,
       "supports_reasoning": true,
-      "input_usd_per_million": 3.0,
-      "output_usd_per_million": 15.0,
+      "input_usd_per_million": 2.0,
+      "output_usd_per_million": 10.0,
       "modalities": ["text"],
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"

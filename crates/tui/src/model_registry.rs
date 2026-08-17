@@ -138,6 +138,7 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("deepseek-coder:1.3b", ModelProvider::DeepSeek),
     // --- Anthropic (config DEFAULT_ANTHROPIC_MODEL + models.rs rows) ---
     ("claude-opus-4-8", ModelProvider::Anthropic),
+    ("claude-opus-5", ModelProvider::Anthropic),
     ("claude-sonnet-4-6", ModelProvider::Anthropic),
     ("claude-sonnet-5", ModelProvider::Anthropic),
     ("claude-fable-5", ModelProvider::Anthropic),
@@ -153,6 +154,7 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("gpt-5.3-codex", ModelProvider::OpenAi),
     // --- Moonshot / Kimi (config DEFAULT_MOONSHOT_MODEL / KIMI_CODE) ---
     ("kimi-k2.7-code", ModelProvider::Moonshot),
+    ("kimi-k2.7-code-highspeed", ModelProvider::Moonshot),
     ("kimi-k2.6", ModelProvider::Moonshot),
     ("kimi-for-coding", ModelProvider::Moonshot),
     ("moonshotai/kimi-k2.7-code", ModelProvider::Moonshot),
@@ -207,6 +209,7 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     // as listed by Google's model pages, 2026-08).
     ("gemini-3.1-pro-preview", ModelProvider::Google),
     ("gemini-3-pro-preview", ModelProvider::Google),
+    ("gemini-3.7-flash", ModelProvider::Google),
     ("gemini-3.6-flash", ModelProvider::Google),
     ("gemini-3.5-flash", ModelProvider::Google),
     ("gemini-3.5-flash-lite", ModelProvider::Google),
@@ -293,6 +296,7 @@ mod tests {
             ("deepseek-v4-flash", Some(1_000_000)),
             ("deepseek-coder:1.3b", Some(128_000)),
             ("claude-opus-4-8", Some(1_000_000)),
+            ("claude-opus-5", Some(1_000_000)),
             ("claude-sonnet-4-6", Some(1_000_000)),
             ("claude-sonnet-5", Some(1_000_000)),
             ("claude-fable-5", Some(1_000_000)),
@@ -302,6 +306,7 @@ mod tests {
             ("gpt-5.6-terra", Some(1_050_000)),
             ("gpt-5-codex", Some(400_000)),
             ("kimi-k2.7-code", Some(262_144)),
+            ("kimi-k2.7-code-highspeed", Some(262_144)),
             ("kimi-k2.6", Some(262_144)),
             ("z-ai/glm-5.1", Some(202_752)),
             ("z-ai/glm-5.2", Some(1_000_000)),
@@ -322,6 +327,8 @@ mod tests {
             ("grok-4.5", Some(500_000)),
             ("grok-4.3", Some(1_000_000)),
             ("grok-4.20-0309-reasoning", Some(2_000_000)),
+            ("gemini-3.7-flash", Some(1_048_576)),
+            ("gemini-3.1-pro-preview", Some(1_048_576)),
             ("mistral-code-latest", Some(256_000)),
             ("mistral-medium-latest", Some(262_144)),
             ("mistral-small-latest", Some(262_144)),

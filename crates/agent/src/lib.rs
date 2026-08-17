@@ -833,6 +833,16 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
+            // Claude Opus 5 (GA 2026-07-24; API id/alias `claude-opus-5`, 1M
+            // context / 128K output per
+            // https://platform.claude.com/docs/en/about-claude/models/overview).
+            ModelInfo {
+                id: "claude-opus-5".to_string(),
+                provider: ProviderKind::Anthropic,
+                aliases: vec!["opus-5".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
             ModelInfo {
                 id: "claude-sonnet-4-6".to_string(),
                 provider: ProviderKind::Anthropic,
@@ -1214,6 +1224,15 @@ impl Default for ModelRegistry {
                 id: "gemini-3-pro-preview".to_string(),
                 provider: ProviderKind::Google,
                 aliases: vec!["gemini-3-pro".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            // Gemini 3.7 Flash (2026-08 latest Flash; 1,048,576 in / 65,536 out,
+            // https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash).
+            ModelInfo {
+                id: "gemini-3.7-flash".to_string(),
+                provider: ProviderKind::Google,
+                aliases: vec![],
                 supports_tools: true,
                 supports_reasoning: true,
             },

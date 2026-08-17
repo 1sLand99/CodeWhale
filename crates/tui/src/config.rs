@@ -1583,6 +1583,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Google => vec![
             DEFAULT_GOOGLE_MODEL,
             "gemini-3-pro-preview",
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
