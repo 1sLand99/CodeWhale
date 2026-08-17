@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The lowercase `bash` tool no longer wedges when its complete-output spill
+  file cannot be created: a full temp volume or exhausted descriptor table
+  used to fail *every* call — `echo ok` included — with the harness-internal
+  "Failed to create streaming shell output" and never recover until the
+  host was cleaned up. The spill is now best-effort (the bounded tail is
+  still returned and the truncation notice says why the full-output path is
+  missing), and any remaining spawn/stream failure names the exhausted
+  resource — disk, file descriptors, memory — and says the next call is safe
+  to retry (#5465; the wedge that took out the owner's own 0.9.9 session).
 - A concrete route/offering output limit now outranks the conservative
   8,192-token compatibility guess for an uncatalogued model. Routes that
   publish no output limit remain fail-closed, documented model ceilings stay
