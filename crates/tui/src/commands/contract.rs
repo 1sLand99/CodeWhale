@@ -14,16 +14,12 @@
 /// handlers. This is the TUI-visible projection of the checked-in migration
 /// topology (`scripts/command-migration-topology.json`); the CI gate performs
 /// the authoritative bidirectional source scan against that artifact.
+///
+/// Consumed by the Phase 6 dual-path dispatch seam; until then the const is
+/// dead in production builds, which the `allow(dead_code)` documents.
+#[allow(dead_code)]
 pub(crate) const PENDING_GROUPS: &[&str] = &[
-    "config",
-    "core",
-    "debug",
-    "memory",
-    "plugins",
-    "project",
-    "session",
-    "skills",
-    "utility",
+    "config", "core", "debug", "memory", "plugins", "project", "session", "skills", "utility",
 ];
 
 #[cfg(test)]
@@ -36,12 +32,12 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(PENDING_GROUPS, sorted.as_slice(), "frontier must be sorted");
         let unique: std::collections::BTreeSet<&str> = PENDING_GROUPS.iter().copied().collect();
-        assert_eq!(unique.len(), PENDING_GROUPS.len(), "frontier must be unique");
+        assert_eq!(
+            unique.len(),
+            PENDING_GROUPS.len(),
+            "frontier must be unique"
+        );
 
-        let group_names: std::collections::BTreeSet<&str> = crate::commands::groups::all_command_groups()
-            .iter()
-            .map(|group| group.commands()[0].info().name)
-            .collect();
         // The nine roots are the group identities in groups/mod.rs order.
         let expected: std::collections::BTreeSet<&str> = [
             "config", "core", "debug", "memory", "plugins", "project", "session", "skills",
@@ -49,7 +45,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert_eq!(unique, expected, "frontier must exactly cover the nine groups");
-        let _ = group_names; // group identity is verified by the CI source gate
+        assert_eq!(
+            unique, expected,
+            "frontier must exactly cover the nine groups"
+        );
     }
 }
