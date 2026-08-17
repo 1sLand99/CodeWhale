@@ -116,6 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference for agents/workflows/plugins/skills
   (docs/design/CLAUDE_CODE_PARITY.md); config.example.toml / SUBAGENTS.md /
   TOOL_LIFECYCLE.md brought back in line with the code (#5447).
+- Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
+  agent detail, and a `doctor` "Fleet roster layers" section (JSON
+  `operate_fleet.roster.multi_layer`), in all 15 TUI locales. Layer collapse
+  and `[fleet.profiles]` migration stay for 0.9.10 (#5098).
 - Sandbox: bwrap containers get the `--dev/--proc/--tmpfs` essentials plus
   configurable extra roots (`bwrap_ro_roots` / `bwrap_dev_roots`) so
   toolchains that live outside the workspace stay reachable read-only
