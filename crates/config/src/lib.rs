@@ -2867,6 +2867,19 @@ impl ConfigToml {
             );
         }
 
+        if key == "telemetry" {
+            // #5441: telemetry resolves ON by default, so an unset file key
+            // must not read "key not found" (or as a bare file value) on a
+            // machine whose batches ship. Show the resolved consent with its
+            // source — a truth change, not a behaviour change.
+            let (on, source) = resolved_telemetry_consent(self.telemetry);
+            return Some(format!(
+                "{} ({})",
+                if on { "on" } else { "off" },
+                source.as_str()
+            ));
+        }
+
         if key == "http_headers" {
             return serialize_http_headers_for_display(&self.http_headers);
         }
@@ -3416,32 +3429,34 @@ impl ConfigToml {
             .clone()
             .or_else(|| env.log_level.clone())
             .or_else(|| self.log_level.clone());
-        let telemetry_allowed = cli
-            .telemetry
-            .or(env.telemetry)
-            .or(self.telemetry)
-            .unwrap_or(true);
-        // `telemetry = false` written to the config file is the off switch the
-        // first-run notice and `docs/TELEMETRY.md` both advertise as the
-        // *persistent* one, so it is a floor and not merely the last term of a
-        // precedence chain. Before this it lost to `--telemetry true`, and the
-        // dispatcher then laundered that per-run flag into the child's
-        // `CODEWHALE_TELEMETRY`, where it also outranked the child's own copy
-        // of the same file: any wrapper script, alias, or agent harness that
-        // passed the flag silently re-enabled a user who had turned telemetry
-        // off. Re-enabling is `codewhale config set telemetry true`, which is
-        // the same durable register the off was written in.
+        // Telemetry consent resolves once, in the shared core behind
+        // [`resolved_telemetry_consent`], so the runtime and the
+        // doctor/config provenance surfaces cannot disagree about what is
+        // shipping (#5441). The comments that matter live there: the
+        // environment/file/default chain, and why every kill switch is a
+        // floor (`telemetry = false` persisted in the file is the *persistent*
+        // off switch; an explicit env "off", an unreadable env value, or a
+        // dispatcher-declared floor forces off regardless of CLI flag or
+        // config file).
+        let (telemetry_env_file, telemetry_source_env_file) = telemetry_consent_from_env(
+            env.telemetry,
+            env.telemetry_env_invalid,
+            env.telemetry_floor,
+            self.telemetry,
+        );
+        // The CLI flag is a run-scoped term on top: `--telemetry false` stops
+        // this run; `--telemetry true` can never climb over a kill switch.
+        // The source names the CLI only when the CLI term actually decided
+        // the outcome — a flag that lost to a kill switch is not the provenance.
+        let telemetry = telemetry_env_file && cli.telemetry != Some(false);
+        let telemetry_source = if cli.telemetry == Some(false)
+            || (cli.telemetry == Some(true) && telemetry_env_file)
+        {
+            TelemetrySource::Cli
+        } else {
+            telemetry_source_env_file
+        };
         let telemetry_persisted_off = self.telemetry == Some(false);
-        // Off is sticky: an explicit env "off", an env value we could not
-        // parse, or a floor declared by the dispatcher forces off regardless of
-        // CLI flag or config file. A kill switch that a later flag can
-        // re-enable is not a kill switch, and a typo in `CODEWHALE_TELEMETRY`
-        // must never resolve to "on".
-        let telemetry = telemetry_allowed
-            && env.telemetry != Some(false)
-            && !env.telemetry_env_invalid
-            && !env.telemetry_floor
-            && !telemetry_persisted_off;
         // Only a *persisted* off is an answer. `--telemetry false` and
         // `CODEWHALE_TELEMETRY=0` are run-scoped kill switches: they must stop
         // this run without deleting the identity and buffered events of a user
@@ -3498,6 +3513,7 @@ impl ConfigToml {
             output_mode,
             log_level,
             telemetry,
+            telemetry_source,
             telemetry_explicit_off,
             telemetry_endpoint,
             approval_policy,
@@ -3563,6 +3579,108 @@ pub fn telemetry_floor_in_force() -> bool {
         return false;
     };
     !matches!(parse_bool(&raw), Ok(true))
+}
+
+/// Where resolved telemetry consent came from (#5441).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetrySource {
+    /// `--telemetry` on this run's command line.
+    Cli,
+    /// `CODEWHALE_TELEMETRY`/`DEEPSEEK_TELEMETRY`, including the dispatcher's
+    /// floor statement and every environment kill switch.
+    Env,
+    /// `telemetry = …` written to the config file.
+    Config,
+    /// Nobody said anything; the shipped default (`on`) applies silently.
+    Default,
+}
+
+impl TelemetrySource {
+    /// Stable label for the doctor row and config display.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Env => "env",
+            Self::Config => "config",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// Read the telemetry environment override, reporting an unreadable value
+/// instead of swallowing it.
+///
+/// Returns `(value, invalid)`. `invalid` is `true` only when the variable
+/// was set to something [`parse_bool`] rejected; an unset variable is
+/// simply `(None, false)`. Shared by the runtime resolver and the
+/// provenance surfaces so they cannot drift.
+fn read_telemetry_env() -> (Option<bool>, bool) {
+    let Some(raw) = std::env::var("CODEWHALE_TELEMETRY")
+        .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY"))
+        .ok()
+    else {
+        return (None, false);
+    };
+    match parse_bool(&raw) {
+        Ok(value) => (Some(value), false),
+        Err(_) => {
+            tracing::warn!(
+                "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value '{raw}'; expected one of \
+                 1/0, true/false, yes/no, on/off, enabled/disabled. Telemetry is forced off."
+            );
+            (None, true)
+        }
+    }
+}
+
+/// Resolved telemetry consent with its source, for surfaces that hold the
+/// config-file value but not the full CLI/env resolution chain — the doctor
+/// runtime-posture row and the `config get telemetry` display (#5441).
+///
+/// This is the same resolution [`ConfigToml::resolve_runtime_options`]
+/// applies without its CLI term: environment first (an explicit value, an
+/// unreadable one, or a dispatcher floor), then the file, then the shipped
+/// default of `on`; a persisted `telemetry = false` is a floor no later
+/// term can climb over. The runtime resolver calls this directly, so the
+/// surfaces and the shipped batches can never disagree.
+#[must_use]
+pub fn resolved_telemetry_consent(file_telemetry: Option<bool>) -> (bool, TelemetrySource) {
+    let (env_telemetry, env_invalid) = read_telemetry_env();
+    telemetry_consent_from_env(
+        env_telemetry,
+        env_invalid,
+        telemetry_floor_in_force(),
+        file_telemetry,
+    )
+}
+
+/// The decision core shared by [`resolved_telemetry_consent`] and the runtime
+/// resolver, which already holds a snapshot of the same environment facts.
+#[must_use]
+fn telemetry_consent_from_env(
+    env_telemetry: Option<bool>,
+    env_invalid: bool,
+    floor: bool,
+    file_telemetry: Option<bool>,
+) -> (bool, TelemetrySource) {
+    let persisted_off = file_telemetry == Some(false);
+    let allowed = env_telemetry.or(file_telemetry).unwrap_or(true);
+    let on = allowed && env_telemetry != Some(false) && !env_invalid && !floor && !persisted_off;
+    let source = if !on && (env_telemetry == Some(false) || env_invalid || floor) {
+        // An environment kill switch decided the outcome.
+        TelemetrySource::Env
+    } else if !on && persisted_off {
+        // The persistent opt-out outranked everything else in play.
+        TelemetrySource::Config
+    } else if env_telemetry.is_some() {
+        TelemetrySource::Env
+    } else if file_telemetry.is_some() {
+        TelemetrySource::Config
+    } else {
+        TelemetrySource::Default
+    };
+    (on, source)
 }
 
 #[must_use]
@@ -4963,6 +5081,10 @@ pub struct ResolvedRuntimeOptions {
     pub output_mode: Option<String>,
     pub log_level: Option<String>,
     pub telemetry: bool,
+    /// Where the resolved telemetry consent came from (cli | env | config |
+    /// default), so doctor and config displays can state the truth about a
+    /// machine that never opted in (#5441).
+    pub telemetry_source: TelemetrySource,
     /// A human wrote `telemetry = false` into the config file.
     ///
     /// This is the *persistent* opt-out, and it is deliberately narrower than
@@ -7103,28 +7225,9 @@ impl EnvRuntimeOverrides {
     }
 
     /// Read the telemetry kill switch, reporting an unreadable value instead of
-    /// swallowing it.
-    ///
-    /// Returns `(value, invalid)`. `invalid` is `true` only when the variable
-    /// was set to something [`parse_bool`] rejected; an unset variable is
-    /// simply `(None, false)`.
+    /// swallowing it. See [`read_telemetry_env`].
     fn load_telemetry() -> (Option<bool>, bool) {
-        let Some(raw) = std::env::var("CODEWHALE_TELEMETRY")
-            .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY"))
-            .ok()
-        else {
-            return (None, false);
-        };
-        match parse_bool(&raw) {
-            Ok(value) => (Some(value), false),
-            Err(_) => {
-                tracing::warn!(
-                    "Invalid CODEWHALE_TELEMETRY/DEEPSEEK_TELEMETRY value '{raw}'; expected one of \
-                     1/0, true/false, yes/no, on/off, enabled/disabled. Telemetry is forced off."
-                );
-                (None, true)
-            }
-        }
+        read_telemetry_env()
     }
 
     fn base_url_for(&self, provider: ProviderKind) -> Option<String> {

@@ -345,13 +345,31 @@ pub(crate) fn classify_call(name: &str, input: &Value, spec: &dyn ToolSpec) -> C
 ///
 /// Returns the operator-facing refusal text, which names the posture rather
 /// than the tool, so the refusal reads as a contract instead of a malfunction.
+///
+/// `proven_read_only` (#5426/#5438) carries bounded read-only shell evidence
+/// — the exact `agent_readonly_bash_input` predicate `BashTool::execute`
+/// enforces under `ShellPolicy::ReadOnly` — so the call classifies as
+/// [`CallClass::Bounded`]: the same class `classify_call` assigns when the
+/// spec itself reports the input read-only. Two invariants: the admission
+/// can never outrun the execute-time refusal (same predicate both sides),
+/// and the parent's parallel auto-approve classifier is untouched —
+/// `spec.is_read_only_for` still answers the deliberately tighter
+/// `is_parallel_readonly_command` for every other consumer.
 pub(crate) fn enforce_execution_envelope(
     name: &str,
     input: &Value,
     spec: &dyn ToolSpec,
     envelope: ExecutionEnvelope,
+    proven_read_only: bool,
 ) -> Result<(), String> {
     if envelope.is_unrestricted() {
+        return Ok(());
+    }
+    if proven_read_only {
+        // Classified Bounded: no capability the call can exercise escapes
+        // the envelope. Network-reaching shape is still rejected separately
+        // by the child's network gate, and the execute path re-verifies the
+        // same predicate before running anything.
         return Ok(());
     }
     match classify_call(name, input, spec) {
@@ -503,7 +521,7 @@ mod tests {
             ("plugin_deploy", json!({})),
         ] {
             let spec = executes(name, Some("list"));
-            let error = enforce_execution_envelope(name, &input, &spec, READ_ONLY)
+            let error = enforce_execution_envelope(name, &input, &spec, READ_ONLY, false)
                 .expect_err("read-only member must not execute programs");
             assert!(error.contains("read-only"), "{name}: {error}");
         }
@@ -524,14 +542,15 @@ mod tests {
     fn a_shell_less_posture_cannot_start_a_verification_process() {
         let verifier = executes("run_verifiers", None);
         for input in [json!({}), json!({"commands": []})] {
-            let error = enforce_execution_envelope("run_verifiers", &input, &verifier, NO_SHELL)
-                .expect_err("an analyst was granted no authority to start a process");
+            let error =
+                enforce_execution_envelope("run_verifiers", &input, &verifier, NO_SHELL, false)
+                    .expect_err("an analyst was granted no authority to start a process");
             assert!(error.contains("shell authority"), "{error}");
         }
 
         let tests = executes("run_tests", None);
         for input in [json!({}), json!({"args": "  "}), json!({"args": "-p tui"})] {
-            enforce_execution_envelope("run_tests", &input, &tests, NO_SHELL)
+            enforce_execution_envelope("run_tests", &input, &tests, NO_SHELL, false)
                 .expect_err("the default test gate still forks a process");
         }
 
@@ -542,6 +561,7 @@ mod tests {
             &json!({"commands": [{"program": "bash", "args": ["-lc", "id"]}]}),
             &verifier,
             NO_SHELL,
+            false,
         )
         .expect_err("operator command lines are refused first");
         assert!(error.contains("arbitrary execution"), "{error}");
@@ -555,7 +575,7 @@ mod tests {
     fn a_verifier_ceiling_keeps_the_verification_surface() {
         let tests = executes("run_tests", None);
         for input in [json!({}), json!({"args": "-p tui exact_fleet"})] {
-            enforce_execution_envelope("run_tests", &input, &tests, READ_ONLY)
+            enforce_execution_envelope("run_tests", &input, &tests, READ_ONLY, false)
                 .expect("a verifier ceiling grants shell authority, which is its whole job");
         }
     }
@@ -588,25 +608,37 @@ mod tests {
     #[test]
     fn bounded_read_only_and_verification_calls_survive() {
         let tasks = executes("tasks", Some("list"));
-        enforce_execution_envelope("tasks", &json!({"action": "list"}), &tasks, READ_ONLY)
-            .expect("durable task bookkeeping is read-only");
+        enforce_execution_envelope(
+            "tasks",
+            &json!({"action": "list"}),
+            &tasks,
+            READ_ONLY,
+            false,
+        )
+        .expect("durable task bookkeeping is read-only");
 
         let verifier = executes("run_verifiers", None);
         for input in [json!({}), json!({"commands": []})] {
-            enforce_execution_envelope("run_verifiers", &input, &verifier, READ_ONLY)
+            enforce_execution_envelope("run_verifiers", &input, &verifier, READ_ONLY, false)
                 .expect("the default verification gate is what a verifier is for");
         }
         let tests = executes("run_tests", None);
         for input in [json!({}), json!({"args": "  "})] {
-            enforce_execution_envelope("run_tests", &input, &tests, READ_ONLY)
+            enforce_execution_envelope("run_tests", &input, &tests, READ_ONLY, false)
                 .expect("the default test gate is bounded");
         }
 
         // Delegation stays available: a read-only member may still fan out
         // read-only children, which inherit this same envelope.
         let agent = executes("agent", None);
-        enforce_execution_envelope("agent", &json!({"prompt": "read"}), &agent, READ_ONLY)
-            .expect("delegation is governed by depth, not by write authority");
+        enforce_execution_envelope(
+            "agent",
+            &json!({"prompt": "read"}),
+            &agent,
+            READ_ONLY,
+            false,
+        )
+        .expect("delegation is governed by depth, not by write authority");
     }
 
     /// The shipped `verifier` role is `write = false, shell = "full"`, and its
@@ -622,8 +654,14 @@ mod tests {
             "--package tui --test-threads=1 --nocapture",
             "--workspace --all-features -- --skip slow_case",
         ] {
-            enforce_execution_envelope("run_tests", &json!({"args": args}), &tests, READ_ONLY)
-                .unwrap_or_else(|error| panic!("`{args}` selects tests and must run: {error}"));
+            enforce_execution_envelope(
+                "run_tests",
+                &json!({"args": args}),
+                &tests,
+                READ_ONLY,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("`{args}` selects tests and must run: {error}"));
         }
     }
 
@@ -644,7 +682,7 @@ mod tests {
         };
         let tests = executes("run_tests", None);
         for input in [json!({"args": "-p tui"}), json!({})] {
-            let error = enforce_execution_envelope("run_tests", &input, &tests, NO_SHELL)
+            let error = enforce_execution_envelope("run_tests", &input, &tests, NO_SHELL, false)
                 .expect_err("a planner/scout/consultant has no shell authority");
             assert!(error.contains("shell"), "{input}: {error}");
         }
@@ -667,9 +705,14 @@ mod tests {
             "--features tui/evil",
             "`whoami`",
         ] {
-            let error =
-                enforce_execution_envelope("run_tests", &json!({"args": args}), &tests, READ_ONLY)
-                    .expect_err("`{args}` is not a test selection");
+            let error = enforce_execution_envelope(
+                "run_tests",
+                &json!({"args": args}),
+                &tests,
+                READ_ONLY,
+                false,
+            )
+            .expect_err("`{args}` is not a test selection");
             assert!(error.contains("read-only"), "{args}: {error}");
         }
 
@@ -680,7 +723,8 @@ mod tests {
             json!({"commands": "bash -lc whoami"}),
         ] {
             assert!(
-                enforce_execution_envelope("run_verifiers", &input, &verifier, READ_ONLY).is_err(),
+                enforce_execution_envelope("run_verifiers", &input, &verifier, READ_ONLY, false)
+                    .is_err(),
                 "run_verifiers names programs and must be refused: {input}"
             );
         }
@@ -694,7 +738,8 @@ mod tests {
             read_only_action: None,
         };
         assert!(
-            enforce_execution_envelope("pandoc_convert", &json!({}), &writer, READ_ONLY).is_err()
+            enforce_execution_envelope("pandoc_convert", &json!({}), &writer, READ_ONLY, false)
+                .is_err()
         );
 
         let reacher = FakeTool {
@@ -703,8 +748,14 @@ mod tests {
             read_only_action: None,
         };
         assert!(
-            enforce_execution_envelope("mcp__remote__query", &json!({}), &reacher, READ_ONLY)
-                .is_err()
+            enforce_execution_envelope(
+                "mcp__remote__query",
+                &json!({}),
+                &reacher,
+                READ_ONLY,
+                false
+            )
+            .is_err()
         );
         assert!(
             enforce_execution_envelope(
@@ -715,6 +766,7 @@ mod tests {
                     network: true,
                     ..READ_ONLY
                 },
+                false
             )
             .is_ok()
         );
@@ -730,6 +782,7 @@ mod tests {
             &json!({"action": "gate_run", "command": "cargo test"}),
             &spec,
             ExecutionEnvelope::UNRESTRICTED,
+            false,
         )
         .expect("a write-capable, shell-capable child keeps its gates");
     }

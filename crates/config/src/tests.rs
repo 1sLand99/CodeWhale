@@ -8608,6 +8608,114 @@ fn a_run_scoped_off_is_a_kill_switch_and_not_a_revocation() {
     assert!(!resolved.telemetry_explicit_off);
 }
 
+/// #5441: the resolved consent must name its source, because "telemetry: on"
+/// with no provenance hides the one default users most need to see.
+#[test]
+fn telemetry_consent_names_its_source() {
+    let guard = TelemetryEnvGuard::take();
+
+    // Nobody said anything: on, by default.
+    let (on, source) = resolved_telemetry_consent(None);
+    assert!(on);
+    assert_eq!(source, TelemetrySource::Default);
+
+    // The config file owns the answer.
+    let (on, source) = resolved_telemetry_consent(Some(true));
+    assert!(on);
+    assert_eq!(source, TelemetrySource::Config);
+
+    // A persisted off is a floor and is named as the decision.
+    let (on, source) = resolved_telemetry_consent(Some(false));
+    assert!(!on);
+    assert_eq!(source, TelemetrySource::Config);
+
+    // An explicit environment "on" loses to the persisted off: re-enabling
+    // is writing the durable register the off was written in.
+    guard.set("1");
+    let (on, source) = resolved_telemetry_consent(Some(false));
+    assert!(!on);
+    assert_eq!(source, TelemetrySource::Config);
+
+    // An environment kill switch decides and is named.
+    guard.set("0");
+    let (on, source) = resolved_telemetry_consent(Some(true));
+    assert!(!on);
+    assert_eq!(source, TelemetrySource::Env);
+
+    // An unreadable environment value is a kill switch, never "on".
+    guard.set("yes-please");
+    let (on, source) = resolved_telemetry_consent(Some(true));
+    assert!(!on);
+    assert_eq!(source, TelemetrySource::Env);
+
+    // A clean environment "on" with nothing in the file is env-owned.
+    guard.set("1");
+    let (on, source) = resolved_telemetry_consent(None);
+    assert!(on);
+    assert_eq!(source, TelemetrySource::Env);
+}
+
+/// #5441: the runtime receipt carries the same source the surfaces print.
+#[test]
+fn resolved_runtime_options_reports_telemetry_source() {
+    let guard = TelemetryEnvGuard::take();
+
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert!(resolved.telemetry);
+    assert_eq!(resolved.telemetry_source, TelemetrySource::Default);
+
+    // The CLI flag owns the answer for this run, off or on.
+    let cli = CliRuntimeOverrides {
+        telemetry: Some(false),
+        ..CliRuntimeOverrides::default()
+    };
+    let resolved = ConfigToml::default().resolve_runtime_options(&cli);
+    assert!(!resolved.telemetry);
+    assert_eq!(resolved.telemetry_source, TelemetrySource::Cli);
+
+    // A kill switch still beats `--telemetry true`, and the source says so.
+    guard.set("0");
+    let cli = CliRuntimeOverrides {
+        telemetry: Some(true),
+        ..CliRuntimeOverrides::default()
+    };
+    let resolved = ConfigToml::default().resolve_runtime_options(&cli);
+    assert!(!resolved.telemetry);
+    assert_eq!(resolved.telemetry_source, TelemetrySource::Env);
+}
+
+/// #5441: `config get telemetry` reports the resolved consent with its
+/// source instead of "key not found" on a machine whose batches ship.
+#[test]
+fn config_display_for_telemetry_reports_resolved_consent_with_source() {
+    let guard = TelemetryEnvGuard::take();
+
+    let config = ConfigToml::default();
+    assert_eq!(
+        config.get_display_value("telemetry").as_deref(),
+        Some("on (default)")
+    );
+
+    let config = ConfigToml {
+        telemetry: Some(false),
+        ..ConfigToml::default()
+    };
+    assert_eq!(
+        config.get_display_value("telemetry").as_deref(),
+        Some("off (config)")
+    );
+
+    guard.set("0");
+    let config = ConfigToml {
+        telemetry: Some(true),
+        ..ConfigToml::default()
+    };
+    assert_eq!(
+        config.get_display_value("telemetry").as_deref(),
+        Some("off (env)")
+    );
+}
+
 #[test]
 fn the_dispatcher_states_the_floor_rather_than_letting_the_child_infer_it() {
     // The child cannot tell an operator's declared kill switch from the

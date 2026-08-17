@@ -1563,6 +1563,12 @@ impl ShellManager {
         self.sandbox_manager.set_prefer_bwrap(prefer);
     }
 
+    /// Set user-configured bwrap mount extensions (#5410): extra read-only
+    /// roots and writable device nodes such as `/dev/null`.
+    pub fn set_bwrap_extensions(&mut self, extensions: crate::sandbox::BwrapMountExtensions) {
+        self.sandbox_manager.set_bwrap_extensions(extensions);
+    }
+
     /// Return the OS sandbox wrapper this shell manager is configured and able
     /// to apply to commands.
     pub fn configured_sandbox_type(&self) -> Option<SandboxType> {
@@ -3094,6 +3100,16 @@ fn exec_shell_input_agent_readonly(input: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_str)
         .expect("shape check established a command string");
     is_agent_readonly_shell_command(command)
+}
+
+/// `exec_shell_input_agent_readonly` is also the gate-side predicate for the
+/// subagent posture check (#5426): the catalog carve-out that admits
+/// canonical `bash` to Scout/Reviewer/Planner must judge the same call the
+/// `BashTool::execute` `ShellPolicy::ReadOnly` branch will judge, so the
+/// posture gate can admit a proven-readonly call without ever widening past
+/// the execute-time refusal.
+pub(crate) fn agent_readonly_bash_input(input: &serde_json::Value) -> bool {
+    exec_shell_input_agent_readonly(input)
 }
 
 fn exec_shell_input_is_parallel_readonly(input: &serde_json::Value) -> bool {

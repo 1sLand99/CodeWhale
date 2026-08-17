@@ -13,6 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8,192-token compatibility guess for an uncatalogued model. Routes that
   publish no output limit remain fail-closed, documented model ceilings stay
   authoritative, and a route limit can never raise the requested cap (#5460).
+- Context-window honesty at every surface (#5239, #5441): the
+  `model-name hint` and `fallback` rungs of the context-window ladder are
+  guesses, and every surface that renders one now says so — the status line,
+  `/status`, `/config`, the context-pressure message, the model picker chips,
+  and the auto-router inventory. Unverified windows still drive real budgets
+  (compaction trigger, context meter, output reservation); they just stop
+  reading as capabilities anyone checked. A window parsed from an `_Nk`
+  model-name suffix (`qwen3-32b-256k` → 256K) is now its own
+  `model-name hint` rung below `catalog`, because it is optimistic rather
+  than conservative — a catalog or provider-reported value beats it. The
+  `[providers.<name>] context_window` override remains the hard fix and
+  renders as `configured` with no marker.
+- Output-ceiling honesty (#5440): an Anthropic-family model the catalog does
+  not describe keeps the 64K Messages floor as its clamp and the ChatGPT/
+  Codex OAuth route keeps its 4K policy, but `OutputCeilingSource` gained an
+  `unverified` rung for both, so exec-stream receipts and the model picker
+  label them `unverified`/"assumed floor" instead of `documented`. Clamp
+  values are unchanged.
+- Telemetry default-on is visible (#5441): `codewhale doctor`'s
+  runtime-posture section gained a `telemetry=on (default)`-style row with
+  the source that decided it (cli | env | config | default), and
+  `codewhale config get telemetry` reports the resolved consent with its
+  source instead of `key not found` on a machine whose batches ship. Truth
+  change only; resolution and behavior are untouched.
 
 ### Changed
 

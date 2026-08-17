@@ -233,8 +233,8 @@ fn context_usage(app: &App) -> (usize, u32, f64) {
     (used, max, percent)
 }
 
-/// Name where the effective context window came from and the exact key that
-/// changes it.
+/// Name where the effective context window came from, the honesty marker for
+/// a guess (#5239), and the exact key that changes it.
 ///
 /// #5134: `/status` printed the window as a bare number, so a user watching
 /// auto-compaction fire at 128K on a 1M-capable model had no way to learn that
@@ -242,7 +242,7 @@ fn context_usage(app: &App) -> (usize, u32, f64) {
 /// provenance label alone is not enough — the actionable half is the key path.
 fn context_window_source(app: &App) -> String {
     let source = app.active_context_window_source;
-    let label = source.label();
+    let label = source.display_label();
     let Some(table) = app
         .api_provider
         .metadata()

@@ -3011,6 +3011,14 @@ fn maybe_warn_context_pressure_for_config(
         return;
     }
 
+    // #5239: the meter drives real budgets off this window, so an unverified
+    // one must say so next to the numbers that depend on it.
+    let window_note = if app.active_context_window_source.is_verified() {
+        ""
+    } else {
+        ", unverified window"
+    };
+
     let recommendation = if !config.enabled {
         "Consider enabling auto_compact or use /compact."
     } else if will_auto_compact {
@@ -3021,7 +3029,7 @@ fn maybe_warn_context_pressure_for_config(
 
     if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
         app.status_message = Some(format!(
-            "Context critical: {percent:.0}% ({used}/{max} tokens). {recommendation}"
+            "Context critical: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
         ));
         return;
     }
@@ -3033,7 +3041,7 @@ fn maybe_warn_context_pressure_for_config(
             "Context building"
         };
         app.status_message = Some(format!(
-            "{status_prefix}: {percent:.0}% ({used}/{max} tokens). {recommendation}"
+            "{status_prefix}: {percent:.0}% ({used}/{max} tokens{window_note}). {recommendation}"
         ));
     }
 }

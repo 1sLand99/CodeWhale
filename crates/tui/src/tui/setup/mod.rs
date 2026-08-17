@@ -329,7 +329,7 @@ impl SetupRuntimeFacts {
             &app.model,
             app.active_route_limits,
         );
-        let context_window_source = app.active_context_window_source.label();
+        let context_window_source = app.active_context_window_source.display_label();
         let provider =
             format!("{provider_name} · context {context_window} ({context_window_source})");
         let auth = readiness.label().into_owned();

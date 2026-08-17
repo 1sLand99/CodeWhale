@@ -4863,6 +4863,7 @@ mod tests {
             output_mode: None,
             log_level: None,
             telemetry: false,
+            telemetry_source: codewhale_config::TelemetrySource::Default,
             telemetry_explicit_off: false,
             telemetry_endpoint: None,
             approval_policy: None,

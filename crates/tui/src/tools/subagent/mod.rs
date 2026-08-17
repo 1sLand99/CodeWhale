@@ -13738,6 +13738,24 @@ impl SubAgentToolRegistry {
                         && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest)
                 }
                 ApprovalRequirement::Required => {
+                    // #5426 acceptance point 1: the bounded read-only shell.
+                    // `allows_bounded_readonly_bash` admits canonical `bash`
+                    // to the inspection roles through the raw-shell deny
+                    // list; a call the agent read-only classifier proves
+                    // mutation-free is Auto-class evidence, not a held
+                    // mutation, so the gate must not demand `ShellPolicy::
+                    // Full` for it. Judged by the same predicate
+                    // `BashTool::execute` enforces under
+                    // `ShellPolicy::ReadOnly` (shell.rs), so this admission
+                    // can never widen past the execute-time refusal — the
+                    // first live dogfood against #5428 was denied all three
+                    // canonical inspection commands here because the gate
+                    // consulted only `Required` → `Full`.
+                    if self.allows_bounded_readonly_bash(name)
+                        && input.is_some_and(crate::tools::shell::agent_readonly_bash_input)
+                    {
+                        return true;
+                    }
                     matches!(self.runtime_profile.shell, ShellPolicy::Full)
                         && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
                 }
@@ -13898,6 +13916,7 @@ impl SubAgentToolRegistry {
             input,
             spec.as_ref(),
             self.execution_envelope(),
+            self.bounded_readonly_bash_evidence(name, input),
         )
         .err()
     }
@@ -13913,10 +13932,25 @@ impl SubAgentToolRegistry {
                 input,
                 spec.as_ref(),
                 envelope,
+                self.bounded_readonly_bash_evidence(name, input),
             )
             .is_ok(),
             None => true,
         }
+    }
+
+    /// #5426/#5438: the bounded read-only shell evidence for the exact call.
+    /// True only for canonical `bash` on the inspection roles whose command
+    /// the agent read-only classifier proves mutation-free — the same
+    /// predicate the posture gate and `BashTool::execute` (under
+    /// `ShellPolicy::ReadOnly`) enforce, so gate, envelope, and execute all
+    /// answer one question with one classifier. The first live dogfood was
+    /// denied at the gate; after the gate fix it would STILL have been
+    /// denied here — `classify_call` consults `spec.is_read_only_for`, which
+    /// for bash is the deliberately tighter parallel classifier.
+    fn bounded_readonly_bash_evidence(&self, name: &str, input: &Value) -> bool {
+        self.allows_bounded_readonly_bash(name)
+            && crate::tools::shell::agent_readonly_bash_input(input)
     }
 
     fn visibility_representative_input(&self, name: &str) -> Option<Value> {
@@ -14135,13 +14169,16 @@ impl SubAgentToolRegistry {
         // shape-specific; this one is derived from the tool's real capabilities
         // and this call's canonical action, so it also covers the tools no list
         // in this file can name — repository plugins, runtime MCP server tools,
-        // and anything registered later.
+        // and anything registered later. The bounded read-only bash carve-out
+        // (#5426/#5438) carries its proven-read-only evidence so the envelope
+        // classifies it Bounded instead of refusing it as Executes.
         if let Some(spec) = self.registry.get(name) {
             crate::tools::execution_envelope::enforce_execution_envelope(
                 name,
                 &input,
                 spec.as_ref(),
                 self.execution_envelope(),
+                self.bounded_readonly_bash_evidence(name, &input),
             )
             .map_err(|refusal| anyhow!(refusal))?;
         }
