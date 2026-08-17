@@ -92,7 +92,10 @@ fn tool_result_is_noisy(tool_name: &str) -> bool {
             | "run_verifiers"
             | "task_gate_run"
             | "multi_tool_use.parallel"
+            | "Web"
             | "web_search"
+            | "web.run"
+            | "fetch_url"
     )
 }
 
