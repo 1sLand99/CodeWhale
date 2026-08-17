@@ -107,15 +107,15 @@ fn apply_xai_grok_4_6_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_xai_grok_4_6_route(provider, base_url, model)
-        && !(provider == ApiProvider::Xai
+    if !(is_exact_xai_grok_4_6_route(provider, base_url, model)
+        || (provider == ApiProvider::Xai
             && codewhale_config::provider::is_exact_xai_platform_route(
                 codewhale_config::ProviderKind::Xai,
                 base_url,
             )
             && model
                 .trim()
-                .eq_ignore_ascii_case(crate::config::XAI_GROK_4_5_MODEL))
+                .eq_ignore_ascii_case(crate::config::XAI_GROK_4_5_MODEL)))
     {
         return;
     }
