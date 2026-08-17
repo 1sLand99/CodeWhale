@@ -17,7 +17,7 @@ monoliths without necessity):
 | Phase rail | `tui/phase_strip.rs` |
 | Stream entry seam | `client/stream_entry.rs` |
 
-Business logic must not land in `ui.rs` / `app.rs` / `widgets/mod.rs` unless it
+Business logic must not land in `tui/ui.rs` / `tui/app.rs` / `tui/widgets/mod.rs` unless it
 is pure view wiring.
 
 ## StreamFn consolidation (landed post-0.9.1)
@@ -50,7 +50,7 @@ StreamFn (shared decode loop) is still deferred.
 
 ## Thin TUI over core (north star)
 
-`ui.rs` / `app.rs` / `widgets/mod.rs` remain large. Post-0.9.1 priority:
+`tui/ui.rs` / `tui/app.rs` / `tui/widgets/mod.rs` remain large. Post-0.9.1 priority:
 
 1. Extract tool / git / github / session / workflow / MCP routing out of the TUI
    crate into a core/data layer (kimi-code `agent-core` / piagent package shape).
