@@ -77,6 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS CI: the `agent_focus_pty` auto-review receipt test waited on a
   worker that had already completed and raced the rail's focus; it now holds
   the child's wrap-up and waits for a settled live row (refs #5056, #5403).
+- DeepSeek V4 pricing follows the published peak/off-peak tiers (peak
+  01:00–04:00 and 06:00–10:00 UTC; off-peak is half of peak) for
+  `deepseek-v4-flash` and `deepseek-v4-pro` in USD and CNY, resolved from
+  each turn's recorded time; the stale single-tier rows understated cost up
+  to ~4×. Because every direct DeepSeek first-party rate is now
+  time-windowed, the scorecard fails closed (`missing_recorded_time`) on an
+  undated DeepSeek turn instead of guessing a tier (#5470; #5241 follow-up,
+  verified against api-docs.deepseek.com on 2026-08-17).
 - SSE UTF-8 split across HTTP/2 DATA frames now fails closed in every
   streaming dialect: a shared strict decoder, tail flush, and
   `decode_failed` propagation (`InvalidSseUtf8`) replace the per-dialect
