@@ -86,6 +86,36 @@ pub struct ShadowedProfile {
     pub winner_source: PathBuf,
 }
 
+/// One observed definition of a profile id, including whether it won the merge.
+///
+/// Built from the winning member plus every [`ShadowedProfile`] for that id so
+/// the roster view, detail pane, and doctor can list the full stack without
+/// changing merge precedence (#5098 visibility).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLayer {
+    pub origin: ProfileOrigin,
+    pub source: PathBuf,
+    pub wins: bool,
+}
+
+/// A profile id that exists in more than one roster layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiLayerProfile {
+    pub id: String,
+    pub effective: ProfileOrigin,
+    pub effective_path: PathBuf,
+    pub layers: Vec<ProfileLayer>,
+}
+
+fn origin_precedence(origin: ProfileOrigin) -> u8 {
+    match origin {
+        ProfileOrigin::Workspace => 3,
+        ProfileOrigin::Personal => 2,
+        ProfileOrigin::Config => 1,
+        ProfileOrigin::BuiltIn => 0,
+    }
+}
+
 /// Process-launch decision: whether project-scope agent profiles
 /// (`.codewhale/agents/*.toml`) may join the dispatch roster (#5098). Set
 /// once from `--no-project-config` at launch so every roster re-read (spawn
@@ -456,6 +486,103 @@ impl FleetRoster {
             .iter()
             .filter(move |shadow| shadow.id.trim().eq_ignore_ascii_case(&id))
     }
+
+    /// Every layer that defined `id`, winner first, then remaining layers
+    /// from highest remaining precedence to lowest.
+    #[must_use]
+    pub fn layers_for(&self, id: &str) -> Vec<ProfileLayer> {
+        let Some(member) = self.get(id) else {
+            return Vec::new();
+        };
+        layers_from_parts(member, &self.shadowed)
+    }
+
+    /// Profile ids defined in more than one layer (sorted), with the winning
+    /// layer and every losing path. Empty when nothing is shadowed.
+    #[must_use]
+    pub fn multi_layer_report(&self) -> Vec<MultiLayerProfile> {
+        let mut ids: Vec<String> = self
+            .members
+            .iter()
+            .filter(|member| self.layers_for(&member.id).len() > 1)
+            .map(|member| member.id.clone())
+            .collect();
+        ids.sort_by_key(|id| id.to_lowercase());
+        ids.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        ids.into_iter()
+            .filter_map(|id| {
+                let layers = self.layers_for(&id);
+                let winner = layers.iter().find(|layer| layer.wins)?;
+                Some(MultiLayerProfile {
+                    id,
+                    effective: winner.origin,
+                    effective_path: winner.source.clone(),
+                    layers,
+                })
+            })
+            .collect()
+    }
+
+    /// Human doctor lines for multi-layer profile ids: effective layer plus
+    /// every observed path. Empty when no id is defined in more than one layer.
+    #[must_use]
+    pub fn doctor_layer_lines(&self) -> Vec<String> {
+        let report = self.multi_layer_report();
+        if report.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for entry in report {
+            lines.push(format!(
+                "{}: effective={} · {}",
+                entry.id,
+                entry.effective,
+                crate::utils::display_path(&entry.effective_path)
+            ));
+            for layer in &entry.layers {
+                let mark = if layer.wins { "wins" } else { "ignored" };
+                lines.push(format!(
+                    "  {} · {} ({mark})",
+                    layer.origin,
+                    crate::utils::display_path(&layer.source)
+                ));
+            }
+        }
+        lines
+    }
+}
+
+/// Reconstruct the full layer stack for a member from the winning copy plus
+/// every recorded displacement. Used by the roster view (which snapshots
+/// members + shadows) and by [`FleetRoster::layers_for`].
+#[must_use]
+pub fn layers_from_parts(member: &AgentProfile, shadowed: &[ShadowedProfile]) -> Vec<ProfileLayer> {
+    let mut layers = vec![ProfileLayer {
+        origin: member.origin,
+        source: member.source.clone(),
+        wins: true,
+    }];
+    for shadow in shadowed
+        .iter()
+        .filter(|shadow| shadow.id.trim().eq_ignore_ascii_case(member.id.trim()))
+    {
+        let already = layers.iter().any(|layer| {
+            layer.origin == shadow.shadowed_origin && layer.source == shadow.shadowed_source
+        });
+        if !already {
+            layers.push(ProfileLayer {
+                origin: shadow.shadowed_origin,
+                source: shadow.shadowed_source.clone(),
+                wins: false,
+            });
+        }
+    }
+    layers.sort_by(|a, b| match (a.wins, b.wins) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => origin_precedence(b.origin).cmp(&origin_precedence(a.origin)),
+    });
+    layers
 }
 
 /// Fold a displaced layer (if any) into the shadow log.

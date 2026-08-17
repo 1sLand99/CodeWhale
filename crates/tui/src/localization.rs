@@ -1453,6 +1453,20 @@ pub enum MessageId {
     FleetRosterMembersCount,
     FleetRosterOperatorFirst,
     FleetRosterOperatorRow,
+    /// Roster row badge when a project file is winning the same id.
+    FleetRosterShadowBadgeProjectOverride,
+    /// Roster row badge when a personal file exists but is ignored.
+    FleetRosterShadowBadgePersonalIgnored,
+    /// Roster row badge when a personal file is winning the same id.
+    FleetRosterShadowBadgePersonalOverride,
+    /// Roster row badge when `[fleet.profiles]` is winning the same id.
+    FleetRosterShadowBadgeConfigOverride,
+    /// Detail-pane heading for the full per-id layer stack.
+    FleetRosterLayersLabel,
+    /// Marker on the winning layer in the detail stack.
+    FleetRosterLayerWins,
+    /// Marker on a displaced layer in the detail stack.
+    FleetRosterLayerIgnored,
     FleetReadyNotice,
     /// Sticky error when Fleet profile save cannot prove collision safety.
     FleetProfileIdentityVerifyFailed,
@@ -2953,6 +2967,13 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FleetRosterMembersCount,
     MessageId::FleetRosterOperatorFirst,
     MessageId::FleetRosterOperatorRow,
+    MessageId::FleetRosterShadowBadgeProjectOverride,
+    MessageId::FleetRosterShadowBadgePersonalIgnored,
+    MessageId::FleetRosterShadowBadgePersonalOverride,
+    MessageId::FleetRosterShadowBadgeConfigOverride,
+    MessageId::FleetRosterLayersLabel,
+    MessageId::FleetRosterLayerWins,
+    MessageId::FleetRosterLayerIgnored,
     MessageId::FleetReadyNotice,
     MessageId::FleetProfileIdentityVerifyFailed,
     MessageId::FleetProfileIdConflict,

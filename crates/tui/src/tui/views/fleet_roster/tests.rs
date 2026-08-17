@@ -260,7 +260,7 @@ include!("../fleet_roster_capability_tests.rs");
 fn detail_lines_carry_overlay_source_for_project_members() {
     let view = view_with_overrides();
     let reviewer = view.members.iter().find(|m| m.id == "reviewer").unwrap();
-    let text = member_detail_lines_with_session(reviewer, None, &view.shadowed)
+    let text = member_detail_lines_with_session(reviewer, None, &view.shadowed, view.locale)
         .iter()
         .map(|line| {
             line.spans
@@ -328,7 +328,7 @@ fn detail_pane_reports_shadowed_lower_layers() {
         winner_source: PathBuf::from(".codewhale/agents/reviewer.toml"),
     });
     let reviewer = view.members.iter().find(|m| m.id == "reviewer").unwrap();
-    let text = member_detail_lines_with_session(reviewer, None, &view.shadowed)
+    let text = member_detail_lines_with_session(reviewer, None, &view.shadowed, view.locale)
         .iter()
         .map(|line| {
             line.spans
@@ -338,10 +338,43 @@ fn detail_pane_reports_shadowed_lower_layers() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Shadows"), "detail names the shadow: {text}");
     assert!(
-        text.contains("personal copy at /home/op/.codewhale/agents/reviewer.toml (ignored)"),
+        text.contains("Layers"),
+        "detail lists every layer for the id: {text}"
+    );
+    assert!(
+        text.contains("project · .codewhale/agents/reviewer.toml (wins)"),
+        "detail names the winning layer: {text}"
+    );
+    assert!(
+        text.contains("personal · /home/op/.codewhale/agents/reviewer.toml (ignored)"),
         "detail names the ignored file: {text}"
+    );
+}
+
+#[test]
+fn roster_row_badges_personal_copy_ignored() {
+    // #5098: the list row itself must say the personal file is ignored,
+    // not only the detail pane.
+    let rows = render_through_stack(
+        || {
+            let mut view = view_with_overrides();
+            view.shadowed.push(crate::fleet::roster::ShadowedProfile {
+                id: "reviewer".to_string(),
+                shadowed_origin: ProfileOrigin::Personal,
+                shadowed_source: PathBuf::from("/home/op/.codewhale/agents/reviewer.toml"),
+                winner_origin: ProfileOrigin::Workspace,
+                winner_source: PathBuf::from(".codewhale/agents/reviewer.toml"),
+            });
+            view
+        },
+        120,
+        32,
+    );
+    let text = rows.join("\n");
+    assert!(
+        text.contains("personal copy ignored"),
+        "shadowed reviewer row is badged: {text}"
     );
 }
 

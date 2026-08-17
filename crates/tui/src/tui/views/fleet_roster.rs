@@ -29,7 +29,7 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::fleet::profile::AgentProfile;
-use crate::fleet::roster::{FleetRoster, ProfileOrigin};
+use crate::fleet::roster::{FleetRoster, ProfileLayer, ProfileOrigin, layers_from_parts};
 use crate::fleet::worker_runtime::roster_member_agent_type;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
@@ -394,28 +394,19 @@ impl FleetRosterView {
             } else {
                 let member = &self.members[idx - 1];
                 let mark = member_role_mark(member);
-                // #5098: badge rows whose winning layer is ignoring a
-                // lower-precedence file, so a shadowed personal/project edit
-                // is visible from the list, not just the detail pane.
-                let shadow_badge = if self
-                    .shadowed
-                    .iter()
-                    .any(|shadow| shadow.id.trim().eq_ignore_ascii_case(member.id.trim()))
-                {
-                    " ⚠shadows"
-                } else {
-                    ""
-                };
+                // #5098: badge rows whose id exists in more than one layer
+                // so a higher-layer win is visible from the list.
+                let shadow_badge = member_shadow_badge(self.locale, member, &self.shadowed);
                 // Whale Teams: the species badge sits between the charter role
                 // mark and the id, so a Scout, Patch, or Lantern reads at a
                 // glance even before the detail pane opens.
                 let species = member_species(member);
                 let badge_cells = whales::BADGE_WIDTH + 1;
                 let text = format!(
-                    "{pointer}{mark} {}  {}{}",
+                    "{pointer}{mark} {}{}  {}",
                     member.id,
-                    member_routing(member),
-                    shadow_badge
+                    shadow_badge.as_deref().unwrap_or(""),
+                    member_routing(member)
                 );
                 let text = truncate_view_text(&text, list_width.saturating_sub(badge_cells));
                 let base_style = if is_selected {
@@ -473,6 +464,7 @@ impl FleetRosterView {
                 member,
                 Some(self.operator.model.as_str()),
                 &self.shadowed,
+                self.locale,
             ));
             lines
         } else {
@@ -653,10 +645,45 @@ fn member_routing_with_session(member: &AgentProfile, session_model: Option<&str
     }
 }
 
+fn member_shadow_badge(
+    locale: Locale,
+    member: &AgentProfile,
+    shadowed: &[crate::fleet::roster::ShadowedProfile],
+) -> Option<String> {
+    let layers = layers_from_parts(member, shadowed);
+    if layers.len() < 2 {
+        return None;
+    }
+    let personal_ignored = layers
+        .iter()
+        .any(|layer| !layer.wins && layer.origin == ProfileOrigin::Personal);
+    let id = if personal_ignored {
+        MessageId::FleetRosterShadowBadgePersonalIgnored
+    } else {
+        match member.origin {
+            ProfileOrigin::Workspace => MessageId::FleetRosterShadowBadgeProjectOverride,
+            ProfileOrigin::Personal => MessageId::FleetRosterShadowBadgePersonalOverride,
+            ProfileOrigin::Config => MessageId::FleetRosterShadowBadgeConfigOverride,
+            ProfileOrigin::BuiltIn => return None,
+        }
+    };
+    Some(format!("  {}", tr(locale, id)))
+}
+
+fn format_profile_layer(layer: &ProfileLayer, locale: Locale) -> String {
+    let mark = if layer.wins {
+        tr(locale, MessageId::FleetRosterLayerWins)
+    } else {
+        tr(locale, MessageId::FleetRosterLayerIgnored)
+    };
+    format!("{} · {} ({mark})", layer.origin, layer.source.display())
+}
+
 fn member_detail_lines_with_session(
     member: &AgentProfile,
     session_model: Option<&str>,
     shadowed: &[crate::fleet::roster::ShadowedProfile],
+    locale: Locale,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -675,20 +702,20 @@ fn member_detail_lines_with_session(
             _ => format!("{} · {}", member.origin, member.source.display()),
         },
     );
-    // #5098: every layer this member is displacing, so a shadowed personal or
-    // project file is visible instead of silently dropped from the merge.
-    for shadow in shadowed
-        .iter()
-        .filter(|shadow| shadow.id.trim().eq_ignore_ascii_case(member.id.trim()))
-    {
+    // #5098: every layer found for this id, with the winner named. The
+    // Origin field still shows the effective copy; this list is the full
+    // stack so a personal/config edit is visible when project wins.
+    let layers = layers_from_parts(member, shadowed);
+    if layers.len() > 1 {
+        let body = layers
+            .iter()
+            .map(|layer| format_profile_layer(layer, locale))
+            .collect::<Vec<_>>()
+            .join("\n");
         detail_field(
             &mut lines,
-            "Shadows",
-            format!(
-                "{} copy at {} (ignored)",
-                shadow.shadowed_origin,
-                shadow.shadowed_source.display()
-            ),
+            &tr(locale, MessageId::FleetRosterLayersLabel),
+            body,
         );
     }
     detail_field(&mut lines, "Slot", member.profile.slot.as_str().to_string());
