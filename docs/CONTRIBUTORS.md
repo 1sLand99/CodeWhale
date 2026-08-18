@@ -37,7 +37,10 @@ notes, and relevant issue/PR comments.
   for an uncatalogued model; routes that publish no limit stay fail-closed
   (#5461, closes #5460); every web tool surface uses the noisy-result soft
   limit (#5474); lowercase saved selectors resolve against the owning
-  Z.ai/DeepSeek catalog row (#5475)
+  Z.ai/DeepSeek catalog row (#5475); configured-skill prompt paths remain
+  stable across ephemeral roots and operating systems (#5492, #5473)
+- **[Gabriel-Degret](https://github.com/Gabriel-Degret)** — configurable
+  auto-router classifier timeout (#5494; first contribution)
 
 **Reports, reproductions, and verification**
 

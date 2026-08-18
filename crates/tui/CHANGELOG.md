@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.9] - 2026-08-17
+## [0.9.9] - 2026-08-18
 
 Codewhale v0.9.9 is a truth-and-resilience release: the shell tool can no
 longer wedge a session when the host runs out of disk or descriptors,
@@ -126,6 +126,11 @@ locales grow to 18 and 8.
 - CI: the release workflows no longer restore npm/cargo caches after
   checking out a caller-supplied SHA — the CodeQL cache-poisoning Highs
   #88–#107 are closed with a contract test over the workflow files (#5463).
+- Compact TUI rows below 60 columns no longer reserve a hidden session-metrics
+  strip, so narrow terminals reclaim the row instead of clipping the
+  transcript (#5486).
+- Strict `cargo doc` builds no longer fail on bare URLs in rustdoc comments;
+  the remaining links are explicit Markdown targets (#5489).
 
 ### Changed
 
@@ -148,6 +153,23 @@ locales grow to 18 and 8.
   now wraps at the full content width on wide terminals, matching
   tool/status cells, instead of stopping at a 105-column rail that left a
   dead right margin on ultrawide displays (#5436).
+- Configured skill prompts are stable across session roots and operating
+  systems: only custom configured roots hide their physical path, ordinary
+  workspace/global skills keep a discoverable privacy-safe path, warning
+  replacements are boundary-aware (including non-UTF-8 Unix paths), and
+  Windows separators render as `/`. The skills prompt is also 50 bytes
+  leaner without raising a runtime-contract ceiling (#5492, #5473).
+- Auto-router classifier requests accept `[auto.router] timeout_secs`, while
+  preserving the existing default when the key is absent (#5494).
+- Every `ci.yml` job now has an explicit 10–90 minute timeout appropriate to
+  its workload, bounding stale assigned runners instead of inheriting
+  GitHub's six-hour default (#5495).
+- The docs shell and shared web components now route localized copy through
+  the typed dictionary spine; these are two incremental phases of #5337,
+  not completion of the full epic (#5488, #5490).
+- Dependency: rusqlite 0.40.2 (#5391).
+- Documentation: stale A/B/C-tier references, provider defaults, module
+  descriptions, and line anchors now match the current code (#5481).
 
 ### Added
 
@@ -188,6 +210,9 @@ locales grow to 18 and 8.
 - Tests: `crates/tui/tests/README.md` states the keyless assembled-journey
   rule and maps the Auto-Review guardian acceptance items to the engine
   journeys that exercise them (#5361).
+- OrcaRouter's default endpoint is classified as an aggregator billing
+  surface, so pricing and session-cost reporting use the correct billing
+  posture instead of treating it as a first-party provider (#5493).
 - Dependencies: ratatui 0.30.2, thiserror 2.0.20.
 
 ### Removed
@@ -200,7 +225,10 @@ locales grow to 18 and 8.
 - hexin (@h3c-hexin) — a concrete route/offering output limit outranks the
   8,192-token compatibility guess for an uncatalogued model (#5461, closes
   #5460); web tool results use the noisy soft limit (#5474); owned direct
-  model casing resolves safely (#5475).
+  model casing resolves safely (#5475); and configured-skill prompts stay
+  stable across ephemeral roots and operating systems (#5492, #5473).
+- Gabriel-Degret (@Gabriel-Degret) — configurable auto-router classifier
+  timeout (#5494; first contribution).
 - @asto18089 — diagnosed the Z.ai `glm-5.2` casing collision and wrote the
   first provider-scoped fix in Pinvou/CodeWhale#14 (carried upstream in
   #5475).
