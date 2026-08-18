@@ -348,7 +348,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch --no-tags origin "${{ github.base_ref }}"
+            git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
             RANGE="origin/${{ github.base_ref }}..HEAD"
           elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
             RANGE="${{ github.event.before }}..${{ github.sha }}"
