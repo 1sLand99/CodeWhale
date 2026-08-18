@@ -49,23 +49,39 @@ pub(super) fn handle_transcript_space(app: &mut App) -> bool {
 /// Route plain input that must be decided before the composer sees it.
 ///
 /// The raw-paste fallback intentionally holds the first ASCII character for
-/// a few milliseconds. A bare Space advertised by the rendered reasoning
-/// affordance is a transcript command, though, and must win before that hold
-/// can turn it into composer text. An already-active burst still wins: its
-/// Space belongs to the pasted payload, not the transcript.
+/// a few milliseconds. Space must use that same ambiguity window: a second
+/// rapid character proves it was paste payload, while a lone held Space can
+/// become the rendered transcript action when the hold expires.
 pub(super) fn handle_plain_key_before_composer(
     app: &mut App,
     key: &KeyEvent,
     now: Instant,
 ) -> bool {
-    let is_reasoning_space = matches!(key.code, KeyCode::Char(' '))
-        && key.modifiers == KeyModifiers::NONE
-        && app.input.is_empty()
-        && !app.paste_burst.is_active();
-    if is_reasoning_space && handle_transcript_space(app) {
-        return true;
-    }
     crate::tui::paste::handle_paste_burst_key(app, key, now)
+}
+
+/// Flush a raw-paste ambiguity window without losing a leading Space.
+///
+/// `FlushResult::Paste` is always composer payload. A lone typed Space is a
+/// transcript action only when the composer is still empty and the last
+/// rendered owner accepts it; otherwise it remains ordinary input.
+pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> bool {
+    match app.take_paste_burst_flush_if_enabled(now) {
+        crate::tui::paste_burst::FlushResult::Paste(text) => {
+            app.insert_str(&text);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(' ')
+            if app.input.is_empty() && handle_transcript_space(app) =>
+        {
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(ch) => {
+            app.insert_char(ch);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::None => false,
+    }
 }
 
 /// Run the interactive TUI event loop.
@@ -3014,7 +3030,7 @@ pub(crate) async fn run_event_loop(
         }
 
         let now = Instant::now();
-        app.flush_paste_burst_if_enabled(now);
+        flush_paste_burst_before_composer(app, now);
         app.sync_status_message_to_toasts();
         // Drain background-LLM cost (compaction summaries, seam
         // recompaction, cycle briefings) accumulated since the last
@@ -4162,7 +4178,7 @@ pub(crate) async fn run_event_loop(
             }
 
             let now = Instant::now();
-            app.flush_paste_burst_if_enabled(now);
+            flush_paste_burst_before_composer(app, now);
 
             // On Windows, AltGr is delivered as `Ctrl+Alt`; treat
             // AltGr-typed chars (e.g. European layouts producing `@`, `\`,

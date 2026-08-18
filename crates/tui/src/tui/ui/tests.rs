@@ -3928,7 +3928,7 @@ fn reasoning_preview_spends_available_viewport_rows_before_truncating() {
 }
 
 #[test]
-fn advertised_reasoning_space_wins_before_first_char_paste_hold() {
+fn advertised_reasoning_space_dispatches_after_first_char_paste_hold() {
     let mut app = create_test_app();
     app.use_paste_burst_detection = true;
     app.bracketed_paste_seen = false;
@@ -3941,17 +3941,26 @@ fn advertised_reasoning_space_wins_before_first_char_paste_hold() {
     let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
     assert!(handle_plain_key_before_composer(&mut app, &space, now));
     assert!(
-        app.folded_thinking.contains(&0),
-        "the rendered transcript action must toggle before paste detection"
+        app.folded_thinking.is_empty(),
+        "Space remains ambiguous until the first-character hold expires"
     );
     assert!(app.input.is_empty(), "Space must not enter the composer");
     assert!(
-        !app.paste_burst.is_active(),
-        "Space must not be retained as the paste heuristic's first character"
+        app.paste_burst.is_active(),
+        "Space must be retained long enough to preserve a leading-space paste"
     );
-    assert!(!app.flush_paste_burst_if_due(
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
         now + crate::tui::paste_burst::PasteBurst::recommended_flush_delay()
     ));
+    assert!(
+        app.folded_thinking.contains(&0),
+        "a lone Space must dispatch the rendered transcript action after the hold"
+    );
+    assert!(
+        app.input.is_empty(),
+        "the dispatched Space is not composer text"
+    );
 
     let _ = render_underwater_test_app(&mut app, 60, 16);
     let expanded = app
@@ -3963,6 +3972,37 @@ fn advertised_reasoning_space_wins_before_first_char_paste_hold() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(expanded.contains("live line 40"), "{expanded}");
+}
+
+#[test]
+fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    let next = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &space, now));
+    assert!(handle_plain_key_before_composer(
+        &mut app,
+        &next,
+        now + Duration::from_millis(1),
+    ));
+    assert!(
+        app.folded_thinking.is_empty(),
+        "a leading-space raw paste must not trigger transcript actions"
+    );
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
+        now + crate::tui::paste_burst::PasteBurst::recommended_active_flush_delay()
+            + Duration::from_millis(2),
+    ));
+    assert_eq!(app.input, " x");
 }
 
 #[test]
