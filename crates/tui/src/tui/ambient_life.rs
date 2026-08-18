@@ -1014,21 +1014,32 @@ pub fn apply_caustic_shimmer(
             }) {
                 continue;
             }
-            let phase = ((elapsed_ms / 80)
-                .wrapping_add(u128::from(local_x))
-                .wrapping_add(u128::from(local_y) * 3))
-                % 12;
-            if phase > 2 {
-                continue;
-            }
             let cell = &mut buf[(area.x + local_x, area.y + local_y)];
             // Soften toward ambient ink without replacing semantic glyphs.
             if cell.symbol() == " " || cell.symbol().is_empty() {
-                let shimmer = ocean::scale_color(row_bg, 1.08);
+                let shimmer =
+                    ocean::scale_color(row_bg, caustic_brightness(elapsed_ms, local_x, local_y));
                 cell.set_bg(shimmer);
             }
         }
     }
+}
+
+/// Continuous travelling caustic. The former `(elapsed / 80) % 12` mask
+/// toggled cells fully on/off at 12.5 Hz; truecolor made that quantization look
+/// like dropped frames. A narrow cosine crest preserves the same sparse light
+/// band while cross-fading every sampled cell between frames.
+fn caustic_brightness(elapsed_ms: u128, local_x: u16, local_y: u16) -> f32 {
+    const CYCLE_MS: f64 = 960.0;
+    const SPATIAL_SLOTS: f64 = 4.0;
+    let time = (elapsed_ms % CYCLE_MS as u128) as f64 / CYCLE_MS;
+    // The sampled grid advances by three terminal columns. Four grid phases
+    // therefore preserve the old 12-column repeat instead of stretching the
+    // caustic topology while changing only its temporal interpolation.
+    let slot = (u32::from(local_x / 3) + u32::from(local_y)) % 4;
+    let phase = (time + f64::from(slot) / SPATIAL_SLOTS) * std::f64::consts::TAU;
+    let crest = ((phase.cos() + 1.0) * 0.5).powi(8);
+    (1.0 + 0.08 * crest) as f32
 }
 
 /// Cached ocean row colors invalidated only when phase/dimensions/palette/breath tick.
@@ -1054,9 +1065,11 @@ impl OceanRampCache {
         phase_tag: u8,
         ramp_fingerprint: u64,
     ) -> &[Color] {
-        // Breath cycle is 90s; bucket at ~80ms atmosphere cadence so we don't
-        // recompute every draw when nothing visible changed.
-        let bucket = elapsed_ms / 80;
+        // The breath and completion fade are continuous. Bucket at a 60 FPS
+        // floor so Ghostty's smooth-motion lane is not quantized back to the
+        // old 80 ms atmosphere cadence; slower terminals still call this only
+        // when they actually draw.
+        let bucket = elapsed_ms / 16;
         if self.colors.len() == usize::from(height)
             && self.height == height
             && self.top == top

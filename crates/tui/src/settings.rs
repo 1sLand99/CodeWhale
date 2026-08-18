@@ -975,27 +975,25 @@ impl Settings {
             self.low_motion = true;
             self.fancy_animations = false;
         }
-        // VS Code (TERM_PROGRAM=vscode, #1356), Ghostty (#1445), and a few
-        // VTE terminals (#1470) produce visible flicker at 120 FPS. Cap their
-        // redraw rate. VS Code's xterm.js renderer also needs decorative
+        // VS Code (TERM_PROGRAM=vscode, #1356) and a few VTE terminals
+        // (#1470) produce visible flicker at 120 FPS. Cap their redraw rate.
+        // VS Code's xterm.js renderer also needs decorative
         // motion disabled: the underwater chrome added substantially more
         // independently moving cells than the original #1356 fix covered.
-        // Ghostty may report
-        // either TERM_PROGRAM=Ghostty/ghostty or TERM=xterm-ghostty.
+        // Ghostty is deliberately absent from this 30 FPS compatibility lane.
+        // Its synchronized GPU renderer gets a dedicated 60 FPS atmosphere
+        // cap in display_refresh; putting it here made the restored truecolor
+        // ocean visibly step even though the terminal could keep up.
         // Like NO_ANIMATIONS above, this unconditionally overrides any
         // disk-loaded value — consistent precedence: env signals always win.
         let term_program = std::env::var("TERM_PROGRAM")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let term = std::env::var("TERM")
             .unwrap_or_default()
             .to_ascii_lowercase();
         // Tabby renders through Electron/xterm.js. Its Windows IME bridge
         // can observe cursor-positioning sequences while a frame is still
         // being applied, so use the calmer rendering path there.
         let term_is_tabby = term_program.contains("tabby");
-        let term_constrains_frame_rate =
-            matches!(term_program.as_str(), "vscode" | "ghostty") || term.contains("ghostty");
+        let term_constrains_frame_rate = term_program == "vscode";
         let vte_env_constrains_frame_rate = std::env::var_os("TILIX_ID")
             .is_some_and(|v| !v.is_empty())
             || std::env::var_os("TERMINATOR_UUID").is_some_and(|v| !v.is_empty());
@@ -3940,7 +3938,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_term_program_caps_redraws_without_disabling_motion() {
+    fn ghostty_term_program_keeps_full_motion_without_the_legacy_30_fps_cap() {
         let _g = term_program_test_guard();
         let prev = std::env::var_os("TERM_PROGRAM");
         // SAFETY: serialised by the guard.
@@ -3952,7 +3950,7 @@ mod tests {
         settings.apply_env_overrides();
         assert!(!settings.low_motion);
         assert!(settings.fancy_animations);
-        assert!(settings.constrained_frame_rate);
+        assert!(!settings.constrained_frame_rate);
         // SAFETY: cleanup under the guard.
         unsafe {
             match prev {
@@ -3963,7 +3961,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_term_fallback_caps_redraws_without_disabling_motion() {
+    fn ghostty_term_fallback_keeps_full_motion_without_the_legacy_30_fps_cap() {
         let _g = term_program_test_guard();
         let prev_program = std::env::var_os("TERM_PROGRAM");
         let prev_term = std::env::var_os("TERM");
@@ -3976,7 +3974,7 @@ mod tests {
         settings.apply_env_overrides();
         assert!(!settings.low_motion);
         assert!(settings.fancy_animations);
-        assert!(settings.constrained_frame_rate);
+        assert!(!settings.constrained_frame_rate);
         // SAFETY: cleanup under the guard.
         unsafe {
             match prev_program {
@@ -4576,8 +4574,9 @@ mod tests {
             "WezTerm",
             "xterm-256color",
             "gnome-terminal-server",
-            // The Ghostty / VS Code paths force low_motion but must NOT
-            // disable DEC 2026 — they handle synchronized output cleanly.
+            // The Ghostty / VS Code paths keep DEC 2026 enabled; both handle
+            // synchronized output cleanly even though their motion policies
+            // differ.
             "ghostty",
             "vscode",
         ] {

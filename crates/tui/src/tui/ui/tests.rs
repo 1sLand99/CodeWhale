@@ -252,12 +252,21 @@ fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
 
 #[test]
 fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
+    let _guard = crate::test_support::lock_test_env();
+    let previous_program = std::env::var_os("TERM_PROGRAM");
+    let previous_term = std::env::var_os("TERM");
+    // SAFETY: serialized by the process-wide test environment lock.
+    unsafe {
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::set_var("TERM", "xterm-256color");
+    }
     let mut app = create_test_app();
     // App::new reads real terminal overlays. This test owns the authored
     // motion cadence, so pin that input instead of inheriting a host's saved
     // low-motion or legacy-console policy.
     app.low_motion = false;
     app.fancy_animations = true;
+    app.constrained_frame_rate = false;
 
     assert_eq!(
         animation_interval_ms(&app, true, false),
@@ -272,6 +281,58 @@ fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
         UI_UNDERWATER_ANIMATION_MS,
         "the slower status spinner must not throttle ambient fish"
     );
+    // SAFETY: cleanup under the same lock.
+    unsafe {
+        match previous_program {
+            Some(value) => std::env::set_var("TERM_PROGRAM", value),
+            None => std::env::remove_var("TERM_PROGRAM"),
+        }
+        match previous_term {
+            Some(value) => std::env::set_var("TERM", value),
+            None => std::env::remove_var("TERM"),
+        }
+    }
+}
+
+#[test]
+fn ghostty_uses_its_smooth_60_fps_lane_for_underwater_motion() {
+    let _guard = crate::test_support::lock_test_env();
+    let previous_program = std::env::var_os("TERM_PROGRAM");
+    let previous_term = std::env::var_os("TERM");
+    // SAFETY: serialized by the process-wide test environment lock.
+    unsafe {
+        std::env::set_var("TERM_PROGRAM", "Ghostty");
+        std::env::set_var("TERM", "xterm-ghostty");
+    }
+    let mut app = create_test_app();
+    app.low_motion = false;
+    app.fancy_animations = true;
+    app.constrained_frame_rate = false;
+
+    assert_eq!(
+        underwater_animation_interval_ms(&app),
+        UI_GHOSTTY_UNDERWATER_ANIMATION_MS
+    );
+    const {
+        assert!(UI_GHOSTTY_UNDERWATER_ANIMATION_MS < UI_UNDERWATER_ANIMATION_MS);
+    }
+    app.constrained_frame_rate = true;
+    assert_eq!(
+        underwater_animation_interval_ms(&app),
+        UI_CONSTRAINED_UNDERWATER_ANIMATION_MS,
+        "tmux/SSH compatibility must override Ghostty's native 60 FPS lane"
+    );
+    // SAFETY: cleanup under the same lock.
+    unsafe {
+        match previous_program {
+            Some(value) => std::env::set_var("TERM_PROGRAM", value),
+            None => std::env::remove_var("TERM_PROGRAM"),
+        }
+        match previous_term {
+            Some(value) => std::env::set_var("TERM", value),
+            None => std::env::remove_var("TERM"),
+        }
+    }
 }
 
 #[test]

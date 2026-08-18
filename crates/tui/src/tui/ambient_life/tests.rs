@@ -654,3 +654,38 @@ fn too_wide_jellyfish_is_truthfully_clipped_as_a_group() {
     assert_eq!(stats.marks_clipped, 5);
     assert_eq!(stats.marks_built, stats.marks_clipped);
 }
+
+#[test]
+fn caustic_brightness_cross_fades_without_80ms_steps() {
+    let samples: Vec<f32> = (0..=120)
+        .map(|frame| caustic_brightness(frame * 16, 18, 2))
+        .collect();
+
+    assert!(samples.iter().all(|value| (1.0..=1.08).contains(value)));
+    assert!(
+        samples
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() < 0.02),
+        "adjacent 60 FPS caustic frames must cross-fade instead of toggling"
+    );
+    assert!(
+        samples.windows(2).any(|pair| pair[0] != pair[1]),
+        "the continuous caustic must still move"
+    );
+    assert_eq!(
+        caustic_brightness(0, 0, 0),
+        caustic_brightness(0, 12, 0),
+        "the authored caustic topology repeats every 12 columns"
+    );
+    assert_eq!(samples.first(), samples.get(60), "960 ms closes one cycle");
+
+    let base = Color::Rgb(64, 96, 128);
+    let colors: Vec<Color> = (0..=60)
+        .map(|frame| ocean::scale_color(base, caustic_brightness(frame * 16, 18, 2)))
+        .collect();
+    assert!(
+        colors.windows(2).any(|pair| pair[0] != pair[1]),
+        "the cross-fade must survive truecolor channel quantization"
+    );
+    assert_eq!(colors.first(), colors.last(), "RGB output closes one cycle");
+}

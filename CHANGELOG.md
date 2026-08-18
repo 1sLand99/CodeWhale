@@ -129,6 +129,9 @@ locales grow to 18 and 8.
 - Compact TUI rows below 60 columns no longer reserve a hidden session-metrics
   strip, so narrow terminals reclaim the row instead of clipping the
   transcript (#5486).
+- Ghostty's truecolor underwater field now uses a dedicated synchronized
+  60 FPS lane instead of the legacy 30 FPS compatibility cap, with continuous
+  caustic fades replacing visibly stepped color changes.
 - Live reasoning's advertised `Space:expand` action now runs before the
   composer's first-character paste-burst hold, while spaces in an active paste
   remain payload. The newest reasoning preview also spends only genuinely free
