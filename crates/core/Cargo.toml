@@ -13,14 +13,14 @@ chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
-codewhale-agent = { path = "../agent", version = "0.9.9" }
-codewhale-config = { path = "../config", version = "0.9.9" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.9" }
-codewhale-hooks = { path = "../hooks", version = "0.9.9" }
-codewhale-mcp = { path = "../mcp", version = "0.9.9" }
-codewhale-protocol = { path = "../protocol", version = "0.9.9" }
-codewhale-state = { path = "../state", version = "0.9.9" }
-codewhale-tools = { path = "../tools", version = "0.9.9" }
+codewhale-agent = { path = "../agent", version = "0.9.10" }
+codewhale-config = { path = "../config", version = "0.9.10" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.10" }
+codewhale-hooks = { path = "../hooks", version = "0.9.10" }
+codewhale-mcp = { path = "../mcp", version = "0.9.10" }
+codewhale-protocol = { path = "../protocol", version = "0.9.10" }
+codewhale-state = { path = "../state", version = "0.9.10" }
+codewhale-tools = { path = "../tools", version = "0.9.10" }
 regex = "1.11"
 serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { workspace = true, features = ["time"] }

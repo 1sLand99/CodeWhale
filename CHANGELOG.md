@@ -7,11 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.10] - Unreleased candidate
+
+Codewhale v0.9.10 is a retention-and-identity release: the shell and
+transcript can no longer retain unbounded tool output in memory or on disk,
+mid-turn history inserts no longer strand in-flight tool rows, every agent
+that ran this session is visible from `/agents list`, the PTY acceptance
+lane has a stall watchdog and bounded CI steps, approval outcomes are
+durable and fail closed (cyq1017, #5360), and three $HOME disk leaks are
+reclaimed. Test threads get an 8 MiB stack so the lib suite can no longer
+abort under load.
+
+### Fixed
+
+- `fix(tui): rebase active-cell tool bindings on every mid-turn history
+  insert` — `/rename` mid-turn left the running tool row spinning forever
+  (#5478).
+- `fix(tui): bound what the shell and transcript retain from tool output` —
+  a 1.1 MB Bash call kept over a megabyte resident for up to an hour; raw
+  streams now cap at 16 MiB in flight and release delivered output, and
+  retained tool outputs cap at 64 KiB per record / 8 MiB per transcript
+  (#5472).
+- `fix(tui): reclaim the three $HOME disk leaks` — orphaned session dirs,
+  the unbounded audit.log, and stranded writer temp files.
+- `fix(tui): persist approval outcomes before execution` (cyq1017) —
+  approval receipts are committed to a session-owned log before execution
+  proceeds; unpersistable evidence blocks the tool; resume reconstructs
+  closed and interrupted approvals (#5360).
+- `test(tui): break the LazyLock/env-barrier deadlock in the test harness`.
+- `ci: give test threads the 8 MiB stack they need` — the lib suite aborted
+  with SIGABRT under load on the default 2 MiB stack.
+
 ### Added
 
-- The TUI header now identifies the active repository or linked worktree before
-  the branch and dirty marker, so operators can see where the agent is working
+- `feat(tui): show repository context in git chrome` (wuisabel-gif) — the TUI
+  header now identifies the active repository or linked worktree before the
+  branch and dirty marker, so operators can see where the agent is working
   without opening the worktree manager (#5437).
+- `feat(tui): first slice of the agents roster` — every agent that ran this
+  session, receipts-only, via `/agents list` and the sidebar fan-out rows
+  (#5479 spec items 1 and 5).
+- `ci: bound PTY acceptance and add a stall watchdog to the harness` —
+  QA_PTY_STALL_TIMEOUT_SECS aborts a wedged PTY run with a diagnostic;
+  the isolated PTY step is capped at 15 minutes; Windows NSIS provisioning
+  gets a bounded retry (#5496).
+- `chore(scripts): dev-cache warns before it fills a disk` (#5465 class).
 
 ## [0.9.9] - 2026-08-18
 
@@ -6190,6 +6230,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
 [Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...HEAD
+[0.9.10]: https://github.com/Hmbown/CodeWhale/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/Hmbown/CodeWhale/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/Hmbown/CodeWhale/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/Hmbown/CodeWhale/compare/v0.9.6...v0.9.7
