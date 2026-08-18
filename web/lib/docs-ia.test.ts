@@ -9,15 +9,18 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import buildSitemap from "../app/sitemap";
 import { DOC_TOPICS, docTopicHref, getTopic } from "./docs-map";
 import { docsTopicIsCurrent } from "./docs-navigation";
 import { locales } from "./i18n/config";
+import { contentLocalesForPath } from "./i18n/content-locales";
 import { getChrome, getHome } from "./i18n/dictionaries";
 import {
   footerProductLinks,
   footerProjectLinks,
   navLinks as buildNavLinks,
 } from "./i18n/links";
+import { SITE_URL } from "./page-meta";
 
 const webRoot = new URL("../", import.meta.url);
 const repoRoot = new URL("../../", import.meta.url);
@@ -26,7 +29,7 @@ function webText(path: string): string {
   return readFileSync(new URL(path, webRoot), "utf8");
 }
 
-const sitemap = webText("app/sitemap.ts");
+const sitemapEntries = buildSitemap();
 const nav = webText("components/nav.tsx");
 const navLinks = webText("components/nav-links.tsx");
 const mobileMenu = webText("components/mobile-menu.tsx");
@@ -70,21 +73,36 @@ describe("sitemap and hreflang preservation", () => {
     for (const topic of DOC_TOPICS) {
       if (!topic.hasPage) continue;
       const path = topic.sitePath ? `/${topic.sitePath}` : `/docs/${topic.slug}`;
-      expect(sitemap, path).toContain(`"${path}"`);
+      expect(
+        sitemapEntries.some((entry) => entry.url === `${SITE_URL}/en${path}`),
+        path,
+      ).toBe(true);
     }
-    expect(sitemap).toContain('"/docs/guide"');
-    expect(sitemap).toContain('"/docs/vocabulary"');
+    expect(
+      sitemapEntries.some((entry) => entry.url === `${SITE_URL}/en/docs/guide`),
+    ).toBe(true);
+    expect(
+      sitemapEntries.some((entry) => entry.url === `${SITE_URL}/en/docs/vocabulary`),
+    ).toBe(true);
   });
 
-  it("keeps per-locale alternate pairs for every indexed route", () => {
-    expect(sitemap).toContain("alternates");
-    // Both the routes and their hreflang alternates are generated from the
-    // canonical locale registry, never hardcoded per locale — asserting the
-    // literal `en:` / `zh:` pairs would forbid exactly that generalization.
-    expect(sitemap).toContain("locales.map");
-    expect(sitemap).toContain("locales.map((l) => [l, `${SITE_URL}/${l}${path}`])");
-    expect(locales).toContain("en");
-    expect(locales).toContain("zh");
+  it("keeps sitemap and hreflang output aligned with real translation coverage", () => {
+    expect(sitemapEntries).toHaveLength(78);
+    for (const [path, expectedLocales] of [
+      ["/", locales],
+      ["/docs/guide", contentLocalesForPath("/docs/guide")],
+      ["/docs", ["en", "zh"]],
+    ] as const) {
+      const suffix = path === "/" ? "" : path;
+      const entry = sitemapEntries.find(
+        (candidate) => candidate.url === `${SITE_URL}/en${suffix}`,
+      );
+      expect(entry, path).toBeDefined();
+      expect(Object.keys(entry?.alternates?.languages ?? {}), path).toEqual([
+        ...expectedLocales,
+      ]);
+    }
+    expect(sitemapEntries.every((entry) => !("lastModified" in entry))).toBe(true);
   });
 
   it("keeps the new docs pages on the shared metadata helper", () => {

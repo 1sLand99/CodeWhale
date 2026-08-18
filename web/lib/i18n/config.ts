@@ -2,9 +2,11 @@
  * Locale configuration for codewhale.net.
  *
  * This is the single canonical website locale registry — the locale
- * switcher, Next.js route generation, middleware detection, sitemap, and
- * hreflang alternates all derive from `ALL_LOCALES`. The cross-surface
- * matrix (TUI packs, READMEs, website) lives in docs/LOCALIZATION.md.
+ * switcher, Next.js route generation, middleware detection, and content
+ * locale registry all derive from `ALL_LOCALES`. Sitemap and hreflang output
+ * then narrow that routed set to the locales with a genuine page-body
+ * translation. The cross-surface matrix (TUI packs, READMEs, website) lives
+ * in docs/LOCALIZATION.md.
  *
  * Status semantics:
  * - `shipped`  — full website parity with English on first-class pages.
@@ -170,9 +172,10 @@ export const ALL_LOCALES: LocaleEntry[] = [
 ];
 
 /**
- * Active website locales (used by Next.js route generation, middleware,
- * sitemap, and the switcher). Both `shipped` and `partial` locales route;
- * `partial` locales carry a visible partial-pack status in the switcher.
+ * Active website locales (used by Next.js route generation, middleware, and
+ * the switcher). Both `shipped` and `partial` locales route; `partial` locales
+ * carry a visible partial-pack status in the switcher. Metadata and sitemap
+ * generation narrow this routed set per page-body translation coverage.
  */
 export const locales = ALL_LOCALES.filter(
   (l) => l.status === "shipped" || l.status === "partial",
