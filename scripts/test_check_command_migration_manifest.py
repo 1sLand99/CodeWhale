@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -140,6 +141,57 @@ class FrontierTests(unittest.TestCase):
         new = ["ghost", "session", "utility"]
         violations = mod.is_valid_frontier_transition(doc["topology"], old, new)
         self.assertTrue(violations, "arbitrary growth must be rejected")
+
+
+class LiveTransitionTests(unittest.TestCase):
+    def test_invalid_current_manifest_fails_closed_before_transition(self) -> None:
+        violations = mod.validate_baseline_transition({}, None)
+        self.assertTrue(any("current topology is invalid" in str(v) for v in violations))
+
+    def test_initial_manifest_must_start_at_all_roots(self) -> None:
+        doc = sample_topology()
+        self.assertEqual(mod.validate_baseline_transition(doc, None), [])
+        doc["frontier"] = ["utility"]
+        violations = mod.validate_baseline_transition(doc, None)
+        self.assertTrue(any("first manifest revision" in str(v) for v in violations))
+
+    def test_live_transition_rejects_topology_mutation(self) -> None:
+        previous = sample_topology()
+        current = json.loads(json.dumps(previous))
+        current["topology"]["utility"]["scope"].append("new.rs")
+        violations = mod.validate_baseline_transition(current, previous)
+        self.assertTrue(any("topology is immutable" in str(v) for v in violations))
+
+    def test_live_transition_accepts_documented_split(self) -> None:
+        previous = sample_topology()
+        current = json.loads(json.dumps(previous))
+        current["frontier"] = ["session::control", "session::lifecycle", "utility"]
+        self.assertEqual(mod.validate_baseline_transition(current, previous), [])
+
+    def test_live_transition_rejects_arbitrary_growth(self) -> None:
+        previous = sample_topology()
+        previous["frontier"] = ["utility"]
+        current = json.loads(json.dumps(previous))
+        current["frontier"] = ["session", "utility"]
+        violations = mod.validate_baseline_transition(current, previous)
+        self.assertTrue(any("arbitrary growth" in str(v) for v in violations))
+
+    def test_pending_projection_must_equal_json_frontier(self) -> None:
+        doc = sample_topology()
+        self.assertEqual(
+            mod.validate_pending_projection(doc, ["session", "utility"]), []
+        )
+        violations = mod.validate_pending_projection(doc, ["utility"])
+        self.assertTrue(any("does not equal JSON frontier" in str(v) for v in violations))
+
+    def test_pending_groups_parser_is_string_only_and_order_preserving(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contract.rs"
+            path.write_text(
+                'pub(crate) const PENDING_GROUPS: &[&str] = &["session", "utility"];\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(mod.load_pending_groups(path), ["session", "utility"])
 
 
 class SelectorTests(unittest.TestCase):

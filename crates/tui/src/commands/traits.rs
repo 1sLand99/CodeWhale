@@ -246,6 +246,32 @@ impl ContextualCommand {
         }
     }
 
+    /// Bridge one portable contract registration into the TUI-owned registry.
+    ///
+    /// The command supplies only contract metadata and an App-free handler;
+    /// the TUI resolves the localization key and owns the resulting registry
+    /// entry. This is the dependency inversion later command crates reuse.
+    pub(crate) fn from_contract<C>() -> Result<Self, String>
+    where
+        C: codewhale_command_contract::metadata::RegisterCommand<CommandResult>,
+    {
+        let portable = C::info();
+        let description_id = super::contract::key_to_message_id(portable.description_key)
+            .ok_or_else(|| {
+                format!(
+                    "unknown command description key {:?} for /{}",
+                    portable.description_key, portable.name
+                )
+            })?;
+        let info = Box::leak(Box::new(CommandInfo {
+            name: portable.name,
+            aliases: portable.aliases,
+            usage: portable.usage,
+            description_id,
+        }));
+        Ok(Self::contextual(info, C::handler()))
+    }
+
     /// The capability-scoped handler, if this entry is migrated.
     pub(crate) fn command_handler(
         &self,

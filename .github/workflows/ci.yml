@@ -277,9 +277,18 @@ jobs:
           python3 scripts/check-command-crate-boundaries.py
       - name: Check command migration manifest
         if: needs.changes.outputs.heavy == 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           python3 scripts/test_check_command_migration_manifest.py
-          python3 scripts/check-command-migration-manifest.py
+          baseline="${PR_BASE_SHA:-${PUSH_BEFORE_SHA:-}}"
+          if [[ -n "${baseline}" && ! "${baseline}" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 origin "${baseline}"
+            python3 scripts/check-command-migration-manifest.py --baseline-ref "${baseline}"
+          else
+            python3 scripts/check-command-migration-manifest.py
+          fi
       # Clippy above runs without `--all-targets`, so it cannot see dead code
       # that only tests keep alive. This ratchet covers that blind spot by
       # refusing to let the `#[allow(dead_code)]` total rise (#4785).

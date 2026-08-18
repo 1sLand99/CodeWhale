@@ -12,26 +12,25 @@
 //! (FEAT-018+) can adopt them one group at a time. Handlers only ever see
 //! `&mut dyn` facets — concrete `App` is never exposed through an envelope.
 //!
-//! ## Disjoint-borrow design (D1)
+//! ## Authoritative host-proxy design (D1)
 //!
-//! `CommandContexts` holds all seven `&mut dyn` facet slots at once, so the
-//! adapters must borrow *disjoint* App fields. Each adapter newtype below
-//! holds references to exactly the fields its facet needs; `App::command_contexts()`
-//! builds the envelope from those disjoint field reborrows. This mirrors the
-//! contract crate's test pattern (small per-facet structs).
+//! `CommandContexts` holds seven independently borrowed facet objects, while
+//! important behavior (mode transitions, model invalidation, cost accounting,
+//! skill refresh) is authoritative on `App`. The adapters therefore share a
+//! synchronous TUI-owned host proxy. Each trait call borrows `App` only for the
+//! duration of that call and delegates to the real operation; handlers still
+//! receive only portable facets and can never name concrete TUI state.
 //!
-//! ## Dead-code note (Phase 6 seam)
+//! ## Dead-code note
 //!
-//! Phase 3 ships the adapters, mappings, and envelope constructor ahead of the
-//! dual-path registry/dispatch seam that consumes them (Phase 6), so in
-//! production builds these items are unreferenced until then. The module-level
-//! allow mirrors the FEAT-014 `#[allow(unused_imports)]` precedent and is
-//! removed once the seam references them.
+//! FEAT-015 intentionally wires no production contextual command. Some bridge
+//! helpers remain production-dead until the first slice migrates (FEAT-018+),
+//! so this transitional module keeps a bounded dead-code allow.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use codewhale_command_contract::facets::{
     CommandCostContext, CommandModePolicyContext, CommandModelContext, CommandSessionContext,
@@ -46,9 +45,8 @@ use codewhale_core::request::{Message, SystemPrompt};
 use codewhale_execpolicy::ApprovalMode;
 
 use crate::localization::MessageId;
-use crate::plugins::types::PluginAuthority;
 use crate::pricing::CostCurrency;
-use crate::tui::app::{App, QueuedMessage, ReasoningEffort};
+use crate::tui::app::{App, ReasoningEffort};
 
 // ---------------------------------------------------------------------------
 // Pending frontier projection (D4)
@@ -74,6 +72,16 @@ pub(crate) fn to_command_mode(mode: AppMode) -> CommandMode {
         AppMode::Yolo => CommandMode::Yolo,
         AppMode::Plan => CommandMode::Plan,
         AppMode::Operate => CommandMode::Operate,
+    }
+}
+
+fn from_command_mode(mode: CommandMode) -> AppMode {
+    match mode {
+        CommandMode::Agent => AppMode::Agent,
+        CommandMode::Auto => AppMode::Auto,
+        CommandMode::Yolo => AppMode::Yolo,
+        CommandMode::Plan => AppMode::Plan,
+        CommandMode::Operate => AppMode::Operate,
     }
 }
 
@@ -107,6 +115,13 @@ pub(crate) fn to_command_currency(currency: CostCurrency) -> CommandCurrency {
     match currency {
         CostCurrency::Usd => CommandCurrency::Usd,
         CostCurrency::Cny => CommandCurrency::Cny,
+    }
+}
+
+fn from_command_currency(currency: CommandCurrency) -> CostCurrency {
+    match currency {
+        CommandCurrency::Usd => CostCurrency::Usd,
+        CommandCurrency::Cny => CostCurrency::Cny,
     }
 }
 
@@ -229,246 +244,240 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
 // Capability facet adapters (D1)
 // ---------------------------------------------------------------------------
 
-/// Session capability adapter: session identity, message list, queue, tokens.
+/// Shared TUI host hidden behind the portable command facets.
 ///
-/// Holds disjoint borrows of `App.current_session_id`, `App.api_messages`,
-/// `App.queued_messages`, and `App.session.total_tokens`.
+/// The envelope needs seven independently borrowed facet objects, while the
+/// authoritative mutation methods live on `App`. Each adapter therefore owns
+/// an `Rc` clone of this synchronous host proxy. Trait calls borrow `App` only
+/// for the duration of one method, delegate to the real TUI authority, and
+/// return owned values. Command handlers never receive or name `App`.
+struct CommandHost<'a> {
+    app: RefCell<&'a mut App>,
+}
+
+type SharedCommandHost<'a> = Rc<CommandHost<'a>>;
+
+/// Session identity, messages, queue operations, and token totals.
 pub(crate) struct SessionAdapter<'a> {
-    session_id: &'a Option<String>,
-    api_messages: &'a mut Vec<Message>,
-    queued_messages: &'a mut VecDeque<QueuedMessage>,
-    total_tokens: &'a u32,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandSessionContext for SessionAdapter<'_> {
     fn session_id(&self) -> Option<String> {
-        self.session_id.clone()
+        self.host.app.borrow().current_session_id.clone()
     }
+
     fn api_messages(&self) -> Vec<Message> {
-        self.api_messages.clone()
+        self.host.app.borrow().api_messages.clone()
     }
+
     fn add_message(&mut self, message: Message) {
-        self.api_messages.push(message);
+        self.host.app.borrow_mut().api_messages.push(message);
     }
+
     fn queued_message_count(&self) -> usize {
-        self.queued_messages.len()
+        self.host.app.borrow().queued_message_count()
     }
+
     fn remove_queued_message(&mut self, index: usize) -> Result<(), String> {
-        if index < self.queued_messages.len() {
-            self.queued_messages.remove(index);
-            Ok(())
-        } else {
-            Err(format!("queued message index {index} out of bounds"))
-        }
+        self.host
+            .app
+            .borrow_mut()
+            .remove_queued_message(index)
+            .map(|_| ())
+            .ok_or_else(|| format!("queued message index {index} out of bounds"))
     }
+
     fn total_tokens(&self) -> u64 {
-        u64::from(*self.total_tokens)
+        u64::from(self.host.app.borrow().session.total_tokens)
     }
 }
 
-/// Model capability adapter: current selection, effort, provider identity,
-/// and fallback chain.
-///
-/// Holds disjoint borrows of `App.model`, `App.auto_model`,
-/// `App.reasoning_effort`, `App.last_effective_provider_identity`, and
-/// `App.provider_chain`.
+/// Model selection, provider identity, effort, and fallback chain.
 pub(crate) struct ModelAdapter<'a> {
-    model: &'a mut String,
-    auto_model: &'a mut bool,
-    reasoning_effort: &'a ReasoningEffort,
-    provider_identity: &'a mut Option<String>,
-    fallback_chain: Vec<CommandProviderId>,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandModelContext for ModelAdapter<'_> {
     fn current_model(&self) -> String {
-        self.model.clone()
+        self.host.app.borrow().model.clone()
     }
+
     fn auto_model(&self) -> bool {
-        *self.auto_model
+        self.host.app.borrow().auto_model
     }
+
     fn set_model_selection(&mut self, model: String, provider: Option<CommandProviderId>) {
-        let auto = model.trim().eq_ignore_ascii_case("auto");
-        *self.model = if auto { "auto".to_string() } else { model };
-        *self.auto_model = auto;
+        let mut app = self.host.app.borrow_mut();
         if let Some(provider) = provider {
             let identity = provider.0;
-            // Mirror App::set_provider_identity semantics: record the stable
-            // identity text; never a URL/credential/path.
-            *self.provider_identity = Some(identity);
+            let provider = crate::config::ApiProvider::parse(&identity)
+                .unwrap_or(crate::config::ApiProvider::Custom);
+            app.set_provider_identity(provider, identity);
         }
+        app.set_model_selection(model);
     }
+
     fn reasoning_effort(&self) -> CommandReasoningEffort {
-        to_command_effort(*self.reasoning_effort)
+        to_command_effort(self.host.app.borrow().reasoning_effort)
     }
+
     fn provider_identity(&self) -> Option<CommandProviderId> {
-        self.provider_identity.as_ref().map(|id| to_provider_id(id))
+        let app = self.host.app.borrow();
+        let identity = app.provider_identity_for_persistence();
+        (!identity.trim().is_empty()).then(|| to_provider_id(identity))
     }
+
     fn fallback_chain(&self) -> Vec<CommandProviderId> {
-        self.fallback_chain.clone()
+        self.host
+            .app
+            .borrow()
+            .fallback_chain_entries()
+            .into_iter()
+            .map(|(_, provider, _)| to_provider_id(provider.as_str()))
+            .collect()
     }
 }
-/// Cost capability adapter: display currency and session/subagent cost totals.
-///
-/// Holds disjoint borrows of `App.cost_currency` and the four session cost
-/// fields on `App.session`.
+
+/// Cost display and accounting operations delegated to App's cost authority.
 pub(crate) struct CostAdapter<'a> {
-    currency: &'a CostCurrency,
-    session_cost: &'a mut f64,
-    session_cost_cny: &'a mut f64,
-    subagent_cost: &'a mut f64,
-    subagent_cost_cny: &'a mut f64,
+    host: SharedCommandHost<'a>,
+}
+
+fn command_cost_estimate(amount: f64, currency: CommandCurrency) -> crate::pricing::CostEstimate {
+    match currency {
+        CommandCurrency::Usd => crate::pricing::CostEstimate {
+            usd: amount,
+            cny: 0.0,
+        },
+        CommandCurrency::Cny => crate::pricing::CostEstimate {
+            usd: 0.0,
+            cny: amount,
+        },
+    }
 }
 
 impl CommandCostContext for CostAdapter<'_> {
     fn display_currency(&self) -> CommandCurrency {
-        to_command_currency(*self.currency)
+        let app = self.host.app.borrow();
+        to_command_currency(app.cost_display_currency(app.cost_currency))
     }
+
     fn session_cost_for_currency(&self, currency: CommandCurrency) -> f64 {
-        match currency {
-            CommandCurrency::Usd => *self.session_cost,
-            CommandCurrency::Cny => *self.session_cost_cny,
-        }
+        self.host
+            .app
+            .borrow()
+            .session_cost_for_currency(from_command_currency(currency))
     }
+
     fn subagent_cost_for_currency(&self, currency: CommandCurrency) -> f64 {
-        match currency {
-            CommandCurrency::Usd => *self.subagent_cost,
-            CommandCurrency::Cny => *self.subagent_cost_cny,
-        }
+        self.host
+            .app
+            .borrow()
+            .subagent_cost_for_currency(from_command_currency(currency))
     }
+
     fn accrue_cost_estimate(&mut self, amount: f64, currency: CommandCurrency) {
-        match currency {
-            CommandCurrency::Usd => *self.session_cost += amount,
-            CommandCurrency::Cny => *self.session_cost_cny += amount,
-        }
+        self.host
+            .app
+            .borrow_mut()
+            .accrue_session_cost_estimate(command_cost_estimate(amount, currency));
     }
-    fn record_turn_cost(&mut self, amount: f64, currency: CommandCurrency, _receipt: bool) {
-        // The full audit path (priced/unpriced counters, provenance receipts)
-        // stays TUI-owned in App::record_turn_cost_audit; the adapter applies
-        // the same currency-field delta so a migrated handler can record a
-        // simple cost without duplicating the audit authority.
-        match currency {
-            CommandCurrency::Usd => *self.session_cost += amount,
-            CommandCurrency::Cny => *self.session_cost_cny += amount,
+
+    fn record_turn_cost(
+        &mut self,
+        amount: f64,
+        currency: CommandCurrency,
+        route_receipt: Option<String>,
+    ) {
+        let mut app = self.host.app.borrow_mut();
+        app.accrue_session_cost_estimate(command_cost_estimate(amount, currency));
+        if let Some(receipt) = route_receipt {
+            app.record_turn_cost_route_receipt(receipt);
         }
     }
 }
 
-/// Mode/policy capability adapter: operating mode, approval posture, shell
-/// access, and policy lock.
-///
-/// Holds disjoint borrows of `App.mode`, `App.approval_mode`,
-/// `App.allow_shell`, plus a snapshot of `App::approval_policy_locked()`.
+/// Operating mode, approval posture, shell access, and policy lock.
 pub(crate) struct ModePolicyAdapter<'a> {
-    mode: &'a mut AppMode,
-    approval_mode: &'a mut ApprovalMode,
-    allow_shell: &'a mut bool,
-    policy_locked: bool,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandModePolicyContext for ModePolicyAdapter<'_> {
     fn mode(&self) -> CommandMode {
-        to_command_mode(*self.mode)
+        to_command_mode(self.host.app.borrow().mode)
     }
+
     fn set_mode(&mut self, mode: CommandMode) {
-        *self.mode = match mode {
-            CommandMode::Agent => AppMode::Agent,
-            CommandMode::Auto => AppMode::Auto,
-            CommandMode::Yolo => AppMode::Yolo,
-            CommandMode::Plan => AppMode::Plan,
-            CommandMode::Operate => AppMode::Operate,
-        };
+        self.host.app.borrow_mut().set_mode(from_command_mode(mode));
     }
+
     fn approval_mode(&self) -> CommandApprovalMode {
-        to_command_approval(*self.approval_mode)
+        to_command_approval(self.host.app.borrow().approval_mode)
     }
+
     fn allow_shell(&self) -> bool {
-        *self.allow_shell
+        self.host.app.borrow().allow_shell
     }
+
     fn set_shell_access(&mut self, allow: bool) {
-        *self.allow_shell = allow;
+        self.host.app.borrow_mut().set_agent_shell_access(allow);
     }
+
     fn policy_locked(&self) -> bool {
-        self.policy_locked
+        self.host.app.borrow().approval_policy_locked()
     }
 }
 
-/// System-prompt capability adapter (read-only).
-///
-/// Holds a disjoint borrow of `App.system_prompt`.
+/// Read access to the effective system prompt.
 pub(crate) struct SystemPromptAdapter<'a> {
-    system_prompt: &'a Option<SystemPrompt>,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandSystemPromptContext for SystemPromptAdapter<'_> {
     fn system_prompt(&self) -> Option<SystemPrompt> {
-        self.system_prompt.clone()
+        self.host.app.borrow().system_prompt.clone()
     }
 }
 
-/// Skills capability adapter: active skill identity and cache refresh.
-///
-/// Holds disjoint borrows of `App.active_skill`, `App.active_skill_provenance`,
-/// `App.cached_skills`, `App.hotbar_actions`, plus the read-only discovery
-/// inputs `App.workspace`, `App.skills_dir`, `App.skills_scan_codewhale_only`,
-/// and `App.plugin_registry`.
+/// Active skill identity and authoritative skill-cache refresh.
 pub(crate) struct SkillsAdapter<'a> {
-    active_skill: &'a Option<String>,
-    active_skill_provenance: &'a Option<PluginAuthority>,
-    cached_skills: &'a mut Vec<(String, String)>,
-    hotbar_actions: &'a mut crate::tui::hotbar::HotbarActionRegistry,
-    workspace: &'a PathBuf,
-    skills_dir: &'a PathBuf,
-    skills_scan_codewhale_only: &'a bool,
-    plugin_registry: &'a Arc<crate::plugins::PluginRegistry>,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandSkillsContext for SkillsAdapter<'_> {
     fn active_skill(&self) -> Option<String> {
-        self.active_skill.clone()
+        self.host.app.borrow().active_skill.clone()
     }
+
     fn active_skill_provenance(&self) -> Option<String> {
-        self.active_skill_provenance
+        self.host
+            .app
+            .borrow()
+            .active_skill_provenance
             .as_ref()
             .map(|authority| authority.plugin_name.clone())
     }
+
     fn refresh_skill_cache(&mut self) {
-        crate::skills::clear_skill_discovery_cache();
-        let skills = crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
-            self.workspace,
-            self.skills_dir,
-            crate::skills::SkillDiscoveryMode::from_codewhale_only(
-                *self.skills_scan_codewhale_only,
-            ),
-            Some(self.plugin_registry.as_ref()),
-        )
-        .into_enabled()
-        .list()
-        .iter()
-        .map(|skill| (skill.name.clone(), skill.description.clone()))
-        .collect::<Vec<_>>();
-        self.hotbar_actions.replace_skills(&skills);
-        *self.cached_skills = skills;
+        self.host.app.borrow_mut().refresh_skill_cache();
     }
 }
 
-/// Workspace capability adapter: workspace path and bounded work-state
-/// snapshot.
-///
-/// Holds a disjoint borrow of `App.workspace` plus the precomputed bounded
-/// serialized work-state snapshot (captured at envelope construction via
-/// `App::work_state_snapshot()` + `todo_snapshot_body`).
+/// Workspace path and bounded serialized work-state snapshot.
 pub(crate) struct WorkspaceAdapter<'a> {
-    workspace: &'a PathBuf,
-    work_state: Result<Option<String>, String>,
+    host: SharedCommandHost<'a>,
 }
 
 impl CommandWorkspaceContext for WorkspaceAdapter<'_> {
     fn workspace(&self) -> PathBuf {
-        self.workspace.clone()
+        self.host.app.borrow().workspace.clone()
     }
+
     fn work_state_snapshot(&self) -> Result<Option<String>, String> {
-        self.work_state.clone()
+        self.host.app.borrow().work_state_snapshot().map(|state| {
+            state.and_then(|state| crate::todo_snapshot::todo_snapshot_body(&state.todos))
+        })
     }
 }
 
@@ -476,14 +485,11 @@ impl CommandWorkspaceContext for WorkspaceAdapter<'_> {
 // Envelope construction (D1)
 // ---------------------------------------------------------------------------
 
-/// Owns the seven disjoint-borrow adapters for one dispatch, so the envelope
-/// can borrow them without touching concrete `App`.
+/// Owns seven facet objects sharing one synchronous TUI host proxy.
 ///
-/// `App::command_contexts()` builds this bundle from disjoint field reborrows;
-/// [`Self::contexts()`] then assembles the `CommandContexts` envelope from the
-/// owned adapters. The bundle is the safe-Rust vehicle for D1's envelope
-/// construction: the envelope itself cannot outlive function-local adapters,
-/// so the adapters live here for the duration of one dispatch.
+/// Handlers borrow only these adapters. Every method delegates to the real App
+/// authority and releases its `RefCell` borrow before returning, so facets can
+/// be called sequentially without exposing TUI types across the boundary.
 pub(crate) struct CommandContextBundle<'a> {
     session: SessionAdapter<'a>,
     model: ModelAdapter<'a>,
@@ -495,7 +501,6 @@ pub(crate) struct CommandContextBundle<'a> {
 }
 
 impl<'a> CommandContextBundle<'a> {
-    /// Build the full seven-slot envelope from the owned adapters.
     pub(crate) fn contexts(&mut self) -> CommandContexts<'_> {
         CommandContexts::empty()
             .with_session(&mut self.session)
@@ -507,72 +512,26 @@ impl<'a> CommandContextBundle<'a> {
             .with_workspace(&mut self.workspace)
     }
 
-    /// Split into the consumed [`ContextParts`] for handlers needing several
-    /// independent facets.
     pub(crate) fn parts(&mut self) -> ContextParts<'_> {
         self.contexts().into_parts()
     }
 }
 
 impl App {
-    /// Build the full capability envelope from disjoint field reborrows.
-    /// Handlers only ever see `&mut dyn` facets; concrete `App` is never
-    /// exposed through an envelope.
+    /// Build an App-free capability envelope backed by authoritative TUI
+    /// operations. The shared proxy is synchronous and local to one dispatch.
     pub(crate) fn command_contexts(&mut self) -> CommandContextBundle<'_> {
-        let work_state = self.work_state_snapshot().map(|state| {
-            state.and_then(|state| crate::todo_snapshot::todo_snapshot_body(&state.todos))
+        let host = Rc::new(CommandHost {
+            app: RefCell::new(self),
         });
-        let fallback_chain = self
-            .fallback_chain_entries()
-            .into_iter()
-            .map(|(_, provider, _)| to_provider_id(provider.as_str()))
-            .collect();
-        let policy_locked = self.approval_policy_locked();
-
         CommandContextBundle {
-            session: SessionAdapter {
-                session_id: &self.current_session_id,
-                api_messages: &mut self.api_messages,
-                queued_messages: &mut self.queued_messages,
-                total_tokens: &self.session.total_tokens,
-            },
-            model: ModelAdapter {
-                model: &mut self.model,
-                auto_model: &mut self.auto_model,
-                reasoning_effort: &self.reasoning_effort,
-                provider_identity: &mut self.last_effective_provider_identity,
-                fallback_chain,
-            },
-            cost: CostAdapter {
-                currency: &self.cost_currency,
-                session_cost: &mut self.session.session_cost,
-                session_cost_cny: &mut self.session.session_cost_cny,
-                subagent_cost: &mut self.session.subagent_cost,
-                subagent_cost_cny: &mut self.session.subagent_cost_cny,
-            },
-            mode_policy: ModePolicyAdapter {
-                mode: &mut self.mode,
-                approval_mode: &mut self.approval_mode,
-                allow_shell: &mut self.allow_shell,
-                policy_locked,
-            },
-            system_prompt: SystemPromptAdapter {
-                system_prompt: &self.system_prompt,
-            },
-            skills: SkillsAdapter {
-                active_skill: &self.active_skill,
-                active_skill_provenance: &self.active_skill_provenance,
-                cached_skills: &mut self.cached_skills,
-                hotbar_actions: &mut self.hotbar_actions,
-                workspace: &self.workspace,
-                skills_dir: &self.skills_dir,
-                skills_scan_codewhale_only: &self.skills_scan_codewhale_only,
-                plugin_registry: &self.plugin_registry,
-            },
-            workspace: WorkspaceAdapter {
-                workspace: &self.workspace,
-                work_state,
-            },
+            session: SessionAdapter { host: host.clone() },
+            model: ModelAdapter { host: host.clone() },
+            cost: CostAdapter { host: host.clone() },
+            mode_policy: ModePolicyAdapter { host: host.clone() },
+            system_prompt: SystemPromptAdapter { host: host.clone() },
+            skills: SkillsAdapter { host: host.clone() },
+            workspace: WorkspaceAdapter { host },
         }
     }
 }
@@ -581,8 +540,14 @@ impl App {
 mod tests {
     use super::*;
 
+    fn test_app() -> App {
+        crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
+            PathBuf::from("."),
+        ))
+    }
+
     #[test]
-    fn pending_groups_is_sorted_unique_and_covers_all_groups() {
+    fn pending_groups_is_sorted_unique_and_matches_checked_in_frontier() {
         let mut sorted = PENDING_GROUPS.to_vec();
         sorted.sort_unstable();
         assert_eq!(PENDING_GROUPS, sorted.as_slice(), "frontier must be sorted");
@@ -593,21 +558,21 @@ mod tests {
             "frontier must be unique"
         );
 
-        // The nine roots are the group identities in groups/mod.rs order.
-        let expected: std::collections::BTreeSet<&str> = [
-            "config", "core", "debug", "memory", "plugins", "project", "session", "skills",
-            "utility",
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            unique, expected,
-            "frontier must exactly cover the nine groups"
-        );
+        let topology: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/command-migration-topology.json"
+        ))
+        .expect("checked-in topology must be valid JSON");
+        let frontier = topology["frontier"]
+            .as_array()
+            .expect("topology frontier")
+            .iter()
+            .map(|entry| entry.as_str().expect("string frontier entry"))
+            .collect::<Vec<_>>();
+        assert_eq!(PENDING_GROUPS, frontier.as_slice());
     }
 
     #[test]
-    fn boundary_mappings_are_exhaustive_and_invertible() {
+    fn boundary_mappings_cover_every_variant() {
         for mode in [
             AppMode::Agent,
             AppMode::Auto,
@@ -615,7 +580,8 @@ mod tests {
             AppMode::Plan,
             AppMode::Operate,
         ] {
-            let _ = to_command_mode(mode);
+            let command = to_command_mode(mode);
+            assert_eq!(from_command_mode(command), mode);
         }
         for approval in [
             ApprovalMode::Auto,
@@ -639,7 +605,8 @@ mod tests {
             let _ = to_command_effort(effort);
         }
         for currency in [CostCurrency::Usd, CostCurrency::Cny] {
-            let _ = to_command_currency(currency);
+            let command = to_command_currency(currency);
+            assert_eq!(from_command_currency(command), currency);
         }
     }
 
@@ -658,142 +625,143 @@ mod tests {
     }
 
     #[test]
-    fn cost_adapter_accrues_per_currency_and_reports_totals() {
-        let mut usd = 1.0f64;
-        let mut cny = 2.0f64;
-        let mut sub_usd = 0.5f64;
-        let mut sub_cny = 1.5f64;
-        let currency = CostCurrency::Usd;
-        let mut adapter = CostAdapter {
-            currency: &currency,
-            session_cost: &mut usd,
-            session_cost_cny: &mut cny,
-            subagent_cost: &mut sub_usd,
-            subagent_cost_cny: &mut sub_cny,
-        };
-        adapter.accrue_cost_estimate(3.0, CommandCurrency::Usd);
-        adapter.accrue_cost_estimate(4.0, CommandCurrency::Cny);
-        assert_eq!(adapter.session_cost_for_currency(CommandCurrency::Usd), 4.0);
-        assert_eq!(adapter.session_cost_for_currency(CommandCurrency::Cny), 6.0);
-        assert_eq!(adapter.display_currency(), CommandCurrency::Usd);
+    fn cost_adapter_delegates_totals_high_water_and_route_receipt_to_app() {
+        let mut app = test_app();
+        app.cost_currency = CostCurrency::Usd;
+        {
+            let mut bundle = app.command_contexts();
+            let mut parts = bundle.parts();
+            let cost = parts.cost.as_mut().expect("cost facet");
+            cost.accrue_cost_estimate(3.0, CommandCurrency::Usd);
+            cost.record_turn_cost(
+                4.0,
+                CommandCurrency::Cny,
+                Some("provider=deepseek model=x".to_string()),
+            );
+            assert_eq!(cost.session_cost_for_currency(CommandCurrency::Usd), 3.0);
+            assert_eq!(cost.session_cost_for_currency(CommandCurrency::Cny), 4.0);
+        }
+        assert_eq!(app.session_cost_for_currency(CostCurrency::Usd), 3.0);
+        assert_eq!(app.session_cost_for_currency(CostCurrency::Cny), 4.0);
         assert_eq!(
-            adapter.subagent_cost_for_currency(CommandCurrency::Usd),
-            0.5
+            app.displayed_session_cost_for_currency(CostCurrency::Usd),
+            3.0
         );
-        assert_eq!(
-            adapter.subagent_cost_for_currency(CommandCurrency::Cny),
-            1.5
+        assert!(
+            app.session
+                .cost_route_receipts
+                .contains("provider=deepseek model=x")
         );
     }
 
     #[test]
-    fn session_adapter_manages_messages_queue_and_tokens() {
-        let session_id = Some("s1".to_string());
-        let mut api_messages = Vec::new();
-        let mut queued = VecDeque::new();
-        let total_tokens = 42u32;
-        let mut adapter = SessionAdapter {
-            session_id: &session_id,
-            api_messages: &mut api_messages,
-            queued_messages: &mut queued,
-            total_tokens: &total_tokens,
-        };
-        assert_eq!(adapter.session_id().as_deref(), Some("s1"));
-        adapter.add_message(Message {
-            role: "user".to_string(),
-            content: vec![],
-        });
-        assert_eq!(adapter.api_messages().len(), 1);
-        adapter.queued_messages.push_back(QueuedMessage {
+    fn session_adapter_delegates_message_and_queue_operations_to_app() {
+        let mut app = test_app();
+        app.current_session_id = Some("s1".to_string());
+        app.session.total_tokens = 42;
+        app.queue_message(crate::tui::app::QueuedMessage {
             display: "q".to_string(),
             skill_instruction: None,
             skill_provenance: None,
         });
-        assert_eq!(adapter.queued_message_count(), 1);
-        assert!(adapter.remove_queued_message(0).is_ok());
-        assert_eq!(adapter.queued_message_count(), 0);
-        assert!(adapter.remove_queued_message(5).is_err());
-        assert_eq!(adapter.total_tokens(), 42);
-        let _ = &session_id;
+        {
+            let mut bundle = app.command_contexts();
+            let mut parts = bundle.parts();
+            let session = parts.session.as_mut().expect("session facet");
+            assert_eq!(session.session_id().as_deref(), Some("s1"));
+            session.add_message(Message {
+                role: "user".to_string(),
+                content: vec![],
+            });
+            assert_eq!(session.api_messages().len(), 1);
+            assert_eq!(session.queued_message_count(), 1);
+            assert!(session.remove_queued_message(0).is_ok());
+            assert!(session.remove_queued_message(5).is_err());
+            assert_eq!(session.total_tokens(), 42);
+        }
+        assert_eq!(app.api_messages.len(), 1);
+        assert_eq!(app.queued_message_count(), 0);
     }
 
     #[test]
-    fn model_adapter_reports_and_sets_selection() {
-        let mut model = "deepseek-v4".to_string();
-        let mut auto_model = false;
-        let effort = ReasoningEffort::High;
-        let mut provider_identity = None;
-        let fallback_chain = vec![to_provider_id("deepseek")];
-        let mut adapter = ModelAdapter {
-            model: &mut model,
-            auto_model: &mut auto_model,
-            reasoning_effort: &effort,
-            provider_identity: &mut provider_identity,
-            fallback_chain,
-        };
-        assert_eq!(adapter.current_model(), "deepseek-v4");
-        assert!(!adapter.auto_model());
-        assert_eq!(adapter.reasoning_effort(), CommandReasoningEffort::High);
-        adapter.set_model_selection("auto".to_string(), Some(to_provider_id("deepseek")));
-        assert!(adapter.auto_model());
-        assert_eq!(adapter.current_model(), "auto");
+    fn model_adapter_delegates_selection_and_route_invalidation_to_app() {
+        let mut app = test_app();
+        app.last_effective_model = Some("stale-model".to_string());
+        {
+            let mut bundle = app.command_contexts();
+            let mut parts = bundle.parts();
+            let model = parts.model.as_mut().expect("model facet");
+            model.set_model_selection("auto".to_string(), Some(to_provider_id("deepseek")));
+            assert!(model.auto_model());
+            assert_eq!(model.current_model(), "auto");
+            assert_eq!(
+                model.provider_identity().map(|id| id.0).as_deref(),
+                Some("deepseek")
+            );
+        }
+        assert!(app.last_effective_model.is_none());
+        assert_eq!(app.provider_identity_for_persistence(), "deepseek");
+    }
+
+    #[test]
+    fn mode_policy_adapter_delegates_mode_and_shell_policy_to_app() {
+        let mut app = test_app();
+        app.set_agent_shell_access(false);
+        {
+            let mut bundle = app.command_contexts();
+            let mut parts = bundle.parts();
+            let policy = parts.mode_policy.as_mut().expect("mode facet");
+            policy.set_shell_access(true);
+            policy.set_mode(CommandMode::Yolo);
+            assert!(policy.allow_shell());
+            assert_eq!(policy.approval_mode(), CommandApprovalMode::Bypass);
+        }
         assert_eq!(
-            adapter.provider_identity().map(|id| id.0).as_deref(),
-            Some("deepseek")
+            app.mode,
+            AppMode::Agent,
+            "YOLO is an Agent compatibility mode"
         );
-        assert_eq!(adapter.fallback_chain().len(), 1);
-    }
-
-    #[test]
-    fn mode_policy_adapter_maps_mode_approval_shell_lock() {
-        let mut mode = AppMode::Plan;
-        let mut approval = ApprovalMode::Suggest;
-        let mut allow_shell = false;
-        let mut adapter = ModePolicyAdapter {
-            mode: &mut mode,
-            approval_mode: &mut approval,
-            allow_shell: &mut allow_shell,
-            policy_locked: true,
-        };
-        assert_eq!(adapter.mode(), CommandMode::Plan);
-        assert_eq!(adapter.approval_mode(), CommandApprovalMode::Suggest);
-        assert!(!adapter.allow_shell());
-        assert!(adapter.policy_locked());
-        adapter.set_mode(CommandMode::Agent);
-        adapter.set_shell_access(true);
-        assert_eq!(mode, AppMode::Agent);
-        assert!(allow_shell);
+        assert!(app.yolo);
+        assert!(app.allow_shell);
     }
 
     #[test]
     fn system_prompt_adapter_returns_owned_prompt() {
-        let prompt = SystemPrompt::Text("system".to_string());
-        let adapter = SystemPromptAdapter {
-            system_prompt: &Some(prompt),
-        };
-        assert!(adapter.system_prompt().is_some());
+        let mut app = test_app();
+        app.system_prompt = Some(SystemPrompt::Text("system".to_string()));
+        let mut bundle = app.command_contexts();
+        let parts = bundle.parts();
+        assert!(
+            parts
+                .system_prompt
+                .expect("system prompt facet")
+                .system_prompt()
+                .is_some()
+        );
     }
 
     #[test]
     fn workspace_adapter_returns_path_and_snapshot() {
-        let workspace = PathBuf::from("/tmp/ws");
-        let adapter = WorkspaceAdapter {
-            workspace: &workspace,
-            work_state: Ok(None),
-        };
-        assert_eq!(adapter.workspace(), PathBuf::from("/tmp/ws"));
-        assert_eq!(adapter.work_state_snapshot().ok().flatten(), None);
+        let mut app = test_app();
+        let expected = app.workspace.clone();
+        let mut bundle = app.command_contexts();
+        let parts = bundle.parts();
+        let workspace = parts.workspace.expect("workspace facet");
+        assert_eq!(workspace.workspace(), expected);
+        assert!(workspace.work_state_snapshot().is_ok());
     }
 
     #[test]
-    fn envelope_round_trips_through_selected_facets() {
-        let mut app = crate::test_support::test_app_with_options(
-            crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
-        );
+    fn envelope_exposes_all_seven_facets_without_app_in_handler_surface() {
+        let mut app = test_app();
         let mut bundle = app.command_contexts();
-        let parts: ContextParts<'_> = bundle.parts();
-        let _ = parts.workspace.expect("workspace facet present");
-        let _ = parts.mode_policy.expect("mode-policy facet present");
-        let _ = parts.cost.expect("cost facet present");
+        let parts = bundle.parts();
+        assert!(parts.session.is_some());
+        assert!(parts.model.is_some());
+        assert!(parts.cost.is_some());
+        assert!(parts.mode_policy.is_some());
+        assert!(parts.system_prompt.is_some());
+        assert!(parts.skills.is_some());
+        assert!(parts.workspace.is_some());
     }
 }

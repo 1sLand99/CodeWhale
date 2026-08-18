@@ -24,13 +24,17 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOPOLOGY_PATH = REPO_ROOT / "scripts" / "command-migration-topology.json"
+CONTRACT_PATH = REPO_ROOT / "crates" / "tui" / "src" / "commands" / "contract.rs"
+TOPOLOGY_REPO_PATH = "scripts/command-migration-topology.json"
 SUPPORTED_SCHEMA_VERSION = 1
 
 # Closed set of Rust integer suffixes accepted by selector const atoms.
@@ -455,6 +459,118 @@ def validate_topology_document(doc: dict) -> list[ManifestViolation]:
 def load_topology(path: Path = TOPOLOGY_PATH) -> dict:
     with path.open(encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def load_pending_groups(path: Path = CONTRACT_PATH) -> list[str]:
+    """Read the TUI frontier projection from `PENDING_GROUPS` fail-closed."""
+    source = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"pub\(crate\)\s+const\s+PENDING_GROUPS\s*:\s*&\[&str\]\s*=\s*&\[(.*?)\];",
+        source,
+        re.DOTALL,
+    )
+    if match is None:
+        raise ValueError(f"could not locate PENDING_GROUPS in {path}")
+    body = match.group(1)
+    stripped = re.sub(r'"(?:\\.|[^"\\])*"', "", body)
+    if re.fullmatch(r"[\s,]*", stripped) is None:
+        raise ValueError("PENDING_GROUPS may contain string literals only")
+    return re.findall(r'"((?:\\.|[^"\\])*)"', body)
+
+
+def validate_pending_projection(doc: dict, pending: list[str]) -> list[ManifestViolation]:
+    if pending != doc.get("frontier"):
+        return [ManifestViolation(
+            "frontier-projection",
+            "PENDING_GROUPS",
+            f"TUI projection {pending!r} does not equal JSON frontier {doc.get('frontier')!r}",
+        )]
+    return []
+
+
+def load_topology_at_ref(ref: str, root: Path = REPO_ROOT) -> dict | None:
+    """Load the topology from a Git revision; return None before its introduction."""
+    commit = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        raise ValueError(f"baseline ref {ref!r} is unavailable: {commit.stderr.strip()}")
+    shown = subprocess.run(
+        ["git", "show", f"{ref}:{TOPOLOGY_REPO_PATH}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shown.returncode != 0:
+        return None
+    return json.loads(shown.stdout)
+
+
+def validate_baseline_transition(current: dict, previous: dict | None) -> list[ManifestViolation]:
+    """Enforce immutable topology and shrink-or-declared-split across revisions."""
+    if validate_topology_document(current):
+        return [ManifestViolation(
+            "current",
+            "topology",
+            "current topology is invalid; cannot validate a monotonic transition",
+        )]
+    if previous is None:
+        roots = sorted(current["topology"])
+        if current.get("frontier") != roots:
+            return [ManifestViolation(
+                "frontier-initialization",
+                "frontier",
+                f"first manifest revision must start at all topology roots {roots!r}",
+            )]
+        return []
+
+    violations = validate_topology_document(previous)
+    if violations:
+        return [ManifestViolation(
+            "baseline",
+            "topology",
+            "baseline topology is invalid; cannot validate a monotonic transition",
+        )]
+    if previous.get("topology") != current.get("topology"):
+        violations.append(ManifestViolation(
+            "topology-transition",
+            "topology",
+            "migration topology is immutable; only the frontier may change",
+        ))
+        return violations
+    violations.extend(
+        is_valid_frontier_transition(
+            previous["topology"], previous["frontier"], current["frontier"]
+        )
+    )
+    return violations
+
+
+def detect_local_baseline_ref(root: Path = REPO_ROOT) -> str | None:
+    """Use the local feature-branch merge-base when available."""
+    process = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if process.returncode != 0:
+        return None
+    baseline = process.stdout.strip()
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return baseline if baseline and baseline != head else None
 
 
 # ---------------------------------------------------------------------------
@@ -1026,9 +1142,25 @@ def _leaf_node(topology: dict, leaf_name: str) -> dict | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    del argv  # reserved for future flags
-    doc = load_topology()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--baseline-ref",
+        help="Git revision whose topology/frontier must transition monotonically to the current one",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        doc = load_topology()
+        pending = load_pending_groups()
+        baseline_ref = args.baseline_ref or detect_local_baseline_ref()
+        previous = load_topology_at_ref(baseline_ref) if baseline_ref else None
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"[command-migration-manifest] FAIL: {error}", file=sys.stderr)
+        return 1
+
     violations = validate_topology_document(doc)
+    violations.extend(validate_pending_projection(doc, pending))
+    violations.extend(validate_baseline_transition(doc, previous))
     if violations:
         print("[command-migration-manifest] FAIL", file=sys.stderr)
         for violation in violations:
@@ -1041,10 +1173,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {violation}", file=sys.stderr)
         return 1
     frontier = doc["frontier"]
+    transition = f"; baseline {baseline_ref}" if baseline_ref else "; initialization"
     print(
         f"[command-migration-manifest] PASS: schema v{SUPPORTED_SCHEMA_VERSION}; "
-        f"frontier [{', '.join(frontier)}] exactly matches source; "
-        "all nine groups still use concrete-App handlers"
+        f"frontier [{', '.join(frontier)}] matches TUI projection and source{transition}"
     )
     return 0
 

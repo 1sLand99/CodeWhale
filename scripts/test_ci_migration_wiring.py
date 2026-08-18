@@ -56,6 +56,13 @@ class CiWiringTests(unittest.TestCase):
         block = migration_step_block(ci)
         self.assertIn("check-command-migration-manifest.py", block)
 
+    def test_migration_live_scan_receives_fetched_baseline(self) -> None:
+        block = migration_step_block(load_ci())
+        self.assertIn("PR_BASE_SHA", block)
+        self.assertIn("PUSH_BEFORE_SHA", block)
+        self.assertIn("git fetch --no-tags --depth=1 origin", block)
+        self.assertIn('--baseline-ref "${baseline}"', block)
+
     def test_migration_commands_are_ordered_self_test_first(self) -> None:
         ci = load_ci()
         block = migration_step_block(ci)

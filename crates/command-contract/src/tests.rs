@@ -56,7 +56,13 @@ impl CommandCostContext for Cost {
         0.5
     }
     fn accrue_cost_estimate(&mut self, _amount: f64, _currency: CommandCurrency) {}
-    fn record_turn_cost(&mut self, _amount: f64, _currency: CommandCurrency, _receipt: bool) {}
+    fn record_turn_cost(
+        &mut self,
+        _amount: f64,
+        _currency: CommandCurrency,
+        _receipt: Option<String>,
+    ) {
+    }
 }
 
 struct Policy;

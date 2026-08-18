@@ -110,21 +110,22 @@ fn build_registry() -> traits::CommandRegistry {
 /// FEAT-015 test-only contextual command (D6).
 ///
 /// Registered into the global registry only in test builds; the production
-/// registry is untouched. The handler is written purely against
-/// `CommandContexts` — its signature physically cannot name `App` or any TUI
-/// type — and the fixture dispatches through the public `execute()`.
+/// registry is untouched. The command implements the portable contract
+/// `RegisterCommand` shape, and its handler cannot name concrete `App`; the
+/// TUI bridge resolves metadata and dispatches it through public `execute()`.
 #[cfg(test)]
 struct Feat015TestCommand;
 
 #[cfg(test)]
-impl Feat015TestCommand {
-    fn info() -> &'static traits::CommandInfo {
-        static INFO: traits::CommandInfo = traits::CommandInfo {
-            name: "feat015ctx",
-            aliases: &[],
-            usage: "/feat015ctx",
-            description_id: crate::localization::MessageId::CmdWorkspaceDescription,
-        };
+impl codewhale_command_contract::metadata::RegisterCommand<CommandResult> for Feat015TestCommand {
+    fn info() -> &'static codewhale_command_contract::metadata::CommandInfo {
+        static INFO: codewhale_command_contract::metadata::CommandInfo =
+            codewhale_command_contract::metadata::CommandInfo {
+                name: "feat015ctx",
+                aliases: &[],
+                usage: "/feat015ctx",
+                description_key: "cmd_workspace_description",
+            };
         &INFO
     }
 
@@ -134,8 +135,8 @@ impl Feat015TestCommand {
 }
 
 /// Test-only contextual handler: reads workspace, mode, and currency facets
-/// through the envelope and returns a TUI `CommandResult`. It has no `App`
-/// parameter and no TUI type in its signature.
+/// through the envelope and returns the host-selected result type. It has no
+/// concrete `App` parameter or TUI state in its input surface.
 #[cfg(test)]
 fn feat015_contextual(
     contexts: codewhale_command_contract::handler::CommandContexts<'_>,
@@ -162,10 +163,10 @@ static FEAT015_CTX: OnceLock<&'static traits::ContextualCommand> = OnceLock::new
 #[cfg(test)]
 fn feat015_ctx_command() -> &'static traits::ContextualCommand {
     FEAT015_CTX.get_or_init(|| {
-        Box::leak(Box::new(traits::ContextualCommand::contextual(
-            Feat015TestCommand::info(),
-            Feat015TestCommand::handler(),
-        )))
+        Box::leak(Box::new(
+            traits::ContextualCommand::from_contract::<Feat015TestCommand>()
+                .expect("FEAT-015 portable registration must bridge into the TUI registry"),
+        ))
     })
 }
 
@@ -1816,9 +1817,12 @@ mod tests {
         // The fixture entry is present in the test-build registry with a
         // capability-scoped handler; production builds never see it.
         assert!(registry().has_contextual_handler("feat015ctx"));
+        let info = registry().get_info("feat015ctx").expect("info");
+        assert_eq!(info.name, "feat015ctx");
         assert_eq!(
-            registry().get_info("feat015ctx").expect("info").name,
-            "feat015ctx"
+            info.description_id,
+            crate::localization::MessageId::CmdWorkspaceDescription,
+            "portable description_key must bridge to the TUI localization id"
         );
     }
 
