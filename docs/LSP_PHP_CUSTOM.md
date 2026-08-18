@@ -1,5 +1,7 @@
 # LSP: PHP Support & Custom Language Server Extension
 
+> 阅读简体中文版：[zh_hans/LSP_PHP_CUSTOM.md](zh_hans/LSP_PHP_CUSTOM.md)
+>
 > v0.8.65+ | `codex/lsp-php-custom-servers`
 
 ## Overview
