@@ -19,6 +19,7 @@
  */
 
 import { REDUCED_MOTION_POLICY, type MediaAsset } from "@/lib/media-manifest";
+import { pickText } from "@/lib/i18n/dictionaries";
 import { StatusBadge } from "./status-badge";
 
 const MEDIA_PLAN_DOC =
@@ -45,8 +46,8 @@ export function SessionMedia({ asset, locale = "en" }: { asset: MediaAsset; loca
           </p>
         </div>
         <figcaption className="session-media-caption">
-          <strong>{isZh ? asset.title.zh : asset.title.en}</strong>
-          <span>{isZh ? asset.description.zh : asset.description.en}</span>
+          <strong>{pickText(asset.title, locale)}</strong>
+          <span>{pickText(asset.description, locale)}</span>
           <a href={MEDIA_PLAN_DOC} target="_blank" rel="noreferrer">
             {isZh ? "录制计划与验收清单 ↗" : "Recording plan and acceptance checklist ↗"}
           </a>
@@ -75,7 +76,7 @@ export function SessionMedia({ asset, locale = "en" }: { asset: MediaAsset; loca
         poster={`/${poster.src}`}
         width={video.width}
         height={video.height}
-        aria-label={isZh ? poster.alt.zh : poster.alt.en}
+        aria-label={pickText(poster.alt, locale)}
       >
         <source src={`/${video.src}`} type="video/mp4" />
         {captions.map((track) => (
@@ -90,8 +91,8 @@ export function SessionMedia({ asset, locale = "en" }: { asset: MediaAsset; loca
         ))}
       </video>
       <figcaption className="session-media-caption">
-        <strong>{isZh ? asset.title.zh : asset.title.en}</strong>
-        <span>{isZh ? asset.description.zh : asset.description.en}</span>
+        <strong>{pickText(asset.title, locale)}</strong>
+        <span>{pickText(asset.description, locale)}</span>
         {asset.gifFallback && (
           <a href={`/${asset.gifFallback.src}`}>
             {isZh ? "GIF 下载回退（无视频环境）" : "GIF fallback download (no-video environments)"}
