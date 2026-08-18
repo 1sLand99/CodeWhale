@@ -8383,7 +8383,8 @@ async fn closed_engine_event_stream_fails_turn_items_and_evicts_engine() -> Resu
     assert!(matches!(rx_op.recv().await, Some(Op::SendMessage { .. })));
     drop(tx_event);
 
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
     let terminal_error = terminal.error.as_deref().unwrap_or_default();
     assert!(
@@ -8402,7 +8403,7 @@ async fn closed_engine_event_stream_fails_turn_items_and_evicts_engine() -> Resu
                 TurnItemLifecycleStatus::Queued | TurnItemLifecycleStatus::InProgress
             ))
     );
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
     loop {
         if !manager.active.lock().await.engines.contains_key(&thread.id) {
             break;

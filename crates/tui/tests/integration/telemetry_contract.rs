@@ -889,12 +889,26 @@ impl LockHolder {
             .open(path)
             .expect("open the telemetry lock");
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
-        // SAFETY: `fd` is owned by `file` and outlives the call.
-        let taken = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(
-            taken, 0,
-            "the telemetry lock must be free before the test takes it"
-        );
+        let started = Instant::now();
+        loop {
+            // SAFETY: `fd` is owned by `file` and outlives the call.
+            let taken = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if taken == 0 {
+                break;
+            }
+
+            let err = std::io::Error::last_os_error();
+            let retryable = err
+                .raw_os_error()
+                .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN);
+            assert!(retryable, "failed to take the telemetry lock: {err}");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the telemetry arming lock remained held for {:?}",
+                started.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Self { file }
     }
 }
