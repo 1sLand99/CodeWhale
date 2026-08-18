@@ -1360,6 +1360,15 @@ fn ocean_scene_fragment_mounts_a_canvas_and_honours_the_guards() {
 #[test]
 fn brand_fragment_is_explicit_responsive_and_slot_safe() {
     let js = super::brand::bundle_brand_js();
+    // The brand mark is the two-color Signal Current contract mark on ink,
+    // never an emoji (design system BRIEF.md: no emoji as icons).
+    assert!(
+        js.contains("viewBox: \"0 0 64 64\""),
+        "Signal Current viewBox"
+    );
+    assert!(js.contains("fill: \"#f6c453\""), "gold body path");
+    assert!(js.contains("fill: \"#48d7ff\""), "cyan current path");
+    assert!(!js.contains("🐋"), "no whale emoji");
     assert!(js.contains("function CodewhaleBrand()"));
     assert!(js.contains("codewhale-brand-lockup"));
     assert!(js.contains("WHALE BROTHERS"));
