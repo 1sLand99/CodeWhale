@@ -3,10 +3,12 @@ import {
   DICTIONARY_LOCALES,
   EN_CHROME,
   EN_DOCS_GUIDE,
+  EN_DOCS_SHELL,
   EN_HOME,
   fill,
   getChrome,
   getDocsGuide,
+  getDocsShell,
   getHome,
   pickText,
   splitToken,
@@ -212,6 +214,22 @@ describe("website dictionaries", () => {
     }
     // A locale without the file falls back to the English reference object.
     expect(getDocsGuide("ja")).toBe(EN_DOCS_GUIDE);
+  });
+
+  it("holds the docs shell dictionary to the same contract (#5337)", () => {
+    const enKeys = Object.keys(EN_DOCS_SHELL).sort();
+    for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
+      expect(Object.keys(getDocsShell(locale)).sort(), `${locale} docs-shell keys`).toEqual(
+        enKeys,
+      );
+    }
+    // zh ships a real translation, not an English pass-through.
+    expect(getDocsShell("zh").heroTitle).not.toBe(EN_DOCS_SHELL.heroTitle);
+    // Every other locale renders the English shell today, exactly as the
+    // `isZh` ternaries in docs/layout.tsx did before the move.
+    for (const locale of ["ja", "fr", "ar", "und"]) {
+      expect(getDocsShell(locale), `${locale} docs-shell`).toBe(EN_DOCS_SHELL);
+    }
   });
 
   it("pickText selects the locale side of legacy { en, zh } pairs", () => {
