@@ -380,7 +380,10 @@ pub(crate) fn billing_surface_for_route(
         ApiProvider::Moonshot => moonshot_surface(&shape),
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => minimax_surface(&shape),
         ApiProvider::XiaomiMimo => xiaomi_surface(&shape),
-        ApiProvider::Openrouter | ApiProvider::NvidiaNim | ApiProvider::OpencodeZen => {
+        ApiProvider::Openrouter
+        | ApiProvider::NvidiaNim
+        | ApiProvider::OpencodeZen
+        | ApiProvider::Orcarouter => {
             is_official_default_endpoint(provider, &shape).then_some(AGGREGATOR_BILLING_SURFACE)
         }
         _ => is_official_default_endpoint(provider, &shape)
@@ -2271,6 +2274,12 @@ mod tests {
             (
                 ApiProvider::Openrouter,
                 "https://openrouter.ai/api/v1",
+                AGGREGATOR_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::Orcarouter,
+                "https://api.orcarouter.ai/v1",
                 AGGREGATOR_BILLING_SURFACE,
                 EndpointMetering::Money,
             ),
