@@ -28,6 +28,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: -Dwarnings
+  # Test threads share a process and tokio/async frames run deep; the default
+  # 2 MiB stack overflowed sporadically in runtime_api::tests::start_turn_*
+  # under load and aborted the whole lib suite (signal 6). 8 MiB is the
+  # measured-safe floor; nextest's per-process runs are unaffected either way.
+  RUST_MIN_STACK: 8388608
 
 jobs:
   changes:
