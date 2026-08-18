@@ -655,6 +655,8 @@ mod tests {
     #[test]
     fn delete_requires_confirmation_and_removes_the_file() {
         let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
         let ws = tempfile::TempDir::new().unwrap();
 
         save_in(ws.path(), FleetScope::Workspace, "Temp Fleet");
