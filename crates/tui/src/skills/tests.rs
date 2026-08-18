@@ -75,6 +75,42 @@ fn prompt_warning_sanitizer_normalizes_windows_separators() {
 }
 
 #[test]
+fn prompt_warning_sanitizer_replaces_configured_roots_only_at_path_boundaries() {
+    let workspace = std::path::Path::new("/tmp/workspace");
+    let configured_root = std::path::Path::new("/tmp/work");
+    let warning = "Skill in /tmp/workspace/.agents/skills/a/SKILL.md shadows /tmp/work/a/SKILL.md";
+
+    let sanitized = super::sanitize_prompt_path_text(warning, workspace, Some(configured_root));
+
+    assert_eq!(
+        sanitized,
+        "Skill in ./.agents/skills/a/SKILL.md shadows <configured-skills>/a/SKILL.md"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_warning_sanitizer_handles_non_utf8_configured_roots() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let workspace = std::path::Path::new("/tmp/workspace");
+    let configured_root = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        b"/tmp/session-\xff/skills".to_vec(),
+    ));
+    let warning = format!(
+        "Skill in {}/visual-design/SKILL.md is not a safe command name",
+        configured_root.display()
+    );
+
+    let sanitized = super::sanitize_prompt_path_text(&warning, workspace, Some(&configured_root));
+
+    assert_eq!(
+        sanitized,
+        "Skill in <configured-skills>/visual-design/SKILL.md is not a safe command name"
+    );
+}
+
+#[test]
 fn render_available_skills_context_lists_paths_and_usage() {
     let tmpdir = TempDir::new().unwrap();
     create_skill_dir(

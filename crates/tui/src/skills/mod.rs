@@ -1303,11 +1303,11 @@ fn sanitize_prompt_path_text(
             .into_iter()
             .flatten()
         {
-            if let Some(root) = root.to_str()
-                && !root.is_empty()
-            {
-                out = out.replace(root, "<configured-skills>");
-            }
+            out = replace_prompt_path_root(
+                &out,
+                root.to_string_lossy().as_ref(),
+                "<configured-skills>",
+            );
         }
     }
     if let Some(ws) = workspace.to_str()
@@ -1338,6 +1338,45 @@ fn sanitize_prompt_path_text(
     // using backslashes. Warnings are model-facing prose, not paths passed
     // back to the OS, so normalize them on every host for a stable contract.
     out.replace('\\', "/")
+}
+
+fn replace_prompt_path_root(text: &str, root: &str, replacement: &str) -> String {
+    if root.is_empty() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find(root) {
+        let start = cursor + relative_start;
+        let end = start + root.len();
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        let starts_at_boundary = before.is_none_or(|ch| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '(' | '[' | '{' | '<' | ',' | ';' | ':' | '=' | '\'' | '"'
+                )
+        });
+        let ends_at_boundary = after.is_none_or(|ch| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '/' | '\\' | ')' | ']' | '}' | '>' | ',' | ';' | ':' | '=' | '\'' | '"'
+                )
+        });
+
+        out.push_str(&text[cursor..start]);
+        if starts_at_boundary && ends_at_boundary {
+            out.push_str(replacement);
+        } else {
+            out.push_str(root);
+        }
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    out
 }
 
 /// Render a skill path without leaking private absolute paths into the
