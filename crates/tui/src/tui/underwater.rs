@@ -515,8 +515,9 @@ pub(crate) fn sync_title_activity(app: &App) {
     crate::tui::notifications::set_title_motion_enabled(
         app.motion_policy().allows_decorative() && app.status_indicator != "off",
     );
-    // Keep the terminal tab identity in step with the existing session name;
-    // change detection inside makes this free when nothing moved.
+    // Keep the `[title] …` window-title prefix in step with the session and
+    // config defaults; change detection inside makes this free when nothing
+    // moved.
     crate::tui::notifications::set_title_prefix(app.window_title_prefix());
     if app.is_loading
         || matches!(
@@ -1728,23 +1729,27 @@ mod tests {
     }
 
     #[test]
-    fn window_title_prefix_uses_existing_session_name() {
+    fn window_title_prefix_prefers_session_over_config_default() {
         let mut app = test_app();
+        // Nothing configured: no prefix at all.
         assert_eq!(app.window_title_prefix(), None);
 
-        app.session_title = Some("task-7".to_string());
+        // Config default alone.
+        app.title_default = Some("workspace-x".to_string());
+        assert_eq!(app.window_title_prefix(), Some("workspace-x"));
+
+        // Session-level `/title` wins over the config default.
+        app.window_title = Some("task-7".to_string());
         assert_eq!(app.window_title_prefix(), Some("task-7"));
 
-        app.session_title = Some("   ".to_string());
-        assert_eq!(app.window_title_prefix(), None);
+        // Clearing the session title falls back to the default.
+        app.window_title = None;
+        assert_eq!(app.window_title_prefix(), Some("workspace-x"));
 
-        // The unnamed-session placeholder is not a tab identity.
-        app.session_title = Some(crate::session_manager::DEFAULT_SESSION_TITLE.to_string());
+        // Whitespace-only titles count as unset.
+        app.window_title = Some("   ".to_string());
         assert_eq!(app.window_title_prefix(), None);
-        app.session_title = Some("new session".to_string());
-        assert_eq!(app.window_title_prefix(), None);
-        app.session_title = Some("  Beta  ".to_string());
-        assert_eq!(app.window_title_prefix(), Some("Beta"));
+        app.window_title = None;
     }
 
     #[test]
@@ -1754,7 +1759,7 @@ mod tests {
         let _guard = crate::tui::notifications::title_prefix_test_lock();
         crate::tui::notifications::set_title_prefix(None);
         let mut app = test_app();
-        app.session_title = Some("sync-check".to_string());
+        app.window_title = Some("sync-check".to_string());
         sync_title_activity(&app);
         assert_eq!(
             crate::tui::notifications::title_prefix_slot()
@@ -1763,7 +1768,7 @@ mod tests {
                 .as_str(),
             "sync-check"
         );
-        app.session_title = None;
+        app.window_title = None;
         sync_title_activity(&app);
         assert_eq!(
             crate::tui::notifications::title_prefix_slot()

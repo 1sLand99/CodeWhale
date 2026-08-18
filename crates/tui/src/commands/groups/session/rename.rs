@@ -128,9 +128,7 @@ pub(crate) fn rename_with_manager(
                     "Session renamed, but Work views were not published: {err}"
                 ));
             }
-            CommandResult::message(format!(
-                "Session and terminal tab renamed to \"{new_title}\""
-            ))
+            CommandResult::message(format!("Session renamed to \"{new_title}\""))
         }
         Err(e) => CommandResult::error(format!("Could not save session: {e}")),
     }
@@ -144,11 +142,11 @@ pub(crate) fn rename_with_manager(
 /// `/rename` or `/title` used to fail outright with "Could not load
 /// session". Prefer the durable checkpoint; if even that has not been
 /// flushed yet, rebuild the document from the same in-memory `App` state the
-/// checkpoint itself was built from. Everything rename needs to preserve
-/// (id, created_at, fork lineage, journal) is either in the checkpoint or
-/// has never existed, and `update_session` re-syncs the conversation from
-/// `App` state immediately afterwards in both cases.
-fn live_session_before_first_snapshot(
+/// checkpoint itself was built from. Everything rename/title needs to
+/// preserve (id, created_at, fork lineage, journal) is either in the
+/// checkpoint or has never existed, and `update_session` re-syncs the
+/// conversation from `App` state immediately afterwards in both cases.
+pub(crate) fn live_session_before_first_snapshot(
     manager: &SessionManager,
     session_id: &str,
     app: &App,

@@ -352,15 +352,16 @@ a published OpenAI-compatible host ship here (#5350).
   updates it. The legacy `deepseek-tui` formula remains a deprecated alias
   for one overlap release.
 
-- Terminal tab/window titles now carry the existing saved session name before
-  the live state (`Codewhale`, `reasoning…`, `using tool…`, `done`), so parallel
-  sessions are identifiable at a glance without a second title setting.
-  `/title <name>` is a discoverable alias for `/rename`; both update the one
-  session name shown in the picker, composer, and terminal tab. Control,
-  bidi, and zero-width format characters are stripped from the saved name
-  itself, so `/title`, `/rename`, the picker, the Runtime API,
-  `codewhale sessions`, and the OSC 0 tab title all carry the same
-  escape-free text (#5419, Sh1Zuku).
+- `/title [name|off]` sets a per-session tab/window title, shown as
+  `[title] …` in front of the terminal window title (`Codewhale` /
+  `reasoning…` / `using tool…` / `done`). The `title` config key supplies
+  the default (`/config title … --save` persists it); multi-window
+  workflows can tell parallel sessions apart at a glance. `/title` is
+  independent of `/rename`, which keeps naming the session in the picker
+  and composer. Control, bidi, and zero-width format characters are
+  stripped from both the saved session name and the window title, so the
+  picker, the Runtime API, `codewhale sessions`, and the OSC 0 tab title
+  all carry the same escape-free text (#5419, #5430).
 - Eden AI is a named OpenAI-compatible Chat Completions provider (`edenai`,
   aliases `eden-ai` / `eden_ai`) with `EDENAI_API_KEY`, global and EU base-URL
   overrides, a live provider-scoped model catalog, and

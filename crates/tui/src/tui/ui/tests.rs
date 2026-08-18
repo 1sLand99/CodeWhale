@@ -5628,6 +5628,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+        window_title: None,
         last_auto_route: None,
     }
 }
@@ -5667,6 +5668,21 @@ fn apply_loaded_session_keeps_submitted_user_tail_in_history() {
     assert!(app.history.iter().any(|cell| {
         matches!(cell, HistoryCell::User { content } if content == "finish the Qthresh proof bundle")
     }));
+}
+
+#[test]
+fn apply_loaded_session_restores_the_window_title_override() {
+    let mut app = create_test_app();
+    let mut session = saved_session_with_messages(vec![]);
+    session.window_title = Some("restored-tab-title".to_string());
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+
+    assert_eq!(
+        app.window_title.as_deref(),
+        Some("restored-tab-title"),
+        "applied session must restore the /title override onto the App"
+    );
 }
 
 #[test]

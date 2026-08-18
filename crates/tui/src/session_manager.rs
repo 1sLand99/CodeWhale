@@ -536,6 +536,12 @@ pub struct SavedSession {
     /// To-do and plan state shown in the Work sidebar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_state: Option<SessionWorkState>,
+    /// User-configured tab/window title for this session (`/title`), shown as
+    /// `[title] …` in front of the terminal window title. Optional for
+    /// backward-compatible session loads; absent sessions use the `title`
+    /// config default instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
     /// Most recent accepted/completed Auto decision, when the saved model mode
     /// is `auto`. Optional for backward-compatible session loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,6 +681,7 @@ impl SavedSession {
             context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
+            window_title: None,
             last_auto_route: None,
         })
     }
@@ -1797,6 +1804,7 @@ pub fn create_saved_session_with_id_and_mode(
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+        window_title: None,
         last_auto_route: None,
     }
 }
@@ -2363,6 +2371,7 @@ mod tests {
             context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
+            window_title: None,
             last_auto_route: None,
         };
         manager.save_session(&session).expect("save");
@@ -2402,6 +2411,7 @@ mod tests {
             context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
+            window_title: None,
             last_auto_route: None,
         };
         manager.save_session(&session).expect("save empty");
