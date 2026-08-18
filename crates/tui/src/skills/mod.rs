@@ -1334,14 +1334,23 @@ fn sanitize_prompt_path_text(
 /// system-prompt prefix (#4632): workspace skills become workspace-relative,
 /// home-dir skills become `~/…`, and anything else is reduced to its trailing
 /// components so the prefix stays free of user-identifying absolute paths.
+/// Skill paths in the prompt are consumed by the model as text, not by the
+/// platform's shell, so normalize Windows separators to forward slashes:
+/// the catalog renders identically on every platform (#5473).
+fn prompt_display(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(workspace) {
-        return rel.display().to_string();
+        return prompt_display(rel);
     }
     if let Some(home) = crate::config::effective_home_dir()
         && let Ok(rel) = path.strip_prefix(&home)
     {
-        return format!("~/{}", rel.display());
+        return format!("~/{}", prompt_display(rel));
     }
     match (path.parent().and_then(Path::file_name), path.file_name()) {
         (Some(dir), Some(file)) => {
@@ -1372,10 +1381,10 @@ fn prompt_skill_path(
     workspace: &Path,
     configured_skills_root: Option<&Path>,
 ) -> Option<String> {
-    if let Some(root) = configured_skills_root {
-        if path_is_within_root(path, root) {
-            return None;
-        }
+    if let Some(root) = configured_skills_root
+        && path_is_within_root(path, root)
+    {
+        return None;
     }
     Some(privacy_safe_skill_path(path, workspace))
 }
