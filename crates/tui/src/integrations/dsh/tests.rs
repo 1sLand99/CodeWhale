@@ -756,13 +756,14 @@ fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
     assert!(a.contains(skin::SKIN_SOURCE));
     assert!(a.contains("ctx.effect"));
     assert!(a.contains("overrideTokens"));
-    assert!(a.contains("createCodewhaleBrand"));
-    assert!(a.contains("brand.start()"));
-    assert!(a.contains("brand.stop()"));
-    assert!(a.contains("if (!ctx.theme) return;"));
+    assert!(a.contains("function CodewhaleBrand()"));
+    assert!(a.contains("ctx.slots.inject(\"shell.overlay\""));
+    assert!(a.contains("ctx.slots.register("));
+    assert!(a.contains("React.createElement(CodewhaleBrand)"));
+    assert!(a.contains("if (!ctx.theme || !ctx.slots) return;"));
     assert!(
-        a.contains("exports.inject = [\"theme\"];"),
-        "cordis exposes ctx.theme only through inject"
+        a.contains("exports.inject = [\"theme\", \"slots\"];"),
+        "cordis exposes ctx.theme and ctx.slots only through inject"
     );
     assert!(
         a.contains("ctx.theme?.overrideTokens"),
@@ -1357,18 +1358,21 @@ fn ocean_scene_fragment_mounts_a_canvas_and_honours_the_guards() {
 }
 
 #[test]
-fn brand_fragment_is_explicit_responsive_and_reversible() {
+fn brand_fragment_is_explicit_responsive_and_slot_safe() {
     let js = super::brand::bundle_brand_js();
+    assert!(js.contains("function CodewhaleBrand()"));
     assert!(js.contains("codewhale-brand-lockup"));
     assert!(js.contains("WHALE BROTHERS"));
     assert!(js.contains("CODEWHALE"));
     assert!(js.contains("DEEPSEEK HARNESS"));
     assert!(js.contains("pointer-events:none"));
-    assert!(js.contains("COMPACT_AT"));
-    assert!(js.contains("window.addEventListener(\"resize\", layout)"));
-    assert!(js.contains("window.removeEventListener(\"resize\", layout)"));
-    assert!(js.contains("window.__codewhaleBrand"));
-    assert!(js.contains("removeChild(root)"));
+    assert!(js.contains("@media(max-width:759px)"));
+    assert!(js.contains("React.createElement"));
+    assert!(!js.contains("document.body"));
+    assert!(!js.contains("document.createElement"));
+    assert!(!js.contains("window.addEventListener"));
+    assert!(!js.contains("window.removeEventListener"));
+    assert!(!js.contains("window.__codewhaleBrand"));
     assert_eq!(super::brand::brand_sha256().len(), 64);
 }
 
@@ -1430,8 +1434,8 @@ fn bundle_client_js_splices_the_ocean_only_when_enabled() {
     // both keep the palette override contract
     for js in [&on, &off] {
         assert!(js.contains("overrideTokens"));
-        assert!(js.contains("exports.inject = [\"theme\"];"));
-        assert!(js.contains("if (!ctx.theme) return;"));
+        assert!(js.contains("exports.inject = [\"theme\", \"slots\"];"));
+        assert!(js.contains("if (!ctx.theme || !ctx.slots) return;"));
     }
 }
 

@@ -187,13 +187,14 @@ apart differ, console clean, dark via `prefers-color-scheme` follows through
 
 ## Whale Brothers / Codewhale identity (v0.9.9 addendum)
 
-`brand.js` mounts a plugin-owned top-right lockup with the literal hierarchy
+`brand.js` renders a plugin-owned top-right lockup through DSH's additive
+`shell.overlay` slot, with the literal hierarchy
 `WHALE BROTHERS` / `CODEWHALE` / `× DEEPSEEK HARNESS`. It is deliberately
 additive: no DSH-owned branding, controls, or DOM classes are replaced. The
 surface is token-driven and pointer-inert, collapses to a compact whale mark
-below 760 px, and unregisters its resize hook and removes its node when the
-client effect is disposed. `package.json` records `brand_sha256` so generated
-bundle identity covers the lockup as well as the palette and ocean.
+below 760 px via media CSS, and unmounts with the client plugin. `package.json`
+records `brand_sha256` so generated bundle identity covers the lockup as well
+as the palette and ocean.
 
 ## Out of scope (decided)
 

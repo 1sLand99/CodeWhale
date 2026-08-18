@@ -1,8 +1,9 @@
 //! Whale Brothers / Codewhale identity lockup for the DSH bundle skin.
 //!
 //! The palette and ocean scene can be mistaken for an ordinary theme. This
-//! small, plugin-owned DOM surface makes the relationship explicit without
-//! replacing or modifying DSH's own product identity.
+//! small, plugin-owned React surface uses DSH's additive `shell.overlay` Slot
+//! to make the relationship explicit without replacing or modifying DSH's own
+//! product identity.
 
 use super::identity::sha256_hex;
 

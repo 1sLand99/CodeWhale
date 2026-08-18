@@ -113,17 +113,16 @@ fn indent_json_block(json: &str, indent: &str) -> String {
 
 /// Client half: `__ModuleLoader__.load` wrapper + factory that applies
 /// `overrideTokens` inside `ctx.effect` and returns the disposer. `inject:
-/// ["theme"]` is required: cordis 4 only exposes injected (or self/ancestor
-/// provided) services on `ctx`; reading `ctx.theme` from a sibling plugin
-/// without it throws `cannot get property "theme" without inject`, which
-/// fails the whole web boot.
+/// ["theme", "slots"]` is required: cordis 4 only exposes injected (or
+/// self/ancestor provided) services on `ctx`; reading either sibling service
+/// without it fails the whole web boot.
 ///
 /// The Whale Brothers / Codewhale lockup is spliced in for every skin and
-/// mounted in its own reversible effect. With `ocean` the ambient scene
-/// (`scene::bundle_scene_js`) is also spliced in: the module mounts the canvas
-/// inside another `ctx.effect`, follows `theme/change` for light/dark, and
-/// re-issues the veil tokens (`scene::ocean_veil_tokens`) as translucent rgba
-/// over the opaque table. The browser-side off switch
+/// registered into DSH's additive `shell.overlay` slot. With `ocean` the
+/// ambient scene (`scene::bundle_scene_js`) is also spliced in: the module
+/// mounts the canvas inside another `ctx.effect`, follows `theme/change` for
+/// light/dark, and re-issues the veil tokens (`scene::ocean_veil_tokens`) as
+/// translucent rgba over the opaque table. The browser-side off switch
 /// (`localStorage["codewhale.ocean"] = "off"` or body class
 /// `codewhale-ocean-off`) skips both the canvas and the veil.
 pub(crate) fn bundle_client_js(ocean: bool) -> String {
@@ -155,17 +154,20 @@ window.__ModuleLoader__.load({{\n\
 \t\tvar module = {{ exports: {{}} }};\n\
 \t\tvar exports = module.exports;\n\
 \t\tObject.defineProperty(exports, Symbol.toStringTag, {{ value: \"Module\" }});\n\
+\t\tlet React = require(\"react\");\n\
 \t\tconst TOKENS = {tokens};\n\
 {ocean_block}\
 		{brand}\n\
 \t\tfunction apply(ctx) {{\n\
-\t\t\tif (!ctx.theme) return;\n\
-\t\t\tvar brand = createCodewhaleBrand();\n\
+\t\t\tif (!ctx.theme || !ctx.slots) return;\n\
 \t\t\tvar ocean = OCEAN ? createOcean(OCEAN_PALETTE) : null;\n\
 \t\t\tvar oceanOn = ocean !== null && !ocean.isOff();\n\
 \t\t\tvar tokens = oceanOn ? Object.assign({{}}, TOKENS, OCEAN_VEIL) : TOKENS;\n\
 \t\t\tctx.effect(() => ctx.theme?.overrideTokens(\"{SKIN_SOURCE}\", tokens));\n\
-\t\t\tctx.effect(() => {{ brand.start(); return () => brand.stop(); }});\n\
+\t\t\tctx.slots.inject(\"shell.overlay\", () => ctx.slots.register(\n\
+\t\t\t\t{{ name: \"shell.overlay\", id: \"codewhale-brand-lockup\", order: 100, label: \"Codewhale\" }},\n\
+\t\t\t\t() => React.createElement(CodewhaleBrand),\n\
+\t\t\t));\n\
 \t\t\tif (oceanOn) {{\n\
 \t\t\t\tctx.effect(() => {{\n\
 \t\t\t\t\tocean.setScheme(ctx.theme.getTheme().active.colorScheme);\n\
@@ -176,7 +178,7 @@ window.__ModuleLoader__.load({{\n\
 \t\t\t}}\n\
 \t\t}}\n\
 \t\texports.apply = apply;\n\
-\t\texports.inject = [\"theme\"];\n\
+\t\texports.inject = [\"theme\", \"slots\"];\n\
 \t\treturn module.exports;\n\
 \t}}\n\
 }});\n"

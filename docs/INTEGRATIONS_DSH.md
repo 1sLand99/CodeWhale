@@ -215,9 +215,10 @@ carries the same hash under `codewhale.skin_sha256`.
 
 The skin mounts a small plugin-owned lockup in the top-right corner that says
 `WHALE BROTHERS`, `CODEWHALE`, and `× DEEPSEEK HARNESS`. It is additive: it
-does not replace or rewrite DeepSeek Harness branding or controls. The lockup
-uses the active skin tokens, ignores pointer input, collapses to a compact
-whale mark below 760 px, and is removed by the same client-plugin disposer.
+registers through DSH's frame-wide `shell.overlay` slot and does not replace or
+rewrite DeepSeek Harness branding or controls. The lockup uses the active skin
+tokens, ignores pointer input, collapses to a compact whale mark below 760 px,
+and is removed with the client plugin.
 `package.json` records the generated fragment as `codewhale.brand_sha256`.
 
 ### Ocean scene (whales and glyph fish)
