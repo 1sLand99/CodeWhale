@@ -243,7 +243,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     // columns are genuinely free after the phase marker, the ledger chips, a
     // floor for any live toast, and the key hints, and sheds its
     // lowest-value groups to fit rather than truncating a number.
-    if metrics_enabled {
+    if metrics_enabled && tier != ShellTier::Compact {
         let snapshot = crate::tui::session_metrics::snapshot_from_app(app);
         if !snapshot.is_empty() {
             let toast_reserve = status_toast
@@ -731,6 +731,18 @@ mod tests {
         }
         assert!(!compact.contains("Tool call"), "{compact}");
         assert!(!compact.contains("tok/s"), "{compact}");
+    }
+
+    #[test]
+    fn session_metrics_strip_is_hidden_when_compact() {
+        let mut app = app_with_session_metrics();
+        // 59 columns is the widest Compact row. The working detail and the
+        // cache chip already stand down here, so the metrics strip claiming
+        // the leftovers is the one thing still crowding the label.
+        let text = strip_text(&mut app, 59);
+        assert!(!text.contains("turns"), "compact strip: {text}");
+        assert!(!text.contains("LLM"), "compact strip: {text}");
+        assert!(!text.contains('│'), "compact strip: {text}");
     }
 
     #[test]
