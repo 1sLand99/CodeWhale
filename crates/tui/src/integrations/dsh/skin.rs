@@ -4,8 +4,8 @@
 //! values, so a stylesheet cannot win. The documented token-level override is
 //! `ctx.theme.overrideTokens`. This module is the single source of truth for
 //! that layer: alias name → (light, dark), both rendered from the TUI Blue
-//! Stage palettes. The ombre water column and crown-fluke mark have no alias
-//! and do not carry.
+//! Stage palettes. The generated bundle also mounts a plugin-owned Whale
+//! Brothers / Codewhale identity lockup; it leaves DSH-owned branding intact.
 
 use std::collections::BTreeMap;
 
@@ -118,15 +118,18 @@ fn indent_json_block(json: &str, indent: &str) -> String {
 /// without it throws `cannot get property "theme" without inject`, which
 /// fails the whole web boot.
 ///
-/// With `ocean` the ambient scene (`scene::bundle_scene_js`) is spliced in:
-/// the module mounts the canvas inside a second `ctx.effect`, follows
-/// `theme/change` for light/dark, and re-issues the veil tokens
-/// (`scene::ocean_veil_tokens`) as translucent rgba over the opaque table.
-/// The browser-side off switch (`localStorage["codewhale.ocean"] = "off"`
-/// or body class `codewhale-ocean-off`) skips both the canvas and the veil.
+/// The Whale Brothers / Codewhale lockup is spliced in for every skin and
+/// mounted in its own reversible effect. With `ocean` the ambient scene
+/// (`scene::bundle_scene_js`) is also spliced in: the module mounts the canvas
+/// inside another `ctx.effect`, follows `theme/change` for light/dark, and
+/// re-issues the veil tokens (`scene::ocean_veil_tokens`) as translucent rgba
+/// over the opaque table. The browser-side off switch
+/// (`localStorage["codewhale.ocean"] = "off"` or body class
+/// `codewhale-ocean-off`) skips both the canvas and the veil.
 pub(crate) fn bundle_client_js(ocean: bool) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let tokens = indent_json_block(&skin_tokens_json(), "\t\t");
+    let brand = indent_json_block(super::brand::bundle_brand_js().trim_end(), "\t\t");
     let ocean_block = if ocean {
         let veil = indent_json_block(&super::scene::ocean_veil_json(), "\t\t");
         let palette = indent_json_block(&super::scene::ocean_palette_json(), "\t\t");
@@ -154,12 +157,15 @@ window.__ModuleLoader__.load({{\n\
 \t\tObject.defineProperty(exports, Symbol.toStringTag, {{ value: \"Module\" }});\n\
 \t\tconst TOKENS = {tokens};\n\
 {ocean_block}\
+		{brand}\n\
 \t\tfunction apply(ctx) {{\n\
 \t\t\tif (!ctx.theme) return;\n\
+\t\t\tvar brand = createCodewhaleBrand();\n\
 \t\t\tvar ocean = OCEAN ? createOcean(OCEAN_PALETTE) : null;\n\
 \t\t\tvar oceanOn = ocean !== null && !ocean.isOff();\n\
 \t\t\tvar tokens = oceanOn ? Object.assign({{}}, TOKENS, OCEAN_VEIL) : TOKENS;\n\
 \t\t\tctx.effect(() => ctx.theme?.overrideTokens(\"{SKIN_SOURCE}\", tokens));\n\
+\t\t\tctx.effect(() => {{ brand.start(); return () => brand.stop(); }});\n\
 \t\t\tif (oceanOn) {{\n\
 \t\t\t\tctx.effect(() => {{\n\
 \t\t\t\t\tocean.setScheme(ctx.theme.getTheme().active.colorScheme);\n\

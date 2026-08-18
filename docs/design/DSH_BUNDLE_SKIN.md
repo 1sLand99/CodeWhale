@@ -10,7 +10,8 @@ the one mechanism DSH actually supports.
 ## Goal
 
 `dsh --profile codewhale` (the `install-bundle` profile) renders in the
-Codewhale palette — Blue Stage dark and light — applied through
+Codewhale palette — Blue Stage dark and light — with an explicit Whale
+Brothers / Codewhale identity lockup, applied through
 `ctx.theme.overrideTokens`, the documented token-level override in
 `@deepseek-ai/dsh-client-ui-theme`. No build toolchain, no runtime deps, no
 injection hacks.
@@ -49,8 +50,7 @@ injection hacks.
   BTreeMap<String, (String, String)>` — alias name → (light, dark), both
   rendered from the real TUI palette (`crates/tui/src/palette`, Blue Stage
   dark + light). Port every mapping from today's `alias_map()` +
-  `theme_block()`; the ombre water column and the crown-fluke SVG do NOT
-  carry (no alias for them — out of scope, as decided).
+  `theme_block()`.
 - New: `pub(crate) fn bundle_client_js() -> String` — renders the client
   half: `__ModuleLoader__.load` wrapper + `factory` whose module applies
   `ctx.theme?.overrideTokens("codewhale-dsh-bundle", TOKENS)` inside
@@ -160,15 +160,14 @@ A 16-fish school of `><>` / `><o>` glyphs (14 px code font, scaled
 hysteresis; 26 stroked bubbles; a two-stop depth gradient. Layer order:
 gradient, far whale, bubbles, spouts, fish, near whale. Palette per scheme
 is derived from the skin's `surface_bg` / `accent_primary` / `text_body` /
-`text_dim`; canvas alphas (near 0.5 light / 0.62 dark, far 0.3 / 0.34) land
-at roughly 10–12 % apparent under the veil.
+`text_dim`; canvas alphas (near 0.64 light / 0.78 dark, far 0.4 / 0.46) are
+deliberately visible through the lighter veil.
 
-Visibility: `--dsw-alias-bg-base` → rgba α 0.55 and
-`--dsw-specific-sidebar-fill` → rgba α 0.72 (`scene::ocean_veil_tokens`),
-merged over the opaque `TOKENS` only when the scene is on. The frame and the
-centre column both paint `bg-base`, so the effective veil over the main area
-is `1 − 0.45² ≈ 0.80`; the canvas is opaque and the same base colour, so text
-contrast is unchanged in practice. Every other layer stays opaque.
+Visibility: `--dsw-alias-bg-base` → rgba α 0.42 and
+`--dsw-specific-sidebar-fill` → rgba α 0.78 (`scene::ocean_veil_tokens`),
+merged over the opaque `TOKENS` only when the scene is on. The lighter main
+veil makes the cast unmistakable while the stronger sidebar layer keeps
+navigation distinct. Every other layer stays opaque.
 
 Budget and guards: rAF capped at ~30 fps, `visibilitychange` pause,
 `prefers-reduced-motion: reduce` → one settled static frame, DPR ≤ 2,
@@ -186,8 +185,18 @@ apart differ, console clean, dark via `prefers-color-scheme` follows through
 `theme/change`, reduced-motion frame is static. Screenshots:
 `docs/design/assets/dsh-ocean-light.png`, `docs/design/assets/dsh-ocean-dark.png`.
 
+## Whale Brothers / Codewhale identity (v0.9.9 addendum)
+
+`brand.js` mounts a plugin-owned top-right lockup with the literal hierarchy
+`WHALE BROTHERS` / `CODEWHALE` / `× DEEPSEEK HARNESS`. It is deliberately
+additive: no DSH-owned branding, controls, or DOM classes are replaced. The
+surface is token-driven and pointer-inert, collapses to a compact whale mark
+below 760 px, and unregisters its resize hook and removes its node when the
+client effect is disposed. `package.json` records `brand_sha256` so generated
+bundle identity covers the lockup as well as the palette and ocean.
+
 ## Out of scope (decided)
 
-Wordmark/whale mark, title/favicon, persona text, layout, any non-bundle
-injection path, supporting dsh newer than the verified rc.6 (reported
+Title/favicon, persona text, DSH-owned layout, any non-bundle injection path,
+supporting dsh newer than the verified rc.6 (reported
 honestly as `stale-version`).

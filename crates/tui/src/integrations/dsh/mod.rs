@@ -17,6 +17,7 @@
 //! permissions. DSH is an integrated harness surface, not a second Fleet
 //! scheduler.
 
+pub(crate) mod brand;
 pub(crate) mod bundle;
 pub(crate) mod detect;
 pub(crate) mod identity;

@@ -211,12 +211,21 @@ only, no user data or environment. The receipt records `skin: true|false`
 and `skin_sha256` (SHA-256 of the rendered `TOKENS` JSON); `package.json`
 carries the same hash under `codewhale.skin_sha256`.
 
+### Whale Brothers / Codewhale identity
+
+The skin mounts a small plugin-owned lockup in the top-right corner that says
+`WHALE BROTHERS`, `CODEWHALE`, and `× DEEPSEEK HARNESS`. It is additive: it
+does not replace or rewrite DeepSeek Harness branding or controls. The lockup
+uses the active skin tokens, ignores pointer input, collapses to a compact
+whale mark below 760 px, and is removed by the same client-plugin disposer.
+`package.json` records the generated fragment as `codewhale.brand_sha256`.
+
 ### Ocean scene (whales and glyph fish)
 
 With the skin on, `lib/client.js` also carries an ambient ocean: a
 full-viewport `<canvas>` (`position: fixed; inset: 0; z-index: -1;
 pointer-events: none`, painted below `#root` and above the body background)
-with a subtle depth gradient, one near and one far whale silhouette (blunt
+with a visible depth gradient, one near and one far whale silhouette (blunt
 head, low dorsal hump, long pectoral flipper, horizontal fluke flexing ±10°)
 gliding slowly across on a gentle sine, biased to the lower half and the top
 edge so they never cross the composer card, an occasional short spout of
@@ -229,9 +238,9 @@ so it flips with the app.
 
 To let the canvas show through, the client re-issues two background tokens
 as translucent rgba over the opaque table while the scene is on:
-`--dsw-alias-bg-base` (α 0.55; the frame and the centre column both paint
-it, so the main area sits under an ~0.80 veil) and
-`--dsw-specific-sidebar-fill` (α 0.72, stacked over the frame). Panels,
+`--dsw-alias-bg-base` (α 0.42; the frame and the centre column both paint
+it) and `--dsw-specific-sidebar-fill` (α 0.78, keeping navigation distinct).
+Panels,
 composer, code blocks and every other layer stay opaque. Verified live on
 dsh 0.1.0-rc.6 in both schemes: no console errors, frames differ, and text
 stays legible (see `docs/design/assets/dsh-ocean-{light,dark}.png`).

@@ -61,10 +61,10 @@ function createOcean(palette) {
 			dark: dark,
 			// Depth gradient: light water reads darker/bluer with depth; dark
 			// water is lit faintly from above and falls to the base at the floor.
-			top: dark ? rgba(mix(base, accent, 0.09), 1) : rgba(base, 1),
-			bottom: dark ? rgba(base, 1) : rgba(mix(base, accent, 0.11), 1),
-			whaleNear: dark ? mix(dim, accent, 0.35) : mix(ink, accent, 0.25),
-			whaleFar: dark ? mix(dim, base, 0.25) : mix(dim, accent, 0.2),
+			top: dark ? rgba(mix(base, accent, 0.16), 1) : rgba(base, 1),
+			bottom: dark ? rgba(base, 1) : rgba(mix(base, accent, 0.17), 1),
+			whaleNear: dark ? mix(dim, accent, 0.58) : mix(ink, accent, 0.36),
+			whaleFar: dark ? mix(dim, base, 0.12) : mix(dim, accent, 0.3),
 			fish: dark ? mix(accent, dim, 0.15) : mix(accent, ink, 0.1),
 			bubble: dark ? mix(dim, accent, 0.4) : mix(accent, dim, 0.3),
 		};
@@ -397,15 +397,15 @@ function createOcean(palette) {
 		g.fillRect(0, 0, W, H);
 		var a = intensity;
 		g.fillStyle = colors.whaleFarStyle;
-		whales[0].draw(g, t, a * (colors.dark ? 0.34 : 0.3));
+		whales[0].draw(g, t, a * (colors.dark ? 0.46 : 0.4));
 		g.strokeStyle = colors.bubbleStyle;
-		drawBubbles(g, bubbles, a * (colors.dark ? 0.55 : 0.5));
+		drawBubbles(g, bubbles, a * (colors.dark ? 0.66 : 0.58));
 		whales[0].drawSpout(g, a * 0.6);
 		whales[1].drawSpout(g, a * 0.6);
 		g.fillStyle = colors.fishStyle;
-		drawFish(g, fish, a * (colors.dark ? 0.85 : 0.9));
+		drawFish(g, fish, a * (colors.dark ? 0.96 : 0.95));
 		g.fillStyle = colors.whaleNearStyle;
-		whales[1].draw(g, t, a * (colors.dark ? 0.62 : 0.5));
+		whales[1].draw(g, t, a * (colors.dark ? 0.78 : 0.64));
 		g.globalAlpha = 1;
 	}
 

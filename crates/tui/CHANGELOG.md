@@ -195,8 +195,9 @@ locales grow to 18 and 8.
   (docs/design/DSH_BUNDLE_SKIN.md, docs/INTEGRATIONS_DSH.md) (#5469).
 - `dsh` integration: an ambient ocean scene behind the DSH web UI — slow
   whale silhouettes, a school of `><>` glyph fish, bubbles — drawn on a
-  canvas under a translucent veil of the Codewhale palette; light and dark,
-  ~30 fps capped, paused when hidden, a static frame under
+  canvas under a translucent veil of the Codewhale palette, plus an explicit
+  responsive `WHALE BROTHERS / CODEWHALE × DEEPSEEK HARNESS` lockup; light
+  and dark, ~30 fps capped, paused when hidden, a static frame under
   `prefers-reduced-motion`; on by default with the skin,
   `codewhale integrations dsh update --ocean false` turns it off (#5484).
 - Fleet: agent shadowing is visible — a roster-row badge, a Layers block in
