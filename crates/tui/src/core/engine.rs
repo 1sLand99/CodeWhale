@@ -2470,6 +2470,16 @@ impl Engine {
                             crate::compaction::strip_compaction_summaries(system_prompt.as_ref());
                         self.session.last_system_prompt_hash =
                             Some(system_prompt_hash(self.session.system_prompt.as_ref()));
+                        // Prompt pins and drift baselines describe the
+                        // conversation that was active before this sync. The
+                        // next submitted turn must establish the installed
+                        // conversation's own full prefix instead of comparing
+                        // it with that stale baseline and emitting a
+                        // `<context_update>` from an empty/restored prompt.
+                        // Host-owned overrides remain byte-stable because the
+                        // refresh path exits early while the override is set.
+                        self.session.pinned_prompt_context = None;
+                        self.session.context_update_baseline = None;
                         // A session sync installs a new (or restored) prefix.
                         // Declare it so the next request re-pins the KV-cache
                         // prefix under a logged `resume` reason instead of
