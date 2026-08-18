@@ -242,6 +242,22 @@ pub fn set_live_session(session_id: Option<&str>) {
 
 /// Is this session currently owned by an in-process interactive surface?
 #[must_use]
+/// The canonical session-id shape: a hyphenated UUID, `8-4-4-4-12` hex.
+///
+/// Used to gate directory removal, so it is deliberately exact rather than
+/// permissive — see `reclaim_orphaned_session_dirs`.
+fn is_session_uuid(name: &str) -> bool {
+    let groups: Vec<&str> = name.split('-').collect();
+    if groups.len() != 5 {
+        return false;
+    }
+    const WIDTHS: [usize; 5] = [8, 4, 4, 4, 12];
+    groups
+        .iter()
+        .zip(WIDTHS)
+        .all(|(group, width)| group.len() == width && group.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 pub fn is_live_session(session_id: &str) -> bool {
     live_sessions()
         .read()
@@ -1405,6 +1421,83 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Ceiling on orphan directories reclaimed per `cleanup` call.
+    ///
+    /// Reconciliation runs on the save path, so it must never turn one save
+    /// into a long stall. A real machine accumulated 780 orphans; at this rate
+    /// it converges over a couple of dozen saves instead of blocking one.
+    const MAX_ORPHAN_DIRS_PER_SWEEP: usize = 32;
+
+    /// Remove per-session artifact directories whose session no longer exists.
+    ///
+    /// `delete_session` removes `sessions/<id>/` along with `<id>.json`, so
+    /// nothing written by the current code leaks. What was missing is
+    /// *reconciliation*: directories stranded by earlier versions — or by a
+    /// `remove_dir_all` that failed while the `remove_file` before it
+    /// succeeded, an error `cleanup_old_sessions_keeping` deliberately
+    /// swallows — were never collected by anything. A real `~/.codewhale`
+    /// held **780** such directories, each holding shell-completion evidence
+    /// artifacts, which is also why traversing that tree had become slow.
+    ///
+    /// Deliberately conservative, because this removes directories under
+    /// `$HOME`. A directory is reclaimed only when **all** of these hold:
+    ///
+    /// - its name is a valid session id by `validated_session_id` (so
+    ///   `checkpoints/` and any other bookkeeping directory is excluded);
+    /// - `sessions/<id>.json` does not exist;
+    /// - `checkpoints/<id>.json` does not exist — a crashed session's evidence
+    ///   must outlive its missing document, since that is exactly what
+    ///   recovery reads;
+    /// - the session is not live in this or any other process
+    ///   (`is_live_session`).
+    ///
+    /// Best effort throughout: a failure to read the directory or remove an
+    /// entry is ignored rather than failing the save that triggered it.
+    fn reclaim_orphaned_session_dirs(&self) {
+        let Ok(entries) = fs::read_dir(&self.sessions_dir) else {
+            return;
+        };
+        let mut reclaimed = 0usize;
+        for entry in entries.flatten() {
+            if reclaimed >= Self::MAX_ORPHAN_DIRS_PER_SWEEP {
+                return;
+            }
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(id) = name.to_str() else {
+                continue;
+            };
+            // `validated_session_id` is far too permissive to gate a
+            // `remove_dir_all` — it accepts any `[A-Za-z0-9_-]+`, which
+            // includes `checkpoints` itself. Reclaiming that directory would
+            // delete every crash-recovery checkpoint, and then, on the same
+            // pass, every session directory those checkpoints were protecting.
+            // Require the exact shape the runtime actually mints instead. An
+            // id that is not a UUID simply keeps its directory: leaving a
+            // stranger alone is the safe direction to be wrong in.
+            if !is_session_uuid(id) {
+                continue;
+            }
+            let Ok(session_path) = self.validated_session_path(id) else {
+                continue;
+            };
+            if session_path.exists() || is_live_session(id) {
+                continue;
+            }
+            if self
+                .validated_checkpoint_path(id)
+                .is_ok_and(|checkpoint| checkpoint.exists())
+            {
+                continue;
+            }
+            if fs::remove_dir_all(entry.path()).is_ok() {
+                reclaimed += 1;
+            }
+        }
+    }
+
     /// Clean up old sessions to stay within `MAX_SESSIONS` limit.
     pub fn cleanup_old_sessions(&self) -> std::io::Result<()> {
         self.cleanup_old_sessions_keeping(None)
@@ -1425,6 +1518,7 @@ impl SessionManager {
                 let _ = self.delete_session(&session.id);
             }
         }
+        self.reclaim_orphaned_session_dirs();
 
         Ok(())
     }
@@ -2442,6 +2536,107 @@ mod tests {
             last_auto_route: None,
         };
         manager.save_session(&session).expect("save empty");
+    }
+
+    // === orphaned per-session artifact directories ===
+
+    /// A real `~/.codewhale/sessions` held 780 directories whose session had
+    /// long been pruned, each still holding shell-completion evidence.
+    #[test]
+    fn cleanup_reclaims_session_dirs_whose_session_is_gone() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+
+        let orphan = "11111111-1111-4111-8111-111111111111";
+        let live = "22222222-2222-4222-8222-222222222222";
+        for id in [orphan, live] {
+            let artifacts = tmp.path().join(id).join("artifacts");
+            fs::create_dir_all(&artifacts).expect("artifact dir");
+            fs::write(artifacts.join("art_evidence.txt"), b"stdout").expect("artifact");
+        }
+        // Only `live` still has a session document.
+        write_session_record(&manager, live, &workspace, Utc::now());
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        assert!(
+            !tmp.path().join(orphan).exists(),
+            "a directory whose session is gone is reclaimed"
+        );
+        assert!(
+            tmp.path().join(live).join("artifacts").exists(),
+            "a directory whose session still exists must be left alone"
+        );
+    }
+
+    #[test]
+    fn a_crashed_sessions_evidence_survives_even_without_its_document() {
+        // Recovery reads exactly this: a checkpoint with no session document.
+        // Reclaiming its evidence would delete what recovery needs.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let crashed = "33333333-3333-4333-8333-333333333333";
+
+        fs::create_dir_all(tmp.path().join(crashed).join("artifacts")).expect("artifacts");
+        let checkpoints = tmp.path().join("checkpoints");
+        fs::create_dir_all(&checkpoints).expect("checkpoints dir");
+        fs::write(checkpoints.join(format!("{crashed}.json")), b"{}").expect("checkpoint");
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        assert!(
+            tmp.path().join(crashed).exists(),
+            "a crashed session's evidence must outlive its missing document"
+        );
+    }
+
+    #[test]
+    fn reclamation_never_touches_bookkeeping_directories() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        // `checkpoints` is not a session id and must survive being empty.
+        let checkpoints = tmp.path().join("checkpoints");
+        fs::create_dir_all(&checkpoints).expect("checkpoints dir");
+        let not_a_session = tmp.path().join("some-user-folder");
+        fs::create_dir_all(&not_a_session).expect("user dir");
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        assert!(checkpoints.exists(), "checkpoints/ is not a session dir");
+        assert!(
+            not_a_session.exists(),
+            "a name that is not a valid session id is not ours to remove"
+        );
+    }
+
+    #[test]
+    fn only_a_real_uuid_can_gate_a_directory_removal() {
+        // Real ids from a live ~/.codewhale.
+        for id in [
+            "db609d23-e25f-48b0-918e-6d1e390a7cb7",
+            "5bd5095c-2a10-46bb-9979-ed967d892d45",
+            "11111111-1111-4111-8111-111111111111",
+        ] {
+            assert!(super::is_session_uuid(id), "{id} is a session id");
+        }
+        // Everything `validated_session_id` would have waved through.
+        for name in [
+            "checkpoints",
+            "some-user-folder",
+            "mine",
+            "artifacts",
+            "db609d23-e25f-48b0-918e-6d1e390a7cb", // short final group
+            "db609d23-e25f-48b0-918e-6d1e390a7cb77", // long final group
+            "db609d23-e25f-48b0-918e",             // four groups
+            "zz609d23-e25f-48b0-918e-6d1e390a7cb7", // non-hex
+            "",
+        ] {
+            assert!(
+                !super::is_session_uuid(name),
+                "{name:?} must never gate a remove_dir_all"
+            );
+        }
     }
 
     #[test]

@@ -328,6 +328,13 @@ fn write_atomic_with_permissions(
         builder.permissions(fs::Permissions::from_mode(0o666));
     }
 
+    // Reclaim our own strays before adding another (see the function docs).
+    // Private policy only: a workspace directory belongs to the user, and a
+    // file of theirs that happens to match this shape is not ours to delete.
+    if permission_policy == AtomicWritePermissions::Private {
+        sweep_stale_atomic_write_temps(parent);
+    }
+
     let mut tmp = builder.tempfile_in(parent)?;
     std::io::Write::write_all(&mut tmp, contents)?;
 
@@ -377,6 +384,66 @@ fn write_atomic_with_permissions(
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// Remove `.tmpXXXXXX` files this writer stranded in `dir` on an earlier run.
+///
+/// `NamedTempFile` deletes itself on drop, so an ordinary failure — or an
+/// ordinary exit — leaves nothing behind. A `SIGKILL` between `tempfile_in`
+/// and `persist` cannot run a destructor, so the partial file survives, and
+/// nothing ever collected it: five such strays (46 KB each, mode 0600) were
+/// sitting in a real `~/.codewhale/` from a single day three weeks earlier.
+/// They accumulate silently in the user's config directory forever.
+///
+/// Deliberately conservative, because this deletes files under `$HOME`:
+///
+/// - **Private-policy directories only** — Codewhale's own config/state dirs,
+///   never a user workspace (enforced at the call site).
+/// - **Exact shape only** — `tempfile`'s default naming is the literal prefix
+///   `.tmp` followed by exactly six alphanumerics and nothing else. A user file
+///   called `.tmp`, `.tmpfile`, or `.tmp-backup` does not match.
+/// - **Older than an hour** — so a concurrent write by another Codewhale
+///   process is never raced. Same threshold and reasoning as
+///   `shell_dispatcher::sweep_stale_temp_ps1`.
+/// - **Best effort** — every failure is ignored; this must never turn a
+///   successful write into an error.
+fn sweep_stale_atomic_write_temps(dir: &Path) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_stray_atomic_write_temp_name(name) {
+            continue;
+        }
+        // Only regular files; never follow or remove a symlink or directory.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE_AFTER);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `tempfile`'s default name: `.tmp` + exactly six ASCII alphanumerics.
+fn is_stray_atomic_write_temp_name(name: &str) -> bool {
+    let Some(random) = name.strip_prefix(".tmp") else {
+        return false;
+    };
+    random.len() == 6 && random.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Open or create a file for appending at `path`, optionally syncing after
@@ -1086,6 +1153,88 @@ mod atomic_write_tests {
         }
         let content = fs::read_to_string(&path).expect("read");
         assert_eq!(content, "line 1\nline 2\n");
+    }
+
+    // === stray atomic-write temp files ===
+
+    /// Backdate a file's mtime past the sweeper's one-hour threshold, using
+    /// std rather than pulling in a dev-dependency just to age a fixture.
+    fn age_past_the_threshold(path: &std::path::Path) {
+        let two_hours_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open fixture");
+        file.set_times(std::fs::FileTimes::new().set_modified(two_hours_ago))
+            .expect("age the fixture");
+    }
+
+    #[test]
+    fn stray_temp_names_match_only_tempfiles_default_shape() {
+        // What `tempfile` actually produces.
+        assert!(super::is_stray_atomic_write_temp_name(".tmp0dqfST"));
+        assert!(super::is_stray_atomic_write_temp_name(".tmpBcX9dY"));
+        assert!(super::is_stray_atomic_write_temp_name(".tmpABC123"));
+
+        // User files that must never be swept.
+        for safe in [
+            ".tmp",
+            ".tmpfile",
+            ".tmp-backup",
+            ".tmp12345",   // five
+            ".tmp1234567", // seven
+            ".tmpABC12_",  // underscore is not alphanumeric
+            "tmpABC123",   // no leading dot
+            ".temp123456",
+            "config.toml",
+        ] {
+            assert!(
+                !super::is_stray_atomic_write_temp_name(safe),
+                "{safe} must not be treated as ours to delete"
+            );
+        }
+    }
+
+    #[test]
+    fn sweeping_removes_only_old_strays_and_leaves_everything_else() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let old_stray = dir.path().join(".tmpAAAAAA");
+        let fresh_stray = dir.path().join(".tmpBBBBBB");
+        let user_file = dir.path().join(".tmp-please-keep");
+        let real_file = dir.path().join("config.toml");
+        for path in [&old_stray, &fresh_stray, &user_file, &real_file] {
+            std::fs::write(path, b"x").expect("write fixture");
+        }
+
+        age_past_the_threshold(&old_stray);
+
+        super::sweep_stale_atomic_write_temps(dir.path());
+
+        assert!(
+            !old_stray.exists(),
+            "an hour-old stray of ours is collected"
+        );
+        assert!(
+            fresh_stray.exists(),
+            "a fresh stray may belong to a concurrent write and must be left alone"
+        );
+        assert!(user_file.exists(), "a user file must never be swept");
+        assert!(real_file.exists());
+    }
+
+    #[test]
+    fn a_private_atomic_write_collects_strays_without_disturbing_the_write() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let stray = dir.path().join(".tmpCCCCCC");
+        std::fs::write(&stray, b"stranded by a SIGKILL").expect("write stray");
+        age_past_the_threshold(&stray);
+
+        let target = dir.path().join("state.json");
+        super::write_atomic(&target, b"{\"ok\":true}").expect("atomic write");
+
+        assert_eq!(std::fs::read(&target).expect("read back"), b"{\"ok\":true}");
+        assert!(!stray.exists(), "the write reclaimed the earlier stray");
     }
 }
 
