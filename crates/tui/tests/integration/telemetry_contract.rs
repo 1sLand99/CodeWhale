@@ -788,6 +788,8 @@ async fn mid_session_opt_out_stops_the_shutdown_flush() {
 
     let mut command = exec_command(&fixture, "hello");
     let mut child = command.spawn().expect("spawn codewhale-tui exec");
+    let stdout = read_in_background(child.stdout.take().expect("stdout pipe"));
+    let stderr = read_in_background(child.stderr.take().expect("stderr pipe"));
 
     // Wait until this session's event is actually buffered, then leave enough
     // time for any accidental background flush to reach the recorder. Nothing
@@ -809,7 +811,12 @@ async fn mid_session_opt_out_stops_the_shutdown_flush() {
         .wait_timeout(EXEC_TIMEOUT)
         .expect("wait for codewhale-tui exec")
         .expect("codewhale-tui exec must exit");
-    let _ = status;
+    let output = Output {
+        status,
+        stdout: stdout.join().expect("stdout reader"),
+        stderr: stderr.join().expect("stderr reader"),
+    };
+    assert_exec_succeeded(&output, "mid-session opt-out run");
 
     assert_no_batches(&server, "an opt-out written mid-session").await;
     let root = fixture.telemetry_root();
@@ -1001,8 +1008,15 @@ fn plant_sentinels(fixture: &Fixture, base_url: &str) {
     .expect("plant workspace file");
     std::fs::write(
         fixture.codewhale_home.join("mcp.json"),
-        json!({"mcpServers": {SENTINEL_MCP_SERVER: {"command": "/bin/true", "args": []}}})
-            .to_string(),
+        // Keep the MCP name in a real parsed config without starting a process
+        // that exits before CodeWhale can write its initialize request. The
+        // telemetry contract is about name redaction, not broken-pipe handling.
+        json!({"mcpServers": {SENTINEL_MCP_SERVER: {
+            "command": "/bin/true",
+            "args": [],
+            "disabled": true
+        }}})
+        .to_string(),
     )
     .expect("plant MCP config");
 }
