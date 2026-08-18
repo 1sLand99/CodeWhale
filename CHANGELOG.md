@@ -129,6 +129,11 @@ locales grow to 18 and 8.
 - Compact TUI rows below 60 columns no longer reserve a hidden session-metrics
   strip, so narrow terminals reclaim the row instead of clipping the
   transcript (#5486).
+- Live reasoning's advertised `Space:expand` action now runs before the
+  composer's first-character paste-burst hold, while spaces in an active paste
+  remain payload. The newest reasoning preview also spends only genuinely free
+  viewport rows before truncating instead of stopping at the fixed 10/12-row
+  fallback on roomy terminals.
 - Strict `cargo doc` builds no longer fail on bare URLs in rustdoc comments;
   the remaining links are explicit Markdown targets (#5489).
 

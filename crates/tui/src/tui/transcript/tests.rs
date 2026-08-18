@@ -1659,6 +1659,93 @@ fn reasoning_target_transfer_rewrites_same_revision_cells() {
 }
 
 #[test]
+fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
+    let cells = vec![reasoning_cell(false), reasoning_cell(false)];
+    let revisions = [1, 1];
+    let mut cache = TranscriptViewCache::new();
+    let constrained = TranscriptRenderOptions {
+        reasoning_preview_viewport_lines: Some(26),
+        ..TranscriptRenderOptions::default()
+    };
+    cache.ensure_split(
+        &[&cells],
+        &revisions,
+        80,
+        constrained,
+        &HashSet::new(),
+        None,
+        Some(reasoning_owner(1)),
+    );
+
+    let first = cache.per_cell[0]
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let newest = cache.per_cell[1]
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!first.contains("reasoning line 20"), "{first}");
+    assert!(newest.contains("reasoning line 12"), "{newest}");
+    assert!(!newest.contains("reasoning line 13"), "{newest}");
+    assert_eq!(cache.total_lines(), 26);
+    assert!(cache.per_cell[0].reasoning_action.is_some());
+    assert!(cache.per_cell[1].reasoning_action.is_some());
+
+    let roomy = TranscriptRenderOptions {
+        reasoning_preview_viewport_lines: Some(34),
+        ..TranscriptRenderOptions::default()
+    };
+    cache.ensure_split(
+        &[&cells],
+        &revisions,
+        80,
+        roomy,
+        &HashSet::new(),
+        None,
+        Some(reasoning_owner(1)),
+    );
+    let newest = cache.per_cell[1]
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(newest.contains("reasoning line 20"), "{newest}");
+    assert!(cache.total_lines() <= 34);
+    assert!(cache.per_cell[1].reasoning_action.is_none());
+
+    // Appending a non-reasoning cell removes the adaptive treatment from the
+    // old tail even though its revision did not change.
+    let extended = vec![
+        reasoning_cell(false),
+        reasoning_cell(false),
+        assistant_cell("answer", false),
+    ];
+    cache.ensure_split(
+        &[&extended],
+        &[1, 1, 1],
+        80,
+        roomy,
+        &HashSet::new(),
+        None,
+        Some(reasoning_owner(2)),
+    );
+    let former_tail = cache.per_cell[1]
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!former_tail.contains("reasoning line 20"), "{former_tail}");
+    assert!(cache.per_cell[1].reasoning_action.is_some());
+}
+
+#[test]
 fn filtered_reasoning_owner_keeps_original_identity() {
     let cells = [reasoning_cell(false)];
     let revisions = [2];

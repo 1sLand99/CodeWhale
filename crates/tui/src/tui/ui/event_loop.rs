@@ -46,6 +46,28 @@ pub(super) fn handle_transcript_space(app: &mut App) -> bool {
     true
 }
 
+/// Route plain input that must be decided before the composer sees it.
+///
+/// The raw-paste fallback intentionally holds the first ASCII character for
+/// a few milliseconds. A bare Space advertised by the rendered reasoning
+/// affordance is a transcript command, though, and must win before that hold
+/// can turn it into composer text. An already-active burst still wins: its
+/// Space belongs to the pasted payload, not the transcript.
+pub(super) fn handle_plain_key_before_composer(
+    app: &mut App,
+    key: &KeyEvent,
+    now: Instant,
+) -> bool {
+    let is_reasoning_space = matches!(key.code, KeyCode::Char(' '))
+        && key.modifiers == KeyModifiers::NONE
+        && app.input.is_empty()
+        && !app.paste_burst.is_active();
+    if is_reasoning_space && handle_transcript_space(app) {
+        return true;
+    }
+    crate::tui::paste::handle_paste_burst_key(app, key, now)
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -4181,8 +4203,7 @@ pub(crate) async fn run_event_loop(
                 app.insert_str(&pending);
             }
 
-            if (is_plain_char || is_plain_enter)
-                && crate::tui::paste::handle_paste_burst_key(app, &key, now)
+            if (is_plain_char || is_plain_enter) && handle_plain_key_before_composer(app, &key, now)
             {
                 continue;
             }

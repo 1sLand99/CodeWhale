@@ -305,6 +305,7 @@ impl TranscriptViewCache {
         let revisions_match = cell_revisions.len() == total_cells;
         let mut dirty_cells = 0usize;
         let mut streaming_tail_update = None;
+        let mut newest_reasoning = None;
 
         let mut idx: usize = 0;
         for cell in cells {
@@ -317,7 +318,21 @@ impl TranscriptViewCache {
             let original_idx = original_index_map
                 .map(|m| *m.get(idx).unwrap_or(&idx))
                 .unwrap_or(idx);
+            let is_layout_aware_preview = idx + 1 == total_cells;
+            let was_layout_aware_preview = idx + 1 == old_len;
+            let is_tool_groupable = matches!(cell, HistoryCell::Tool(_));
+            let render_width = if is_tool_groupable {
+                width.saturating_sub(2).max(1)
+            } else {
+                width
+            };
+            let folded = folded_cells.contains(&original_idx);
+            if is_layout_aware_preview && matches!(cell, HistoryCell::Thinking { .. }) {
+                newest_reasoning = Some((idx, cell, current_rev, folded));
+            }
             if !layout_changed
+                && is_layout_aware_preview == was_layout_aware_preview
+                && !(is_layout_aware_preview && any_dirty)
                 && revisions_match
                 && old_per_cell
                     .get(idx)
@@ -336,13 +351,6 @@ impl TranscriptViewCache {
             any_dirty = true;
             dirty_cells = dirty_cells.saturating_add(1);
             first_dirty = Some(first_dirty.map_or(idx, |current| current.min(idx)));
-            let is_tool_groupable = matches!(cell, HistoryCell::Tool(_));
-            let render_width = if is_tool_groupable {
-                width.saturating_sub(2).max(1)
-            } else {
-                width
-            };
-            let folded = folded_cells.contains(&original_idx);
 
             if matches!(
                 cell,
@@ -417,47 +425,15 @@ impl TranscriptViewCache {
                 continue;
             }
 
-            let (rendered, reasoning_action) =
-                cell.lines_with_copy_metadata_folded(render_width, options, folded);
-            let mut lines = Vec::with_capacity(rendered.len());
-            let mut links = Vec::with_capacity(rendered.len());
-            let mut copy_separators = Vec::with_capacity(rendered.len());
-            let mut copy_prefix_widths = Vec::with_capacity(rendered.len());
-            for rendered_line in rendered {
-                let mut line = rendered_line.line;
-                if is_tool_groupable {
-                    strip_cell_local_tool_rail(&mut line);
-                }
-                lines.push(line);
-                links.push(rendered_line.links);
-                copy_prefix_widths.push(rendered_line.copy_prefix_width);
-                copy_separators.push(rendered_line.copy_separator_after);
-            }
-            if reasoning_action == Some(ReasoningAction::Expand)
-                && let Some(line) = lines.last()
-            {
-                let prefix = line.width().saturating_sub(compute_rail_prefix_width(line));
-                *copy_prefix_widths
-                    .last_mut()
-                    .expect("reasoning affordance line") = prefix;
-                links.last_mut().expect("reasoning affordance line").clear();
-            }
-            let is_empty = lines.is_empty();
-            let ends_blank = last_line_is_blank(&lines);
-            new_per_cell.push(CachedCell {
-                revision: current_rev,
-                lines: Arc::new(lines),
-                links: Arc::new(links),
-                copy_separators: Arc::new(copy_separators),
-                copy_prefix_widths: Arc::new(copy_prefix_widths),
-                is_empty,
-                ends_blank,
-                kind: TranscriptBlockKind::for_cell(cell),
-                is_tool_groupable,
-                reasoning_action,
-                incremental_markdown: None,
-                hot_tail_original: None,
-            });
+            let mut cell_options = options;
+            cell_options.reasoning_preview_extra_lines = 0;
+            new_per_cell.push(render_cached_cell(
+                cell,
+                current_rev,
+                width,
+                cell_options,
+                folded,
+            ));
             idx += 1;
         }
 
@@ -500,6 +476,24 @@ impl TranscriptViewCache {
             rebuild_from -= 1;
         }
         self.flatten_from(options.spacing, rebuild_from);
+
+        let Some(viewport_lines) = options.reasoning_preview_viewport_lines else {
+            return;
+        };
+        let free_rows = viewport_lines.saturating_sub(self.total_lines());
+        let Some((idx, cell, current_rev, folded)) = newest_reasoning.filter(|_| free_rows > 0)
+        else {
+            return;
+        };
+        let mut expanded_options = options;
+        expanded_options.reasoning_preview_extra_lines = free_rows;
+        let expanded = render_cached_cell(cell, current_rev, width, expanded_options, folded);
+        if expanded.lines == self.per_cell[idx].lines {
+            return;
+        }
+        self.per_cell[idx] = expanded;
+        self.set_action_owner(action_owner, original_index_map);
+        self.flatten_from(options.spacing, idx.saturating_sub(1));
     }
 
     fn set_action_owner(
@@ -739,6 +733,62 @@ impl TranscriptViewCache {
             .get(line_index)
             .copied()
             .unwrap_or(0)
+    }
+}
+
+fn render_cached_cell(
+    cell: &HistoryCell,
+    revision: u64,
+    width: u16,
+    options: TranscriptRenderOptions,
+    folded: bool,
+) -> CachedCell {
+    let is_tool_groupable = matches!(cell, HistoryCell::Tool(_));
+    let render_width = if is_tool_groupable {
+        width.saturating_sub(2).max(1)
+    } else {
+        width
+    };
+    let (rendered, reasoning_action) =
+        cell.lines_with_copy_metadata_folded(render_width, options, folded);
+    let mut lines = Vec::with_capacity(rendered.len());
+    let mut links = Vec::with_capacity(rendered.len());
+    let mut copy_separators = Vec::with_capacity(rendered.len());
+    let mut copy_prefix_widths = Vec::with_capacity(rendered.len());
+    for rendered_line in rendered {
+        let mut line = rendered_line.line;
+        if is_tool_groupable {
+            strip_cell_local_tool_rail(&mut line);
+        }
+        lines.push(line);
+        links.push(rendered_line.links);
+        copy_prefix_widths.push(rendered_line.copy_prefix_width);
+        copy_separators.push(rendered_line.copy_separator_after);
+    }
+    if reasoning_action == Some(ReasoningAction::Expand)
+        && let Some(line) = lines.last()
+    {
+        let prefix = line.width().saturating_sub(compute_rail_prefix_width(line));
+        *copy_prefix_widths
+            .last_mut()
+            .expect("reasoning affordance line") = prefix;
+        links.last_mut().expect("reasoning affordance line").clear();
+    }
+    let is_empty = lines.is_empty();
+    let ends_blank = last_line_is_blank(&lines);
+    CachedCell {
+        revision,
+        lines: Arc::new(lines),
+        links: Arc::new(links),
+        copy_separators: Arc::new(copy_separators),
+        copy_prefix_widths: Arc::new(copy_prefix_widths),
+        is_empty,
+        ends_blank,
+        kind: TranscriptBlockKind::for_cell(cell),
+        is_tool_groupable,
+        reasoning_action,
+        incremental_markdown: None,
+        hot_tail_original: None,
     }
 }
 

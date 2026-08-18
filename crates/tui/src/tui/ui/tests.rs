@@ -3562,15 +3562,23 @@ fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     );
 }
 
-fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
+fn reasoning_with_lines(label: &str, line_count: usize, streaming: bool) -> HistoryCell {
     HistoryCell::Thinking {
-        content: (1..=20)
+        content: (1..=line_count)
             .map(|line| format!("{label} line {line:02}"))
             .collect::<Vec<_>>()
             .join("\n"),
         streaming,
         duration_secs: (!streaming).then_some(1.0),
     }
+}
+
+fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
+    reasoning_with_lines(label, 20, streaming)
+}
+
+fn oversized_reasoning(label: &str, streaming: bool) -> HistoryCell {
+    reasoning_with_lines(label, 40, streaming)
 }
 
 fn reasoning_hint_cells(app: &App) -> Vec<usize> {
@@ -3660,7 +3668,7 @@ fn completed_answer_clears_stale_reasoning_expand_hint() {
 #[test]
 fn selected_reasoning_hint_and_space_share_one_owner() {
     let mut app = create_test_app();
-    app.history = vec![long_reasoning("selected", false)];
+    app.history = vec![oversized_reasoning("selected", false)];
     app.resync_history_revisions();
     let _ = render_underwater_test_app(&mut app, 100, 32);
     select_original_cell(&mut app, 0);
@@ -3821,6 +3829,110 @@ fn latest_streaming_reasoning_owns_space_after_an_older_tool() {
     );
     assert!(reasoning_hint_cells(&app).is_empty());
     assert!(!completed.contains("Space:expand"));
+}
+
+#[test]
+fn reasoning_preview_spends_available_viewport_rows_before_truncating() {
+    for streaming in [false, true] {
+        let mut roomy = create_test_app();
+        roomy.history = vec![reasoning_with_lines("roomy", 20, streaming)];
+        roomy.resync_history_revisions();
+        let roomy_surface = render_underwater_test_app(&mut roomy, 100, 32);
+
+        assert!(roomy_surface.contains("roomy line 01"), "{roomy_surface}");
+        assert!(roomy_surface.contains("roomy line 20"), "{roomy_surface}");
+        assert!(
+            !roomy_surface.contains("Space:expand"),
+            "a body that fits the live viewport must not be truncated: {roomy_surface}"
+        );
+        assert!(
+            roomy.viewport.last_transcript_total <= roomy.viewport.last_transcript_visible,
+            "the complete reasoning body should fit without scrolling"
+        );
+
+        let mut compact = create_test_app();
+        compact.history = vec![reasoning_with_lines("compact", 20, streaming)];
+        compact.resync_history_revisions();
+        let compact_surface = render_underwater_test_app(&mut compact, 60, 12);
+        assert!(
+            compact_surface.contains("Space:expand"),
+            "{compact_surface}"
+        );
+        assert_eq!(
+            compact.viewport.last_transcript_total,
+            if streaming { 14 } else { 12 },
+            "the compact 12/10-row fallback must remain intact when no viewport rows are free: {compact_surface}"
+        );
+    }
+}
+
+#[test]
+fn advertised_reasoning_space_wins_before_first_char_paste_hold() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &space, now));
+    assert!(
+        app.folded_thinking.contains(&0),
+        "the rendered transcript action must toggle before paste detection"
+    );
+    assert!(app.input.is_empty(), "Space must not enter the composer");
+    assert!(
+        !app.paste_burst.is_active(),
+        "Space must not be retained as the paste heuristic's first character"
+    );
+    assert!(!app.flush_paste_burst_if_due(
+        now + crate::tui::paste_burst::PasteBurst::recommended_flush_delay()
+    ));
+
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    let expanded = app
+        .viewport
+        .transcript_cache
+        .lines()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("live line 40"), "{expanded}");
+}
+
+#[test]
+fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let first = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &first, now));
+    assert!(app.paste_burst.is_active());
+    assert!(handle_plain_key_before_composer(
+        &mut app,
+        &space,
+        now + Duration::from_millis(1),
+    ));
+    assert!(
+        app.folded_thinking.is_empty(),
+        "an in-flight raw paste must not trigger transcript actions"
+    );
+    assert!(app.flush_paste_burst_if_due(
+        now + crate::tui::paste_burst::PasteBurst::recommended_active_flush_delay()
+            + Duration::from_millis(2)
+    ));
+    assert_eq!(app.input, "a ");
 }
 
 #[test]
