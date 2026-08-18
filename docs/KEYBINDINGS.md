@@ -14,7 +14,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Ctrl-C`             | Cancel current turn / dismiss modal / arm-then-confirm quit    |
 | `Ctrl-B`             | Move a supported foreground shell wait into `/jobs` so the turn can continue; use `/jobs` or `Bash` with `action: "wait"` to inspect it |
 | `Ctrl-D`             | Quit (only when the composer is empty)                         |
-| `Tab`                | When the composer is empty, cycle TUI mode: Plan → Act → Operate → Plan |
+| `Tab`                | When the composer is empty, cycle TUI mode: Plan → Work → Operate → Plan |
 | `Shift+Tab`          | Cycle permission posture: Ask → Auto-Review → Full Access. Live regardless of composer contents or whether a turn is running (suppressed only while a modal other than Config is open) |
 | `Ctrl-T`             | Cycle reasoning effort for the active model. Walks the same ladder as `/model` and `/effort` (catalog or documented route dialect). Always-thinking models omit `off`; Grok 4.6 includes `xhigh`. |
 | `Ctrl-Shift-T`       | Toggle live transcript overlay (sticky-tail auto-scroll)                       |
@@ -29,7 +29,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Alt-!` / `Alt-@` / `Alt-#` / `Alt-$` | Select the work-bar panel: Tasks / Agents / Context / Pinned |
 | `Ctrl-Alt-0`         | Toggle the work bar off / back to the top placement             |
 | `Alt-L`              | Open the pager for the last message (composer empty)             |
-| `Alt-P` / `Alt-A` / `Alt-Y` | Jump to Plan / Work / Operate mode (alternative to `Tab` cycling) |
+| `Alt-P` / `Alt-A` / `Alt-Y` | Jump to Plan / Work / Yolo mode (Yolo = Work + Full Access, an invisible permission shorthand; alternative to `Tab` cycling) |
 | `Ctrl-X` (Activity sidebar) | Cancel all running background shell jobs                  |
 | `Esc`                | Close topmost modal · cancel slash menu · dismiss toast        |
 

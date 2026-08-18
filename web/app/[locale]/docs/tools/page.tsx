@@ -64,10 +64,14 @@ export default async function ToolsPage({ params }: { params: Promise<{ locale: 
                 : "agent · tool_search (always active; every child has its own search)",
             },
             {
+              group: "todo_write",
+              tools: "content · status (complete replacement list)",
+            },
+            {
               group: isZh ? "延迟加载" : "Deferred",
               tools: isZh
-                ? "Git · Run · tasks · todo_write · remember · Web · MCP · plugins；只在策略允许时由 tool_search 加载"
-                : "Git · Run · tasks · todo_write · remember · Web · MCP · plugins; loaded by tool_search only when policy permits",
+                ? "Git · Run · tasks · remember · Web · MCP · plugins；只在策略允许时由 tool_search 加载"
+                : "Git · Run · tasks · remember · Web · MCP · plugins; loaded by tool_search only when policy permits",
             },
             {
               group: isZh ? "会话工具箱" : "Conversation toolbox",

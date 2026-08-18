@@ -64,7 +64,7 @@ Linux `codewhale-linux-arm64` archive in Termux; use the Termux-specific
 Android archive when a release or release candidate publishes one, or build
 from source inside Termux.
 
-The Linux **x64 and arm64** v0.9.7 candidate assets are **static musl builds**.
+The Linux **x64 and arm64** v0.9.9 candidate assets are **static musl builds**.
 The x64 release path has used musl since v0.8.65; v0.9.6 extends the same build
 and static-launch check to arm64. These binaries have no glibc dependency and
 run on their matching architecture across Ubuntu, Debian, RHEL/CentOS, and
@@ -82,7 +82,7 @@ version `GLIBC_2.39' not found
 ```
 
 The npm wrapper, `codewhale update`, and the Unix archive installer retain their
-GNU-binary preflight for older releases. The v0.9.7 arm64 candidate instead uses
+GNU-binary preflight for older releases. The v0.9.9 arm64 candidate instead uses
 `aarch64-unknown-linux-musl`, so it has no `GLIBC_*` floor. If you are installing
 an earlier release on an older arm64 distribution, use:
 
@@ -245,7 +245,13 @@ Useful environment variables:
 | `DEEPSEEK_TUI_OPTIONAL_INSTALL=1`   | Don't fail `npm install` on download/extract errors — useful in CI matrices            |
 
 These keep the `DEEPSEEK_*` spelling because the npm wrapper reads exactly
-these names and no others (`npm/codewhale/scripts/install.js:88-90`). There is
+these names — plus the non-`_TUI_` legacy fallbacks `DEEPSEEK_VERSION`,
+`DEEPSEEK_GITHUB_REPO`, `DEEPSEEK_RELEASE_BASE_URL`, `DEEPSEEK_OPTIONAL_INSTALL`,
+`DEEPSEEK_FORCE_DOWNLOAD`, `DEEPSEEK_DISABLE_INSTALL`, and the download
+timeout/stall variables (`DEEPSEEK_TUI_DOWNLOAD_TIMEOUT_MS` /
+`DEEPSEEK_DOWNLOAD_TIMEOUT_MS`, `DEEPSEEK_TUI_DOWNLOAD_STALL_MS` /
+`DEEPSEEK_DOWNLOAD_STALL_MS`) — all resolved in `npm/codewhale/scripts/install.js`.
+There is
 no `CODEWHALE_VERSION` — setting it has no effect. (The `CODEWHALE_*` rename
 applies to the runtime's own environment variables, not to the installer.)
 
@@ -425,7 +431,7 @@ Each platform appears on the Releases page in **two forms** (this is intentional
 the **bare binaries** (`codewhale-<platform>` and `codew-<platform>`, no extension) and a **`.tar.gz` / `.zip` archive**
 (`codewhale-<platform>.tar.gz`) that bundles the same commands plus an
 `install.sh`. The npm wrapper and the in-app `codewhale update` download the
-matched runtime binaries; the archive is the easiest manual install (see §5).
+matched runtime binaries; the archive is the easiest manual install (see §6).
 The steps below use the bare binaries directly.
 
 Grab the matching command set for your platform from the

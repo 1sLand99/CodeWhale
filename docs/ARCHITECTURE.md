@@ -58,11 +58,11 @@ boundary has held since v0.9.1):
 ┌─────────────────────────────────────────────────────────────────┐
 │                        LLM Layer                                │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │              LLM Client Abstraction (llm_client.rs)       │  │
-│  │  ┌─────────────────┐  ┌─────────────────────────────┐    │  │
-│  │  │  DeepSeek Client │  │  Compatible Client (DeepSeek)│    │  │
-│  │  │   (client.rs)   │  │       (client.rs)           │    │  │
-│  │  └─────────────────┘  └─────────────────────────────┘    │  │
+│  │               LLM Client Layer (client.rs)               │  │
+│  │  ┌──────────────────┐  ┌─────────────────────────────┐   │  │
+│  │  │ OpenAI-compatible │  │  Anthropic / Responses      │   │  │
+│  │  │  (chat adapter)  │  │   (adapters)                │   │  │
+│  │  └──────────────────┘  └─────────────────────────────┘   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -112,15 +112,20 @@ boundary has held since v0.9.1):
 
 ### LLM Integration
 
-- **`client.rs`** - HTTP client for DeepSeek's documented OpenAI-compatible Chat Completions API
-- **`llm_client.rs`** - Abstract LLM client trait with retry logic
+- **`client.rs`** - The live HTTP client layer: OpenAI-compatible, Anthropic,
+  and Responses wire adapters, DeepSeek request-boundary handling, retry
+  policy, and streaming. Provider routes land here through the shared config
+  and catalog layers.
+- **`llm_client/`** - LLM client trait, retry logic, and error classification
+  (`LlmClient`, `RetryConfig`, `with_retry`) consumed by `client.rs`; `mock.rs`
+  is test-only (`#[cfg(test)]`).
 - **`models.rs`** - Data structures for API requests/responses
 
 #### DeepSeek API Endpoints
 
-DeepSeek exposes OpenAI-compatible endpoints. The CLI uses:
-- `https://api.deepseek.com/beta/chat/completions` - default v0.8.16 DeepSeek model turns
-- `https://api.deepseek.com/beta/models` - default v0.8.16 live model discovery and health checks
+DeepSeek exposes OpenAI-compatible endpoints. The first-party route uses:
+- `https://api.deepseek.com/beta` - default DeepSeek base URL (`provider_defaults.rs`)
+- `https://api.deepseek.com/beta/models` - live model discovery and health checks
 
 `https://api.deepseek.com/v1` is accepted for OpenAI SDK compatibility, and
 can still be configured explicitly to opt out of beta-only features such as
@@ -136,7 +141,12 @@ drives turns through Chat Completions.
   - `file.rs` - File read/write operations
   - `todo.rs` - Checklist tools plus legacy todo aliases
   - `tasks.rs` - Model-visible durable task, gate, background shell, and PR-attempt tools
-  - `github.rs` - Read-only GitHub context and guarded comment/closure tools backed by `gh`
+  - `git.rs` - Read-only `git_status` / `git_diff` inspection wrappers
+  - `git_tool.rs` - The canonical action-based `Git` tool (`status | diff | log | show | blame`); per-action legacy aliases were removed in v0.9.3
+  - `git_history.rs` - Read-only `git_log` / `git_show` / `git_blame`
+  - `github/` - Unified `github` tool family (read-only context plus guarded
+    comment/closure actions backed by `gh`); deferred by default and
+    discoverable through `tool_search`
   - `automation.rs` - Model-visible scheduling tools over `AutomationManager`
   - `plan.rs` - Planning tools
   - `subagent/` - Sub-agent launch and supervision. The one model-facing tool
@@ -153,12 +163,13 @@ drives turns through Chat Completions.
 
 ### User Interface
 
-- **`tui/`** - Terminal UI components (ratatui-based)
+- **`tui/`** - Terminal UI components (ratatui-based; this is a representative
+  list, not exhaustive - the module has grown to 80+ focused files):
   - `app.rs` - Application state and message handling
   - `ui.rs` - Event handling, streaming state, and rendering logic
   - `approval.rs` - Tool approval dialog
   - `clipboard.rs` - Clipboard handling
-  - `streaming.rs` - Streaming text collector
+  - `underwater.rs` - Main shell chrome: status chips, mode labels, phase rail
 
 ### LSP Integration
 
@@ -175,10 +186,15 @@ drives turns through Chat Completions.
 
 - **`sandbox/`** - platform sandbox policy preparation and denial reporting
   - `mod.rs` - Sandbox type definitions
+  - `backend.rs` - Pluggable sandbox backend abstraction (routes shell
+    execution to a remote service, e.g. Alibaba OpenSandbox)
   - `policy.rs` - Sandbox policy configuration
+  - `opensandbox.rs` - Alibaba OpenSandbox HTTP backend adapter
   - `seatbelt.rs` - macOS Seatbelt profile generation
   - `bwrap.rs` - opt-in Linux bubblewrap command wrapper
   - `seccomp.rs` - dormant Linux seccomp implementation; not wired into commands
+  - `process_hardening.rs` - Linux kernel-level hardening for the TUI process
+    itself (defense-in-depth; not a child-command sandbox)
   - `windows.rs` - Windows helper contract; not advertised until a Job
     Object process-containment helper exists
 
@@ -200,7 +216,7 @@ drives turns through Chat Completions.
 
 1. User input received in TUI
 2. Input processed by `core/engine.rs`
-3. Message sent to LLM via `llm_client.rs`
+3. Message sent to LLM via `client.rs`
 4. Response streamed back, parsed in `client.rs`
 5. Tool calls extracted and executed via `tools/`
 6. Hooks triggered before/after tool execution

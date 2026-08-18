@@ -239,7 +239,7 @@ subscription OAuth or Claude Code identity headers.
 - [ ] Offline / CI hermetic: set `CODEWHALE_DISABLE_MODELS_DEV_FETCH=1` or
       point `CODEWHALE_MODELS_DEV_PATH` at a fixture.
 - [ ] Before release: `snapshot --check` on the bundled seed; skim
-      `MODEL_PROVIDER_AUDIT.md` for known drift.
+      `PROVIDERS.md` for known drift.
 - [ ] After Models.dev adds a major family you ship by default: consider
       seed PR + default-model decision separately.
 - [ ] Never paste API keys into catalog assets or the automation script env

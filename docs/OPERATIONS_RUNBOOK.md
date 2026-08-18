@@ -8,8 +8,8 @@ This runbook covers practical debugging and incident response for the local CLI/
    - `cargo run -- --version`
    - `cat ~/.codewhale/config.toml` (or inspect configured profile)
 2. Enable verbose logs:
-   - `RUST_LOG=deepseek_cli=debug cargo run`
-   - For HTTP retries/reconnects: `RUST_LOG=deepseek_cli::client=debug cargo run`
+   - `RUST_LOG=codewhale_tui=debug cargo run`
+   - For HTTP retries/reconnects: `RUST_LOG=codewhale_tui::client=debug cargo run`
 3. Capture current state:
    - `ls ~/.codewhale/sessions`
    - `ls ~/.codewhale/sessions/checkpoints`
@@ -22,7 +22,7 @@ Symptoms:
 - partial assistant output with no completion
 
 Checks:
-1. Inspect retry/health logs (`deepseek_cli::client`)
+1. Inspect retry/health logs (`codewhale_tui::client`)
 2. Verify endpoint connectivity:
    - `curl -sS https://api.deepseek.com/beta/models -H "Authorization: Bearer $DEEPSEEK_API_KEY"`
 3. Confirm no local sandbox/permission deadlock in tool output

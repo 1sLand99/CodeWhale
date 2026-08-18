@@ -1,7 +1,7 @@
 # Plugin bundles
 
 Codewhale supports a deliberately small plugin-bundle boundary. The boundary
-was drawn in v0.9.1 and still holds as of v0.9.8: a bundle may contribute
+was drawn in v0.9.1 and still holds as of v0.9.9: a bundle may contribute
 declarative Skills and MCP server configuration through Codewhale's existing
 engines, and nothing else activates. Unsupported declarations stay inventoried
 instead of disabling a mixed bundle. Discovery alone never executes, enables,
@@ -151,7 +151,7 @@ a manifest declaring OAuth fields on a plugin MCP server fails validation.
 ### Active and inactive component surfaces
 
 `[skills]` and `[mcp_servers.*]` are the only active component adapters as of
-v0.9.8. The manifest can additionally inventory the following future
+v0.9.9. The manifest can additionally inventory the following future
 surfaces. Those declarations stay hashed, reviewed, and displayed, but they
 do not activate and they no longer disable the whole bundle:
 

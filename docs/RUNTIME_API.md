@@ -18,7 +18,7 @@ shares the same runtime, provider/model resolution, permission profiles, and
 event vocabulary.
 
 This document is the stable integration contract for native workbench
-applications (and other local supervisors) that embed the DeepSeek engine.
+applications (and other local supervisors) that embed the Codewhale engine.
 
 ## Architecture
 
@@ -195,14 +195,14 @@ ACP-compatible editor clients. The initial adapter implements the ACP baseline:
 - `session/prompt`
 - `session/cancel`
 
-Prompt requests are routed through the configured DeepSeek client and current
+Prompt requests are routed through the configured Codewhale client and current
 default model. Responses are emitted as `session/update` agent message chunks
 followed by a `session/prompt` response with `stopReason: "end_turn"`.
 
 The adapter is intentionally conservative: it does not yet expose shell tools,
 file-write tools, checkpoint replay, or session loading through ACP. Use
 `codewhale serve --http` for the full local runtime API and `codewhale serve --mcp`
-when another client needs DeepSeek's tools as MCP tools.
+when another client needs Codewhale's tools as MCP tools.
 
 ## Capability endpoint: `codewhale doctor --json`
 
@@ -535,6 +535,9 @@ accept an empty string to clear a previously-set value. Added in v0.8.10 (#562):
 - `POST /v1/threads/{id}/turns/{turn_id}/steer`
 - `POST /v1/threads/{id}/turns/{turn_id}/interrupt`
 - `POST /v1/threads/{id}/compact` (manual compaction)
+- `POST /v1/threads/{id}/undo` - fork the thread with the last N turns removed (`{"depth": N}`, default 0 = last turn only); returns the forked thread plus `original_user_text` so a GUI can pre-populate the input box
+- `POST /v1/threads/{id}/patch-undo` - snapshot-based file rollback followed by the same fork (`{"depth": N}`); returns `patch_result` (`files_restored`, `summary`, `snapshot_label`) alongside the forked thread
+- `POST /v1/threads/{id}/retry` - fork with the last N turns removed and immediately start a new turn (`{"depth": N, "prompt": "..."}`; `prompt` overrides the original user text, which is re-used when omitted)
 
 **Approvals**
 - `POST /v1/approvals/{approval_id}` with body
@@ -589,12 +592,14 @@ bounded durable replay from its last accepted cursor. Optional `replay_limit`
 returns the newest requested tail and may not exceed 4096; `previous_seq` on
 the first returned event advances past exactly the omitted history.
 
-**Snapshots** (read-only side-git restore point listing)
+**Snapshots** (side-git restore point listing + restore)
 - `GET /v1/snapshots?limit=20`
+- `POST /v1/snapshots/{id}/restore`
 
 `/v1/snapshots` lists recent side-git restore points for the runtime workspace.
-It is read-only and does not restore files. `limit` defaults to `20` and must be
-between `1` and `100`.
+`limit` defaults to `20` and must be between `1` and `100`. `POST
+/v1/snapshots/{id}/restore` restores workspace files from the snapshot and
+returns `{"restored": "<snapshot-id>"}`.
 
 ```json
 [
@@ -605,11 +610,6 @@ between `1` and `100`.
   }
 ]
 ```
-
-Runtime API restore/retry/undo/editor-apply mutation endpoints are intentionally
-deferred. GUI clients should treat thread summaries and snapshots as inspection
-surfaces until atomic filesystem + conversation-state mutation semantics are
-specified and tested.
 
 **Receipts** (future read-only audit export)
 - Proposed only: `GET /v1/threads/{thread_id}/turns/{turn_id}/receipt`
