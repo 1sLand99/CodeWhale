@@ -426,7 +426,30 @@ jobs:
       - name: Install NSIS for Windows installer regression
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'windows-latest'
         shell: pwsh
-        run: choco install nsis -y --no-progress
+        # Bounded retry, not a weaker check (#5403). Every observed failure here
+        # was Chocolatey's feed, not the code: a 504 from the V2 API, and
+        # "package was not found with the source(s) listed". A single attempt
+        # made `Test (windows-latest)` — a required check on every PR — report
+        # on community.chocolatey.org's availability instead of on the tree.
+        # NSIS must still install for the regression below to run; this only
+        # survives a transient outage.
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $delays = @(0, 20, 45)
+          for ($attempt = 0; $attempt -lt $delays.Count; $attempt++) {
+            if ($delays[$attempt] -gt 0) {
+              Write-Host "NSIS install attempt $($attempt + 1) after $($delays[$attempt])s backoff"
+              Start-Sleep -Seconds $delays[$attempt]
+            }
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "NSIS installed on attempt $($attempt + 1)"
+              exit 0
+            }
+            Write-Host "::warning::choco install nsis failed (exit $LASTEXITCODE)"
+          }
+          Write-Host "::error::NSIS could not be provisioned from Chocolatey after $($delays.Count) attempts"
+          exit 1
       - name: Test Windows installer PATH regression
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'windows-latest'
         shell: pwsh
@@ -501,6 +524,14 @@ jobs:
         # run it separately on Unix after the workspace suite has released its
         # PTYs.
         if: needs.changes.outputs.heavy == 'true' && matrix.os != 'windows-latest' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        # Bounded twice, because libtest has no per-test timeout and this step
+        # wedged for over an hour on the exact-head 0.9.9 macOS run: the harness
+        # aborts itself after QA_PTY_STALL_TIMEOUT_SECS of no PTY activity (with
+        # a diagnostic naming the last harness step), and this ceiling catches
+        # anything that outlives even that — a stall during the build, say.
+        timeout-minutes: 15
+        env:
+          QA_PTY_STALL_TIMEOUT_SECS: '180'
         run: cargo test -p codewhale-tui --test pty qa_pty::skills_opens_manager_owned_then_compatible -- --ignored --exact
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')

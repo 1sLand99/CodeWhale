@@ -131,6 +131,9 @@ impl HarnessBuilder {
             builder = builder.env(k, v);
         }
 
+        // Arm the stall watchdog before the child exists, so a spawn that wedges
+        // is covered too. Idempotent per process.
+        super::watchdog::arm();
         let pty = builder.spawn().context("spawn PtySession")?;
         let frame = Frame::new(self.rows, self.cols);
         Ok(Harness {
@@ -172,6 +175,9 @@ impl Harness {
     /// Pull whatever the child has written since last call into the frame
     /// parser. Returns `true` if any new bytes arrived.
     pub fn pump(&mut self) -> bool {
+        // Every bounded wait loops through here, so this is the harness's
+        // liveness signal for the stall watchdog.
+        super::watchdog::progress("pump");
         let bytes = self.pty.drain();
         let any = !bytes.is_empty();
         if any {

@@ -25,6 +25,7 @@ pub mod keys;
 pub mod modes;
 pub mod pty;
 pub mod view_log;
+pub mod watchdog;
 
 pub use frame::{Color, Frame};
 pub use keys::paste;

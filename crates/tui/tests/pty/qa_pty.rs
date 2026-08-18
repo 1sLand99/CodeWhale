@@ -5595,3 +5595,170 @@ fn composer_wraps_between_words_and_the_lock_toast_stays_legible() -> anyhow::Re
     let _ = h.shutdown();
     Ok(())
 }
+
+// ===========================================================================
+// #5472 — retained-memory regression benchmark for chatty `Bash` calls
+// ===========================================================================
+
+/// Steady-state RSS growth per chatty shell call must stay well under the size
+/// of the output each call produced.
+///
+/// The bug: `ShellManager.processes` kept the full raw stdout of every uppercase
+/// `Bash` call — foreground included — for up to an hour, and the only eviction
+/// ran from `list_jobs()`, i.e. only if the user opened the jobs panel. Measured
+/// on this scenario, per-call RSS growth over calls 7..40:
+///
+/// | output per call | before | after |
+/// | --- | --- | --- |
+/// | ~0 (`echo`)     | —          | 112 KiB   |
+/// | 1.1 MB          | 1,597 KiB  | 316–972 KiB |
+/// | 4.4 MB          | 5,689–6,028 KiB | 875–1,762 KiB |
+///
+/// Before, growth tracked ~1.3× the output size — one whole copy of every
+/// command's output, cumulative. After, it is ~0.26× and does not track the
+/// tracked-retention bound at all: the exact in-process measurement lives in
+/// `tools::shell::tests` (1,110,000 bytes retained → ≤131,072). What remains
+/// here is per-turn UI overhead plus allocator pages that are freed but not
+/// returned to the OS, so the threshold below is deliberately loose — it is
+/// sized from the measured 4.9× gap above, with better than 2× margin on both
+/// sides, because RSS is a noisy instrument and a flaky gate is worse than none.
+///
+/// This drives the real binary through the `!` bang-shell path, which dispatches
+/// `Op::RunShellCommand` with `tool_name = "Bash"` — the exact path the issue is
+/// about — so it needs no provider turn: it measures the shell subsystem alone
+/// and costs no API quota.
+///
+/// `#[ignore]`d: real PTY, ~70 s. Run it deliberately:
+/// `cargo test -p codewhale-tui --test pty qa_pty::chatty_bash_calls_do_not_grow_rss_per_call -- --ignored --exact --nocapture`
+#[test]
+#[ignore = "real-PTY memory benchmark; ~70s, run deliberately"]
+fn chatty_bash_calls_do_not_grow_rss_per_call() -> anyhow::Result<()> {
+    /// ~4.4 MB of stdout per call. The larger the output, the further apart the
+    /// fixed and regressed slopes sit, which is what makes the gate sound.
+    const CHATTY: &str = "!yes 0123456789abcdefghijklmnopqrstuvwxyz | head -n 120000";
+    const CHATTY_ECHO: &str = "head -n 120000";
+    const CALLS: usize = 40;
+    /// Calls excluded from the slope. Early calls also pay one-time allocator,
+    /// transcript and tool-detail warmup, which is not per-call growth.
+    const WARMUP: usize = 6;
+    /// Measured across repeated runs: 875–1,762 KiB/call fixed (the spread is
+    /// machine load), 5,689–6,028 KiB/call regressed. This sits ~1.7× above the
+    /// worst passing observation and ~1.9× below the best failing one.
+    const MAX_KIB_PER_CALL: i64 = 3_000;
+
+    fn rss_kib(pid: u32) -> anyhow::Result<u64> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().parse()?)
+    }
+
+    // Type, let the composer settle, *then* submit. Text and Enter in one burst
+    // reads as a paste, and a pasted trailing newline deliberately does not
+    // auto-submit (#1073) — the command would just sit in the composer unrun,
+    // and RSS would be flat for entirely the wrong reason.
+    fn submit(h: &mut Harness, text: &str, echo: &str) -> anyhow::Result<()> {
+        h.send(keys::key::text(text))?;
+        h.wait_for_text(echo, KEY_TIMEOUT)?;
+        h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(4))?;
+        h.send(keys::key::enter())?;
+        Ok(())
+    }
+
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    submit(&mut h, "/config allow_shell true", "allow_shell true")?;
+    h.wait_for_idle(Duration::from_millis(500), Duration::from_secs(8))?;
+
+    let pid = h.pid().expect("tui pid");
+    let mut series = Vec::with_capacity(CALLS);
+    for index in 0..CALLS {
+        submit(&mut h, CHATTY, CHATTY_ECHO)?;
+        h.wait_for_idle(Duration::from_millis(800), Duration::from_secs(60))?;
+        if index == 0 {
+            // Prove something ran before trusting any slope.
+            let frame = h.frame();
+            assert!(
+                frame.contains("done"),
+                "the bang shell command never completed — nothing was measured:\n{}",
+                frame.debug_dump()
+            );
+        }
+        series.push(rss_kib(pid)?);
+    }
+
+    let first = series[WARMUP] as i64;
+    let last = series[CALLS - 1] as i64;
+    let per_call = (last - first) / (CALLS - 1 - WARMUP) as i64;
+    eprintln!(
+        "#5472 retention: calls {}..{CALLS} grew {} KiB = {per_call} KiB/call (limit {MAX_KIB_PER_CALL})\nseries: {series:?}",
+        WARMUP + 1,
+        last - first,
+    );
+    assert!(
+        per_call <= MAX_KIB_PER_CALL,
+        "each chatty Bash call left {per_call} KiB resident after finishing (limit \
+         {MAX_KIB_PER_CALL}); output was ~4.4 MB per call, so growth at this rate is the \
+         full-stdout retention of #5472 coming back. Series: {series:?}"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+// ===========================================================================
+// #5479 — `/agents list` prints the receipts-only roster into the transcript
+// ===========================================================================
+
+/// Transcript parity for the agents roster: `/agents list` renders the same
+/// rows the rail will, in the transcript, so a session log (and `exec`, which
+/// has no modal) carries the agent history rather than only the TUI showing it.
+///
+/// With no agents spawned this asserts the honest empty state — the point being
+/// that it renders *something truthful* rather than an empty frame, and that it
+/// does not open the modal.
+#[test]
+fn agents_list_prints_the_roster_in_the_transcript() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+
+    h.send(keys::key::text("/agents list"))?;
+    h.wait_for_text("/agents list", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(4))?;
+    h.send(keys::key::enter())?;
+
+    h.wait_for_text("No agents have run in this session yet", KEY_TIMEOUT)?;
+    let frame = h.frame();
+    let dump = frame.debug_dump();
+    assert!(
+        frame.contains("● main"),
+        "the parent session is row zero:\n{dump}"
+    );
+    assert!(
+        !frame.contains("Fleet workers:"),
+        "`list` prints to the transcript instead of opening the modal:\n{dump}"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// An unknown argument is refused with usage rather than silently opening the
+/// modal — the failure mode that makes a typo look like it worked.
+#[test]
+fn agents_rejects_an_unknown_argument_instead_of_ignoring_it() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+
+    h.send(keys::key::text("/agents lst"))?;
+    h.wait_for_text("/agents lst", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(4))?;
+    h.send(keys::key::enter())?;
+
+    h.wait_for_text("Usage: /agents [list]", KEY_TIMEOUT)?;
+    let _ = h.shutdown();
+    Ok(())
+}
