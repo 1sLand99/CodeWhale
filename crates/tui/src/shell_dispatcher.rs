@@ -423,7 +423,14 @@ impl ShellDispatcher {
     fn detect_shell() -> ShellKind {
         #[cfg(test)]
         {
-            test_env_lock::with_test_env_lock(Self::detect_shell_unlocked)
+            // Non-blocking on purpose. This runs inside the `LazyLock`
+            // initializer in `global_dispatcher()`, and a test that holds the
+            // env barrier can reach `global_dispatcher()` while another thread
+            // is initializing it — blocking here inverts the two locks and
+            // wedges the whole test binary with no libtest timeout to end it.
+            // `$SHELL` is the only variable read, and the two tests that set it
+            // set it to a fixed value, so an unsynchronized read is safe.
+            test_env_lock::with_test_env_lock_if_uncontended(Self::detect_shell_unlocked)
         }
         #[cfg(not(test))]
         {
