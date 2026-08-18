@@ -22504,3 +22504,85 @@ fn gate_receipts_are_held_until_their_tool_card_completes_then_flushed_in_order(
     assert!(app.pending_gate_receipts.is_empty());
     assert!(!super::event_loop::flush_gate_receipts_for(&mut app, None));
 }
+
+// ===========================================================================
+// #5478 — a mid-turn history insert must not orphan an in-flight tool row
+// ===========================================================================
+
+/// `/rename` mid-turn left the running tool row spinning forever, even though
+/// the job completed and everything else (result, footer, `/jobs`, cost) was
+/// correct.
+///
+/// Root cause is not in the rename path at all: an in-flight tool is bound to a
+/// *virtual* index, `history.len() + entry_index`, and completion resolves it
+/// against `history.len()` **as it is at completion time**. Any command that
+/// pushes a cell into history mid-turn — `/rename`'s "Session and terminal tab
+/// renamed to …" note, and every other command that reports a message —
+/// shifts `history.len()`, so the binding silently comes to mean a different
+/// cell. The completion then updates the wrong cell and the real row never
+/// leaves "running".
+#[test]
+fn a_message_added_mid_turn_does_not_strand_the_running_tool_row() {
+    use crate::tui::history::{ToolCell, ToolStatus};
+
+    let mut app = create_test_app();
+    let input = serde_json::json!({"action": "run", "command": "sleep 12; echo slow-done"});
+    handle_tool_call_started(&mut app, "bash-inflight", "Bash", &input);
+
+    // The exact thing /rename does while the tool is still running.
+    app.add_message(HistoryCell::System {
+        content: "Session and terminal tab renamed to \"v099-dogfood\"".to_string(),
+    });
+
+    let result: Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> =
+        Ok(crate::tools::spec::ToolResult::success("slow-done"));
+    crate::tui::tool_routing::handle_tool_call_complete(&mut app, "bash-inflight", "Bash", &result);
+
+    let active = app.active_cell.as_ref().expect("active cell still present");
+    let HistoryCell::Tool(ToolCell::Exec(exec)) = &active.entries()[0] else {
+        panic!("the in-flight Bash row must still be an ExecCell")
+    };
+    assert_eq!(
+        exec.status,
+        ToolStatus::Success,
+        "the tool row must flip to done; leaving it Running is the #5478 stuck spinner"
+    );
+
+    // And the note itself must be untouched — the completion must not have
+    // been written over the message that displaced it.
+    let note = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the rename note stays in history");
+    assert!(note.contains("v099-dogfood"), "{note}");
+}
+
+/// The same binding survives several mid-turn inserts, not just one.
+#[test]
+fn several_mid_turn_messages_still_leave_the_tool_row_resolvable() {
+    use crate::tui::history::{ToolCell, ToolStatus};
+
+    let mut app = create_test_app();
+    let input = serde_json::json!({"action": "run", "command": "sleep 12"});
+    handle_tool_call_started(&mut app, "bash-inflight", "Bash", &input);
+    for index in 0..4 {
+        app.add_message(HistoryCell::System {
+            content: format!("mid-turn note {index}"),
+        });
+    }
+
+    let result: Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> =
+        Ok(crate::tools::spec::ToolResult::success("done"));
+    crate::tui::tool_routing::handle_tool_call_complete(&mut app, "bash-inflight", "Bash", &result);
+
+    let active = app.active_cell.as_ref().expect("active cell");
+    let HistoryCell::Tool(ToolCell::Exec(exec)) = &active.entries()[0] else {
+        panic!("ExecCell")
+    };
+    assert_eq!(exec.status, ToolStatus::Success);
+}

@@ -1326,8 +1326,6 @@ fn push_orphan_tool_completion(
         Ok(tool_result) => Some(summarize_tool_output(&tool_result.content)),
         Err(err) => Some(err.to_string()),
     };
-    let history_threshold_before_push = app.history.len();
-    let active_in_flight = app.active_cell.is_some();
     let spillover_path = result
         .as_ref()
         .ok()
@@ -1380,27 +1378,10 @@ fn push_orphan_tool_completion(
         },
     );
 
-    // Shift active-cell virtual indices forward by 1 to absorb the new
-    // history cell. Without this, the next completion would address the
-    // wrong entry.
-    if active_in_flight {
-        let threshold = history_threshold_before_push;
-        for idx in app.tool_cells.values_mut() {
-            if *idx >= threshold {
-                *idx = idx.wrapping_add(1);
-            }
-        }
-        for (cell_idx, _) in app.exploring_entries.values_mut() {
-            if *cell_idx >= threshold {
-                *cell_idx = cell_idx.wrapping_add(1);
-            }
-        }
-        if let Some(idx) = app.exploring_cell.as_mut()
-            && *idx >= threshold
-        {
-            *idx = idx.wrapping_add(1);
-        }
-    }
+    // The virtual-index rebase this path used to do inline now lives in
+    // `App::add_message`, so every mid-turn history insert gets it — not just
+    // orphan completions. That gap was #5478: `/rename`'s note shifted the
+    // indices with nothing to re-base them.
 }
 
 fn tool_status_from_result(result: &Result<ToolResult, ToolError>) -> ToolStatus {

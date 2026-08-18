@@ -3125,6 +3125,13 @@ impl App {
     const HISTORY_FOLD_BATCH: usize = 1_000;
 
     pub fn add_message(&mut self, msg: HistoryCell) {
+        // An in-flight tool is bound to a *virtual* index, `history.len() +
+        // entry_index`, resolved against `history.len()` at completion time.
+        // Growing history here without re-basing those bindings makes each of
+        // them silently mean a different cell, so the completion lands on the
+        // wrong one and the real row spins forever (#5478 — reproduced by
+        // `/rename` mid-turn, but every command that reports a message hits it).
+        self.rebase_active_cell_bindings(1);
         let rev = self.fresh_history_revision();
         self.history.push(msg);
         self.history_revisions.push(rev);
@@ -4179,6 +4186,41 @@ impl App {
     /// Mutable variant of [`Self::cell_at_virtual_index`]. Bumps the
     /// appropriate revision counter (active-cell revision when targeting an
     /// in-flight entry, history version otherwise).
+    /// Shift every binding that points *into the active cell* up by `added`,
+    /// to keep it pointing at the same entry after `added` cells are appended
+    /// to history.
+    ///
+    /// Bindings below `history.len()` address finalized cells and must not
+    /// move. Only called when an active cell exists: with no active cell there
+    /// are no virtual indices to re-base, and shifting would corrupt real ones.
+    fn rebase_active_cell_bindings(&mut self, added: usize) {
+        if added == 0 || self.active_cell.is_none() {
+            return;
+        }
+        let boundary = self.history.len();
+        for index in self.tool_cells.values_mut() {
+            if *index >= boundary {
+                *index = index.saturating_add(added);
+            }
+        }
+        for (cell_index, _) in self.exploring_entries.values_mut() {
+            if *cell_index >= boundary {
+                *cell_index = cell_index.saturating_add(added);
+            }
+        }
+        self.active_tool_entry_completed_at =
+            std::mem::take(&mut self.active_tool_entry_completed_at)
+                .into_iter()
+                .map(|(index, at)| {
+                    if index >= boundary {
+                        (index.saturating_add(added), at)
+                    } else {
+                        (index, at)
+                    }
+                })
+                .collect();
+    }
+
     pub fn cell_at_virtual_index_mut(&mut self, index: usize) -> Option<&mut HistoryCell> {
         if index < self.history.len() {
             // Bump only the targeted cell's revision; leave every other
