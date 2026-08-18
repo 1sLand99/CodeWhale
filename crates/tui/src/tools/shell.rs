@@ -65,7 +65,8 @@ use crate::work_graph::{
 };
 use crate::worker_profile::ShellPolicy;
 use output::{
-    BoundedOutputAccumulator, BoundedOutputSnapshot, tail_from_buffer, tail_text,
+    BoundedOutputAccumulator, BoundedOutputSnapshot, RAW_STREAM_SETTLED_TAIL_BYTES,
+    RawOutputBuffer, SharedRawOutput, new_shared_raw_output, tail_from_buffer, tail_text,
     take_delta_from_buffer,
 };
 
@@ -244,20 +245,24 @@ pub struct ShellCompletionEvent {
     pub owner_agent_name: Option<String>,
 }
 
-/// Exact byte evidence captured alongside a bounded completion event.
+/// Byte evidence captured alongside a bounded completion event. Exact unless
+/// the stream exceeded the in-memory retention ceiling, in which case the
+/// omission is declared per stream rather than presented as complete.
 #[derive(Debug, Clone)]
 pub(crate) struct ShellCompletionEvidence {
     pub event: ShellCompletionEvent,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    stdout_omitted: usize,
+    stderr_omitted: usize,
 }
 
 impl ShellCompletionEvidence {
     /// Encode each stream losslessly. UTF-8 remains readable; arbitrary bytes
     /// use base64 so `retrieve_tool_result` can still recover exact output.
     pub(crate) fn artifact_bytes(&self) -> Vec<u8> {
-        fn stream(bytes: &[u8]) -> serde_json::Value {
-            match std::str::from_utf8(bytes) {
+        fn stream(bytes: &[u8], omitted: usize) -> serde_json::Value {
+            let mut value = match std::str::from_utf8(bytes) {
                 Ok(content) => serde_json::json!({
                     "encoding": "utf-8",
                     "byte_length": bytes.len(),
@@ -268,7 +273,20 @@ impl ShellCompletionEvidence {
                     "byte_length": bytes.len(),
                     "content": base64::engine::general_purpose::STANDARD.encode(bytes),
                 }),
+            };
+            // Additive and only present when something was actually dropped, so
+            // the common case stays byte-identical to the v1 artifact readers
+            // already parse.
+            if omitted > 0
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("leading_bytes_omitted".into(), omitted.into());
+                object.insert(
+                    "total_byte_length".into(),
+                    bytes.len().saturating_add(omitted).into(),
+                );
             }
+            value
         }
 
         serde_json::json!({
@@ -278,8 +296,8 @@ impl ShellCompletionEvidence {
             "status": format!("{:?}", self.event.status),
             "exit_code": self.event.exit_code,
             "duration_ms": self.event.duration_ms,
-            "stdout": stream(&self.stdout),
-            "stderr": stream(&self.stderr),
+            "stdout": stream(&self.stdout, self.stdout_omitted),
+            "stderr": stream(&self.stderr, self.stderr_omitted),
         })
         .to_string()
         .into_bytes()
@@ -290,7 +308,18 @@ impl ShellCompletionEvidence {
 // artifact carries the exact bytes beyond these diagnostic tails.
 const SHELL_COMPLETION_TAIL_BYTES: usize = 1_024;
 
-fn bounded_completion_tail(buffer: &Arc<Mutex<Vec<u8>>>, max_bytes: usize) -> (usize, String) {
+/// How long a finished shell record stays listed in `/jobs`.
+const FINISHED_SHELL_MAX_AGE: Duration = Duration::from_secs(3600);
+/// Ceiling on finished records kept for the jobs panel. A long automation run
+/// makes hundreds of `Bash` calls per hour; the panel is only useful for the
+/// recent ones (#5472).
+const MAX_FINISHED_SHELL_RECORDS: usize = 128;
+/// Ceiling on bytes still held across all finished records. Each settled record
+/// releases down to a 64 KiB tail, so this only binds when many large outputs
+/// finish inside the same window.
+const MAX_FINISHED_SHELL_BYTES: usize = 8 * 1024 * 1024;
+
+fn bounded_completion_tail(buffer: &SharedRawOutput, max_bytes: usize) -> (usize, String) {
     let (total, candidate) = tail_from_buffer(buffer, max_bytes);
     if candidate.len() <= max_bytes {
         return (total, candidate);
@@ -732,7 +761,7 @@ impl StdinWriter {
 
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
-    buffer: Arc<Mutex<Vec<u8>>>,
+    buffer: SharedRawOutput,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -740,8 +769,18 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(mut guard) = buffer.lock() {
-                        guard.extend_from_slice(&chunk[..n]);
+                    // `RawOutputBuffer::append` enforces the in-flight ceiling
+                    // here, at the only writer, so a chatty command cannot grow
+                    // the process without bound while it runs (#5472). It
+                    // returns false once the stream has been abandoned, which
+                    // is this thread's only exit when a descendant holds the
+                    // pipe open and EOF never arrives.
+                    let keep_reading = buffer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .append(&chunk[..n]);
+                    if !keep_reading {
+                        break;
                     }
                 }
                 Err(_) => break,
@@ -845,9 +884,25 @@ fn spawn_sync_reader_thread<R: Read + Send + 'static>(
 ) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
-        tx.send(buf).ok();
+        // Bounded, unlike the `read_to_end` this replaces (#5472 finding 2).
+        // `recv_sync_reader_output` gives up after 5 s, but the thread lives as
+        // long as the pipe does — an interactive command that keeps printing
+        // grew this Vec without limit, for a result nobody was still waiting
+        // for. The tail is what the caller renders, so keep the tail.
+        let mut buf = RawOutputBuffer::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if !buf.append(&chunk[..n]) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        tx.send(buf.retained().to_vec()).ok();
     });
     rx
 }
@@ -865,14 +920,18 @@ pub struct BackgroundShell {
     pub status: ShellStatus,
     pub exit_code: Option<i64>,
     pub started_at: Instant,
+    /// When the job reached a terminal status. A finished job reports the
+    /// duration it finished with; without this, `started_at.elapsed()` kept
+    /// growing and `/jobs` showed "2m 07s" for a 12-second command (#5478).
+    finished_at: Option<Instant>,
     last_output_at: Instant,
     last_observed_output_len: usize,
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
     ownership: ShellOwnership,
-    stdout_buffer: Arc<Mutex<Vec<u8>>>,
-    stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
+    stdout_buffer: SharedRawOutput,
+    stderr_buffer: Option<SharedRawOutput>,
     /// Lowercase `bash` streams one combined process pipe through a bounded
     /// small-contract-compatible accumulator while persisting the complete output.
     bounded_output: Option<Arc<Mutex<BoundedOutputAccumulator>>>,
@@ -988,10 +1047,30 @@ impl Drop for ShellSpawnIntentGuard {
 }
 
 impl BackgroundShell {
+    /// Wall time to report: elapsed while running, frozen once finished.
+    fn wall_duration(&self) -> Duration {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+    }
+
+    fn wall_millis(&self) -> u64 {
+        u64::try_from(self.wall_duration().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Stamp the finish instant the first time a terminal status is observed.
+    /// Idempotent: a later poll must not restate when the job ended.
+    fn mark_finished(&mut self) {
+        if self.finished_at.is_none() && self.status != ShellStatus::Running {
+            self.finished_at = Some(Instant::now());
+        }
+    }
+
     /// Check if the process has completed and update status
     fn poll(&mut self) -> bool {
         self.refresh_output_activity();
         if self.status != ShellStatus::Running {
+            self.mark_finished();
             self.publish_lifecycle_best_effort();
             return true;
         }
@@ -1028,6 +1107,7 @@ impl BackgroundShell {
         if completed && let Some(process_group_id) = pending_process_group {
             unregister_pending_persistent_process_group(process_group_id);
         }
+        self.mark_finished();
         self.publish_lifecycle_best_effort();
         completed
     }
@@ -1073,14 +1153,53 @@ impl BackgroundShell {
         let stdout_len = self
             .stdout_buffer
             .lock()
-            .map(|data| data.len())
+            .map(|data| data.total_len())
             .unwrap_or(0);
         let stderr_len = self
             .stderr_buffer
             .as_ref()
-            .and_then(|buffer| buffer.lock().ok().map(|data| data.len()))
+            .and_then(|buffer| buffer.lock().ok().map(|data| data.total_len()))
             .unwrap_or(0);
         stdout_len.saturating_add(stderr_len)
+    }
+
+    /// Drop everything but a bounded tail of both raw streams.
+    ///
+    /// Called only once a job is terminal **and** its bytes have already been
+    /// delivered — either returned as the foreground tool result, or written to
+    /// its durable completion artifact. Before that the full bytes are a
+    /// contract; after it they are pure residency for the up-to-1 h the
+    /// finished record stays listed, which is what took the owner's host to
+    /// 11 GB of swap (#5472 finding 1).
+    fn release_delivered_output(&mut self) {
+        if self.status == ShellStatus::Running {
+            return;
+        }
+        for buffer in [Some(&self.stdout_buffer), self.stderr_buffer.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .release_to_tail(RAW_STREAM_SETTLED_TAIL_BYTES);
+        }
+    }
+
+    /// Bytes still held in memory for this job, for the eviction accounting in
+    /// [`ShellManager::cleanup`] and for tests that assert the bound.
+    fn retained_output_bytes(&self) -> usize {
+        let stdout = self
+            .stdout_buffer
+            .lock()
+            .map(|data| data.retained().len())
+            .unwrap_or(0);
+        let stderr = self
+            .stderr_buffer
+            .as_ref()
+            .and_then(|buffer| buffer.lock().ok().map(|data| data.retained().len()))
+            .unwrap_or(0);
+        stdout.saturating_add(stderr)
     }
 
     /// Collect output from the background threads
@@ -1106,10 +1225,10 @@ impl BackgroundShell {
         #[cfg(windows)]
         terminate_and_close_windows_job(self.windows_job.take());
         if let Some(handle) = self.stdout_thread.take() {
-            finish_background_reader(handle, &self.status);
+            finish_background_reader(handle, &self.status, Some(&self.stdout_buffer));
         }
         if let Some(handle) = self.stderr_thread.take() {
-            finish_background_reader(handle, &self.status);
+            finish_background_reader(handle, &self.status, self.stderr_buffer.as_ref());
         }
         self.stdin = None;
         self.child = None;
@@ -1140,9 +1259,11 @@ impl BackgroundShell {
         if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
             return (snapshot.content, String::new(), snapshot.total_bytes, 0);
         }
-        let (stdout_bytes, stderr_bytes) = self.full_output_bytes();
-        let stdout_len = stdout_bytes.len();
-        let stderr_len = stderr_bytes.len();
+        let (stdout_bytes, stderr_bytes, stdout_omitted, stderr_omitted) =
+            self.retained_output_bytes_with_omissions();
+        // Report what the stream produced, not what is still held.
+        let stdout_len = stdout_bytes.len().saturating_add(stdout_omitted);
+        let stderr_len = stderr_bytes.len().saturating_add(stderr_omitted);
 
         (
             String::from_utf8_lossy(&stdout_bytes).to_string(),
@@ -1152,21 +1273,30 @@ impl BackgroundShell {
         )
     }
 
-    fn full_output_bytes(&self) -> (Vec<u8>, Vec<u8>) {
+    /// Retained bytes for both streams plus how many leading bytes the memory
+    /// bound discarded. Callers that publish these bytes as evidence must
+    /// declare the omission rather than presenting a clipped stream as exact.
+    fn retained_output_bytes_with_omissions(&self) -> (Vec<u8>, Vec<u8>, usize, usize) {
         if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
-            return (snapshot.content.into_bytes(), Vec::new());
+            let omitted = snapshot.total_bytes.saturating_sub(snapshot.retained_bytes);
+            return (snapshot.content.into_bytes(), Vec::new(), omitted, 0);
         }
-        let stdout_bytes = self
+        let (stdout_bytes, stdout_omitted) = self
             .stdout_buffer
             .lock()
-            .map(|data| data.clone())
+            .map(|data| (data.retained().to_vec(), data.dropped()))
             .unwrap_or_default();
-        let stderr_bytes = self
+        let (stderr_bytes, stderr_omitted) = self
             .stderr_buffer
             .as_ref()
-            .and_then(|buffer| buffer.lock().ok().map(|data| data.clone()))
+            .and_then(|buffer| {
+                buffer
+                    .lock()
+                    .ok()
+                    .map(|data| (data.retained().to_vec(), data.dropped()))
+            })
             .unwrap_or_default();
-        (stdout_bytes, stderr_bytes)
+        (stdout_bytes, stderr_bytes, stdout_omitted, stderr_omitted)
     }
 
     fn take_delta(&mut self) -> (String, String, usize, usize, usize, usize) {
@@ -1266,6 +1396,7 @@ impl BackgroundShell {
             }
         }
         self.status = ShellStatus::Killed;
+        self.mark_finished();
         self.heavy_permit.take();
         self.collect_output();
         self.publish_lifecycle_best_effort();
@@ -1283,8 +1414,7 @@ impl BackgroundShell {
                 exit_code: self.exit_code,
                 stdout: snapshot.content,
                 stderr: String::new(),
-                duration_ms: u64::try_from(self.started_at.elapsed().as_millis())
-                    .unwrap_or(u64::MAX),
+                duration_ms: self.wall_millis(),
                 stdout_len: snapshot.total_bytes,
                 stderr_len: 0,
                 stdout_omitted: snapshot.total_bytes.saturating_sub(snapshot.retained_bytes),
@@ -1296,22 +1426,27 @@ impl BackgroundShell {
                 sandbox_denied: false,
             });
         }
-        let (stdout_full, stderr_full, _, _) = self.full_output();
+        let (stdout_full, stderr_full, stdout_total, stderr_total) = self.full_output();
         let (stdout, stdout_meta) = truncate_with_meta(&stdout_full);
         let (stderr, stderr_meta) = truncate_with_meta(&stderr_full);
+        // `truncate_with_meta` can only see the bytes still held. Fold in what
+        // the in-memory bound dropped so a >16 MiB stream reports its real
+        // length and its real omission instead of silently shrinking (#5472).
+        let stdout_dropped = stdout_total.saturating_sub(stdout_meta.original_len);
+        let stderr_dropped = stderr_total.saturating_sub(stderr_meta.original_len);
         Ok(ShellResult {
             task_id: Some(self.id.clone()),
             status: self.status.clone(),
             exit_code: self.exit_code,
             stdout,
             stderr,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            stdout_len: stdout_meta.original_len,
-            stderr_len: stderr_meta.original_len,
-            stdout_omitted: stdout_meta.omitted,
-            stderr_omitted: stderr_meta.omitted,
-            stdout_truncated: stdout_meta.truncated,
-            stderr_truncated: stderr_meta.truncated,
+            duration_ms: self.wall_millis(),
+            stdout_len: stdout_total,
+            stderr_len: stderr_total,
+            stdout_omitted: stdout_meta.omitted.saturating_add(stdout_dropped),
+            stderr_omitted: stderr_meta.omitted.saturating_add(stderr_dropped),
+            stdout_truncated: stdout_meta.truncated || stdout_dropped > 0,
+            stderr_truncated: stderr_meta.truncated || stderr_dropped > 0,
             sandboxed,
             sandbox_type: if sandboxed {
                 Some(self.sandbox_type.to_string())
@@ -1364,7 +1499,7 @@ impl BackgroundShell {
             cwd: self.working_dir.clone(),
             status: self.status.clone(),
             exit_code: self.exit_code,
-            elapsed_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms: self.wall_millis(),
             stdout_tail,
             stderr_tail,
             stdout_len,
@@ -1419,11 +1554,14 @@ impl BackgroundShell {
 
     fn completion_evidence(&self) -> ShellCompletionEvidence {
         let event = self.completion_event();
-        let (stdout, stderr) = self.full_output_bytes();
+        let (stdout, stderr, stdout_omitted, stderr_omitted) =
+            self.retained_output_bytes_with_omissions();
         ShellCompletionEvidence {
             event,
             stdout,
             stderr,
+            stdout_omitted,
+            stderr_omitted,
         }
     }
 
@@ -1437,7 +1575,11 @@ impl BackgroundShell {
     }
 }
 
-fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellStatus) {
+fn finish_background_reader(
+    handle: std::thread::JoinHandle<()>,
+    status: &ShellStatus,
+    buffer: Option<&SharedRawOutput>,
+) {
     // A killed Windows process can leave a pipe reader blocked even after its
     // Job Object has been closed. Cancellation must return promptly instead of
     // waiting for that reader to observe EOF. Other terminal states still join
@@ -1464,7 +1606,21 @@ fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellS
         let _ = handle.join();
         let _ = done_tx.send(());
     });
-    let _ = done_rx.recv_timeout(READER_JOIN_GRACE);
+    if done_rx.recv_timeout(READER_JOIN_GRACE).is_ok() {
+        return;
+    }
+    // The reader is still blocked in `read()` on a pipe a descendant refuses to
+    // close. Previously both it and the helper thread above stayed alive for the
+    // life of the process, the reader still appending into a buffer nobody would
+    // ever read (#5472 finding 2). Abandoning the stream releases what it holds
+    // and gives the reader an exit on its next wakeup, which also lets the
+    // helper's `join` return.
+    if let Some(buffer) = buffer {
+        buffer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .abandon();
+    }
 }
 
 impl Drop for BackgroundShell {
@@ -2102,11 +2258,11 @@ impl ShellManager {
             ));
         }
 
-        let stdout_buffer = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buffer = new_shared_raw_output();
         let stderr_buffer = if tty || persist_pending || small_contract_mode {
             None
         } else {
-            Some(Arc::new(Mutex::new(Vec::new())))
+            Some(new_shared_raw_output())
         };
         // The spill file is best-effort: a full disk or exhausted descriptor
         // table must not make `echo ok` unrunnable (that is exactly how the
@@ -2273,6 +2429,7 @@ impl ShellManager {
             status: ShellStatus::Running,
             exit_code: None,
             started_at: started,
+            finished_at: None,
             last_output_at: started,
             last_observed_output_len: 0,
             sandbox_type,
@@ -2326,6 +2483,10 @@ impl ShellManager {
 
         self.processes.insert(task_id.clone(), bg_shell);
         spawn_guard.disarm();
+        // Evict here, not only from `list_jobs()`: retention must not depend on
+        // the user opening the jobs panel, and every spawn is exactly the moment
+        // the previous calls' records became one call staler (#5472).
+        self.cleanup(FINISHED_SHELL_MAX_AGE);
 
         Ok(ShellResult {
             task_id: Some(task_id),
@@ -2383,6 +2544,22 @@ impl ShellManager {
         }
 
         shell.snapshot()
+    }
+
+    /// Poll a job and return only its status.
+    ///
+    /// The foreground wait loop ticks every 100 ms and discards the snapshot
+    /// unless the job is terminal, but `get_output` → `snapshot` clones both
+    /// raw buffers to build it. On a command printing 50 MB that was ~1.5 GB of
+    /// allocate-and-drop churn per wait, all of it thrown away (#5472 finding 1,
+    /// the transient term). Status is what the loop actually needs.
+    fn poll_status(&mut self, task_id: &str) -> Result<ShellStatus> {
+        let shell = self
+            .processes
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
+        shell.poll();
+        Ok(shell.status.clone())
     }
 
     /// Write data to stdin of a background process.
@@ -2622,7 +2799,7 @@ impl ShellManager {
             shell.poll();
         }
         // Evict completed processes older than 1 hour to bound memory growth.
-        self.cleanup(Duration::from_secs(3600));
+        self.cleanup(FINISHED_SHELL_MAX_AGE);
 
         let mut jobs = self
             .processes
@@ -2662,6 +2839,10 @@ impl ShellManager {
             if shell.status != ShellStatus::Running && !shell.completion_reported {
                 shell.completion_reported = true;
                 completions.push(shell.completion_evidence());
+                // The bytes are now in the caller's hands (they become a durable
+                // session artifact). Holding a second copy here for the rest of
+                // the retention hour is what #5472 measured.
+                shell.release_delivered_output();
             }
         }
         completions.sort_by(|a, b| a.event.task_id.cmp(&b.event.task_id));
@@ -2673,6 +2854,12 @@ impl ShellManager {
     fn acknowledge_foreground_completion(&mut self, task_id: &str) {
         if let Some(shell) = self.processes.get_mut(task_id) {
             shell.completion_reported = true;
+            // The caller already holds this job's `ShellResult`; the record only
+            // stays listed so `/jobs` can show it. A 1,200-char tail is all any
+            // remaining consumer reads, so the rest is released now instead of
+            // at the 1 h `cleanup` (#5472 finding 1 — the dominant term: every
+            // uppercase `Bash` call, foreground included, went through here).
+            shell.release_delivered_output();
         }
     }
 
@@ -2747,9 +2934,13 @@ impl ShellManager {
         );
     }
 
-    /// Clean up completed processes older than the given duration
+    /// Clean up completed processes older than the given duration, then enforce
+    /// the count and byte ceilings on what is left.
+    ///
+    /// Age alone is not a bound: it only fired from `list_jobs()`, so a session
+    /// that never opened the jobs panel evicted nothing, and 500 finished
+    /// records inside one hour were all retained regardless of size (#5472).
     pub fn cleanup(&mut self, max_age: Duration) {
-        let _now = Instant::now();
         self.processes.retain(|_, shell| {
             if shell.status == ShellStatus::Running {
                 true
@@ -2757,6 +2948,63 @@ impl ShellManager {
                 shell.started_at.elapsed() < max_age
             }
         });
+        self.enforce_finished_job_bounds();
+    }
+
+    /// Bytes still held across every tracked job. The retention bound in #5472
+    /// is stated in these terms, so the tests assert on them directly.
+    #[cfg(test)]
+    pub(crate) fn retained_output_bytes_total(&self) -> usize {
+        self.processes
+            .values()
+            .map(BackgroundShell::retained_output_bytes)
+            .fold(0, usize::saturating_add)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_job_count(&self) -> usize {
+        self.processes.len()
+    }
+
+    /// Drop the oldest finished records once they exceed either ceiling.
+    /// Running jobs are never evicted — killing the handle would orphan a live
+    /// process — and a job whose completion has not been delivered yet is
+    /// evicted last, since dropping it loses the only copy of its result.
+    fn enforce_finished_job_bounds(&mut self) {
+        let mut finished = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| shell.status != ShellStatus::Running)
+            .map(|(id, shell)| {
+                (
+                    id.clone(),
+                    shell.completion_reported,
+                    shell.started_at,
+                    shell.retained_output_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let total_bytes: usize = finished
+            .iter()
+            .map(|(_, _, _, bytes)| *bytes)
+            .fold(0, usize::saturating_add);
+        if finished.len() <= MAX_FINISHED_SHELL_RECORDS && total_bytes <= MAX_FINISHED_SHELL_BYTES {
+            return;
+        }
+        // Undelivered completions last, then oldest first.
+        finished.sort_by(|a, b| a.1.cmp(&b.1).reverse().then_with(|| a.2.cmp(&b.2)));
+        let mut remaining_count = finished.len();
+        let mut remaining_bytes = total_bytes;
+        for (id, _, _, bytes) in finished {
+            if remaining_count <= MAX_FINISHED_SHELL_RECORDS
+                && remaining_bytes <= MAX_FINISHED_SHELL_BYTES
+            {
+                break;
+            }
+            self.processes.remove(&id);
+            remaining_count -= 1;
+            remaining_bytes = remaining_bytes.saturating_sub(bytes);
+        }
     }
 }
 
@@ -3546,7 +3794,11 @@ async fn execute_foreground_via_background(
             return result;
         }
 
-        let snapshot = {
+        // Poll status only. The snapshot — and the buffer clones behind it — is
+        // built once, when there is actually a result to return (#5472). Both
+        // happen under one lock acquisition so the record cannot be evicted
+        // between observing that it finished and reading its result.
+        let finished = {
             let mut manager = context
                 .shell_manager
                 .lock()
@@ -3554,14 +3806,18 @@ async fn execute_foreground_via_background(
             if manager.take_foreground_background_request() {
                 return manager.get_output(&task_id, false, 0);
             }
-            let snapshot = manager.get_output(&task_id, false, 0)?;
-            if snapshot.status != ShellStatus::Running {
+            if manager.poll_status(&task_id)? == ShellStatus::Running {
+                None
+            } else {
+                let snapshot = manager.get_output(&task_id, false, 0)?;
+                // Ordering matters: the snapshot is taken before the
+                // acknowledgement releases the retained bytes.
                 manager.acknowledge_foreground_completion(&task_id);
+                Some(snapshot)
             }
-            snapshot
         };
 
-        if snapshot.status != ShellStatus::Running {
+        if let Some(snapshot) = finished {
             return Ok(snapshot);
         }
 

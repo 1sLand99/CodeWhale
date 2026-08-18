@@ -357,17 +357,150 @@ pub(super) fn resource_exhaustion_hint(error: &io::Error) -> Option<&'static str
     None
 }
 
+/// Hard in-flight ceiling for one raw shell stream held in memory (#5472).
+/// Past this the oldest bytes are dropped — counted, never silently lost — so
+/// one chatty command (`cargo build -v`, `git log -p`) cannot grow the process
+/// by its entire output. Deliberately far above every consumer of these bytes:
+/// the 30 KB tool-result truncation (`shell_output::MAX_OUTPUT_SIZE`), the
+/// 1,200-char job-panel tail and the 1 KiB completion tail all fit with three
+/// orders of magnitude to spare. The only surface a clip can reach is the
+/// durable completion artifact, which records the omission explicitly.
+pub(super) const RAW_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Extra headroom before a front-drop, so the O(len) compaction runs once per
+/// `cap / 4` bytes appended instead of once per chunk.
+const RAW_STREAM_DROP_SLACK: usize = RAW_STREAM_MAX_BYTES / 4;
+
+/// Tail retained once a job's output has been *delivered* — the foreground
+/// result is already the tool result, or the completion evidence is already
+/// written to its session artifact. Everything past this is dead weight for
+/// the up-to-1 h the finished record stays listed (#5472 finding 1).
+pub(super) const RAW_STREAM_SETTLED_TAIL_BYTES: usize = 64 * 1024;
+
+/// One raw (undecoded) shell stream retained in memory for a live job.
+///
+/// Bounded two independent ways, which is the whole point of the type:
+/// `append` enforces `cap` while the command runs, and `release_to_tail`
+/// collapses the buffer the moment its bytes have been delivered. Both record
+/// how many leading bytes were discarded so `total_len` — and therefore every
+/// `stdout_len` / `byte_length` the model and the artifact see — stays honest.
+pub(super) struct RawOutputBuffer {
+    data: Vec<u8>,
+    dropped: usize,
+    cap: usize,
+    abandoned: bool,
+}
+
+impl RawOutputBuffer {
+    pub(super) fn new() -> Self {
+        Self::with_cap(RAW_STREAM_MAX_BYTES)
+    }
+
+    pub(super) fn with_cap(cap: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            dropped: 0,
+            cap: cap.max(1),
+            abandoned: false,
+        }
+    }
+
+    /// Append, returning `false` once nobody will ever read this stream again.
+    ///
+    /// The reader thread uses that as its exit condition, which is the only way
+    /// out when a descendant has escaped the process group and holds the pipe
+    /// write-end open: `read()` will never see EOF, so without this the thread
+    /// runs — and retains its buffer — for the life of the process (#5472
+    /// finding 2).
+    pub(super) fn append(&mut self, bytes: &[u8]) -> bool {
+        if self.abandoned {
+            // Keep the total honest even though the bytes are discarded.
+            self.dropped = self.dropped.saturating_add(bytes.len());
+            return false;
+        }
+        self.data.extend_from_slice(bytes);
+        if self.data.len() > self.cap.saturating_add(RAW_STREAM_DROP_SLACK.min(self.cap)) {
+            self.drop_front_to(self.cap);
+        }
+        true
+    }
+
+    /// Give up on this stream: release everything held and stop accepting more.
+    ///
+    /// Called when the bounded reader join times out. The shell is already
+    /// terminal and its result already delivered, so nothing can consume these
+    /// bytes; holding them until the writer eventually closes is pure residency.
+    pub(super) fn abandon(&mut self) {
+        self.abandoned = true;
+        self.dropped = self.dropped.saturating_add(self.data.len());
+        self.data = Vec::new();
+    }
+
+    /// Total bytes this stream has produced, including bytes no longer held.
+    pub(super) fn total_len(&self) -> usize {
+        self.dropped.saturating_add(self.data.len())
+    }
+
+    /// Leading bytes discarded by the in-flight cap or by `release_to_tail`.
+    pub(super) fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    pub(super) fn retained(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Collapse to at most `keep` trailing bytes and give the allocation back.
+    /// Called once a job is terminal *and* its output has been delivered.
+    pub(super) fn release_to_tail(&mut self, keep: usize) {
+        if self.data.len() <= keep {
+            return;
+        }
+        self.drop_front_to(keep);
+        self.data.shrink_to_fit();
+    }
+
+    fn drop_front_to(&mut self, keep: usize) {
+        let mut start = self.data.len().saturating_sub(keep);
+        // Snap forward off a UTF-8 continuation byte so the retained slice
+        // never begins mid-character (the leading-U+FFFD bug guarded against
+        // in `tail_from_buffer`).
+        while start < self.data.len() && (self.data[start] & 0xC0) == 0x80 {
+            start += 1;
+        }
+        self.data.drain(..start);
+        self.dropped = self.dropped.saturating_add(start);
+    }
+}
+
+impl Default for RawOutputBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(super) type SharedRawOutput = Arc<Mutex<RawOutputBuffer>>;
+
+pub(super) fn new_shared_raw_output() -> SharedRawOutput {
+    Arc::new(Mutex::new(RawOutputBuffer::new()))
+}
+
 pub(super) fn take_delta_from_buffer(
-    buffer: &Arc<Mutex<Vec<u8>>>,
+    buffer: &SharedRawOutput,
     cursor: &mut usize,
 ) -> (Vec<u8>, usize) {
     let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
-    let total = guard.len();
-    let start = (*cursor).min(total);
+    let total = guard.total_len();
+    // The cursor is an absolute offset into the stream. Bytes the bound already
+    // discarded can never be delivered as a delta, so skip forward over them
+    // rather than re-sending the retained tail as if it were new.
+    let start_abs = (*cursor).max(guard.dropped()).min(total);
+    let start = start_abs - guard.dropped();
+    let retained = guard.retained();
     // Clone only the unread portion (the delta), not the entire accumulated buffer.
     // Long-running processes can produce megabytes of output; cloning the full
     // buffer on every poll held the ShellManager mutex for O(total_bytes) time.
-    let unread = &guard[start..];
+    let unread = &retained[start..];
     // A poll can land mid-character: the caller decodes this delta as UTF-8, so
     // handing back a truncated multibyte sequence renders it as replacement
     // glyphs and corrupts the next delta's leading byte too (the streaming-client
@@ -381,7 +514,7 @@ pub(super) fn take_delta_from_buffer(
         Err(_) => unread.len(),
     };
     let delta = unread[..consumed].to_vec();
-    *cursor = start + consumed;
+    *cursor = start_abs + consumed;
     (delta, total)
 }
 
@@ -391,21 +524,23 @@ pub(super) fn take_delta_from_buffer(
 /// (e.g. for the job-panel display). `max_tail_chars` is in Unicode scalar
 /// values; we read at most `max_tail_chars * 4` bytes from the end to account
 /// for multi-byte UTF-8 sequences.
-pub(super) fn tail_from_buffer(
-    buffer: &Arc<Mutex<Vec<u8>>>,
-    max_tail_chars: usize,
-) -> (usize, String) {
+pub(super) fn tail_from_buffer(buffer: &SharedRawOutput, max_tail_chars: usize) -> (usize, String) {
     let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
-    let total = guard.len();
+    // The reported length is the stream's total, not what is still held: a
+    // released or clipped buffer must not make the model believe the command
+    // printed less than it did.
+    let total = guard.total_len();
+    let retained = guard.retained();
+    let retained_len = retained.len();
     // Over-estimate byte count (4 bytes per char worst case for UTF-8).
-    let mut tail_start = total.saturating_sub(max_tail_chars.saturating_mul(4));
+    let mut tail_start = retained_len.saturating_sub(max_tail_chars.saturating_mul(4));
     // Snap forward to the next valid UTF-8 codepoint boundary so we don't
     // pass a slice beginning with continuation bytes (0x80-0xBF) to
     // from_utf8_lossy, which would emit a leading U+FFFD replacement char.
-    while tail_start < total && (guard[tail_start] & 0xC0) == 0x80 {
+    while tail_start < retained_len && (retained[tail_start] & 0xC0) == 0x80 {
         tail_start += 1;
     }
-    let tail_str = String::from_utf8_lossy(&guard[tail_start..]).into_owned();
+    let tail_str = String::from_utf8_lossy(&retained[tail_start..]).into_owned();
     (total, tail_text(&tail_str, max_tail_chars))
 }
 
@@ -428,16 +563,27 @@ pub(super) fn tail_text(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::{
         BOUNDED_OUTPUT_MAX_BYTES, BOUNDED_OUTPUT_MAX_LINES, BoundedOutputAccumulator,
+        RAW_STREAM_MAX_BYTES, RawOutputBuffer, SharedRawOutput, tail_from_buffer,
         take_delta_from_buffer,
     };
     use std::sync::{Arc, Mutex};
+
+    fn raw(bytes: &[u8]) -> SharedRawOutput {
+        let mut buffer = RawOutputBuffer::new();
+        buffer.append(bytes);
+        Arc::new(Mutex::new(buffer))
+    }
+
+    fn append(buffer: &SharedRawOutput, bytes: &[u8]) {
+        buffer.lock().unwrap().append(bytes);
+    }
 
     #[test]
     fn delta_holds_back_an_incomplete_trailing_utf8_sequence() {
         // "宽" is three bytes; deliver two of them, then the rest.
         let wide = "宽".as_bytes();
-        let buffer = Arc::new(Mutex::new(b"ok ".to_vec()));
-        buffer.lock().unwrap().extend_from_slice(&wide[..2]);
+        let buffer = raw(b"ok ");
+        append(&buffer, &wide[..2]);
         let mut cursor = 0usize;
 
         let (delta, total) = take_delta_from_buffer(&buffer, &mut cursor);
@@ -448,7 +594,7 @@ mod tests {
         assert_eq!(total, 5, "total still reports every buffered byte");
         assert_eq!(cursor, 3, "the split character stays unread");
 
-        buffer.lock().unwrap().extend_from_slice(&wide[2..]);
+        append(&buffer, &wide[2..]);
         let (delta, _) = take_delta_from_buffer(&buffer, &mut cursor);
         assert_eq!(
             String::from_utf8(delta).expect("delta must be whole characters"),
@@ -460,11 +606,139 @@ mod tests {
     fn delta_does_not_stall_on_genuinely_invalid_bytes() {
         // A lone 0xFF is never a valid start byte: passing it through keeps
         // binary output flowing instead of parking the cursor forever.
-        let buffer = Arc::new(Mutex::new(vec![b'a', 0xFF, b'b']));
+        let buffer = raw(&[b'a', 0xFF, b'b']);
         let mut cursor = 0usize;
         let (delta, total) = take_delta_from_buffer(&buffer, &mut cursor);
         assert_eq!(delta, vec![b'a', 0xFF, b'b']);
         assert_eq!(cursor, total);
+    }
+
+    // === #5472: in-memory retention bounds for the raw `Bash` streams ===
+
+    #[test]
+    fn raw_buffer_caps_in_flight_bytes_and_keeps_the_total_honest() {
+        let mut buffer = RawOutputBuffer::with_cap(1_024);
+        // 4 MiB through a 1 KiB cap: the analogue of `cargo build -v` through
+        // the 16 MiB production ceiling.
+        for _ in 0..1_024 {
+            buffer.append(&[b'x'; 4_096]);
+        }
+        let produced = 1_024 * 4_096;
+        assert_eq!(
+            buffer.total_len(),
+            produced,
+            "the stream's length must survive the bound"
+        );
+        assert_eq!(buffer.dropped(), produced - buffer.retained().len());
+        assert!(
+            buffer.retained().len() <= 1_024 + 1_024 / 4,
+            "retained {} exceeded cap + slack",
+            buffer.retained().len()
+        );
+    }
+
+    #[test]
+    fn raw_buffer_release_collapses_to_a_tail_and_reports_the_omission() {
+        let mut buffer = RawOutputBuffer::new();
+        buffer.append(&[b'y'; 200_000]);
+        assert_eq!(buffer.dropped(), 0, "200 KB is under the in-flight ceiling");
+
+        buffer.release_to_tail(1_000);
+        assert_eq!(buffer.retained().len(), 1_000);
+        assert_eq!(buffer.dropped(), 199_000);
+        assert_eq!(
+            buffer.total_len(),
+            200_000,
+            "releasing memory must not rewrite how much the command printed"
+        );
+    }
+
+    #[test]
+    fn raw_buffer_never_retains_a_split_character() {
+        let mut buffer = RawOutputBuffer::with_cap(8);
+        // Each "宽" is 3 bytes, so a byte-exact tail would land mid-character.
+        for _ in 0..64 {
+            buffer.append("宽".as_bytes());
+        }
+        assert!(
+            std::str::from_utf8(buffer.retained()).is_ok(),
+            "front-drop must snap off continuation bytes"
+        );
+
+        let mut released = RawOutputBuffer::new();
+        for _ in 0..64 {
+            released.append("宽".as_bytes());
+        }
+        released.release_to_tail(10);
+        assert!(std::str::from_utf8(released.retained()).is_ok());
+    }
+
+    #[test]
+    fn delta_skips_bytes_the_bound_already_discarded() {
+        // A consumer that stops reading while output keeps arriving must be
+        // moved forward, not handed the retained tail as if it were new bytes.
+        let buffer = Arc::new(Mutex::new(RawOutputBuffer::with_cap(16)));
+        append(&buffer, b"first-chunk-that-will-be-dropped-entirely");
+        let mut cursor = 0usize;
+        let (delta, total) = take_delta_from_buffer(&buffer, &mut cursor);
+        let dropped = buffer.lock().unwrap().dropped();
+        assert!(dropped > 0, "the cap must have clipped the front");
+        assert_eq!(cursor, total, "cursor lands at the stream's true position");
+        assert_eq!(
+            delta.len(),
+            total - dropped,
+            "only bytes still held can be delivered"
+        );
+
+        append(&buffer, b"tail");
+        let (delta, _) = take_delta_from_buffer(&buffer, &mut cursor);
+        assert_eq!(
+            delta,
+            b"tail".to_vec(),
+            "subsequent deltas continue from the corrected cursor"
+        );
+    }
+
+    #[test]
+    fn tail_reports_the_stream_total_not_the_retained_length() {
+        let buffer = Arc::new(Mutex::new(RawOutputBuffer::new()));
+        append(&buffer, b"abcdefghij");
+        buffer.lock().unwrap().release_to_tail(4);
+        let (total, tail) = tail_from_buffer(&buffer, 100);
+        assert_eq!(total, 10, "stdout_len must not shrink when memory is freed");
+        assert_eq!(tail, "ghij");
+    }
+
+    #[test]
+    fn abandoning_a_stream_releases_it_and_stops_the_reader() {
+        let mut buffer = RawOutputBuffer::new();
+        assert!(buffer.append(&[b'a'; 5_000]), "a live stream keeps reading");
+        buffer.abandon();
+
+        assert_eq!(buffer.retained().len(), 0, "held bytes are released");
+        assert_eq!(
+            buffer.total_len(),
+            5_000,
+            "the stream's length survives the release"
+        );
+        assert!(
+            !buffer.append(&[b'b'; 100]),
+            "an abandoned stream tells the reader thread to exit"
+        );
+        assert_eq!(buffer.retained().len(), 0, "and retains nothing further");
+        assert_eq!(
+            buffer.total_len(),
+            5_100,
+            "bytes that arrive after the give-up are still counted, not hidden"
+        );
+    }
+
+    #[test]
+    fn raw_stream_ceiling_clears_every_downstream_bound() {
+        // The clip must be unreachable by the model-visible surfaces: the 30 KB
+        // result truncation, the 1,200-char job tail, the 1 KiB completion tail.
+        assert!(RAW_STREAM_MAX_BYTES > 30_000 * 100);
+        assert!(super::RAW_STREAM_SETTLED_TAIL_BYTES > 30_000);
     }
 
     #[test]

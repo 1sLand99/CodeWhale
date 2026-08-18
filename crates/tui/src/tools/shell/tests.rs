@@ -1369,6 +1369,8 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
         },
         stdout: stdout.clone(),
         stderr: stderr.clone(),
+        stdout_omitted: 0,
+        stderr_omitted: 0,
     };
 
     let payload: serde_json::Value =
@@ -3695,4 +3697,197 @@ async fn signal_cleanup_kills_staged_persistent_service_group() {
     };
     assert!(libc::WIFSIGNALED(status));
     assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+}
+
+// === #5472: in-memory retention must be bounded ===
+
+/// ~1.1 MB on stdout, fast: 30,000 lines of 37 bytes.
+#[cfg(unix)]
+fn chatty_command() -> String {
+    "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -n 30000".to_string()
+}
+
+/// The finding-1 regression: before this bound, a single uppercase `Bash` call
+/// left its entire stdout resident in `ShellManager.processes` until the 1 h
+/// `cleanup`, and only if the user happened to open the jobs panel.
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_releases_its_output_once_the_result_is_returned() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": chatty_command()}), &ctx)
+        .await
+        .expect("run chatty foreground command");
+
+    // The result itself is unaffected: still the same 30 KB truncation.
+    assert!(
+        result
+            .content
+            .contains("0123456789abcdefghijklmnopqrstuvwxyz")
+    );
+
+    let manager = ctx.shell_manager.lock().expect("shell manager");
+    let retained = manager.retained_output_bytes_total();
+    assert!(
+        retained <= RAW_STREAM_SETTLED_TAIL_BYTES * 2,
+        "a finished foreground call must not keep its full stdout resident: \
+         {retained} bytes still held (bound {})",
+        RAW_STREAM_SETTLED_TAIL_BYTES * 2
+    );
+}
+
+/// Releasing memory must not rewrite history: the job panel keeps reporting how
+/// much the command actually printed.
+#[cfg(unix)]
+#[tokio::test]
+async fn released_output_still_reports_the_real_stream_length() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    BashTool::new("Bash")
+        .execute(json!({"command": chatty_command()}), &ctx)
+        .await
+        .expect("run chatty foreground command");
+
+    let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    let jobs = manager.list_jobs();
+    let job = jobs.first().expect("the finished job is still listed");
+    assert!(
+        job.stdout_len >= 1_000_000,
+        "stdout_len must stay honest after release, got {}",
+        job.stdout_len
+    );
+    assert!(
+        !job.stdout_tail.is_empty(),
+        "a diagnostic tail must survive the release"
+    );
+}
+
+/// A background job's bytes become a durable session artifact at drain time;
+/// keeping a second copy in the manager afterwards is the pure-waste term.
+#[cfg(unix)]
+#[tokio::test]
+async fn draining_completion_evidence_releases_the_retained_copy() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let started = BashTool::new("Bash")
+        .execute(
+            json!({"command": chatty_command(), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = started
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+
+    let evidence = manager.drain_finished_jobs_with_evidence();
+    assert_eq!(evidence.len(), 1);
+    assert!(
+        evidence[0].event.stdout_len >= 1_000_000,
+        "the event still reports the full length"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&evidence[0].artifact_bytes()).expect("evidence JSON");
+    assert!(
+        payload["stdout"]["content"]
+            .as_str()
+            .expect("stdout content")
+            .len()
+            >= 1_000_000,
+        "the artifact carries the exact bytes; only the manager's copy is dropped"
+    );
+
+    let retained = manager.retained_output_bytes_total();
+    assert!(
+        retained <= RAW_STREAM_SETTLED_TAIL_BYTES * 2,
+        "{retained} bytes still held after the evidence was published"
+    );
+}
+
+/// Age was the only bound, and it only ran from `list_jobs()`. Hundreds of
+/// finished records inside one hour were all retained.
+#[test]
+fn cleanup_bounds_finished_records_by_count() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    for index in 0..(MAX_FINISHED_SHELL_RECORDS + 40) {
+        let result = manager
+            .execute_with_options_env(
+                &echo_command(&format!("record-{index}")),
+                None,
+                10_000,
+                true,
+                None,
+                false,
+                None,
+                std::collections::HashMap::new(),
+            )
+            .expect("spawn");
+        let task_id = result.task_id.expect("task id");
+        wait_for_completed_shell(&mut manager, &task_id);
+    }
+    manager.cleanup(FINISHED_SHELL_MAX_AGE);
+    assert!(
+        manager.tracked_job_count() <= MAX_FINISHED_SHELL_RECORDS,
+        "finished records must be capped, got {}",
+        manager.tracked_job_count()
+    );
+}
+
+/// #5478 nit: `/jobs` reported `2m 07s` for a 12-second command, because
+/// elapsed was `started_at.elapsed()` even after the job finished. A completed
+/// job reports the duration it finished with.
+#[test]
+fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let result = manager
+        .execute_with_options_env(
+            &echo_command("frozen-elapsed"),
+            None,
+            10_000,
+            true,
+            None,
+            false,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .expect("spawn");
+    let task_id = result.task_id.expect("task id");
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+
+    let first = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("job listed")
+        .elapsed_ms;
+
+    std::thread::sleep(Duration::from_millis(400));
+
+    let second = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("job still listed")
+        .elapsed_ms;
+
+    assert_eq!(
+        first, second,
+        "a finished job's elapsed must stop moving; it read {first}ms then {second}ms"
+    );
+    assert!(
+        second < 10_000,
+        "the frozen value must be the real duration, not the timeout: {second}ms"
+    );
 }
