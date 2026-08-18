@@ -892,7 +892,8 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn_id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn_id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(manager.active_turn_flags(&thread.id, &turn_id).await, None);
 
