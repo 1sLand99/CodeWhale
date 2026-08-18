@@ -3379,6 +3379,7 @@ mod tests {
                 provider: Some("deepseek".to_string()),
                 model: Some("deepseek-v4-flash".to_string()),
                 thinking: None,
+                timeout_secs: None,
             }),
             cross_provider: None,
         });

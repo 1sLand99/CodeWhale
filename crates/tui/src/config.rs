@@ -2480,6 +2480,12 @@ pub struct AutoConfig {
     pub router: Option<AutoRouterConfig>,
 }
 
+/// Default classifier call timeout for `[auto.router]` (seconds).
+pub(crate) const DEFAULT_AUTO_ROUTER_TIMEOUT_SECS: u64 = 4;
+/// Upper clamp for a configured classifier timeout: a hung local router must
+/// not stall an Auto turn forever.
+pub(crate) const MAX_AUTO_ROUTER_TIMEOUT_SECS: u64 = 300;
+
 /// Explicit classifier route for Auto model mode (`[auto.router]`).
 ///
 /// When `provider` + `model` are set, Auto mode's classifier call goes to that
@@ -2502,6 +2508,12 @@ pub struct AutoRouterConfig {
     /// Thinking tier for the classifier call (e.g. `"off"`). Defaults to off.
     #[serde(default)]
     pub thinking: Option<String>,
+    /// Classifier call timeout in seconds. Defaults to
+    /// [`DEFAULT_AUTO_ROUTER_TIMEOUT_SECS`] (4); `0` means "use the default".
+    /// Values above [`MAX_AUTO_ROUTER_TIMEOUT_SECS`] (300) are clamped so a
+    /// hung local router cannot stall a turn indefinitely.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 fn default_update_check_for_updates() -> bool {
@@ -4312,6 +4324,21 @@ impl Config {
             .as_ref()
             .and_then(|a| a.cross_provider)
             .unwrap_or(false)
+    }
+
+    /// Classifier call timeout for `[auto.router]` in seconds. Defaults to
+    /// [`DEFAULT_AUTO_ROUTER_TIMEOUT_SECS`] (4); `0` means "use the default".
+    /// Values above [`MAX_AUTO_ROUTER_TIMEOUT_SECS`] (300) are clamped so a
+    /// hung local router cannot stall a turn indefinitely.
+    #[must_use]
+    pub fn auto_router_timeout_secs(&self) -> u64 {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.router.as_ref())
+            .and_then(|r| r.timeout_secs)
+            .filter(|secs| *secs > 0)
+            .unwrap_or(DEFAULT_AUTO_ROUTER_TIMEOUT_SECS)
+            .min(MAX_AUTO_ROUTER_TIMEOUT_SECS)
     }
 
     #[must_use]

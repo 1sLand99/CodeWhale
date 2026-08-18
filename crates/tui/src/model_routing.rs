@@ -1029,10 +1029,14 @@ async fn auto_route_inventory_recommendation(
     };
 
     let response = if allow_response_cache {
-        tokio::time::timeout(Duration::from_secs(4), client.create_message(request)).await??
+        tokio::time::timeout(
+            Duration::from_secs(inventory.router_timeout_secs),
+            client.create_message(request),
+        )
+        .await??
     } else {
         tokio::time::timeout(
-            Duration::from_secs(4),
+            Duration::from_secs(inventory.router_timeout_secs),
             client.create_message_without_response_cache(request),
         )
         .await??
