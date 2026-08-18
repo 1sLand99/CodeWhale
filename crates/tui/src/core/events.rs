@@ -384,6 +384,11 @@ pub enum Event {
         /// Follow-ups handed to a running child that it has not yet taken at
         /// its next round boundary (`agent_id` → count). Only non-zero entries.
         queued_follow_ups: std::collections::HashMap<String, usize>,
+        /// Receipts-only roster of every agent that ran this session (#5479):
+        /// status, current step, elapsed and token usage per row, built from
+        /// the retained worker records rather than from live agent state, so a
+        /// finished agent keeps the numbers it finished with.
+        roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
     },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the

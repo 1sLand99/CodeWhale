@@ -957,7 +957,10 @@ pub(crate) struct CoordinationRegistrationSnapshot {
 }
 
 impl AgentWorkerRecord {
-    fn new(spec: AgentWorkerSpec, now_ms: u64) -> Self {
+    /// Build a record exactly as the manager does. `pub(crate)` so the agents
+    /// roster projection (#5479) can be tested against real records instead of
+    /// a hand-rolled struct literal that would drift from this one.
+    pub(crate) fn new(spec: AgentWorkerSpec, now_ms: u64) -> Self {
         let run_id = agent_worker_run_id(&spec);
         let artifacts = default_subagent_artifacts(&run_id);
         let follow_up = follow_up_target_for_spec(&spec);
@@ -7308,7 +7311,7 @@ fn open_private_subagent_transcript(path: &Path, append: bool) -> Result<fs::Fil
         .map_err(Into::into)
 }
 
-fn epoch_millis_now() -> u64 {
+pub(crate) fn epoch_millis_now() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         Err(_) => 0,

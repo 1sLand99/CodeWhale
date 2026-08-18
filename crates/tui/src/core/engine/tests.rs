@@ -17581,6 +17581,7 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
         coordination: crate::tools::subagent::SubAgentManager::new(PathBuf::from("."), 1)
             .coordination_detail_projection(None, 24),
         queued_follow_ups: std::collections::HashMap::new(),
+        roster: Vec::new(),
     });
     assert!(
         result.is_err(),

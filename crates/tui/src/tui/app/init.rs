@@ -909,6 +909,8 @@ impl App {
             active_cell: None,
             active_cell_revision: 0,
             active_tool_details: HashMap::new(),
+            agent_roster: Vec::new(),
+            agent_roster_print_requested: false,
             active_tool_entry_completed_at: HashMap::new(),
             exploring_cell: None,
             exploring_entries: HashMap::new(),

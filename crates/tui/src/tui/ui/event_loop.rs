@@ -2322,8 +2322,17 @@ pub(crate) async fn run_event_loop(
                         agents,
                         coordination,
                         queued_follow_ups,
+                        roster,
                     } => {
                         app.agent_queued_follow_ups = queued_follow_ups;
+                        app.agent_roster = roster;
+                        if std::mem::take(&mut app.agent_roster_print_requested) {
+                            let content = crate::tui::agent_roster::render_agent_roster(
+                                &app.agent_roster,
+                                "main",
+                            );
+                            app.add_message(crate::tui::history::HistoryCell::System { content });
+                        }
                         let mut sorted = agents.clone();
                         sort_subagents_in_place(&mut sorted);
                         sorted.retain(|a| !a.from_prior_session);

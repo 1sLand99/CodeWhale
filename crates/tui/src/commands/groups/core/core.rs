@@ -383,6 +383,15 @@ pub fn models(_app: &mut App) -> CommandResult {
 }
 
 /// List Fleet worker status from the engine.
+/// Request a refresh and print the agent roster into the transcript once it
+/// lands. One-shot: the flag is cleared by the event handler, so ambient
+/// refreshes (sidebar polls, spawn/complete events) never spam the transcript.
+pub fn subagents_roster(app: &mut App) -> CommandResult {
+    app.agent_roster_print_requested = true;
+    app.status_message = Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
+    CommandResult::action(AppAction::ListSubAgents)
+}
+
 pub fn subagents(app: &mut App) -> CommandResult {
     if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
         let agents = subagent_view_agents(app, &app.subagent_cache);

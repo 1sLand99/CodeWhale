@@ -101,10 +101,17 @@ fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
 }
 
 fn agent_list_event(manager: &SubAgentManager) -> Event {
+    // One clock read shared by every row, so elapsed values in a single
+    // listing are consistent with each other (#5479).
+    let now_ms = crate::tools::subagent::epoch_millis_now();
     Event::AgentList {
         agents: manager.list(),
         coordination: manager.coordination_detail_projection(None, 24),
         queued_follow_ups: manager.queued_follow_up_counts(),
+        roster: crate::tui::agent_roster::build_agent_roster(
+            &manager.list_worker_records(),
+            now_ms,
+        ),
     }
 }
 

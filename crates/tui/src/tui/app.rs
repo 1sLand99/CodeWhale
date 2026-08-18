@@ -1531,6 +1531,13 @@ pub struct App {
     /// Follow-ups a running child has not yet taken at its next round
     /// boundary (`agent_id` → count), from the latest `AgentList` refresh.
     pub agent_queued_follow_ups: HashMap<String, usize>,
+    /// Receipts-only roster of every agent that ran this session (#5479).
+    /// Refreshed wholesale on each `AgentList` event; rendered by `/agents`
+    /// and, in a later slice, by the agents rail.
+    pub agent_roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+    /// `/agents list` asked for a one-shot transcript listing. Cleared by the
+    /// `AgentList` handler that prints it.
+    pub agent_roster_print_requested: bool,
     /// Per-role sequence counters for unnamed children (#3030). Two concurrent
     /// builders render as `builder · 1` and `builder · 2` instead of sharing a
     /// bare, indistinguishable role label.
