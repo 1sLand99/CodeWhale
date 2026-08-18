@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train.",
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills placeholder re-based the skill/memory/goal/handoff stage identities: the representative warning swaps a 33-char fixture skills root for the 19-char <configured-skills> token (-14 bytes per stage). Explicit maintainer decision for #5473/#5492.",
   "document_kind": "codewhale.runtime_contract_budget",
   "representative_context": {
     "fixture_id": "representative-v1",
@@ -11,12 +11,12 @@
       "goal": {
         "bytes": 8205,
         "delta_bytes": 81,
-        "identity_sha256": "68629ca6acf75c3396461dd61fd3aa1199f598960e8112bd18b0156425349c4f"
+        "identity_sha256": "68a67d2148a3f1e82b3b53e7e10dfa112d279fb77ec76caa2019c9ba61167667"
       },
       "handoff": {
         "bytes": 8593,
         "delta_bytes": 388,
-        "identity_sha256": "4d11618f03f84a572dda8e0c69d3a31af1d7ff0362c9bae4075bf453db859d05"
+        "identity_sha256": "65689303b1eb2f0a6c5e5d06440a68534dd649c96d2b3a33ea54f0e98f78e9d7"
       },
       "instructions": {
         "bytes": 6494,
@@ -26,7 +26,7 @@
       "memory": {
         "bytes": 8124,
         "delta_bytes": 963,
-        "identity_sha256": "5b59a51104e9a98d81a1baa54393b63efee0c8cf42cf273830d42388b0ca87b8"
+        "identity_sha256": "c930e2ac21c3c6d93df3b6ba1ef58fd23c329129ea591cc3ffab378a8b2ead6f"
       },
       "project": {
         "bytes": 6363,
@@ -36,7 +36,7 @@
       "skill": {
         "bytes": 7161,
         "delta_bytes": 667,
-        "identity_sha256": "65cad0ba231a1c6bb1d74d0dea6c7cb33154c7efc4506ab7998d542dff8dd1aa"
+        "identity_sha256": "70b1e43aa254ef67dfe19616c552c4cac6805d2f4e47f3d2b3156b1b059eded4"
       }
     },
     "system_prompt_blocks": 6,
