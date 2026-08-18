@@ -25,7 +25,12 @@ const FILES = ["chrome.ts", "home.ts"];
 // required reference; a locale that ships the file is held to the same
 // key/token parity, and a locale without it falls back to English at
 // lookup time — so absence is a valid state, never a failure.
-const OPTIONAL_FILES = ["docs-guide.ts", "docs-shell.ts"];
+const OPTIONAL_FILES = [
+  "docs-guide.ts",
+  "docs-shell.ts",
+  "docs-hooks.ts",
+  "docs-troubleshooting.ts",
+];
 
 /** Top-level keys of the exported object literal (two-space indented `key:`). */
 function extractKeys(source) {

@@ -320,3 +320,43 @@ export interface DocsShellDict {
   installCta: string;
   sourceDocsCta: string;
 }
+
+/**
+ * `app/[locale]/docs/hooks/page.tsx`.
+ *
+ * `configIntro` carries three `{token}` placeholders for the literal
+ * `[[hooks.hooks]]`, `/hooks` and `[hooks].enabled` spans the page typesets
+ * as inline `<code>`. They stay out of the prose because they are config
+ * syntax rather than copy, and the token-parity half of `check-locales.mjs`
+ * then guards the sentence for free.
+ */
+export interface DocsHooksDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  configIntro: string;
+  /** Lifecycle events as `[name, detail]`, in the order the page lists them. */
+  events: [string, string][];
+  projectTitle: string;
+  projectLead: string;
+  sourceNote: string;
+}
+
+/** `app/[locale]/docs/troubleshooting/page.tsx`. */
+export interface DocsTroubleshootingDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  /** Triage entries as `[name, detail]`, in the order the page lists them. */
+  incidents: [string, string][];
+  dockerTitle: string;
+  dockerLead: string;
+  dockerToolboxNote: string;
+  sourceNote: string;
+}

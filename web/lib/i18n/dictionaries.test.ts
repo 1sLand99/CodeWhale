@@ -3,15 +3,20 @@ import {
   DICTIONARY_LOCALES,
   EN_CHROME,
   EN_DOCS_GUIDE,
+  EN_DOCS_HOOKS,
   EN_DOCS_SHELL,
+  EN_DOCS_TROUBLESHOOTING,
   EN_HOME,
   fill,
   getChrome,
   getDocsGuide,
+  getDocsHooks,
   getDocsShell,
+  getDocsTroubleshooting,
   getHome,
   pickText,
   splitToken,
+  splitTokens,
 } from "./dictionaries";
 import { locales, partialLocales } from "./config";
 import type { ChromeDict, HomeDict } from "./dictionaries/types";
@@ -230,6 +235,60 @@ describe("website dictionaries", () => {
     for (const locale of ["ja", "fr", "ar", "und"]) {
       expect(getDocsShell(locale), `${locale} docs-shell`).toBe(EN_DOCS_SHELL);
     }
+  });
+
+  it("holds the docs page-body dictionaries to the same contract (#5337)", () => {
+    for (const [label, get, reference] of [
+      ["docs-hooks", getDocsHooks, EN_DOCS_HOOKS],
+      ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING],
+    ] as const) {
+      const enKeys = Object.keys(reference).sort();
+      for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
+        expect(Object.keys(get(locale)).sort(), `${locale} ${label} keys`).toEqual(enKeys);
+      }
+      // zh ships a real translation, not an English pass-through.
+      expect(get("zh").overviewTitle, `zh ${label}`).not.toBe(reference.overviewTitle);
+      // Every other locale renders English today, exactly as the `isZh`
+      // ternaries in the page did before the move.
+      for (const locale of ["ja", "fr", "ar", "und"]) {
+        expect(get(locale), `${locale} ${label}`).toBe(reference);
+      }
+    }
+  });
+
+  it("keeps the docs page lists structurally aligned", () => {
+    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
+      expect(getDocsHooks(locale).events, `${locale} hook events`).toHaveLength(4);
+      expect(
+        getDocsTroubleshooting(locale).incidents,
+        `${locale} triage entries`,
+      ).toHaveLength(5);
+    }
+  });
+
+  it("carries every code-span token through the hooks intro for splitTokens()", () => {
+    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
+      const parts = splitTokens(getDocsHooks(locale).configIntro);
+      const tokens = parts.flatMap((part) => ("token" in part ? [part.token] : []));
+      expect(tokens, `${locale} configIntro tokens`).toEqual([
+        "hooksTable",
+        "hooksCommand",
+        "enabledKey",
+      ]);
+    }
+  });
+
+  it("splitTokens interleaves literal text and token names in template order", () => {
+    expect(splitTokens("a {one} b {two}")).toEqual([
+      { text: "a " },
+      { token: "one" },
+      { text: " b " },
+      { token: "two" },
+    ]);
+    // A template with no token is one literal run, and an empty run between
+    // adjacent tokens is dropped rather than rendered as an empty node.
+    expect(splitTokens("plain")).toEqual([{ text: "plain" }]);
+    expect(splitTokens("{one}{two}")).toEqual([{ token: "one" }, { token: "two" }]);
   });
 
   it("pickText selects the locale side of legacy { en, zh } pairs", () => {

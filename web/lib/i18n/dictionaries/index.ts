@@ -12,13 +12,24 @@
  * than a map entry, which keeps `DICTIONARY_LOCALES` equal to the set of
  * non-reference locale directories that `check-locales.mjs` walks.
  */
-import type { ChromeDict, DocsGuideDict, DocsShellDict, HomeDict } from "./types";
+import type {
+  ChromeDict,
+  DocsGuideDict,
+  DocsHooksDict,
+  DocsShellDict,
+  DocsTroubleshootingDict,
+  HomeDict,
+} from "./types";
 import { chrome as enChrome } from "./en/chrome";
 import { home as enHome } from "./en/home";
 import { docsGuide as enDocsGuide } from "./en/docs-guide";
 import { docsGuide as zhDocsGuide } from "./zh/docs-guide";
 import { docsShell as enDocsShell } from "./en/docs-shell";
 import { docsShell as zhDocsShell } from "./zh/docs-shell";
+import { docsHooks as enDocsHooks } from "./en/docs-hooks";
+import { docsHooks as zhDocsHooks } from "./zh/docs-hooks";
+import { docsTroubleshooting as enDocsTroubleshooting } from "./en/docs-troubleshooting";
+import { docsTroubleshooting as zhDocsTroubleshooting } from "./zh/docs-troubleshooting";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -128,6 +139,14 @@ const DOCS_SHELL: Record<string, DocsShellDict> = {
   zh: zhDocsShell,
 };
 
+const DOCS_HOOKS: Record<string, DocsHooksDict> = {
+  zh: zhDocsHooks,
+};
+
+const DOCS_TROUBLESHOOTING: Record<string, DocsTroubleshootingDict> = {
+  zh: zhDocsTroubleshooting,
+};
+
 export function getChrome(locale: string): ChromeDict {
   return CHROME[locale] ?? enChrome;
 }
@@ -142,6 +161,14 @@ export function getDocsGuide(locale: string): DocsGuideDict {
 
 export function getDocsShell(locale: string): DocsShellDict {
   return DOCS_SHELL[locale] ?? enDocsShell;
+}
+
+export function getDocsHooks(locale: string): DocsHooksDict {
+  return DOCS_HOOKS[locale] ?? enDocsHooks;
+}
+
+export function getDocsTroubleshooting(locale: string): DocsTroubleshootingDict {
+  return DOCS_TROUBLESHOOTING[locale] ?? enDocsTroubleshooting;
 }
 
 /**
@@ -160,6 +187,8 @@ export const EN_CHROME = enChrome;
 export const EN_HOME = enHome;
 export const EN_DOCS_GUIDE = enDocsGuide;
 export const EN_DOCS_SHELL = enDocsShell;
+export const EN_DOCS_HOOKS = enDocsHooks;
+export const EN_DOCS_TROUBLESHOOTING = enDocsTroubleshooting;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */
@@ -178,4 +207,18 @@ export function fill(template: string, vars: Record<string, string | number>): s
  */
 export function splitToken(template: string, token: string): string[] {
   return template.split(`{${token}}`);
+}
+
+/**
+ * Split a template on every `{token}` it carries, for a sentence with more
+ * than one substituted node. Returns literal text and token names
+ * interleaved in template order, so a locale that reorders the tokens still
+ * renders correctly and no translated fragment is concatenated by the
+ * call site.
+ */
+export function splitTokens(template: string): Array<{ text: string } | { token: string }> {
+  return template
+    .split(/\{(\w+)\}/g)
+    .map((part, i) => (i % 2 === 1 ? { token: part } : { text: part }))
+    .filter((part) => "token" in part || part.text !== "");
 }
