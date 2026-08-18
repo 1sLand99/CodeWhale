@@ -60,7 +60,12 @@ class CiWiringTests(unittest.TestCase):
         block = migration_step_block(load_ci())
         self.assertIn("PR_BASE_SHA", block)
         self.assertIn("PUSH_BEFORE_SHA", block)
-        self.assertIn("git fetch --no-tags --depth=1 origin", block)
+        self.assertIn("git fetch --no-tags origin", block)
+        self.assertNotIn(
+            "--depth",
+            block,
+            "baseline fetch must preserve the full ancestry used by later CI range checks",
+        )
         self.assertIn('--baseline-ref "${baseline}"', block)
 
     def test_migration_commands_are_ordered_self_test_first(self) -> None:

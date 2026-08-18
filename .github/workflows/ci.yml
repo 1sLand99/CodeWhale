@@ -288,7 +288,7 @@ jobs:
           python3 scripts/test_check_command_migration_manifest.py
           baseline="${PR_BASE_SHA:-${PUSH_BEFORE_SHA:-}}"
           if [[ -n "${baseline}" && ! "${baseline}" =~ ^0+$ ]]; then
-            git fetch --no-tags --depth=1 origin "${baseline}"
+            git fetch --no-tags origin "${baseline}"
             python3 scripts/check-command-migration-manifest.py --baseline-ref "${baseline}"
           else
             python3 scripts/check-command-migration-manifest.py
