@@ -3094,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn config_fancy_animations_keeps_ghostty_frame_cap_without_disabling_motion() {
+    fn config_fancy_animations_keeps_ghostty_full_motion() {
         let temp_root = env::temp_dir().join(format!(
             "codewhale-tui-ghostty-fancy-config-test-{}",
             std::process::id()
@@ -3109,14 +3109,14 @@ mod tests {
 
         let mut app = create_test_app();
         assert!(app.fancy_animations);
-        assert!(app.constrained_frame_rate);
+        assert!(!app.constrained_frame_rate);
 
         let result = set_config_value(&mut app, "fancy_animations", "true", false);
 
         assert!(!result.is_error);
         assert!(
             app.fancy_animations,
-            "Ghostty compatibility must cap redraws without disabling motion"
+            "Ghostty must keep authored motion enabled"
         );
         assert_eq!(
             result.message.as_deref(),

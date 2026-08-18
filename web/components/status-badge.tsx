@@ -8,6 +8,7 @@
  */
 
 import type { LocalizedText } from "@/lib/content/vocabulary";
+import { pickText } from "@/lib/i18n/dictionaries";
 
 export type StatusKind = "experimental" | "preview" | "pending" | "unavailable";
 
@@ -28,8 +29,7 @@ export function StatusBadge({
   /** Overrides the default per-kind label (e.g. a media entry's pendingLabel). */
   label?: LocalizedText;
 }) {
-  const isZh = locale === "zh";
-  const text = label ? (isZh ? label.zh : label.en) : isZh ? DEFAULT_LABELS[kind].zh : DEFAULT_LABELS[kind].en;
+  const text = pickText(label ?? DEFAULT_LABELS[kind], locale);
 
   return (
     <span className={`status-badge status-badge-${kind}`}>

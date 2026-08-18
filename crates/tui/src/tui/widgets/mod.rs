@@ -48,7 +48,6 @@ const SEND_FLASH_DURATION: Duration = Duration::from_millis(500);
 const COMPOSER_PANEL_HEIGHT: u16 = 2;
 const JUMP_TO_LATEST_BUTTON_WIDTH: u16 = 3;
 const JUMP_TO_LATEST_BUTTON_HEIGHT: u16 = 3;
-
 pub struct ChatWidget {
     content_area: Rect,
     lines: Vec<Line<'static>>,
@@ -195,7 +194,8 @@ impl ChatWidget {
         let jump_border = app.ui_theme.border;
         let jump_arrow = app.ui_theme.status_working;
         let visible_lines = content_area.height as usize;
-        let render_options = app.transcript_render_options();
+        let mut render_options = app.transcript_render_options();
+        render_options.reasoning_preview_viewport_lines = Some(visible_lines);
 
         if render_empty_state {
             let lines = build_empty_state_lines(app, content_area);

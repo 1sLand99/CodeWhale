@@ -19,7 +19,7 @@
  */
 
 /** Contributors whose PRs were merged or harvested into this release. */
-export const RELEASE_CONTRIBUTORS: string[] = ["@h3c-hexin"];
+export const RELEASE_CONTRIBUTORS: string[] = ["@h3c-hexin", "@Gabriel-Degret"];
 
 /** Contributors who helped with reports, reproductions, and verification. */
 export const RELEASE_HELPERS: string[] = [

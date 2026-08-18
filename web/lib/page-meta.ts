@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { locales } from "./i18n/config";
+import { canonicalLocaleForPath, contentLocalesForPath } from "./i18n/content-locales";
 
 /** Canonical origin for the production site (no trailing slash). */
 export const SITE_URL = "https://codewhale.net";
@@ -45,10 +45,11 @@ const OG_LOCALE: Record<string, string> = {
 /**
  * buildPageMetadata — per-page SEO metadata for the localized site.
  *
- * Produces a canonical URL for the rendered locale, hreflang alternates for
- * every routed locale (derived from `locales` in lib/i18n/config.ts, plus
- * `x-default` pointing at the English page), and matching Open Graph /
- * Twitter card fields wired to the shared OG image.
+ * Produces a canonical URL for the page body's translated locale, hreflang
+ * alternates only for genuine translations (plus `x-default` pointing at the
+ * English page), and matching Open Graph / Twitter card fields wired to the
+ * shared OG image. Routed partial-locale fallbacks stay accessible, but their
+ * canonical points to the English source instead of claiming a translation.
  *
  * @param path        Route path WITHOUT the locale prefix, with a leading
  *                    slash: "/" for the homepage, "/install", "/docs", …
@@ -83,12 +84,13 @@ export function buildPageMetadata({
 }): Metadata {
   // "/" → "" so the homepage canonical is /en, not /en/.
   const suffix = path === "/" ? "" : path.replace(/\/+$/, "");
-  const canonical = `${SITE_URL}/${locale}${suffix}`;
+  const canonicalLocale = canonicalLocaleForPath(path, locale);
+  const canonical = `${SITE_URL}/${canonicalLocale}${suffix}`;
 
-  // hreflang alternates derive from the canonical locale registry, so a new
-  // routed locale appears on every page without touching call sites.
+  // Only advertise locales with a genuine page-body translation. Partial
+  // locale routes remain usable, but do not become duplicate index entries.
   const languages: Record<string, string> = {};
-  for (const l of locales) {
+  for (const l of contentLocalesForPath(path)) {
     languages[l] = `${SITE_URL}/${l}${suffix}`;
   }
   languages["x-default"] = `${SITE_URL}/en${suffix}`;
@@ -107,7 +109,7 @@ export function buildPageMetadata({
       url: canonical,
       siteName: SITE_NAME,
       type: "website",
-      locale: OG_LOCALE[locale] ?? "en_US",
+      locale: OG_LOCALE[canonicalLocale] ?? "en_US",
       images: [OG_IMAGE],
     },
     twitter: {

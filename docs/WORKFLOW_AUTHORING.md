@@ -127,7 +127,7 @@ Workflow IR is lowered to workers:
 - up to 16 live worker agents at once; larger populations queue (block) on the
   host's per-run concurrency gate until a live slot frees, then route through
   Fleet;
-- up to 5 recursive Fleet rings (the default user configuration is 2);
+- up to 8 recursive Fleet rings (the default user configuration is 3);
 - loops require `max_iterations`;
 - dynamic `expand` nodes require `max_children` and a template.
 

@@ -163,6 +163,10 @@ pub(crate) fn status_animation_interval_ms(app: &App) -> u64 {
 pub(crate) fn underwater_animation_interval_ms(app: &App) -> u64 {
     if app.effective_low_motion_for_status() || app.low_motion {
         crate::tui::display_refresh::adaptive_animation_interval_ms(true)
+    } else if app.constrained_frame_rate {
+        UI_CONSTRAINED_UNDERWATER_ANIMATION_MS
+    } else if crate::tui::display_refresh::terminal_is_ghostty() {
+        UI_GHOSTTY_UNDERWATER_ANIMATION_MS
     } else {
         // Measured display Hz can raise atmosphere cadence on high-Hz
         // panels; missing probe falls back to the ~8 fps floor.

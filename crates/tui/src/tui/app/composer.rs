@@ -800,6 +800,7 @@ impl App {
         true
     }
 
+    #[cfg(test)]
     pub fn flush_paste_burst_if_due(&mut self, now: Instant) -> bool {
         match self.paste_burst.flush_if_due(now) {
             FlushResult::Paste(text) => {
@@ -814,8 +815,12 @@ impl App {
         }
     }
 
-    pub fn flush_paste_burst_if_enabled(&mut self, now: Instant) -> bool {
-        self.use_paste_burst_detection && self.flush_paste_burst_if_due(now)
+    pub(crate) fn take_paste_burst_flush_if_enabled(&mut self, now: Instant) -> FlushResult {
+        if self.use_paste_burst_detection {
+            self.paste_burst.flush_if_due(now)
+        } else {
+            FlushResult::None
+        }
     }
 
     pub fn paste_burst_next_flush_delay_if_enabled(&self, now: Instant) -> Option<Duration> {

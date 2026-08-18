@@ -32,6 +32,7 @@ env:
 jobs:
   changes:
     name: Change detection
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       heavy: ${{ steps.detect.outputs.heavy }}
@@ -157,6 +158,7 @@ jobs:
 
   versions:
     name: Version drift
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -190,6 +192,7 @@ jobs:
 
   integrations:
     name: Integrations
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -210,6 +213,7 @@ jobs:
   lint:
     name: Lint
     needs: changes
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -366,6 +370,7 @@ jobs:
     name: Workflow RLM cache
     needs: changes
     if: needs.changes.outputs.workflow == 'true'
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -397,6 +402,7 @@ jobs:
     # macOS/Windows runners. Heavy changes use the real matrix OS as before.
     # The ternary is safe: matrix.os is always a non-empty literal, so
     # runs-on can never evaluate to empty.
+    timeout-minutes: 90
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
       # A failure on one desktop platform must not erase evidence from the
@@ -522,6 +528,7 @@ jobs:
     # them off macOS/Windows runners. On pull_request the matrix is
     # ubuntu-only, so the required "npm wrapper smoke (ubuntu-latest)"
     # context is unaffected.
+    timeout-minutes: 30
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
       matrix:
@@ -595,6 +602,7 @@ jobs:
       github.event_name != 'schedule' &&
       needs.changes.outputs.heavy == 'true' &&
       (github.event_name != 'pull_request' || needs.changes.outputs.mobile == 'true')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -639,6 +647,7 @@ jobs:
     name: Workflow lint
     needs: changes
     if: needs.changes.outputs.actions == 'true'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -655,6 +664,7 @@ jobs:
   docs:
     name: Documentation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

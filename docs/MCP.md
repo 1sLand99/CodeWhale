@@ -104,6 +104,9 @@ Supported in-TUI actions:
 ```text
 /mcp init
 /mcp init --force
+/mcp import
+/mcp recommendations
+/mcp add recommended <id>
 /mcp add stdio <name> <command> [args...]
 /mcp add http <name> <url>
 /mcp login <name> [--scope scope]
@@ -311,9 +314,9 @@ The CLI also exposes helper tools when MCP is enabled:
 
 You can also use `mcpServers` instead of `servers` for compatibility with other clients.
 
-## Running DeepSeek as an MCP Server
+## Running Codewhale as an MCP Server
 
-You can register your local DeepSeek binary as an MCP server so other DeepSeek sessions (or any MCP client) can call its tools.
+You can register your local Codewhale binary as an MCP server so other Codewhale sessions (or any MCP client) can call its tools.
 
 ### Quick Setup
 
@@ -374,9 +377,9 @@ becomes `mcp_codewhale_shell`.
 | **Config** | `~/.codewhale/mcp.json` entry | Direct URL connection | Editor `agent_servers` custom command |
 | **Lifecycle** | Spawned per client session | Long-running daemon | Spawned per editor agent session |
 
-Use `mcp add-self` when you want DeepSeek tools available to other MCP clients.
+Use `mcp add-self` when you want Codewhale tools available to other MCP clients.
 Use `serve --http` when building applications that consume the API directly.
-Use `serve --acp` when an editor wants to talk to DeepSeek as an ACP agent.
+Use `serve --acp` when an editor wants to talk to Codewhale as an ACP agent.
 
 ### Verification
 

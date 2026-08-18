@@ -203,6 +203,15 @@ pub struct TranscriptRenderOptions {
     /// `[transcript] prose_measure` so the main cache and the full-screen
     /// overlay agree on the same effective width.
     pub(crate) prose_measure: Option<u16>,
+    /// Extra raw reasoning body rows available to the newest transcript cell.
+    /// The transcript cache derives this from genuinely unused viewport rows;
+    /// non-layout-aware renderers and historical cells retain the compact
+    /// 10/12-row fallback.
+    pub(crate) reasoning_preview_extra_lines: usize,
+    /// Live transcript height used by the cache to derive the extra rows
+    /// above. Kept separate from the render-level budget so cached geometry is
+    /// stable and explicit reasoning summaries retain their four-row cap.
+    pub(crate) reasoning_preview_viewport_lines: Option<usize>,
 }
 
 impl Default for TranscriptRenderOptions {
@@ -221,6 +230,8 @@ impl Default for TranscriptRenderOptions {
             spacing: TranscriptSpacing::Comfortable,
             palette_mode: palette::PaletteMode::detect(),
             prose_measure: None,
+            reasoning_preview_extra_lines: 0,
+            reasoning_preview_viewport_lines: None,
         }
     }
 }
@@ -389,7 +400,7 @@ impl HistoryCell {
                 duration_secs,
             } => {
                 let collapsed = folded ^ !options.verbose ^ options.thinking_default_expanded;
-                let (lines, expandable) = thinking::render_thinking_with_analysis(
+                let (lines, expandable) = thinking::render_thinking_with_preview_limit(
                     content,
                     width,
                     *streaming,
@@ -397,6 +408,7 @@ impl HistoryCell {
                     collapsed,
                     options.low_motion,
                     options.thinking_highlight,
+                    options.reasoning_preview_extra_lines,
                 );
                 reasoning_action = expandable.then_some(if collapsed {
                     ReasoningAction::Expand

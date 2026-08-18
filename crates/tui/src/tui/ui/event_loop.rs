@@ -46,6 +46,44 @@ pub(super) fn handle_transcript_space(app: &mut App) -> bool {
     true
 }
 
+/// Route plain input that must be decided before the composer sees it.
+///
+/// The raw-paste fallback intentionally holds the first ASCII character for
+/// a few milliseconds. Space must use that same ambiguity window: a second
+/// rapid character proves it was paste payload, while a lone held Space can
+/// become the rendered transcript action when the hold expires.
+pub(super) fn handle_plain_key_before_composer(
+    app: &mut App,
+    key: &KeyEvent,
+    now: Instant,
+) -> bool {
+    crate::tui::paste::handle_paste_burst_key(app, key, now)
+}
+
+/// Flush a raw-paste ambiguity window without losing a leading Space.
+///
+/// `FlushResult::Paste` is always composer payload. A lone typed Space is a
+/// transcript action only when the composer is still empty and the last
+/// rendered owner accepts it; otherwise it remains ordinary input.
+pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> bool {
+    match app.take_paste_burst_flush_if_enabled(now) {
+        crate::tui::paste_burst::FlushResult::Paste(text) => {
+            app.insert_str(&text);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(' ')
+            if app.input.is_empty() && handle_transcript_space(app) =>
+        {
+            true
+        }
+        crate::tui::paste_burst::FlushResult::Typed(ch) => {
+            app.insert_char(ch);
+            true
+        }
+        crate::tui::paste_burst::FlushResult::None => false,
+    }
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -2992,7 +3030,7 @@ pub(crate) async fn run_event_loop(
         }
 
         let now = Instant::now();
-        app.flush_paste_burst_if_enabled(now);
+        flush_paste_burst_before_composer(app, now);
         app.sync_status_message_to_toasts();
         // Drain background-LLM cost (compaction summaries, seam
         // recompaction, cycle briefings) accumulated since the last
@@ -4140,7 +4178,7 @@ pub(crate) async fn run_event_loop(
             }
 
             let now = Instant::now();
-            app.flush_paste_burst_if_enabled(now);
+            flush_paste_burst_before_composer(app, now);
 
             // On Windows, AltGr is delivered as `Ctrl+Alt`; treat
             // AltGr-typed chars (e.g. European layouts producing `@`, `\`,
@@ -4181,8 +4219,7 @@ pub(crate) async fn run_event_loop(
                 app.insert_str(&pending);
             }
 
-            if (is_plain_char || is_plain_enter)
-                && crate::tui::paste::handle_paste_burst_key(app, &key, now)
+            if (is_plain_char || is_plain_enter) && handle_plain_key_before_composer(app, &key, now)
             {
                 continue;
             }

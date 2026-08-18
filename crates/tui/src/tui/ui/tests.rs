@@ -252,12 +252,21 @@ fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
 
 #[test]
 fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
+    let _guard = crate::test_support::lock_test_env();
+    let previous_program = std::env::var_os("TERM_PROGRAM");
+    let previous_term = std::env::var_os("TERM");
+    // SAFETY: serialized by the process-wide test environment lock.
+    unsafe {
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::set_var("TERM", "xterm-256color");
+    }
     let mut app = create_test_app();
     // App::new reads real terminal overlays. This test owns the authored
     // motion cadence, so pin that input instead of inheriting a host's saved
     // low-motion or legacy-console policy.
     app.low_motion = false;
     app.fancy_animations = true;
+    app.constrained_frame_rate = false;
 
     assert_eq!(
         animation_interval_ms(&app, true, false),
@@ -272,6 +281,58 @@ fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
         UI_UNDERWATER_ANIMATION_MS,
         "the slower status spinner must not throttle ambient fish"
     );
+    // SAFETY: cleanup under the same lock.
+    unsafe {
+        match previous_program {
+            Some(value) => std::env::set_var("TERM_PROGRAM", value),
+            None => std::env::remove_var("TERM_PROGRAM"),
+        }
+        match previous_term {
+            Some(value) => std::env::set_var("TERM", value),
+            None => std::env::remove_var("TERM"),
+        }
+    }
+}
+
+#[test]
+fn ghostty_uses_its_smooth_60_fps_lane_for_underwater_motion() {
+    let _guard = crate::test_support::lock_test_env();
+    let previous_program = std::env::var_os("TERM_PROGRAM");
+    let previous_term = std::env::var_os("TERM");
+    // SAFETY: serialized by the process-wide test environment lock.
+    unsafe {
+        std::env::set_var("TERM_PROGRAM", "Ghostty");
+        std::env::set_var("TERM", "xterm-ghostty");
+    }
+    let mut app = create_test_app();
+    app.low_motion = false;
+    app.fancy_animations = true;
+    app.constrained_frame_rate = false;
+
+    assert_eq!(
+        underwater_animation_interval_ms(&app),
+        UI_GHOSTTY_UNDERWATER_ANIMATION_MS
+    );
+    const {
+        assert!(UI_GHOSTTY_UNDERWATER_ANIMATION_MS < UI_UNDERWATER_ANIMATION_MS);
+    }
+    app.constrained_frame_rate = true;
+    assert_eq!(
+        underwater_animation_interval_ms(&app),
+        UI_CONSTRAINED_UNDERWATER_ANIMATION_MS,
+        "tmux/SSH compatibility must override Ghostty's native 60 FPS lane"
+    );
+    // SAFETY: cleanup under the same lock.
+    unsafe {
+        match previous_program {
+            Some(value) => std::env::set_var("TERM_PROGRAM", value),
+            None => std::env::remove_var("TERM_PROGRAM"),
+        }
+        match previous_term {
+            Some(value) => std::env::set_var("TERM", value),
+            None => std::env::remove_var("TERM"),
+        }
+    }
 }
 
 #[test]
@@ -3562,15 +3623,23 @@ fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     );
 }
 
-fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
+fn reasoning_with_lines(label: &str, line_count: usize, streaming: bool) -> HistoryCell {
     HistoryCell::Thinking {
-        content: (1..=20)
+        content: (1..=line_count)
             .map(|line| format!("{label} line {line:02}"))
             .collect::<Vec<_>>()
             .join("\n"),
         streaming,
         duration_secs: (!streaming).then_some(1.0),
     }
+}
+
+fn long_reasoning(label: &str, streaming: bool) -> HistoryCell {
+    reasoning_with_lines(label, 20, streaming)
+}
+
+fn oversized_reasoning(label: &str, streaming: bool) -> HistoryCell {
+    reasoning_with_lines(label, 40, streaming)
 }
 
 fn reasoning_hint_cells(app: &App) -> Vec<usize> {
@@ -3660,7 +3729,7 @@ fn completed_answer_clears_stale_reasoning_expand_hint() {
 #[test]
 fn selected_reasoning_hint_and_space_share_one_owner() {
     let mut app = create_test_app();
-    app.history = vec![long_reasoning("selected", false)];
+    app.history = vec![oversized_reasoning("selected", false)];
     app.resync_history_revisions();
     let _ = render_underwater_test_app(&mut app, 100, 32);
     select_original_cell(&mut app, 0);
@@ -3821,6 +3890,150 @@ fn latest_streaming_reasoning_owns_space_after_an_older_tool() {
     );
     assert!(reasoning_hint_cells(&app).is_empty());
     assert!(!completed.contains("Space:expand"));
+}
+
+#[test]
+fn reasoning_preview_spends_available_viewport_rows_before_truncating() {
+    for streaming in [false, true] {
+        let mut roomy = create_test_app();
+        roomy.history = vec![reasoning_with_lines("roomy", 20, streaming)];
+        roomy.resync_history_revisions();
+        let roomy_surface = render_underwater_test_app(&mut roomy, 100, 32);
+
+        assert!(roomy_surface.contains("roomy line 01"), "{roomy_surface}");
+        assert!(roomy_surface.contains("roomy line 20"), "{roomy_surface}");
+        assert!(
+            !roomy_surface.contains("Space:expand"),
+            "a body that fits the live viewport must not be truncated: {roomy_surface}"
+        );
+        assert!(
+            roomy.viewport.last_transcript_total <= roomy.viewport.last_transcript_visible,
+            "the complete reasoning body should fit without scrolling"
+        );
+
+        let mut compact = create_test_app();
+        compact.history = vec![reasoning_with_lines("compact", 20, streaming)];
+        compact.resync_history_revisions();
+        let compact_surface = render_underwater_test_app(&mut compact, 60, 12);
+        assert!(
+            compact_surface.contains("Space:expand"),
+            "{compact_surface}"
+        );
+        assert_eq!(
+            compact.viewport.last_transcript_total,
+            if streaming { 14 } else { 12 },
+            "the compact 12/10-row fallback must remain intact when no viewport rows are free: {compact_surface}"
+        );
+    }
+}
+
+#[test]
+fn advertised_reasoning_space_dispatches_after_first_char_paste_hold() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &space, now));
+    assert!(
+        app.folded_thinking.is_empty(),
+        "Space remains ambiguous until the first-character hold expires"
+    );
+    assert!(app.input.is_empty(), "Space must not enter the composer");
+    assert!(
+        app.paste_burst.is_active(),
+        "Space must be retained long enough to preserve a leading-space paste"
+    );
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
+        now + crate::tui::paste_burst::PasteBurst::recommended_flush_delay()
+    ));
+    assert!(
+        app.folded_thinking.contains(&0),
+        "a lone Space must dispatch the rendered transcript action after the hold"
+    );
+    assert!(
+        app.input.is_empty(),
+        "the dispatched Space is not composer text"
+    );
+
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    let expanded = app
+        .viewport
+        .transcript_cache
+        .lines()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("live line 40"), "{expanded}");
+}
+
+#[test]
+fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    let next = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &space, now));
+    assert!(handle_plain_key_before_composer(
+        &mut app,
+        &next,
+        now + Duration::from_millis(1),
+    ));
+    assert!(
+        app.folded_thinking.is_empty(),
+        "a leading-space raw paste must not trigger transcript actions"
+    );
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
+        now + crate::tui::paste_burst::PasteBurst::recommended_active_flush_delay()
+            + Duration::from_millis(2),
+    ));
+    assert_eq!(app.input, " x");
+}
+
+#[test]
+fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    app.history = vec![oversized_reasoning("live", true)];
+    app.resync_history_revisions();
+    let surface = render_underwater_test_app(&mut app, 60, 16);
+    assert!(surface.contains("Space:expand"), "{surface}");
+
+    let now = Instant::now();
+    let first = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(handle_plain_key_before_composer(&mut app, &first, now));
+    assert!(app.paste_burst.is_active());
+    assert!(handle_plain_key_before_composer(
+        &mut app,
+        &space,
+        now + Duration::from_millis(1),
+    ));
+    assert!(
+        app.folded_thinking.is_empty(),
+        "an in-flight raw paste must not trigger transcript actions"
+    );
+    assert!(app.flush_paste_burst_if_due(
+        now + crate::tui::paste_burst::PasteBurst::recommended_active_flush_delay()
+            + Duration::from_millis(2)
+    ));
+    assert_eq!(app.input, "a ");
 }
 
 #[test]

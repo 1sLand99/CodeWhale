@@ -53,10 +53,60 @@ fn discovery_metrics_reset_and_snapshot_are_exact() {
 fn prompt_warning_sanitizer_scrubs_stale_conventional_home_roots() {
     let workspace = std::path::Path::new("/tmp/workspace");
     let warning = "Skill at /Users/private-name/.agents/skills/a/SKILL.md is shadowed by /home/other/.skills/a/SKILL.md";
-    let sanitized = super::sanitize_prompt_path_text(warning, workspace);
+    let sanitized = super::sanitize_prompt_path_text(warning, workspace, None);
     assert_eq!(
         sanitized,
         "Skill at ~/.agents/skills/a/SKILL.md is shadowed by ~/.skills/a/SKILL.md"
+    );
+}
+
+#[test]
+fn prompt_warning_sanitizer_normalizes_windows_separators() {
+    let workspace = std::path::Path::new(r"C:\workspace");
+    let configured_root = std::path::Path::new(r"C:\runtime\sessions\session-123\skills");
+    let warning = r"Skill in C:\runtime\sessions\session-123\skills\visual-design\SKILL.md is not a safe command name";
+
+    let sanitized = super::sanitize_prompt_path_text(warning, workspace, Some(configured_root));
+
+    assert_eq!(
+        sanitized,
+        "Skill in <configured-skills>/visual-design/SKILL.md is not a safe command name"
+    );
+}
+
+#[test]
+fn prompt_warning_sanitizer_replaces_configured_roots_only_at_path_boundaries() {
+    let workspace = std::path::Path::new("/tmp/workspace");
+    let configured_root = std::path::Path::new("/tmp/work");
+    let warning = "Skill in /tmp/workspace/.agents/skills/a/SKILL.md shadows /tmp/work/a/SKILL.md";
+
+    let sanitized = super::sanitize_prompt_path_text(warning, workspace, Some(configured_root));
+
+    assert_eq!(
+        sanitized,
+        "Skill in ./.agents/skills/a/SKILL.md shadows <configured-skills>/a/SKILL.md"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_warning_sanitizer_handles_non_utf8_configured_roots() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let workspace = std::path::Path::new("/tmp/workspace");
+    let configured_root = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        b"/tmp/session-\xff/skills".to_vec(),
+    ));
+    let warning = format!(
+        "Skill in {}/visual-design/SKILL.md is not a safe command name",
+        configured_root.display()
+    );
+
+    let sanitized = super::sanitize_prompt_path_text(&warning, workspace, Some(&configured_root));
+
+    assert_eq!(
+        sanitized,
+        "Skill in <configured-skills>/visual-design/SKILL.md is not a safe command name"
     );
 }
 
@@ -74,14 +124,11 @@ fn render_available_skills_context_lists_paths_and_usage() {
 
     // #4632: paths render relative to the skills base dir (privacy-safe),
     // so the assertion checks the workspace-relative form.
-    let expected_path = std::path::Path::new("test-skill")
-        .join("SKILL.md")
-        .display()
-        .to_string();
+    let expected_path = super::prompt_display(&std::path::Path::new("test-skill").join("SKILL.md"));
 
     assert!(rendered.contains("## Skills"));
     assert!(rendered.contains("- test-skill: A test skill"));
-    assert!(rendered.contains("load the exact skill before applying it"));
+    assert!(rendered.contains("load the exact skill before use"));
     assert!(rendered.contains("do not expand tool, approval, or trust authority"));
     assert!(
         rendered.contains(&expected_path),
@@ -151,14 +198,8 @@ fn render_available_skills_context_uses_real_dir_name_not_frontmatter_name() {
 
     // #4632: rendered relative to the skills base dir; the regression
     // intent (real dir name, not frontmatter name) is unchanged.
-    let real_path = std::path::Path::new("weird-dir-name")
-        .join("SKILL.md")
-        .display()
-        .to_string();
-    let stale_path = std::path::Path::new("friendly-name")
-        .join("SKILL.md")
-        .display()
-        .to_string();
+    let real_path = super::prompt_display(&std::path::Path::new("weird-dir-name").join("SKILL.md"));
+    let stale_path = super::prompt_display(&std::path::Path::new("friendly-name").join("SKILL.md"));
 
     assert!(
         rendered.contains(&real_path),
@@ -1724,6 +1765,94 @@ fn workspace_and_dir_entry_point_shares_the_same_cache() {
     assert_eq!(rewalked, super::SkillDiscoveryMetrics::default());
     assert_eq!(first.len(), second.len());
     assert!(second.get("configured").is_some());
+}
+
+#[test]
+fn configured_skill_prompt_uses_a_stable_root_in_entries_and_warnings() {
+    let _env_lock = crate::test_support::lock_test_env();
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = home.join("workspace");
+    let skills_dir = home
+        .join("runtime")
+        .join("sessions")
+        .join("session-123")
+        .join("skills");
+    std::fs::create_dir_all(&workspace).unwrap();
+    write_skill(
+        &workspace.join(".claude").join("skills"),
+        "workspace-skill",
+        "Workspace skill",
+        "Instructions",
+    );
+    let configured_skill = skills_dir.join("visual-design");
+    std::fs::create_dir_all(&configured_skill).unwrap();
+    std::fs::write(
+        configured_skill.join("SKILL.md"),
+        "---\nname: Visual Design\ndescription: Design assets\n---\nInstructions",
+    )
+    .unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    let rendered =
+        super::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+            &workspace,
+            &skills_dir,
+            super::SkillDiscoveryMode::Compatible,
+            "en",
+            None,
+        )
+        .expect("configured skill context");
+
+    assert!(rendered.contains("- visual-design: Design assets\n"));
+    assert!(rendered.contains(
+        "- workspace-skill: Workspace skill (file: .claude/skills/workspace-skill/SKILL.md)"
+    ));
+    assert!(
+        rendered
+            .contains("in <configured-skills>/visual-design/SKILL.md is not a safe command name")
+    );
+    assert!(!rendered.contains("session-123"), "{rendered}");
+    assert!(!rendered.contains(home.to_str().unwrap()), "{rendered}");
+}
+
+#[test]
+fn default_workspace_skill_prompt_preserves_its_discoverable_path() {
+    let _env_lock = crate::test_support::lock_test_env();
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = home.join("workspace");
+    let skills_dir = workspace.join(".agents").join("skills");
+    std::fs::create_dir_all(&home).unwrap();
+    write_skill(
+        &skills_dir,
+        "workspace-skill",
+        "Workspace skill",
+        "Instructions",
+    );
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    let rendered =
+        super::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+            &workspace,
+            &skills_dir,
+            super::SkillDiscoveryMode::Compatible,
+            "en",
+            None,
+        )
+        .expect("workspace skill context");
+
+    assert!(rendered.contains(
+        "- workspace-skill: Workspace skill (file: .agents/skills/workspace-skill/SKILL.md)"
+    ));
 }
 
 #[test]

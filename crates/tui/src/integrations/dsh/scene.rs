@@ -26,11 +26,12 @@ pub(crate) const OCEAN_WINDOW_HANDLE: &str = "__codewhaleOcean";
 
 /// Alpha of `--dsw-alias-bg-base` while the scene is on. The frame and the
 /// centre column both paint this token, so the effective veil over the main
-/// area is `1 - (1 - a)^2` (~0.80 at 0.55); dialogs that paint it once sit
-/// at 0.55 over an opaque canvas that is itself the same base colour.
-const BASE_VEIL_ALPHA: &str = "0.55";
+/// area is `1 - (1 - a)^2` (~0.66 at 0.42); dialogs that paint it once sit
+/// at 0.42 over an opaque canvas that is itself the same base colour. This
+/// keeps text surfaces calm while letting the Codewhale scene read clearly.
+const BASE_VEIL_ALPHA: &str = "0.42";
 /// Alpha of `--dsw-specific-sidebar-fill` (stacked over the frame).
-const SIDEBAR_VEIL_ALPHA: &str = "0.72";
+const SIDEBAR_VEIL_ALPHA: &str = "0.78";
 
 /// The scene script fragment: defines `createOcean(palette)`; no module
 /// syntax, no top-level side effects.

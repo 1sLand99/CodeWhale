@@ -441,6 +441,20 @@ assert.ok(cnbBuild >= 0, "CNB release preflight must build the consolidated runt
 assert.ok(cnbAlias > cnbBuild, "CNB release preflight must materialize codew after the build");
 assert.ok(cnbSmoke > cnbAlias, "CNB release preflight must materialize codew before smoke");
 
+const cnbTagRelease = cnb.match(/\$:\n  tag_push:\n([\s\S]*)$/);
+assert.ok(cnbTagRelease, "CNB must retain a tag release pipeline");
+const cnbTagStamp = cnbTagRelease[1].indexOf(
+  'export DEEPSEEK_BUILD_SHA="$commit_sha"',
+);
+const cnbTagBuild = cnbTagRelease[1].indexOf(
+  "cargo build --jobs 2 --release --locked \\",
+);
+assert.match(cnbTagRelease[1], /checkout_sha="\$\(git rev-parse 'HEAD\^\{commit\}'\)"/);
+assert.match(cnbTagRelease[1], /commit_sha="\$\{CNB_COMMIT:-\$\{checkout_sha\}\}"/);
+assert.match(cnbTagRelease[1], /CNB_COMMIT[\s\S]*does not match checkout[\s\S]*exit 1/);
+assert.ok(cnbTagStamp >= 0, "CNB tag releases must stamp the consolidated runtime");
+assert.ok(cnbTagBuild > cnbTagStamp, "CNB tag releases must stamp before compiling");
+
 assert.doesNotMatch(
   archiveInstaller,
   /cargo install codewhale --locked/,

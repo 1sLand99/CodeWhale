@@ -147,6 +147,13 @@ $:
 
             ./scripts/release/check-versions.sh
             ./scripts/release/check-ohos-deps.sh
+            checkout_sha="$(git rev-parse 'HEAD^{commit}')"
+            commit_sha="${CNB_COMMIT:-${checkout_sha}}"
+            if [ "$commit_sha" != "$checkout_sha" ]; then
+              echo "ERROR: CNB_COMMIT ${commit_sha} does not match checkout ${checkout_sha}" >&2
+              exit 1
+            fi
+            export DEEPSEEK_BUILD_SHA="$commit_sha"
             cargo build --jobs 2 --release --locked \
               --target x86_64-unknown-linux-musl \
               -p codewhale-cli   # single binary
@@ -181,7 +188,6 @@ $:
               echo "ERROR: tag ${tag_name} does not match Cargo.toml version ${cargo_version}" >&2
               exit 1
             fi
-            commit_sha="${CNB_COMMIT:-$(git rev-parse HEAD)}"
             {
               echo "# ${tag_name:-CNB release}"
               echo

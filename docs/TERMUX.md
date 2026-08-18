@@ -1,7 +1,7 @@
 # Termux / Android arm64 Support
 
 Codewhale provides an Android arm64 build and archive path for
-[Termux](https://termux.dev). Treat v0.9.1 support as a preview until the
+[Termux](https://termux.dev). Treat Termux support as a preview until the
 real-device runtime QA tracked in #4236 and #4242 is complete. This document
 covers the install path and the platform-specific behavior differences you
 should know about.
@@ -86,8 +86,8 @@ not encrypted at rest.
 
 ### Self-update
 
-`codewhale update` on Android requests `codewhale-android-arm64` and
-`codewhale-tui-android-arm64` release assets — never the Linux arm64
+`codewhale update` on Android requests the `codewhale-android-arm64`
+release asset — never the Linux arm64
 assets. The GNU libc (glibc) compatibility preflight is Linux-only and is
 skipped entirely on Android (Bionic libc).
 

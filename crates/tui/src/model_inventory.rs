@@ -53,6 +53,8 @@ pub(crate) struct ModelInventory {
     pub(crate) router_model: String,
     /// Thinking tier for the classifier call (None = off) (#auto.router).
     pub(crate) router_thinking: Option<String>,
+    /// Classifier call timeout in seconds (default 4; clamped at config load).
+    pub(crate) router_timeout_secs: u64,
     /// Whether an explicit legacy `[auto.router]` classifier route is
     /// configured. Absent configuration means legacy Auto stays local/free —
     /// holding a provider key never elects a network classifier by itself.
@@ -224,6 +226,7 @@ impl ModelInventory {
             .unwrap_or_else(|| (ApiProvider::Deepseek, "deepseek-v4-flash".to_string(), None));
 
         let cross_provider_auto = config.auto_cross_provider();
+        let router_timeout_secs = config.auto_router_timeout_secs();
 
         Self {
             active_provider,
@@ -232,6 +235,7 @@ impl ModelInventory {
             router_available: router_configured && has_api_key_for(config, router_provider),
             router_model,
             router_thinking,
+            router_timeout_secs,
             cross_provider_auto,
             candidates,
         }
@@ -700,6 +704,65 @@ mod tests {
     }
 
     #[test]
+    fn inventory_router_timeout_secs_respects_config_with_clamp() {
+        let _env_lock = crate::test_support::lock_test_env();
+
+        // Unset: the legacy default (4 s) survives.
+        let config = Config {
+            ..Default::default()
+        };
+        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 4);
+
+        // Explicit value is honored.
+        let config = Config {
+            auto: Some(crate::config::AutoConfig {
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("custom".to_string()),
+                    model: Some("local-router".to_string()),
+                    thinking: None,
+                    timeout_secs: Some(15),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 15);
+
+        // Out-of-range values clamp to the safety ceiling, never to zero.
+        let config = Config {
+            auto: Some(crate::config::AutoConfig {
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("custom".to_string()),
+                    model: Some("local-router".to_string()),
+                    thinking: None,
+                    timeout_secs: Some(9_999),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            ModelInventory::from_config(&config).router_timeout_secs,
+            crate::config::MAX_AUTO_ROUTER_TIMEOUT_SECS
+        );
+
+        // Zero means "use the default", not an instant timeout.
+        let config = Config {
+            auto: Some(crate::config::AutoConfig {
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("custom".to_string()),
+                    model: Some("local-router".to_string()),
+                    thinking: None,
+                    timeout_secs: Some(0),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(ModelInventory::from_config(&config).router_timeout_secs, 4);
+    }
+
+    #[test]
     fn inventory_ignores_unresolved_command_and_secret_auth_metadata() {
         let _env_lock = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir().expect("isolated credential home");
@@ -744,6 +807,7 @@ mod tests {
                     provider: Some("zai".to_string()),
                     model: Some("glm-5-turbo".to_string()),
                     thinking: Some("low".to_string()),
+                    timeout_secs: None,
                 }),
             }),
             ..Default::default()
@@ -791,6 +855,7 @@ mod tests {
                     provider: Some("zai".to_string()),
                     model: Some("glm-5-turbo".to_string()),
                     thinking: None,
+                    timeout_secs: None,
                 }),
                 cross_provider: None,
             }),
@@ -862,6 +927,7 @@ mod tests {
             router_provider: ApiProvider::Deepseek,
             router_model: "deepseek-v4-flash".to_string(),
             router_thinking: None,
+            router_timeout_secs: 4,
             router_configured: false,
             router_available: false,
             cross_provider_auto: false,
@@ -1025,6 +1091,7 @@ mod tests {
                     provider: Some("deepseek".to_string()),
                     model: Some("deepseek-v4-flash".to_string()),
                     thinking: None,
+                    timeout_secs: None,
                 }),
             }),
             ..zai.clone()

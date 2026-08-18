@@ -27,7 +27,11 @@ pty = { max-threads = 1 }
 # Integration tests that spawn the real `codewhale` binary and wait on
 # service start-up deadlines; bounded so a fully parallel run on a busy
 # machine cannot starve them past their 30 s budgets.
-spawns-binaries = { max-threads = 4 }
+spawns-binaries = { max-threads = 3 }
+# Telemetry contract tests also spawn the real binary, and their fixture's
+# in-process mutex cannot serialize nextest's one-process-per-test workers.
+# Keep one telemetry process alongside the other three integration workers.
+telemetry-contract = { max-threads = 1 }
 
 [[profile.default.overrides]]
 # The PTY test binary (`crates/tui/tests/pty`) drives real pseudo-terminals
@@ -36,6 +40,10 @@ spawns-binaries = { max-threads = 4 }
 filter = 'binary(pty)'
 test-group = 'pty'
 slow-timeout = { period = "120s" }
+
+[[profile.default.overrides]]
+filter = 'binary(integration) & test(/^telemetry_contract::/)'
+test-group = 'telemetry-contract'
 
 [[profile.default.overrides]]
 filter = 'binary(integration)'

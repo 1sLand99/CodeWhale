@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use super::detect::{DshDetection, DshRunner};
 use super::identity::sha256_hex;
 use super::receipt::write_atomic;
-use super::scene;
 use super::skin::{self, SKIN_SOURCE};
+use super::{brand, scene};
 
 pub(crate) const BUNDLE_DIR: &str = "bundle";
 pub(crate) const BUNDLE_PACKAGE_NAME: &str = "codewhale-dsh-bundle";
@@ -273,6 +273,7 @@ pub(crate) fn render_bundle_files(
         });
         package_json["codewhale"]["skin_sha256"] = serde_json::json!(skin::skin_tokens_sha256());
         package_json["codewhale"]["skin_source"] = serde_json::json!(SKIN_SOURCE);
+        package_json["codewhale"]["brand_sha256"] = serde_json::json!(brand::brand_sha256());
         if ocean {
             package_json["codewhale"]["ocean_scene_sha256"] =
                 serde_json::json!(scene::scene_sha256());

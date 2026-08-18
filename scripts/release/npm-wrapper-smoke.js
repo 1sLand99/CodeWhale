@@ -15,6 +15,8 @@ const prepareAssetsScript = path.join(
   "release",
   "prepare-local-release-assets.js",
 );
+const CLEANUP_MAX_RETRIES = 8;
+const CLEANUP_RETRY_DELAY_MS = 250;
 
 function shellQuote(value) {
   return /\s/.test(value) ? JSON.stringify(value) : value;
@@ -132,6 +134,19 @@ function parsePackJson(stdout) {
   return first.filename;
 }
 
+async function removeSmokeWorkspace(tempRoot, remove = fsp.rm) {
+  await remove(tempRoot, {
+    force: true,
+    recursive: true,
+    // Windows can report ENOTEMPTY briefly while completed binary downloads
+    // are still being released by the filesystem. fs.rm retries ENOTEMPTY
+    // (and the other documented transient removal errors) with linear
+    // backoff; the finite cap still surfaces a persistent cleanup failure.
+    maxRetries: CLEANUP_MAX_RETRIES,
+    retryDelay: CLEANUP_RETRY_DELAY_MS,
+  });
+}
+
 async function main() {
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "codewhale-npm-smoke-"));
   const suppliedAssetsDir = String(
@@ -205,9 +220,17 @@ async function main() {
       await new Promise((resolve) => server.close(resolve));
     }
     if (!keepTemp) {
-      await fsp.rm(tempRoot, { force: true, recursive: true });
+      await removeSmokeWorkspace(tempRoot);
     }
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  CLEANUP_MAX_RETRIES,
+  CLEANUP_RETRY_DELAY_MS,
+  removeSmokeWorkspace,
+};

@@ -19,6 +19,10 @@ pub const FALLBACK_ANIMATION_MS: u64 = 120;
 pub const MIN_ANIMATION_HZ: u32 = 4;
 /// Absolute ceiling for adaptive animation intervals (≈ 30 fps).
 pub const MAX_ANIMATION_HZ: u32 = 30;
+/// Ghostty's dedicated full-motion cap. Its GPU renderer and DEC 2026 support
+/// can sustain this cadence, while the historical 30 FPS compatibility lane
+/// makes truecolor caustics and fades visibly step.
+pub const GHOSTTY_MOTION_HZ: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayRefreshSource {
@@ -190,6 +194,34 @@ fn is_remote_session() -> bool {
         || std::env::var_os("SSH_TTY").is_some()
 }
 
+fn terminal_is_ghostty_values(term_program: &str, term: &str) -> bool {
+    term_program.trim().eq_ignore_ascii_case("ghostty")
+        || term.to_ascii_lowercase().contains("ghostty")
+}
+
+/// Whether the current terminal is Ghostty. Tests keep this uncached because
+/// they pin environment values; production caches the immutable startup env.
+#[must_use]
+pub fn terminal_is_ghostty() -> bool {
+    #[cfg(test)]
+    {
+        terminal_is_ghostty_values(
+            &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+            &std::env::var("TERM").unwrap_or_default(),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| {
+            terminal_is_ghostty_values(
+                &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+                &std::env::var("TERM").unwrap_or_default(),
+            )
+        })
+    }
+}
+
 fn accept_hz(hz: u32) -> Option<u32> {
     if (MIN_HZ..=MAX_HZ).contains(&hz) {
         Some(hz)
@@ -297,6 +329,9 @@ pub fn content_driven_draw_interval(
     display_hz: Option<u32>,
     low_motion: bool,
 ) -> Duration {
+    if !low_motion && terminal_is_ghostty() {
+        return Duration::from_nanos(1_000_000_000u64 / u64::from(GHOSTTY_MOTION_HZ));
+    }
     match tier {
         DrawCadenceTier::Atmosphere => animation_interval_for_hz(display_hz, low_motion),
         DrawCadenceTier::Interactive => draw_min_interval_for_hz(display_hz, low_motion),
@@ -349,6 +384,38 @@ mod tests {
         let interval = animation_interval_for_hz(Some(60), false);
         // Standard panels stay on the 120 ms atmosphere floor.
         assert_eq!(interval, Duration::from_millis(FALLBACK_ANIMATION_MS));
+    }
+
+    #[test]
+    fn ghostty_gets_a_smooth_60_fps_cap_for_ambient_and_interactive_frames() {
+        let _guard = crate::test_support::lock_test_env();
+        let previous_program = std::env::var_os("TERM_PROGRAM");
+        let previous_term = std::env::var_os("TERM");
+        // SAFETY: serialized by the process-wide test environment lock.
+        unsafe {
+            std::env::set_var("TERM_PROGRAM", "Ghostty");
+            std::env::set_var("TERM", "xterm-ghostty");
+        }
+        let expected = Duration::from_nanos(1_000_000_000 / 60);
+        assert_eq!(
+            content_driven_draw_interval(DrawCadenceTier::Atmosphere, Some(120), false),
+            expected
+        );
+        assert_eq!(
+            content_driven_draw_interval(DrawCadenceTier::Interactive, Some(120), false),
+            expected
+        );
+        // SAFETY: cleanup under the same lock.
+        unsafe {
+            match previous_program {
+                Some(value) => std::env::set_var("TERM_PROGRAM", value),
+                None => std::env::remove_var("TERM_PROGRAM"),
+            }
+            match previous_term {
+                Some(value) => std::env::set_var("TERM", value),
+                None => std::env::remove_var("TERM"),
+            }
+        }
     }
 
     #[test]

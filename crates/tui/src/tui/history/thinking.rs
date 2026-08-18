@@ -104,6 +104,29 @@ pub(crate) fn render_thinking_with_analysis(
     low_motion: bool,
     highlight: bool,
 ) -> (Vec<Line<'static>>, bool) {
+    render_thinking_with_preview_limit(
+        content,
+        width,
+        streaming,
+        duration_secs,
+        collapsed,
+        low_motion,
+        highlight,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_thinking_with_preview_limit(
+    content: &str,
+    width: u16,
+    streaming: bool,
+    duration_secs: Option<f32>,
+    collapsed: bool,
+    low_motion: bool,
+    highlight: bool,
+    preview_extra_lines: usize,
+) -> (Vec<Line<'static>>, bool) {
     let state = thinking_visual_state(streaming, duration_secs);
     let style = thinking_style();
     // 12% reasoning surface tint over the app ink — the only deliberately
@@ -142,7 +165,7 @@ pub(crate) fn render_thinking_with_analysis(
 
     let content_width = width.saturating_sub(3).max(1);
     let (collapsed_body, expandable) =
-        collapsed_thinking_body(content, width, streaming, body_style);
+        collapsed_thinking_body(content, width, streaming, body_style, preview_extra_lines);
     let rendered = if collapsed {
         collapsed_body
     } else if content.trim().is_empty() {
@@ -192,6 +215,7 @@ fn collapsed_thinking_body(
     width: u16,
     streaming: bool,
     style: Style,
+    preview_extra_lines: usize,
 ) -> (Vec<Line<'static>>, bool) {
     let (body_text, without_explicit_summary) = if streaming {
         // #861 RC4 / #1324: an in-flight block has no meaningful completed
@@ -213,9 +237,9 @@ fn collapsed_thinking_body(
         markdown_render::render_markdown(&body_text, width.saturating_sub(3).max(1), style)
     };
     let limit = if streaming {
-        THINKING_STREAMING_PREVIEW_LINE_LIMIT
+        THINKING_STREAMING_PREVIEW_LINE_LIMIT.saturating_add(preview_extra_lines)
     } else if without_explicit_summary {
-        THINKING_COMPLETED_PREVIEW_LINE_LIMIT
+        THINKING_COMPLETED_PREVIEW_LINE_LIMIT.saturating_add(preview_extra_lines)
     } else {
         THINKING_SUMMARY_LINE_LIMIT
     };

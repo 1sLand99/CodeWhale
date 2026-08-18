@@ -215,6 +215,13 @@ const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_M
 /// may raise this (still bounded); low_motion always freezes the cadence.
 /// Active markers run at 8fps; atmosphere stays subordinate.
 pub(crate) const UI_UNDERWATER_ANIMATION_MS: u64 = 80;
+/// Full-motion compatibility cadence for VTE, tmux, and other terminals that
+/// explicitly request the 30 FPS safety cap.
+pub(crate) const UI_CONSTRAINED_UNDERWATER_ANIMATION_MS: u64 = 34;
+/// 60 FPS Ghostty atmosphere clock. Its renderer is capped separately from
+/// the legacy 30 FPS compatibility lane, so truecolor motion stays smooth
+/// without restoring the 120 FPS flicker that originally motivated #1445.
+pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 17;
 // Minimum chat-host width at which the file-tree pane renders. At an
 // 80-column terminal the file tree owns 20 columns, leaving a 60-column chat
 // host; below this floor the tree is hidden rather than squeezing the

@@ -12646,6 +12646,119 @@ async fn sync_session_restores_current_mode() {
 }
 
 #[tokio::test]
+async fn sync_session_without_prompt_repins_full_system_prompt_on_next_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const WORKSPACE_RULE: &str = "SYNC_SESSION_FULL_PROMPT_PROOF";
+
+    async fn wait_for_completed_turn(handle: &EngineHandle) {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for turn completion")
+                .expect("engine event channel closed before turn completion");
+            if let Event::TurnComplete { status, error, .. } = event {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+        }
+    }
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("AGENTS.md"),
+        format!("# Rules\n\nAlways preserve {WORKSPACE_RULE}.\n"),
+    )
+    .expect("write AGENTS.md fixture");
+    let config = Config::default();
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "Turn complete.",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let established_context = engine.installed_next_turn_prompt_context();
+    assert_eq!(
+        engine.refresh_pinned_header_for_turn(&established_context),
+        None
+    );
+    assert_eq!(
+        engine.session.pinned_prompt_context.as_ref(),
+        Some(&established_context),
+        "precondition: the outgoing conversation has an established prompt pin"
+    );
+    let task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("fresh-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync fresh session without a persisted prompt");
+    let synced = handle
+        .get_session_snapshot()
+        .await
+        .expect("drain session sync");
+    assert!(
+        synced.system_prompt.is_none(),
+        "SyncSession must install the persisted prompt exactly before the next turn"
+    );
+
+    handle
+        .send(external_user_message_op(
+            "Start the newly synchronized conversation.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send first turn after sync");
+    wait_for_completed_turn(&handle).await;
+
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 1);
+    let repinned = requests[0]
+        .system
+        .clone()
+        .map(system_prompt_text)
+        .expect("the first turn after SyncSession must send a full system prompt");
+    assert!(repinned.contains(WORKSPACE_RULE), "{repinned}");
+    assert!(
+        requests[0].messages.iter().all(|message| {
+            message.content.iter().all(|block| {
+                !matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text.starts_with("<context_update>")
+                )
+            })
+        }),
+        "the fresh session must not inherit a context-update delta: {:?}",
+        requests[0].messages
+    );
+
+    let refreshed = handle
+        .get_session_snapshot()
+        .await
+        .expect("snapshot refreshed session");
+    let refreshed_prompt = refreshed
+        .system_prompt
+        .map(system_prompt_text)
+        .expect("refreshed session prompt");
+    assert!(refreshed_prompt.contains(WORKSPACE_RULE));
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn sync_session_same_id_does_not_finalize_live_worker() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().to_path_buf();

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
 import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "./release-credits";
-import { EN_CHROME, EN_HOME, getChrome, getHome } from "./i18n/dictionaries";
+import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome, getHome } from "./i18n/dictionaries";
 
 function pageSource(path: string): string {
   return readFileSync(new URL(`../app/[locale]/${path}`, import.meta.url), "utf8");
@@ -14,7 +14,9 @@ describe("public website copy contracts", () => {
     const search = readFileSync(new URL("../components/docs-search.tsx", import.meta.url), "utf8");
 
     expect(layout).toContain("docs-portal-hero");
-    expect(layout).toContain("Find the guidance you need.");
+    // The hero copy is dictionary-driven now (#5337), so assert it where the
+    // string actually lives rather than in the TSX.
+    expect(EN_DOCS_SHELL.heroTitle).toBe("Find the guidance you need.");
     expect(layout).not.toContain("Section 02");
     expect(layout).not.toContain("How Codewhale works: ego");
     expect(layout).not.toContain("<Seal");

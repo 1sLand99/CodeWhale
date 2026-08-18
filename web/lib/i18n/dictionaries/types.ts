@@ -302,3 +302,21 @@ export interface DocsGuideDict {
   nextTitle: string;
   sourceNote: string;
 }
+
+/**
+ * The docs shell: the portal hero in `app/[locale]/docs/layout.tsx` that
+ * wraps every docs page, plus the metadata of the hub page it frames
+ * (`app/[locale]/docs/page.tsx`, whose body is the `DocsSearch` component).
+ *
+ * No `bodyClassName` here: the hero typesets through `portal-*` classes,
+ * which never varied by locale.
+ */
+export interface DocsShellDict {
+  metaTitle: string;
+  metaDescription: string;
+  portalMark: string;
+  heroTitle: string;
+  heroLead: string;
+  installCta: string;
+  sourceDocsCta: string;
+}

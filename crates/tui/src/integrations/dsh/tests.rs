@@ -756,10 +756,14 @@ fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
     assert!(a.contains(skin::SKIN_SOURCE));
     assert!(a.contains("ctx.effect"));
     assert!(a.contains("overrideTokens"));
-    assert!(a.contains("if (!ctx.theme) return;"));
+    assert!(a.contains("function CodewhaleBrand()"));
+    assert!(a.contains("ctx.slots.inject(\"shell.overlay\""));
+    assert!(a.contains("ctx.slots.register("));
+    assert!(a.contains("React.createElement(CodewhaleBrand)"));
+    assert!(a.contains("if (!ctx.theme || !ctx.slots) return;"));
     assert!(
-        a.contains("exports.inject = [\"theme\"];"),
-        "cordis exposes ctx.theme only through inject"
+        a.contains("exports.inject = [\"theme\", \"slots\"];"),
+        "cordis exposes ctx.theme and ctx.slots only through inject"
     );
     assert!(
         a.contains("ctx.theme?.overrideTokens"),
@@ -1354,6 +1358,25 @@ fn ocean_scene_fragment_mounts_a_canvas_and_honours_the_guards() {
 }
 
 #[test]
+fn brand_fragment_is_explicit_responsive_and_slot_safe() {
+    let js = super::brand::bundle_brand_js();
+    assert!(js.contains("function CodewhaleBrand()"));
+    assert!(js.contains("codewhale-brand-lockup"));
+    assert!(js.contains("WHALE BROTHERS"));
+    assert!(js.contains("CODEWHALE"));
+    assert!(js.contains("DEEPSEEK HARNESS"));
+    assert!(js.contains("pointer-events:none"));
+    assert!(js.contains("@media(max-width:759px)"));
+    assert!(js.contains("React.createElement"));
+    assert!(!js.contains("document.body"));
+    assert!(!js.contains("document.createElement"));
+    assert!(!js.contains("window.addEventListener"));
+    assert!(!js.contains("window.removeEventListener"));
+    assert!(!js.contains("window.__codewhaleBrand"));
+    assert_eq!(super::brand::brand_sha256().len(), 64);
+}
+
+#[test]
 fn ocean_palette_and_veil_come_from_the_skin_palette() {
     let palette = scene::ocean_palette();
     for scheme in ["light", "dark"] {
@@ -1369,8 +1392,8 @@ fn ocean_palette_and_veil_come_from_the_skin_palette() {
 
     let veil = scene::ocean_veil_tokens();
     let base = &veil["--dsw-alias-bg-base"];
-    assert!(base.light.starts_with("rgba(") && base.light.ends_with(",0.55)"));
-    assert!(base.dark.starts_with("rgba(") && base.dark.ends_with(",0.55)"));
+    assert!(base.light.starts_with("rgba(") && base.light.ends_with(",0.42)"));
+    assert!(base.dark.starts_with("rgba(") && base.dark.ends_with(",0.42)"));
     assert!(
         veil["--dsw-specific-sidebar-fill"]
             .light
@@ -1411,8 +1434,8 @@ fn bundle_client_js_splices_the_ocean_only_when_enabled() {
     // both keep the palette override contract
     for js in [&on, &off] {
         assert!(js.contains("overrideTokens"));
-        assert!(js.contains("exports.inject = [\"theme\"];"));
-        assert!(js.contains("if (!ctx.theme) return;"));
+        assert!(js.contains("exports.inject = [\"theme\", \"slots\"];"));
+        assert!(js.contains("if (!ctx.theme || !ctx.slots) return;"));
     }
 }
 
@@ -1424,6 +1447,10 @@ fn bundle_manifest_records_the_ocean_decision_and_scene_sha() {
         on.iter().map(|(n, t)| (*n, t.as_str())).collect();
     let pkg: serde_json::Value = serde_json::from_str(by_name["package.json"]).unwrap();
     assert_eq!(pkg["codewhale"]["ocean"], true);
+    assert_eq!(
+        pkg["codewhale"]["brand_sha256"],
+        super::brand::brand_sha256()
+    );
     assert_eq!(
         pkg["codewhale"]["ocean_scene_sha256"],
         scene::scene_sha256()

@@ -31,6 +31,7 @@ Current packaging note:
   - `codewhale-lane`
   - `codewhale-agent`
   - `codewhale-core`
+  - `codewhale-command-contract`
   - `codewhale-app-server`
 
 ## Version Coordination
@@ -274,7 +275,7 @@ and fails branch-only release sources before assets are published.
    ```
 
    Both Cargo and npm publication fail closed unless `HEAD`, the clean local
-   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 20-crate
+   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 21-crate
    dependency order lives in `scripts/release/crates.sh`; do not maintain a
    second handwritten order in this runbook. The helper waits for each new
    version to appear on crates.io before moving to dependents and safely skips
