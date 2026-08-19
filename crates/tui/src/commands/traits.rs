@@ -158,6 +158,16 @@ impl CommandInfo {
 pub trait Command: Send + Sync {
     fn info(&self) -> &'static CommandInfo;
     fn execute(&self, app: &mut App, args: Option<&str>) -> CommandResult;
+
+    /// FEAT-015 dual-path seam: if the entry carries a capability-scoped
+    /// handler, the dispatcher builds the envelope from `app` and calls it
+    /// here; otherwise the legacy `execute(app, args)` path is used. The
+    /// default keeps every existing entry legacy (D2).
+    fn contextual_handler(
+        &self,
+    ) -> Option<codewhale_command_contract::handler::CommandHandler<CommandResult>> {
+        None
+    }
 }
 
 pub trait CommandGroup: Send + Sync {
@@ -196,6 +206,102 @@ impl Command for FunctionCommand {
     }
 }
 
+/// A registry entry that carries an optional capability-scoped handler.
+///
+/// FEAT-015's dual-path seam (D2): migrated registrations may supply a
+/// `CommandHandler<CommandResult>` (App-free; built from `CommandContexts`),
+/// while unmigrated registrations keep the legacy `execute(app, args)` path.
+/// This entry type is App-free — only the dispatcher in `commands/mod.rs`
+/// touches `App` when it builds the envelope from the bundle.
+///
+/// FEAT-015 ships no production contextual registration, so in production
+/// builds this type is only referenced through the trait; the test fixture
+/// (D6) constructs it under `#[cfg(test)]`. The allow is removed once a
+/// production group migrates (FEAT-018+).
+#[allow(dead_code)]
+pub(crate) struct ContextualCommand {
+    info: &'static CommandInfo,
+    handler: Option<codewhale_command_contract::handler::CommandHandler<CommandResult>>,
+    legacy: Option<CommandHandler>,
+}
+
+#[allow(dead_code)]
+impl ContextualCommand {
+    pub(crate) const fn legacy(info: &'static CommandInfo, legacy: CommandHandler) -> Self {
+        Self {
+            info,
+            handler: None,
+            legacy: Some(legacy),
+        }
+    }
+
+    pub(crate) const fn contextual(
+        info: &'static CommandInfo,
+        handler: codewhale_command_contract::handler::CommandHandler<CommandResult>,
+    ) -> Self {
+        Self {
+            info,
+            handler: Some(handler),
+            legacy: None,
+        }
+    }
+
+    /// Bridge one portable contract registration into the TUI-owned registry.
+    ///
+    /// The command supplies only contract metadata and an App-free handler;
+    /// the TUI resolves the localization key and owns the resulting registry
+    /// entry. This is the dependency inversion later command crates reuse.
+    pub(crate) fn from_contract<C>() -> Result<Self, String>
+    where
+        C: codewhale_command_contract::metadata::RegisterCommand<CommandResult>,
+    {
+        let portable = C::info();
+        let description_id = super::contract::key_to_message_id(portable.description_key)
+            .ok_or_else(|| {
+                format!(
+                    "unknown command description key {:?} for /{}",
+                    portable.description_key, portable.name
+                )
+            })?;
+        let info = Box::leak(Box::new(CommandInfo {
+            name: portable.name,
+            aliases: portable.aliases,
+            usage: portable.usage,
+            description_id,
+        }));
+        Ok(Self::contextual(info, C::handler()))
+    }
+
+    /// The capability-scoped handler, if this entry is migrated.
+    pub(crate) fn command_handler(
+        &self,
+    ) -> Option<codewhale_command_contract::handler::CommandHandler<CommandResult>> {
+        self.handler.clone()
+    }
+
+    /// Whether this entry still uses the legacy concrete-App path.
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.handler.is_none()
+    }
+}
+impl Command for ContextualCommand {
+    fn info(&self) -> &'static CommandInfo {
+        self.info
+    }
+
+    fn execute(&self, app: &mut App, args: Option<&str>) -> CommandResult {
+        match self.legacy {
+            Some(legacy) => legacy(app, args),
+            None => CommandResult::error("command has no executable handler"),
+        }
+    }
+
+    fn contextual_handler(
+        &self,
+    ) -> Option<codewhale_command_contract::handler::CommandHandler<CommandResult>> {
+        self.handler.clone()
+    }
+}
 pub struct CommandRegistry {
     commands: Vec<&'static dyn Command>,
     name_to_index: HashMap<&'static str, usize>,
@@ -225,6 +331,14 @@ impl CommandRegistry {
         }
     }
 
+    /// FEAT-015: register a test-only contextual command under `#[cfg(test)]`.
+    /// The production registry is untouched (D6); the fixture dispatches
+    /// through the public `execute()` to prove the seam.
+    #[cfg(test)]
+    pub(crate) fn register_test_only(&mut self, command: &'static dyn Command) {
+        self.register(command);
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
         let name = name.strip_prefix('/').unwrap_or(name);
         self.name_to_index
@@ -235,6 +349,16 @@ impl CommandRegistry {
 
     pub fn get_info(&self, name: &str) -> Option<&'static CommandInfo> {
         self.get(name).map(Command::info)
+    }
+
+    /// FEAT-015: whether the named entry has a capability-scoped handler.
+    /// Used by test assertions under `#[cfg(test)]`; production builds have
+    /// no contextual entries, so the method is dead there until a group
+    /// migrates (FEAT-018+).
+    #[allow(dead_code)]
+    pub(crate) fn has_contextual_handler(&self, name: &str) -> bool {
+        self.get(name)
+            .is_some_and(|command| command.contextual_handler().is_some())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn Command> {

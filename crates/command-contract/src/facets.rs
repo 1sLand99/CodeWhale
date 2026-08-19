@@ -39,7 +39,12 @@ pub trait CommandCostContext {
     fn session_cost_for_currency(&self, currency: CommandCurrency) -> f64;
     fn subagent_cost_for_currency(&self, currency: CommandCurrency) -> f64;
     fn accrue_cost_estimate(&mut self, amount: f64, currency: CommandCurrency);
-    fn record_turn_cost(&mut self, amount: f64, currency: CommandCurrency, route_receipt: bool);
+    fn record_turn_cost(
+        &mut self,
+        amount: f64,
+        currency: CommandCurrency,
+        route_receipt: Option<String>,
+    );
 }
 
 /// Operating mode, approval posture, shell access, and policy lock.

@@ -6,6 +6,7 @@
 //! module keeps registry construction, user-command precedence, and the
 //! fall-through behaviour.
 
+mod contract;
 pub mod discovery;
 mod groups;
 pub mod traits;
@@ -99,7 +100,74 @@ fn build_registry() -> traits::CommandRegistry {
     for &group in groups::all_command_groups() {
         registry.register_group(group);
     }
+    #[cfg(test)]
+    {
+        registry.register_test_only(feat015_ctx_command());
+    }
     registry
+}
+
+/// FEAT-015 test-only contextual command (D6).
+///
+/// Registered into the global registry only in test builds; the production
+/// registry is untouched. The command implements the portable contract
+/// `RegisterCommand` shape, and its handler cannot name concrete `App`; the
+/// TUI bridge resolves metadata and dispatches it through public `execute()`.
+#[cfg(test)]
+struct Feat015TestCommand;
+
+#[cfg(test)]
+impl codewhale_command_contract::metadata::RegisterCommand<CommandResult> for Feat015TestCommand {
+    fn info() -> &'static codewhale_command_contract::metadata::CommandInfo {
+        static INFO: codewhale_command_contract::metadata::CommandInfo =
+            codewhale_command_contract::metadata::CommandInfo {
+                name: "feat015ctx",
+                aliases: &[],
+                usage: "/feat015ctx",
+                description_key: "cmd_workspace_description",
+            };
+        &INFO
+    }
+
+    fn handler() -> codewhale_command_contract::handler::CommandHandler<CommandResult> {
+        codewhale_command_contract::handler::CommandHandler::Contextual(feat015_contextual)
+    }
+}
+
+/// Test-only contextual handler: reads workspace, mode, and currency facets
+/// through the envelope and returns the host-selected result type. It has no
+/// concrete `App` parameter or TUI state in its input surface.
+#[cfg(test)]
+fn feat015_contextual(
+    contexts: codewhale_command_contract::handler::CommandContexts<'_>,
+    arg: Option<&str>,
+) -> CommandResult {
+    use codewhale_command_contract::handler::ContextParts;
+    let parts: ContextParts<'_> = contexts.into_parts();
+    let workspace = parts.workspace.expect("workspace facet").workspace();
+    let mode = parts.mode_policy.expect("mode-policy facet").mode();
+    let currency = parts.cost.expect("cost facet").display_currency();
+    let normalized = arg.unwrap_or("");
+    CommandResult::message(format!(
+        "feat015ctx workspace={} mode={:?} currency={:?} arg={}",
+        workspace.display(),
+        mode,
+        currency,
+        normalized
+    ))
+}
+
+#[cfg(test)]
+static FEAT015_CTX: OnceLock<&'static traits::ContextualCommand> = OnceLock::new();
+
+#[cfg(test)]
+fn feat015_ctx_command() -> &'static traits::ContextualCommand {
+    FEAT015_CTX.get_or_init(|| {
+        Box::leak(Box::new(
+            traits::ContextualCommand::from_contract::<Feat015TestCommand>()
+                .expect("FEAT-015 portable registration must bridge into the TUI registry"),
+        ))
+    })
 }
 
 pub fn registry() -> &'static traits::CommandRegistry {
@@ -192,6 +260,22 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         } else {
             arg
         };
+        // FEAT-015 dual-path seam (D2): a migrated entry with a
+        // capability-scoped handler receives the envelope built from `app`;
+        // everything else keeps the legacy `execute(app, args)` path. No
+        // production entry is migrated in FEAT-015, so the contextual branch
+        // is only reachable by the test-only fixture (D6).
+        if let Some(handler) = command_object.contextual_handler() {
+            let mut bundle = app.command_contexts();
+            return match handler {
+                codewhale_command_contract::handler::CommandHandler::Pure(pure_fn) => {
+                    pure_fn(command_arg)
+                }
+                codewhale_command_contract::handler::CommandHandler::Contextual(contextual) => {
+                    contextual(bundle.contexts(), command_arg)
+                }
+            };
+        }
         return command_object.execute(app, command_arg);
     }
 
@@ -865,9 +949,16 @@ mod tests {
             "debug group not found (expected first command: /tokens)"
         );
 
-        // Consistency: group-iterated command count must match registry
+        // Consistency: group-iterated command count must match registry.
+        // FEAT-015 registers one test-only contextual command (`/feat015ctx`)
+        // under `#[cfg(test)]` to prove the dual-path seam (D6); the nine
+        // production groups remain exactly 95 commands.
+        let test_only_count = command_infos()
+            .iter()
+            .filter(|info| info.name == "feat015ctx")
+            .count();
         assert_eq!(
-            total_commands,
+            total_commands + test_only_count,
             command_infos().len(),
             "group-iterated command count must match registry infos count"
         );
@@ -1700,5 +1791,54 @@ mod tests {
         );
         assert!(result.action.is_none());
         assert!(app.active_skill.is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // FEAT-015: test-only contextual dispatch through the public dispatcher
+    // (D6). The fixture is registered into the global registry only in test
+    // builds and executes through the public `execute()`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn feat015_contextual_command_executes_through_public_dispatcher() {
+        let mut app = create_test_app();
+        let result = execute("/feat015ctx hello", &mut app);
+        assert!(!result.is_error, "{result:?}");
+        let message = result.message.expect("message");
+        assert!(message.contains("workspace="), "{message}");
+        assert!(message.contains("mode="), "{message}");
+        assert!(message.contains("currency="), "{message}");
+        assert!(message.contains("arg=hello"), "{message}");
+        assert!(result.action.is_none());
+    }
+
+    #[test]
+    fn feat015_contextual_command_is_registered_only_in_test_builds() {
+        // The fixture entry is present in the test-build registry with a
+        // capability-scoped handler; production builds never see it.
+        assert!(registry().has_contextual_handler("feat015ctx"));
+        let info = registry().get_info("feat015ctx").expect("info");
+        assert_eq!(info.name, "feat015ctx");
+        assert_eq!(
+            info.description_id,
+            crate::localization::MessageId::CmdWorkspaceDescription,
+            "portable description_key must bridge to the TUI localization id"
+        );
+    }
+
+    #[test]
+    fn feat015_all_production_entries_remain_legacy() {
+        // Every non-fixture registered command must still use the legacy
+        // concrete-App path (no production group is migrated in FEAT-015).
+        for info in command_infos() {
+            if info.name == "feat015ctx" {
+                continue;
+            }
+            assert!(
+                !registry().has_contextual_handler(info.name),
+                "/{} must remain on the legacy dispatch path",
+                info.name
+            );
+        }
     }
 }

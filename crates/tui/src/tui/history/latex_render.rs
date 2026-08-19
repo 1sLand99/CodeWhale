@@ -234,9 +234,7 @@ where
         }
     }
     // Last row
-    if !current.is_empty() || true {
-        row_fn(parse_row_cells(&current));
-    }
+    row_fn(parse_row_cells(&current));
 }
 
 /// Split a single row into cells by `&`.

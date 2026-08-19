@@ -3416,6 +3416,8 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
 
                 h.send(keys::key::alt('v'))?;
                 h.wait_for_text("Raw detail", KEY_TIMEOUT)?;
+                h.send(keys::key::ch('g'))?;
+                h.wait_for_idle(Duration::from_millis(60), KEY_TIMEOUT)?;
                 assert!(
                     scroll_until(&mut h, ScrollDir::Down, "Exact File change"),
                     "off mode lost the exact-evidence section:\n{}",
