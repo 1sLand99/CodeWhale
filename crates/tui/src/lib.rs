@@ -9663,8 +9663,9 @@ fn merge_user_workspace_config(
             return;
         }
     };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
+    let raw = match read_user_config_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
         Err(error) => {
             eprintln!(
                 "warning: could not read user config at {}: {error}. \
@@ -9692,6 +9693,20 @@ fn merge_user_workspace_config(
     merge_user_workspace_config_from_doc(config, &doc, workspace);
     if allow_shell_from_env {
         config.allow_shell = allow_shell_before;
+    }
+}
+
+fn read_user_config_file(path: &Path) -> io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(metadata_error) => Err(metadata_error),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -16918,6 +16933,45 @@ allow_shell = true
             config.allow_shell,
             Some(false),
             "project overlay must not loosen shell access"
+        );
+    }
+
+    #[test]
+    fn missing_user_config_is_absent_not_an_error() {
+        let tmp = tempdir().expect("tempdir");
+        let missing = tmp.path().join("config.toml");
+
+        assert_eq!(
+            read_user_config_file(&missing).expect("missing config is a normal first-run state"),
+            None
+        );
+    }
+
+    #[test]
+    fn existing_unreadable_user_config_remains_an_error() {
+        let tmp = tempdir().expect("tempdir");
+        let unreadable = tmp.path().join("config.toml");
+        fs::create_dir(&unreadable).expect("create directory at config path");
+
+        assert!(
+            read_user_config_file(&unreadable).is_err(),
+            "an existing path that cannot be read as a config must still warn"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_user_config_symlink_remains_an_error() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let missing_target = tmp.path().join("missing-target.toml");
+        let config_path = tmp.path().join("config.toml");
+        symlink(&missing_target, &config_path).expect("create dangling config symlink");
+
+        assert!(
+            read_user_config_file(&config_path).is_err(),
+            "a dangling symlink is an existing but unreadable config and must still warn"
         );
     }
 
