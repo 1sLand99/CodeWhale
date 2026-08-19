@@ -59,9 +59,9 @@ pub(crate) struct SearchProbeTarget {
 /// query strings may contain credentials and must never be echoed by doctor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchProbeTargetError {
-    MissingBaseUrl,
-    UnsupportedBaseUrl,
-    InvalidBaseUrl,
+    Missing,
+    Unsupported,
+    Invalid,
 }
 
 /// Resolve the configured provider's transport endpoint for doctor.
@@ -81,7 +81,7 @@ pub(crate) fn search_probe_target(
             SearchProvider::DuckDuckGo | SearchProvider::Searxng
         )
     {
-        return Err(SearchProbeTargetError::UnsupportedBaseUrl);
+        return Err(SearchProbeTargetError::Unsupported);
     }
 
     let (raw, configured) = match provider {
@@ -95,7 +95,7 @@ pub(crate) fn search_probe_target(
         SearchProvider::Bocha => (BOCHA_ENDPOINT, false),
         SearchProvider::Metaso => (METASO_ENDPOINT, false),
         SearchProvider::Searxng => (
-            configured_base_url.ok_or(SearchProbeTargetError::MissingBaseUrl)?,
+            configured_base_url.ok_or(SearchProbeTargetError::Missing)?,
             true,
         ),
         SearchProvider::Baidu => (BAIDU_ENDPOINT, false),
@@ -103,23 +103,23 @@ pub(crate) fn search_probe_target(
         SearchProvider::Sofya => (SOFYA_ENDPOINT, false),
     };
 
-    let mut url = reqwest::Url::parse(raw).map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+    let mut url = reqwest::Url::parse(raw).map_err(|_| SearchProbeTargetError::Invalid)?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(SearchProbeTargetError::InvalidBaseUrl);
+        return Err(SearchProbeTargetError::Invalid);
     }
 
     url.set_fragment(None);
     url.set_query(None);
     if configured {
         url.set_username("")
-            .map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+            .map_err(|_| SearchProbeTargetError::Invalid)?;
         url.set_password(None)
-            .map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+            .map_err(|_| SearchProbeTargetError::Invalid)?;
         url.set_path("/");
     }
     let host = url
         .host_str()
-        .ok_or(SearchProbeTargetError::InvalidBaseUrl)?
+        .ok_or(SearchProbeTargetError::Invalid)?
         .to_string();
 
     Ok(SearchProbeTarget { url, host })
@@ -2124,15 +2124,15 @@ mod tests {
     fn doctor_search_probe_rejects_configuration_that_runtime_cannot_use() {
         assert_eq!(
             search_probe_target(SearchProvider::Searxng, None),
-            Err(SearchProbeTargetError::MissingBaseUrl)
+            Err(SearchProbeTargetError::Missing)
         );
         assert_eq!(
             search_probe_target(SearchProvider::Tavily, Some("https://ignored.example")),
-            Err(SearchProbeTargetError::UnsupportedBaseUrl)
+            Err(SearchProbeTargetError::Unsupported)
         );
         assert_eq!(
             search_probe_target(SearchProvider::DuckDuckGo, Some("file:///tmp/search")),
-            Err(SearchProbeTargetError::InvalidBaseUrl)
+            Err(SearchProbeTargetError::Invalid)
         );
     }
 

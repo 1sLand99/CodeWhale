@@ -417,13 +417,13 @@ pub(crate) fn doctor_search_probe_lines(report: &DoctorSearchProbeReport) -> Vec
         ],
         DoctorSearchProbeReport::ConfigurationError(error) => {
             let detail = match error {
-                SearchProbeTargetError::MissingBaseUrl => {
+                SearchProbeTargetError::Missing => {
                     "SearXNG requires an explicit [search] base_url"
                 }
-                SearchProbeTargetError::UnsupportedBaseUrl => {
+                SearchProbeTargetError::Unsupported => {
                     "[search] base_url is supported only for DuckDuckGo-compatible or SearXNG providers"
                 }
-                SearchProbeTargetError::InvalidBaseUrl => {
+                SearchProbeTargetError::Invalid => {
                     "the configured [search] base_url is not a valid HTTP(S) authority"
                 }
             };
