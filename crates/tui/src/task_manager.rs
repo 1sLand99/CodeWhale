@@ -855,7 +855,7 @@ async fn drive_engine_turn(
                     continue;
                 }
                 tokio::select! {
-                    _ = cancel.cancelled() => {}
+                    _ = cancel.cancelled(), if !cancel.is_cancelled() => {}
                     _ = subscription.recv() => {}
                     _ = sleep(wait) => {}
                 }
@@ -898,6 +898,12 @@ fn optional_nonzero_text(text: String) -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+fn append_message_delta(result_text: &mut String, event: &TaskExecutionEvent) {
+    if let TaskExecutionEvent::MessageDelta { content } = event {
+        result_text.push_str(content);
     }
 }
 
@@ -1581,9 +1587,10 @@ impl TaskManager {
 
         let mut guard = ExecutionGuard::new(self.cfg.execution_limits, Instant::now());
         let mut dirty = false;
+        let mut accumulated_result_text = String::new();
         let persist_debounce = self.cfg.execution_limits.persist_debounce;
 
-        let result = loop {
+        let (mut result, manager_terminalized) = loop {
             match guard.evaluate(
                 Instant::now(),
                 cancel.is_cancelled(),
@@ -1595,35 +1602,33 @@ impl TaskManager {
                     continue;
                 }
                 GuardAction::Terminalize { reason } => {
-                    break TaskExecutionResult::from_reason(reason, None);
+                    break (TaskExecutionResult::from_reason(reason, None), true);
                 }
                 GuardAction::Run { wait } => {
                     tokio::select! {
                         maybe_event = event_rx.recv() => {
-                            match maybe_event {
-                                Some(event) => {
-                                    let now = Instant::now();
-                                    if execution_event_is_progress(&event) {
-                                        guard.note_progress(now);
+                            if let Some(event) = maybe_event {
+                                let now = Instant::now();
+                                if execution_event_is_progress(&event) {
+                                    guard.note_progress(now);
+                                }
+                                append_message_delta(&mut accumulated_result_text, &event);
+                                match self.apply_execution_event(&task_id, event).await {
+                                    Ok(outcome) => {
+                                        dirty = !outcome.persisted;
                                     }
-                                    match self.apply_execution_event(&task_id, event).await {
-                                        Ok(outcome) => {
-                                            dirty = !outcome.persisted;
-                                        }
-                                        Err(err) => {
-                                            tracing::error!(
-                                                "Failed to apply task event for {task_id}: {err}"
-                                            );
-                                        }
+                                    Err(err) => {
+                                        tracing::error!(
+                                            "Failed to apply task event for {task_id}: {err}"
+                                        );
                                     }
                                 }
-                                None => {}
                             }
                         }
                         exec_result = &mut exec_fut => {
-                            break guard.preserve_timeout_reason(exec_result);
+                            break (guard.preserve_timeout_reason(exec_result), false);
                         }
-                        _ = self.cancel_token.cancelled() => {
+                        _ = self.cancel_token.cancelled(), if !self.cancel_token.is_cancelled() => {
                             cancel.cancel();
                         }
                         _ = sleep(persist_debounce), if dirty => {
@@ -1639,9 +1644,13 @@ impl TaskManager {
         };
 
         while let Ok(event) = event_rx.try_recv() {
+            append_message_delta(&mut accumulated_result_text, &event);
             if let Err(err) = self.apply_execution_event(&task_id, event).await {
                 tracing::error!("Failed to apply trailing task event for {task_id}: {err}");
             }
+        }
+        if manager_terminalized {
+            result.result_text = optional_nonzero_text(accumulated_result_text);
         }
         if dirty && let Err(err) = self.flush_task(&task_id).await {
             tracing::error!("Failed to flush task {task_id}: {err}");
@@ -2473,6 +2482,7 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, lock_test_env};
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Duration;
 
     struct MockExecutor;
@@ -3191,6 +3201,50 @@ mod tests {
         }
     }
 
+    struct PartialThenHangExecutor;
+
+    #[async_trait]
+    impl TaskExecutor for PartialThenHangExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            events: mpsc::Sender<TaskExecutionEvent>,
+            _cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            let _ = events
+                .send(TaskExecutionEvent::MessageDelta {
+                    content: "partial ".to_string(),
+                })
+                .await;
+            let _ = events
+                .send(TaskExecutionEvent::MessageDelta {
+                    content: "result".to_string(),
+                })
+                .await;
+            std::future::pending().await
+        }
+    }
+
+    struct PollCountingHangExecutor {
+        polls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TaskExecutor for PollCountingHangExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            _events: mpsc::Sender<TaskExecutionEvent>,
+            _cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            std::future::poll_fn(|_| {
+                self.polls.fetch_add(1, Ordering::Relaxed);
+                std::task::Poll::Pending
+            })
+            .await
+        }
+    }
+
     struct HeartbeatExecutor;
 
     #[async_trait]
@@ -3506,6 +3560,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forced_timeout_keeps_all_partial_message_output() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager = TaskManager::start_with_executor(
+            short_test_config(root),
+            Arc::new(PartialThenHangExecutor),
+        )
+        .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("retain partial result"))
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+
+        assert_eq!(finished.status, TaskStatus::Failed);
+        assert_eq!(finished.terminal_reason.as_deref(), Some("idle_timeout"));
+        assert_eq!(finished.result_summary.as_deref(), Some("partial result"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cooperative_cancel_after_idle_timeout_keeps_timeout_reason() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
         let manager = TaskManager::start_with_executor(
@@ -3599,6 +3672,40 @@ mod tests {
         let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
         assert_eq!(finished.status, TaskStatus::Canceled);
         assert_eq!(finished.terminal_reason.as_deref(), Some("shutdown"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancel_signal_does_not_spin_during_grace() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let manager = TaskManager::start_with_executor(
+            short_test_config(root),
+            Arc::new(PollCountingHangExecutor {
+                polls: Arc::clone(&polls),
+            }),
+        )
+        .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("stuck during shutdown"))
+            .await?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while manager.get_task(&task.id).await?.status != TaskStatus::Running {
+            if std::time::Instant::now() >= deadline {
+                bail!("task never started running");
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+
+        manager.shutdown();
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        assert_eq!(finished.terminal_reason.as_deref(), Some("shutdown"));
+        assert!(
+            polls.load(Ordering::Relaxed) <= 10,
+            "already-canceled shutdown signal repeatedly repolled the executor during grace: {} polls",
+            polls.load(Ordering::Relaxed)
+        );
         Ok(())
     }
 
