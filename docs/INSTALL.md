@@ -8,7 +8,7 @@ If you just want the short version, see the
 [main README](../README.md#install) or
 [简体中文 README](../README.zh-CN.md#安装).
 
-This branch describes the **v0.9.9 source candidate**. Install commands that use
+This branch describes the **v0.9.10 source candidate**. Install commands that use
 `latest` resolve to the latest published package or GitHub Release, which may
 trail the source candidate. A candidate is not a published install until the
 matching package, tag, checksums, and release assets exist.
@@ -52,7 +52,7 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The v0.9.9 source-candidate npm wrapper recognizes Android arm64 and resolves
+⁴ The v0.9.10 source-candidate npm wrapper recognizes Android arm64 and resolves
   the matching `codewhale` and `codew` Android assets. npm
   installation works only for a package version whose GitHub Release publishes
   those matching assets. The Android/Termux path remains preview-only until the

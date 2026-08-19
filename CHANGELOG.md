@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.10] - Unreleased candidate
 
+These notes describe the v0.9.10 source candidate. It is not a published
+install until the tag ships; `latest` still resolves to the previous
+release.
+
 Codewhale v0.9.10 is a retention-and-identity release: the shell and
 transcript can no longer retain unbounded tool output in memory or on disk,
 mid-turn history inserts no longer strand in-flight tool rows, every agent
@@ -63,6 +67,30 @@ abort under load.
   the isolated PTY step is capped at 15 minutes; Windows NSIS provisioning
   gets a bounded retry (#5496).
 - `chore(scripts): dev-cache warns before it fills a disk` (#5465 class).
+
+### Contributors
+
+- cyq1017 (@cyq1017) — approval outcomes are persisted before execution can
+  proceed: receipts commit to a session-owned log first, unpersistable
+  evidence blocks the tool, stale decisions are rejected, and resume
+  reconstructs closed and interrupted approvals (#5491, closes #5360).
+- aboimpinto (@aboimpinto) — the TUI-owned dependency-injection and migration
+  infrastructure that makes slash-command extraction safe: seven capability
+  facets, a dual-path dispatch seam, and source-aware CI enforcement so a
+  command slice cannot claim migration while it still accepts concrete `App`
+  (#5506, EPIC-005/FEAT-015 under #5316, which they also filed).
+- wuisabel-gif (@wuisabel-gif) — the TUI header now names the active
+  repository or linked worktree before the branch and dirty marker, derived
+  from Git's common directory and capped by shell density tier (#5511, the
+  repo/worktree slice of #5437).
+- SparkofSpike (@SparkofSpike) — Tier 1 of the Chinese docs localization:
+  Chinese and Indonesian documentation moves to `docs/zh_hans/` and
+  `docs/id/` with redirect stubs held at the old paths for one release cycle
+  (#5507, epic #5482, which they also filed).
+- Lstarsky0 (@Lstarsky0) — `docs/hooks` and `docs/troubleshooting` move onto
+  the dictionary spine, retiring their inline bilingual literals in favor of
+  locale dictionaries with token-aware code spans (#5504, closes #5337, which
+  they also filed).
 
 ## [0.9.9] - 2026-08-18
 

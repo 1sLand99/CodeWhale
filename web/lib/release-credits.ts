@@ -19,14 +19,13 @@
  */
 
 /** Contributors whose PRs were merged or harvested into this release. */
-export const RELEASE_CONTRIBUTORS: string[] = ["@h3c-hexin", "@Gabriel-Degret"];
+export const RELEASE_CONTRIBUTORS: string[] = [
+  "@cyq1017",
+  "@aboimpinto",
+  "@wuisabel-gif",
+  "@SparkofSpike",
+  "@Lstarsky0",
+];
 
 /** Contributors who helped with reports, reproductions, and verification. */
-export const RELEASE_HELPERS: string[] = [
-  "@asto18089",
-  "@hardy922",
-  "@redstar",
-  "@all-lopezg",
-  "@alitvak69",
-  "@wuisabel-gif",
-];
+export const RELEASE_HELPERS: string[] = [];

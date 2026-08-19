@@ -28,6 +28,36 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.10 — retention, identity, and durable approvals</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[cyq1017](https://github.com/cyq1017)** — approval outcomes are persisted
+  before execution can proceed: receipts commit to a session-owned log first,
+  unpersistable evidence blocks the tool, stale decisions are rejected, and
+  resume reconstructs closed and interrupted approvals (#5491, closes #5360)
+- **[aboimpinto](https://github.com/aboimpinto)** — the TUI-owned
+  dependency-injection and migration infrastructure behind safe slash-command
+  extraction: seven capability facets, a dual-path dispatch seam, and
+  source-aware CI enforcement so a command slice cannot claim migration while
+  it still accepts concrete `App` (#5506, EPIC-005/FEAT-015 under the #5316
+  umbrella they filed)
+- **[wuisabel-gif](https://github.com/wuisabel-gif)** — the TUI header now
+  names the active repository or linked worktree before the branch and dirty
+  marker, derived from Git's common directory and capped by shell density
+  tier (#5511, the repo/worktree slice of #5437)
+- **[SparkofSpike](https://github.com/SparkofSpike)** — Tier 1 of the Chinese
+  docs localization: Chinese and Indonesian documentation moves to
+  `docs/zh_hans/` and `docs/id/`, with redirect stubs held at the old paths
+  for one release cycle (#5507, epic #5482 they filed)
+- **[Lstarsky0](https://github.com/Lstarsky0)** — `docs/hooks` and
+  `docs/troubleshooting` move onto the dictionary spine, retiring their inline
+  bilingual literals in favor of locale dictionaries with token-aware code
+  spans (#5504, closes #5337 they filed)
+
+</details>
+
+<details>
 <summary><strong>v0.9.9 — truth and resilience</strong></summary>
 
 **Merged or adapted contributions**
