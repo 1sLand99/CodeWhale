@@ -35,6 +35,8 @@ const OPTIONAL_FILES = [
   "docs-fleet.ts",
   "docs-modes.ts",
   "docs-runtime-api.ts",
+  "docs-sandbox.ts",
+  "docs-web.ts",
 ];
 
 /** Top-level keys of the exported object literal (two-space indented `key:`). */

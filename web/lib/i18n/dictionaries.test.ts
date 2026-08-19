@@ -6,6 +6,8 @@ import {
   EN_DOCS_CONSTITUTION,
   EN_DOCS_HOOKS,
   EN_DOCS_RUNTIME_API,
+  EN_DOCS_SANDBOX,
+  EN_DOCS_WEB,
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
   EN_HOME,
@@ -15,6 +17,8 @@ import {
   getDocsConstitution,
   getDocsHooks,
   getDocsRuntimeApi,
+  getDocsSandbox,
+  getDocsWeb,
   getDocsShell,
   getDocsTroubleshooting,
   getHome,
@@ -247,6 +251,8 @@ describe("website dictionaries", () => {
       ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING],
       ["docs-constitution", getDocsConstitution, EN_DOCS_CONSTITUTION],
       ["docs-runtime-api", getDocsRuntimeApi, EN_DOCS_RUNTIME_API],
+      ["docs-sandbox", getDocsSandbox, EN_DOCS_SANDBOX],
+      ["docs-web", getDocsWeb, EN_DOCS_WEB],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
       for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
@@ -277,6 +283,9 @@ describe("website dictionaries", () => {
         getDocsRuntimeApi(locale).entries.map(([key]) => key),
         `${locale} runtime entries`,
       ).toEqual(["http", "mobile", "stdio", "web", "doctor", "acp", "exec"]);
+      // The platform rows are keyed by their own translated name rather than a
+      // code-owned key, so only the count is comparable across locales.
+      expect(getDocsSandbox(locale).platforms, `${locale} sandbox platforms`).toHaveLength(4);
     }
   });
 
@@ -313,6 +322,38 @@ describe("website dictionaries", () => {
         "legacyTokenEnv",
         "insecureFlag",
         "mobileFlag",
+      ]);
+    }
+  });
+
+  it("carries every code-span token through the sandbox and web copy", () => {
+    const tokensOf = (template: string) =>
+      splitTokens(template).flatMap((part) => ("token" in part ? [part.token] : []));
+    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
+      // Two of these repeat, and the order is the sentence's, so this is a
+      // stricter check than check-locales.mjs, which compares token sets.
+      expect(tokensOf(getDocsSandbox(locale).policiesLead), `${locale} policiesLead`).toEqual([
+        "sandboxMode",
+        "readOnly",
+        "workspaceWrite",
+        "dangerFullAccess",
+        "externalSandbox",
+        "dangerFullAccess",
+        "externalSandbox",
+      ]);
+      const web = getDocsWeb(locale);
+      expect(tokensOf(web.overviewLead), `${locale} web overviewLead`).toEqual([
+        "webCommand",
+        "loopbackHost",
+        "defaultUrl",
+        "portExample",
+      ]);
+      expect(tokensOf(web.localLead), `${locale} localLead`).toEqual([
+        "webCommand",
+        "portFlag",
+        "hostFlag",
+        "mobileCommand",
+        "httpFlag",
       ]);
     }
   });

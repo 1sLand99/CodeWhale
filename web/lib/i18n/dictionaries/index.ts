@@ -20,9 +20,11 @@ import type {
   DocsGuideDict,
   DocsHooksDict,
   DocsRuntimeApiDict,
+  DocsSandboxDict,
   DocsShellDict,
   DocsModesDict,
   DocsTroubleshootingDict,
+  DocsWebDict,
   HomeDict,
 } from "./types";
 import { chrome as enChrome } from "./en/chrome";
@@ -45,6 +47,10 @@ import { docsModes as enDocsModes } from "./en/docs-modes";
 import { docsModes as zhDocsModes } from "./zh/docs-modes";
 import { docsRuntimeApi as enDocsRuntimeApi } from "./en/docs-runtime-api";
 import { docsRuntimeApi as zhDocsRuntimeApi } from "./zh/docs-runtime-api";
+import { docsSandbox as enDocsSandbox } from "./en/docs-sandbox";
+import { docsSandbox as zhDocsSandbox } from "./zh/docs-sandbox";
+import { docsWeb as enDocsWeb } from "./en/docs-web";
+import { docsWeb as zhDocsWeb } from "./zh/docs-web";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -182,6 +188,14 @@ const DOCS_RUNTIME_API: Record<string, DocsRuntimeApiDict> = {
   zh: zhDocsRuntimeApi,
 };
 
+const DOCS_SANDBOX: Record<string, DocsSandboxDict> = {
+  zh: zhDocsSandbox,
+};
+
+const DOCS_WEB: Record<string, DocsWebDict> = {
+  zh: zhDocsWeb,
+};
+
 export function getChrome(locale: string): ChromeDict {
   return CHROME[locale] ?? enChrome;
 }
@@ -226,6 +240,14 @@ export function getDocsRuntimeApi(locale: string): DocsRuntimeApiDict {
   return DOCS_RUNTIME_API[locale] ?? enDocsRuntimeApi;
 }
 
+export function getDocsSandbox(locale: string): DocsSandboxDict {
+  return DOCS_SANDBOX[locale] ?? enDocsSandbox;
+}
+
+export function getDocsWeb(locale: string): DocsWebDict {
+  return DOCS_WEB[locale] ?? enDocsWeb;
+}
+
 /**
  * Select one side of a legacy `{ en, zh }` content pair by locale. This is
  * the transitional bridge for `web/lib/content/` modules that still carry
@@ -249,6 +271,8 @@ export const EN_DOCS_CONSTITUTION = enDocsConstitution;
 export const EN_DOCS_FLEET = enDocsFleet;
 export const EN_DOCS_MODES = enDocsModes;
 export const EN_DOCS_RUNTIME_API = enDocsRuntimeApi;
+export const EN_DOCS_SANDBOX = enDocsSandbox;
+export const EN_DOCS_WEB = enDocsWeb;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */
