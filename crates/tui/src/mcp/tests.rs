@@ -1943,7 +1943,15 @@ fn active_plugin_fixture(
     crate::plugins::types::PluginAuthority,
 ) {
     let plugins_root = plugin_base.parent().expect("plugin parent").to_path_buf();
-    let root = plugins_root.parent().unwrap_or(&plugins_root).to_path_buf();
+    // Callers use both `<temp>/plugins/<name>` and `<temp>/<name>` layouts.
+    // Only peel the conventional `plugins` directory; otherwise using the
+    // parent would place multiple parallel fixtures in the shared system temp
+    // root and make their durable state files collide on Windows.
+    let root = if plugins_root.file_name().and_then(|name| name.to_str()) == Some("plugins") {
+        plugins_root.parent().unwrap_or(&plugins_root).to_path_buf()
+    } else {
+        plugins_root.clone()
+    };
     let discovery = crate::plugins::discovery::DiscoveryConfig {
         workspace: root.join("project"),
         user_plugins_dir: plugins_root,
