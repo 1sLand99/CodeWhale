@@ -1725,7 +1725,7 @@ impl Settings {
             ),
             (
                 "status_indicator",
-                "Header status indicator next to effort chip: cw, whale, dots, off",
+                "Header status mark, shown before the route: cw, whale, dots, off",
             ),
             (
                 "synchronized_output",

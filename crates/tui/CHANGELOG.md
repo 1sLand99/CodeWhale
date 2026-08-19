@@ -24,6 +24,15 @@ abort under load.
 
 ### Fixed
 
+- `fix(tui): make the header status mark honour its setting` — `status_indicator`
+  did nothing for three of its four documented values. The header hardcoded a
+  leading `cw` span *and* asked for a second mark beside the effort chip, then
+  filtered the second one against the literal `"cw"`; because `cw`, the legacy
+  `whale` opt-in, and every unknown value all normalize onto that same mark,
+  the filter discarded them and left `off` with nothing to turn off. `cw`,
+  `whale`, `off`, and a typo all rendered byte-identical headers. There is one
+  mark now and the setting owns it: `cw`/`whale` draw the typographic mark,
+  `dots` draws the activity frames, `off` removes it (thejayjetson, #5512).
 - `fix(tui): rebase active-cell tool bindings on every mid-turn history
   insert` — `/rename` mid-turn left the running tool row spinning forever
   (#5478).
@@ -91,6 +100,9 @@ abort under load.
   the dictionary spine, retiring their inline bilingual literals in favor of
   locale dictionaries with token-aware code spans (#5504, closes #5337, which
   they also filed).
+- @thejayjetson — the header status-indicator report that pinned the
+  regression to a specific setting, with every value, theme, and
+  `fancy_animations` combination already ruled out (#5512).
 
 ## [0.9.9] - 2026-08-18
 

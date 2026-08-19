@@ -55,6 +55,13 @@ notes, and relevant issue/PR comments.
   bilingual literals in favor of locale dictionaries with token-aware code
   spans (#5504, closes #5337 they filed)
 
+**Reports, reproductions, and verification**
+
+- **[thejayjetson](https://github.com/thejayjetson)** — the header
+  status-indicator report that pinned the regression to a specific setting,
+  having already ruled out every value, both themes, `fancy_animations`, the
+  terminal auto-off rules, and a clean `codewhale doctor` (#5512)
+
 </details>
 
 <details>

@@ -973,21 +973,30 @@ fn render_header_with_git_status(
         ApprovalMode::Auto => app.ui_theme.permission_auto_review,
         ApprovalMode::Bypass => app.ui_theme.permission_full_access,
     };
+    // `status_indicator` owns the single header mark. It used to be filtered
+    // against the literal "cw" because the header also hardcoded a leading
+    // "cw" span, and `header_status_indicator_frame` collapses `cw`, the
+    // legacy `whale` opt-in, and unknown values onto that same mark — so the
+    // filter silently discarded three of the setting's four documented values
+    // and left `off` with nothing to turn off (#5512). There is one mark now,
+    // and this setting decides what occupies it.
     let status_indicator = crate::tui::widgets::header_status_indicator_frame(
         (!app.low_motion && app.fancy_animations)
             .then_some(app.turn_started_at)
             .flatten(),
         &app.status_indicator,
-    )
-    .filter(|indicator| *indicator != "cw");
-    let mut left = vec![
-        Span::styled(
-            "cw",
+    );
+    let mut left = Vec::new();
+    if let Some(indicator) = status_indicator {
+        left.push(Span::styled(
+            indicator,
             Style::default()
                 .fg(app.ui_theme.accent_primary)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
+        ));
+        left.push(Span::raw("  "));
+    }
+    left.extend([
         Span::styled(
             route_label.clone(),
             Style::default().fg(app.ui_theme.text_muted),
@@ -999,19 +1008,7 @@ fn render_header_with_git_status(
         ),
         Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
         Span::styled(effort_label.clone(), Style::default().fg(app.ui_theme.info)),
-    ];
-    // The selected brand/status mark is part of the user's chosen header,
-    // not expendable wide-screen decoration. Keep it in compact layouts too;
-    // route text truncates before the permission posture or selected mark.
-    if let Some(indicator) = status_indicator {
-        left.push(Span::raw(" "));
-        left.push(Span::styled(
-            indicator,
-            Style::default()
-                .fg(app.ui_theme.info)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+    ]);
     // Permission is safety state, not optional chrome. Compact terminals shed
     // route detail and the context meter, but keep mode, effective effort, and
     // the effective posture.
@@ -1150,9 +1147,10 @@ fn render_header_with_git_status(
     } else {
         effort_label.clone()
     };
-    let indicator_width = status_indicator.map_or(0, |indicator| 1 + indicator.width());
-    let minimum_left_width = 4usize
-        .saturating_add(indicator_width)
+    // The mark leads the header and carries its own two-space gutter, so it
+    // costs `width + 2` when present and nothing at all when `off` (#5512).
+    let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
+    let minimum_left_width = indicator_width
         .saturating_add(3 + mode_label(app.ui_locale, app.mode).width())
         .saturating_add(3 + minimum_effort.width())
         .saturating_add(3 + permission_label(app).width());
@@ -1248,10 +1246,10 @@ fn render_header_with_git_status(
         // nothing, as it always has); below that the goal itself truncates,
         // and when even a minimal chip cannot fit it drops rather than
         // clipping mid-word (#39).
-        let indicator_width = status_indicator.map_or(0, |indicator| 1 + indicator.width());
-        let base_fixed = 4usize
-            .saturating_add(indicator_width)
-            .saturating_add(span_width(&suffix));
+        // Same accounting as the baseline pass: the mark leads and owns its
+        // gutter, so it is `width + 2` present and 0 when `off` (#5512).
+        let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
+        let base_fixed = indicator_width.saturating_add(span_width(&suffix));
         if let Some((text, color)) = &goal_chip {
             let goal_room = left_budget.saturating_sub(base_fixed).saturating_sub(3);
             if goal_room >= 8 {
@@ -1271,11 +1269,7 @@ fn render_header_with_git_status(
         // cannot fit. The route label still yields its budget first.
         if let Some((text, color)) = &workflow_chip {
             let workflow_room = left_budget
-                .saturating_sub(
-                    4usize
-                        .saturating_add(indicator_width)
-                        .saturating_add(span_width(&suffix)),
-                )
+                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if workflow_room >= 8 {
                 suffix.push(Span::styled(
@@ -1292,11 +1286,7 @@ fn render_header_with_git_status(
         // useful, but it yields to every piece of operator state ahead of it.
         if let Some((text, color)) = &update_chip {
             let update_room = left_budget
-                .saturating_sub(
-                    4usize
-                        .saturating_add(indicator_width)
-                        .saturating_add(span_width(&suffix)),
-                )
+                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if update_room >= 8 {
                 suffix.push(Span::styled(
@@ -1309,26 +1299,18 @@ fn render_header_with_git_status(
                 ));
             }
         }
-        let fixed_width = 4usize
-            .saturating_add(indicator_width)
-            .saturating_add(span_width(&suffix));
+        let fixed_width = indicator_width.saturating_add(span_width(&suffix));
         let route_budget = left_budget.saturating_sub(fixed_width);
-        left = vec![Span::styled(
-            "cw",
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD),
-        )];
+        left = Vec::new();
         if let Some(indicator) = status_indicator {
-            left.push(Span::raw(" "));
             left.push(Span::styled(
                 indicator,
                 Style::default()
-                    .fg(app.ui_theme.info)
+                    .fg(app.ui_theme.accent_primary)
                     .add_modifier(Modifier::BOLD),
             ));
+            left.push(Span::raw("  "));
         }
-        left.push(Span::raw("  "));
         left.push(Span::styled(
             truncate_to_width(&route_label, route_budget),
             Style::default().fg(app.ui_theme.text_muted),
@@ -1829,6 +1811,81 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_footer(area, &mut buf, app);
         (0..area.width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    /// #5512: the header status indicator never rendered for three of its
+    /// four documented values. `header_status_indicator_frame` collapses
+    /// `cw`, the legacy `whale` opt-in, and unknown values onto the `cw`
+    /// mark, and the header then filtered that exact string out because it
+    /// also hardcoded a leading `cw` span — so `cw`, `whale`, `off`, and a
+    /// typo all produced byte-identical headers and `off` had nothing to
+    /// turn off. There is one mark now and the setting owns it.
+    #[test]
+    fn status_indicator_setting_changes_the_header_mark() {
+        let render = |value: &str| {
+            let mut app = test_app();
+            app.status_indicator = value.to_string();
+            header_text(&app, 120)
+        };
+
+        let cw = render("cw");
+        let whale = render("whale");
+        let dots = render("dots");
+        let off = render("off");
+        let unknown = render("not-a-real-value");
+
+        assert!(cw.starts_with("cw  "), "cw must lead with the mark: {cw:?}");
+        assert_eq!(whale, cw, "legacy whale opt-in normalizes onto the cw mark");
+        assert_eq!(unknown, cw, "unknown values fall back to the cw mark");
+
+        assert!(
+            !off.starts_with("cw"),
+            "`off` must actually remove the mark: {off:?}"
+        );
+        assert_ne!(off, cw, "`off` must differ from `cw` (#5512)");
+
+        assert_ne!(dots, cw, "`dots` must differ from `cw` (#5512)");
+        assert!(
+            !dots.starts_with("cw"),
+            "`dots` replaces the mark rather than sitting beside it: {dots:?}"
+        );
+
+        // Every documented value still renders a single-line header that
+        // keeps the operator state the layout guarantees.
+        for (value, rendered) in [
+            ("cw", &cw),
+            ("whale", &whale),
+            ("dots", &dots),
+            ("off", &off),
+        ] {
+            assert!(
+                !rendered.contains('\n'),
+                "{value} header must stay one line"
+            );
+            let lowered = rendered.to_ascii_lowercase();
+            assert!(
+                lowered.contains("work"),
+                "{value} lost the mode: {rendered:?}"
+            );
+            assert!(
+                lowered.contains("ask"),
+                "{value} lost the posture: {rendered:?}"
+            );
+        }
+    }
+
+    /// The mark must not be duplicated: the header carries exactly one.
+    #[test]
+    fn header_carries_exactly_one_status_mark() {
+        let mut app = test_app();
+        app.status_indicator = "cw".to_string();
+        let rendered = header_text(&app, 120);
+        let trimmed = rendered.trim_end();
+        assert_eq!(
+            trimmed.matches("cw").count(),
+            1,
+            "exactly one cw mark belongs in the header: {trimmed:?}"
+        );
     }
 
     fn header_text(app: &App, width: u16) -> String {
