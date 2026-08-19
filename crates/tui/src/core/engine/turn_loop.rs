@@ -20,6 +20,29 @@ use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
+struct StreamOutcome {
+    current_text_raw: String,
+    current_text_visible: String,
+    current_thinking: String,
+    current_thinking_signature: Option<String>,
+    current_thinking_state: Option<crate::models::OpaqueReasoningState>,
+    tool_uses: Vec<ToolUseState>,
+    usage: Usage,
+    usage_reported: bool,
+    stop_reason: Option<String>,
+    pending_message_complete: bool,
+    last_text_index: Option<usize>,
+    stream_errors: u32,
+    pending_steers: Vec<String>,
+    sleep_resume_pending: bool,
+    headless_stream_resume_pending: bool,
+    interactive_stream_resume_pending: bool,
+    stream_start: Instant,
+    first_token_at: Option<Instant>,
+    request_dispatched_at: Instant,
+    stream_error: Option<String>,
+}
+
 fn localized_request_preparation_error(locale_tag: &str, error: &anyhow::Error) -> Option<String> {
     if matches!(
         error.downcast_ref::<crate::client::cloud_code::CloudCodeRequestError>(),
@@ -1009,7 +1032,7 @@ impl Engine {
             // Session metrics: the model call is measured from this dispatch
             // instant (connection setup included), and time-to-first-token is
             // the gap to the first content-bearing stream event.
-            let mut request_dispatched_at = Instant::now();
+            let request_dispatched_at = Instant::now();
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -1047,602 +1070,42 @@ impl Engine {
                     return (TurnOutcomeStatus::Failed, turn_error);
                 }
             };
-            // The stream value is itself `Pin<Box<dyn Stream + Send>>`, which
-            // is `Unpin`, so we can rebind it on a transparent retry without
-            // breaking the existing pin invariants.
-            let mut stream = stream;
-
-            // Track content blocks
+            let StreamOutcome {
+                current_text_raw,
+                current_text_visible,
+                current_thinking,
+                current_thinking_signature,
+                current_thinking_state,
+                mut tool_uses,
+                usage,
+                usage_reported,
+                stop_reason,
+                pending_message_complete,
+                last_text_index,
+                stream_errors,
+                mut pending_steers,
+                sleep_resume_pending,
+                headless_stream_resume_pending,
+                interactive_stream_resume_pending,
+                stream_start,
+                first_token_at,
+                request_dispatched_at,
+                stream_error,
+            } = self
+                .process_stream(
+                    client.as_ref(),
+                    stream,
+                    &stream_request,
+                    request_dispatched_at,
+                    stream_retry_attempts,
+                )
+                .await;
+            turn_error = turn_error.or(stream_error);
+            // These belong to post-stream response assembly, not stream
+            // consumption: blocks are built from the completed stream state,
+            // and truncation is derived from its terminal stop reason below.
             let mut content_blocks: Vec<ContentBlock> = Vec::new();
-            let mut current_text_raw = String::new();
-            let mut current_text_visible = String::new();
-            let mut current_thinking = String::new();
-            // #3014: Anthropic signed-thinking signature for the current
-            // thinking block; must be replayed verbatim in tool loops.
-            let mut current_thinking_signature: Option<String> = None;
-            let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
-            let mut tool_uses: Vec<ToolUseState> = Vec::new();
-            let mut usage = Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Usage::default()
-            };
-            // Flips when the provider actually reports usage for this call
-            // (MessageStart and/or a usage-carrying delta). Per-step usage
-            // events are only emitted for reported usage — a silent provider
-            // must not surface as fabricated zeros.
-            let mut usage_reported = false;
-            let mut stop_reason: Option<String> = None;
-            // Set when the provider ends the response at its output limit
-            // (`length` / `max_tokens` / `max_output_tokens`). The turn
-            // degrades instead of failing: the partial assistant message is
-            // accepted, the truncation is surfaced to the model as a bounded
-            // runtime observation, and the loop continues.
             let mut output_limit_truncated: Option<String> = None;
-            let mut current_block_kind: Option<ContentBlockKind> = None;
-            // Map block_index → tool_uses position. Required because the
-            // OpenAI-compatible streaming parser emits multiple
-            // ContentBlockStart::ToolUse events back-to-back (one per
-            // tool_call in a batch) before any ContentBlockStop arrives —
-            // all Stops are flushed together at `finish_reason`. A single
-            // Option<usize> gets overwritten by each new Start; the first
-            // Stop then takes the last index, and every subsequent Stop
-            // takes `None`, dropping ToolCallStarted events for every
-            // tool call except the last one in the batch.
-            let mut current_tool_indices: std::collections::HashMap<u32, usize> =
-                std::collections::HashMap::new();
-            let mut tool_call_filter = ToolCallDeltaFilterState::default();
-            let mut fake_wrapper_notice_emitted = false;
-            let mut pending_message_complete = false;
-            let mut last_text_index: Option<usize> = None;
-            let mut stream_errors = 0u32;
-            // #103 transparent retry bookkeeping. `any_content_received` flips
-            // on the first non-MessageStart event so we know whether DeepSeek
-            // billed us / the user has seen any output for this turn yet.
-            // This is distinct from the outer `stream_retry_attempts` (which
-            // restarts the whole turn-step when a stream died with no
-            // content-block delta delivered to the consumer).
-            let mut any_content_received = false;
-            let mut transparent_stream_retries = 0u32;
-            let mut pending_steers: Vec<String> = Vec::new();
-            // `stream_start` is reset on a transparent retry so the wall-clock
-            // budget restarts with the fresh stream.
-            let mut stream_start = Instant::now();
-            // First content-bearing event of this model call, for TTFT.
-            let mut first_token_at: Option<Instant> = None;
-            // #2990 sleep-resume bookkeeping: monotonic and wall-clock stamps
-            // of the last stream progress. `Instant` pauses across a host
-            // suspend while `SystemTime` does not, so a large divergence on
-            // the next error tells "machine slept" apart from "network died".
-            let mut last_progress_mono = Instant::now();
-            let mut last_progress_wall = std::time::SystemTime::now();
-            let mut sleep_resume_pending = false;
-            // Headless mid-stream network-drop resume (Terminal-Bench P0,
-            // v0.9.4): set when a network-class stream error arrives after
-            // partial content in a headless host; the post-loop block then
-            // discards the fragment and re-issues the request instead of
-            // forfeiting the whole exec session.
-            let mut headless_stream_resume_pending = false;
-            // Interactive mid-stream network-drop resume (0.9.4): preserve the
-            // partial reply as a committed assistant message, append a runtime
-            // user continuation message, and re-issue the request.
-            let mut interactive_stream_resume_pending = false;
-            let mut stream_content_bytes: usize = 0;
-            let (chunk_timeout_secs, chunk_timeout) = stream_chunk_timeout_budget(&self.config);
-            let max_duration = Duration::from_secs(STREAM_MAX_DURATION_SECS);
-
-            // Process stream events
-            loop {
-                let poll_outcome = tokio::select! {
-                    biased;
-                    _ = self.cancel_token.cancelled() => None,
-                    result = tokio::time::timeout(chunk_timeout, stream.next()) => {
-                        match result {
-                            Ok(Some(event_result)) => Some(event_result),
-                            Ok(None) => None, // stream ended normally
-                            Err(_) => {
-                                let envelope = StreamError::Stall {
-                                    timeout_secs: chunk_timeout_secs,
-                                }
-                                .into_envelope();
-                                crate::logging::warn(&envelope.message);
-                                // A stall is a stream error like any other:
-                                // count it so the nothing-streamed retry can
-                                // fire, and record it so an unrecovered stall
-                                // fails the turn with the real reason instead
-                                // of ending "Completed" over a frozen block.
-                                stream_errors = stream_errors.saturating_add(1);
-                                turn_error.get_or_insert(envelope.message.clone());
-                                let _ = self.tx_event.send(Event::error(envelope)).await;
-                                None
-                            }
-                        }
-                    }
-                };
-                let Some(event_result) = poll_outcome else {
-                    break;
-                };
-                while let Ok(steer) = self.rx_steer.try_recv() {
-                    let steer = steer.trim().to_string();
-                    if steer.is_empty() {
-                        continue;
-                    }
-                    pending_steers.push(steer.clone());
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Steer input queued: {}",
-                            summarize_text(&steer, 120)
-                        )))
-                        .await;
-                }
-
-                if self.cancel_token.is_cancelled() {
-                    break;
-                }
-
-                // Guard: max wall-clock duration
-                if stream_start.elapsed() > max_duration {
-                    let envelope = StreamError::DurationLimit {
-                        limit_secs: STREAM_MAX_DURATION_SECS,
-                    }
-                    .into_envelope();
-                    crate::logging::warn(&envelope.message);
-                    turn_error.get_or_insert(envelope.message.clone());
-                    let _ = self.tx_event.send(Event::error(envelope)).await;
-                    break;
-                }
-
-                // Guard: max accumulated content bytes
-                if stream_content_bytes > STREAM_MAX_CONTENT_BYTES {
-                    let envelope = StreamError::Overflow {
-                        limit_bytes: STREAM_MAX_CONTENT_BYTES,
-                    }
-                    .into_envelope();
-                    crate::logging::warn(&envelope.message);
-                    turn_error.get_or_insert(envelope.message.clone());
-                    let _ = self.tx_event.send(Event::error(envelope)).await;
-                    break;
-                }
-
-                let event = match event_result {
-                    Ok(e) => {
-                        last_progress_mono = Instant::now();
-                        last_progress_wall = std::time::SystemTime::now();
-                        // Flip on the first non-MessageStart event — that's
-                        // the moment we cross from "stream not yet productive"
-                        // (eligible for transparent retry) into "DeepSeek has
-                        // billed us / user has seen output" (must surface).
-                        if !any_content_received && !matches!(e, StreamEvent::MessageStart { .. }) {
-                            any_content_received = true;
-                            first_token_at.get_or_insert_with(Instant::now);
-                        }
-                        e
-                    }
-                    Err(e) => {
-                        stream_errors = stream_errors.saturating_add(1);
-                        let message = self.decorate_auth_error_message(e.to_string());
-                        // #2990: wall-clock far ahead of the monotonic clock
-                        // since the last chunk means the host slept mid-stream.
-                        // The partial output predates the sleep and the user
-                        // was not watching — schedule a full request retry in
-                        // the post-loop block instead of failing the turn.
-                        let wall_elapsed = last_progress_wall
-                            .elapsed()
-                            .unwrap_or_else(|_| last_progress_mono.elapsed());
-                        if should_resume_after_sleep(
-                            sleep_gap_detected(last_progress_mono.elapsed(), wall_elapsed),
-                            stream_retry_attempts,
-                            self.cancel_token.is_cancelled(),
-                        ) {
-                            crate::logging::warn(format!(
-                                "Stream error after suspected system sleep ({:?} monotonic vs {:?} wall since last chunk); scheduling request retry: {message}",
-                                last_progress_mono.elapsed(),
-                                wall_elapsed,
-                            ));
-                            sleep_resume_pending = true;
-                            break;
-                        }
-                        // #103: when the stream errors before any content was
-                        // streamed AND we still have retry budget, transparently
-                        // resend the request. DeepSeek has not billed for any
-                        // output and the user has seen nothing — re-trying is
-                        // the right user-visible behavior.
-                        if should_transparently_retry_stream(
-                            any_content_received,
-                            transparent_stream_retries,
-                            self.cancel_token.is_cancelled(),
-                        ) {
-                            transparent_stream_retries =
-                                transparent_stream_retries.saturating_add(1);
-                            crate::logging::info(format!(
-                                "Transparent stream retry {transparent_stream_retries}/{MAX_TRANSPARENT_STREAM_RETRIES} (no content received yet): {message}",
-                            ));
-                            // Drop the failed stream before issuing the new
-                            // request to release the underlying connection.
-                            drop(stream);
-                            request_dispatched_at = Instant::now();
-                            let retry_stream_result = tokio::select! {
-                                biased;
-                                () = self.cancel_token.cancelled() => break,
-                                result = client.create_message_stream(stream_request.clone()) => result,
-                            };
-                            match retry_stream_result {
-                                Ok(fresh) => {
-                                    stream = fresh;
-                                    stream_start = Instant::now();
-                                    // Roll back the error counter — this one
-                                    // didn't surface to the user.
-                                    stream_errors = stream_errors.saturating_sub(1);
-                                    continue;
-                                }
-                                Err(retry_err) => {
-                                    let retry_msg = self.decorate_auth_error_message(format!(
-                                        "Stream retry failed: {retry_err}"
-                                    ));
-                                    turn_error.get_or_insert(retry_msg.clone());
-                                    let _ = self
-                                        .tx_event
-                                        .send(Event::error(ErrorEnvelope::classify(
-                                            retry_msg, true,
-                                        )))
-                                        .await;
-                                    break;
-                                }
-                            }
-                        }
-                        // Headless hosts (exec / stream-json): a mid-stream
-                        // network drop must not forfeit the whole session the
-                        // way it does interactively. No operator is watching
-                        // the partial deltas, the fragment was never committed
-                        // to the conversation, and no tool from the incomplete
-                        // response has executed, so break out and let the
-                        // post-loop block re-issue the request (bounded by
-                        // MAX_STREAM_RETRIES), exactly like the #2990
-                        // sleep-resume. Do NOT emit an error event here: the
-                        // exec host forwards every error event onto the
-                        // stream-json error channel, and a successful retry
-                        // would leave that terminal-looking event on the
-                        // stream even though the turn recovered. When the
-                        // budget is already exhausted this check is false
-                        // and the normal surface-the-error path below runs,
-                        // so the final failure is still reported.
-                        let network_class_error = matches!(
-                            crate::error_taxonomy::classify_error_message(&message),
-                            ErrorCategory::Network | ErrorCategory::Timeout
-                        );
-                        if should_resume_after_network_drop(
-                            !self.config.terminal_chrome_enabled,
-                            network_class_error,
-                            stream_retry_attempts,
-                            self.cancel_token.is_cancelled(),
-                        ) {
-                            crate::logging::warn(format!(
-                                "Headless stream resume: network drop after partial content; scheduling request retry: {message}"
-                            ));
-                            // Keep the real error as the prospective turn
-                            // outcome; the post-loop retry clears it, and if
-                            // the turn still fails the last attempt surfaces
-                            // it through the normal path below.
-                            turn_error.get_or_insert(stream_read_error_user_message(
-                                &message,
-                                any_content_received,
-                            ));
-                            headless_stream_resume_pending = true;
-                            break;
-                        }
-                        // Interactive TUI: a network/timeout-class stream drop
-                        // after partial text (but before any tool call) should
-                        // preserve the partial reply and re-issue the request
-                        // with a runtime continuation message, bounded by
-                        // MAX_STREAM_RETRIES. This keeps the turn alive instead
-                        // of failing with a terminal-looking error.
-                        if should_resume_interactive_after_network_drop(
-                            self.config.terminal_chrome_enabled,
-                            network_class_error,
-                            any_content_received,
-                            tool_uses.is_empty(),
-                            stream_retry_attempts,
-                            self.cancel_token.is_cancelled(),
-                        ) {
-                            crate::logging::warn(format!(
-                                "Interactive stream resume: network drop after partial content; preserving fragment and scheduling request retry: {message}"
-                            ));
-                            turn_error.get_or_insert(stream_read_error_user_message(
-                                &message,
-                                any_content_received,
-                            ));
-                            interactive_stream_resume_pending = true;
-                            break;
-                        }
-                        let user_message =
-                            stream_read_error_user_message(&message, any_content_received);
-                        turn_error.get_or_insert(user_message.clone());
-                        let _ = self
-                            .tx_event
-                            .send(Event::error(ErrorEnvelope::classify(user_message, true)))
-                            .await;
-                        if stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-
-                match event {
-                    StreamEvent::MessageStart { message } => {
-                        // The chat-completions adapter emits a synthetic
-                        // MessageStart with a zeroed usage; only a usage that
-                        // carries data counts as provider-reported.
-                        usage_reported |= usage_has_reported_data(&message.usage);
-                        merge_stream_usage(&mut usage, message.usage);
-                    }
-                    StreamEvent::ContentBlockStart {
-                        index,
-                        content_block,
-                    } => match content_block {
-                        ContentBlockStart::Text { text } => {
-                            current_text_raw = text;
-                            current_text_visible.clear();
-                            tool_call_filter = ToolCallDeltaFilterState::default();
-                            let filtered = filter_tool_call_delta_with_state(
-                                &current_text_raw,
-                                &mut tool_call_filter,
-                            );
-                            if !fake_wrapper_notice_emitted
-                                && filtered.len() < current_text_raw.len()
-                                && contains_fake_tool_wrapper(&current_text_raw)
-                            {
-                                let _ =
-                                    self.tx_event.send(Event::status(FAKE_WRAPPER_NOTICE)).await;
-                                fake_wrapper_notice_emitted = true;
-                            }
-                            current_text_visible.push_str(&filtered);
-                            current_block_kind = Some(ContentBlockKind::Text);
-                            last_text_index = Some(index as usize);
-                            let _ = self
-                                .tx_event
-                                .send(Event::MessageStarted {
-                                    index: index as usize,
-                                })
-                                .await;
-                        }
-                        ContentBlockStart::Thinking { thinking } => {
-                            current_thinking = thinking;
-                            current_thinking_signature = None;
-                            current_thinking_state = None;
-                            current_block_kind = Some(ContentBlockKind::Thinking);
-                            let _ = self
-                                .tx_event
-                                .send(Event::ThinkingStarted {
-                                    index: index as usize,
-                                })
-                                .await;
-                        }
-                        ContentBlockStart::ToolUse {
-                            id,
-                            name,
-                            input,
-                            caller,
-                            thought_signature,
-                        } => {
-                            crate::logging::info(format!(
-                                "Tool '{name}' block start. Initial input: {input:?}"
-                            ));
-                            current_block_kind = Some(ContentBlockKind::ToolUse);
-                            current_tool_indices.insert(index, tool_uses.len());
-                            // ToolCallStarted is deferred to ContentBlockStop —
-                            // see `final_tool_input`. Emitting here would ship
-                            // the placeholder `{}` and the cell would render
-                            // `<command>` / `<file>` literals to the user.
-                            tool_uses.push(ToolUseState {
-                                id,
-                                name,
-                                input,
-                                caller,
-                                thought_signature,
-                                input_buffer: String::new(),
-                                input_parse_error: None,
-                            });
-                        }
-                        ContentBlockStart::ServerToolUse { id, name, input } => {
-                            crate::logging::info(format!(
-                                "Server tool '{name}' block start. Initial input: {input:?}"
-                            ));
-                            current_block_kind = Some(ContentBlockKind::ToolUse);
-                            current_tool_indices.insert(index, tool_uses.len());
-                            tool_uses.push(ToolUseState {
-                                id,
-                                name,
-                                input,
-                                caller: None,
-                                thought_signature: None,
-                                input_buffer: String::new(),
-                                input_parse_error: None,
-                            });
-                        }
-                    },
-                    StreamEvent::ContentBlockDelta { index, delta } => match delta {
-                        Delta::TextDelta { text } => {
-                            stream_content_bytes = stream_content_bytes.saturating_add(text.len());
-                            current_text_raw.push_str(&text);
-                            let filtered =
-                                filter_tool_call_delta_with_state(&text, &mut tool_call_filter);
-                            if !fake_wrapper_notice_emitted
-                                && filtered.len() < text.len()
-                                && contains_fake_tool_wrapper(&current_text_raw)
-                            {
-                                let _ =
-                                    self.tx_event.send(Event::status(FAKE_WRAPPER_NOTICE)).await;
-                                fake_wrapper_notice_emitted = true;
-                            }
-                            if !filtered.is_empty() {
-                                current_text_visible.push_str(&filtered);
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::MessageDelta {
-                                        index: index as usize,
-                                        content: filtered,
-                                    })
-                                    .await;
-                            }
-                        }
-                        Delta::ThinkingDelta { thinking } => {
-                            stream_content_bytes =
-                                stream_content_bytes.saturating_add(thinking.len());
-                            current_thinking.push_str(&thinking);
-                            if !thinking.is_empty() {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::ThinkingDelta {
-                                        index: index as usize,
-                                        content: thinking,
-                                    })
-                                    .await;
-                            }
-                        }
-                        Delta::SignatureDelta { signature } => {
-                            // #3014: capture (and concatenate, defensively)
-                            // the signed-thinking signature for replay.
-                            match current_thinking_signature.as_mut() {
-                                Some(existing) => existing.push_str(&signature),
-                                None => current_thinking_signature = Some(signature),
-                            }
-                        }
-                        Delta::ReasoningStateDelta { state } => {
-                            current_thinking_state = Some(state);
-                        }
-                        Delta::InputJsonDelta { partial_json } => {
-                            if let Some(&tool_idx) = current_tool_indices.get(&index)
-                                && let Some(tool_state) = tool_uses.get_mut(tool_idx)
-                            {
-                                tool_state.input_buffer.push_str(&partial_json);
-                                crate::logging::info(format!(
-                                    "Tool '{}' input delta: {} (buffer now: {})",
-                                    tool_state.name, partial_json, tool_state.input_buffer
-                                ));
-                                if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                    tool_state.input = value.clone();
-                                    crate::logging::info(format!(
-                                        "Tool '{}' input parsed: {:?}",
-                                        tool_state.name, value
-                                    ));
-                                }
-                            }
-                        }
-                    },
-                    StreamEvent::ContentBlockStop { index } => {
-                        let stopped_kind = current_block_kind.take();
-                        match stopped_kind {
-                            Some(ContentBlockKind::Text) => {
-                                let flushed = flush_tool_call_delta_state(&mut tool_call_filter);
-                                if !flushed.is_empty() {
-                                    current_text_visible.push_str(&flushed);
-                                    let _ = self
-                                        .tx_event
-                                        .send(Event::MessageDelta {
-                                            index: index as usize,
-                                            content: flushed,
-                                        })
-                                        .await;
-                                }
-                                pending_message_complete = true;
-                                last_text_index = Some(index as usize);
-                            }
-                            Some(ContentBlockKind::Thinking) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::ThinkingComplete {
-                                        index: index as usize,
-                                    })
-                                    .await;
-                            }
-                            Some(ContentBlockKind::ToolUse) | None => {}
-                        }
-                        // Route the Stop using event.index (via
-                        // `current_tool_indices`) rather than the single
-                        // `current_block_kind` slot. In an OpenAI batch
-                        // tool-call stream every Stop after the first sees
-                        // `stopped_kind = None` because `take()` cleared the
-                        // slot, so the original `matches!(stopped_kind, …)`
-                        // check would skip every tool except the last.
-                        if let Some(tool_idx) = current_tool_indices.remove(&index)
-                            && let Some(tool_state) = tool_uses.get_mut(tool_idx)
-                        {
-                            crate::logging::info(format!(
-                                "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
-                                tool_state.name, tool_state.input_buffer, tool_state.input
-                            ));
-                            if !tool_state.input_buffer.trim().is_empty() {
-                                if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                    tool_state.input = value;
-                                    crate::logging::info(format!(
-                                        "Tool '{}' final input: {:?}",
-                                        tool_state.name, tool_state.input
-                                    ));
-                                } else {
-                                    crate::logging::warn(format!(
-                                        "Tool '{}' failed to parse final input buffer: '{}'",
-                                        tool_state.name, tool_state.input_buffer
-                                    ));
-                                    let error =
-                                        malformed_tool_arguments_error(&tool_state.input_buffer);
-                                    tool_state.input_parse_error = Some(error);
-                                    tool_state.input =
-                                        malformed_tool_arguments_input(&tool_state.input_buffer);
-                                    let _ = self
-                                        .tx_event
-                                        .send(Event::status(format!(
-                                            "⚠ Tool '{}' received malformed arguments from model",
-                                            tool_state.name
-                                        )))
-                                        .await;
-                                }
-                            } else {
-                                crate::logging::warn(format!(
-                                    "Tool '{}' input buffer is empty, using initial input: {:?}",
-                                    tool_state.name, tool_state.input
-                                ));
-                            }
-
-                            // Now that the input is finalized, announce the
-                            // tool call to the UI. Deferring to here is what
-                            // keeps the cell from rendering `<command>` /
-                            // `<file>` placeholders during the brief window
-                            // between block start and the last InputJsonDelta.
-                            let _ = self
-                                .tx_event
-                                .send(Event::ToolCallStarted {
-                                    id: tool_state.id.clone(),
-                                    name: tool_state.name.clone(),
-                                    input: final_tool_input(tool_state),
-                                })
-                                .await;
-                        }
-                    }
-                    StreamEvent::MessageDelta {
-                        delta,
-                        usage: delta_usage,
-                    } => {
-                        if let Some(reason) = delta.stop_reason {
-                            stop_reason = Some(reason);
-                        }
-                        if let Some(u) = delta_usage {
-                            usage_reported |= usage_has_reported_data(&u);
-                            merge_stream_usage(&mut usage, u);
-                        }
-                    }
-                    StreamEvent::MessageStop | StreamEvent::Ping => {}
-                    StreamEvent::Error { error } => {
-                        // #3014: Anthropic SSE error event. The adapter
-                        // surfaces fatal errors as stream Err items; this
-                        // defensive arm keeps any passed-through error
-                        // visible instead of silently dropped.
-                        crate::logging::warn(format!("Provider stream error event: {error}"));
-                        stream_errors += 1;
-                    }
-                }
-            }
 
             // Account for every provider response before deciding whether to
             // retry or accept it. A terminal stop reason followed by a
@@ -3989,6 +3452,622 @@ impl Engine {
             return (TurnOutcomeStatus::Failed, Some(err));
         }
         (TurnOutcomeStatus::Completed, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_stream(
+        &mut self,
+        client: &dyn crate::core::model_client::ModelClient,
+        stream: crate::llm_client::StreamEventBox,
+        stream_request: &crate::models::MessageRequest,
+        mut request_dispatched_at: Instant,
+        stream_retry_attempts: u32,
+    ) -> StreamOutcome {
+        // The stream value is itself `Pin<Box<dyn Stream + Send>>`, which
+        // is `Unpin`, so we can rebind it on a transparent retry without
+        // breaking the existing pin invariants.
+        let mut stream = stream;
+        let mut stream_error: Option<String> = None;
+
+        let mut current_text_raw = String::new();
+        let mut current_text_visible = String::new();
+        let mut current_thinking = String::new();
+        // #3014: Anthropic signed-thinking signature for the current
+        // thinking block; must be replayed verbatim in tool loops.
+        let mut current_thinking_signature: Option<String> = None;
+        let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
+        let mut tool_uses: Vec<ToolUseState> = Vec::new();
+        let mut usage = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            ..Usage::default()
+        };
+        // Flips when the provider actually reports usage for this call
+        // (MessageStart and/or a usage-carrying delta). Per-step usage
+        // events are only emitted for reported usage — a silent provider
+        // must not surface as fabricated zeros.
+        let mut usage_reported = false;
+        let mut stop_reason: Option<String> = None;
+        let mut current_block_kind: Option<ContentBlockKind> = None;
+        // Map block_index → tool_uses position. Required because the
+        // OpenAI-compatible streaming parser emits multiple
+        // ContentBlockStart::ToolUse events back-to-back (one per
+        // tool_call in a batch) before any ContentBlockStop arrives —
+        // all Stops are flushed together at `finish_reason`. A single
+        // Option<usize> gets overwritten by each new Start; the first
+        // Stop then takes the last index, and every subsequent Stop
+        // takes `None`, dropping ToolCallStarted events for every
+        // tool call except the last one in the batch.
+        let mut current_tool_indices: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        let mut tool_call_filter = ToolCallDeltaFilterState::default();
+        let mut fake_wrapper_notice_emitted = false;
+        let mut pending_message_complete = false;
+        let mut last_text_index: Option<usize> = None;
+        let mut stream_errors = 0u32;
+        // #103 transparent retry bookkeeping. `any_content_received` flips
+        // on the first non-MessageStart event so we know whether DeepSeek
+        // billed us / the user has seen any output for this turn yet.
+        // This is distinct from the outer `stream_retry_attempts` (which
+        // restarts the whole turn-step when a stream died with no
+        // content-block delta delivered to the consumer).
+        let mut any_content_received = false;
+        let mut transparent_stream_retries = 0u32;
+        let mut pending_steers: Vec<String> = Vec::new();
+        // `stream_start` is reset on a transparent retry so the wall-clock
+        // budget restarts with the fresh stream.
+        let mut stream_start = Instant::now();
+        // First content-bearing event of this model call, for TTFT.
+        let mut first_token_at: Option<Instant> = None;
+        // #2990 sleep-resume bookkeeping: monotonic and wall-clock stamps
+        // of the last stream progress. `Instant` pauses across a host
+        // suspend while `SystemTime` does not, so a large divergence on
+        // the next error tells "machine slept" apart from "network died".
+        let mut last_progress_mono = Instant::now();
+        let mut last_progress_wall = std::time::SystemTime::now();
+        let mut sleep_resume_pending = false;
+        // Headless mid-stream network-drop resume (Terminal-Bench P0,
+        // v0.9.4): set when a network-class stream error arrives after
+        // partial content in a headless host; the post-loop block then
+        // discards the fragment and re-issues the request instead of
+        // forfeiting the whole exec session.
+        let mut headless_stream_resume_pending = false;
+        // Interactive mid-stream network-drop resume (0.9.4): preserve the
+        // partial reply as a committed assistant message, append a runtime
+        // user continuation message, and re-issue the request.
+        let mut interactive_stream_resume_pending = false;
+        let mut stream_content_bytes: usize = 0;
+        let (chunk_timeout_secs, chunk_timeout) = stream_chunk_timeout_budget(&self.config);
+        let max_duration = Duration::from_secs(STREAM_MAX_DURATION_SECS);
+
+        // Process stream events
+        loop {
+            let poll_outcome = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => None,
+                result = tokio::time::timeout(chunk_timeout, stream.next()) => {
+                    match result {
+                        Ok(Some(event_result)) => Some(event_result),
+                        Ok(None) => None, // stream ended normally
+                        Err(_) => {
+                            let envelope = StreamError::Stall {
+                                timeout_secs: chunk_timeout_secs,
+                            }
+                            .into_envelope();
+                            crate::logging::warn(&envelope.message);
+                            // A stall is a stream error like any other:
+                            // count it so the nothing-streamed retry can
+                            // fire, and record it so an unrecovered stall
+                            // fails the turn with the real reason instead
+                            // of ending "Completed" over a frozen block.
+                            stream_errors = stream_errors.saturating_add(1);
+                            stream_error.get_or_insert(envelope.message.clone());
+                            let _ = self.tx_event.send(Event::error(envelope)).await;
+                            None
+                        }
+                    }
+                }
+            };
+            let Some(event_result) = poll_outcome else {
+                break;
+            };
+            while let Ok(steer) = self.rx_steer.try_recv() {
+                let steer = steer.trim().to_string();
+                if steer.is_empty() {
+                    continue;
+                }
+                pending_steers.push(steer.clone());
+                let _ = self
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Steer input queued: {}",
+                        summarize_text(&steer, 120)
+                    )))
+                    .await;
+            }
+
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
+
+            // Guard: max wall-clock duration
+            if stream_start.elapsed() > max_duration {
+                let envelope = StreamError::DurationLimit {
+                    limit_secs: STREAM_MAX_DURATION_SECS,
+                }
+                .into_envelope();
+                crate::logging::warn(&envelope.message);
+                stream_error.get_or_insert(envelope.message.clone());
+                let _ = self.tx_event.send(Event::error(envelope)).await;
+                break;
+            }
+
+            // Guard: max accumulated content bytes
+            if stream_content_bytes > STREAM_MAX_CONTENT_BYTES {
+                let envelope = StreamError::Overflow {
+                    limit_bytes: STREAM_MAX_CONTENT_BYTES,
+                }
+                .into_envelope();
+                crate::logging::warn(&envelope.message);
+                stream_error.get_or_insert(envelope.message.clone());
+                let _ = self.tx_event.send(Event::error(envelope)).await;
+                break;
+            }
+
+            let event = match event_result {
+                Ok(e) => {
+                    last_progress_mono = Instant::now();
+                    last_progress_wall = std::time::SystemTime::now();
+                    // Flip on the first non-MessageStart event — that's
+                    // the moment we cross from "stream not yet productive"
+                    // (eligible for transparent retry) into "DeepSeek has
+                    // billed us / user has seen output" (must surface).
+                    if !any_content_received && !matches!(e, StreamEvent::MessageStart { .. }) {
+                        any_content_received = true;
+                        first_token_at.get_or_insert_with(Instant::now);
+                    }
+                    e
+                }
+                Err(e) => {
+                    stream_errors = stream_errors.saturating_add(1);
+                    let message = self.decorate_auth_error_message(e.to_string());
+                    // #2990: wall-clock far ahead of the monotonic clock
+                    // since the last chunk means the host slept mid-stream.
+                    // The partial output predates the sleep and the user
+                    // was not watching — schedule a full request retry in
+                    // the post-loop block instead of failing the turn.
+                    let wall_elapsed = last_progress_wall
+                        .elapsed()
+                        .unwrap_or_else(|_| last_progress_mono.elapsed());
+                    if should_resume_after_sleep(
+                        sleep_gap_detected(last_progress_mono.elapsed(), wall_elapsed),
+                        stream_retry_attempts,
+                        self.cancel_token.is_cancelled(),
+                    ) {
+                        crate::logging::warn(format!(
+                            "Stream error after suspected system sleep ({:?} monotonic vs {:?} wall since last chunk); scheduling request retry: {message}",
+                            last_progress_mono.elapsed(),
+                            wall_elapsed,
+                        ));
+                        sleep_resume_pending = true;
+                        break;
+                    }
+                    // #103: when the stream errors before any content was
+                    // streamed AND we still have retry budget, transparently
+                    // resend the request. DeepSeek has not billed for any
+                    // output and the user has seen nothing — re-trying is
+                    // the right user-visible behavior.
+                    if should_transparently_retry_stream(
+                        any_content_received,
+                        transparent_stream_retries,
+                        self.cancel_token.is_cancelled(),
+                    ) {
+                        transparent_stream_retries = transparent_stream_retries.saturating_add(1);
+                        crate::logging::info(format!(
+                            "Transparent stream retry {transparent_stream_retries}/{MAX_TRANSPARENT_STREAM_RETRIES} (no content received yet): {message}",
+                        ));
+                        // Drop the failed stream before issuing the new
+                        // request to release the underlying connection.
+                        drop(stream);
+                        request_dispatched_at = Instant::now();
+                        let retry_stream_result = tokio::select! {
+                            biased;
+                            () = self.cancel_token.cancelled() => break,
+                            result = client.create_message_stream(stream_request.clone()) => result,
+                        };
+                        match retry_stream_result {
+                            Ok(fresh) => {
+                                stream = fresh;
+                                stream_start = Instant::now();
+                                // Roll back the error counter — this one
+                                // didn't surface to the user.
+                                stream_errors = stream_errors.saturating_sub(1);
+                                continue;
+                            }
+                            Err(retry_err) => {
+                                let retry_msg = self.decorate_auth_error_message(format!(
+                                    "Stream retry failed: {retry_err}"
+                                ));
+                                stream_error.get_or_insert(retry_msg.clone());
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::error(ErrorEnvelope::classify(retry_msg, true)))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                    // Headless hosts (exec / stream-json): a mid-stream
+                    // network drop must not forfeit the whole session the
+                    // way it does interactively. No operator is watching
+                    // the partial deltas, the fragment was never committed
+                    // to the conversation, and no tool from the incomplete
+                    // response has executed, so break out and let the
+                    // post-loop block re-issue the request (bounded by
+                    // MAX_STREAM_RETRIES), exactly like the #2990
+                    // sleep-resume. Do NOT emit an error event here: the
+                    // exec host forwards every error event onto the
+                    // stream-json error channel, and a successful retry
+                    // would leave that terminal-looking event on the
+                    // stream even though the turn recovered. When the
+                    // budget is already exhausted this check is false
+                    // and the normal surface-the-error path below runs,
+                    // so the final failure is still reported.
+                    let network_class_error = matches!(
+                        crate::error_taxonomy::classify_error_message(&message),
+                        ErrorCategory::Network | ErrorCategory::Timeout
+                    );
+                    if should_resume_after_network_drop(
+                        !self.config.terminal_chrome_enabled,
+                        network_class_error,
+                        stream_retry_attempts,
+                        self.cancel_token.is_cancelled(),
+                    ) {
+                        crate::logging::warn(format!(
+                            "Headless stream resume: network drop after partial content; scheduling request retry: {message}"
+                        ));
+                        // Keep the real error as the prospective turn
+                        // outcome; the post-loop retry clears it, and if
+                        // the turn still fails the last attempt surfaces
+                        // it through the normal path below.
+                        stream_error.get_or_insert(stream_read_error_user_message(
+                            &message,
+                            any_content_received,
+                        ));
+                        headless_stream_resume_pending = true;
+                        break;
+                    }
+                    // Interactive TUI: a network/timeout-class stream drop
+                    // after partial text (but before any tool call) should
+                    // preserve the partial reply and re-issue the request
+                    // with a runtime continuation message, bounded by
+                    // MAX_STREAM_RETRIES. This keeps the turn alive instead
+                    // of failing with a terminal-looking error.
+                    if should_resume_interactive_after_network_drop(
+                        self.config.terminal_chrome_enabled,
+                        network_class_error,
+                        any_content_received,
+                        tool_uses.is_empty(),
+                        stream_retry_attempts,
+                        self.cancel_token.is_cancelled(),
+                    ) {
+                        crate::logging::warn(format!(
+                            "Interactive stream resume: network drop after partial content; preserving fragment and scheduling request retry: {message}"
+                        ));
+                        stream_error.get_or_insert(stream_read_error_user_message(
+                            &message,
+                            any_content_received,
+                        ));
+                        interactive_stream_resume_pending = true;
+                        break;
+                    }
+                    let user_message =
+                        stream_read_error_user_message(&message, any_content_received);
+                    stream_error.get_or_insert(user_message.clone());
+                    let _ = self
+                        .tx_event
+                        .send(Event::error(ErrorEnvelope::classify(user_message, true)))
+                        .await;
+                    if stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            match event {
+                StreamEvent::MessageStart { message } => {
+                    // The chat-completions adapter emits a synthetic
+                    // MessageStart with a zeroed usage; only a usage that
+                    // carries data counts as provider-reported.
+                    usage_reported |= usage_has_reported_data(&message.usage);
+                    merge_stream_usage(&mut usage, message.usage);
+                }
+                StreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                } => match content_block {
+                    ContentBlockStart::Text { text } => {
+                        current_text_raw = text;
+                        current_text_visible.clear();
+                        tool_call_filter = ToolCallDeltaFilterState::default();
+                        let filtered = filter_tool_call_delta_with_state(
+                            &current_text_raw,
+                            &mut tool_call_filter,
+                        );
+                        if !fake_wrapper_notice_emitted
+                            && filtered.len() < current_text_raw.len()
+                            && contains_fake_tool_wrapper(&current_text_raw)
+                        {
+                            let _ = self.tx_event.send(Event::status(FAKE_WRAPPER_NOTICE)).await;
+                            fake_wrapper_notice_emitted = true;
+                        }
+                        current_text_visible.push_str(&filtered);
+                        current_block_kind = Some(ContentBlockKind::Text);
+                        last_text_index = Some(index as usize);
+                        let _ = self
+                            .tx_event
+                            .send(Event::MessageStarted {
+                                index: index as usize,
+                            })
+                            .await;
+                    }
+                    ContentBlockStart::Thinking { thinking } => {
+                        current_thinking = thinking;
+                        current_thinking_signature = None;
+                        current_thinking_state = None;
+                        current_block_kind = Some(ContentBlockKind::Thinking);
+                        let _ = self
+                            .tx_event
+                            .send(Event::ThinkingStarted {
+                                index: index as usize,
+                            })
+                            .await;
+                    }
+                    ContentBlockStart::ToolUse {
+                        id,
+                        name,
+                        input,
+                        caller,
+                        thought_signature,
+                    } => {
+                        crate::logging::info(format!(
+                            "Tool '{name}' block start. Initial input: {input:?}"
+                        ));
+                        current_block_kind = Some(ContentBlockKind::ToolUse);
+                        current_tool_indices.insert(index, tool_uses.len());
+                        // ToolCallStarted is deferred to ContentBlockStop —
+                        // see `final_tool_input`. Emitting here would ship
+                        // the placeholder `{}` and the cell would render
+                        // `<command>` / `<file>` literals to the user.
+                        tool_uses.push(ToolUseState {
+                            id,
+                            name,
+                            input,
+                            caller,
+                            thought_signature,
+                            input_buffer: String::new(),
+                            input_parse_error: None,
+                        });
+                    }
+                    ContentBlockStart::ServerToolUse { id, name, input } => {
+                        crate::logging::info(format!(
+                            "Server tool '{name}' block start. Initial input: {input:?}"
+                        ));
+                        current_block_kind = Some(ContentBlockKind::ToolUse);
+                        current_tool_indices.insert(index, tool_uses.len());
+                        tool_uses.push(ToolUseState {
+                            id,
+                            name,
+                            input,
+                            caller: None,
+                            thought_signature: None,
+                            input_buffer: String::new(),
+                            input_parse_error: None,
+                        });
+                    }
+                },
+                StreamEvent::ContentBlockDelta { index, delta } => match delta {
+                    Delta::TextDelta { text } => {
+                        stream_content_bytes = stream_content_bytes.saturating_add(text.len());
+                        current_text_raw.push_str(&text);
+                        let filtered =
+                            filter_tool_call_delta_with_state(&text, &mut tool_call_filter);
+                        if !fake_wrapper_notice_emitted
+                            && filtered.len() < text.len()
+                            && contains_fake_tool_wrapper(&current_text_raw)
+                        {
+                            let _ = self.tx_event.send(Event::status(FAKE_WRAPPER_NOTICE)).await;
+                            fake_wrapper_notice_emitted = true;
+                        }
+                        if !filtered.is_empty() {
+                            current_text_visible.push_str(&filtered);
+                            let _ = self
+                                .tx_event
+                                .send(Event::MessageDelta {
+                                    index: index as usize,
+                                    content: filtered,
+                                })
+                                .await;
+                        }
+                    }
+                    Delta::ThinkingDelta { thinking } => {
+                        stream_content_bytes = stream_content_bytes.saturating_add(thinking.len());
+                        current_thinking.push_str(&thinking);
+                        if !thinking.is_empty() {
+                            let _ = self
+                                .tx_event
+                                .send(Event::ThinkingDelta {
+                                    index: index as usize,
+                                    content: thinking,
+                                })
+                                .await;
+                        }
+                    }
+                    Delta::SignatureDelta { signature } => {
+                        // #3014: capture (and concatenate, defensively)
+                        // the signed-thinking signature for replay.
+                        match current_thinking_signature.as_mut() {
+                            Some(existing) => existing.push_str(&signature),
+                            None => current_thinking_signature = Some(signature),
+                        }
+                    }
+                    Delta::ReasoningStateDelta { state } => {
+                        current_thinking_state = Some(state);
+                    }
+                    Delta::InputJsonDelta { partial_json } => {
+                        if let Some(&tool_idx) = current_tool_indices.get(&index)
+                            && let Some(tool_state) = tool_uses.get_mut(tool_idx)
+                        {
+                            tool_state.input_buffer.push_str(&partial_json);
+                            crate::logging::info(format!(
+                                "Tool '{}' input delta: {} (buffer now: {})",
+                                tool_state.name, partial_json, tool_state.input_buffer
+                            ));
+                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
+                                tool_state.input = value.clone();
+                                crate::logging::info(format!(
+                                    "Tool '{}' input parsed: {:?}",
+                                    tool_state.name, value
+                                ));
+                            }
+                        }
+                    }
+                },
+                StreamEvent::ContentBlockStop { index } => {
+                    let stopped_kind = current_block_kind.take();
+                    match stopped_kind {
+                        Some(ContentBlockKind::Text) => {
+                            let flushed = flush_tool_call_delta_state(&mut tool_call_filter);
+                            if !flushed.is_empty() {
+                                current_text_visible.push_str(&flushed);
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::MessageDelta {
+                                        index: index as usize,
+                                        content: flushed,
+                                    })
+                                    .await;
+                            }
+                            pending_message_complete = true;
+                            last_text_index = Some(index as usize);
+                        }
+                        Some(ContentBlockKind::Thinking) => {
+                            let _ = self
+                                .tx_event
+                                .send(Event::ThinkingComplete {
+                                    index: index as usize,
+                                })
+                                .await;
+                        }
+                        Some(ContentBlockKind::ToolUse) | None => {}
+                    }
+                    // Route the Stop using event.index (via
+                    // `current_tool_indices`) rather than the single
+                    // `current_block_kind` slot. In an OpenAI batch
+                    // tool-call stream every Stop after the first sees
+                    // `stopped_kind = None` because `take()` cleared the
+                    // slot, so the original `matches!(stopped_kind, …)`
+                    // check would skip every tool except the last.
+                    if let Some(tool_idx) = current_tool_indices.remove(&index)
+                        && let Some(tool_state) = tool_uses.get_mut(tool_idx)
+                    {
+                        crate::logging::info(format!(
+                            "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
+                            tool_state.name, tool_state.input_buffer, tool_state.input
+                        ));
+                        if !tool_state.input_buffer.trim().is_empty() {
+                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
+                                tool_state.input = value;
+                                crate::logging::info(format!(
+                                    "Tool '{}' final input: {:?}",
+                                    tool_state.name, tool_state.input
+                                ));
+                            } else {
+                                crate::logging::warn(format!(
+                                    "Tool '{}' failed to parse final input buffer: '{}'",
+                                    tool_state.name, tool_state.input_buffer
+                                ));
+                                let error =
+                                    malformed_tool_arguments_error(&tool_state.input_buffer);
+                                tool_state.input_parse_error = Some(error);
+                                tool_state.input =
+                                    malformed_tool_arguments_input(&tool_state.input_buffer);
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::status(format!(
+                                        "⚠ Tool '{}' received malformed arguments from model",
+                                        tool_state.name
+                                    )))
+                                    .await;
+                            }
+                        } else {
+                            crate::logging::warn(format!(
+                                "Tool '{}' input buffer is empty, using initial input: {:?}",
+                                tool_state.name, tool_state.input
+                            ));
+                        }
+
+                        // Now that the input is finalized, announce the
+                        // tool call to the UI. Deferring to here is what
+                        // keeps the cell from rendering `<command>` /
+                        // `<file>` placeholders during the brief window
+                        // between block start and the last InputJsonDelta.
+                        let _ = self
+                            .tx_event
+                            .send(Event::ToolCallStarted {
+                                id: tool_state.id.clone(),
+                                name: tool_state.name.clone(),
+                                input: final_tool_input(tool_state),
+                            })
+                            .await;
+                    }
+                }
+                StreamEvent::MessageDelta {
+                    delta,
+                    usage: delta_usage,
+                } => {
+                    if let Some(reason) = delta.stop_reason {
+                        stop_reason = Some(reason);
+                    }
+                    if let Some(u) = delta_usage {
+                        usage_reported |= usage_has_reported_data(&u);
+                        merge_stream_usage(&mut usage, u);
+                    }
+                }
+                StreamEvent::MessageStop | StreamEvent::Ping => {}
+                StreamEvent::Error { error } => {
+                    // #3014: Anthropic SSE error event. The adapter
+                    // surfaces fatal errors as stream Err items; this
+                    // defensive arm keeps any passed-through error
+                    // visible instead of silently dropped.
+                    crate::logging::warn(format!("Provider stream error event: {error}"));
+                    stream_errors += 1;
+                }
+            }
+        }
+        StreamOutcome {
+            current_text_raw,
+            current_text_visible,
+            current_thinking,
+            current_thinking_signature,
+            current_thinking_state,
+            tool_uses,
+            usage,
+            usage_reported,
+            stop_reason,
+            pending_message_complete,
+            last_text_index,
+            stream_errors,
+            pending_steers,
+            sleep_resume_pending,
+            headless_stream_resume_pending,
+            interactive_stream_resume_pending,
+            stream_start,
+            first_token_at,
+            request_dispatched_at,
+            stream_error,
+        }
     }
 
     fn goal_snapshot_with_current_turn_usage(
