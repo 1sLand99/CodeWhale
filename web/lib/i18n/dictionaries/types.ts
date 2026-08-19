@@ -360,3 +360,35 @@ export interface DocsTroubleshootingDict {
   dockerToolboxNote: string;
   sourceNote: string;
 }
+
+/** `app/[locale]/docs/configuration/page.tsx`. */
+export interface DocsConfigurationDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  auditLead: string;
+  overlayTitle: string;
+  overlayLead: string;
+  overlayLimits: string;
+  credentialsTitle: string;
+  credentialsLead: string;
+  legacyTitle: string;
+  legacyLead: string;
+  sourceNote: string;
+}
+
+/** `app/[locale]/docs/constitution/page.tsx`. */
+export interface DocsConstitutionDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewCompanion: string;
+  overviewLead: string;
+  scopes: [string, string, string][];
+  authorityNote: string;
+  configurationLink: string;
+  sourceNote: string;
+}
