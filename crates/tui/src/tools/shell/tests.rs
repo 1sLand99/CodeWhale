@@ -3819,27 +3819,30 @@ async fn draining_completion_evidence_releases_the_retained_copy() {
 fn cleanup_bounds_finished_records_by_count() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
-    for index in 0..(MAX_FINISHED_SHELL_RECORDS + 40) {
-        let result = manager
-            .execute_with_options_env(
-                &echo_command(&format!("record-{index}")),
-                None,
-                10_000,
-                true,
-                None,
-                false,
-                None,
-                std::collections::HashMap::new(),
-            )
-            .expect("spawn");
-        let task_id = result.task_id.expect("task id");
-        wait_for_completed_shell(&mut manager, &task_id);
+    let seeded_count = MAX_FINISHED_SHELL_RECORDS + 40;
+    for index in 0..seeded_count {
+        // Give every fixture a deterministic ordering while keeping all of
+        // them far younger than the age ceiling. Lower ids are older.
+        manager.seed_finished_record_for_test(
+            format!("record-{index}"),
+            Duration::from_millis((seeded_count - index) as u64),
+        );
     }
     manager.cleanup(FINISHED_SHELL_MAX_AGE);
+    assert_eq!(manager.tracked_job_count(), MAX_FINISHED_SHELL_RECORDS);
     assert!(
-        manager.tracked_job_count() <= MAX_FINISHED_SHELL_RECORDS,
-        "finished records must be capped, got {}",
-        manager.tracked_job_count()
+        manager.inspect_job("record-39").is_err(),
+        "the oldest overflow record must be evicted"
+    );
+    assert!(
+        manager.inspect_job("record-40").is_ok(),
+        "the first record inside the cap must survive"
+    );
+    assert!(
+        manager
+            .inspect_job(&format!("record-{}", seeded_count - 1))
+            .is_ok(),
+        "the newest record must survive"
     );
 }
 

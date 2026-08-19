@@ -1719,6 +1719,50 @@ impl ShellManager {
         self.output_spill_dir = dir;
     }
 
+    /// Insert a finished job without spawning. Count-bound tests would
+    /// otherwise pay for 100+ live shells.
+    #[cfg(test)]
+    pub(crate) fn seed_finished_record_for_test(&mut self, id: impl Into<String>, age: Duration) {
+        let now = Instant::now();
+        let started_at = now.checked_sub(age).unwrap_or(now);
+        let id = id.into();
+        self.processes.insert(
+            id.clone(),
+            BackgroundShell {
+                id,
+                command: String::new(),
+                working_dir: self.default_workspace.clone(),
+                status: ShellStatus::Completed,
+                exit_code: Some(0),
+                started_at,
+                finished_at: Some(now),
+                last_output_at: now,
+                last_observed_output_len: 0,
+                sandbox_type: SandboxType::None,
+                linked_task_id: None,
+                owner_agent: None,
+                ownership: ShellOwnership::Managed,
+                stdout_buffer: new_shared_raw_output(),
+                stderr_buffer: Some(new_shared_raw_output()),
+                bounded_output: None,
+                heavy_permit: None,
+                stdout_cursor: 0,
+                stderr_cursor: 0,
+                completion_reported: false,
+                stdin: None,
+                child: None,
+                #[cfg(windows)]
+                windows_job: None,
+                stdout_thread: None,
+                stderr_thread: None,
+                work_lifecycle: None,
+                lifecycle_seq: 0,
+                last_lifecycle_status: None,
+                last_lifecycle_bytes: 0,
+            },
+        );
+    }
+
     /// Test-only observation of the workspace selected by runtime rebuilds.
     #[cfg(test)]
     pub(crate) fn default_workspace(&self) -> &Path {
