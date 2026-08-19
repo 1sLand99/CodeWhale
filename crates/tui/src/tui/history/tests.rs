@@ -1966,6 +1966,7 @@ fn generic_tool_cell_renders_rlm_with_rlm_label_not_swarm() {
 
 #[test]
 fn exploring_card_search_reads_as_find_not_read() {
+    use crate::localization::Locale;
     // #4145: a completed grep grouped under the exploration card must not
     // render `read done · Searching …`; the header verb has to agree with the
     // `Searching for …` label.
@@ -1975,27 +1976,47 @@ fn exploring_card_search_reads_as_find_not_read() {
             status: ToolStatus::Success,
         }],
     };
-    let header: String = cell.lines_with_motion(80, true)[0]
+    let header_en: String = cell.lines_with_motion_and_locale(80, true, Locale::En)[0]
         .spans
         .iter()
         .map(|s| s.content.as_ref())
         .collect::<String>();
     assert!(
-        header.contains("find done"),
-        "search card header should read `find done`: {header:?}"
+        header_en.contains("find done"),
+        "search card header should read `find done`: {header_en:?}"
     );
     assert!(
-        !header.contains("read done"),
-        "search card must not pair `read done` with a search label: {header:?}"
+        !header_en.contains("read done"),
+        "search card must not pair `read done` with a search label: {header_en:?}"
     );
     assert!(
-        header.contains("Searching for `TranscriptScroll`"),
-        "search label should remain intact: {header:?}"
+        header_en.contains("Searching for `TranscriptScroll`"),
+        "search label should remain intact: {header_en:?}"
+    );
+
+    // zh-Hans localization regression
+    let header_zh: String = cell.lines_with_motion_and_locale(80, true, Locale::ZhHans)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        header_zh.contains("find 完成"),
+        "zh-Hans search card header should read `find 完成`: {header_zh:?}"
+    );
+    assert!(
+        !header_zh.contains("find done") && !header_zh.contains("read done"),
+        "zh-Hans search card must not leak English done: {header_zh:?}"
+    );
+    assert!(
+        header_zh.contains("Searching for `TranscriptScroll`"),
+        "search label should remain intact in zh-Hans: {header_zh:?}"
     );
 }
 
 #[test]
 fn exploring_card_read_keeps_read_verb() {
+    use crate::localization::Locale;
     // The fix only re-verbs search-only cards — a plain read stays `read`.
     let cell = super::ExploringCell {
         entries: vec![super::ExploringEntry {
@@ -2003,14 +2024,29 @@ fn exploring_card_read_keeps_read_verb() {
             status: ToolStatus::Success,
         }],
     };
-    let header: String = cell.lines_with_motion(80, true)[0]
+    let header_en: String = cell.lines_with_motion_and_locale(80, true, Locale::En)[0]
         .spans
         .iter()
         .map(|s| s.content.as_ref())
         .collect::<String>();
     assert!(
-        header.contains("read done"),
-        "read card header should read `read done`: {header:?}"
+        header_en.contains("read done"),
+        "read card header should read `read done`: {header_en:?}"
+    );
+
+    // zh-Hans localization regression
+    let header_zh: String = cell.lines_with_motion_and_locale(80, true, Locale::ZhHans)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        header_zh.contains("read 完成"),
+        "zh-Hans read card header should read `read 完成`: {header_zh:?}"
+    );
+    assert!(
+        !header_zh.contains("read done"),
+        "zh-Hans read card must not leak English done: {header_zh:?}"
     );
 }
 
@@ -3664,22 +3700,203 @@ fn agent_spawn_suppresses_generic_card_in_favor_of_delegate_card() {
 
 #[test]
 fn finished_read_card_names_the_line_count() {
+    use crate::localization::Locale;
     use crate::tui::widgets::tool_card::ToolFamily;
-    let one = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Success, Some("hello\n"));
-    assert_eq!(one, "1 line");
-    let many = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Success, Some("a\nb\nc\n"));
-    assert_eq!(many, "3 lines");
-    let running = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Running, Some("a\nb"));
+
+    // English (en)
+    let zero_en =
+        super::tool_receipt_label(ToolFamily::Read, ToolStatus::Success, Some(""), Locale::En);
+    assert_eq!(zero_en, "done");
+    let one_en = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Success,
+        Some("hello\n"),
+        Locale::En,
+    );
+    assert_eq!(one_en, "1 line");
+    let many_en = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Success,
+        Some("a\nb\nc\n"),
+        Locale::En,
+    );
+    assert_eq!(many_en, "3 lines");
+    let find_en = super::tool_receipt_label(
+        ToolFamily::Find,
+        ToolStatus::Success,
+        Some("match 1\nmatch 2\n"),
+        Locale::En,
+    );
+    assert_eq!(find_en, "2 lines");
+    let running = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Running,
+        Some("a\nb"),
+        Locale::En,
+    );
     assert_eq!(running, "running");
+
+    // Simplified Chinese (zh-Hans)
+    let zero_zh = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Success,
+        Some(""),
+        Locale::ZhHans,
+    );
+    assert_eq!(zero_zh, "完成");
+    let one_zh = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Success,
+        Some("hello\n"),
+        Locale::ZhHans,
+    );
+    assert_eq!(one_zh, "1 行");
+    let many_zh = super::tool_receipt_label(
+        ToolFamily::Read,
+        ToolStatus::Success,
+        Some("a\nb\nc\n"),
+        Locale::ZhHans,
+    );
+    assert_eq!(many_zh, "3 行");
+    let find_zh = super::tool_receipt_label(
+        ToolFamily::Find,
+        ToolStatus::Success,
+        Some("match 1\nmatch 2\n"),
+        Locale::ZhHans,
+    );
+    assert_eq!(find_zh, "2 行");
 }
 
 #[test]
 fn finished_run_card_does_not_infer_stdio_streams_from_rendered_text() {
+    use crate::localization::Locale;
     use crate::tui::widgets::tool_card::ToolFamily;
-    let mixed = super::tool_receipt_label(
+
+    // English (en) — generic Run truthfulness: always localized done, never stdout/stderr counts
+    let mixed_en = super::tool_receipt_label(
         ToolFamily::Run,
         ToolStatus::Success,
         Some("stdout:\nok\nmore\nstderr:\nbad\n"),
+        Locale::En,
     );
-    assert_eq!(mixed, "done");
+    assert_eq!(mixed_en, "done");
+
+    let multiline_en = super::tool_receipt_label(
+        ToolFamily::Run,
+        ToolStatus::Success,
+        Some("line 1\nline 2\nline 3\n"),
+        Locale::En,
+    );
+    assert_eq!(multiline_en, "done");
+
+    // zh-Hans — generic Run truthfulness: always localized done
+    let mixed_zh = super::tool_receipt_label(
+        ToolFamily::Run,
+        ToolStatus::Success,
+        Some("stdout:\nok\nmore\nstderr:\nbad\n"),
+        Locale::ZhHans,
+    );
+    assert_eq!(mixed_zh, "完成");
+
+    let multiline_zh = super::tool_receipt_label(
+        ToolFamily::Run,
+        ToolStatus::Success,
+        Some("line 1\nline 2\nline 3\n"),
+        Locale::ZhHans,
+    );
+    assert_eq!(multiline_zh, "完成");
+}
+
+#[test]
+fn shell_formatter_cases_render_truthful_localized_run_receipts() {
+    use crate::localization::Locale;
+    use crate::tui::history::{ExecCell, ExecSource, RenderMode, ToolStatus};
+
+    // Formatter case 1: printf redirect write preview
+    let printf_cell = ExecCell {
+        command: "printf '%s\\n' 'hello' 'world' > src/main.rs".to_string(),
+        status: ToolStatus::Success,
+        output: Some("printf > src/main.rs\nhello\nworld\n".to_string()),
+        live_output: None,
+        shell_task_id: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: Some(42),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    };
+
+    let lines_en = printf_cell.render_with_locale(80, true, RenderMode::Live, Locale::En);
+    let header_en = lines_en[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        header_en.contains("done"),
+        "English shell header must contain localized done: {header_en}"
+    );
+    assert!(
+        !header_en.contains("3 lines") && !header_en.contains("stdout"),
+        "English shell header must not invent counts: {header_en}"
+    );
+
+    let lines_zh = printf_cell.render_with_locale(80, true, RenderMode::Live, Locale::ZhHans);
+    let header_zh = lines_zh[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        header_zh.contains("完成"),
+        "zh-Hans shell header must contain localized done: {header_zh}"
+    );
+    assert!(
+        !header_zh.contains("3 行") && !header_zh.contains("stdout"),
+        "zh-Hans shell header must not invent counts: {header_zh}"
+    );
+
+    // Formatter case 2: logical OR operator fallback
+    let or_cell = ExecCell {
+        command: "cargo build || echo fallback".to_string(),
+        status: ToolStatus::Success,
+        output: Some(
+            "   Compiling pkg v0.1.0\n   Finished dev [unoptimized + debuginfo]\n".to_string(),
+        ),
+        live_output: None,
+        shell_task_id: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: Some(120),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    };
+
+    let or_lines_en = or_cell.render_with_locale(80, true, RenderMode::Live, Locale::En);
+    let or_header_en = or_lines_en[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        or_header_en.contains("done"),
+        "English shell header must contain localized done: {or_header_en}"
+    );
+
+    let or_lines_zh = or_cell.render_with_locale(80, true, RenderMode::Live, Locale::ZhHans);
+    let or_header_zh = or_lines_zh[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        or_header_zh.contains("完成"),
+        "zh-Hans shell header must contain localized done: {or_header_zh}"
+    );
 }

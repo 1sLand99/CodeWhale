@@ -1225,6 +1225,10 @@ pub enum MessageId {
     ToolFamilyVerify,
     ToolFamilyThink,
     ToolFamilyGeneric,
+    // Tool execution receipt labels (card headers).
+    ToolReceiptDone,
+    ToolReceiptLinesSingular,
+    ToolReceiptLinesPlural,
     // Voice commands (/voice, /voice-send, /voice-control)
     CmdVoiceDescription,
     CmdVoiceSendDescription,
@@ -2925,6 +2929,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ToolFamilyVerify,
     MessageId::ToolFamilyThink,
     MessageId::ToolFamilyGeneric,
+    MessageId::ToolReceiptDone,
+    MessageId::ToolReceiptLinesSingular,
+    MessageId::ToolReceiptLinesPlural,
     MessageId::CmdVoiceDescription,
     MessageId::CmdVoiceSendDescription,
     MessageId::CmdVoiceControlDescription,
@@ -4779,6 +4786,44 @@ mod tests {
             MessageId::McpCapabilitiesAdvertised,
             MessageId::McpCapabilitiesLegacyFallback,
             MessageId::McpCapabilitiesNotObserved,
+        ];
+        let english = raw_locale_messages(Locale::En);
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for id in ids {
+                let key = format!("{id:?}");
+                let english_value = english
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English pack is missing {key}"));
+                let translated = pack
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+                if *locale != Locale::En {
+                    assert_ne!(
+                        translated,
+                        english_value,
+                        "{} must translate {key} instead of copying English",
+                        locale.tag()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_receipt_strings_have_complete_locale_parity() {
+        let ids = [
+            MessageId::ToolReceiptDone,
+            MessageId::ToolReceiptLinesSingular,
+            MessageId::ToolReceiptLinesPlural,
         ];
         let english = raw_locale_messages(Locale::En);
         for locale in Locale::shipped_complete() {
