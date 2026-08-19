@@ -845,8 +845,6 @@ impl Renderable for ChatWidget {
         );
 
         let area = _area;
-        crate::tui::hover_layer::begin_frame();
-
         // Repaint the full chat area with the codewhale-ink background each
         // frame. Ratatui's `Paragraph` only writes cells that contain text,
         // so cells the current frame's paragraph doesn't touch would
@@ -922,11 +920,6 @@ impl Renderable for ChatWidget {
                 true,
             );
         }
-        crate::tui::hover_layer::apply_resolved_effects(
-            buf,
-            !self.ocean_animated,
-            self.scroll_thumb,
-        );
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
@@ -1731,34 +1724,12 @@ impl Renderable for ComposerWidget<'_> {
                     entry.name.clone()
                 };
 
-                let name_display = {
-                    let display_width: usize = display_name.width();
-                    if display_width > label_width {
-                        let mut s = String::new();
-                        let mut w = 0;
-                        for ch in display_name.chars() {
-                            let cw = ch.width().unwrap_or(0);
-                            if w + cw + 1 > label_width {
-                                break;
-                            }
-                            s.push(ch);
-                            w += cw;
-                        }
-                        s.push('…');
-                        // pad to label_width display cols
-                        while s.width() < label_width {
-                            s.push(' ');
-                        }
-                        s
-                    } else {
-                        // pad to label_width display cols
-                        let mut s = display_name;
-                        while s.width() < label_width {
-                            s.push(' ');
-                        }
-                        s
-                    }
-                };
+                let name_was_truncated = display_name.width() > label_width;
+                let mut name_display =
+                    crate::tui::ui_text::truncate_line_to_width(&display_name, label_width);
+                while name_display.width() < label_width {
+                    name_display.push(' ');
+                }
 
                 // Skill marker prefix
                 let skill_prefix = if entry.is_skill { "✦" } else { " " };
@@ -1767,26 +1738,11 @@ impl Renderable for ComposerWidget<'_> {
                 // 1(" ") + 1(marker) + skill_prefix.width() + label_width + 2("  ")
                 let prefix_display_width = 1 + 1 + skill_prefix.width() + label_width + 2;
                 let desc_capacity = content_width.saturating_sub(prefix_display_width);
-                let desc_display = {
-                    let display_width: usize = entry.description.width();
-                    if display_width > desc_capacity && desc_capacity > 0 {
-                        let mut s = String::new();
-                        let mut w = 0;
-                        for ch in entry.description.chars() {
-                            let cw = ch.width().unwrap_or(0);
-                            if w + cw + 1 > desc_capacity {
-                                break;
-                            }
-                            s.push(ch);
-                            w += cw;
-                        }
-                        s.push('…');
-                        s
-                    } else {
-                        entry.description.clone()
-                    }
-                };
+                let description_was_truncated = entry.description.width() > desc_capacity;
+                let desc_display =
+                    crate::tui::ui_text::truncate_line_to_width(&entry.description, desc_capacity);
 
+                let row_line_index = lines.len();
                 lines.push(Line::from(vec![
                     Span::styled(" ", Style::default()),
                     Span::styled(marker, sel_style),
@@ -1795,6 +1751,25 @@ impl Renderable for ComposerWidget<'_> {
                     Span::styled("  ", desc_style),
                     Span::styled(desc_display, desc_style),
                 ]));
+
+                if name_was_truncated || description_was_truncated {
+                    let full_text = if entry.description.trim().is_empty() {
+                        display_name
+                    } else {
+                        format!("{display_name}  {}", entry.description)
+                    };
+                    let row_y = inner_area
+                        .y
+                        .saturating_add(u16::try_from(row_line_index).unwrap_or(u16::MAX));
+                    if row_y < inner_area.bottom() {
+                        crate::tui::hover_layer::register_rect(
+                            crate::tui::hover_hit::HoverTargetKind::TruncatedText,
+                            Rect::new(inner_area.x, row_y, inner_area.width, 1),
+                            full_text,
+                            false,
+                        );
+                    }
+                }
             }
         }
 
@@ -5664,6 +5639,55 @@ mod tests {
         assert!(!names.contains(&"/model deepseek-v4-pro"));
         assert!(!names.contains(&"/model deepseek-v4-flash"));
         assert!(!names.contains(&"/model deepseek-coder:1.3b"));
+    }
+
+    #[test]
+    fn truncated_slash_row_registers_its_full_localized_copy_for_hover() {
+        let mut app = create_test_app();
+        app.input = "/model".to_string();
+        app.cursor_position = app.input.len();
+        let full_name = "/model provider/very-long-model-identifier";
+        let full_description = "切换到这个模型并保留完整的本地化说明";
+        let entries = vec![SlashMenuEntry {
+            name: full_name.to_string(),
+            description: full_description.to_string(),
+            is_skill: false,
+            alias_hint: None,
+        }];
+        let area = Rect::new(0, 0, 36, 7);
+        let mut buf = Buffer::empty(area);
+
+        crate::tui::hover_layer::begin_frame();
+        ComposerWidget::new(&app, area.height, &entries, &[]).render(area, &mut buf);
+
+        let targets = crate::tui::hover_layer::registered_targets();
+        assert_eq!(targets.len(), 1, "targets: {targets:?}");
+        assert_eq!(
+            targets[0].kind,
+            crate::tui::hover_hit::HoverTargetKind::TruncatedText
+        );
+        assert!(targets[0].label.contains(full_name));
+        assert!(targets[0].label.contains(full_description));
+    }
+
+    #[test]
+    fn complete_slash_row_does_not_register_a_hover_popover() {
+        let mut app = create_test_app();
+        app.input = "/help".to_string();
+        app.cursor_position = app.input.len();
+        let entries = vec![SlashMenuEntry {
+            name: "/help".to_string(),
+            description: "Show help".to_string(),
+            is_skill: false,
+            alias_hint: None,
+        }];
+        let area = Rect::new(0, 0, 80, 7);
+        let mut buf = Buffer::empty(area);
+
+        crate::tui::hover_layer::begin_frame();
+        ComposerWidget::new(&app, area.height, &entries, &[]).render(area, &mut buf);
+
+        assert!(crate::tui::hover_layer::registered_targets().is_empty());
     }
 
     #[test]

@@ -13,6 +13,8 @@ use crate::tui::ocean;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoverTargetKind {
     Link,
+    /// A compact row that omitted part of its full source label.
+    TruncatedText,
 }
 
 /// Result of a hover hit-test.

@@ -389,7 +389,12 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         MouseEventKind::Moved => {
             // Update last mouse position for tooltip rendering + hover layer.
             app.last_mouse_pos = Some((mouse.column, mouse.row));
+            let previous_hover = crate::tui::hover_layer::current_hover();
             crate::tui::hover_layer::set_pointer(mouse.column, mouse.row);
+            crate::tui::hover_layer::resolve_hover();
+            if crate::tui::hover_layer::current_hover() != previous_hover {
+                app.needs_redraw = true;
+            }
 
             // Check sidebar sections for hover popovers. Only surface a
             // popover when the hovered row lost information in the compact
@@ -1606,7 +1611,9 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_transcript_text, build_context_menu_entries, sidebar_click_action};
+    use super::{
+        agent_transcript_text, build_context_menu_entries, handle_mouse_event, sidebar_click_action,
+    };
     use crate::config::Config;
     use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
@@ -1677,6 +1684,47 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn mouse_move(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn idle_pointer_enter_and_leave_request_hover_redraws() {
+        let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
+        crate::tui::hover_layer::clear_pointer();
+        crate::tui::hover_layer::begin_frame();
+        crate::tui::hover_layer::register_rect(
+            crate::tui::hover_hit::HoverTargetKind::TruncatedText,
+            Rect::new(10, 5, 20, 1),
+            "full clipped row",
+            false,
+        );
+
+        let mut app = create_test_app();
+        app.launch.visible = false;
+        app.needs_redraw = false;
+        handle_mouse_event(&mut app, mouse_move(12, 5));
+        assert!(
+            app.needs_redraw,
+            "entering a target must repaint while idle"
+        );
+        assert_eq!(
+            crate::tui::hover_layer::current_hover().map(|hit| hit.kind),
+            Some(crate::tui::hover_hit::HoverTargetKind::TruncatedText)
+        );
+
+        app.needs_redraw = false;
+        handle_mouse_event(&mut app, mouse_move(40, 5));
+        assert!(app.needs_redraw, "leaving a target must clear its popover");
+        assert!(crate::tui::hover_layer::current_hover().is_none());
+        crate::tui::hover_layer::clear_pointer();
     }
 
     #[test]

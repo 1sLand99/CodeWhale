@@ -687,6 +687,9 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
 
 pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
     let size = f.area();
+    // Hover targets belong to the whole composed frame. Resetting inside the
+    // transcript erased targets registered later by the composer and modals.
+    crate::tui::hover_layer::begin_frame();
     let shell_area = session_shell_area(size);
     // Keep the view stack's focus-context texture prototype (#4823) in step
     // with the parsed setting each frame: a plain enum/theme copy, no
@@ -1125,6 +1128,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             app.ui_theme.footer_bg,
         );
     }
+    crate::tui::hover_layer::apply_resolved_effects(
+        f.buffer_mut(),
+        app.effective_low_motion_for_status(),
+        &app.ui_theme,
+    );
     if !app.view_stack.is_empty() {
         // The live transcript overlay snapshots the app's history + active
         // cell on each render so streaming mutations propagate. Other views
