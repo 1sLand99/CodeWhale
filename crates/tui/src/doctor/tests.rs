@@ -8,6 +8,7 @@ fn default_probe_request_is_fully_offline() {
     assert!(!request.should_probe_api(false));
     assert!(!request.should_probe_api(true));
     assert!(!request.should_probe_mcp());
+    assert!(!request.should_probe_search());
 }
 
 fn ds4_config() -> crate::config::Config {
@@ -118,6 +119,15 @@ fn live_probe_flags_open_only_their_owned_boundary() {
     };
     assert!(!local.should_probe_api(false));
     assert!(local.should_probe_api(true));
+
+    let search = DoctorProbeRequest {
+        probe_search: true,
+        ..DoctorProbeRequest::default()
+    };
+    assert!(search.should_probe_search());
+    assert!(!search.should_check_updates());
+    assert!(!search.should_probe_api(false));
+    assert!(!search.should_probe_mcp());
 }
 
 #[test]
@@ -131,18 +141,184 @@ fn cli_defaults_doctor_offline_and_keeps_json_incompatible_with_live_flags() {
     assert!(!args.probe_api);
     assert!(!args.probe_local);
     assert!(!args.probe_mcp);
+    assert!(!args.probe_search);
 
-    for flag in [
-        "--check-updates",
-        "--probe-api",
-        "--probe-local",
-        "--probe-mcp",
-    ] {
-        assert!(
-            crate::Cli::try_parse_from(["codewhale-tui", "doctor", "--json", flag]).is_err(),
-            "--json unexpectedly accepted live flag {flag}"
-        );
+    let cli = crate::Cli::try_parse_from(["codewhale-tui", "doctor", "--probe-search"])
+        .expect("parse search probe");
+    let Some(crate::Commands::Doctor(args)) = cli.command else {
+        panic!("expected doctor command");
+    };
+    assert!(args.probe_search);
+    assert!(!args.probe_api);
+    assert!(!args.probe_local);
+    assert!(!args.probe_mcp);
+
+    for output_flag in ["--json", "--context-json"] {
+        for live_flag in [
+            "--check-updates",
+            "--probe-api",
+            "--probe-local",
+            "--probe-mcp",
+            "--probe-search",
+        ] {
+            assert!(
+                crate::Cli::try_parse_from(["codewhale-tui", "doctor", output_flag, live_flag,])
+                    .is_err(),
+                "{output_flag} unexpectedly accepted live flag {live_flag}"
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn search_probe_counts_any_http_response_as_transport_only() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = crate::config::Config {
+        search: Some(crate::config::SearchConfig {
+            provider: Some(crate::config::SearchProvider::DuckDuckGo),
+            base_url: Some(server.uri()),
+            api_key: None,
+        }),
+        ..Default::default()
+    };
+
+    let report = doctor_search_probe(
+        &config,
+        DoctorProbeRequest {
+            probe_search: true,
+            ..DoctorProbeRequest::default()
+        },
+    )
+    .await;
+    let lines = doctor_search_probe_lines(&report).join("\n");
+
+    assert!(matches!(
+        report,
+        DoctorSearchProbeReport::Reachable { status: 401, .. }
+    ));
+    assert!(lines.contains("responded (HTTP 401)"), "{lines}");
+    assert!(lines.contains("Transport only"), "{lines}");
+    assert!(lines.contains("authentication and search results were not tested"));
+    assert!(!lines.contains("search successful"));
+    let requests = server.received_requests().await.expect("recorded probe");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.query().is_none());
+    assert!(requests[0].body.is_empty());
+    assert!(requests[0].headers.get("authorization").is_none());
+    assert!(requests[0].headers.get("x-api-key").is_none());
+    assert!(requests[0].headers.get("cookie").is_none());
+}
+
+#[tokio::test]
+async fn search_probe_does_not_follow_redirects() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", "/redirected"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/redirected"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let config = crate::config::Config {
+        search: Some(crate::config::SearchConfig {
+            provider: Some(crate::config::SearchProvider::Searxng),
+            base_url: Some(server.uri()),
+            api_key: None,
+        }),
+        ..Default::default()
+    };
+
+    let report = doctor_search_probe(
+        &config,
+        DoctorProbeRequest {
+            probe_search: true,
+            ..DoctorProbeRequest::default()
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        report,
+        DoctorSearchProbeReport::Reachable { status: 302, .. }
+    ));
+}
+
+#[tokio::test]
+async fn search_probe_respects_network_policy_without_contacting_the_authority() {
+    let config = crate::config::Config {
+        search: Some(crate::config::SearchConfig {
+            provider: Some(crate::config::SearchProvider::Searxng),
+            base_url: Some("https://search.example/private?token=secret".to_string()),
+            api_key: None,
+        }),
+        network: Some(crate::config::NetworkPolicyToml {
+            default: "allow".to_string(),
+            deny: vec!["search.example".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let report = doctor_search_probe(
+        &config,
+        DoctorProbeRequest {
+            probe_search: true,
+            ..DoctorProbeRequest::default()
+        },
+    )
+    .await;
+    let lines = doctor_search_probe_lines(&report).join("\n");
+
+    assert_eq!(
+        report,
+        DoctorSearchProbeReport::PolicyDenied {
+            authority: "https://search.example".to_string()
+        }
+    );
+    assert!(!lines.contains("private"));
+    assert!(!lines.contains("token"));
+    assert!(!lines.contains("secret"));
+}
+
+#[tokio::test]
+async fn search_probe_skips_the_default_provider_when_web_search_is_disabled() {
+    let mut config = crate::config::Config::default();
+    config
+        .set_feature("web_search", false)
+        .expect("known feature");
+
+    let report = doctor_search_probe(
+        &config,
+        DoctorProbeRequest {
+            probe_search: true,
+            ..DoctorProbeRequest::default()
+        },
+    )
+    .await;
+
+    assert_eq!(report, DoctorSearchProbeReport::FeatureDisabled);
+    assert!(
+        doctor_search_probe_lines(&report)
+            .join("\n")
+            .contains("web_search feature is disabled")
+    );
 }
 
 #[test]

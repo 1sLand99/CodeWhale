@@ -43,6 +43,88 @@ const SOFYA_ENDPOINT: &str = "https://sofya.co/v1/search";
 const ERROR_BODY_PREVIEW_BYTES: usize = 512;
 const VOLCENGINE_MIN_TIMEOUT_MS: u64 = 90_000;
 
+/// Credential-free endpoint selected for an explicit doctor reachability
+/// probe. The ordinary search request builders remain the source of truth for
+/// provider endpoints; doctor borrows those endpoints without constructing a
+/// query or reading an API key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchProbeTarget {
+    pub(crate) url: reqwest::Url,
+    pub(crate) host: String,
+}
+
+/// Safe configuration failures for a search reachability probe.
+///
+/// These variants deliberately carry no configured URL: userinfo, paths, and
+/// query strings may contain credentials and must never be echoed by doctor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchProbeTargetError {
+    MissingBaseUrl,
+    UnsupportedBaseUrl,
+    InvalidBaseUrl,
+}
+
+/// Resolve the configured provider's transport endpoint for doctor.
+///
+/// Built-in endpoints keep their known request path. User-configured
+/// DuckDuckGo-compatible and SearXNG URLs are reduced to their HTTP(S)
+/// authority so the probe cannot transmit userinfo, path/query credentials,
+/// or a real search query.
+pub(crate) fn search_probe_target(
+    provider: SearchProvider,
+    base_url: Option<&str>,
+) -> Result<SearchProbeTarget, SearchProbeTargetError> {
+    let configured_base_url = configured_search_base_url(base_url);
+    if configured_base_url.is_some()
+        && !matches!(
+            provider,
+            SearchProvider::DuckDuckGo | SearchProvider::Searxng
+        )
+    {
+        return Err(SearchProbeTargetError::UnsupportedBaseUrl);
+    }
+
+    let (raw, configured) = match provider {
+        SearchProvider::Bing => (BING_ENDPOINT, false),
+        SearchProvider::DuckDuckGo => (
+            configured_base_url.unwrap_or(DUCKDUCKGO_ENDPOINT),
+            configured_base_url.is_some(),
+        ),
+        SearchProvider::Firecrawl => (FIRECRAWL_ENDPOINT, false),
+        SearchProvider::Tavily => (TAVILY_ENDPOINT, false),
+        SearchProvider::Bocha => (BOCHA_ENDPOINT, false),
+        SearchProvider::Metaso => (METASO_ENDPOINT, false),
+        SearchProvider::Searxng => (
+            configured_base_url.ok_or(SearchProbeTargetError::MissingBaseUrl)?,
+            true,
+        ),
+        SearchProvider::Baidu => (BAIDU_ENDPOINT, false),
+        SearchProvider::Volcengine => (VOLCENGINE_RESPONSES_ENDPOINT, false),
+        SearchProvider::Sofya => (SOFYA_ENDPOINT, false),
+    };
+
+    let mut url = reqwest::Url::parse(raw).map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(SearchProbeTargetError::InvalidBaseUrl);
+    }
+
+    url.set_fragment(None);
+    url.set_query(None);
+    if configured {
+        url.set_username("")
+            .map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+        url.set_password(None)
+            .map_err(|_| SearchProbeTargetError::InvalidBaseUrl)?;
+        url.set_path("/");
+    }
+    let host = url
+        .host_str()
+        .ok_or(SearchProbeTargetError::InvalidBaseUrl)?
+        .to_string();
+
+    Ok(SearchProbeTarget { url, host })
+}
+
 /// Returns `Ok(())` if the policy allows the call, or a `ToolError` otherwise.
 /// Falls through silently when no policy is attached (back-compat).
 pub(crate) fn check_policy(
@@ -1971,14 +2053,15 @@ fn duckduckgo_allows_bing_fallback(base_url: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ERROR_BODY_PREVIEW_BYTES, ScrapeEndpoints, WebSearchTool, baidu_search_payload,
-        bocha_error_message, domain_matches, duckduckgo_search_url, extract_search_query,
-        finalize_search_response, optional_search_max_results, parse_baidu_results,
-        parse_bocha_results, parse_metaso_results, parse_searxng_results, parse_sofya_results,
-        parse_tavily_results, parse_volcengine_results, register_search_citations, rerank,
-        run_scrape_search_with_endpoints, sanitize_error_body, searxng_search_url,
-        truncate_error_body, volcengine_extract_text,
+        ERROR_BODY_PREVIEW_BYTES, ScrapeEndpoints, SearchProbeTargetError, WebSearchTool,
+        baidu_search_payload, bocha_error_message, domain_matches, duckduckgo_search_url,
+        extract_search_query, finalize_search_response, optional_search_max_results,
+        parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
+        parse_sofya_results, parse_tavily_results, parse_volcengine_results,
+        register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
+        search_probe_target, searxng_search_url, truncate_error_body, volcengine_extract_text,
     };
+    use crate::config::SearchProvider;
     use crate::tools::web::contract::{
         BackendId, BackendSearch, CapabilityState, DegradedReason, QueryCapabilities, QueryKnob,
         Recency, SearchQuery, SearchResult,
@@ -1986,6 +2069,72 @@ mod tests {
     use crate::tools::web::scrape::{decode_html_entities, normalize_bing_url};
     use serde_json::json;
     use std::time::Instant;
+
+    #[test]
+    fn doctor_search_probe_targets_cover_every_builtin_provider() {
+        let cases = [
+            (SearchProvider::Bing, "https://www.bing.com/search"),
+            (
+                SearchProvider::DuckDuckGo,
+                "https://html.duckduckgo.com/html/",
+            ),
+            (
+                SearchProvider::Firecrawl,
+                "https://api.firecrawl.dev/v2/search",
+            ),
+            (SearchProvider::Tavily, "https://api.tavily.com/search"),
+            (
+                SearchProvider::Bocha,
+                "https://api.bochaai.com/v1/web-search",
+            ),
+            (SearchProvider::Metaso, "https://metaso.cn/api/v1"),
+            (
+                SearchProvider::Baidu,
+                "https://qianfan.baidubce.com/v2/ai_search/web_search",
+            ),
+            (
+                SearchProvider::Volcengine,
+                "https://ark.cn-beijing.volces.com/api/v3/responses",
+            ),
+            (SearchProvider::Sofya, "https://sofya.co/v1/search"),
+        ];
+
+        for (provider, expected) in cases {
+            let target = search_probe_target(provider, None).expect("built-in target");
+            assert_eq!(target.url.as_str(), expected, "{provider:?}");
+            assert_eq!(target.host, target.url.host_str().unwrap(), "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_search_probe_strips_every_secret_capable_custom_url_component() {
+        let target = search_probe_target(
+            SearchProvider::Searxng,
+            Some(
+                "https://URL-USER:URL-PASSWORD@search.example:8443/private/URL-PATH?URL-QUERY=secret#URL-FRAGMENT",
+            ),
+        )
+        .expect("credential-free target");
+
+        assert_eq!(target.url.as_str(), "https://search.example:8443/");
+        assert_eq!(target.host, "search.example");
+    }
+
+    #[test]
+    fn doctor_search_probe_rejects_configuration_that_runtime_cannot_use() {
+        assert_eq!(
+            search_probe_target(SearchProvider::Searxng, None),
+            Err(SearchProbeTargetError::MissingBaseUrl)
+        );
+        assert_eq!(
+            search_probe_target(SearchProvider::Tavily, Some("https://ignored.example")),
+            Err(SearchProbeTargetError::UnsupportedBaseUrl)
+        );
+        assert_eq!(
+            search_probe_target(SearchProvider::DuckDuckGo, Some("file:///tmp/search")),
+            Err(SearchProbeTargetError::InvalidBaseUrl)
+        );
+    }
 
     #[test]
     fn bing_ckurl_with_html_entities_decodes_real_url() {

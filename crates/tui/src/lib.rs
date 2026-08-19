@@ -1027,6 +1027,13 @@ struct DoctorArgs {
         conflicts_with_all = ["json", "context_json"]
     )]
     probe_mcp: bool,
+    /// Opt in to a credential-free transport probe of the selected search provider
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    probe_search: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1997,6 +2004,7 @@ async fn run_async_main_dispatch(
                         probe_api: args.probe_api,
                         probe_local: args.probe_local,
                         probe_mcp: args.probe_mcp,
+                        probe_search: args.probe_search,
                     };
                     run_doctor(
                         &config,
@@ -4490,6 +4498,13 @@ async fn run_doctor(
             );
             println!("    Run `codewhale doctor --probe-api` to opt in.");
         }
+    }
+
+    println!();
+    println!("{}", "Search Provider Reachability:".bold());
+    let search_probe = crate::doctor::doctor_search_probe(config, probes).await;
+    for line in crate::doctor::doctor_search_probe_lines(&search_probe) {
+        println!("  {line}");
     }
 
     // MCP configuration
@@ -7064,6 +7079,8 @@ fn doctor_search_provider_json(config: &Config) -> serde_json::Value {
     json!({
         "provider": search_provider.provider.as_str(),
         "source": search_provider.source.as_str(),
+        "reachability": "not_checked",
+        "reachability_reason": "offline_json",
     })
 }
 
@@ -13945,6 +13962,8 @@ mod doctor_endpoint_tests {
         }
         assert_eq!(report["provider"], "duckduckgo");
         assert_eq!(report["source"], "config");
+        assert_eq!(report["reachability"], "not_checked");
+        assert_eq!(report["reachability_reason"], "offline_json");
     }
 
     #[test]
@@ -13961,6 +13980,7 @@ mod doctor_endpoint_tests {
         }
         assert_eq!(report["provider"], "tavily");
         assert_eq!(report["source"], "env override");
+        assert_eq!(report["reachability"], "not_checked");
     }
 
     #[test]

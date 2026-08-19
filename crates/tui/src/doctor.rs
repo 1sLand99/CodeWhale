@@ -1,6 +1,7 @@
 //! Structural, offline-by-default diagnostics shared by doctor renderers.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -258,6 +259,7 @@ pub(crate) struct DoctorProbeRequest {
     pub(crate) probe_api: bool,
     pub(crate) probe_local: bool,
     pub(crate) probe_mcp: bool,
+    pub(crate) probe_search: bool,
 }
 
 impl DoctorProbeRequest {
@@ -281,6 +283,177 @@ impl DoctorProbeRequest {
     /// Whether configured MCP processes may be started and contacted.
     pub(crate) fn should_probe_mcp(self) -> bool {
         self.probe_mcp
+    }
+
+    /// Whether the selected web-search provider authority may be contacted.
+    pub(crate) fn should_probe_search(self) -> bool {
+        self.probe_search
+    }
+}
+
+const SEARCH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded, credential-free reachability result for the configured search
+/// provider. This intentionally cannot represent a successful search or valid
+/// authentication: a HEAD response proves transport reachability only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DoctorSearchProbeReport {
+    NotChecked,
+    FeatureDisabled,
+    ConfigurationError(crate::tools::web_search::SearchProbeTargetError),
+    PolicyDenied {
+        authority: String,
+    },
+    PolicyApprovalRequired {
+        authority: String,
+    },
+    Reachable {
+        authority: String,
+        status: u16,
+    },
+    Unreachable {
+        authority: String,
+        failure: DoctorSearchProbeFailure,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DoctorSearchProbeFailure {
+    Timeout,
+    Connection,
+    Request,
+}
+
+/// Probe the selected search provider without reading credentials, issuing a
+/// query, following redirects, or writing a network-policy audit receipt.
+pub(crate) async fn doctor_search_probe(
+    config: &crate::config::Config,
+    probes: DoctorProbeRequest,
+) -> DoctorSearchProbeReport {
+    use crate::network_policy::{Decision, NetworkPolicyDecider};
+
+    if !probes.should_probe_search() {
+        return DoctorSearchProbeReport::NotChecked;
+    }
+    if !config
+        .features()
+        .enabled(crate::features::Feature::WebSearch)
+    {
+        return DoctorSearchProbeReport::FeatureDisabled;
+    }
+
+    let provider = config.search_provider();
+    let base_url = config
+        .search
+        .as_ref()
+        .and_then(|search| search.base_url.as_deref());
+    let target = match crate::tools::web_search::search_probe_target(provider, base_url) {
+        Ok(target) => target,
+        Err(error) => return DoctorSearchProbeReport::ConfigurationError(error),
+    };
+    let authority = structural_url_authority(target.url.as_str());
+
+    if let Some(policy) = config.network.clone().map(|network| {
+        // Doctor is a read-only diagnostic. Evaluate the same typed policy as
+        // web_search, but do not attach the runtime audit writer.
+        NetworkPolicyDecider::new(network.into_runtime(), None)
+    }) {
+        match policy.evaluate(&target.host, "web_search") {
+            Decision::Allow => {}
+            Decision::Deny => return DoctorSearchProbeReport::PolicyDenied { authority },
+            Decision::Prompt => {
+                return DoctorSearchProbeReport::PolicyApprovalRequired { authority };
+            }
+        }
+    }
+
+    let client = match crate::tls::reqwest_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(SEARCH_PROBE_TIMEOUT)
+        .timeout(SEARCH_PROBE_TIMEOUT)
+        .user_agent(concat!("codewhale-doctor/", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            return DoctorSearchProbeReport::Unreachable {
+                authority,
+                failure: DoctorSearchProbeFailure::Request,
+            };
+        }
+    };
+
+    match client.head(target.url).send().await {
+        Ok(response) => DoctorSearchProbeReport::Reachable {
+            authority,
+            status: response.status().as_u16(),
+        },
+        Err(error) => {
+            let failure = if error.is_timeout() {
+                DoctorSearchProbeFailure::Timeout
+            } else if error.is_connect() {
+                DoctorSearchProbeFailure::Connection
+            } else {
+                DoctorSearchProbeFailure::Request
+            };
+            DoctorSearchProbeReport::Unreachable { authority, failure }
+        }
+    }
+}
+
+/// Plain, bounded doctor copy for a search reachability result.
+pub(crate) fn doctor_search_probe_lines(report: &DoctorSearchProbeReport) -> Vec<String> {
+    use crate::tools::web_search::SearchProbeTargetError;
+
+    match report {
+        DoctorSearchProbeReport::NotChecked => vec![
+            "· not checked (offline default)".to_string(),
+            "Run `codewhale doctor --probe-search` to test the selected provider authority."
+                .to_string(),
+        ],
+        DoctorSearchProbeReport::FeatureDisabled => vec![
+            "· not checked because the web_search feature is disabled".to_string(),
+            "Enable web_search before probing its provider.".to_string(),
+        ],
+        DoctorSearchProbeReport::ConfigurationError(error) => {
+            let detail = match error {
+                SearchProbeTargetError::MissingBaseUrl => {
+                    "SearXNG requires an explicit [search] base_url"
+                }
+                SearchProbeTargetError::UnsupportedBaseUrl => {
+                    "[search] base_url is supported only for DuckDuckGo-compatible or SearXNG providers"
+                }
+                SearchProbeTargetError::InvalidBaseUrl => {
+                    "the configured [search] base_url is not a valid HTTP(S) authority"
+                }
+            };
+            vec![format!("! not probed: {detail}")]
+        }
+        DoctorSearchProbeReport::PolicyDenied { authority } => vec![
+            format!("! {authority} blocked by configured network policy"),
+            "The same policy blocks web_search; update /network only if this authority should be allowed."
+                .to_string(),
+        ],
+        DoctorSearchProbeReport::PolicyApprovalRequired { authority } => vec![
+            format!("! {authority} requires network approval"),
+            "Allow the authority with /network, then rerun this probe.".to_string(),
+        ],
+        DoctorSearchProbeReport::Reachable { authority, status } => vec![
+            format!("✓ {authority} responded (HTTP {status})"),
+            "Transport only; authentication and search results were not tested.".to_string(),
+        ],
+        DoctorSearchProbeReport::Unreachable { authority, failure } => {
+            let detail = match failure {
+                DoctorSearchProbeFailure::Timeout => "timed out",
+                DoctorSearchProbeFailure::Connection => "connection, DNS, or TLS setup failed",
+                DoctorSearchProbeFailure::Request => "request failed",
+            };
+            vec![
+                format!("✗ {authority} {detail}"),
+                "No search API key or query was sent; provider error details were omitted."
+                    .to_string(),
+            ]
+        }
     }
 }
 
