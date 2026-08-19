@@ -649,6 +649,56 @@ fn runtime_auth_ignores_blank_configured_tokens() {
 }
 
 #[test]
+fn runtime_token_environment_prefers_the_codewhale_name() {
+    let environment = runtime_token_environment(&|name| match name {
+        RUNTIME_TOKEN_ENV => Some(" canonical-token ".to_string()),
+        LEGACY_RUNTIME_TOKEN_ENV => Some("legacy-token".to_string()),
+        _ => None,
+    });
+
+    assert_eq!(environment.token.as_deref(), Some("canonical-token"));
+    assert!(!environment.legacy_alias_used);
+    assert!(runtime_token_alias_warning(None, &environment).is_none());
+}
+
+#[test]
+fn runtime_token_environment_falls_through_a_blank_primary_to_the_legacy_alias() {
+    let environment = runtime_token_environment(&|name| match name {
+        RUNTIME_TOKEN_ENV => Some(" \t ".to_string()),
+        LEGACY_RUNTIME_TOKEN_ENV => Some(" legacy-token ".to_string()),
+        _ => None,
+    });
+
+    assert_eq!(environment.token.as_deref(), Some("legacy-token"));
+    assert!(environment.legacy_alias_used);
+}
+
+#[test]
+fn consumed_legacy_runtime_token_reports_one_value_free_deprecation_line() {
+    let secret = "legacy-super-secret-token";
+    let environment = runtime_token_environment(&|name| {
+        (name == LEGACY_RUNTIME_TOKEN_ENV).then(|| secret.to_string())
+    });
+    let warning = runtime_token_alias_warning(None, &environment).expect("legacy warning");
+
+    assert_eq!(warning.lines().count(), 1);
+    assert!(warning.contains(LEGACY_RUNTIME_TOKEN_ENV));
+    assert!(warning.contains(RUNTIME_TOKEN_ENV));
+    assert!(warning.contains("0.10.0"));
+    assert!(!warning.contains(secret));
+}
+
+#[test]
+fn explicit_cli_runtime_token_does_not_warn_about_an_unused_legacy_alias() {
+    let environment = runtime_token_environment(&|name| {
+        (name == LEGACY_RUNTIME_TOKEN_ENV).then(|| "legacy-token".to_string())
+    });
+
+    assert!(runtime_token_alias_warning(Some("cli-token"), &environment).is_none());
+    assert!(runtime_token_alias_warning(Some(" \t"), &environment).is_some());
+}
+
+#[test]
 fn url_query_component_percent_encodes_token() {
     assert_eq!(
         url_query_component("abc ABC+/?:=&%"),

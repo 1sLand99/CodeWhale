@@ -103,6 +103,45 @@ use self::sessions::{messages_from_thread_detail, session_to_detail};
 use self::workspace::collect_workspace_status;
 use self::workspace::{collect_workspace_git_metadata, workspace_status};
 
+const RUNTIME_TOKEN_ENV: &str = "CODEWHALE_RUNTIME_TOKEN";
+const LEGACY_RUNTIME_TOKEN_ENV: &str = "DEEPSEEK_RUNTIME_TOKEN";
+const LEGACY_RUNTIME_TOKEN_WARNING: &str = "Warning: DEEPSEEK_RUNTIME_TOKEN is deprecated; use \
+CODEWHALE_RUNTIME_TOKEN (the legacy alias is removed in 0.10.0).";
+
+struct RuntimeTokenEnvironment {
+    token: Option<String>,
+    legacy_alias_used: bool,
+}
+
+fn runtime_token_environment(lookup: &dyn Fn(&str) -> Option<String>) -> RuntimeTokenEnvironment {
+    let nonblank = |name| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+
+    if let Some(token) = nonblank(RUNTIME_TOKEN_ENV) {
+        return RuntimeTokenEnvironment {
+            token: Some(token),
+            legacy_alias_used: false,
+        };
+    }
+
+    let token = nonblank(LEGACY_RUNTIME_TOKEN_ENV);
+    RuntimeTokenEnvironment {
+        legacy_alias_used: token.is_some(),
+        token,
+    }
+}
+
+fn runtime_token_alias_warning(
+    cli_token: Option<&str>,
+    environment: &RuntimeTokenEnvironment,
+) -> Option<&'static str> {
+    let cli_token_is_used = cli_token.is_some_and(|token| !token.trim().is_empty());
+    (!cli_token_is_used && environment.legacy_alias_used).then_some(LEGACY_RUNTIME_TOKEN_WARNING)
+}
+
 #[derive(Clone)]
 pub struct RuntimeApiState {
     config: Arc<parking_lot::RwLock<Config>>,
@@ -820,12 +859,12 @@ pub async fn run_http_server(
     );
 
     let sessions_dir = default_sessions_dir().unwrap_or_else(|_| fallback_sessions_dir());
-    let runtime_token_env = std::env::var("CODEWHALE_RUNTIME_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("DEEPSEEK_RUNTIME_TOKEN").ok());
+    let runtime_token_env = runtime_token_environment(&|name| std::env::var(name).ok());
+    let runtime_token_alias_warning =
+        runtime_token_alias_warning(options.auth_token.as_deref(), &runtime_token_env);
     let resolved_auth = resolve_runtime_auth(
         options.auth_token.clone(),
-        runtime_token_env,
+        runtime_token_env.token,
         options.insecure_no_auth,
     );
     let runtime_token = resolved_auth.token.clone();
@@ -881,6 +920,9 @@ pub async fn run_http_server(
     println!("Runtime API listening on http://{bound_addr}");
     for line in runtime_auth_status_lines(&resolved_auth) {
         println!("{line}");
+    }
+    if let Some(warning) = runtime_token_alias_warning {
+        println!("{warning}");
     }
     if options.mobile {
         print_mobile_urls(
