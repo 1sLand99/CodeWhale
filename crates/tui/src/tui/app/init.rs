@@ -678,13 +678,13 @@ impl App {
                 state.panel = crate::tui::work_surface::RailPanel::parse(&settings.rail_panel);
                 state
             },
-            hunt: HuntState::default(),
+            goal: HostGoalState::default(),
             session: SessionState::default(),
             active_allowed_tools: None,
             pausable: false,
             pending_route_save: None,
             paused: false,
-            paused_quarry: None,
+            paused_goal_objective: None,
             history: Vec::new(),
             history_version: 0,
             transcript_identity_epoch: 0,

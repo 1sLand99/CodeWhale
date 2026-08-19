@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use crate::localization::Locale;
-use crate::tui::app::HuntVerdict;
+use crate::tools::goal::GoalStatus;
 
 use ratatui::{
     style::Style,
@@ -66,13 +66,13 @@ impl SidebarWorkSummary {
 /// quarry; the work summary uses this so a completed goal can still render
 /// with its DONE state.
 pub(crate) fn live_goal_objective(app: &App) -> Option<String> {
-    if app.paused || app.paused_quarry.is_some() {
-        app.hunt
-            .quarry
+    if app.paused || app.paused_goal_objective.is_some() {
+        app.goal
+            .objective
             .clone()
-            .or_else(|| app.paused_quarry.clone())
+            .or_else(|| app.paused_goal_objective.clone())
     } else {
-        app.hunt.quarry.clone()
+        app.goal.objective.clone()
     }
 }
 
@@ -80,10 +80,10 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
     fn live_pause_indicator(app: &App) -> Option<String> {
         if app.paused && app.is_loading {
             Some("(Pausing)".to_string())
-        } else if app.paused || app.paused_quarry.is_some() {
+        } else if app.paused || app.paused_goal_objective.is_some() {
             Some("(Paused)".to_string())
-        } else if app.hunt.verdict == HuntVerdict::Wounded {
-            Some(match app.hunt.pause_reason {
+        } else if app.goal.status == GoalStatus::Paused {
+            Some(match app.goal.pause_reason {
                 Some(reason) => format!("(Paused: {})", reason.label()),
                 None => "(Paused)".to_string(),
             })
@@ -94,14 +94,15 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
 
     fn apply_live_goal_state(summary: &mut SidebarWorkSummary, app: &App) {
         summary.goal_objective = live_goal_objective(app);
-        summary.goal_token_budget = app.hunt.token_budget;
-        summary.goal_completed = app.hunt.verdict == HuntVerdict::Hunted;
-        summary.goal_started_at = app.hunt.started_at;
-        summary.goal_finished_at = app.hunt.finished_at;
+        summary.goal_token_budget = app.goal.token_budget;
+        summary.goal_completed = app.goal.status == GoalStatus::Complete;
+        summary.goal_started_at = app.goal.started_at;
+        summary.goal_finished_at = app.goal.finished_at;
         summary.tokens_used = app.session.total_conversation_tokens;
         summary.pause_indicator = live_pause_indicator(app);
-        summary.workflow_paused =
-            app.paused || app.paused_quarry.is_some() || app.hunt.verdict == HuntVerdict::Wounded;
+        summary.workflow_paused = app.paused
+            || app.paused_goal_objective.is_some()
+            || app.goal.status == GoalStatus::Paused;
     }
 
     let fresh = (|| {
@@ -120,10 +121,10 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
 
         let mut summary = SidebarWorkSummary {
             goal_objective: live_goal_objective(app),
-            goal_token_budget: app.hunt.token_budget,
-            goal_completed: app.hunt.verdict == HuntVerdict::Hunted,
-            goal_started_at: app.hunt.started_at,
-            goal_finished_at: app.hunt.finished_at,
+            goal_token_budget: app.goal.token_budget,
+            goal_completed: app.goal.status == GoalStatus::Complete,
+            goal_started_at: app.goal.started_at,
+            goal_finished_at: app.goal.finished_at,
             tokens_used: app.session.total_conversation_tokens,
             checklist_completion_pct,
             checklist_items,
@@ -132,8 +133,8 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             state_updating: false,
             pause_indicator: live_pause_indicator(app),
             workflow_paused: app.paused
-                || app.paused_quarry.is_some()
-                || app.hunt.verdict == HuntVerdict::Wounded,
+                || app.paused_goal_objective.is_some()
+                || app.goal.status == GoalStatus::Paused,
         };
         apply_live_goal_state(&mut summary, app);
         Some(summary)
@@ -1227,9 +1228,10 @@ mod tests {
     use crate::localization::Locale;
     use crate::palette;
     use crate::palette::PaletteMode;
+    use crate::tools::goal::GoalStatus;
     use crate::tools::todo::TodoStatus;
     use crate::tui::app::{
-        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App, HuntVerdict,
+        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App,
         SidebarHoverSection, SidebarHoverState, SidebarRowAction, TuiOptions,
     };
     use ratatui::text::Line;
@@ -1636,16 +1638,16 @@ mod tests {
     #[test]
     fn sidebar_work_summary_keeps_live_fields_on_cache_fallback() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("test quarry".to_string());
-        app.hunt.verdict = HuntVerdict::Hunted;
+        app.goal.objective = Some("test quarry".to_string());
+        app.goal.status = GoalStatus::Complete;
         {
             let mut todos = app.todos.try_lock().expect("todos lock");
             todos.add("item".to_string(), TodoStatus::Pending);
         }
         let _first = sidebar_work_summary(&mut app);
 
-        app.hunt.quarry = Some("updated quarry".to_string());
-        app.hunt.verdict = HuntVerdict::Hunting;
+        app.goal.objective = Some("updated quarry".to_string());
+        app.goal.status = GoalStatus::Active;
         let held_arc = app.todos.clone();
         let _held = held_arc.try_lock().expect("hold todos lock");
 
@@ -1656,11 +1658,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_work_summary_uses_paused_quarry_when_goal_is_cleared() {
+    fn sidebar_work_summary_uses_paused_goal_objective_when_goal_is_cleared() {
         let mut app = create_test_app();
-        app.hunt.quarry = None;
+        app.goal.objective = None;
         app.paused = true;
-        app.paused_quarry = Some("Scan nested git repositories".to_string());
+        app.paused_goal_objective = Some("Scan nested git repositories".to_string());
 
         let summary = sidebar_work_summary(&mut app);
 
@@ -1675,9 +1677,9 @@ mod tests {
     #[test]
     fn sidebar_names_goal_pause_reason() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("Finish within budget".to_string());
-        app.hunt.verdict = HuntVerdict::Wounded;
-        app.hunt.pause_reason = Some(crate::tools::goal::GoalPauseReason::BudgetLimit);
+        app.goal.objective = Some("Finish within budget".to_string());
+        app.goal.status = GoalStatus::Paused;
+        app.goal.pause_reason = Some(crate::tools::goal::GoalPauseReason::BudgetLimit);
 
         let summary = sidebar_work_summary(&mut app);
 
@@ -1691,9 +1693,9 @@ mod tests {
     #[test]
     fn work_panel_renders_paused_command_goal() {
         let mut app = create_test_app();
-        app.hunt.quarry = None;
+        app.goal.objective = None;
         app.paused = false;
-        app.paused_quarry = Some("Deploy to staging".to_string());
+        app.paused_goal_objective = Some("Deploy to staging".to_string());
 
         let summary = sidebar_work_summary(&mut app);
         let text = lines_to_text(&work_panel_lines(

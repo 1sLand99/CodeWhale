@@ -635,8 +635,8 @@ fn add_app_runtime_entries(builder: &mut ReportBuilder, app: &App) {
     }
 
     if let Some(goal) = app
-        .hunt
-        .quarry
+        .goal
+        .objective
         .as_deref()
         .filter(|goal| !goal.trim().is_empty())
     {

@@ -167,8 +167,8 @@ pub(crate) async fn build_preview_request_inputs(
                 crate::route_budget::known_route_limits(planned.route.candidate.limits()),
                 app.mode,
                 paused_dispatch.goal_objective(app),
-                app.hunt.verdict.goal_status(),
-                app.hunt.token_budget,
+                app.goal.status,
+                app.goal.token_budget,
                 app.translation_enabled,
                 app.verbosity.clone(),
             );
@@ -233,9 +233,9 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         todos: app.todos.clone(),
         plan_state: app.plan_state.clone(),
         goal_state: crate::tools::goal::new_shared_goal_state_from_host_status(
-            app.hunt.quarry.clone(),
-            app.hunt.token_budget,
-            app.hunt.verdict.goal_status(),
+            app.goal.objective.clone(),
+            app.goal.token_budget,
+            app.goal.status,
         ),
         max_spawn_depth: config.subagent_max_spawn_depth_for_provider(provider),
         subagent_token_budget: config.subagent_token_budget_for_provider(provider),
@@ -278,9 +278,9 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         speech_output_dir: config.speech_output_dir(),
         vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
-        goal_objective: app.hunt.quarry.clone(),
-        goal_token_budget: app.hunt.token_budget,
-        goal_status: app.hunt.verdict.goal_status(),
+        goal_objective: app.goal.objective.clone(),
+        goal_token_budget: app.goal.token_budget,
+        goal_status: app.goal.status,
         goal_max_continuations: config.goal_max_continuations(),
         goal_continuation_delay_seconds: config.goal_continuation_delay_seconds(),
         locale_tag: app.ui_locale.tag().to_string(),
@@ -308,7 +308,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
 
 #[cfg(test)]
 pub(crate) fn build_app_system_prompt(app: &App, config: &Config) -> SystemPrompt {
-    build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref())
+    build_app_system_prompt_with_goal(app, config, app.goal.objective.as_deref())
 }
 
 pub(crate) fn build_app_system_prompt_with_goal(

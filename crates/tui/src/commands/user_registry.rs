@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 
-use crate::tui::app::{App, AppAction, HuntVerdict};
+use crate::tools::goal::GoalStatus;
+use crate::tui::app::{App, AppAction};
 
 use super::CommandResult;
 use super::user_commands;
@@ -585,17 +586,17 @@ pub fn try_dispatch(app: &mut App, input: &str) -> Option<CommandResult> {
 
     let metadata = metadata?;
 
-    app.hunt.quarry = None;
-    app.hunt.started_at = None;
-    app.hunt.verdict = HuntVerdict::Hunting;
-    app.hunt.token_budget = None;
-    app.hunt.tokens_used = 0;
-    app.hunt.time_used_seconds = 0;
-    app.hunt.continuation_count = 0;
+    app.goal.objective = None;
+    app.goal.started_at = None;
+    app.goal.status = GoalStatus::Active;
+    app.goal.token_budget = None;
+    app.goal.tokens_used = 0;
+    app.goal.time_used_seconds = 0;
+    app.goal.continuation_count = 0;
     app.active_allowed_tools = None;
     app.pausable = false;
     app.paused = false;
-    app.paused_quarry = None;
+    app.paused_goal_objective = None;
     let mut todos_cleared = false;
     for _ in 0..10 {
         if let Ok(mut todos) = app.todos.try_lock() {
@@ -623,8 +624,8 @@ pub fn try_dispatch(app: &mut App, input: &str) -> Option<CommandResult> {
     }
 
     if let Some(description) = metadata.description.clone() {
-        app.hunt.quarry = Some(description);
-        app.hunt.started_at = Some(std::time::Instant::now());
+        app.goal.objective = Some(description);
+        app.goal.started_at = Some(std::time::Instant::now());
     }
     if let Some(tools) = metadata.allowed_tools.clone() {
         app.active_allowed_tools = Some(tools);
@@ -882,7 +883,7 @@ mod tests {
 
         assert!(!result.is_error);
         assert_eq!(sent_message(result), "secret now");
-        assert_eq!(app.hunt.quarry.as_deref(), Some("Internal workflow"));
+        assert_eq!(app.goal.objective.as_deref(), Some("Internal workflow"));
     }
 
     #[test]
@@ -931,17 +932,17 @@ mod tests {
         write_workspace_command(tmp.path(), "plain", "plain command");
         let mut app = test_app(tmp.path().to_path_buf());
 
-        app.hunt.quarry = Some("old objective".to_string());
-        app.hunt.started_at = Some(std::time::Instant::now());
-        app.hunt.verdict = crate::tui::app::HuntVerdict::Escaped;
-        app.hunt.token_budget = Some(42);
-        app.hunt.tokens_used = 100;
-        app.hunt.time_used_seconds = 5;
-        app.hunt.continuation_count = 2;
+        app.goal.objective = Some("old objective".to_string());
+        app.goal.started_at = Some(std::time::Instant::now());
+        app.goal.status = crate::tools::goal::GoalStatus::Blocked;
+        app.goal.token_budget = Some(42);
+        app.goal.tokens_used = 100;
+        app.goal.time_used_seconds = 5;
+        app.goal.continuation_count = 2;
         app.active_allowed_tools = Some(vec!["bash".to_string()]);
         app.pausable = true;
         app.paused = true;
-        app.paused_quarry = Some("old objective".to_string());
+        app.paused_goal_objective = Some("old objective".to_string());
         {
             let mut todos = app.todos.try_lock().expect("todos lock");
             todos.add(
@@ -961,17 +962,17 @@ mod tests {
         let result = crate::commands::execute("/plain", &mut app);
 
         assert!(!result.is_error);
-        assert_eq!(app.hunt.quarry, None);
-        assert_eq!(app.hunt.started_at, None);
-        assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
-        assert_eq!(app.hunt.token_budget, None);
-        assert_eq!(app.hunt.tokens_used, 0);
-        assert_eq!(app.hunt.time_used_seconds, 0);
-        assert_eq!(app.hunt.continuation_count, 0);
+        assert_eq!(app.goal.objective, None);
+        assert_eq!(app.goal.started_at, None);
+        assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
+        assert_eq!(app.goal.token_budget, None);
+        assert_eq!(app.goal.tokens_used, 0);
+        assert_eq!(app.goal.time_used_seconds, 0);
+        assert_eq!(app.goal.continuation_count, 0);
         assert_eq!(app.active_allowed_tools, None);
         assert!(!app.pausable);
         assert!(!app.paused);
-        assert!(app.paused_quarry.is_none());
+        assert!(app.paused_goal_objective.is_none());
         assert!(
             app.todos
                 .try_lock()

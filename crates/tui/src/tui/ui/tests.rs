@@ -8110,11 +8110,11 @@ async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate()
     let mut app = create_test_app();
     app.pausable = true;
     app.paused = true;
-    app.paused_quarry = Some("finish the paused audit".to_string());
-    app.hunt.quarry = None;
-    app.hunt.tokens_used = 7;
-    app.hunt.time_used_seconds = 11;
-    app.hunt.continuation_count = 2;
+    app.paused_goal_objective = Some("finish the paused audit".to_string());
+    app.goal.objective = None;
+    app.goal.tokens_used = 7;
+    app.goal.time_used_seconds = 11;
+    app.goal.continuation_count = 2;
     app.api_messages
         .push(text_message("assistant", "existing conversation"));
     app.add_message(HistoryCell::System {
@@ -8141,13 +8141,13 @@ async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate()
     assert!(app.paused);
     assert!(app.pausable);
     assert_eq!(
-        app.paused_quarry.as_deref(),
+        app.paused_goal_objective.as_deref(),
         Some("finish the paused audit")
     );
-    assert!(app.hunt.quarry.is_none());
-    assert_eq!(app.hunt.tokens_used, 7);
-    assert_eq!(app.hunt.time_used_seconds, 11);
-    assert_eq!(app.hunt.continuation_count, 2);
+    assert!(app.goal.objective.is_none());
+    assert_eq!(app.goal.tokens_used, 7);
+    assert_eq!(app.goal.time_used_seconds, 11);
+    assert_eq!(app.goal.continuation_count, 2);
     assert!(engine.handle.is_paused());
     assert_eq!(app.api_messages, before_messages);
     assert_eq!(format!("{:?}", app.history), before_history);
@@ -8165,8 +8165,8 @@ async fn paused_dispatch_at_compaction_threshold_enqueues_one_atomic_send() {
     let mut app = create_test_app();
     app.pausable = true;
     app.paused = true;
-    app.paused_quarry = Some("finish the paused audit".to_string());
-    app.hunt.quarry = None;
+    app.paused_goal_objective = Some("finish the paused audit".to_string());
+    app.goal.objective = None;
     app.auto_compact_user_configured = true;
     app.auto_compact = true;
     app.auto_compact_threshold_percent = 10.0;
@@ -8576,11 +8576,11 @@ async fn failed_real_preflight_preserves_paused_command_state_and_engine_gate() 
     app.set_model_selection("local-model".to_string());
     app.paused = true;
     app.pausable = true;
-    app.paused_quarry = Some("finish the paused audit".to_string());
-    app.hunt.quarry = None;
-    app.hunt.tokens_used = 7;
-    app.hunt.time_used_seconds = 11;
-    app.hunt.continuation_count = 2;
+    app.paused_goal_objective = Some("finish the paused audit".to_string());
+    app.goal.objective = None;
+    app.goal.tokens_used = 7;
+    app.goal.time_used_seconds = 11;
+    app.goal.continuation_count = 2;
     let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
     handle.set_paused(true);
 
@@ -8596,13 +8596,13 @@ async fn failed_real_preflight_preserves_paused_command_state_and_engine_gate() 
     assert!(app.paused);
     assert!(app.pausable);
     assert_eq!(
-        app.paused_quarry.as_deref(),
+        app.paused_goal_objective.as_deref(),
         Some("finish the paused audit")
     );
-    assert!(app.hunt.quarry.is_none());
-    assert_eq!(app.hunt.tokens_used, 7);
-    assert_eq!(app.hunt.time_used_seconds, 11);
-    assert_eq!(app.hunt.continuation_count, 2);
+    assert!(app.goal.objective.is_none());
+    assert_eq!(app.goal.tokens_used, 7);
+    assert_eq!(app.goal.time_used_seconds, 11);
+    assert_eq!(app.goal.continuation_count, 2);
     assert!(handle.is_paused());
     assert!(app.api_messages.is_empty());
     assert!(app.history.is_empty());
@@ -9710,8 +9710,8 @@ async fn dispatch_non_resume_message_preserves_paused_command_state() {
     let mut app = create_test_app();
     app.pausable = true;
     app.paused = true;
-    app.paused_quarry = Some("Scan nested git repositories".to_string());
-    app.hunt.quarry = Some("Scan nested git repositories".to_string());
+    app.paused_goal_objective = Some("Scan nested git repositories".to_string());
+    app.goal.objective = Some("Scan nested git repositories".to_string());
     let mut engine = mock_engine_handle();
     engine.handle.set_paused(true);
     let config = Config::default();
@@ -9728,10 +9728,10 @@ async fn dispatch_non_resume_message_preserves_paused_command_state() {
     assert!(!app.paused);
     assert!(app.pausable);
     assert_eq!(
-        app.paused_quarry.as_deref(),
+        app.paused_goal_objective.as_deref(),
         Some("Scan nested git repositories")
     );
-    assert!(app.hunt.quarry.is_none());
+    assert!(app.goal.objective.is_none());
     assert!(!engine.handle.is_paused());
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage {
@@ -9752,7 +9752,7 @@ async fn dispatch_resume_message_restores_paused_command_goal() {
     let mut app = create_test_app();
     app.pausable = true;
     app.paused = true;
-    app.paused_quarry = Some("Scan nested git repositories".to_string());
+    app.paused_goal_objective = Some("Scan nested git repositories".to_string());
     let mut engine = mock_engine_handle();
     engine.handle.set_paused(true);
     let config = Config::default();
@@ -9768,9 +9768,9 @@ async fn dispatch_resume_message_restores_paused_command_goal() {
 
     assert!(!app.paused);
     assert!(app.pausable);
-    assert!(app.paused_quarry.is_none());
+    assert!(app.paused_goal_objective.is_none());
     assert_eq!(
-        app.hunt.quarry.as_deref(),
+        app.goal.objective.as_deref(),
         Some("Scan nested git repositories")
     );
     assert!(!engine.handle.is_paused());
@@ -9841,11 +9841,11 @@ async fn dispatch_user_message_keeps_auto_review_separate_from_bypass() {
 #[test]
 fn apply_goal_snapshot_updates_visible_goal_status() {
     let mut app = create_test_app();
-    app.hunt.quarry = Some("Ship the release lane".to_string());
-    app.hunt.token_budget = Some(10_000);
-    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
+    app.goal.objective = Some("Ship the release lane".to_string());
+    app.goal.token_budget = Some(10_000);
+    app.goal.status = crate::tools::goal::GoalStatus::Active;
     let started_at = Instant::now();
-    app.hunt.started_at = Some(started_at);
+    app.goal.started_at = Some(started_at);
 
     let completed = crate::tools::goal::GoalSnapshot {
         objective: Some("Ship the release lane".to_string()),
@@ -9868,17 +9868,17 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &completed));
-    assert_eq!(app.hunt.quarry.as_deref(), Some("Ship the release lane"));
-    assert_eq!(app.hunt.token_budget, Some(10_000));
-    assert_eq!(app.hunt.tokens_used, 12_345);
-    assert_eq!(app.hunt.time_used_seconds, 12);
-    assert_eq!(app.hunt.continuation_count, 2);
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
-    assert_eq!(app.hunt.started_at, Some(started_at));
+    assert_eq!(app.goal.objective.as_deref(), Some("Ship the release lane"));
+    assert_eq!(app.goal.token_budget, Some(10_000));
+    assert_eq!(app.goal.tokens_used, 12_345);
+    assert_eq!(app.goal.time_used_seconds, 12);
+    assert_eq!(app.goal.continuation_count, 2);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Complete);
+    assert_eq!(app.goal.started_at, Some(started_at));
     // A completed goal must freeze the elapsed timer (regression for the bug
     // where the sidebar kept ticking "completed in {elapsed}" forever).
     assert!(
-        app.hunt.finished_at.is_some(),
+        app.goal.finished_at.is_some(),
         "terminal verdict should set finished_at so the timer freezes"
     );
 
@@ -9898,15 +9898,15 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &blocked));
-    assert_eq!(app.hunt.quarry.as_deref(), Some("Different objective"));
-    assert_eq!(app.hunt.token_budget, None);
-    assert_eq!(app.hunt.tokens_used, 12_345);
-    assert_eq!(app.hunt.time_used_seconds, 13);
-    assert_eq!(app.hunt.continuation_count, 3);
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Escaped);
-    assert!(app.hunt.started_at.is_some());
+    assert_eq!(app.goal.objective.as_deref(), Some("Different objective"));
+    assert_eq!(app.goal.token_budget, None);
+    assert_eq!(app.goal.tokens_used, 12_345);
+    assert_eq!(app.goal.time_used_seconds, 13);
+    assert_eq!(app.goal.continuation_count, 3);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Blocked);
+    assert!(app.goal.started_at.is_some());
     assert!(
-        app.hunt.finished_at.is_some(),
+        app.goal.finished_at.is_some(),
         "blocked verdict should also freeze the elapsed timer"
     );
 }
@@ -9963,7 +9963,7 @@ fn apply_goal_snapshot_prints_a_receipt_when_the_runtime_sets_a_new_goal() {
     );
 
     let mut declared = create_test_app();
-    declared.hunt.quarry = Some("make the tests pass".to_string());
+    declared.goal.objective = Some("make the tests pass".to_string());
     apply_goal_snapshot_to_app(&mut declared, &snapshot);
     assert!(
         declared.history.iter().all(|cell| {
@@ -9991,7 +9991,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &stale_active));
-    assert!(app.hunt.quarry.is_some());
+    assert!(app.goal.objective.is_some());
 
     // SetGoalStatus(clear) is processed after the prior turn's active update.
     // Its canonical empty snapshot must be observable and win the replay.
@@ -10010,14 +10010,14 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &cleared));
-    assert!(app.hunt.quarry.is_none());
-    assert!(app.hunt.token_budget.is_none());
-    assert_eq!(app.hunt.tokens_used, 0);
-    assert_eq!(app.hunt.time_used_seconds, 0);
-    assert_eq!(app.hunt.continuation_count, 0);
-    assert!(app.hunt.started_at.is_none());
-    assert!(app.hunt.finished_at.is_none());
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
+    assert!(app.goal.objective.is_none());
+    assert!(app.goal.token_budget.is_none());
+    assert_eq!(app.goal.tokens_used, 0);
+    assert_eq!(app.goal.time_used_seconds, 0);
+    assert_eq!(app.goal.continuation_count, 0);
+    assert!(app.goal.started_at.is_none());
+    assert!(app.goal.finished_at.is_none());
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
     assert!(
         !apply_goal_snapshot_to_app(&mut app, &cleared),
         "replaying the same clear receipt must be idempotent"
@@ -10032,7 +10032,7 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
     };
     assert!(!apply_goal_snapshot_to_app(&mut app, &malformed));
     assert_eq!(
-        app.hunt.quarry.as_deref(),
+        app.goal.objective.as_deref(),
         Some("Goal cleared while the prior turn finished")
     );
 }
@@ -10040,9 +10040,9 @@ fn canonical_goal_clear_wins_after_stale_active_snapshot() {
 #[test]
 fn apply_goal_snapshot_resume_clears_frozen_timer() {
     let mut app = create_test_app();
-    app.hunt.quarry = Some("Ship the release lane".to_string());
-    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
-    app.hunt.started_at = Some(Instant::now());
+    app.goal.objective = Some("Ship the release lane".to_string());
+    app.goal.status = crate::tools::goal::GoalStatus::Active;
+    app.goal.started_at = Some(Instant::now());
 
     // First, mark the goal complete — finished_at gets set.
     let completed = crate::tools::goal::GoalSnapshot {
@@ -10065,8 +10065,8 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &completed));
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
-    assert!(app.hunt.finished_at.is_some());
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Complete);
+    assert!(app.goal.finished_at.is_some());
 
     // Now a later snapshot reports the goal active again (resume). The frozen
     // timer must clear so the sidebar starts ticking once more.
@@ -10085,9 +10085,9 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
     assert!(
-        app.hunt.finished_at.is_none(),
+        app.goal.finished_at.is_none(),
         "resume should re-arm the elapsed timer"
     );
 }
@@ -10095,9 +10095,9 @@ fn apply_goal_snapshot_resume_clears_frozen_timer() {
 #[test]
 fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
     let mut app = create_test_app();
-    app.hunt.quarry = Some("Ship the release lane".to_string());
-    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
-    app.hunt.started_at = Some(Instant::now());
+    app.goal.objective = Some("Ship the release lane".to_string());
+    app.goal.status = crate::tools::goal::GoalStatus::Active;
+    app.goal.started_at = Some(Instant::now());
 
     // Pause the goal — the timer freezes.
     let paused = crate::tools::goal::GoalSnapshot {
@@ -10115,13 +10115,13 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused));
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Paused);
     assert_eq!(
-        app.hunt.pause_reason,
+        app.goal.pause_reason,
         Some(crate::tools::goal::GoalPauseReason::User)
     );
     let frozen_at = app
-        .hunt
+        .goal
         .finished_at
         .expect("pausing must freeze the elapsed timer");
 
@@ -10143,9 +10143,9 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &paused_with_usage));
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Wounded);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Paused);
     assert_eq!(
-        app.hunt.finished_at,
+        app.goal.finished_at,
         Some(frozen_at),
         "a paused goal's frozen timer must stay frozen when usage updates arrive"
     );
@@ -10166,10 +10166,10 @@ fn apply_goal_snapshot_keeps_paused_timer_frozen_across_usage_updates() {
         ..Default::default()
     };
     assert!(apply_goal_snapshot_to_app(&mut app, &resumed));
-    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
-    assert_eq!(app.hunt.pause_reason, None);
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
+    assert_eq!(app.goal.pause_reason, None);
     assert!(
-        app.hunt.finished_at.is_none(),
+        app.goal.finished_at.is_none(),
         "resuming a paused goal should re-arm the elapsed timer"
     );
 }
@@ -13106,7 +13106,7 @@ fn next_escape_action_pauses_then_cancels_pausable_command() {
     app.is_loading = false;
     app.paused = false;
     app.pausable = true;
-    app.paused_quarry = Some("Scan repos".to_string());
+    app.paused_goal_objective = Some("Scan repos".to_string());
     assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
 
     app.is_loading = true;
@@ -22958,7 +22958,7 @@ mod work_surface {
             app.subagent_cache.push(agent);
             // Goal and checklist so `Pinned` has content too, and so the goal
             // title — the one title Top *is* allowed to paint — is in play.
-            app.hunt.quarry = Some("keep the chrome off the strip".to_string());
+            app.goal.objective = Some("keep the chrome off the strip".to_string());
             app.todos.try_lock().expect("todos lock").add(
                 "rail-checklist-item".to_string(),
                 crate::tools::todo::TodoStatus::InProgress,

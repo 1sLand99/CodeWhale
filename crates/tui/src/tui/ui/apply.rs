@@ -277,15 +277,15 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     // state emitted by GoalState::snapshot. Require both fields so a malformed
     // objective-less Active/Blocked update cannot erase valid visible state.
     if snapshot.objective.is_none() && snapshot.status.trim() == "none" {
-        let changed = app.hunt.quarry.is_some()
-            || app.hunt.token_budget.is_some()
-            || app.hunt.tokens_used != 0
-            || app.hunt.time_used_seconds != 0
-            || app.hunt.continuation_count != 0
-            || app.hunt.started_at.is_some()
-            || app.hunt.finished_at.is_some()
-            || app.hunt.verdict != HuntVerdict::default();
-        app.hunt = crate::tui::app::HuntState::default();
+        let changed = app.goal.objective.is_some()
+            || app.goal.token_budget.is_some()
+            || app.goal.tokens_used != 0
+            || app.goal.time_used_seconds != 0
+            || app.goal.continuation_count != 0
+            || app.goal.started_at.is_some()
+            || app.goal.finished_at.is_some()
+            || app.goal.status != GoalStatus::default();
+        app.goal = crate::tui::app::HostGoalState::default();
         app.last_known_goal_state = None;
         return changed;
     }
@@ -306,15 +306,15 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         tracing::warn!("ignoring unknown runtime goal status: {}", snapshot.status);
         return false;
     };
-    let verdict = HuntVerdict::from_goal_status(status);
-    let objective_changed = app.hunt.quarry.as_deref() != Some(objective);
+    let verdict = status;
+    let objective_changed = app.goal.objective.as_deref() != Some(objective);
     let changed = objective_changed
-        || app.hunt.token_budget != snapshot.token_budget
-        || app.hunt.tokens_used != snapshot.tokens_used
-        || app.hunt.time_used_seconds != snapshot.time_used_seconds
-        || app.hunt.continuation_count != snapshot.continuation_count
-        || app.hunt.pause_reason != snapshot.pause_reason
-        || app.hunt.verdict != verdict;
+        || app.goal.token_budget != snapshot.token_budget
+        || app.goal.tokens_used != snapshot.tokens_used
+        || app.goal.time_used_seconds != snapshot.time_used_seconds
+        || app.goal.continuation_count != snapshot.continuation_count
+        || app.goal.pause_reason != snapshot.pause_reason
+        || app.goal.status != verdict;
     if !changed {
         app.last_known_goal_state = durable_goal;
         return false;
@@ -323,25 +323,25 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     // The runtime introduced a new active objective (the model called
     // `create_goal`, or a restored session carried one): say so once, in one
     // line, so the user knows a persistent goal is now driving turns and how
-    // to stop it. `/goal <objective>` sets `quarry` before this snapshot lands,
+    // to stop it. `/goal <objective>` sets the objective before this snapshot lands,
     // so a user-declared goal does not repeat its own receipt.
-    if objective_changed && verdict == HuntVerdict::Hunting {
+    if objective_changed && verdict == GoalStatus::Active {
         let content = app
             .tr(crate::localization::MessageId::GoalReceiptSet)
             .replace("{objective}", objective);
         app.add_message(crate::tui::history::HistoryCell::System { content });
     }
-    app.hunt.quarry = Some(objective.to_string());
-    app.hunt.token_budget = snapshot.token_budget;
-    app.hunt.tokens_used = snapshot.tokens_used;
-    app.hunt.time_used_seconds = snapshot.time_used_seconds;
-    app.hunt.continuation_count = snapshot.continuation_count;
-    app.hunt.pause_reason = snapshot.pause_reason;
-    app.hunt.verdict = verdict;
-    if objective_changed || app.hunt.started_at.is_none() {
+    app.goal.objective = Some(objective.to_string());
+    app.goal.token_budget = snapshot.token_budget;
+    app.goal.tokens_used = snapshot.tokens_used;
+    app.goal.time_used_seconds = snapshot.time_used_seconds;
+    app.goal.continuation_count = snapshot.continuation_count;
+    app.goal.pause_reason = snapshot.pause_reason;
+    app.goal.status = verdict;
+    if objective_changed || app.goal.started_at.is_none() {
         let now = Instant::now();
         let elapsed = std::time::Duration::from_secs(snapshot.elapsed_seconds.unwrap_or_default());
-        app.hunt.started_at = now.checked_sub(elapsed).or(Some(now));
+        app.goal.started_at = now.checked_sub(elapsed).or(Some(now));
     }
     // Freeze the elapsed timer the first time a goal leaves the active state.
     // Paused (Wounded) goals freeze too — usage snapshots keep arriving while
@@ -349,12 +349,12 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     // paused (matching close_hunt, which records the pause instant). Only an
     // explicit resume back to Hunting re-arms the timer.
     match verdict {
-        HuntVerdict::Hunted | HuntVerdict::Escaped | HuntVerdict::Wounded => {
-            if app.hunt.finished_at.is_none() {
-                app.hunt.finished_at = Some(Instant::now());
+        GoalStatus::Complete | GoalStatus::Blocked | GoalStatus::Paused => {
+            if app.goal.finished_at.is_none() {
+                app.goal.finished_at = Some(Instant::now());
             }
         }
-        HuntVerdict::Hunting => app.hunt.finished_at = None,
+        GoalStatus::Active => app.goal.finished_at = None,
     }
     app.last_known_goal_state = durable_goal;
     true
@@ -1028,6 +1028,17 @@ pub(crate) async fn apply_command_result(
             AppAction::SetGoalStatus { status, clear } => {
                 let _ = engine_handle
                     .send(Op::SetGoalStatus { status, clear })
+                    .await;
+            }
+            AppAction::SetGoalObjective {
+                objective,
+                token_budget,
+            } => {
+                let _ = engine_handle
+                    .send(Op::SetGoalObjective {
+                        objective,
+                        token_budget,
+                    })
                     .await;
             }
             AppAction::OpenTextPager { title, content } => {
@@ -2698,7 +2709,7 @@ pub(crate) fn apply_loaded_session_with_goal(
     // Goal state is session-owned just like Work state. A legacy/no-goal
     // session clears the previous session's objective; a durable sidecar
     // rebuilds both the visible hunt and the EngineConfig seeded below.
-    app.hunt = crate::tui::app::HuntState::default();
+    app.goal = crate::tui::app::HostGoalState::default();
     app.last_known_goal_state = None;
     if let Some(goal) = goal {
         let snapshot = goal.to_runtime_snapshot();

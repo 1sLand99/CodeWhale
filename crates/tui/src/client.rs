@@ -3913,7 +3913,7 @@ pub(crate) fn build_cache_warmup_request(request: &MessageRequest) -> MessageReq
 }
 
 pub(crate) use chat::CACHE_WARMUP_MAX_TOKENS;
-pub(crate) use chat::{REASONING_REPLAY_PLACEHOLDER, is_reasoning_replay_placeholder};
+pub(crate) use chat::is_reasoning_replay_placeholder;
 
 #[cfg(test)]
 mod tests {

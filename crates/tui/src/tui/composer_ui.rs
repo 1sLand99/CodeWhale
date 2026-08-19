@@ -19,7 +19,7 @@ pub(crate) fn next_escape_action(app: &App, slash_menu_open: bool) -> EscapeActi
         EscapeAction::CloseSlashMenu
     } else if app.queued_draft.is_some() {
         EscapeAction::DiscardQueuedDraft
-    } else if app.paused || app.paused_quarry.is_some() {
+    } else if app.paused || app.paused_goal_objective.is_some() {
         EscapeAction::CancelRequest
     } else if app.pausable
         && !app.paused

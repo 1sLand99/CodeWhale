@@ -167,6 +167,14 @@ pub enum Op {
         clear: bool,
     },
 
+    /// Set (or replace) the active goal objective and immediately start goal
+    /// work through the runtime's continuation steering. `/goal <objective>`
+    /// is the caller; the objective is never echoed as a raw user message.
+    SetGoalObjective {
+        objective: String,
+        token_budget: Option<u32>,
+    },
+
     /// Describe the exact request the next turn would send, without
     /// sending it (`/preview-request`, #1004).
     ///

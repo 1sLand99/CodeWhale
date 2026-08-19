@@ -968,6 +968,13 @@ pub enum AppAction {
         status: crate::tools::goal::GoalStatus,
         clear: bool,
     },
+    /// Set or replace the goal objective (`/goal <objective>`). The engine
+    /// owns the goal and starts the first goal turn itself as runtime
+    /// steering; the objective is never sent as a raw user message.
+    SetGoalObjective {
+        objective: String,
+        token_budget: Option<u32>,
+    },
     ListSubAgents,
     /// Ask the engine to describe the exact next outbound request
     /// (`/preview-request`, #1004). The engine is the authority: only it can

@@ -1469,7 +1469,7 @@ pub(crate) async fn run_event_loop(
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
                         app.suppress_stream_events_until_turn_complete = false;
                         app.active_allowed_tools = None;
-                        if app.paused_quarry.is_none() {
+                        if app.paused_goal_objective.is_none() {
                             app.pausable = false;
                             app.paused = false;
                         }
@@ -4712,7 +4712,7 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
-                            if app.paused || app.paused_quarry.is_some() {
+                            if app.paused || app.paused_goal_objective.is_some() {
                                 clear_paused_command_state(app, &engine_handle);
                                 if app.is_loading
                                     || matches!(
@@ -4726,10 +4726,10 @@ pub(crate) async fn run_event_loop(
                                     stream_display_clock.reset();
                                 }
                                 app.active_allowed_tools = None;
-                                app.hunt.quarry = None;
-                                app.hunt.tokens_used = 0;
-                                app.hunt.time_used_seconds = 0;
-                                app.hunt.continuation_count = 0;
+                                app.goal.objective = None;
+                                app.goal.tokens_used = 0;
+                                app.goal.time_used_seconds = 0;
+                                app.goal.continuation_count = 0;
                                 app.status_message =
                                     Some(parent_stop_status(app, "Paused command cancelled"));
                             } else {

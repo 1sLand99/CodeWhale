@@ -139,10 +139,10 @@ use super::key_actions;
 use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
     AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
-    HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
-    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
-    ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
-    looks_like_slash_command_input, shell_command_from_bang_input,
+    OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort, StatusToast,
+    StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence,
+    TuiOptions, bound_agent_activity_text, is_stop_word, looks_like_slash_command_input,
+    shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -1328,7 +1328,7 @@ fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSo
 fn preview_effective_base_prompt(app: &mut App, config: &Config) {
     use crate::prompts::base_preview;
 
-    let prompt = build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref());
+    let prompt = build_app_system_prompt_with_goal(app, config, app.goal.objective.as_deref());
     let home = codewhale_config::codewhale_home().ok();
     let constitution_path = codewhale_config::UserConstitution::path().ok();
     let sources = base_preview::PreviewSources {
@@ -1905,8 +1905,8 @@ async fn tool_result_content_for_api_message(
 
 const INITIAL_PROMPT_DEFERRED_STATUS: &str = "Initial prompt ready; complete setup to send it";
 
-fn paused_quarry_title(quarry: &str) -> &str {
-    quarry
+fn paused_goal_objective_title(objective: &str) -> &str {
+    objective
         .split(['\n', '\r'])
         .next()
         .map(str::trim)
@@ -1999,7 +1999,7 @@ Paused command: {title}\n\
 enum PausedCommandDispatch {
     None,
     ClearWithoutQuarry,
-    Resume { quarry: String, note: String },
+    Resume { objective: String, note: String },
     Detach { note: String },
 }
 
@@ -2013,9 +2013,9 @@ impl PausedCommandDispatch {
 
     fn goal_objective(&self, app: &App) -> Option<String> {
         match self {
-            Self::Resume { quarry, .. } => Some(quarry.clone()),
+            Self::Resume { objective, .. } => Some(objective.clone()),
             Self::Detach { .. } | Self::ClearWithoutQuarry => None,
-            Self::None => app.hunt.quarry.clone(),
+            Self::None => app.goal.objective.clone(),
         }
     }
 
@@ -2027,39 +2027,39 @@ impl PausedCommandDispatch {
                 app.paused = false;
                 app.pausable = false;
             }
-            Self::Resume { quarry, .. } => {
+            Self::Resume { objective, .. } => {
                 app.paused = false;
-                app.paused_quarry = None;
-                app.hunt.quarry = Some(quarry);
+                app.paused_goal_objective = None;
+                app.goal.objective = Some(objective);
                 app.pausable = true;
             }
             Self::Detach { .. } => {
                 app.paused = false;
-                app.hunt.quarry = None;
-                app.hunt.tokens_used = 0;
-                app.hunt.time_used_seconds = 0;
-                app.hunt.continuation_count = 0;
+                app.goal.objective = None;
+                app.goal.tokens_used = 0;
+                app.goal.time_used_seconds = 0;
+                app.goal.continuation_count = 0;
             }
         }
     }
 }
 
 fn plan_paused_command_message(app: &App, user_message: &str) -> PausedCommandDispatch {
-    if !app.paused && app.paused_quarry.is_none() {
+    if !app.paused && app.paused_goal_objective.is_none() {
         return PausedCommandDispatch::None;
     }
 
-    let Some(quarry) = app
-        .paused_quarry
+    let Some(objective) = app
+        .paused_goal_objective
         .clone()
-        .or_else(|| app.hunt.quarry.clone())
+        .or_else(|| app.goal.objective.clone())
     else {
         return PausedCommandDispatch::ClearWithoutQuarry;
     };
-    let title = paused_quarry_title(&quarry).to_string();
+    let title = paused_goal_objective_title(&objective).to_string();
     if is_resume_message(user_message) {
         PausedCommandDispatch::Resume {
-            quarry,
+            objective,
             note: paused_command_note(&title, true),
         }
     } else {
@@ -2070,14 +2070,14 @@ fn plan_paused_command_message(app: &App, user_message: &str) -> PausedCommandDi
 }
 
 fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
-    app.paused_quarry = app
-        .paused_quarry
+    app.paused_goal_objective = app
+        .paused_goal_objective
         .clone()
-        .or_else(|| app.hunt.quarry.clone());
-    app.hunt.quarry = None;
-    app.hunt.tokens_used = 0;
-    app.hunt.time_used_seconds = 0;
-    app.hunt.continuation_count = 0;
+        .or_else(|| app.goal.objective.clone());
+    app.goal.objective = None;
+    app.goal.tokens_used = 0;
+    app.goal.time_used_seconds = 0;
+    app.goal.continuation_count = 0;
     app.paused = true;
     app.pausable = true;
     engine_handle.set_paused(true);
@@ -2089,7 +2089,7 @@ fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
 fn clear_paused_command_state(app: &mut App, engine_handle: &EngineHandle) {
     app.pausable = false;
     app.paused = false;
-    app.paused_quarry = None;
+    app.paused_goal_objective = None;
     engine_handle.set_paused(false);
 }
 
@@ -2705,8 +2705,8 @@ async fn execute_command_input(
 pub(crate) struct SteerPausedSnapshot {
     paused: bool,
     pausable: bool,
-    paused_quarry: Option<String>,
-    quarry: Option<String>,
+    paused_goal_objective: Option<String>,
+    objective: Option<String>,
     tokens_used: u64,
     time_used_seconds: u64,
     continuation_count: u32,

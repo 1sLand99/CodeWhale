@@ -605,8 +605,8 @@ pub(crate) fn prepare_user_dispatch(
         app_route_identity,
         route_config,
         goal_objective,
-        goal_status: app.hunt.verdict.goal_status(),
-        goal_token_budget: app.hunt.token_budget,
+        goal_status: app.goal.status,
+        goal_token_budget: app.goal.token_budget,
         mode: app.mode,
         api_provider: app.api_provider,
         app_model: app.model.clone(),
@@ -796,7 +796,7 @@ pub(crate) fn build_dispatch_success_closure(
             app.system_prompt = Some(build_app_system_prompt_with_goal(
                 app,
                 config,
-                app.hunt.quarry.as_deref(),
+                app.goal.objective.as_deref(),
             ));
             // History and api_messages were already appended in the sync prepare
             // phase; record references now that the turn is accepted.
@@ -1080,22 +1080,22 @@ pub(crate) fn snapshot_steer_paused_state(app: &App) -> SteerPausedSnapshot {
     SteerPausedSnapshot {
         paused: app.paused,
         pausable: app.pausable,
-        paused_quarry: app.paused_quarry.clone(),
-        quarry: app.hunt.quarry.clone(),
-        tokens_used: app.hunt.tokens_used,
-        time_used_seconds: app.hunt.time_used_seconds,
-        continuation_count: app.hunt.continuation_count,
+        paused_goal_objective: app.paused_goal_objective.clone(),
+        objective: app.goal.objective.clone(),
+        tokens_used: app.goal.tokens_used,
+        time_used_seconds: app.goal.time_used_seconds,
+        continuation_count: app.goal.continuation_count,
     }
 }
 
 pub(crate) fn restore_steer_paused_state(app: &mut App, snapshot: &SteerPausedSnapshot) {
     app.paused = snapshot.paused;
     app.pausable = snapshot.pausable;
-    app.paused_quarry = snapshot.paused_quarry.clone();
-    app.hunt.quarry = snapshot.quarry.clone();
-    app.hunt.tokens_used = snapshot.tokens_used;
-    app.hunt.time_used_seconds = snapshot.time_used_seconds;
-    app.hunt.continuation_count = snapshot.continuation_count;
+    app.paused_goal_objective = snapshot.paused_goal_objective.clone();
+    app.goal.objective = snapshot.objective.clone();
+    app.goal.tokens_used = snapshot.tokens_used;
+    app.goal.time_used_seconds = snapshot.time_used_seconds;
+    app.goal.continuation_count = snapshot.continuation_count;
 }
 
 pub(crate) async fn attempt_steer_with_queue_fallback(

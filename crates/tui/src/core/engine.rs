@@ -2382,6 +2382,13 @@ impl Engine {
                     Op::SetGoalStatus { status, clear } => {
                         self.handle_set_goal_status(status, clear).await;
                     }
+                    Op::SetGoalObjective {
+                        objective,
+                        token_budget,
+                    } => {
+                        self.handle_set_goal_objective(objective, token_budget)
+                            .await;
+                    }
                     Op::PreviewOutboundRequest {
                         inputs,
                         json,
@@ -3668,6 +3675,16 @@ impl Engine {
         if clear || status != GoalStatus::Active {
             self.cancel_scheduled_goal_continuation(true).await;
         }
+        // A continuation is scheduled only on a real transition INTO Active
+        // from a non-active state (paused/blocked resume). Re-asserting
+        // Active on an already-active goal must not stack a second
+        // autonomous turn on top of the loop that is already running.
+        let was_active = self
+            .config
+            .goal_state
+            .lock()
+            .map(|state| state.is_active())
+            .unwrap_or(false);
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if clear {
@@ -3708,6 +3725,7 @@ impl Engine {
         // avoids an unrelated no-goal turn racing with a newly declared goal in
         // the UI while still letting the clear win over a preceding active
         // TurnComplete snapshot.
+        let snapshot_has_objective = snapshot.objective.is_some();
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
 
         let label = if clear {
@@ -3724,6 +3742,56 @@ impl Engine {
             .tx_event
             .send(Event::status(format!("Goal {label}.")))
             .await;
+
+        // Resuming an objective-bearing goal restarts the runtime's own
+        // steering loop — the kickoff is a continuation turn, never a raw
+        // user message echoing the objective (codex `/goal resume` parity).
+        let resumed_into_active = !clear && status == GoalStatus::Active && !was_active;
+        if resumed_into_active && snapshot_has_objective {
+            self.schedule_goal_continuation(Vec::new()).await;
+        }
+    }
+
+    /// `/goal <objective>` — control-plane goal set (codex `/goal` parity).
+    /// The engine is authoritative: the objective lands in
+    /// `SharedGoalState`, every host projection is refreshed, `GoalUpdated`
+    /// publishes the new snapshot, and the first goal turn is dispatched as
+    /// runtime steering (the continuation prompt built from the goal
+    /// snapshot). The objective is never echoed as a raw user message.
+    async fn handle_set_goal_objective(&mut self, objective: String, token_budget: Option<u32>) {
+        let Some(objective) = normalized_goal_objective(Some(&objective)) else {
+            let _ = self
+                .tx_event
+                .send(Event::status(
+                    "Goal not set: the objective is empty after trimming.".to_string(),
+                ))
+                .await;
+            return;
+        };
+        sync_goal_state_from_host(
+            &self.config.goal_state,
+            Some(&objective),
+            token_budget,
+            GoalStatus::Active,
+        );
+        self.config.goal_objective = Some(objective);
+        self.config.goal_token_budget = token_budget;
+        self.config.goal_status = GoalStatus::Active;
+        self.refresh_system_prompt_with_reason("goal");
+        self.emit_session_updated().await;
+        let snapshot = match self.config.goal_state.lock() {
+            Ok(state) => state.snapshot(),
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned during SetGoalObjective: {err}");
+                return;
+            }
+        };
+        let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        let _ = self
+            .tx_event
+            .send(Event::status("Goal set; starting goal work.".to_string()))
+            .await;
+        self.schedule_goal_continuation(Vec::new()).await;
     }
 
     /// Build the turn's tool registry and the model-facing tool catalog.

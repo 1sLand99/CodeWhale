@@ -94,17 +94,17 @@ pub(crate) fn one_line_summary(text: &str, max_width: usize) -> String {
 /// (#39: the ocean shell has no sidebar, so without a topbar chip a goal set
 /// via `create_goal` was invisible there).
 pub(crate) fn active_goal_chip_state(app: &App) -> Option<(String, bool)> {
-    let (objective, paused) = match (&app.hunt.quarry, &app.paused_quarry) {
+    let (objective, paused) = match (&app.goal.objective, &app.paused_goal_objective) {
         (Some(objective), _) => {
             if matches!(
-                app.hunt.verdict,
-                crate::tui::app::HuntVerdict::Hunted | crate::tui::app::HuntVerdict::Escaped
+                app.goal.status,
+                crate::tools::goal::GoalStatus::Complete | crate::tools::goal::GoalStatus::Blocked
             ) {
                 return None;
             }
             (
                 objective.clone(),
-                app.hunt.verdict == crate::tui::app::HuntVerdict::Wounded,
+                app.goal.status == crate::tools::goal::GoalStatus::Paused,
             )
         }
         (None, Some(objective)) => (objective.clone(), true),

@@ -3330,8 +3330,8 @@ pub(crate) fn should_render_empty_state(app: &App) -> bool {
             .try_lock()
             .map(|todos| !todos.snapshot().is_empty())
             .unwrap_or(true)
-        && app.hunt.quarry.is_none()
-        && app.paused_quarry.is_none()
+        && app.goal.objective.is_none()
+        && app.paused_goal_objective.is_none()
 }
 
 fn build_empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {

@@ -668,8 +668,8 @@ mod tests {
     #[test]
     fn relay_slash_command_routes_to_session_relay_instruction() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("Unify the work surface".to_string());
-        app.hunt.token_budget = Some(12_000);
+        app.goal.objective = Some("Unify the work surface".to_string());
+        app.goal.token_budget = Some(12_000);
         {
             let mut todos = app.todos.try_lock().expect("todo lock");
             todos.add("inspect workspace".to_string(), TodoStatus::Completed);
@@ -1569,10 +1569,12 @@ mod tests {
         assert!(note_help.contains("Usage: /note"));
 
         let mut app = create_test_app();
-        let result = execute("/hunt ship layer 2 | budget: 100", &mut app);
+        let result = execute("/goal ship layer 2 | budget: 100", &mut app);
         assert!(!result.is_error);
-        assert_eq!(app.hunt.quarry.as_deref(), Some("ship layer 2"));
-        assert_eq!(app.hunt.token_budget, Some(100));
+        assert_eq!(app.goal.objective.as_deref(), Some("ship layer 2"));
+        assert_eq!(app.goal.token_budget, Some(100));
+        // The hunt-era alias is gone: `/hunt` must not resolve anymore.
+        assert!(execute("/hunt ship layer 2", &mut app).is_error);
 
         let (mut app, _tmpdir, _guard) = create_isolated_test_app();
         let result = execute("/skills", &mut app);

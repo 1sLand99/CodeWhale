@@ -65,10 +65,10 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
     if let Some(focus) = focus {
         let _ = writeln!(out, "- Requested relay focus: {focus}");
     }
-    if let Some(quarry) = app.hunt.quarry.as_deref() {
-        let _ = writeln!(out, "- Goal objective: {quarry}");
+    if let Some(objective) = app.goal.objective.as_deref() {
+        let _ = writeln!(out, "- Goal objective: {objective}");
     }
-    if let Some(budget) = app.hunt.token_budget {
+    if let Some(budget) = app.goal.token_budget {
         let _ = writeln!(out, "- Goal token budget: {budget}");
     }
     // Read through the same authoritative graph-backed snapshot seam used by

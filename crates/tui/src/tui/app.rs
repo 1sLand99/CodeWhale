@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use codewhale_config::{ProviderChain, route::RouteLimits};
@@ -737,56 +736,25 @@ impl Default for ViewportState {
     }
 }
 
-/// Verdict for a hunt (#2092).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HuntVerdict {
-    #[default]
-    Hunting,
-    Hunted,
-    Wounded,
-    Escaped,
-}
-
-impl HuntVerdict {
-    #[must_use]
-    pub fn goal_status(self) -> crate::tools::goal::GoalStatus {
-        match self {
-            Self::Hunting => crate::tools::goal::GoalStatus::Active,
-            Self::Hunted => crate::tools::goal::GoalStatus::Complete,
-            Self::Wounded => crate::tools::goal::GoalStatus::Paused,
-            Self::Escaped => crate::tools::goal::GoalStatus::Blocked,
-        }
-    }
-
-    #[must_use]
-    pub fn from_goal_status(status: crate::tools::goal::GoalStatus) -> Self {
-        match status {
-            crate::tools::goal::GoalStatus::Active => Self::Hunting,
-            crate::tools::goal::GoalStatus::Paused => Self::Wounded,
-            crate::tools::goal::GoalStatus::Complete => Self::Hunted,
-            crate::tools::goal::GoalStatus::Blocked => Self::Escaped,
-        }
-    }
-}
-
-/// Hunt tracking state (#2092 — was GoalState).
+/// Host-side tracking state for the active thread goal. Mirrors the
+/// engine's authoritative `SharedGoalState` snapshot (`GoalUpdated`) so the
+/// sidebar, top bar, and system prompt all read one truth.
 #[derive(Debug, Clone, Default)]
-pub struct HuntState {
-    pub quarry: Option<String>,
+pub struct HostGoalState {
+    pub objective: Option<String>,
     pub token_budget: Option<u32>,
     pub tokens_used: u64,
     pub time_used_seconds: u64,
     pub continuation_count: u32,
     /// Why an unfinished goal is paused. Kept separate from the four-state
-    /// hunt verdict so usage, budget, and run-limit stops stay distinguishable.
+    /// status so usage, budget, and run-limit stops stay distinguishable.
     pub pause_reason: Option<crate::tools::goal::GoalPauseReason>,
     pub started_at: Option<Instant>,
-    /// When the goal reached a terminal verdict (Hunted/Wounded/Escaped).
+    /// When the goal reached a terminal status (Complete/Blocked).
     /// While `None`, elapsed time keeps growing; once set, the sidebar freezes
     /// the timer at `finished_at - started_at` so completed goals stop ticking.
     pub finished_at: Option<Instant>,
-    pub verdict: HuntVerdict,
+    pub status: crate::tools::goal::GoalStatus,
 }
 
 /// Session cost and token telemetry state.
@@ -1124,7 +1092,7 @@ pub struct App {
     /// so the replacement shell can be removed or promoted as one unit.
     pub work_surface: crate::tui::work_surface::WorkSurfaceState,
     /// Goal sub-state.
-    pub hunt: HuntState,
+    pub goal: HostGoalState,
     /// Session sub-state (cost, tokens, telemetry).
     pub session: SessionState,
     /// Active tool restriction from custom slash command frontmatter.
@@ -1139,7 +1107,7 @@ pub struct App {
     /// True after Esc paused a pausable command and before it is resumed or cancelled.
     pub paused: bool,
     /// Saved custom-command objective while the command is paused.
-    pub paused_quarry: Option<String>,
+    pub paused_goal_objective: Option<String>,
     pub history: Vec<HistoryCell>,
     pub history_version: u64,
     /// Bumped when destructive reindexing could make a cached Space owner name

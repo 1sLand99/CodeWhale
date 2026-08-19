@@ -149,8 +149,9 @@ fn normalize_explicit_goal_objective(raw: &str) -> Option<String> {
 }
 
 /// Runtime status for a goal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GoalStatus {
+    #[default]
     Active,
     Paused,
     Complete,
