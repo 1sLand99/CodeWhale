@@ -2595,6 +2595,112 @@ fn goal_custom_route_config() -> Config {
     }
 }
 
+#[tokio::test]
+async fn explicit_natural_goal_activates_before_provider_request() {
+    let request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = std::sync::Arc::new(FirstRequestGatedGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        request_entered: std::sync::Arc::clone(&request_entered),
+        release_request: std::sync::Arc::clone(&release_request),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            max_steps: 1,
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "hello - take over and make it your /goal to solve navier stokes".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send explicit natural goal turn");
+
+    let mut saw_goal_before_turn = false;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("explicit goal event timeout")
+        .expect("explicit goal event");
+        match event {
+            Event::GoalUpdated { snapshot } => {
+                assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
+                assert_eq!(snapshot.status, "active");
+                saw_goal_before_turn = true;
+            }
+            Event::TurnStarted { .. } => {
+                assert!(
+                    saw_goal_before_turn,
+                    "durable goal must be published before provider work starts"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
+        .await
+        .expect("provider request was never entered");
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
+    assert!(snapshot.is_active());
+
+    // Stop autonomous continuation after the one provider-boundary receipt.
+    handle
+        .send(Op::SetGoalStatus {
+            status: crate::tools::goal::GoalStatus::Paused,
+            clear: false,
+        })
+        .await
+        .expect("queue goal pause");
+    release_request.notify_one();
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("goal pause did not settle")
+        .expect("post-goal session snapshot");
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        goal_state.lock().expect("goal lock").snapshot().status,
+        "paused"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 fn without_named_custom_route(mut config: Config) -> Config {
     config
         .providers

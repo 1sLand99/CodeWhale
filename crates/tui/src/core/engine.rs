@@ -45,7 +45,8 @@ use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
 use crate::tools::goal::{
-    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
+    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, explicit_goal_directive,
+    new_shared_goal_state,
 };
 use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
@@ -4085,6 +4086,58 @@ impl Engine {
         verbosity: Option<String>,
         provenance: UserInputProvenance,
     ) -> SendMessageOutcome {
+        let mut goal_objective = goal_objective;
+        let mut goal_token_budget = goal_token_budget;
+        let mut goal_status = goal_status;
+
+        // A literal natural-language `/goal` declaration is control-plane
+        // intent, not a suggestion that each provider may acknowledge or
+        // ignore. Activate it through the same GoalState::create path as the
+        // model-visible create_goal tool before constructing any provider
+        // request. Only structurally external user input can authorize this;
+        // runtime text, recalled memory, handoffs, and pasted multi-line
+        // transcripts cannot create a goal.
+        //
+        // KV-cache effect: this only selects the already-existing volatile
+        // <session_goal> contributor. It adds no new stable-prefix text.
+        let explicit_goal_result = if provenance.can_authorize_work() {
+            explicit_goal_directive(&content).map(|directive| {
+                self.config
+                    .goal_state
+                    .lock()
+                    .map_err(|_| "goal state lock poisoned".to_string())
+                    .and_then(|mut state| {
+                        state
+                            .create(directive.objective, None)
+                            .map_err(str::to_string)?;
+                        Ok(state.snapshot())
+                    })
+            })
+        } else {
+            None
+        };
+        if let Some(result) = explicit_goal_result {
+            match result {
+                Ok(snapshot) => {
+                    goal_objective.clone_from(&snapshot.objective);
+                    goal_token_budget = snapshot.token_budget;
+                    goal_status = GoalStatus::Active;
+                    // Publish before TurnStarted/provider dispatch so the TUI
+                    // and durable runtime host observe the real goal action,
+                    // even when this model would otherwise reply only in prose.
+                    let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+                }
+                Err(error) => {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Requested /goal was not created: {error}"
+                        )))
+                        .await;
+                }
+            }
+        }
+
         let effective_provider = route.identity.provider;
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();

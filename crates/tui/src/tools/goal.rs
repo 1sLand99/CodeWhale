@@ -38,6 +38,116 @@ pub fn new_shared_goal_state_from_host_status(
     Arc::new(Mutex::new(state))
 }
 
+/// A goal declaration stated in ordinary user prose rather than as a leading
+/// `/goal <objective>` command.
+///
+/// This intentionally recognizes only a narrow, explicit `/goal` directive.
+/// Ordinary long-running requests are not silently promoted to goals, and a
+/// quoted multi-line transcript cannot authorize one through a later line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitGoalDirective {
+    pub objective: String,
+}
+
+/// Extract an explicit natural-language `/goal` declaration from the user's
+/// first non-empty line.
+///
+/// The provider never participates in this decision. That makes an explicit
+/// declaration behave the same on DeepSeek, Zai, and every compatible route,
+/// while keeping ordinary tasks and discussion *about* `/goal` untouched.
+#[must_use]
+pub fn explicit_goal_directive(input: &str) -> Option<ExplicitGoalDirective> {
+    let line = input.lines().find(|line| !line.trim().is_empty())?.trim();
+    let lower = line.to_ascii_lowercase();
+
+    // Objective follows the directive.
+    for pattern in [
+        "make it your /goal to",
+        "make this your /goal to",
+        "make that your /goal to",
+        "set your /goal to",
+        "set my /goal to",
+        "set the /goal to",
+        "set /goal to",
+        "your /goal is",
+        "my /goal is",
+        "the /goal is",
+    ] {
+        let Some(index) = lower.find(pattern) else {
+            continue;
+        };
+        if !is_direct_goal_clause(&lower[..index]) {
+            continue;
+        }
+        let objective = normalize_explicit_goal_objective(&line[index + pattern.len()..])?;
+        return Some(ExplicitGoalDirective { objective });
+    }
+
+    // Objective precedes the marker: "make solving X your /goal".
+    for marker in [" your /goal", " my /goal", " the /goal"] {
+        let Some(marker_index) = lower.find(marker) else {
+            continue;
+        };
+        let before_marker = &lower[..marker_index];
+        let Some(make_index) = before_marker.rfind("make ") else {
+            continue;
+        };
+        if !is_direct_goal_clause(&lower[..make_index]) {
+            continue;
+        }
+        let objective =
+            normalize_explicit_goal_objective(&line[make_index + "make ".len()..marker_index])?;
+        if matches!(
+            objective.to_ascii_lowercase().as_str(),
+            "it" | "this" | "that"
+        ) {
+            continue;
+        }
+        return Some(ExplicitGoalDirective { objective });
+    }
+
+    None
+}
+
+fn is_direct_goal_clause(prefix: &str) -> bool {
+    let prefix = prefix.trim_end();
+    if prefix.is_empty() {
+        return true;
+    }
+    [
+        "please",
+        "and",
+        "then",
+        "also",
+        "now",
+        "you to",
+        "need to",
+        "can you",
+        "could you",
+        "would you",
+        "can we",
+        "could we",
+        "should",
+        "must",
+        "-",
+        ";",
+        ":",
+        ",",
+    ]
+    .iter()
+    .any(|ending| prefix.ends_with(ending))
+}
+
+fn normalize_explicit_goal_objective(raw: &str) -> Option<String> {
+    let objective = raw
+        .trim()
+        .trim_start_matches([':', '-', '–', '—'])
+        .trim()
+        .trim_end_matches(['.', '!', '?'])
+        .trim();
+    (!objective.is_empty()).then(|| objective.to_string())
+}
+
 /// Runtime status for a goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
@@ -639,7 +749,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Use it when a direct user request describes a verifiable end state that will take more than one turn (\"until the tests pass\", \"make X work end to end\", \"go through every file in Y\", \"keep going until Z\") — you may infer that intent in any language and phrasing; do not create a goal for routine single-turn work, questions, or one-file edits. Keep the user's full objective, not a shortened one-turn version. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete or clear it before creating another."
+        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete or clear it before creating another."
     }
 
     fn input_schema(&self) -> Value {
@@ -919,6 +1029,40 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn explicit_goal_directive_extracts_user_requested_objective() {
+        let request = explicit_goal_directive(
+            "hello - take over and make it your /goal to solve navier stokes",
+        )
+        .expect("explicit /goal request");
+        assert_eq!(request.objective, "solve navier stokes");
+
+        let request = explicit_goal_directive("Please make ship the release your /goal.")
+            .expect("objective-before-marker request");
+        assert_eq!(request.objective, "ship the release");
+
+        let request = explicit_goal_directive("Could you set /goal to repair provider routing?")
+            .expect("set /goal request");
+        assert_eq!(request.objective, "repair provider routing");
+    }
+
+    #[test]
+    fn explicit_goal_directive_rejects_ordinary_or_quoted_goal_discussion() {
+        for input in [
+            "solve navier stokes",
+            "why didn't you make it your /goal to solve navier stokes?",
+            "what does /goal do?",
+            "review the /goal implementation",
+            "see this transcript where /goal was ignored:\nhello - take over and make it your /goal to solve navier stokes",
+        ] {
+            assert_eq!(
+                explicit_goal_directive(input),
+                None,
+                "must not activate from: {input}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn update_goal_rejects_objective_knob_instead_of_ignoring_it() {
