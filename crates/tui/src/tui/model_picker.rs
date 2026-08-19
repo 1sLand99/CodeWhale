@@ -407,14 +407,6 @@ impl ModelPickerView {
         self.clamp_model_selection();
     }
 
-    #[cfg(test)]
-    fn visible_model_ids(&self) -> Vec<&str> {
-        self.visible_model_rows()
-            .iter()
-            .map(|row| row.id.as_str())
-            .collect()
-    }
-
     fn visible_model_rows(&self) -> Vec<&ModelPickerRow> {
         let query = self.query.trim();
         let mut rows: Vec<&ModelPickerRow> = self
@@ -1269,17 +1261,6 @@ fn fit_text(text: &str, width: usize) -> String {
     out
 }
 
-#[cfg(test)]
-fn picker_model_ids_for_provider(provider: ApiProvider) -> Vec<String> {
-    let mut models = vec!["auto".to_string()];
-    for id in provider_catalog_model_ids(provider) {
-        if id != "auto" && !models.iter().any(|m| m.eq_ignore_ascii_case(&id)) {
-            models.push(id);
-        }
-    }
-    models
-}
-
 pub(crate) fn provider_scoped_model_completion_ids(app: &App) -> Vec<String> {
     // Slash completions inline the current custom model so `/model <current>`
     // stays visible even when it is outside the provider catalog.
@@ -2068,15 +2049,6 @@ fn coding_score(row: &ModelPickerRow) -> u32 {
         score += 10;
     }
     score
-}
-
-#[cfg(test)]
-fn picker_model_hint(id: &str, provider: Option<ApiProvider>) -> String {
-    let config = Config::default();
-    let metadata = effective_picker_metadata(&config, provider, id);
-    let codex_freshness = (provider == Some(ApiProvider::OpenaiCodex))
-        .then(|| codex_model_cache::model_roster().freshness);
-    render_picker_model_hint(id, provider, &metadata, codex_freshness)
 }
 
 fn effective_picker_metadata(

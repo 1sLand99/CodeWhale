@@ -786,11 +786,6 @@ impl GuidedConstitutionDraft {
         true
     }
 
-    #[cfg(test)]
-    fn to_constitution(self, locale: Locale) -> UserConstitution {
-        self.to_constitution_with_freeform(locale, None)
-    }
-
     fn to_constitution_with_freeform(
         self,
         locale: Locale,
@@ -2244,30 +2239,6 @@ fn freeform_note_line(locale: Locale, note: &str, editing: bool) -> Line<'static
 }
 
 impl SetupWizardView {
-    #[cfg(test)]
-    #[must_use]
-    pub fn new(state: SetupState, locale: Locale) -> Self {
-        let selected = initial_step_index(&state);
-        Self {
-            state,
-            selected,
-            locale,
-            show_wizard_progress: true,
-            facts: SetupRuntimeFacts::default(),
-            guided_draft: GuidedConstitutionDraft::default(),
-            constitution_advanced: false,
-            freeform_note: String::new(),
-            editing_freeform_note: false,
-            guided_preview_seen: false,
-            existing_preview_seen: false,
-            model_draft: None,
-            model_draft_label: None,
-            runtime_preset: SetupRuntimePreset::default(),
-            runtime_preset_preview_seen: false,
-            body_scroll: 0,
-        }
-    }
-
     #[must_use]
     pub fn new_for_app(app: &App, config: &Config) -> Self {
         Self::new_with_facts(
@@ -2294,12 +2265,6 @@ impl SetupWizardView {
             step,
             SetupRuntimeFacts::from_app_config(app, config),
         )
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub fn state(&self) -> &SetupState {
-        &self.state
     }
 
     #[must_use]
@@ -4128,12 +4093,6 @@ fn tools_mcp_on_ramp_text(locale: Locale, facts: &SetupRuntimeFacts) -> String {
         plugins_path_display: facts.tools_mcp_plugins_path_display.clone(),
     };
     tools_mcp::on_ramp_text(locale, &tools_facts)
-}
-
-#[cfg(test)]
-#[must_use]
-fn guided_constitution_template(locale: Locale) -> UserConstitution {
-    GuidedConstitutionDraft::default().to_constitution(locale)
 }
 
 /// Who authored the draft being previewed for ratification.

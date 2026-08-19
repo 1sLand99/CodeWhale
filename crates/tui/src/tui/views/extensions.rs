@@ -1039,12 +1039,6 @@ impl ExtensionsView {
         Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale)
     }
 
-    #[cfg(test)]
-    #[must_use]
-    pub fn from_snapshot(snapshot: ExtensionsSnapshot, tab: ExtensionsTab) -> Self {
-        Self::from_snapshot_with_locale(snapshot, tab, Locale::En)
-    }
-
     fn from_snapshot_with_locale(
         snapshot: ExtensionsSnapshot,
         tab: ExtensionsTab,
@@ -1174,11 +1168,6 @@ impl ExtensionsView {
                 tr(self.locale, MessageId::ExtensionsNoItems).into_owned()
             }
         }
-    }
-
-    #[cfg(test)]
-    fn folded_group_count(&self) -> usize {
-        self.folded_groups.len()
     }
 }
 

@@ -529,11 +529,6 @@ fn completion_elapsed_ms(app: &App) -> Option<u128> {
         .filter(|elapsed| *elapsed < COMPLETION_BREATH_MS)
 }
 
-#[cfg(test)]
-pub(crate) fn phase_marker(app: &App, phase: ShellPhase) -> (&'static str, Cow<'static, str>) {
-    phase_marker_with_activity(app, phase, LiveActivity::from_app(app))
-}
-
 /// Truthful window-title activity verb for the OSC-0 whale animation.
 ///
 /// Uses short English fragments (with fixed-width ellipsis) so alt-tabbed
