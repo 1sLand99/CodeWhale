@@ -1,5 +1,30 @@
-use codewhale_tui::session_manager::{SavedSession, create_saved_session_with_id_and_mode};
+mod models {
+    pub use codewhale_core::request::{ContentBlock, Message};
+}
+#[path = "../src/session_tree.rs"]
+mod session_tree;
+
+use models::Message;
+use serde::{Deserialize, Serialize};
+use session_tree::SessionJournal;
+use std::io::Write;
 use std::time::Instant;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Probe {
+    #[serde(default)]
+    schema_version: u32,
+    metadata: serde_json::Value,
+    messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    journal: Option<SessionJournal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leaf_id: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
 
 fn main() {
     let path = std::env::args().nth(1).expect("path");
@@ -7,86 +32,98 @@ fn main() {
     println!("file bytes: {}", raw.len());
 
     let t = Instant::now();
-    let session: SavedSession = serde_json::from_str(&raw).unwrap();
+    let s: Probe = serde_json::from_str(&raw).unwrap();
     println!("typed parse: {:?}", t.elapsed());
     println!(
         "messages: {} journal entries: {}",
-        session.messages.len(),
-        session
-            .journal
-            .as_ref()
-            .map(|j| j.entries.len())
-            .unwrap_or(0)
+        s.messages.len(),
+        s.journal.as_ref().map(|j| j.entries.len()).unwrap_or(0)
     );
 
-    // 1. to_string_pretty of whole session (what serialize_saved_session does)
     for _ in 0..3 {
         let t = Instant::now();
-        let s = serde_json::to_string_pretty(&session).unwrap();
+        let out = serde_json::to_string_pretty(&s).unwrap();
         println!(
-            "to_string_pretty full: {:?} ({} bytes)",
+            "to_string_pretty FULL: {:?} ({} bytes)",
             t.elapsed(),
-            s.len()
+            out.len()
         );
     }
-    // 2. to_string_pretty with messages dropped (the proposed dedup)
-    let mut deduped = session.clone();
-    deduped.messages = Vec::new();
+    let mut dedup = s.clone();
+    dedup.messages = Vec::new();
     for _ in 0..3 {
         let t = Instant::now();
-        let s = serde_json::to_string_pretty(&deduped).unwrap();
+        let out = serde_json::to_string_pretty(&dedup).unwrap();
         println!(
-            "to_string_pretty journal-only: {:?} ({} bytes)",
+            "to_string_pretty JOURNAL-ONLY: {:?} ({} bytes)",
             t.elapsed(),
-            s.len()
+            out.len()
         );
     }
-    // 3. full deep clone of session
     for _ in 0..3 {
         let t = Instant::now();
-        let c = session.clone();
+        let c = s.clone();
         println!(
-            "SavedSession::clone: {:?} (msgs {})",
+            "Probe::clone (== SavedSession::clone): {:?} ({} msgs)",
             t.elapsed(),
             c.messages.len()
         );
     }
-    // 4. journal.to_messages()
-    let j = session.journal.as_ref().unwrap();
+    let j = s.journal.as_ref().unwrap();
     for _ in 0..3 {
         let t = Instant::now();
         let m = j.to_messages();
-        println!("journal.to_messages: {:?} ({} msgs)", t.elapsed(), m.len());
+        println!(
+            "journal.to_messages (deep clone): {:?} ({} msgs)",
+            t.elapsed(),
+            m.len()
+        );
     }
-    // 5. UI-thread cost: create_saved_session_with_id_and_mode over api_messages
     for _ in 0..3 {
         let t = Instant::now();
-        let s = create_saved_session_with_id_and_mode(
-            "id".to_string(),
-            &session.messages,
-            "m",
-            std::path::Path::new("/tmp"),
-            0,
-            None,
-            None,
-        );
+        let jj = SessionJournal::from_messages(s.messages.clone(), 0);
         println!(
-            "create_saved_session_with_id_and_mode: {:?} ({} msgs)",
+            "from_messages(messages.to_vec()) [UI-thread snapshot build]: {:?} ({} entries)",
             t.elapsed(),
-            s.messages.len()
+            jj.entries.len()
         );
     }
-    // 6. atomic write timing
-    let content = serde_json::to_string_pretty(&session).unwrap();
+    for _ in 0..3 {
+        let t = Instant::now();
+        let eq = s.messages == j.to_messages();
+        println!(
+            "storage_compatible_copy compare: {:?} (eq={})",
+            t.elapsed(),
+            eq
+        );
+    }
+    let content = serde_json::to_string_pretty(&s).unwrap();
     let dir = std::env::temp_dir();
     for _ in 0..3 {
         let t = Instant::now();
         let mut f = tempfile::NamedTempFile::new_in(&dir).unwrap();
-        use std::io::Write;
         f.write_all(content.as_bytes()).unwrap();
         f.as_file().sync_all().unwrap();
         let p = dir.join("zz_perf_probe_out.json");
         f.persist(&p).unwrap();
-        println!("atomic write+fsync: {:?}", t.elapsed());
+        println!(
+            "atomic write+fsync {} bytes: {:?}",
+            content.len(),
+            t.elapsed()
+        );
+    }
+    let dc = serde_json::to_string_pretty(&dedup).unwrap();
+    for _ in 0..3 {
+        let t = Instant::now();
+        let mut f = tempfile::NamedTempFile::new_in(&dir).unwrap();
+        f.write_all(dc.as_bytes()).unwrap();
+        f.as_file().sync_all().unwrap();
+        let p = dir.join("zz_perf_probe_out2.json");
+        f.persist(&p).unwrap();
+        println!(
+            "atomic write+fsync DEDUP {} bytes: {:?}",
+            dc.len(),
+            t.elapsed()
+        );
     }
 }

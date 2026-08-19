@@ -1249,15 +1249,28 @@ fn analyze_destructive_patterns(command: &str) -> Option<SafetyAnalysis> {
 /// the destructive pass never examined the second stage. `||` is replaced
 /// before `|` so the boolean operator is not shredded into two empty pipes.
 fn split_command_segments(command: &str) -> Vec<String> {
-    command
-        .replace("&&", "\n")
-        .replace("||", "\n")
-        .replace('|', "\n")
-        .replace(';', "\n")
-        .split('\n')
-        .map(str::trim)
+    // Char-based, not byte-indexed: commands carry non-ASCII paths and slicing
+    // a multibyte character in half panics. `&&` and `||` are consumed as one
+    // unit so `||` cannot leave a stray `|` behind to split again.
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '&' | '|' if chars.peek() == Some(&ch) => {
+                chars.next();
+                segments.push(std::mem::take(&mut current));
+            }
+            '|' | ';' => segments.push(std::mem::take(&mut current)),
+            '&' => current.push(ch),
+            _ => current.push(ch),
+        }
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .map(|segment| segment.trim().to_owned())
         .filter(|segment| !segment.is_empty())
-        .map(ToOwned::to_owned)
         .collect()
 }
 
@@ -1734,6 +1747,24 @@ mod destructive_composition_tests {
             analyze_command(&deep).level,
             SafetyLevel::Dangerous,
             "unreadable nesting must fail closed"
+        );
+    }
+
+    /// Segment splitting is char-based; a byte-indexed version panics when a
+    /// command carries a non-ASCII path, which is ordinary for our users.
+    #[test]
+    fn segment_splitting_survives_non_ascii_paths() {
+        for command in [
+            "ls -la 文档/项目 | head -20",
+            "cat 说明.md && echo done",
+            "grep -r 'ключ' . ; echo ok",
+        ] {
+            let _ = analyze_command(command);
+        }
+        assert_eq!(
+            analyze_command(r#"echo 文档 | rm -rf "$HOME""#).level,
+            SafetyLevel::Dangerous,
+            "non-ASCII must not blind the pipeline split"
         );
     }
 
