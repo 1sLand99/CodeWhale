@@ -765,7 +765,7 @@ fn scrolled_user_prompt_pin(
     if width == 0 {
         return None;
     }
-    let Some((orig_idx, content)) =
+    let (orig_idx, content) =
         history
             .iter()
             .enumerate()
@@ -775,10 +775,7 @@ fn scrolled_user_prompt_pin(
                     Some((idx, content.as_str()))
                 }
                 _ => None,
-            })
-    else {
-        return None;
-    };
+            })?;
     let first_line = line_meta.iter().position(|meta| match meta {
         TranscriptLineMeta::CellLine {
             cell_index,
@@ -793,9 +790,7 @@ fn scrolled_user_prompt_pin(
         }
         _ => false,
     });
-    let Some(first_line) = first_line else {
-        return None;
-    };
+    let first_line = first_line?;
     if first_line >= top {
         return None;
     }

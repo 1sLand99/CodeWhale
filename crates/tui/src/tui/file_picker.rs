@@ -745,12 +745,14 @@ fn collect_candidates_limited(
 ) -> CandidateWalk {
     let mut out: Vec<String> = Vec::new();
     let mut truncated = push_matching_files(
-        root,
-        root,
-        max_depth,
-        true,
-        limit,
-        &|_| true,
+        MatchingFileWalk {
+            walk_root: root,
+            display_root: root,
+            max_depth,
+            honor_gitignore: true,
+            limit,
+            matches: &|_| true,
+        },
         &mut out,
         None,
     );
@@ -763,12 +765,14 @@ fn collect_candidates_limited(
                 continue;
             }
             truncated = push_matching_files(
-                &dot_dir,
-                root,
-                max_depth.map(|d| d.saturating_sub(1)),
-                false,
-                limit,
-                &|_| true,
+                MatchingFileWalk {
+                    walk_root: &dot_dir,
+                    display_root: root,
+                    max_depth: max_depth.map(|d| d.saturating_sub(1)),
+                    honor_gitignore: false,
+                    limit,
+                    matches: &|_| true,
+                },
                 &mut out,
                 None,
             );
@@ -807,12 +811,14 @@ fn collect_query_matches(
     let mut seen = HashSet::new();
     let under_always = always_dir_prefix(root, &start).is_some();
     let hit_cap = push_matching_files(
-        &start,
-        root,
-        depth,
-        !under_always,
-        limit,
-        &matches,
+        MatchingFileWalk {
+            walk_root: &start,
+            display_root: root,
+            max_depth: depth,
+            honor_gitignore: !under_always,
+            limit,
+            matches: &matches,
+        },
         &mut out,
         Some(&mut seen),
     );
@@ -823,12 +829,14 @@ fn collect_query_matches(
                 continue;
             }
             if push_matching_files(
-                &dot_dir,
-                root,
-                max_depth.map(|d| d.saturating_sub(1)),
-                false,
-                limit,
-                &matches,
+                MatchingFileWalk {
+                    walk_root: &dot_dir,
+                    display_root: root,
+                    max_depth: max_depth.map(|d| d.saturating_sub(1)),
+                    honor_gitignore: false,
+                    limit,
+                    matches: &matches,
+                },
                 &mut out,
                 Some(&mut seen),
             ) {
@@ -876,16 +884,28 @@ fn always_dir_prefix(root: &Path, path: &Path) -> Option<&'static str> {
     })
 }
 
-fn push_matching_files(
-    walk_root: &Path,
-    display_root: &Path,
+struct MatchingFileWalk<'a> {
+    walk_root: &'a Path,
+    display_root: &'a Path,
     max_depth: Option<usize>,
     honor_gitignore: bool,
     limit: usize,
-    matches: &dyn Fn(&str) -> bool,
+    matches: &'a dyn Fn(&str) -> bool,
+}
+
+fn push_matching_files(
+    walk: MatchingFileWalk<'_>,
     out: &mut Vec<String>,
     mut seen: Option<&mut HashSet<String>>,
 ) -> bool {
+    let MatchingFileWalk {
+        walk_root,
+        display_root,
+        max_depth,
+        honor_gitignore,
+        limit,
+        matches,
+    } = walk;
     if limit == 0 || out.len() >= limit {
         return true;
     }
