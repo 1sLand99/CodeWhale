@@ -50,6 +50,16 @@ abort under load.
 - `test(tui): break the LazyLock/env-barrier deadlock in the test harness`.
 - `ci: give test threads the 8 MiB stack they need` — the lib suite aborted
   with SIGABRT under load on the default 2 MiB stack.
+- YOLO entry points honor a locked approval policy: `--yolo`, `/mode yolo`,
+  `/zidong`, and Alt+Y can no longer set Full Access + trust + shell when
+  config or managed requirements own the posture.
+- Terminal PTY tools fail closed without a sandbox backend under a narrowed
+  filesystem posture, and otherwise start `$SHELL -i` through
+  `SandboxManager::prepare` like `bash`.
+- Skill update refuses to replace a directory that has no `.installed-from`
+  marker — same ownership gate plugins already used.
+- `cp`/`mv` are workspace-safe only when every path operand stays inside
+  the workspace — Auto-Review no longer auto-allows `cp /etc/passwd .`.
 
 ### Added
 

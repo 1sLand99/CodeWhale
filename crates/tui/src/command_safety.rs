@@ -1622,15 +1622,67 @@ fn all_segments_known_safe(command: &str) -> bool {
 
 /// Check if a command is safe within the workspace
 fn is_workspace_safe_command(command: &str) -> bool {
-    let command_lower = command.to_lowercase();
-
-    for ws_cmd in WORKSPACE_SAFE_COMMANDS {
-        if command_lower.starts_with(ws_cmd) {
-            return true;
-        }
+    let tokens = shell_words(command);
+    let Some(tokens) = unwrap_to_effective_tokens(&tokens) else {
+        return false;
+    };
+    let Some(start) = primary_token_index(&tokens) else {
+        return false;
+    };
+    let verb = command_word(&tokens[start]);
+    if matches!(verb.as_str(), "cp" | "mv") {
+        return copy_or_move_operands_are_workspace_relative(&tokens[start + 1..]);
     }
 
-    false
+    let command_lower = command.to_lowercase();
+    WORKSPACE_SAFE_COMMANDS
+        .iter()
+        .any(|ws_cmd| command_lower.starts_with(ws_cmd))
+}
+
+/// `cp`/`mv` are workspace-safe only when every path operand stays inside the
+/// workspace. Auto-Review treats `WorkspaceSafe` as an auto-allow, so a leading
+/// `cp`/`mv` token must not bless `/etc/passwd` or `$HOME`.
+fn copy_or_move_operands_are_workspace_relative(args: &[String]) -> bool {
+    let mut saw_operand = false;
+    for arg in args {
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            continue;
+        }
+        if !operand_is_workspace_relative(arg) {
+            return false;
+        }
+        saw_operand = true;
+    }
+    saw_operand
+}
+
+fn operand_is_workspace_relative(token: &str) -> bool {
+    let trimmed = token.trim_matches(['"', '\'']);
+    if trimmed.is_empty() || trimmed == "-" {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "~"
+        || lower.starts_with("~/")
+        || lower == "$home"
+        || lower.starts_with("$home/")
+        || lower == "${home}"
+        || lower.starts_with("${home}/")
+    {
+        return false;
+    }
+    if trimmed.contains('$') {
+        return false;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    if normalized.starts_with('/') || std::path::Path::new(trimmed).is_absolute() {
+        return false;
+    }
+    !normalized.split('/').any(|part| part == "..")
 }
 
 /// Parse a command and extract the primary command name
@@ -2070,6 +2122,32 @@ mod tests {
             analyze_command("npm install").level,
             SafetyLevel::WorkspaceSafe
         );
+        assert_eq!(
+            analyze_command("cp src.rs dest.rs").level,
+            SafetyLevel::WorkspaceSafe
+        );
+        assert_eq!(
+            analyze_command("mv notes.txt notes.bak").level,
+            SafetyLevel::WorkspaceSafe
+        );
+    }
+
+    #[test]
+    fn cp_and_mv_are_not_workspace_safe_from_the_verb_alone() {
+        for command in [
+            "cp /etc/passwd .",
+            "mv $HOME/secret ./stolen",
+            "cp ~/.ssh/id_rsa ./id_rsa",
+            r#"mv "$HOME" ./home-backup"#,
+            "cp ../outside.txt .",
+            "env cp /tmp/x ./x",
+        ] {
+            assert_ne!(
+                analyze_command(command).level,
+                SafetyLevel::WorkspaceSafe,
+                "{command} must not auto-allow against an outside path"
+            );
+        }
     }
 
     #[test]

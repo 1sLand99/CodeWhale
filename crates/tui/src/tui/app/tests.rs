@@ -3706,6 +3706,48 @@ fn managed_requirements_ignore_saved_full_access_and_lock_changes() {
 }
 
 #[test]
+fn yolo_entry_points_honor_a_locked_approval_policy() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let requirements_path = tmp.path().join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "allowed_approval_policies = [\"on-request\"]\n",
+    )
+    .expect("requirements");
+    let config = Config {
+        requirements_path: Some(requirements_path.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+
+    let mut options = test_options(false);
+    options.yolo = true;
+    options.allow_shell = false;
+    let mut app = App::new(options, &config);
+
+    assert!(app.approval_policy_locked());
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.trust_mode);
+    assert!(!app.yolo);
+
+    assert_eq!(app.select_mode(AppMode::Yolo), SettingSelection::Refused);
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.yolo);
+    assert!(
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("controlled"))
+    );
+
+    assert!(!app.set_mode(AppMode::Yolo));
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.yolo);
+}
+
+#[test]
 fn set_mode_agent_to_yolo_to_agent_restores_baseline_without_yolo_leak() {
     // Round-trip Agent -> YOLO -> Agent must not leave YOLO's elevated authority
     // (shell/trust/Auto) bleeding into the restored Agent surface (#3386).

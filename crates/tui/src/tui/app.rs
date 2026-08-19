@@ -1611,6 +1611,10 @@ pub struct App {
     /// True only when an organization requirements file owns approval policy.
     /// Unlike a user-owned config key, this source cannot be edited in-app.
     approval_policy_requirements_managed: bool,
+    /// True when the interactive shell switch is user-owned (unset or root
+    /// config.toml). Profile / env / managed / project owners stay in charge
+    /// even when a YOLO entry point asks for Full Access.
+    shell_access_editable: bool,
     // Clipboard handler
     pub clipboard: ClipboardHandler,
     // Tool approval session allowlist
@@ -2447,7 +2451,10 @@ impl App {
             AppMode::Yolo => AppMode::Agent,
             other => other,
         };
-        let yolo_compat = requested_mode == AppMode::Yolo;
+        // YOLO is a permission change (Full Access + trust + shell), not a
+        // mode change. A locked approval policy owns that surface — every
+        // other posture route already honors the lock.
+        let yolo_compat = requested_mode == AppMode::Yolo && !self.approval_policy_locked();
         let previous_mode = self.mode;
         if previous_mode == mode && !yolo_compat && !self.yolo {
             return false;
@@ -2475,7 +2482,9 @@ impl App {
         if yolo_compat {
             // Transient full-access mirrors for legacy YOLO entry points; do not
             // persist trust/shell elevation into the durable Agent baseline.
-            self.allow_shell = true;
+            if self.shell_access_editable {
+                self.allow_shell = true;
+            }
             self.trust_mode = true;
             self.approval_mode = ApprovalMode::Bypass;
             self.yolo = true;
@@ -2547,6 +2556,15 @@ impl App {
     /// [`StartupDefaultsWriter`]: crate::tui::startup_defaults::StartupDefaultsWriter
     pub fn select_mode(&mut self, mode: AppMode) -> SettingSelection {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
+            return SettingSelection::Refused;
+        }
+        if matches!(mode, AppMode::Yolo) && self.approval_policy_locked() {
+            self.push_status_toast(
+                "Permissions are controlled by config or managed requirements".to_string(),
+                StatusToastLevel::Warning,
+                Some(6_000),
+            );
+            self.needs_redraw = true;
             return SettingSelection::Refused;
         }
         let changed = self.set_mode(mode);

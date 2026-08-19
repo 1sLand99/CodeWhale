@@ -482,29 +482,12 @@ impl App {
 
         // Resolve the saved mode separately from the permission posture.
         let preferred_mode = AppMode::from_setting(&settings.default_mode);
-        let yolo_compat = yolo || (preferred_mode == AppMode::Yolo && !start_in_agent_mode);
-        let initial_mode = if yolo_compat || start_in_agent_mode {
+        let yolo_requested = yolo || (preferred_mode == AppMode::Yolo && !start_in_agent_mode);
+        let initial_mode = if yolo_requested || start_in_agent_mode {
             AppMode::Agent
         } else {
             preferred_mode
         };
-        let needs_workspace_trust = !yolo_compat && crate::tui::onboarding::needs_trust(&workspace);
-        // Suppress the missing-key provider picker for the xAI-OAuth-missing-
-        // credential case: the user already chose xAI and just needs to
-        // re-authenticate it, not re-pick a provider every launch.
-        let (onboarding, onboarding_missing_key_recovery) = launch_onboarding_decision(
-            skip_onboarding,
-            was_onboarded,
-            needs_api_key,
-            needs_workspace_trust,
-            xai_oauth_needs_reauth,
-        );
-        let onboarding_workspace_trust_gate = onboarding_is_workspace_trust_gate(
-            skip_onboarding,
-            was_onboarded,
-            needs_api_key,
-            needs_workspace_trust,
-        );
 
         // Durable Agent-era permission baseline (#3386). Plan/YOLO derive from
         // and restore to this. Legacy Auto inputs parse to Agent; if an older
@@ -538,6 +521,33 @@ impl App {
             approval_policy_control == ApprovalPolicyControl::RootConfig;
         let approval_policy_requirements_managed =
             approval_policy_control == ApprovalPolicyControl::Requirements;
+        let shell_access_editable = config
+            .allow_shell_control(
+                config_path.as_deref(),
+                config_profile.as_deref(),
+                &workspace,
+            )
+            .editable_root();
+        // YOLO is a permission change. A locked policy must not be sidestepped
+        // by --yolo, default_mode=yolo, /zidong, or Alt+Y.
+        let yolo_compat = yolo_requested && !approval_policy_locked;
+        let needs_workspace_trust = !yolo_compat && crate::tui::onboarding::needs_trust(&workspace);
+        // Suppress the missing-key provider picker for the xAI-OAuth-missing-
+        // credential case: the user already chose xAI and just needs to
+        // re-authenticate it, not re-pick a provider every launch.
+        let (onboarding, onboarding_missing_key_recovery) = launch_onboarding_decision(
+            skip_onboarding,
+            was_onboarded,
+            needs_api_key,
+            needs_workspace_trust,
+            xai_oauth_needs_reauth,
+        );
+        let onboarding_workspace_trust_gate = onboarding_is_workspace_trust_gate(
+            skip_onboarding,
+            was_onboarded,
+            needs_api_key,
+            needs_workspace_trust,
+        );
         let saved_permission_posture = if approval_policy_locked {
             None
         } else {
@@ -562,7 +572,11 @@ impl App {
             // policy so a YOLO -> Agent downshift restores it.
             agent_approval_mode: configured_approval_mode,
         };
-        let allow_shell = allow_shell || yolo_compat || matches!(initial_mode, AppMode::Yolo);
+        let allow_shell = if yolo_compat {
+            allow_shell || shell_access_editable
+        } else {
+            allow_shell
+        };
         let shell_manager = new_shared_shell_manager(workspace.clone());
 
         // Initialize hooks executor from config, merged with project-local
@@ -849,10 +863,11 @@ impl App {
             approval_policy_locked,
             approval_policy_root_editable,
             approval_policy_requirements_managed,
+            shell_access_editable,
             clipboard: ClipboardHandler::new(),
             approval_session_approved: HashSet::new(),
             approval_session_denied: HashSet::new(),
-            approval_mode: if yolo_compat || matches!(initial_mode, AppMode::Yolo) {
+            approval_mode: if yolo_compat {
                 ApprovalMode::Bypass
             } else {
                 configured_approval_mode
@@ -864,7 +879,7 @@ impl App {
             last_known_work_state: None,
             current_session_metadata: None,
             session_artifacts: Vec::new(),
-            trust_mode: yolo_compat || initial_mode == AppMode::Yolo || configured_trust_mode,
+            trust_mode: yolo_compat || configured_trust_mode,
             translation_enabled: false,
             mini_window: config.mini_window.clone().unwrap_or_default(),
             status_items: config
