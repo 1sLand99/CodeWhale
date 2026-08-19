@@ -439,3 +439,12 @@ If the workflow failed for the release tag, use the exact-tag rerun or
     `gh workflow run sync-cnb.yml --ref vX.Y.Z`; never omit the tag ref
   - follow the proof steps in
     [docs/CNB_MIRROR.md](CNB_MIRROR.md#manual-fallback)
+- Workflow runner failure or hung release job:
+  - every release-lane job carries an explicit `timeout-minutes` to contain
+    unattended runs, but timeouts are containment rather than immediate recovery
+  - if a workflow job sits `in_progress` with 404 logs (or produces no useful
+    log output for 20 minutes), cancel the run and rerun failed jobs / dispatch
+    an exact-ref rerun rather than waiting out the full job timeout
+  - check the last-useful-log timestamp before cancelling to distinguish an
+    infrastructure failure (runner dropped / HTTP 404 on log stream) from a
+    legitimate long build step (e.g. Windows artifact compilation)

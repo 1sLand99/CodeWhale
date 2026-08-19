@@ -410,6 +410,8 @@ assert.match(runbook, /expected_sha/);
 assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
+assert.match(runbook, /last[- ]useful[- ]log/i, "runbook must document the last-useful-log rule (#5496)");
+assert.match(runbook, /404 logs/i, "runbook must document the 404-log cancellation rule (#5496)");
 
 const cnbRustGates = cnb.match(
   /\.rust_workspace_gates_stage: &rust_workspace_gates_stage([\s\S]*?)\n\.linux_rust_gates:/,
@@ -530,6 +532,22 @@ function jobsWithoutTimeout(source) {
   return offenders;
 }
 
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  uncapped:\n    runs-on: ubuntu-latest\n"),
+  ["uncapped"],
+  "jobsWithoutTimeout must detect an uncapped job",
+);
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  reusable:\n    uses: ./.github/workflows/reusable.yml\n"),
+  [],
+  "jobsWithoutTimeout must skip reusable workflow callers",
+);
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  capped:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n"),
+  [],
+  "jobsWithoutTimeout must accept a capped job",
+);
+
 for (const [name, source] of [
   ["release-candidate.yml", candidate],
   ["release-artifacts.yml", artifacts],
@@ -553,6 +571,28 @@ assert.ok(
   Number(buildTimeout[1]) >= 60,
   `artifact build cap ${buildTimeout[1]}m leaves no margin over a healthy 40-45m Windows build`,
 );
+
+function jobTimeout(source, job) {
+  const match = source.match(
+    new RegExp(`^  ${job}:\\n(?:.*\\n)*?    timeout-minutes: (\\d+)$`, "m"),
+  );
+  assert.ok(match, `${job} must declare timeout-minutes`);
+  return Number(match[1]);
+}
+
+// Pin the measured release-lane budget: fast setup and packaging fail quickly,
+// while cross-platform compilation keeps real margin over the 40-45m Windows
+// build observed on the release train.
+assert.equal(jobTimeout(candidate, "resolve"), 10);
+assert.equal(jobTimeout(candidate, "web"), 15);
+assert.equal(jobTimeout(artifacts, "pin"), 10);
+assert.equal(jobTimeout(artifacts, "build"), 90);
+for (const job of ["bundle", "windows-installer", "assemble", "smoke"]) {
+  assert.equal(jobTimeout(artifacts, job), 15, `${job} must keep the 15m packaging cap`);
+}
+assert.equal(jobTimeout(nightly, "build"), 90);
+assert.equal(jobTimeout(release, "resolve"), 10);
+assert.equal(jobTimeout(release, "parity"), 20);
 
 console.log(
   "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",
