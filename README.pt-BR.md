@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -33,7 +33,7 @@ uma das coisas mais úteis que você pode fazer — veja [Contribuindo](#contrib
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale rodando em um terminal](assets/screenshot.png)
+![Codewhale rodando em um terminal](assets/screenshot.webp)
 
 ## Instalação
 

@@ -31,7 +31,7 @@ useful things you can do — see [Contributing](#contributing).
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale running in a terminal](assets/screenshot.png)
+![Codewhale running in a terminal](assets/screenshot.webp)
 
 ## Install
 

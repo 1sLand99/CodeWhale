@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Открытый агент для программирования в вашем терминале — модель приносите с собой.
@@ -35,7 +35,7 @@ harness станет вашим, а не нашим.
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale, запущенный в терминале](assets/screenshot.png)
+![Codewhale, запущенный в терминале](assets/screenshot.webp)
 
 ## Установка
 

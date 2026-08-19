@@ -18,7 +18,7 @@
  * "Plan · Work · Operate", "Ask · Auto-Review · Full Access",
  * "TUI · exec · web · API", "Codewhale", "GitHub", "Issues",
  * `npm install -g codewhale`, `cargo test --locked`, `codewhale exec`,
- * package-manager proper nouns, mirror names, and `/codewhale-tui.png`.
+ * package-manager proper nouns, mirror names, and `/codewhale-tui.webp`.
  */
 
 export interface ChromeDict {
@@ -214,7 +214,7 @@ export interface HomeDict {
 
   /** Screenshot toolbar label, e.g. "Current session". */
   shotSession: string;
-  /** Screenshot alt text for /codewhale-tui.png. */
+  /** Screenshot alt text for /codewhale-tui.webp. */
   screenshotAlt: string;
   /** Screenshot figcaption. */
   figcaption: string;

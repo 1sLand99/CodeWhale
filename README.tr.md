@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Terminaliniz için açık kaynak bir kodlama ajanı — modeli siz getirin.
@@ -34,7 +34,7 @@ yapabileceğiniz en yararlı şeylerden biridir — bkz.
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Terminalde çalışan Codewhale](assets/screenshot.png)
+![Terminalde çalışan Codewhale](assets/screenshot.webp)
 
 ## Kurulum
 

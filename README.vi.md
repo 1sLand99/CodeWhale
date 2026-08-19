@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -33,7 +33,7 @@ trong những điều hữu ích nhất bạn có thể làm — xem [Đóng gó
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale chạy trong terminal](assets/screenshot.png)
+![Codewhale chạy trong terminal](assets/screenshot.webp)
 
 ## Cài đặt
 

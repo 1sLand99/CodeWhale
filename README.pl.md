@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Otwartoźródłowy agent programistyczny do Twojego terminala — model przynosisz sam.
@@ -33,7 +33,7 @@ zrobić — zobacz [Współtworzenie](#współtworzenie).
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale działający w terminalu](assets/screenshot.png)
+![Codewhale działający w terminalu](assets/screenshot.webp)
 
 ## Instalacja
 

@@ -113,6 +113,22 @@ function pngDimensions(image: Buffer): [number, number] {
   return [image.readUInt32BE(16), image.readUInt32BE(20)];
 }
 
+/**
+ * Dimensions of the canonical product screenshot. It is a lossless VP8L WebP,
+ * so the size lives in the 14-bit-packed VP8L header rather than a PNG IHDR;
+ * PNG is still accepted so this keeps working if the asset is ever swapped back.
+ */
+function imageDimensions(image: Buffer): [number, number] {
+  if (image.subarray(1, 4).toString("ascii") === "PNG") return pngDimensions(image);
+  expect(image.subarray(0, 4).toString("ascii")).toBe("RIFF");
+  expect(image.subarray(8, 12).toString("ascii")).toBe("WEBP");
+  const chunk = image.subarray(12, 16).toString("ascii");
+  expect(chunk, "expected a lossless VP8L screenshot").toBe("VP8L");
+  // VP8L: 1 signature byte, then width-1 and height-1 as 14-bit LE fields.
+  const bits = image.readUInt32LE(21);
+  return [(bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1];
+}
+
 function comparableVersion(value: string): number {
   const [major = 0, minor = 0, patch = 0] = value.split(".").map((n) => Number.parseInt(n, 10) || 0);
   return major * 1_000_000 + minor * 1_000 + patch;
@@ -585,14 +601,14 @@ done
     const digest = (image: Buffer) => createHash("sha256").update(image).digest("hex");
 
     expect(digest(readmeImage)).toBe(digest(websiteImage));
-    expect(pngDimensions(readmeImage)).toEqual([1562, 1256]);
+    expect(imageDimensions(readmeImage)).toEqual([1562, 1256]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
     expect(matrix.screenshot.terminal).toBe("unrecorded");
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
-    expect(readme).toContain("assets/screenshot.png");
-    expect(homepage).toContain('src="/codewhale-tui.png"');
+    expect(readme).toContain("assets/screenshot.webp");
+    expect(homepage).toContain('src="/codewhale-tui.webp"');
     // Alt text and figcaption are dictionary-backed (#4934); the screenshot
     // contract now runs through the EN reference value and the page's use of
     // it, and every routed locale must caption the same session honestly.

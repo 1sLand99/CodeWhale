@@ -17,8 +17,34 @@ function applySecurityHeaders(res: NextResponse): NextResponse {
   return res;
 }
 
+/**
+ * The one host this site is indexed under. `www` is also bound to this worker
+ * as a custom domain, so without this guard the entire site answers on two
+ * hosts and every page has a duplicate URL a crawler can reach.
+ *
+ * This runs before the locale and static-asset branches on purpose: the
+ * canonical host has to win for assets and API routes too, or a `www` page
+ * keeps pulling subresources from `www` after the document moved.
+ */
+const CANONICAL_HOST = "codewhale.net";
+
+function canonicalHostRedirect(req: NextRequest): NextResponse | null {
+  const host = req.headers.get("host");
+  if (!host) return null;
+  // Compare without the port so local and preview hosts are untouched.
+  const bare = host.split(":")[0].toLowerCase();
+  if (bare !== `www.${CANONICAL_HOST}`) return null;
+  const url = req.nextUrl.clone();
+  url.host = CANONICAL_HOST;
+  url.port = "";
+  return NextResponse.redirect(url, 301);
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+
+  const canonical = canonicalHostRedirect(req);
+  if (canonical) return applySecurityHeaders(canonical);
 
   // Skip API routes, static files, _next, and the dot-less metadata route
   // for the shared OG image (but still apply security headers).

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 터미널에서 쓰는 오픈소스 코딩 에이전트 — 모델은 당신이 가져옵니다.
@@ -18,7 +18,7 @@ Codewhale은 DeepSeek을 위한 네이티브 경험으로 시작했습니다. �
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![터미널에서 실행 중인 Codewhale](assets/screenshot.png)
+![터미널에서 실행 중인 Codewhale](assets/screenshot.webp)
 
 ## 설치
 

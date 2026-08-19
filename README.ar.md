@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 وكيل برمجة مفتوح المصدر لطرفيّتك — أحضر نموذجك بنفسك.
@@ -29,7 +29,7 @@ reviewer على Kimi. اكتب أدوارك ودستور constitution خاصًا
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale يعمل في طرفية](assets/screenshot.png)
+![Codewhale يعمل في طرفية](assets/screenshot.webp)
 
 ## التثبيت
 

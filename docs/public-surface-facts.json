@@ -230,8 +230,8 @@
     ]
   },
   "screenshot": {
-    "readme": "assets/screenshot.png",
-    "website": "web/public/codewhale-tui.png",
+    "readme": "assets/screenshot.webp",
+    "website": "web/public/codewhale-tui.webp",
     "sourceVersion": null,
     "sourceCommit": null,
     "terminal": "unrecorded",

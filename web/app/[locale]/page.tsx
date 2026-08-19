@@ -159,7 +159,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               <span>{d.shotSession}</span>
             </div>
             <Image
-              src="/codewhale-tui.png"
+              src="/codewhale-tui.webp"
               alt={d.screenshotAlt}
               width={1562}
               height={1256}

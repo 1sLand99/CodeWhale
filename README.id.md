@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -18,7 +18,7 @@ Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkem
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale running in a terminal](assets/screenshot.png)
+![Codewhale running in a terminal](assets/screenshot.webp)
 
 ## Instalasi
 

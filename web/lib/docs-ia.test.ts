@@ -255,7 +255,7 @@ describe("homepage integration", () => {
     // (plain "Unreleased", per docs/design/WEB_VOICE.md).
     expect(homepage).toContain("d.sourceCandidate");
     expect(getHome("en").sourceCandidate).toBe("Unreleased");
-    expect(homepage).toContain('src="/codewhale-tui.png"');
+    expect(homepage).toContain('src="/codewhale-tui.webp"');
     for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
       expect(homepage).toContain(label);
     }

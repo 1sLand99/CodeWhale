@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:79856d0c10be -->
+<!-- source: README.md sha256:acee66e62ab0 -->
 # Codewhale
 
 給終端機用的開源程式設計智能體——模型由你自備。
@@ -18,7 +18,7 @@ Codewhale 起初是為 DeepSeek 打造的原生體驗，如今已成長為社群
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale 在終端機中執行](assets/screenshot.png)
+![Codewhale 在終端機中執行](assets/screenshot.webp)
 
 ## 安裝
 
