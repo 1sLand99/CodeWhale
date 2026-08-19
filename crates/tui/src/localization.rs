@@ -1335,6 +1335,21 @@ pub enum MessageId {
     // Setup wizard — guided answer notes.
     SetupGuidedNotes,
     // Underwater launch screen (pre-session menu + worktree flow).
+    LaunchStartTitle,
+    LaunchMenuWork,
+    LaunchMenuChat,
+    LaunchWorkDescription,
+    LaunchChatDescription,
+    LaunchWorkspaceGitReady,
+    LaunchWorkspaceFolderReady,
+    LaunchProviderConfigured,
+    LaunchProviderSetupNeeded,
+    LaunchGroupContinue,
+    LaunchGroupMore,
+    LaunchWorkspaceGitShort,
+    LaunchWorkspaceFolderShort,
+    LaunchProviderConfiguredShort,
+    LaunchProviderSetupShort,
     LaunchMenuNewSession,
     LaunchMenuNewWorktree,
     LaunchMenuResumeSession,
@@ -2972,6 +2987,21 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SetupGuidedEvidenceTestsAndReceipts,
     MessageId::SetupGuidedEvidenceReleaseReceipts,
     MessageId::SetupGuidedNotes,
+    MessageId::LaunchStartTitle,
+    MessageId::LaunchMenuWork,
+    MessageId::LaunchMenuChat,
+    MessageId::LaunchWorkDescription,
+    MessageId::LaunchChatDescription,
+    MessageId::LaunchWorkspaceGitReady,
+    MessageId::LaunchWorkspaceFolderReady,
+    MessageId::LaunchProviderConfigured,
+    MessageId::LaunchProviderSetupNeeded,
+    MessageId::LaunchGroupContinue,
+    MessageId::LaunchGroupMore,
+    MessageId::LaunchWorkspaceGitShort,
+    MessageId::LaunchWorkspaceFolderShort,
+    MessageId::LaunchProviderConfiguredShort,
+    MessageId::LaunchProviderSetupShort,
     MessageId::LaunchMenuNewSession,
     MessageId::LaunchMenuNewWorktree,
     MessageId::LaunchMenuResumeSession,
@@ -4452,6 +4482,34 @@ mod tests {
         let ids = [
             MessageId::ComposerOperatePlaceholder,
             MessageId::EmptyStateHelpConnector,
+        ];
+        for locale in Locale::shipped_complete() {
+            if *locale == Locale::En {
+                continue;
+            }
+            for id in ids {
+                let localized = tr(*locale, id);
+                assert!(!localized.is_empty(), "{} empty for {id:?}", locale.tag());
+                assert_ne!(
+                    localized,
+                    tr(Locale::En, id),
+                    "{} should translate {id:?}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn launch_choice_and_readiness_prose_is_translated_in_complete_locales() {
+        let ids = [
+            MessageId::LaunchStartTitle,
+            MessageId::LaunchMenuWork,
+            MessageId::LaunchMenuChat,
+            MessageId::LaunchWorkDescription,
+            MessageId::LaunchChatDescription,
+            MessageId::LaunchWorkspaceFolderReady,
+            MessageId::LaunchProviderSetupNeeded,
         ];
         for locale in Locale::shipped_complete() {
             if *locale == Locale::En {

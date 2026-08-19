@@ -37,10 +37,11 @@ pub enum ShellTier {
     Wide,
 }
 
-const LAUNCH_ROWS: [(MessageId, &str); 5] = [
-    (MessageId::LaunchMenuNewSession, "Enter"),
-    (MessageId::LaunchMenuNewWorktree, "Ctrl+N"),
+const LAUNCH_ROWS: [(MessageId, &str); 6] = [
+    (MessageId::LaunchMenuWork, "Enter"),
+    (MessageId::LaunchMenuChat, "C"),
     (MessageId::LaunchMenuResumeSession, "Ctrl+R"),
+    (MessageId::LaunchMenuNewWorktree, "Ctrl+N"),
     (MessageId::LaunchMenuChangelog, "Ctrl+L"),
     (MessageId::LaunchMenuQuit, "Ctrl+Q"),
 ];
@@ -49,10 +50,24 @@ const LAUNCH_ROWS: [(MessageId, &str); 5] = [
 pub enum LaunchAction {
     None,
     NewSession,
+    NewChat,
     CreateWorktree(String),
     Resume,
     Changelog,
     Quit,
+}
+
+impl LaunchAction {
+    /// Session-only mode selected by a launch choice. The event loop applies
+    /// this with `App::set_mode`, never the startup-default-writing selector.
+    #[must_use]
+    pub const fn session_mode(&self) -> Option<AppMode> {
+        match self {
+            Self::NewSession => Some(AppMode::Agent),
+            Self::NewChat => Some(AppMode::Plan),
+            _ => None,
+        }
+    }
 }
 
 /// Translate launch-menu input into one product action. Direct reliable keys
@@ -97,10 +112,17 @@ pub fn handle_launch_key(
     }
 
     let direct = match key.code {
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1),
+        KeyCode::Char('c') | KeyCode::Char('C')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Some(1)
+        }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(2),
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(4),
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(4),
+        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(5),
         _ => None,
     };
     if let Some(selected) = direct {
@@ -122,18 +144,19 @@ pub fn handle_launch_key(
 
     match launch.selected {
         0 => LaunchAction::NewSession,
-        1 if launch.worktree_available => {
+        1 => LaunchAction::NewChat,
+        2 => LaunchAction::Resume,
+        3 if launch.worktree_available => {
             launch.worktree_input = Some(String::new());
             launch.status = Some(tr(locale, MessageId::LaunchWorktreePrompt).into_owned());
             LaunchAction::None
         }
-        1 => {
+        3 => {
             launch.status = Some(tr(locale, MessageId::LaunchWorktreeNeedsGit).into_owned());
             LaunchAction::None
         }
-        2 => LaunchAction::Resume,
-        3 => LaunchAction::Changelog,
-        4 => LaunchAction::Quit,
+        4 => LaunchAction::Changelog,
+        5 => LaunchAction::Quit,
         _ => LaunchAction::None,
     }
 }
@@ -737,6 +760,60 @@ fn render_launch_line(area: Rect, buf: &mut Buffer, y: u16, spans: Vec<Span<'sta
     );
 }
 
+fn render_launch_content_line(
+    area: Rect,
+    buf: &mut Buffer,
+    y: u16,
+    inset: u16,
+    spans: Vec<Span<'static>>,
+) {
+    if y >= area.height {
+        return;
+    }
+    let inset = inset.min(area.width / 2);
+    Paragraph::new(Line::from(spans)).render(
+        Rect {
+            x: area.x.saturating_add(inset),
+            y: area.y.saturating_add(y),
+            width: area.width.saturating_sub(inset.saturating_mul(2)),
+            height: 1,
+        },
+        buf,
+    );
+}
+
+fn launch_has_detail(area: Rect) -> bool {
+    area.width >= 60 && area.height >= 22
+}
+
+fn launch_content_start(_area: Rect) -> u16 {
+    // Keep the decision block anchored just below the shell header at every
+    // detailed size. Vertically centering it made a wide terminal look like
+    // an old fixed-height menu floating in decorative emptiness.
+    3
+}
+
+fn launch_row_y(area: Rect, index: usize) -> u16 {
+    const DETAIL_ROW_OFFSETS: [u16; 6] = [4, 7, 11, 12, 15, 16];
+    let start = launch_content_start(area);
+    if launch_has_detail(area) {
+        start.saturating_add(DETAIL_ROW_OFFSETS[index])
+    } else {
+        start.saturating_add(u16::try_from(index).unwrap_or(0))
+    }
+}
+
+fn launch_workspace_name(app: &App) -> String {
+    app.workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || crate::utils::display_path(&app.workspace),
+            str::to_string,
+        )
+}
+
 /// Render the distinct pre-session choice state. This screen contains no
 /// transcript, composer, dashboard, or post-launch whale: each row dispatches
 /// to real session/worktree machinery before the idle ocean is entered.
@@ -783,15 +860,96 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         );
     }
 
-    let rows_start = if area.height >= 16 { 4 } else { 3 };
+    if launch_has_detail(area) {
+        let content_start = launch_content_start(area);
+        render_launch_content_line(
+            area,
+            buf,
+            content_start,
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, MessageId::LaunchStartTitle).into_owned(),
+                Style::default()
+                    .fg(app.ui_theme.text_body)
+                    .add_modifier(Modifier::BOLD),
+            )],
+        );
+        let workspace_id = if app.launch.worktree_available {
+            MessageId::LaunchWorkspaceGitReady
+        } else {
+            MessageId::LaunchWorkspaceFolderReady
+        };
+        render_launch_content_line(
+            area,
+            buf,
+            content_start.saturating_add(1),
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, workspace_id).replace("{name}", &launch_workspace_name(app)),
+                Style::default().fg(app.ui_theme.text_soft),
+            )],
+        );
+        let provider_id = if app.onboarding_needs_api_key {
+            MessageId::LaunchProviderSetupNeeded
+        } else {
+            MessageId::LaunchProviderConfigured
+        };
+        render_launch_content_line(
+            area,
+            buf,
+            content_start.saturating_add(2),
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, provider_id).into_owned(),
+                Style::default().fg(if app.onboarding_needs_api_key {
+                    app.ui_theme.warning
+                } else {
+                    app.ui_theme.success
+                }),
+            )],
+        );
+        for (row, description_id) in [
+            (launch_row_y(area, 0), MessageId::LaunchWorkDescription),
+            (launch_row_y(area, 1), MessageId::LaunchChatDescription),
+        ] {
+            render_launch_content_line(
+                area,
+                buf,
+                row.saturating_add(1),
+                4,
+                vec![Span::styled(
+                    tr(app.ui_locale, description_id).into_owned(),
+                    Style::default().fg(app.ui_theme.text_muted),
+                )],
+            );
+        }
+        for (row, heading_id) in [
+            (launch_row_y(area, 2), MessageId::LaunchGroupContinue),
+            (launch_row_y(area, 4), MessageId::LaunchGroupMore),
+        ] {
+            render_launch_content_line(
+                area,
+                buf,
+                row.saturating_sub(1),
+                2,
+                vec![Span::styled(
+                    tr(app.ui_locale, heading_id).into_owned(),
+                    Style::default()
+                        .fg(app.ui_theme.text_hint)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+    }
+
     for (index, (label_id, key)) in LAUNCH_ROWS.iter().enumerate() {
-        let y = rows_start + u16::try_from(index).unwrap_or(0);
+        let y = launch_row_y(area, index);
         if y >= area.height.saturating_sub(3) {
             break;
         }
         let selected = app.launch.selected == index;
         let mut label = tr(app.ui_locale, *label_id).into_owned();
-        if index == 1 && !app.launch.worktree_available {
+        if index == 3 && !app.launch.worktree_available {
             label.push_str(&format!(
                 " · {}",
                 tr(app.ui_locale, MessageId::LaunchMenuUnavailable)
@@ -804,29 +962,34 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
                     .replace("{count}", &app.launch.workspace_session_count.to_string())
             ));
         }
-        let prefix = if selected { "  ▸ " } else { "    " };
+        let prefix = if selected { "▸ " } else { "  " };
         let key_width = key.width();
-        let label_budget = width.saturating_sub(prefix.width() + key_width + 2);
+        let content_width = width.saturating_sub(4);
+        let label_budget = content_width.saturating_sub(prefix.width() + key_width + 2);
         let label = truncate_to_width(&label, label_budget);
-        let fill = width.saturating_sub(prefix.width() + label.width() + key_width);
+        let fill = content_width.saturating_sub(prefix.width() + label.width() + key_width);
         let row_style = if selected {
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD)
-        } else if index == 1 && !app.launch.worktree_available {
+            crate::tui::menu_style::theme_selected_row_style(&app.ui_theme)
+        } else if index == 3 && !app.launch.worktree_available {
             Style::default().fg(app.ui_theme.text_dim)
         } else {
             Style::default().fg(app.ui_theme.text_body)
         };
-        render_launch_line(
+        let key_style = if selected {
+            row_style
+        } else {
+            Style::default().fg(app.ui_theme.text_hint)
+        };
+        render_launch_content_line(
             area,
             buf,
             y,
+            2,
             vec![
                 Span::styled(prefix, row_style),
                 Span::styled(label, row_style),
-                Span::raw(" ".repeat(fill)),
-                Span::styled(*key, Style::default().fg(app.ui_theme.text_hint)),
+                Span::styled(" ".repeat(fill), row_style),
+                Span::styled(*key, key_style),
             ],
         );
     }
@@ -876,17 +1039,25 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         )],
     );
 
-    let saved_sessions = if app.launch.workspace_session_count == 1 {
-        tr(app.ui_locale, MessageId::LaunchSavedSessionSingular).into_owned()
-    } else {
-        tr(app.ui_locale, MessageId::LaunchSavedSessionsPlural)
-            .replace("{count}", &app.launch.workspace_session_count.to_string())
-    };
+    let workspace_kind = tr(
+        app.ui_locale,
+        if app.launch.worktree_available {
+            MessageId::LaunchWorkspaceGitShort
+        } else {
+            MessageId::LaunchWorkspaceFolderShort
+        },
+    );
+    let provider = tr(
+        app.ui_locale,
+        if app.onboarding_needs_api_key {
+            MessageId::LaunchProviderSetupShort
+        } else {
+            MessageId::LaunchProviderConfiguredShort
+        },
+    );
     let status = format!(
-        "{} · {} · {}",
-        app.model_display_label(),
-        mode_label(app.ui_locale, app.mode),
-        saved_sessions
+        "{} · {workspace_kind} · {provider}",
+        launch_workspace_name(app)
     );
     render_launch_line(
         area,
@@ -903,16 +1074,15 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
 /// The coordinates mirror the renderer's responsive row placement exactly.
 pub fn record_launch_row_areas(area: Rect, launch: &mut crate::tui::app::LaunchState) {
     launch.row_areas.clear();
-    let rows_start = if area.height >= 16 { 4 } else { 3 };
     for index in 0..LAUNCH_ROWS.len() {
-        let y = rows_start + u16::try_from(index).unwrap_or(0);
+        let y = launch_row_y(area, index);
         if y >= area.height.saturating_sub(3) {
             break;
         }
         launch.row_areas.push(Rect {
-            x: area.x,
+            x: area.x.saturating_add(2),
             y: area.y.saturating_add(y),
-            width: area.width,
+            width: area.width.saturating_sub(4),
             height: 1,
         });
     }
@@ -1820,13 +1990,132 @@ mod tests {
     fn launch_row_hitboxes_follow_responsive_render_rows() {
         let mut launch = launch();
         record_launch_row_areas(Rect::new(3, 2, 80, 24), &mut launch);
-        assert_eq!(launch.row_areas.len(), 5);
-        assert_eq!(launch.row_areas[0], Rect::new(3, 6, 80, 1));
-        assert_eq!(launch.row_areas[4], Rect::new(3, 10, 80, 1));
+        assert_eq!(launch.row_areas.len(), 6);
+        assert_eq!(launch.row_areas[0], Rect::new(5, 9, 76, 1));
+        assert_eq!(launch.row_areas[5], Rect::new(5, 21, 76, 1));
 
         record_launch_row_areas(Rect::new(3, 2, 40, 10), &mut launch);
         assert_eq!(launch.row_areas.len(), 4);
-        assert_eq!(launch.row_areas[0], Rect::new(3, 5, 40, 1));
+        assert_eq!(launch.row_areas[0], Rect::new(5, 5, 36, 1));
+    }
+
+    fn launch_render(app: &App, width: u16, height: u16) -> (Buffer, String) {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        render_launch_screen(area, &mut buf, app);
+        let text = (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (buf, text)
+    }
+
+    #[test]
+    fn compact_launch_keeps_every_choice_and_readiness_fact_visible() {
+        let mut app = test_app();
+        app.workspace = PathBuf::from("/tmp/codewhale");
+        app.launch = launch();
+        app.onboarding_needs_api_key = false;
+
+        let (buf, text) = launch_render(&app, 40, 12);
+
+        for expected in [
+            "Work · current folder",
+            "Chat · read-only",
+            "Resume session · 2 saved",
+            "New worktree",
+            "Changelog",
+            "Quit",
+            "Enter",
+            "Ctrl+R",
+            "Ctrl+N",
+            "Ctrl+L",
+            "Ctrl+Q",
+            "codewhale · Git · provider set",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}:\n{text}");
+        }
+        assert!(
+            text.contains('▸'),
+            "selection needs a non-color cue:\n{text}"
+        );
+        assert_eq!(buf[(2, 3)].bg, app.ui_theme.selection_bg);
+        assert_eq!(
+            buf[(4, 3)].bg,
+            app.ui_theme.selection_bg,
+            "the selected label must sit inside its selection band"
+        );
+        assert!(
+            !text.contains("deepseek-v4-flash"),
+            "launch readiness must not become model marketing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn normal_and_wide_launch_add_decision_context() {
+        let mut app = test_app();
+        app.workspace = PathBuf::from("/tmp/codewhale");
+        app.launch = launch();
+        app.onboarding_needs_api_key = false;
+
+        for (width, height) in [(80, 24), (120, 36)] {
+            let (buf, text) = launch_render(&app, width, height);
+            for expected in [
+                "Start here",
+                "Workspace · codewhale · Git workspace",
+                "Provider · configured",
+                "Use this folder with local tools; changes follow your approval policy.",
+                "Conversation and planning only; no file changes.",
+                "Continue",
+                "More",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{width}x{height} missing {expected:?}:\n{text}"
+                );
+            }
+            assert!(
+                !text.contains("deepseek-v4-flash"),
+                "{width}x{height}:\n{text}"
+            );
+            assert_eq!(
+                buf[(4, 7)].bg,
+                app.ui_theme.selection_bg,
+                "{width}x{height} selected label escaped its row"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_provider_copy_reports_setup_without_route_or_secret_detail() {
+        let mut app = test_app();
+        app.workspace = PathBuf::from("/tmp/codewhale");
+        app.launch = launch();
+        app.onboarding_needs_api_key = true;
+
+        let (_, compact) = launch_render(&app, 40, 12);
+        assert!(compact.contains("provider setup"), "{compact}");
+        let (_, normal) = launch_render(&app, 80, 24);
+        assert!(normal.contains("Provider · setup needed"), "{normal}");
+        assert!(!normal.contains("deepseek-v4-flash"), "{normal}");
+    }
+
+    #[test]
+    fn all_complete_locales_keep_six_compact_launch_targets() {
+        let mut app = test_app();
+        app.workspace = PathBuf::from("/tmp/codewhale");
+        app.launch = launch();
+        for locale in Locale::shipped_complete() {
+            app.ui_locale = *locale;
+            let (_, text) = launch_render(&app, 40, 12);
+            for key in ["Enter", "C", "Ctrl+R", "Ctrl+N", "Ctrl+L", "Ctrl+Q"] {
+                assert!(
+                    text.contains(key),
+                    "{} compact launch lost {key}:\n{text}",
+                    locale.tag()
+                );
+            }
+        }
     }
 
     fn footer_text(app: &mut App) -> String {
@@ -2607,6 +2896,24 @@ mod tests {
         assert_eq!(
             handle_launch_key(
                 &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                Locale::En,
+            ),
+            LaunchAction::NewChat
+        );
+        assert_eq!(state.selected, 1);
+        assert_eq!(
+            handle_launch_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
+                Locale::En,
+            ),
+            LaunchAction::NewChat
+        );
+
+        assert_eq!(
+            handle_launch_key(
+                &mut state,
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
                 Locale::En,
             ),
@@ -2622,7 +2929,36 @@ mod tests {
             ),
             LaunchAction::Changelog
         );
-        assert_eq!(state.selected, 3);
+        assert_eq!(state.selected, 4);
+    }
+
+    #[test]
+    fn launch_work_and_chat_modes_are_session_only_and_restore_policy() {
+        let mut app = test_app();
+        let initial_policy = (app.allow_shell, app.trust_mode, app.approval_mode);
+        let pending_defaults = app.startup_defaults.pending_len();
+
+        assert_eq!(LaunchAction::NewChat.session_mode(), Some(AppMode::Plan));
+        let _ = app.set_mode(LaunchAction::NewChat.session_mode().unwrap());
+        assert_eq!(app.mode, AppMode::Plan);
+        assert_eq!(app.startup_defaults.pending_len(), pending_defaults);
+
+        assert_eq!(
+            LaunchAction::NewSession.session_mode(),
+            Some(AppMode::Agent)
+        );
+        let _ = app.set_mode(LaunchAction::NewSession.session_mode().unwrap());
+        assert_eq!(app.mode, AppMode::Agent);
+        assert_eq!(
+            (app.allow_shell, app.trust_mode, app.approval_mode),
+            initial_policy,
+            "Work must restore the configured Agent policy instead of broadening permissions"
+        );
+        assert_eq!(
+            app.startup_defaults.pending_len(),
+            pending_defaults,
+            "launch choices must not persist a startup-default change"
+        );
     }
 
     #[test]

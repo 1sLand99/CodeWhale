@@ -3419,9 +3419,30 @@ pub(crate) async fn run_event_loop(
                     return Ok(());
                 }
                 if let Some(action) = app.pending_launch_action.take() {
+                    // Work and Chat choose only this new session's posture.
+                    // `set_mode` deliberately does not write startup defaults.
+                    if let Some(mode) = action.session_mode() {
+                        let _ = app.set_mode(mode);
+                    }
                     match action {
                         crate::tui::underwater::LaunchAction::None => {}
                         crate::tui::underwater::LaunchAction::NewSession => {
+                            let result = begin_launch_session(app, None);
+                            if apply_command_result(
+                                terminal,
+                                app,
+                                &mut engine_handle,
+                                &task_manager,
+                                config,
+                                &mut web_config_session,
+                                result,
+                            )
+                            .await?
+                            {
+                                return Ok(());
+                            }
+                        }
+                        crate::tui::underwater::LaunchAction::NewChat => {
                             let result = begin_launch_session(app, None);
                             if apply_command_result(
                                 terminal,
@@ -3915,10 +3936,30 @@ pub(crate) async fn run_event_loop(
                 }
 
                 let launch_locale = app.ui_locale;
-                match crate::tui::underwater::handle_launch_key(&mut app.launch, key, launch_locale)
-                {
+                let action =
+                    crate::tui::underwater::handle_launch_key(&mut app.launch, key, launch_locale);
+                if let Some(mode) = action.session_mode() {
+                    let _ = app.set_mode(mode);
+                }
+                match action {
                     crate::tui::underwater::LaunchAction::None => {}
                     crate::tui::underwater::LaunchAction::NewSession => {
+                        let result = begin_launch_session(app, None);
+                        if apply_command_result(
+                            terminal,
+                            app,
+                            &mut engine_handle,
+                            &task_manager,
+                            config,
+                            &mut web_config_session,
+                            result,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                    }
+                    crate::tui::underwater::LaunchAction::NewChat => {
                         let result = begin_launch_session(app, None);
                         if apply_command_result(
                             terminal,

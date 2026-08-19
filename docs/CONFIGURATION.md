@@ -1619,9 +1619,11 @@ Common settings keys:
   context panel, `/cost`, `/tokens`, and long-turn notification summaries. The
   aliases `rmb` and `yuan` normalize to `cny`.
 - `default_mode` (`agent`, `plan`, or `operate`; legacy values are accepted for migration but are not live mode vocabulary)
-- `launch_screen` (`on`/`off`; default `off`): show the pre-session New/
-  Resume/Worktree menu. With it off, Codewhale enters a new session directly;
-  resume remains available in-session.
+- `launch_screen` (`on`/`off`; default `off`): show the pre-session Work/Chat/
+  Resume/Worktree menu. Work uses the current folder under the configured
+  approval policy; Chat starts a read-only conversation. With the launch
+  screen off, Codewhale enters a new session directly; resume remains
+  available in-session.
 - `sidebar_focus` (legacy, migration-only): the classic right sidebar this key
   configured was removed in the 0.9.4 rail unification. The key is still read
   once so old settings carry forward, then folds into the live keys:

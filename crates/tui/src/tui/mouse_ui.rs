@@ -1728,6 +1728,28 @@ mod tests {
     }
 
     #[test]
+    fn launch_mouse_rows_dispatch_the_same_work_and_chat_actions_as_keyboard() {
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.worktree_available = true;
+        crate::tui::underwater::record_launch_row_areas(Rect::new(0, 0, 80, 24), &mut app.launch);
+
+        handle_mouse_event(&mut app, left_click(10, 10));
+        assert_eq!(app.launch.selected, 1);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::NewChat)
+        );
+
+        handle_mouse_event(&mut app, left_click(10, 7));
+        assert_eq!(app.launch.selected, 0);
+        assert_eq!(
+            app.pending_launch_action.take(),
+            Some(crate::tui::underwater::LaunchAction::NewSession)
+        );
+    }
+
+    #[test]
     fn context_menu_keeps_paste_first_outside_sidebar() {
         let mut app = create_test_app();
         app.work_surface.last_area = Some(Rect::new(60, 4, 20, 6));
