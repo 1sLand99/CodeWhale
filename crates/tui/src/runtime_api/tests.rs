@@ -395,6 +395,7 @@ fn messages_from_thread_detail_batches_tool_results() {
             "item_answer".to_string(),
         ],
         steer_count: 0,
+        agent_mail_message_id: None,
     };
     let item = |id: &str,
                 kind: TurnItemKind,

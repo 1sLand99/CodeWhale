@@ -20,6 +20,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use codewhale_protocol::agent_mail::{
+    AgentMailDeliveryMode, AgentMailEnvelope, AgentMailMessageId, AgentMailSendRequest,
+    AgentMailSendResponse,
+};
 use codewhale_protocol::runtime::{
     DynamicToolCallResult, RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION,
     RuntimeCapabilities, RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
@@ -539,6 +543,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         memory: true,
         mcp_server_management: true,
         skill_lifecycle: true,
+        agent_mail: true,
     }
 }
 
@@ -1076,6 +1081,16 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
+        .route("/v1/agent-mail", post(send_agent_mail))
+        .route("/v1/threads/{id}/agent-mail", get(list_agent_mail))
+        .route(
+            "/v1/threads/{id}/agent-mail/{message_id}/deliver",
+            post(deliver_agent_mail),
+        )
+        .route(
+            "/v1/threads/{id}/agent-mail/{message_id}/read",
+            post(mark_agent_mail_read),
+        )
         .route(
             "/v1/threads/{id}/goal",
             get(get_thread_goal)
@@ -4025,6 +4040,83 @@ async fn start_thread_turn(
     ))
 }
 
+#[derive(Debug, Serialize)]
+struct AgentMailDeliveryResponse {
+    envelope: AgentMailEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn: Option<TurnRecord>,
+}
+
+async fn send_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Json(request): Json<AgentMailSendRequest>,
+) -> Result<(StatusCode, Json<AgentMailSendResponse>), ApiError> {
+    let mut response = state
+        .runtime_threads
+        .queue_agent_mail(request)
+        .await
+        .map_err(map_agent_mail_err)?;
+    if response.envelope.delivery_mode == AgentMailDeliveryMode::WakeAtSafeBoundary
+        && response.envelope.trigger_turn
+    {
+        let (envelope, _) = state
+            .runtime_threads
+            .deliver_agent_mail(
+                &response.envelope.destination.thread_id,
+                &response.envelope.message_id,
+            )
+            .await
+            .map_err(map_agent_mail_err)?;
+        response.envelope = envelope;
+    }
+    let status = if response.idempotent_replay {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(response)))
+}
+
+async fn list_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AgentMailEnvelope>>, ApiError> {
+    let inbox = state
+        .runtime_threads
+        .list_agent_mail_for_thread(&id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(inbox))
+}
+
+async fn deliver_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<AgentMailDeliveryResponse>, ApiError> {
+    let message_id = AgentMailMessageId::parse(message_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let (envelope, turn) = state
+        .runtime_threads
+        .deliver_agent_mail(&id, &message_id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(AgentMailDeliveryResponse { envelope, turn }))
+}
+
+async fn mark_agent_mail_read(
+    State(state): State<RuntimeApiState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<AgentMailEnvelope>, ApiError> {
+    let message_id = AgentMailMessageId::parse(message_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let envelope = state
+        .runtime_threads
+        .mark_agent_mail_read(&id, &message_id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(envelope))
+}
+
 async fn steer_thread_turn(
     State(state): State<RuntimeApiState>,
     Path((id, turn_id)): Path<(String, String)>,
@@ -6319,6 +6411,23 @@ fn map_thread_err(err: anyhow::Error) -> ApiError {
             status: StatusCode::CONFLICT,
             message,
         }
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
+fn map_agent_mail_err(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("ownership denied") {
+        ApiError::forbidden(message)
+    } else if lower.contains("already exists with different delivery intent") {
+        ApiError::conflict(message)
+    } else if lower.contains("failed to read agent mail envelope") && lower.contains("no such file")
+    {
+        ApiError::not_found(message)
+    } else if lower.starts_with("thread '") && lower.ends_with("' not found") {
+        ApiError::not_found(message)
     } else {
         ApiError::bad_request(message)
     }

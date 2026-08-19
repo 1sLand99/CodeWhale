@@ -57,6 +57,10 @@ pub enum UserInputProvenance {
     Runtime,
     /// Completion/event text from a child worker or sub-agent handoff.
     SubAgentHandoff,
+    /// A bounded, typed Agent Mail envelope delivered by the durable runtime.
+    /// Provider protocols still receive a user-role projection, but this
+    /// provenance can never inherit external-user authority.
+    AgentMail,
     /// Text restored from a saved/imported transcript.
     ImportedTranscript,
     /// Text recalled from memory or another persisted source.
@@ -71,6 +75,7 @@ impl UserInputProvenance {
             Self::ExternalUser => "external_user",
             Self::Runtime => "runtime",
             Self::SubAgentHandoff => "subagent_handoff",
+            Self::AgentMail => "agent_mail",
             Self::ImportedTranscript => "imported_transcript",
             Self::MemoryRecall => "memory_recall",
             Self::AssistantGenerated => "assistant_generated",

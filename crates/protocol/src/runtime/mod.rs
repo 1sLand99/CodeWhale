@@ -78,6 +78,9 @@ pub struct RuntimeCapabilities {
     /// are available via the HTTP API.
     #[serde(default)]
     pub skill_lifecycle: bool,
+    /// Durable, workspace-scoped cross-task Agent Mail endpoints and events.
+    #[serde(default)]
+    pub agent_mail: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
@@ -378,6 +381,7 @@ mod tests {
             memory: true,
             mcp_server_management: false,
             skill_lifecycle: false,
+            agent_mail: true,
         };
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();
@@ -389,6 +393,7 @@ mod tests {
         assert_eq!(obj.get("fleet_event_stream").unwrap(), &json!(true));
         assert_eq!(obj.get("thread_goals").unwrap(), &json!(true));
         assert_eq!(obj.get("memory").unwrap(), &json!(true));
+        assert_eq!(obj.get("agent_mail").unwrap(), &json!(true));
     }
 
     #[test]
