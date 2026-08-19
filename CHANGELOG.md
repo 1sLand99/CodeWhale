@@ -67,6 +67,9 @@ abort under load.
 - Short CLI no longer waits up to three seconds for a telemetry POST on
   exit; `session_end` is recorded and the buffer ships on the next
   interactive session.
+- `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
+  the empty palette and bare `/` menu instead of only under Advanced
+  (#5442, #5439).
 
 ### Added
 

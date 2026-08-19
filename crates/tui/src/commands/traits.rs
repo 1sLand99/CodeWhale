@@ -31,9 +31,7 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
     "context",
     "diff",
     "edit",
-    "goal",
     "hf",
-    "hooks",
     "lsp",
     "modeldb",
     "models",
@@ -51,12 +49,9 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
     "status",
     "system",
     "theme",
-    "tokens",
     "tools",
-    "translate",
     "trust",
     "verbose",
-    "workspace",
 ];
 
 pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];

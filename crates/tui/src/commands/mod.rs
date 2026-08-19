@@ -1080,6 +1080,23 @@ mod tests {
     }
 
     #[test]
+    fn flagship_orchestration_and_workspace_commands_are_visible_at_the_palette_root() {
+        for name in ["goal", "hooks", "tokens", "translate", "workspace"] {
+            let info = registry()
+                .get_info(name)
+                .unwrap_or_else(|| panic!("/{name} must be registered"));
+            assert!(
+                info.show_in_empty_discovery(),
+                "/{name} must appear at the palette root (#5442 / #5439)"
+            );
+            assert!(
+                !traits::ADVANCED_DISCOVERY_COMMANDS.contains(&name),
+                "/{name} must not stay on the Advanced discovery list"
+            );
+        }
+    }
+
+    #[test]
     fn command_discovery_tier_lists_use_canonical_registered_names() {
         for (tier_name, names) in [
             ("advanced", traits::ADVANCED_DISCOVERY_COMMANDS),
