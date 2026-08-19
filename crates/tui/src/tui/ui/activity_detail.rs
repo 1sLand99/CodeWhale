@@ -7,11 +7,12 @@
 //! tool-details pager (including #500 spillover folding), copy-cell actions, and
 //! footer detail labels live here too.
 
+use crate::localization::{MessageId, tr};
 use crate::snapshot::SnapshotRepo;
 use crate::tui::app::App;
 use crate::tui::footer_ui::one_line_summary;
 use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
-use crate::tui::pager::PagerView;
+use crate::tui::pager::{PagerPage, PagerView};
 use crate::tui::ui_text::{
     history_cell_to_clipboard_text, history_cell_to_text, truncate_line_to_width,
 };
@@ -625,17 +626,53 @@ pub(super) fn open_turn_inspector_pager(app: &mut App) -> bool {
         .last_transcript_area
         .map(|area| area.width)
         .unwrap_or(80);
-    let text = turn_inspector_text(app);
-    // Precompute the compact Markdown handoff (#4108) and attach it so the
-    // pager's `e` key can copy a pasteable artifact without reaching back into
-    // `app`. Reuses the same turn scope + section data as the overview above.
-    let handoff = turn_handoff_markdown(app);
-    app.view_stack.push(
-        PagerView::from_text("Turn Inspector", &text, width.saturating_sub(2))
-            .with_copy_text(text)
-            .with_export_markdown(handoff),
-    );
+    let ranges = turn_ranges(app);
+    let page_count = ranges.len();
+    let pages = ranges
+        .into_iter()
+        .enumerate()
+        .map(|(page_index, (start, end))| {
+            let latest = page_index + 1 == page_count;
+            let text =
+                turn_inspector_text_for_range(app, start, end, page_index, page_count, latest);
+            let page = PagerPage::from_text("Turn Inspector", &text, width.saturating_sub(2))
+                .with_copy_text(text);
+            if latest {
+                // The existing handoff remains attached only to the
+                // current/latest turn it actually describes.
+                page.with_export_markdown(turn_handoff_markdown(app))
+            } else {
+                page
+            }
+        })
+        .collect();
+    app.view_stack
+        .push(PagerView::from_pages(pages, page_count.saturating_sub(1)));
     true
+}
+
+/// Chronological virtual-cell ranges for every recorded turn. A transcript
+/// without a user prompt still gets one coherent page, matching the previous
+/// Turn Inspector empty/degraded behavior.
+fn turn_ranges(app: &App) -> Vec<(usize, usize)> {
+    let end = app.virtual_cell_count();
+    let starts: Vec<usize> = (0..end)
+        .filter(|&idx| {
+            matches!(
+                app.cell_at_virtual_index(idx),
+                Some(HistoryCell::User { .. })
+            )
+        })
+        .collect();
+    if starts.is_empty() {
+        return vec![(0, end)];
+    }
+    starts
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, start)| (start, starts.get(idx + 1).copied().unwrap_or(end)))
+        .collect()
 }
 
 /// Virtual-cell range `[start, end)` of the turn under inspection.
@@ -676,14 +713,38 @@ fn short_turn_id(turn_id: &str) -> &str {
 }
 
 /// Assemble the Turn Inspector overview text from all available turn data.
+#[cfg(test)]
 pub(super) fn turn_inspector_text(app: &App) -> String {
     let (start, end) = current_turn_range(app);
+    turn_inspector_text_for_range(app, start, end, 0, 1, true)
+}
+
+fn turn_inspector_text_for_range(
+    app: &App,
+    start: usize,
+    end: usize,
+    page_index: usize,
+    page_count: usize,
+    latest: bool,
+) -> String {
     let mut out: Vec<String> = Vec::new();
 
     // Turn identity header. Lead with the human turn number and status; the
     // id is a short correlation suffix, never a raw UUID dump (dogfood A6).
-    let status = humanized_turn_status(app);
-    if app.turn_counter > 0 {
+    let status = if latest {
+        std::borrow::Cow::Borrowed(humanized_turn_status(app))
+    } else {
+        tr(app.ui_locale, MessageId::AutomationRunStatusCompleted)
+    };
+    if !latest {
+        let historical_offset = page_count.saturating_sub(page_index + 1) as u64;
+        let number = app
+            .turn_counter
+            .checked_sub(historical_offset)
+            .filter(|number| *number > 0)
+            .unwrap_or(page_index as u64 + 1);
+        out.push(format!("Turn #{number} \u{00B7} {status}"));
+    } else if app.turn_counter > 0 {
         let mut line = format!("Turn #{} \u{00B7} {status}", app.turn_counter);
         if let Some(turn_id) = app.runtime_turn_id.as_ref() {
             line.push_str(&format!(" \u{00B7} id {}", short_turn_id(turn_id)));
@@ -702,35 +763,70 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
         )
         .footer_chord,
     );
-    out.push(format!(
-        "Overview of the current/latest turn · press {details} for the selected item's raw detail"
-    ));
+    if latest {
+        out.push(format!(
+            "Overview of the current/latest turn · press {details} for the selected item's raw detail"
+        ));
+    }
 
     push_section(&mut out, "Intent", vec![turn_intent_line(app, start)]);
 
-    if let Some(line) = selected_item_context_line(app) {
+    if latest && let Some(line) = selected_item_context_line(app) {
         push_section(&mut out, "Selected item", vec![line]);
     }
 
-    push_section(&mut out, "To-do", turn_todo_lines(app));
     push_section(
         &mut out,
-        "Turn timeline",
-        turn_timeline_lines(app, start, end),
+        "To-do",
+        if latest {
+            turn_todo_lines(app)
+        } else {
+            Vec::new()
+        },
     );
+    let mut timeline = turn_full_conversation_lines(app, start, end);
+    if !timeline.is_empty() {
+        timeline.push(String::new());
+    }
+    timeline.extend(turn_timeline_lines(app, start, end));
+    push_section(&mut out, "Turn timeline", timeline);
     push_section(
         &mut out,
         "Files changed",
         turn_files_changed(app, start, end),
     );
-    push_section(&mut out, "Diagnostics loop", turn_diagnostics_lines(app));
+    push_section(
+        &mut out,
+        "Diagnostics loop",
+        if latest {
+            turn_diagnostics_lines(app)
+        } else {
+            Vec::new()
+        },
+    );
     push_section(
         &mut out,
         "Tests / verifier",
         turn_verifier_lines(app, start, end),
     );
-    push_section(&mut out, "Approvals / denials", turn_approvals_lines(app));
-    push_section(&mut out, "Model route + tokens/cost", turn_route_lines(app));
+    push_section(
+        &mut out,
+        "Approvals / denials",
+        if latest {
+            turn_approvals_lines(app)
+        } else {
+            Vec::new()
+        },
+    );
+    push_section(
+        &mut out,
+        "Model route + tokens/cost",
+        if latest {
+            turn_route_lines(app)
+        } else {
+            Vec::new()
+        },
+    );
     push_section(
         &mut out,
         "Final result / status",
@@ -738,6 +834,73 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
     );
 
     out.join("\n")
+}
+
+/// Source-faithful, turn-scoped transcript for the inspector page. The normal
+/// transcript can stay compact/folded; this explicit detail surface preserves
+/// complete recorded input, reasoning, tool results, and assistant output.
+fn turn_full_conversation_lines(app: &App, start: usize, end: usize) -> Vec<String> {
+    let thinking_total = (start..end)
+        .filter(|&idx| {
+            matches!(
+                app.cell_at_virtual_index(idx),
+                Some(HistoryCell::Thinking { .. })
+            )
+        })
+        .count();
+    let mut thinking_position = 0usize;
+    let mut out = Vec::new();
+
+    for idx in start..end {
+        let Some(cell) = app.cell_at_virtual_index(idx) else {
+            continue;
+        };
+        let tag = match cell {
+            HistoryCell::User { .. } => "[›]".to_string(),
+            HistoryCell::Thinking { streaming, .. } => {
+                thinking_position += 1;
+                format!(
+                    "[∿ {} {thinking_position}/{thinking_total} · {}]",
+                    tr(app.ui_locale, MessageId::PhaseReasoning),
+                    tr(
+                        app.ui_locale,
+                        if *streaming {
+                            MessageId::AutomationRunStatusRunning
+                        } else {
+                            MessageId::PhaseDone
+                        }
+                    )
+                )
+            }
+            HistoryCell::Tool(_) => format!("[⚙ {}]", tr(app.ui_locale, MessageId::PhaseUsingTool)),
+            HistoryCell::SubAgent(_) => "[↗]".to_string(),
+            HistoryCell::Assistant { streaming, .. } => format!(
+                "[◆ · {}]",
+                tr(
+                    app.ui_locale,
+                    if *streaming {
+                        MessageId::AutomationRunStatusRunning
+                    } else {
+                        MessageId::PhaseDone
+                    }
+                )
+            ),
+            HistoryCell::Error { .. } => "[!]".to_string(),
+            HistoryCell::System { .. } | HistoryCell::ArchivedContext { .. } => "[i]".to_string(),
+        };
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push(tag);
+        let body = history_cell_to_clipboard_text(cell, 120);
+        if body.trim().is_empty() {
+            out.push("—".to_string());
+        } else {
+            out.push(body);
+        }
+    }
+
+    out
 }
 
 /// Build a compact, pasteable Markdown handoff of the current/latest turn

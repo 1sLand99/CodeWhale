@@ -18811,6 +18811,150 @@ fn turn_inspector_scopes_to_latest_turn_only() {
 }
 
 #[test]
+fn turn_inspector_switches_isolated_full_turn_pages_with_tagged_reasoning_and_output() {
+    let mut app = create_test_app();
+    app.turn_counter = 2;
+    app.runtime_turn_status = Some("completed".to_string());
+    app.history = vec![
+        HistoryCell::User {
+            content: "FIRST-PROMPT\nkeep this input line".to_string(),
+        },
+        HistoryCell::Thinking {
+            content: "FIRST-THOUGHT\nfull reasoning tail".to_string(),
+            streaming: false,
+            duration_secs: Some(1.0),
+        },
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "read_file".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("src/first.rs".to_string()),
+            output: Some("FIRST-TOOL-OUTPUT\ncomplete execution tail".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+        HistoryCell::Assistant {
+            content: "FIRST-ANSWER\ncomplete assistant tail".to_string(),
+            streaming: false,
+        },
+        HistoryCell::User {
+            content: "SECOND-PROMPT".to_string(),
+        },
+        HistoryCell::Thinking {
+            content: "SECOND-THOUGHT".to_string(),
+            streaming: true,
+            duration_secs: None,
+        },
+        HistoryCell::Assistant {
+            content: "SECOND-ANSWER".to_string(),
+            streaming: true,
+        },
+    ];
+
+    assert!(open_turn_inspector_pager(&mut app));
+    let mut view = app.view_stack.pop().expect("turn inspector pager");
+    let pager = view
+        .as_any_mut()
+        .downcast_mut::<PagerView>()
+        .expect("turn inspector should reuse PagerView");
+
+    let latest = pager.body_text();
+    assert!(latest.contains("SECOND-PROMPT"), "{latest}");
+    assert!(latest.contains("[∿ reasoning 1/1 · running]"), "{latest}");
+    assert!(latest.contains("SECOND-THOUGHT"), "{latest}");
+    assert!(latest.contains("[◆ · running]"), "{latest}");
+    assert!(latest.contains("SECOND-ANSWER"), "{latest}");
+    assert!(!latest.contains("FIRST-PROMPT"), "page leaked: {latest}");
+
+    let action = pager.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(matches!(action, ViewAction::None));
+    let first = pager.body_text();
+    for expected in [
+        "FIRST-PROMPT",
+        "keep this input line",
+        "[∿ reasoning 1/1 · done]",
+        "FIRST-THOUGHT",
+        "full reasoning tail",
+        "[⚙ using tool]",
+        "FIRST-TOOL-OUTPUT",
+        "complete execution tail",
+        "[◆ · done]",
+        "FIRST-ANSWER",
+        "complete assistant tail",
+    ] {
+        assert!(first.contains(expected), "missing {expected}: {first}");
+    }
+    assert!(!first.contains("SECOND-PROMPT"), "page leaked: {first}");
+    let copied = match pager.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)) {
+        ViewAction::Emit(crate::tui::views::ViewEvent::CopyToClipboard { text, .. }) => text,
+        other => panic!("expected page-scoped copy event, got {other:?}"),
+    };
+    for expected in [
+        "FIRST-PROMPT\nkeep this input line",
+        "FIRST-THOUGHT",
+        "full reasoning tail",
+        "FIRST-ANSWER\ncomplete assistant tail",
+    ] {
+        assert!(copied.contains(expected), "missing {expected}: {copied}");
+    }
+    assert!(!copied.contains("SECOND-PROMPT"), "page leaked: {copied}");
+}
+
+#[test]
+fn turn_inspector_page_navigation_remains_visible_at_40x12() {
+    let mut app = create_test_app();
+    app.turn_counter = 2;
+    app.runtime_turn_status = Some("completed".to_string());
+    app.history = vec![
+        HistoryCell::User {
+            content: "first compact turn".to_string(),
+        },
+        HistoryCell::Assistant {
+            content: "first compact answer".to_string(),
+            streaming: false,
+        },
+        HistoryCell::User {
+            content: "second compact turn".to_string(),
+        },
+        HistoryCell::Assistant {
+            content: "second compact answer".to_string(),
+            streaming: false,
+        },
+    ];
+
+    assert!(open_turn_inspector_pager(&mut app));
+    let mut view = app.view_stack.pop().expect("turn inspector pager");
+    let pager = view
+        .as_any_mut()
+        .downcast_mut::<PagerView>()
+        .expect("turn inspector should reuse PagerView");
+    let area = Rect::new(0, 0, 40, 12);
+
+    let mut latest_buf = ratatui::buffer::Buffer::empty(area);
+    pager.render(area, &mut latest_buf);
+    let latest_surface = latest_buf
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(latest_surface.contains("2/2"), "{latest_surface}");
+    assert!(latest_surface.contains("←/→"), "{latest_surface}");
+    assert!(latest_surface.contains("Turn #2"), "{latest_surface}");
+
+    let _ = pager.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let mut first_buf = ratatui::buffer::Buffer::empty(area);
+    pager.render(area, &mut first_buf);
+    let first_surface = first_buf
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(first_surface.contains("1/2"), "{first_surface}");
+    assert!(first_surface.contains("Turn #1"), "{first_surface}");
+}
+
+#[test]
 fn ctrl_o_open_turn_inspector_pager_opens_turn_overview_not_single_cell() {
     // The Ctrl+O handler dispatches to open_turn_inspector_pager; assert that
     // helper opens the turn overview rather than the single-cell detail.
