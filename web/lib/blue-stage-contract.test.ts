@@ -60,5 +60,16 @@ describe("Blue Stage public-surface contract", () => {
       /@media \(max-width: 900px\)[\s\S]*?\.site-github-link,[\s\S]*?\.site-discord-link\s*\{\s*display:\s*none/,
     );
     expect(mobile).not.toMatch(/body:has\(\.product-home\) \.site-nav-actions select/);
+    // The locale <select> and the home wordmark must keep a usable hit
+    // target on every viewport, not only below 520px. Long native option
+    // labels and 2xl companion text used to collapse the wordmark to 0.
+    expect(CSS).toMatch(
+      /\.site-nav-actions select\s*\{\s*width:\s*6\.75rem;\s*max-width:\s*6\.75rem;\s*min-width:\s*0;/,
+    );
+    // `min-width` is the floor that keeps the wordmark clickable; the shrink
+    // factor stays at 1 so the compact controls are never the ones pushed
+    // past `overflow-x: clip` when the row is over budget.
+    expect(CSS).toMatch(/\.paper-wordmark\s*\{[\s\S]*?flex:\s*0 1 auto;[\s\S]*?min-width:\s*8\.75rem;/);
+    expect(CSS).not.toMatch(/\.paper-wordmark\s*\{[\s\S]*?flex:\s*0 0 auto;/);
   });
 });

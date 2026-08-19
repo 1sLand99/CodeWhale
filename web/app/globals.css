@@ -456,10 +456,17 @@ mark.search-highlight {
 }
 
 .paper-wordmark {
-  flex: 1 1 auto;
+  /* The old `flex: 1 1 auto` with `min-width: 0` let long-locale strips
+     (de, pt-BR, id) collapse the home control to a zero-width hit target.
+     `min-width` is a hard flexbox floor, so the shrink factor stays at 1:
+     the box gives back space down to 8.75rem and no further. Refusing to
+     shrink at all instead pushes the overflow onto the compact controls —
+     at 375px on a docs route the menu toggle is the item that gets clipped.
+     The tag still ellipsizes inside this box. */
+  flex: 0 1 auto;
   gap: 0.75rem;
   max-width: 15rem;
-  min-width: 0;
+  min-width: 8.75rem;
   overflow: hidden;
 }
 
@@ -529,6 +536,15 @@ mark.search-highlight {
 }
 
 .site-nav-actions > * { flex-shrink: 0; }
+
+/* Native <select> sizes to the selected option (Safari) or the longest
+   option (Chrome). Unbounded, "Bahasa Indonesia (sebagian)" / "Deutsch
+   (teilweise)" push the compact controls past overflow-x: clip. */
+.site-nav-actions select {
+  width: 6.75rem;
+  max-width: 6.75rem;
+  min-width: 0;
+}
 
 .site-github-link {
   display: inline-flex;

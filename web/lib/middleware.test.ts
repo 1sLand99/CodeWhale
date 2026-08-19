@@ -57,3 +57,39 @@ describe("dotted well-known paths", () => {
     expect(res.headers.get("location")).toBeNull();
   });
 });
+
+describe("locale prefix", () => {
+  it("prefixes a bare path with the detected locale", () => {
+    const res = middleware(
+      request("https://codewhale.net/install", "codewhale.net", {
+        "accept-language": "ja,en;q=0.8",
+      }),
+    );
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("https://codewhale.net/ja/install");
+  });
+
+  it("leaves an already-localized path, including pt-BR, unprefixed", () => {
+    for (const path of ["/zh/install", "/pt-BR/docs/guide", "/de"]) {
+      const res = middleware(request(`https://codewhale.net${path}`, "codewhale.net"));
+      expect(res.status, path).not.toBe(307);
+      expect(res.headers.get("location"), path).toBeNull();
+    }
+  });
+
+  it("folds a miscased locale prefix onto its canonical spelling", () => {
+    // Without this the segment reads as bare and the request lands on
+    // `/en/pt-br/install`, which is a 404 rather than the Portuguese page.
+    const res = middleware(
+      request("https://codewhale.net/pt-br/install?x=1", "codewhale.net"),
+    );
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toBe("https://codewhale.net/pt-BR/install?x=1");
+  });
+
+  it("settles after one canonicalizing redirect", () => {
+    const res = middleware(request("https://codewhale.net/pt-BR/install", "codewhale.net"));
+    expect(res.status).not.toBe(308);
+    expect(res.headers.get("location")).toBeNull();
+  });
+});

@@ -1,8 +1,9 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { ALL_LOCALES, locales } from "@/lib/i18n/config";
+import { ALL_LOCALES } from "@/lib/i18n/config";
 import { fill, getChrome } from "@/lib/i18n/dictionaries";
+import { replacePathLocale } from "@/lib/i18n/path";
 
 /** Labels for the dropdown. Keyed by locale code, displayed in native script. */
 const LOCALE_LABELS: Record<string, string> = {};
@@ -20,15 +21,8 @@ export function LocaleSwitcher({ current }: { current: string }) {
 
   const switchLocale = (code: string) => {
     if (code === current) return;
-    const segments = pathname.split("/");
-    if ((locales as readonly string[]).includes(segments[1])) {
-      segments[1] = code;
-    } else {
-      segments.splice(1, 0, code);
-    }
-    const newPath = segments.join("/") || `/${code}`;
     document.cookie = `NEXT_LOCALE=${code};path=/;max-age=${60 * 60 * 24 * 365}`;
-    router.push(newPath);
+    router.push(replacePathLocale(pathname, code));
   };
 
   // If only 1 routed locale, no switcher needed.

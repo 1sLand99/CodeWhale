@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { locales } from "@/lib/i18n/config";
 import { detectLocaleFromHeaders } from "@/lib/i18n/detect";
+import { pathLocale, replacePathLocale } from "@/lib/i18n/path";
 
 const COOKIE = "NEXT_LOCALE";
 
@@ -57,11 +57,23 @@ export function middleware(req: NextRequest) {
     return applySecurityHeaders(NextResponse.next());
   }
 
-  // Check if locale is already in path
-  const seg = pathname.split("/")[1];
-  if (locales.includes(seg as typeof locales[number])) {
-    const res = NextResponse.next();
-    res.cookies.set(COOKIE, seg, { path: "/", maxAge: 60 * 60 * 24 * 365 });
+  // Check if locale is already in path (`pt-BR` is one segment).
+  const existing = pathLocale(pathname);
+  if (existing) {
+    // A miscased prefix names the same route, so fold `/pt-br/install` onto
+    // `/pt-BR/install` instead of letting it reach the bare-path branch
+    // below, which would redirect to `/en/pt-br/install` — a 404. One
+    // canonical spelling also keeps a single URL in the index.
+    const canonicalPath = replacePathLocale(pathname, existing);
+    let res: NextResponse;
+    if (canonicalPath === pathname) {
+      res = NextResponse.next();
+    } else {
+      const url = req.nextUrl.clone();
+      url.pathname = canonicalPath;
+      res = NextResponse.redirect(url, 308);
+    }
+    res.cookies.set(COOKIE, existing, { path: "/", maxAge: 60 * 60 * 24 * 365 });
     return applySecurityHeaders(res);
   }
 
