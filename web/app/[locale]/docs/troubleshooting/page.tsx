@@ -23,7 +23,7 @@ export default async function TroubleshootingPage({
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{t.overviewTitle}</h2>
+        <h1 className="font-display text-3xl mb-1">{t.overviewTitle}</h1>
         <p className={`${t.bodyClassName} mt-3`}>{t.overviewLead}</p>
         <div className="hairline-t mt-6">
           {t.incidents.map(([name, detail]) => (

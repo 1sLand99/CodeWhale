@@ -89,7 +89,7 @@ export default async function ModesPage({ params }: { params: Promise<{ locale: 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "模式" : "Modes"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "模式" : "Modes"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "模式决定 Codewhale 如何组织工作；权限姿态决定它如何处理具有后果的工具调用。两者相互独立。"

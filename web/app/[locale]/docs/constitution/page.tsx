@@ -21,12 +21,12 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">
+        <h1 className="font-display text-3xl mb-1">
           {isZh ? "宪章与 /constitution" : "Constitution and /constitution"}{" "}
           <span className="font-cjk text-indigo text-2xl ml-2">
             {isZh ? "Constitution" : "宪章与 /constitution"}
           </span>
-        </h2>
+        </h1>
         {isZh ? (
           <p className="text-ink-soft mt-3 leading-[1.9] tracking-wide">
             Codewhale 先给 Agent 一个可追责的地址，再给上下文冲突一套法律。

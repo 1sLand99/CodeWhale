@@ -23,7 +23,7 @@ export default async function WorkSurfacePage({ params }: { params: Promise<{ lo
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "工作面板" : "The Work surface"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "工作面板" : "The Work surface"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "Codewhale 的 TUI 侧栏有一块 Work 区域，显示当前工作的实时状态。它不只是视觉上的待办清单：同一份工作状态同时由模型可见的工具、会话接力（relay）和子 Agent 交接共同维护。Codewhale 只有一个 Work 面板——带计数的 To-do 执行台账。update_plan 是对话式的推理笔记，不是第二个进度面板。"

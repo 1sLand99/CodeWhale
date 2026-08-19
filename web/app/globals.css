@@ -2889,6 +2889,7 @@ html[lang="ko"] .ocean-column h2 {
   margin-bottom: 1rem;
 }
 
+.docs-portal-hero-inner .docs-hero-title,
 .docs-portal-hero-inner h1,
 .community-welcome-inner h1 {
   max-width: 50rem;
@@ -2900,7 +2901,7 @@ html[lang="ko"] .ocean-column h2 {
   margin-top: 0.85rem;
 }
 
-.docs-portal-hero-inner p,
+.docs-portal-hero-inner p:not(.docs-hero-title),
 .community-welcome-inner p {
   max-width: 47rem;
   margin-top: 1rem;

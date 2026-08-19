@@ -42,7 +42,7 @@ export default async function RuntimeApiPage({ params }: { params: Promise<{ loc
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "运行时 API" : "Runtime API"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "运行时 API" : "Runtime API"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "codewhale app-server 是 canonical 的本地运行时 API 与控制平面。本地 SDK、移动/远控客户端和编辑器集成直接与它对话，而不是抓终端输出。引擎只作为本地进程运行：所有 API 默认绑定 localhost——没有托管中继，不托管 provider 令牌，不泄露秘密。codewhale serve --http / --mobile 保留为 app-server --http / --mobile 的兼容别名，启动的是同一个服务器；新集成应面向 app-server。"

@@ -26,7 +26,10 @@ export default async function DocsLayout({
             <Whale size={28} />
             <span>{t.portalMark}</span>
           </div>
-          <h1>{t.heroTitle}</h1>
+          {/* Shell chrome, not the page heading: this line is identical on all
+              16 docs URLs, so each page owns its own <h1> (its topic) and this
+              keeps the hero's display size without claiming the heading rank. */}
+          <p className="docs-hero-title">{t.heroTitle}</p>
           <p>{t.heroLead}</p>
           <div className="portal-actions">
             <Link href={`/${locale}/install`} className="portal-button portal-button-primary">

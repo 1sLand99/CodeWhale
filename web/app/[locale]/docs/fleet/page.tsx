@@ -28,7 +28,7 @@ export default async function FleetPage({ params }: { params: Promise<{ locale: 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "Fleet 与 Workflow" : "Fleet & Workflow"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "Fleet 与 Workflow" : "Fleet & Workflow"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "Fleet 是面向持久多 worker 运行的控制平面。它不是独立的执行引擎：一个 Fleet worker 就是一次由 Fleet 启动并持久跟踪的 codewhale exec 无头运行。当工作需要重试、睡眠/重启后存活、远程执行、收据或可审计的台账时，使用 Fleet 而不是短寿命的 agent 扇出。"

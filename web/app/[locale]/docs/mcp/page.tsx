@@ -23,7 +23,7 @@ export default async function McpPage({ params }: { params: Promise<{ locale: st
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">MCP</h2>
+        <h1 className="font-display text-3xl mb-1">MCP</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "Codewhale 可以通过 MCP（Model Context Protocol）加载额外的工具。MCP 服务器可以是由 TUI 启动的本地 stdio 进程，也可以是远程 URL 服务器（Streamable HTTP，带旧版 SSE 回退）。连接成功的服务器会把工具注册进模型目录；失败或被禁用的服务器不会作为可用工具呈现给模型。"

@@ -27,7 +27,7 @@ export default async function ConfigurationPage({
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "配置" : "Configuration"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "配置" : "Configuration"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "Codewhale 从 ~/.codewhale/config.toml 读取配置（旧版 ~/.deepseek/config.toml 仍作为回退读取）。--config 标志和 CODEWHALE_CONFIG_PATH 环境变量可以指定别的路径，两者同时设置时 --config 优先；文件加载之后再应用环境变量覆盖。"
