@@ -54,6 +54,7 @@ class PersistenceBacklogMeasurementTests(unittest.TestCase):
                 "cargo",
                 "test",
                 "--locked",
+                "--all-features",
                 "-p",
                 "codewhale-tui",
                 "--lib",

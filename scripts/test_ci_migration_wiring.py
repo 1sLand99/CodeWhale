@@ -101,6 +101,18 @@ class CiWiringTests(unittest.TestCase):
             ci.index("Check command migration manifest"),
         )
 
+    def test_main_ci_concurrency_is_keyed_by_sha(self) -> None:
+        ci = load_ci()
+        self.assertIn("github.workflow, github.sha", ci)
+        self.assertIn("ci-pr-{0}", ci)
+        self.assertNotIn(
+            "github.event.pull_request.number || github.ref",
+            ci,
+            "main must not share one concurrency group per ref — pending runs get cancelled",
+        )
+        self.assertIn("name: Safety gate", ci)
+        self.assertIn("Hermetic safety and authorization tests", ci)
+
     def test_valid_wiring_passes_all_assertions(self) -> None:
         # The live workflow must satisfy every structural invariant above.
         ci = load_ci()

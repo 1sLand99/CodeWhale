@@ -18,10 +18,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  # PRs: cancel superseded head runs. Push/schedule/dispatch on main must not
-  # cancel each other — they share github.ref with no pull_request.number, and
-  # canceling mid-run hid assertion failures that shipped in v0.9.8 (#5383).
+  # PRs still share one group so a new push cancels the superseded head.
+  # Push/schedule/dispatch on main must be keyed by SHA: with cancel-in-progress
+  # false, GitHub still cancels a *pending* run in the same group when a new
+  # one queues. That is how 31 of the last 40 main CI runs vanished without a
+  # verdict (test bankruptcy, 2026-08-19). Each SHA gets its own group so
+  # every commit on main actually finishes.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.workflow, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -214,6 +217,48 @@ jobs:
             echo "== ${bridge}"
             (cd "integrations/${bridge}" && npm test)
           done
+
+  safety-gate:
+    name: Safety gate
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true'
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        id: sccache
+        continue-on-error: true
+      - name: Enable sccache
+        if: steps.sccache.outcome == 'success'
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "${GITHUB_ENV}"
+          echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "${GITHUB_ENV}"
+      - name: Install Linux system dependencies
+        run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break
+            echo "apt-get update failed (attempt $i); retrying in 15s"
+            sleep 15
+          done
+          sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Hermetic safety and authorization tests
+        env:
+          HOME: ${{ runner.temp }}/cw-hermetic-home
+          RUST_MIN_STACK: "8388608"
+        run: |
+          mkdir -p "${HOME}"
+          cargo test -p codewhale-tui --lib --locked -- command_safety auto_review authority sandbox
+          cargo test -p codewhale-execpolicy --locked
 
   lint:
     name: Lint

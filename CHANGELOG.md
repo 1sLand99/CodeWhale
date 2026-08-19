@@ -60,6 +60,10 @@ abort under load.
   marker — same ownership gate plugins already used.
 - `cp`/`mv` are workspace-safe only when every path operand stays inside
   the workspace — Auto-Review no longer auto-allows `cp /etc/passwd .`.
+- Main CI no longer shares one concurrency group per branch: each SHA
+  gets a verdict instead of a cancelled pending run. A hermetic Safety
+  gate job runs authorization tests in under 15 minutes (test bankruptcy
+  restructuring — no tests deleted).
 
 ### Added
 
