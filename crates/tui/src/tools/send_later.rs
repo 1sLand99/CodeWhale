@@ -304,6 +304,7 @@ async fn execute_schedule(input: &Value, context: &ToolContext) -> Result<ToolRe
         fire_at,
         message: message.to_string(),
         workspace,
+        owner_session_id: Some(context.state_namespace.clone()),
         parent_trigger_id,
     };
 
@@ -336,7 +337,7 @@ async fn execute_list(input: &Value, context: &ToolContext) -> Result<ToolResult
     let records = {
         let manager = automations.lock().await;
         manager
-            .list_triggers(status_filter, limit)
+            .list_triggers_for_owner(status_filter, limit, &context.state_namespace)
             .map_err(|err| ToolError::execution_failed(format!("send_later list failed: {err}")))?
     };
 
@@ -375,7 +376,7 @@ async fn execute_read(input: &Value, context: &ToolContext) -> Result<ToolResult
     let record = {
         let manager = automations.lock().await;
         manager
-            .get_trigger(trigger_id)
+            .get_trigger_for_owner(trigger_id, &context.state_namespace)
             .map_err(|err| ToolError::execution_failed(format!("send_later read failed: {err}")))?
     };
 
@@ -407,9 +408,11 @@ async fn execute_cancel(input: &Value, context: &ToolContext) -> Result<ToolResu
 
     let record = {
         let manager = automations.lock().await;
-        manager.cancel_trigger(trigger_id).map_err(|err| {
-            ToolError::execution_failed(format!("send_later cancel failed: {err}"))
-        })?
+        manager
+            .cancel_trigger_for_owner(trigger_id, &context.state_namespace)
+            .map_err(|err| {
+                ToolError::execution_failed(format!("send_later cancel failed: {err}"))
+            })?
     };
 
     Ok(ToolResult::success(
@@ -454,18 +457,24 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Mutex;
 
-    use crate::automation_manager::AutomationManager;
+    use crate::automation_manager::{AutomationManager, DelayedTriggerStatus};
     use crate::tools::spec::{RuntimeToolServices, ToolContext, ToolSpec};
 
     use super::SendLaterTool;
 
     fn make_context(tmp: &TempDir) -> ToolContext {
+        make_context_for_session(tmp, "test-session")
+    }
+
+    fn make_context_for_session(tmp: &TempDir, session_id: &str) -> ToolContext {
         let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
         let shared = Arc::new(Mutex::new(manager));
-        ToolContext::new(".").with_runtime_services(RuntimeToolServices {
-            automations: Some(shared),
-            ..Default::default()
-        })
+        ToolContext::new(".")
+            .with_state_namespace(session_id)
+            .with_runtime_services(RuntimeToolServices {
+                automations: Some(shared),
+                ..Default::default()
+            })
     }
 
     #[tokio::test]
@@ -824,6 +833,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trigger_controls_are_session_owned_and_legacy_records_fail_closed() {
+        let tmp = TempDir::new().unwrap();
+        let session_a = make_context_for_session(&tmp, "session-a");
+        let session_b = make_context_for_session(&tmp, "session-b");
+        let tool = SendLaterTool::new("send_later");
+
+        let session_b_result = tool
+            .execute(
+                json!({
+                    "action": "schedule",
+                    "delay_minutes": 30,
+                    "message": "session B continuation"
+                }),
+                &session_b,
+            )
+            .await
+            .unwrap();
+        let session_b_id = serde_json::from_str::<serde_json::Value>(&session_b_result.content)
+            .unwrap()["trigger_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let session_a_result = tool
+            .execute(
+                json!({
+                    "action": "schedule",
+                    "delay_minutes": 30,
+                    "message": "session A continuation"
+                }),
+                &session_a,
+            )
+            .await
+            .unwrap();
+        let session_a_id = serde_json::from_str::<serde_json::Value>(&session_a_result.content)
+            .unwrap()["trigger_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
+        let mut legacy = manager
+            .create_trigger(crate::automation_manager::CreateDelayedTriggerRequest {
+                fire_at: chrono::Utc::now() + Duration::hours(1),
+                message: "ownerless legacy continuation".to_string(),
+                workspace: None,
+                owner_session_id: None,
+                parent_trigger_id: None,
+            })
+            .unwrap();
+
+        let session_b_list = tool
+            .execute(json!({ "action": "list", "limit": 1 }), &session_b)
+            .await
+            .unwrap();
+        assert!(session_b_list.content.contains(&session_b_id));
+        assert!(!session_b_list.content.contains(&session_a_id));
+        assert!(!session_b_list.content.contains(&legacy.trigger_id));
+
+        for action in ["read", "cancel"] {
+            let error = tool
+                .execute(
+                    json!({ "action": action, "trigger_id": &session_a_id }),
+                    &session_b,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("not found"), "{error}");
+        }
+        let still_pending = manager.get_trigger(&session_a_id).unwrap();
+        assert_eq!(still_pending.status, DelayedTriggerStatus::Pending);
+
+        let legacy_error = tool
+            .execute(
+                json!({ "action": "read", "trigger_id": &legacy.trigger_id }),
+                &session_a,
+            )
+            .await
+            .unwrap_err();
+        assert!(legacy_error.to_string().contains("not found"));
+
+        let restored_a = tool
+            .execute(
+                json!({ "action": "read", "trigger_id": &session_a_id }),
+                &session_a,
+            )
+            .await
+            .unwrap();
+        assert!(
+            restored_a.content.contains("session A continuation"),
+            "switching A to B and back must restore A's controls"
+        );
+
+        let own_cancel = tool
+            .execute(
+                json!({ "action": "cancel", "trigger_id": &session_b_id }),
+                &session_b,
+            )
+            .await
+            .unwrap();
+        assert!(own_cancel.content.contains("canceled"));
+
+        legacy.fire_at = chrono::Utc::now() - Duration::minutes(1);
+        manager.save_trigger(&legacy).unwrap();
+        assert!(
+            manager
+                .collect_due_triggers(chrono::Utc::now())
+                .unwrap()
+                .iter()
+                .all(|record| record.trigger_id != legacy.trigger_id),
+            "ownerless legacy triggers must never fire"
+        );
+    }
+
+    #[tokio::test]
     async fn collect_due_triggers_returns_past_pending() {
         let tmp = TempDir::new().unwrap();
         let manager = AutomationManager::open(tmp.path().to_path_buf()).unwrap();
@@ -833,6 +957,7 @@ mod tests {
             fire_at: chrono::Utc::now() + Duration::hours(1),
             message: "Not due yet.".to_string(),
             workspace: None,
+            owner_session_id: Some("session-a".to_string()),
             parent_trigger_id: None,
         };
         let record = manager.create_trigger(req).unwrap();

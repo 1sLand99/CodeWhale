@@ -78,6 +78,9 @@ pub struct DelayedTriggerRecord {
     /// Working directory for the task that fires when the trigger trips.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
+    /// Session that scheduled this trigger. Missing legacy ownership fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<String>,
     pub status: DelayedTriggerStatus,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +106,8 @@ pub struct CreateDelayedTriggerRequest {
     pub message: String,
     /// Optional workspace directory for the fired task.
     pub workspace: Option<PathBuf>,
+    /// Session that owns controls and the task created when this trigger fires.
+    pub owner_session_id: Option<String>,
     /// Optional parent trigger id for re-arm lineage tracking.
     pub parent_trigger_id: Option<String>,
 }
@@ -1336,6 +1341,7 @@ impl AutomationManager {
             fire_at: req.fire_at,
             message: req.message.trim().to_string(),
             workspace: req.workspace,
+            owner_session_id: req.owner_session_id,
             status: DelayedTriggerStatus::Pending,
             created_at: now,
             fired_at: None,
@@ -1363,6 +1369,21 @@ impl AutomationManager {
             );
         }
         Ok(record)
+    }
+
+    /// Load a trigger only when it belongs to the given session.
+    ///
+    /// Foreign, ownerless legacy, unreadable, and absent records share the same
+    /// result so trigger existence cannot be disclosed across sessions.
+    pub fn get_trigger_for_owner(
+        &self,
+        trigger_id: &str,
+        owner_session_id: &str,
+    ) -> Result<DelayedTriggerRecord> {
+        self.get_trigger(trigger_id)
+            .ok()
+            .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))
+            .ok_or_else(|| anyhow::anyhow!("Trigger '{trigger_id}' not found"))
     }
 
     /// Atomically persist a trigger record.
@@ -1413,9 +1434,28 @@ impl AutomationManager {
         Ok(out)
     }
 
-    /// Cancel a pending trigger.  Returns the updated record.
-    pub fn cancel_trigger(&self, trigger_id: &str) -> Result<DelayedTriggerRecord> {
-        let mut record = self.get_trigger(trigger_id)?;
+    /// List session-owned triggers, applying ownership before sorting and limit.
+    pub fn list_triggers_for_owner(
+        &self,
+        status_filter: Option<DelayedTriggerStatus>,
+        limit: Option<usize>,
+        owner_session_id: &str,
+    ) -> Result<Vec<DelayedTriggerRecord>> {
+        let mut records = self.list_triggers(status_filter, None)?;
+        records.retain(|record| record.owner_session_id.as_deref() == Some(owner_session_id));
+        if let Some(limit) = limit {
+            records.truncate(limit);
+        }
+        Ok(records)
+    }
+
+    /// Cancel a pending trigger owned by the given session.
+    pub fn cancel_trigger_for_owner(
+        &self,
+        trigger_id: &str,
+        owner_session_id: &str,
+    ) -> Result<DelayedTriggerRecord> {
+        let mut record = self.get_trigger_for_owner(trigger_id, owner_session_id)?;
         if !matches!(record.status, DelayedTriggerStatus::Pending) {
             bail!(
                 "Trigger '{trigger_id}' cannot be canceled (status: {:?})",
@@ -1430,7 +1470,10 @@ impl AutomationManager {
     /// Return all pending triggers whose `fire_at` is at or before `now`.
     pub fn collect_due_triggers(&self, now: DateTime<Utc>) -> Result<Vec<DelayedTriggerRecord>> {
         let pending = self.list_triggers(Some(DelayedTriggerStatus::Pending), None)?;
-        Ok(pending.into_iter().filter(|t| t.fire_at <= now).collect())
+        Ok(pending
+            .into_iter()
+            .filter(|trigger| trigger.owner_session_id.is_some() && trigger.fire_at <= now)
+            .collect())
     }
 }
 
@@ -1604,7 +1647,7 @@ async fn fire_due_triggers_shared(
             allow_shell: Some(false),
             trust_mode: Some(false),
             auto_approve: Some(false),
-            owner_session_id: None,
+            owner_session_id: trigger.owner_session_id.clone(),
         };
 
         match task_manager.add_task(new_task).await {
@@ -2599,6 +2642,75 @@ mod tests {
         assert!(explicit_task.auto_approve);
 
         task_manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_trigger_fires_task_with_same_owner_and_skips_legacy_ownerless() -> Result<()> {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let task_manager = TaskManager::start_with_executor(
+            automation_task_config(tempdir.path().join("tasks")),
+            std::sync::Arc::new(AutomationNoopExecutor),
+        )
+        .await?;
+        let manager = AutomationManager::open(tempdir.path().join("automations"))?;
+
+        let mut owned = manager.create_trigger(CreateDelayedTriggerRequest {
+            fire_at: Utc::now() + Duration::hours(1),
+            message: "owned delayed continuation".to_string(),
+            workspace: None,
+            owner_session_id: Some("session-a".to_string()),
+            parent_trigger_id: None,
+        })?;
+        owned.fire_at = Utc::now() - Duration::minutes(1);
+        manager.save_trigger(&owned)?;
+
+        let mut legacy = manager.create_trigger(CreateDelayedTriggerRequest {
+            fire_at: Utc::now() + Duration::hours(1),
+            message: "legacy delayed continuation".to_string(),
+            workspace: None,
+            owner_session_id: None,
+            parent_trigger_id: None,
+        })?;
+        legacy.fire_at = Utc::now() - Duration::minutes(1);
+        manager.save_trigger(&legacy)?;
+
+        let shared = Arc::new(Mutex::new(manager));
+        fire_due_triggers_shared(&shared, &task_manager).await?;
+
+        let manager = shared.lock().await;
+        let fired = manager.get_trigger(&owned.trigger_id)?;
+        assert_eq!(fired.status, DelayedTriggerStatus::Fired);
+        let task = task_manager
+            .get_task(fired.task_id.as_deref().expect("fired task id"))
+            .await?;
+        assert_eq!(task.owner_session_id.as_deref(), Some("session-a"));
+
+        let legacy_after = manager.get_trigger(&legacy.trigger_id)?;
+        assert_eq!(legacy_after.status, DelayedTriggerStatus::Pending);
+        assert!(legacy_after.task_id.is_none());
+        drop(manager);
+        task_manager.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_delayed_trigger_deserializes_without_owner() -> Result<()> {
+        let now = Utc::now();
+        let record: DelayedTriggerRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": CURRENT_TRIGGER_SCHEMA_VERSION,
+            "trigger_id": "trig_legacy",
+            "fire_at": (now + Duration::hours(1)).to_rfc3339(),
+            "message": "legacy trigger",
+            "status": "pending",
+            "created_at": now.to_rfc3339(),
+            "fired_at": null,
+            "task_id": null,
+            "thread_id": null,
+            "error": null,
+            "parent_trigger_id": null
+        }))?;
+        assert_eq!(record.owner_session_id, None);
         Ok(())
     }
 
