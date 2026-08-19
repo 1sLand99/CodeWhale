@@ -186,9 +186,12 @@ fn repository_name_from_common_dir(worktree_root: &Path, common_dir: &Path) -> O
 
 /// Compact chrome label: `CodeWhale · main* ↑2` or
 /// `CodeWhale/feature · feature*` for a linked worktree.
+///
+/// Omits the segment when Git has not named a location or ref. A known
+/// location without a branch still renders — the header must not invent a
+/// ref to fill the slot.
 #[must_use]
 pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
-    let branch = snap.branch.as_deref()?;
     let worktree_name = snap
         .root
         .as_deref()
@@ -196,13 +199,18 @@ pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
         .map(|name| name.to_string_lossy());
     let location = match (snap.repository_name.as_deref(), worktree_name.as_deref()) {
         (Some(repository), Some(worktree)) if repository != worktree => {
-            format!("{repository}/{worktree}")
+            Some(format!("{repository}/{worktree}"))
         }
-        (Some(repository), _) => repository.to_string(),
-        (None, Some(worktree)) => worktree.to_string(),
-        (None, None) => return Some(branch.to_string()),
+        (Some(repository), _) => Some(repository.to_string()),
+        (None, Some(worktree)) => Some(worktree.to_string()),
+        (None, None) => None,
     };
-    let mut label = format!("{location} · {branch}");
+    let mut label = match (location, snap.branch.as_deref()) {
+        (Some(location), Some(branch)) => format!("{location} · {branch}"),
+        (Some(location), None) => location,
+        (None, Some(branch)) => branch.to_string(),
+        (None, None) => return None,
+    };
     if snap.dirty {
         label.push('*');
     }
@@ -213,6 +221,13 @@ pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
         label.push_str(&format!(" ↓{}", snap.behind));
     }
     Some(label)
+}
+
+/// Status-bar ink for repository chrome. Location is metadata, not a
+/// failure — dirtiness is the `*` on the same gray string.
+#[must_use]
+pub fn chrome_ink() -> crate::palette::ChromeInk {
+    crate::palette::ChromeInk::Metadata
 }
 
 /// Create a new worktree at `path` tracking `branch` (or a new branch name).
@@ -293,6 +308,50 @@ locked
         assert_eq!(
             chrome_label(&snap).as_deref(),
             Some("repo/feature · feature*")
+        );
+    }
+
+    #[test]
+    fn chrome_label_omits_dirty_marker_when_clean() {
+        let snap = GitStatusSnapshot {
+            root: Some("/repo".into()),
+            repository_name: Some("repo".into()),
+            branch: Some("main".into()),
+            dirty: false,
+            ..GitStatusSnapshot::default()
+        };
+        assert_eq!(chrome_label(&snap).as_deref(), Some("repo · main"));
+    }
+
+    #[test]
+    fn chrome_label_keeps_location_when_the_ref_is_unknown() {
+        let snap = GitStatusSnapshot {
+            root: Some("/repo/.cw-worktrees/feature".into()),
+            repository_name: Some("repo".into()),
+            branch: None,
+            dirty: true,
+            ..GitStatusSnapshot::default()
+        };
+        assert_eq!(chrome_label(&snap).as_deref(), Some("repo/feature*"));
+    }
+
+    #[test]
+    fn chrome_label_is_absent_without_a_repo_or_ref() {
+        assert_eq!(
+            chrome_label(&GitStatusSnapshot {
+                error: Some("not a git repository".into()),
+                ..GitStatusSnapshot::default()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn chrome_ink_is_metadata_not_failure() {
+        assert_eq!(chrome_ink(), crate::palette::ChromeInk::Metadata);
+        assert_eq!(
+            chrome_ink().family(),
+            crate::palette::SemanticFamily::Metadata
         );
     }
 

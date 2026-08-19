@@ -93,6 +93,16 @@ abort under load.
   header now identifies the active repository or linked worktree before the
   branch and dirty marker, so operators can see where the agent is working
   without opening the worktree manager (#5437).
+- `feat(tui): formalize the status-bar color grammar` — seven semantic
+  families live in `docs/design/STATUS_BAR_COLOR_GRAMMAR.md` and
+  `palette::grammar`; header and phase-strip ink resolve through named
+  `ChromeInk` slots so chrome cannot invent an eighth meaning or spend
+  Failure red on a dirty worktree or selected mode. The footer's session
+  metrics strip resolves through the same inks, and the red reservation is
+  checked against every selectable theme, not just the whale default;
+  typed footer toasts resolve through the grammar too.
+  Repo/worktree chrome stays metadata and still renders when Git names a
+  location but not a ref (#5437).
 - `feat(tui): first slice of the agents roster` — every agent that ran this
   session, receipts-only, via `/agents list` and the sidebar fan-out rows
   (#5479 spec items 1 and 5).

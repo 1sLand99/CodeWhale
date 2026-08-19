@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::HeaderItem;
 use crate::localization::{Locale, MessageId, tr};
+use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::{
     app::{App, AppMode, OnboardingState},
     approval::ApprovalMode,
@@ -397,17 +398,49 @@ impl ShellPhase {
 
     #[must_use]
     pub fn color(self, app: &App) -> Color {
-        match self {
-            Self::Idle => app.ui_theme.text_muted,
-            Self::Done => app.ui_theme.success,
-            Self::Typing => app.ui_theme.accent_primary,
-            // Verifying shares the live seafoam hue; the tick-vs-bubble
-            // marker carries the checking/searching distinction.
-            Self::Working | Self::Verifying => app.ui_theme.status_working,
-            Self::Waiting | Self::Approval => app.ui_theme.accent_action,
-            Self::Failed => app.ui_theme.error_fg,
-        }
+        phase_ink(self).color(&app.ui_theme)
     }
+}
+
+/// Status-bar phase ink. Failure red is only `Failed`.
+#[must_use]
+pub(crate) fn phase_ink(phase: ShellPhase) -> ChromeInk {
+    match phase {
+        ShellPhase::Idle => ChromeInk::Metadata,
+        ShellPhase::Done => ChromeInk::Outcome,
+        ShellPhase::Typing => ChromeInk::Identity,
+        // Verifying shares the live seafoam hue; the tick-vs-bubble
+        // marker carries the checking/searching distinction.
+        ShellPhase::Working | ShellPhase::Verifying => ChromeInk::Active,
+        ShellPhase::Waiting | ShellPhase::Approval => ChromeInk::Waiting,
+        ShellPhase::Failed => ChromeInk::Failure,
+    }
+}
+
+/// Exhaustive on purpose: a new [`AppMode`] must be handed a Policy ink
+/// deliberately rather than inheriting act's by falling through a wildcard.
+fn header_mode_ink(mode: AppMode) -> ChromeInk {
+    match mode {
+        AppMode::Plan => ChromeInk::PolicyPlan,
+        AppMode::Operate => ChromeInk::PolicyOperate,
+        // YOLO stays Policy, not Failure — the header must not spend red
+        // on a selected mode. It wears the act badge because `mode_label`
+        // resolves it to act; the posture it implies is the permission
+        // chip's Cognition ink, not this one.
+        AppMode::Agent | AppMode::Auto | AppMode::Yolo => ChromeInk::PolicyAct,
+    }
+}
+
+fn header_permission_ink(mode: ApprovalMode) -> ChromeInk {
+    match mode {
+        ApprovalMode::Suggest | ApprovalMode::Never => ChromeInk::PermissionAsk,
+        ApprovalMode::Auto => ChromeInk::PermissionAutoReview,
+        ApprovalMode::Bypass => ChromeInk::PermissionFullAccess,
+    }
+}
+
+fn header_fg(app: &App, ink: ChromeInk) -> Style {
+    chrome_style(&app.ui_theme, ink)
 }
 
 /// Summarize only tools whose lifecycle is actually `Running`. A read label
@@ -924,7 +957,7 @@ fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
                 format_token_count_compact(u64::from(app.session.total_cache_hit_tokens)),
                 format_token_count_compact(u64::from(app.session.total_output_tokens)),
             ),
-            Style::default().fg(app.ui_theme.info),
+            header_fg(app, ChromeInk::Info),
         )
     })
 }
@@ -962,18 +995,11 @@ fn render_header_with_git_status(
     let (effective_provider, effective_model) = app.effective_route_identity_display();
     let route_label = format!("{effective_provider} · {effective_model}");
     let effort_label = app.reasoning_effort_display_label();
-    let mode_color = match app.mode {
-        AppMode::Plan => app.ui_theme.mode_plan,
-        AppMode::Operate => app.ui_theme.mode_operate,
-        _ => app.ui_theme.mode_agent,
-    };
+    let mode_color = header_mode_ink(app.mode).color(&app.ui_theme);
     // Match the composer's warm top edge exactly: Ask amber, Auto-Review
     // Signal Gold, and Full Access coral.
-    let permission_color = match app.approval_mode {
-        ApprovalMode::Suggest | ApprovalMode::Never => app.ui_theme.permission_ask,
-        ApprovalMode::Auto => app.ui_theme.permission_auto_review,
-        ApprovalMode::Bypass => app.ui_theme.permission_full_access,
-    };
+    let permission_color = header_permission_ink(app.approval_mode).color(&app.ui_theme);
+    let dim = header_fg(app, ChromeInk::MetadataDim);
     // `status_indicator` owns the single header mark. It used to be filtered
     // against the literal "cw" because the header also hardcoded a leading
     // "cw" span, and `header_status_indicator_frame` collapses `cw`, the
@@ -991,32 +1017,24 @@ fn render_header_with_git_status(
     if let Some(indicator) = status_indicator {
         left.push(Span::styled(
             indicator,
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD),
+            header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
         ));
         left.push(Span::raw("  "));
     }
     left.extend([
-        Span::styled(
-            route_label.clone(),
-            Style::default().fg(app.ui_theme.text_muted),
-        ),
-        Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+        Span::styled(route_label.clone(), header_fg(app, ChromeInk::Metadata)),
+        Span::styled(" · ", dim),
         Span::styled(
             mode_label(app.ui_locale, app.mode),
             Style::default().fg(mode_color),
         ),
-        Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
-        Span::styled(effort_label.clone(), Style::default().fg(app.ui_theme.info)),
+        Span::styled(" · ", dim),
+        Span::styled(effort_label.clone(), header_fg(app, ChromeInk::Info)),
     ]);
     // Permission is safety state, not optional chrome. Compact terminals shed
     // route detail and the context meter, but keep mode, effective effort, and
     // the effective posture.
-    left.push(Span::styled(
-        " · ",
-        Style::default().fg(app.ui_theme.text_dim),
-    ));
+    left.push(Span::styled(" · ", dim));
     left.push(Span::styled(
         permission_label(app),
         Style::default().fg(permission_color),
@@ -1035,17 +1053,14 @@ fn render_header_with_git_status(
                 format!("goal {}", truncate_to_width(&flat, budget))
             };
             let color = if paused {
-                app.ui_theme.warning
+                ChromeInk::Attention.color(&app.ui_theme)
             } else {
-                app.ui_theme.status_working
+                ChromeInk::Active.color(&app.ui_theme)
             };
             (text, color)
         });
     if let Some((text, color)) = &goal_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1058,12 +1073,9 @@ fn render_header_with_git_status(
     let workflow_chip = app
         .workflow_panel
         .as_ref()
-        .map(|panel| (panel.top_bar_chip(), app.ui_theme.info));
+        .map(|panel| (panel.top_bar_chip(), ChromeInk::Info.color(&app.ui_theme)));
     if let Some((text, color)) = &workflow_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1077,12 +1089,9 @@ fn render_header_with_git_status(
     let update_chip = app
         .update_available
         .as_ref()
-        .map(|label| (label.clone(), app.ui_theme.warning));
+        .map(|label| (label.clone(), ChromeInk::Attention.color(&app.ui_theme)));
     if let Some((text, color)) = &update_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1103,7 +1112,7 @@ fn render_header_with_git_status(
                     "▱".repeat(5usize.saturating_sub(filled)),
                     percent
                 ),
-                Style::default().fg(app.ui_theme.info),
+                header_fg(app, ChromeInk::Info),
             )
         });
     let token_breakdown = (tier != ShellTier::Compact)
@@ -1113,7 +1122,7 @@ fn render_header_with_git_status(
     let version = (tier == ShellTier::Wide).then(|| {
         Span::styled(
             format!("v{}", shell_build_version()),
-            Style::default().fg(app.ui_theme.text_hint),
+            header_fg(app, ChromeInk::MetadataHint),
         )
     });
     // Cached repository/worktree status only — never probe from the render path.
@@ -1126,7 +1135,7 @@ fn render_header_with_git_status(
         };
         Span::styled(
             truncate_to_width(&label, max_width),
-            Style::default().fg(app.ui_theme.text_muted),
+            header_fg(app, crate::tui::git_status::chrome_ink()),
         )
     });
 
@@ -1235,11 +1244,11 @@ fn render_header_with_git_status(
             effort_label.clone()
         };
         let mut suffix = vec![
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+            Span::styled(" · ", dim),
             Span::styled(mode, Style::default().fg(mode_color)),
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
-            Span::styled(effort, Style::default().fg(app.ui_theme.info)),
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+            Span::styled(" · ", dim),
+            Span::styled(effort, header_fg(app, ChromeInk::Info)),
+            Span::styled(" · ", dim),
             Span::styled(permission, Style::default().fg(permission_color)),
         ];
         // The goal chip survives cramped layouts too — it is operator state,
@@ -1254,10 +1263,7 @@ fn render_header_with_git_status(
         if let Some((text, color)) = &goal_chip {
             let goal_room = left_budget.saturating_sub(base_fixed).saturating_sub(3);
             if goal_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, goal_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1273,10 +1279,7 @@ fn render_header_with_git_status(
                 .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if workflow_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, workflow_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1290,10 +1293,7 @@ fn render_header_with_git_status(
                 .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if update_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, update_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1306,15 +1306,13 @@ fn render_header_with_git_status(
         if let Some(indicator) = status_indicator {
             left.push(Span::styled(
                 indicator,
-                Style::default()
-                    .fg(app.ui_theme.accent_primary)
-                    .add_modifier(Modifier::BOLD),
+                header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
             ));
             left.push(Span::raw("  "));
         }
         left.push(Span::styled(
             truncate_to_width(&route_label, route_budget),
-            Style::default().fg(app.ui_theme.text_muted),
+            header_fg(app, ChromeInk::Metadata),
         ));
         left.extend(suffix);
     }
@@ -1957,6 +1955,108 @@ mod tests {
         assert!(
             narrow.to_ascii_lowercase().contains("ask"),
             "permission: {narrow:?}"
+        );
+    }
+
+    #[test]
+    fn header_git_chrome_uses_metadata_ink_not_failure() {
+        let app = test_app();
+        let git_status = crate::tui::git_status::GitStatusSnapshot {
+            root: Some("/repo/.cw-worktrees/feature".into()),
+            repository_name: Some("repo".into()),
+            branch: Some("feature".into()),
+            dirty: true,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 130, 1);
+        let mut buf = Buffer::empty(area);
+        render_header_with_git_status(area, &mut buf, &app, &git_status);
+        let rendered = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+        let label_byte = rendered
+            .find("repo/feature")
+            .expect("repo/worktree label should render");
+        let label_x = rendered[..label_byte].width() as u16;
+        assert_eq!(
+            buf[(label_x, 0)].fg,
+            crate::palette::ChromeInk::Metadata.color(&app.ui_theme)
+        );
+        assert_ne!(
+            buf[(label_x, 0)].fg,
+            crate::palette::ChromeInk::Failure.color(&app.ui_theme)
+        );
+    }
+
+    #[test]
+    fn header_keeps_known_worktree_when_branch_is_unknown() {
+        let app = test_app();
+        let git_status = crate::tui::git_status::GitStatusSnapshot {
+            root: Some("/repo/.cw-worktrees/feature".into()),
+            repository_name: Some("repo".into()),
+            branch: None,
+            dirty: true,
+            ..Default::default()
+        };
+
+        let wide = header_text_with_git_status(&app, 130, &git_status);
+        assert!(wide.contains("repo/feature*"), "wide header: {wide:?}");
+        assert!(
+            !wide.contains("repo/feature ·"),
+            "unknown branch must not gain an invented ref: {wide:?}"
+        );
+
+        let narrow = header_text_with_git_status(&app, 60, &git_status);
+        assert!(!narrow.contains('\n'), "narrow header must stay one line");
+        assert!(narrow.to_ascii_lowercase().contains("work"), "{narrow:?}");
+        assert!(narrow.to_ascii_lowercase().contains("ask"), "{narrow:?}");
+    }
+
+    /// The real YOLO posture is mode + bypassed approvals, so pin both spans
+    /// it paints. Neither the selected mode nor the Full Access chip may
+    /// borrow Failure red: mode is Policy, permission is Cognition.
+    #[test]
+    fn header_yolo_mode_does_not_spend_failure_red() {
+        let mut app = test_app();
+        app.mode = AppMode::Yolo;
+        app.approval_mode = ApprovalMode::Bypass;
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        // Render against an explicit empty snapshot so the repo segment
+        // cannot drift the spans this test locates.
+        render_header_with_git_status(
+            area,
+            &mut buf,
+            &app,
+            &crate::tui::git_status::GitStatusSnapshot::default(),
+        );
+        let rendered = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+        let fg_at = |needle: &str| {
+            let byte = rendered
+                .rfind(needle)
+                .unwrap_or_else(|| panic!("{needle:?} should render: {rendered:?}"));
+            buf[(rendered[..byte].width() as u16, 0)].fg
+        };
+
+        let red = crate::palette::ChromeInk::Failure.color(&app.ui_theme);
+        let mode_fg = fg_at(mode_label(app.ui_locale, app.mode).as_ref());
+        assert_eq!(
+            mode_fg,
+            crate::palette::ChromeInk::PolicyAct.color(&app.ui_theme)
+        );
+        assert_ne!(mode_fg, red);
+
+        let permission = permission_label(&app);
+        let permission_fg = fg_at(permission.as_ref());
+        assert_eq!(
+            permission_fg,
+            crate::palette::ChromeInk::PermissionFullAccess.color(&app.ui_theme)
+        );
+        assert_eq!(
+            crate::palette::ChromeInk::PermissionFullAccess.family(),
+            crate::palette::SemanticFamily::Cognition
         );
     }
 

@@ -23,6 +23,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::localization::{MessageId, tr};
+use crate::palette::ChromeInk;
 use crate::tui::{
     app::App,
     underwater::{LiveActivity, ShellPhase, ShellTier, phase_marker_with_activity},
@@ -99,6 +100,17 @@ fn session_cache_hit_percentage(app: &App) -> Option<u8> {
     Some(((hit * 100 + total / 2) / total) as u8)
 }
 
+/// Toasts share the footer rail, so their typed level must resolve through
+/// the same closed status-bar grammar as the phase marker around them.
+fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
+    match level {
+        crate::tui::app::StatusToastLevel::Info => ChromeInk::Info,
+        crate::tui::app::StatusToastLevel::Success => ChromeInk::Outcome,
+        crate::tui::app::StatusToastLevel::Warning => ChromeInk::Attention,
+        crate::tui::app::StatusToastLevel::Error => ChromeInk::Failure,
+    }
+}
+
 /// Paint the one-line phase rail. Compact left marker (icon + verb + duration)
 /// instead of a full-width routine phase band. Amber only for approval/waiting;
 /// cyan/teal for routine work.
@@ -136,11 +148,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         if let Some(detail) = working_detail(app, activity) {
             left.push(Span::styled(
                 " · ",
-                Style::default().fg(app.ui_theme.text_dim),
+                Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
             ));
             left.push(Span::styled(
                 detail,
-                Style::default().fg(app.ui_theme.status_working),
+                Style::default().fg(ChromeInk::Active.color(&app.ui_theme)),
             ));
         }
         left.push(Span::styled(
@@ -148,7 +160,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 " · {}",
                 tr(app.ui_locale, MessageId::FooterHintEscInterrupt)
             ),
-            Style::default().fg(app.ui_theme.text_dim),
+            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
         ));
     }
 
@@ -168,11 +180,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     {
         tail.push(Span::styled(
             " · ",
-            Style::default().fg(app.ui_theme.text_dim),
+            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
         ));
         tail.push(Span::styled(
             amount,
-            Style::default().fg(app.ui_theme.text_muted),
+            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
         ));
     }
 
@@ -188,11 +200,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     {
         tail.push(Span::styled(
             " · ",
-            Style::default().fg(app.ui_theme.text_dim),
+            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
         ));
         tail.push(Span::styled(
             format!("cache {pct}%"),
-            Style::default().fg(app.ui_theme.text_muted),
+            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
         ));
     }
 
@@ -268,7 +280,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             if !strip.is_empty() {
                 tail.push(Span::styled(
                     if ascii { " | " } else { " │ " },
-                    Style::default().fg(app.ui_theme.text_dim),
+                    Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
                 ));
                 tail.extend(crate::tui::session_metrics::spans(&strip, &app.ui_theme));
             }
@@ -307,11 +319,11 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             .max(TOAST_MIN_WIDTH);
         left.push(Span::styled(
             " · ",
-            Style::default().fg(app.ui_theme.text_dim),
+            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
         ));
         left.push(Span::styled(
             truncate_to_width(toast.text.trim(), toast_budget),
-            Style::default().fg(crate::tui::ui::status_color(toast.level)),
+            Style::default().fg(status_toast_ink(toast.level).color(&app.ui_theme)),
         ));
     }
     left.extend(tail);
@@ -321,7 +333,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         left.push(Span::raw(" ".repeat(available - left_width - right_width)));
         left.push(Span::styled(
             right_text.into_owned(),
-            Style::default().fg(app.ui_theme.text_hint),
+            Style::default().fg(ChromeInk::MetadataHint.color(&app.ui_theme)),
         ));
     }
     Paragraph::new(Line::from(left)).render(area, buf);
@@ -397,10 +409,55 @@ mod tests {
     }
 
     #[test]
+    fn footer_toasts_stay_inside_the_closed_color_grammar() {
+        use crate::tui::app::StatusToastLevel;
+
+        for (level, expected) in [
+            (StatusToastLevel::Info, ChromeInk::Info),
+            (StatusToastLevel::Success, ChromeInk::Outcome),
+            (StatusToastLevel::Warning, ChromeInk::Attention),
+            (StatusToastLevel::Error, ChromeInk::Failure),
+        ] {
+            assert_eq!(status_toast_ink(level), expected, "{level:?}");
+
+            let mut app = test_app();
+            app.ui_theme = crate::palette::ThemeId::Dracula.ui_theme();
+            app.push_status_toast("toast proof", level, None);
+            let area = Rect::new(0, 0, 160, 1);
+            let mut buf = Buffer::empty(area);
+            render(area, &mut buf, &mut app);
+            let rendered = (0..area.width)
+                .map(|x| buf[(x, 0)].symbol())
+                .collect::<String>();
+            let byte = rendered
+                .find("toast proof")
+                .unwrap_or_else(|| panic!("{level:?} toast should render: {rendered:?}"));
+            let x = rendered[..byte].width() as u16;
+            assert_eq!(
+                buf[(x, 0)].fg,
+                expected.color(&app.ui_theme),
+                "{level:?} must use the active theme's grammar slot"
+            );
+        }
+    }
+
+    #[test]
     fn working_marker_uses_the_live_work_status_role() {
         let app = test_app();
         assert_eq!(ShellPhase::Working.color(&app), app.ui_theme.status_working);
         assert_ne!(ShellPhase::Working.color(&app), app.ui_theme.info);
+        assert_eq!(
+            crate::tui::underwater::phase_ink(ShellPhase::Working),
+            ChromeInk::Active
+        );
+        assert_eq!(
+            crate::tui::underwater::phase_ink(ShellPhase::Failed),
+            ChromeInk::Failure
+        );
+        assert_ne!(
+            crate::tui::underwater::phase_ink(ShellPhase::Working).family(),
+            crate::palette::SemanticFamily::Failure
+        );
     }
 
     #[test]

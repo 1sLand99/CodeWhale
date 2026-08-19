@@ -8,6 +8,8 @@ Read the repository guidance first.
 - One owner per fact: route/mode/permission/context in the header; work in the
   top strip; receipts and the active row in the transcript; phase/cost/detail
   controls in the footer.
+- Status-bar ink goes through `palette::grammar` (`docs/design/STATUS_BAR_COLOR_GRAMMAR.md`).
+  Do not invent an eighth semantic or spend Failure red on non-failure chrome.
 - Derive state from typed enums such as `ShellPhase` and `OceanTreatment`.
   Renderers must not infer state from English strings or invent lifecycle state.
 - Keep settled output still. Motion is semantic, bounded, and fully disabled by
