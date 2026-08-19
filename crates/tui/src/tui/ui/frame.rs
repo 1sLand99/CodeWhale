@@ -685,7 +685,7 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     preview
 }
 
-pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
+pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(u16, u16)> {
     let size = f.area();
     // Hover targets belong to the whole composed frame. Resetting inside the
     // transcript erased targets registered later by the composer and modals.
@@ -717,7 +717,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             let buf = f.buffer_mut();
             app.view_stack.render(size, buf);
         }
-        return;
+        return None;
     }
 
     if app.launch.visible {
@@ -733,7 +733,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
             let buf = f.buffer_mut();
             app.view_stack.render(size, buf);
         }
-        return;
+        return None;
     }
 
     // Mini-window mode: when the host terminal window is pinned into its
@@ -1089,10 +1089,6 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         app.viewport.last_composer_scroll_offset = scroll_offset;
         app.viewport.last_composer_top_padding = top_padding;
     }
-    if let Some(cursor_pos) = cursor_pos {
-        f.set_cursor_position(cursor_pos);
-    }
-
     crate::tui::underwater::render_footer(body_chunks[footer_slot], f.buffer_mut(), app);
 
     // The underwater shell is one water column, not a stack of independently
@@ -1148,6 +1144,39 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) {
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
     }
+
+    cursor_pos
+}
+
+/// Hide the real terminal caret before ratatui applies a frame diff.
+///
+/// A diff moves the terminal cursor through every changed run. Electron/xterm
+/// IME bridges (notably Tabby on Windows, #5023) can observe those transient
+/// positions even though the final frame is correct, which makes the native
+/// candidate window jump around the screen. Keep the caret hidden for the
+/// whole diff and pair this with [`finish_frame_cursor`] after the draw.
+pub(super) fn prepare_frame_cursor<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> std::result::Result<(), B::Error> {
+    terminal.hide_cursor()
+}
+
+/// Restore the composer caret in IME-safe order: position first, reveal last.
+///
+/// Ratatui's `Frame::set_cursor_position` path currently calls `show_cursor`
+/// before `set_cursor_position`. That briefly exposes the stale or last-diff
+/// position to the terminal's IME bridge. Owning the final two operations here
+/// preserves ratatui's internal cursor tracking while ensuring there is only
+/// one visible caret position per completed frame (#5023).
+pub(super) fn finish_frame_cursor<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    cursor_pos: Option<(u16, u16)>,
+) -> std::result::Result<(), B::Error> {
+    if let Some(cursor_pos) = cursor_pos {
+        terminal.set_cursor_position(cursor_pos)?;
+        terminal.show_cursor()?;
+    }
+    Ok(())
 }
 
 /// Draw a complete application frame, optionally with a full viewport reset.
@@ -1183,11 +1212,17 @@ pub(crate) fn draw_app_frame_inner(
     // failing `?` would return early and leave the terminal stuck in
     // synchronized-update mode (screen frozen).
     let result = (|| -> Result<()> {
+        // The terminal cursor itself is also input-method geometry. Hide it
+        // before clear/diff operations move it, then restore the one composer
+        // position after ratatui finishes drawing (#5023).
+        prepare_frame_cursor(terminal)?;
         if full_repaint {
             terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
             terminal.clear()?;
         }
-        terminal.draw(|f| render(f, app, config))?;
+        let mut cursor_pos = None;
+        terminal.draw(|f| cursor_pos = render(f, app, config))?;
+        finish_frame_cursor(terminal, cursor_pos)?;
         Ok(())
     })();
 

@@ -24,7 +24,12 @@ use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{
+    Terminal,
+    backend::{Backend, ClearType, TestBackend, WindowSize},
+    buffer::Cell,
+    layout::{Position, Size},
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
@@ -55,6 +60,178 @@ fn session_shell_area_fills_the_host_terminal_at_every_width() {
             frame::session_shell_area(host),
             host,
             "{width}x{height} must fill the host terminal"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorOperation {
+    Hide,
+    Position(Position),
+    Show,
+}
+
+#[derive(Debug)]
+struct CursorTraceBackend {
+    inner: TestBackend,
+    operations: Vec<CursorOperation>,
+}
+
+impl CursorTraceBackend {
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            inner: TestBackend::new(width, height),
+            operations: Vec::new(),
+        }
+    }
+}
+
+impl Backend for CursorTraceBackend {
+    type Error = std::convert::Infallible;
+
+    fn draw<'a, I>(&mut self, content: I) -> std::result::Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> std::result::Result<(), Self::Error> {
+        self.operations.push(CursorOperation::Hide);
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> std::result::Result<(), Self::Error> {
+        self.operations.push(CursorOperation::Show);
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> std::result::Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(
+        &mut self,
+        position: P,
+    ) -> std::result::Result<(), Self::Error> {
+        let position = position.into();
+        self.operations.push(CursorOperation::Position(position));
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> std::result::Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> std::result::Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> std::result::Result<Size, Self::Error> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> std::result::Result<WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> std::result::Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
+
+#[test]
+fn frame_cursor_is_hidden_during_diff_then_positioned_before_reveal() {
+    let mut terminal = Terminal::new(CursorTraceBackend::new(40, 12)).unwrap();
+    terminal.backend_mut().operations.clear();
+
+    frame::prepare_frame_cursor(&mut terminal).unwrap();
+    frame::finish_frame_cursor(&mut terminal, Some((17, 9))).unwrap();
+
+    assert_eq!(
+        terminal.backend().operations,
+        [
+            CursorOperation::Hide,
+            CursorOperation::Position(Position::new(17, 9)),
+            CursorOperation::Show,
+        ],
+        "the IME must never observe a visible stale or intermediate cursor (#5023)"
+    );
+    assert!(terminal.backend().inner.cursor_visible());
+    terminal
+        .backend_mut()
+        .inner
+        .assert_cursor_position(Position::new(17, 9));
+}
+
+#[test]
+fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
+    for (width, height) in [(40, 12), (140, 40)] {
+        let mut app = create_test_app();
+        app.onboarding = OnboardingState::None;
+        app.launch.visible = false;
+        app.input = "ab中文".to_string();
+        app.cursor_position = app.input.chars().count();
+        let config = Config::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+        frame::prepare_frame_cursor(&mut terminal).unwrap();
+        let mut first_cursor = None;
+        terminal
+            .draw(|frame| first_cursor = super::frame::render(frame, &mut app, &config))
+            .unwrap();
+        let first_cursor = first_cursor.expect("active composer must expose its cursor");
+        assert!(
+            !terminal.backend().cursor_visible(),
+            "the caret stays hidden until the completed frame is positioned"
+        );
+
+        let inner = app
+            .viewport
+            .last_composer_content
+            .expect("render records composer content geometry");
+        let text_area = crate::tui::widgets::composer_content_geometry(inner, false).text_area;
+        assert_eq!(
+            first_cursor.0,
+            text_area.x + 6,
+            "{width}x{height}: ASCII + two CJK glyphs occupy six cells"
+        );
+        assert!(
+            first_cursor.1 >= text_area.y
+                && first_cursor.1 < text_area.y.saturating_add(text_area.height),
+            "{width}x{height}: cursor must remain inside composer content: {first_cursor:?}"
+        );
+
+        frame::finish_frame_cursor(&mut terminal, Some(first_cursor)).unwrap();
+        assert!(terminal.backend().cursor_visible());
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::from(first_cursor));
+
+        frame::prepare_frame_cursor(&mut terminal).unwrap();
+        let mut second_cursor = None;
+        terminal
+            .draw(|frame| second_cursor = super::frame::render(frame, &mut app, &config))
+            .unwrap();
+        assert_eq!(
+            second_cursor,
+            Some(first_cursor),
+            "{width}x{height}: identical CJK frames must keep stable IME geometry"
+        );
+
+        assert!(handle_composer_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: first_cursor.0,
+                row: first_cursor.1,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        assert_eq!(
+            app.cursor_position,
+            app.input.chars().count(),
+            "{width}x{height}: rendered caret and mouse hit mapping must select the same CJK boundary"
         );
     }
 }
@@ -3155,7 +3332,9 @@ fn render_test_app(app: &mut App, config: &Config, width: u16, height: u16) -> S
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("paste safety test terminal");
     terminal
-        .draw(|frame| render(frame, app, config))
+        .draw(|frame| {
+            let _ = render(frame, app, config);
+        })
         .expect("render paste safety surface");
     terminal
         .backend()
@@ -3530,7 +3709,9 @@ fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String 
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("underwater test terminal");
     terminal
-        .draw(|frame| render(frame, app, &config))
+        .draw(|frame| {
+            let _ = render(frame, app, &config);
+        })
         .expect("render underwater shell");
     let buffer = terminal.backend().buffer();
     (0..height)
@@ -3569,7 +3750,9 @@ fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let config = Config::default();
     let mut terminal = Terminal::new(TestBackend::new(200, 32)).expect("wide test terminal");
     terminal
-        .draw(|frame| render(frame, &mut app, &config))
+        .draw(|frame| {
+            let _ = render(frame, &mut app, &config);
+        })
         .expect("render wide ocean canvas");
     let buffer = terminal.backend().buffer();
 
@@ -4773,7 +4956,9 @@ async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
     let backend = TestBackend::new(89, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
-        .draw(|frame| render(frame, &mut app, &config))
+        .draw(|frame| {
+            let _ = render(frame, &mut app, &config);
+        })
         .expect("render completed denial sequence");
     let buffer = terminal.backend().buffer();
     let rendered = (0..buffer.area.height)
