@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "Per a feina més llarga, tria /auto (revisió), /goal (un objectiu) o /workflow (script).",
   "GoalContinuationWaiting": "Objectiu actiu · torn següent d'aquí a {delay} · Esc, Ctrl+C o /goal pause atura la continuació pendent",
   "GoalContinuationReady": "La continuació de l'objectiu està preparada; els controls en cua s'executen abans del torn següent.",
-  "GoalContinuationStopped": "S'ha aturat la continuació pendent; l'objectiu continua actiu."
+  "GoalContinuationStopped": "S'ha aturat la continuació pendent; l'objectiu continua actiu.",
+  "McpCapabilitiesAdvertised": "Capacitats anunciades: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Capacitats anunciades: no proporcionades; s'usa el descobriment antic",
+  "McpCapabilitiesNotObserved": "Capacitats anunciades: no observades perquè el servidor no està connectat"
 }

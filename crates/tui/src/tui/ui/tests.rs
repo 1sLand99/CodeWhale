@@ -1292,6 +1292,7 @@ async fn mcp_reload_uses_engine_snapshot_and_clears_pending_state() {
             read_timeout: 5,
             connected: true,
             error: None,
+            capability_metadata: crate::mcp::McpServerCapabilityMetadata::LegacyFallback,
             tools: Vec::new(),
             resources: Vec::new(),
             prompts: Vec::new(),

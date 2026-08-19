@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "長い作業は /auto（審査）、/goal（一つの目標）、/workflow（脚本）から選びます。",
   "GoalContinuationWaiting": "目標は実行中 · 次のターンまで {delay} · Esc、Ctrl+C、または /goal pause で保留中の続行を停止",
   "GoalContinuationReady": "目標の続行準備ができました。キュー内の操作を次のターンより先に実行します。",
-  "GoalContinuationStopped": "保留中の目標続行を停止しました。目標はアクティブなままです。"
+  "GoalContinuationStopped": "保留中の目標続行を停止しました。目標はアクティブなままです。",
+  "McpCapabilitiesAdvertised": "公開された機能: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "公開された機能: 未提供（従来の検出フォールバックを使用）",
+  "McpCapabilitiesNotObserved": "公開された機能: サーバーが未接続のため未確認"
 }

@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "Para trabalho mais longo, escolha /auto (revisão), /goal (um objetivo) ou /workflow (script).",
   "GoalContinuationWaiting": "Objetivo ativo · próximo turno em {delay} · Esc, Ctrl+C ou /goal pause interrompe a continuação pendente",
   "GoalContinuationReady": "Continuação do objetivo pronta; os controles na fila executam antes do próximo turno.",
-  "GoalContinuationStopped": "Continuação pendente interrompida; o objetivo permanece ativo."
+  "GoalContinuationStopped": "Continuação pendente interrompida; o objetivo permanece ativo.",
+  "McpCapabilitiesAdvertised": "Recursos anunciados: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Recursos anunciados: não informados; usando descoberta legada como alternativa",
+  "McpCapabilitiesNotObserved": "Recursos anunciados: não observados porque o servidor não está conectado"
 }

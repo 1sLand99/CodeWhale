@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "Für längere Arbeit: /auto (Prüfung), /goal (ein Ziel) oder /workflow (Skript).",
   "GoalContinuationWaiting": "Ziel aktiv · nächster Durchlauf in {delay} · Esc, Ctrl+C oder /goal pause stoppt die ausstehende Fortsetzung",
   "GoalContinuationReady": "Zielfortsetzung bereit; wartende Steuerbefehle laufen vor dem nächsten Durchlauf.",
-  "GoalContinuationStopped": "Ausstehende Zielfortsetzung gestoppt; das Ziel bleibt aktiv."
+  "GoalContinuationStopped": "Ausstehende Zielfortsetzung gestoppt; das Ziel bleibt aktiv.",
+  "McpCapabilitiesAdvertised": "Angekündigte Fähigkeiten: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Angekündigte Fähigkeiten: nicht angegeben; ältere Erkennung wird ersatzweise verwendet",
+  "McpCapabilitiesNotObserved": "Angekündigte Fähigkeiten: nicht beobachtet, da der Server nicht verbunden ist"
 }

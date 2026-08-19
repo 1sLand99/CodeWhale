@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "Công việc dài hơn: chọn /auto (xem xét), /goal (một mục tiêu) hoặc /workflow (script).",
   "GoalContinuationWaiting": "Mục tiêu đang hoạt động · lượt tiếp theo sau {delay} · Esc, Ctrl+C hoặc /goal pause sẽ dừng lượt tiếp tục đang chờ",
   "GoalContinuationReady": "Lượt tiếp tục mục tiêu đã sẵn sàng; các lệnh điều khiển trong hàng đợi chạy trước lượt tiếp theo.",
-  "GoalContinuationStopped": "Đã dừng lượt tiếp tục mục tiêu đang chờ; mục tiêu vẫn hoạt động."
+  "GoalContinuationStopped": "Đã dừng lượt tiếp tục mục tiêu đang chờ; mục tiêu vẫn hoạt động.",
+  "McpCapabilitiesAdvertised": "Khả năng đã công bố: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Khả năng đã công bố: không được cung cấp; dùng cơ chế khám phá cũ",
+  "McpCapabilitiesNotObserved": "Khả năng đã công bố: chưa quan sát được vì máy chủ chưa kết nối"
 }

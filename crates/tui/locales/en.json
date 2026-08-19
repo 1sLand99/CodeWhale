@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "For longer work pick /auto (reviewer), /goal (one objective), or /workflow (a script).",
   "GoalContinuationWaiting": "Goal active · next turn in {delay} · Esc, Ctrl+C, or /goal pause stops the pending continuation",
   "GoalContinuationReady": "Goal continuation ready; queued controls run before the next turn.",
-  "GoalContinuationStopped": "Pending goal continuation stopped; the goal remains active."
+  "GoalContinuationStopped": "Pending goal continuation stopped; the goal remains active.",
+  "McpCapabilitiesAdvertised": "Advertised capabilities: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Advertised capabilities: not provided; using legacy discovery fallback",
+  "McpCapabilitiesNotObserved": "Advertised capabilities: not observed because the server is not connected"
 }

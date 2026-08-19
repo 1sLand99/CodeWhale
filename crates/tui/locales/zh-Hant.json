@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "較長的工作請選 /auto（審核）、/goal（單一目標）或 /workflow（腳本）。",
   "GoalContinuationWaiting": "目標執行中 · {delay} 後開始下一輪 · 按 Esc、Ctrl+C 或使用 /goal pause 可停止待執行的繼續操作",
   "GoalContinuationReady": "目標繼續操作已就緒；佇列中的控制命令會在下一輪之前執行。",
-  "GoalContinuationStopped": "已停止待執行的目標繼續操作；目標仍保持執行狀態。"
+  "GoalContinuationStopped": "已停止待執行的目標繼續操作；目標仍保持執行狀態。",
+  "McpCapabilitiesAdvertised": "已宣告的能力：{capabilities}",
+  "McpCapabilitiesLegacyFallback": "已宣告的能力：未提供；使用舊版探索後援",
+  "McpCapabilitiesNotObserved": "已宣告的能力：伺服器未連線，尚未觀測"
 }

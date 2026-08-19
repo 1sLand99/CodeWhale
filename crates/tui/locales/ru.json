@@ -1590,5 +1590,8 @@
   "OnboardTipsLine5": "Для длинной работы выберите /auto (проверка), /goal (одна цель) или /workflow (скрипт).",
   "GoalContinuationWaiting": "Цель активна · следующий ход через {delay} · Esc, Ctrl+C или /goal pause останавливает ожидающее продолжение",
   "GoalContinuationReady": "Продолжение цели готово; команды в очереди выполнятся перед следующим ходом.",
-  "GoalContinuationStopped": "Ожидающее продолжение цели остановлено; цель остаётся активной."
+  "GoalContinuationStopped": "Ожидающее продолжение цели остановлено; цель остаётся активной.",
+  "McpCapabilitiesAdvertised": "Заявленные возможности: {capabilities}",
+  "McpCapabilitiesLegacyFallback": "Заявленные возможности: не указаны; используется резервное устаревшее обнаружение",
+  "McpCapabilitiesNotObserved": "Заявленные возможности: не определены, так как сервер не подключён"
 }

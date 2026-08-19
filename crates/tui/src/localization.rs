@@ -417,6 +417,9 @@ pub enum MessageId {
     McpRecommendationPlaywright,
     McpRecommendationCua,
     McpRecommendationContainerUse,
+    McpCapabilitiesAdvertised,
+    McpCapabilitiesLegacyFallback,
+    McpCapabilitiesNotObserved,
     CmdMemoryDescription,
     CmdPluginDescription,
     ExtensionsActionFocus,
@@ -2089,6 +2092,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::McpRecommendationPlaywright,
     MessageId::McpRecommendationCua,
     MessageId::McpRecommendationContainerUse,
+    MessageId::McpCapabilitiesAdvertised,
+    MessageId::McpCapabilitiesLegacyFallback,
+    MessageId::McpCapabilitiesNotObserved,
     MessageId::CmdPluginDescription,
     MessageId::ExtensionsActionFocus,
     MessageId::ExtensionsActionFold,
@@ -4579,6 +4585,44 @@ mod tests {
                         pack.get(key),
                         english.get(key),
                         "{} copied English prose for {key}",
+                        locale.tag()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_capability_metadata_copy_has_complete_locale_parity() {
+        let ids = [
+            MessageId::McpCapabilitiesAdvertised,
+            MessageId::McpCapabilitiesLegacyFallback,
+            MessageId::McpCapabilitiesNotObserved,
+        ];
+        let english = raw_locale_messages(Locale::En);
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for id in ids {
+                let key = format!("{id:?}");
+                let english_value = english
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English pack is missing {key}"));
+                let translated = pack
+                    .get(&key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+                if *locale != Locale::En {
+                    assert_ne!(
+                        translated,
+                        english_value,
+                        "{} must translate {key} instead of copying English",
                         locale.tag()
                     );
                 }

@@ -1490,6 +1490,11 @@ mod tests {
             read_timeout: 5,
             connected: enabled,
             error: None,
+            capability_metadata: if enabled {
+                crate::mcp::McpServerCapabilityMetadata::LegacyFallback
+            } else {
+                crate::mcp::McpServerCapabilityMetadata::NotObserved
+            },
             tools,
             resources: Vec::new(),
             prompts: Vec::new(),
