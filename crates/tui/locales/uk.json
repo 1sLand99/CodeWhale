@@ -1587,5 +1587,8 @@
   "AutoReceiptOn": "Auto-Review увімкнено. /goal тримає одну ціль; /workflow запускає скрипт.",
   "AutoReceiptPlanNote": "Plan лишається лише для читання, доки ви не перейдете в Work або Operate.",
   "EmptyStateOrchestrationLabel": "Продовжувати",
-  "OnboardTipsLine5": "Для довшої роботи оберіть /auto (перевірка), /goal (одна ціль) або /workflow (скрипт)."
+  "OnboardTipsLine5": "Для довшої роботи оберіть /auto (перевірка), /goal (одна ціль) або /workflow (скрипт).",
+  "GoalContinuationWaiting": "Ціль активна · наступний хід через {delay} · Esc, Ctrl+C або /goal pause зупиняє очікуване продовження",
+  "GoalContinuationReady": "Продовження цілі готове; команди в черзі виконаються перед наступним ходом.",
+  "GoalContinuationStopped": "Очікуване продовження цілі зупинено; ціль залишається активною."
 }

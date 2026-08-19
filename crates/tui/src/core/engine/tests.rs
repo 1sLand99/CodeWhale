@@ -1310,7 +1310,7 @@ async fn queued_failed_turn_cancels_older_goal_continuation_without_third_call()
         ))
         .await
         .expect("queue failing ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     assert!(engine.has_scheduled_goal_continuation());
     let run_task = tokio::spawn(engine.run());
 
@@ -1336,6 +1336,279 @@ async fn queued_failed_turn_cancels_older_goal_continuation_without_third_call()
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn configured_goal_delay_is_cancellable_without_starting_another_turn() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the delayed provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    {
+        let mut events = handle.rx_event.write().await;
+        let waiting = tokio::time::timeout(model_turn_event_timeout(), events.recv())
+            .await
+            .expect("missing continuation wait event")
+            .expect("engine event channel closed");
+        assert!(matches!(
+            waiting,
+            Event::GoalContinuationWaiting { delay_seconds: 300 }
+        ));
+    }
+
+    handle.cancel();
+    {
+        let mut events = handle.rx_event.write().await;
+        let ended = tokio::time::timeout(model_turn_event_timeout(), async {
+            loop {
+                if let Some(Event::GoalContinuationWaitEnded { interrupted }) = events.recv().await
+                {
+                    break interrupted;
+                }
+            }
+        })
+        .await
+        .expect("cancel did not end the continuation delay");
+        assert!(
+            ended,
+            "the wait receipt must identify an explicit interrupt"
+        );
+    }
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("engine did not accept controls after cancelling the delay")
+        .expect("session snapshot after cancelled delay");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "cancelling the quiet period must happen before provider dispatch"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after delay cancellation")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn cancellation_after_delay_expiry_beats_queued_continuation_dispatch() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the raced provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+
+    engine.schedule_goal_continuation(Vec::new()).await;
+    // Deterministically place the fixture at the timer/mailbox boundary: the
+    // quiet period expired and its one coalesced token is already queued, but
+    // the engine has not consumed it yet.
+    engine
+        .scheduled_goal_continuation
+        .as_mut()
+        .expect("scheduled continuation")
+        .ready_at = None;
+    engine.try_flush_pending_goal_continuation();
+    assert!(
+        engine
+            .scheduled_goal_continuation
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.enqueued)
+    );
+    handle.cancel();
+    let run_task = tokio::spawn(engine.run());
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("engine did not settle the delay-expiry cancellation race")
+        .expect("session snapshot after expiry race");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "cancelled delayed token must be discarded before provider dispatch"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after expiry race")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn configured_goal_delay_expires_into_exactly_one_continuation() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "stop after proving delayed dispatch".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("dispatch once after the cadence".to_string()),
+            goal_continuation_delay_seconds: 1,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    engine
+        .config
+        .goal_state
+        .lock()
+        .expect("goal lock")
+        .sync_from_host_status(
+            Some("dispatch once after the cadence"),
+            None,
+            crate::tools::goal::GoalStatus::Active,
+        );
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    let (mut saw_waiting, mut saw_ready, mut saw_started) = (false, false, false);
+    {
+        let mut events = handle.rx_event.write().await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::GoalContinuationWaiting { delay_seconds: 1 } => saw_waiting = true,
+                    Event::GoalContinuationWaitEnded { interrupted: false } => saw_ready = true,
+                    Event::TurnStarted { .. } => {
+                        saw_started = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("configured delay did not dispatch its continuation");
+    }
+    assert!(saw_waiting && saw_ready && saw_started);
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("delayed failing turn did not settle")
+        .expect("session snapshot after delayed dispatch");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one delayed schedule must create exactly one provider request"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after delayed dispatch")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn goal_pause_during_configured_delay_cancels_pending_continuation() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the paused provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("coordinate until paused".to_string()),
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    goal_state.lock().expect("goal lock").sync_from_host_status(
+        Some("coordinate until paused"),
+        None,
+        crate::tools::goal::GoalStatus::Active,
+    );
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SetGoalStatus {
+            status: crate::tools::goal::GoalStatus::Paused,
+            clear: false,
+        })
+        .await
+        .expect("pause delayed goal");
+    {
+        let mut events = handle.rx_event.write().await;
+        let interrupted = tokio::time::timeout(model_turn_event_timeout(), async {
+            loop {
+                if let Some(Event::GoalContinuationWaitEnded { interrupted }) = events.recv().await
+                {
+                    break interrupted;
+                }
+            }
+        })
+        .await
+        .expect("goal pause did not end the continuation delay");
+        assert!(
+            interrupted,
+            "a pause is an explicit interruption, not a ready-to-run receipt"
+        );
+    }
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("goal pause did not settle during delay")
+        .expect("session snapshot after goal pause");
+
+    assert_eq!(
+        goal_state.lock().expect("goal lock").snapshot().status,
+        "paused"
+    );
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a goal status control must beat the delayed continuation"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after pausing delayed goal")
+        .expect("engine task");
 }
 
 #[tokio::test]
@@ -1371,7 +1644,7 @@ async fn queued_not_started_turn_cancels_older_goal_continuation() {
         ))
         .await
         .expect("queue not-started ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     let run_task = tokio::spawn(engine.run());
 
     let session = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
@@ -1432,7 +1705,7 @@ async fn queued_interrupted_turn_cancels_older_goal_continuation_without_third_c
         ))
         .await
         .expect("queue interruptible ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     let run_task = tokio::spawn(engine.run());
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
         .await
@@ -1618,7 +1891,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
             payload: "ready child completion".to_string(),
         })
         .expect("queue ready idle child completion");
-    engine.schedule_goal_continuation(vec![stale_tool]);
+    engine.schedule_goal_continuation(vec![stale_tool]).await;
     assert!(
         engine.has_scheduled_goal_continuation(),
         "a live schedule must activate temporary op priority"
@@ -1649,7 +1922,9 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
             // Refresh after capacity opens. The existing token must retain its
             // FIFO position behind the remaining controls while carrying the
             // newest runtime tool catalog when it is eventually consumed.
-            engine.schedule_goal_continuation(vec![fresh_tool.clone()]);
+            engine
+                .schedule_goal_continuation(vec![fresh_tool.clone()])
+                .await;
         }
     }
 
@@ -1712,7 +1987,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
             payload: "ready child completion".to_string(),
         })
         .expect("queue ready idle child completion");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     assert!(engine.has_scheduled_goal_continuation());
     assert!(
         handle.tx_op.capacity() > 0,

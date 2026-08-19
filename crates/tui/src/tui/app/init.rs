@@ -745,6 +745,7 @@ impl App {
             workspace,
             workflow_config: config.workflow_config(),
             goal_max_continuations: config.goal_max_continuations(),
+            goal_continuation_waiting: false,
             configured_sandbox_mode: config.sandbox_mode.clone(),
             sandbox_backend: crate::sandbox::get_platform_sandbox_with_bwrap_preference(
                 config.prefer_bwrap.unwrap_or(false),

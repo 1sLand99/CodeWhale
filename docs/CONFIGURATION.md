@@ -2202,11 +2202,26 @@ opt into one:
 # Optional safety backstop on automatic goal continuation passes.
 # Default: 0 (unlimited). Set a positive value to opt into a ceiling.
 max_continuations = 100
+
+# Optional cancellable quiet period between successful turns. This is useful
+# for coordinator goals that should poll on a cadence instead of keeping one
+# provider turn open. Default: 0 (continue immediately).
+continuation_delay_seconds = 300
 ```
+
+The effective delay is capped at 86,400 seconds (24 hours); use an automation
+for schedules that are less frequent than once per day.
 
 When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
+
+The delay starts only after a successful turn while an explicitly created goal
+is still active. `/goal pause`, `/goal done`, `/goal blocked`, `/goal clear`,
+Esc, or Ctrl+C cancels a pending continuation before another provider request
+starts. Failed turns and policy/route failures never schedule another turn.
+Only the numeric cadence is stored in config; no prompt, credential, or secret
+is persisted for the loop.
 
 ### Notifications
 

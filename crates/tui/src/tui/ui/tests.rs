@@ -12493,6 +12493,23 @@ fn ctrl_c_disposition_loading_cancels_turn() {
 }
 
 #[test]
+fn ctrl_c_disposition_goal_delay_cancels_continuation_instead_of_arming_exit() {
+    let mut app = create_test_app();
+    app.is_loading = false;
+    app.goal_continuation_waiting = true;
+    assert_eq!(ctrl_c_disposition(&app), CtrlCDisposition::CancelTurn);
+}
+
+#[test]
+fn escape_goal_delay_cancels_continuation_with_empty_composer() {
+    let mut app = create_test_app();
+    app.is_loading = false;
+    app.input.clear();
+    app.goal_continuation_waiting = true;
+    assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
+}
+
+#[test]
 fn ctrl_c_disposition_armed_idle_confirms_exit() {
     let mut app = create_test_app();
     app.arm_quit();

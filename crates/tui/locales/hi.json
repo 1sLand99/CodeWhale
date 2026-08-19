@@ -1587,5 +1587,8 @@
   "AutoReceiptOn": "Auto-Review चालू है। /goal एक लक्ष्य रखता है; /workflow स्क्रिप्ट चलाता है।",
   "AutoReceiptPlanNote": "Work या Operate पर जाने तक Plan केवल पढ़ने योग्य रहता है।",
   "EmptyStateOrchestrationLabel": "जारी रखें",
-  "OnboardTipsLine5": "लंबे काम के लिए /auto (समीक्षा), /goal (एक लक्ष्य) या /workflow (स्क्रिप्ट) चुनें।"
+  "OnboardTipsLine5": "लंबे काम के लिए /auto (समीक्षा), /goal (एक लक्ष्य) या /workflow (स्क्रिप्ट) चुनें।",
+  "GoalContinuationWaiting": "लक्ष्य सक्रिय · अगला टर्न {delay} में · Esc, Ctrl+C या /goal pause लंबित जारीकरण रोकता है",
+  "GoalContinuationReady": "लक्ष्य जारीकरण तैयार है; अगली टर्न से पहले कतारबद्ध नियंत्रण चलेंगे।",
+  "GoalContinuationStopped": "लंबित लक्ष्य जारीकरण रोक दिया गया; लक्ष्य सक्रिय है।"
 }

@@ -5900,6 +5900,7 @@ impl RuntimeThreadManager {
                 goal_token_budget: None,
                 goal_status: crate::tools::goal::GoalStatus::Active,
                 goal_max_continuations: cfg.goal_max_continuations(),
+                goal_continuation_delay_seconds: cfg.goal_continuation_delay_seconds(),
                 allowed_tools: None,
                 disallowed_tools: None,
                 max_tool_calls: None,

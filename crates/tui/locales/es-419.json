@@ -1587,5 +1587,8 @@
   "AutoReceiptOn": "Auto-Review activado. /goal mantiene un objetivo; /workflow ejecuta un script.",
   "AutoReceiptPlanNote": "Plan sigue en solo lectura hasta que pases a Work u Operate.",
   "EmptyStateOrchestrationLabel": "Seguir",
-  "OnboardTipsLine5": "Para trabajo más largo, elige /auto (revisión), /goal (un objetivo) o /workflow (script)."
+  "OnboardTipsLine5": "Para trabajo más largo, elige /auto (revisión), /goal (un objetivo) o /workflow (script).",
+  "GoalContinuationWaiting": "Objetivo activo · siguiente turno en {delay} · Esc, Ctrl+C o /goal pause detiene la continuación pendiente",
+  "GoalContinuationReady": "La continuación del objetivo está lista; los controles en cola se ejecutan antes del siguiente turno.",
+  "GoalContinuationStopped": "Se detuvo la continuación pendiente; el objetivo sigue activo."
 }

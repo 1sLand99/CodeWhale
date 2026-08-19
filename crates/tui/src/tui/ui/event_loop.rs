@@ -1364,6 +1364,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::TurnStarted { turn_id, .. } => {
+                        app.goal_continuation_waiting = false;
                         app.session.last_tool_request_snapshot = None;
                         app.ocean_completion_started_at = None;
                         app.ocean_receipt_settle_start = None;
@@ -1975,6 +1976,23 @@ pub(crate) async fn run_event_loop(
                         if apply_goal_snapshot_to_app(app, &snapshot) {
                             transcript_batch_updated = true;
                         }
+                    }
+                    EngineEvent::GoalContinuationWaiting { delay_seconds } => {
+                        app.goal_continuation_waiting = true;
+                        let delay = crate::elapsed::format_elapsed_secs(delay_seconds);
+                        app.status_message = Some(
+                            app.tr(MessageId::GoalContinuationWaiting)
+                                .replace("{delay}", &delay),
+                        );
+                    }
+                    EngineEvent::GoalContinuationWaitEnded { interrupted } => {
+                        app.goal_continuation_waiting = false;
+                        let message_id = if interrupted {
+                            MessageId::GoalContinuationStopped
+                        } else {
+                            MessageId::GoalContinuationReady
+                        };
+                        app.status_message = Some(app.tr(message_id).to_string());
                     }
                     EngineEvent::SessionUpdated {
                         session_id,
@@ -4447,7 +4465,15 @@ pub(crate) async fn run_event_loop(
                             clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
+                            let was_waiting = app.goal_continuation_waiting;
                             engine_handle.cancel();
+                            if was_waiting {
+                                app.goal_continuation_waiting = false;
+                                app.status_message =
+                                    Some(app.tr(MessageId::GoalContinuationStopped).to_string());
+                                app.disarm_quit();
+                                continue;
+                            }
                             mark_active_turn_cancelled_locally(app);
                             current_streaming_text.clear();
                             stream_display_clock.reset();
@@ -4568,7 +4594,15 @@ pub(crate) async fn run_event_loop(
                                 app.status_message =
                                     Some(parent_stop_status(app, "Paused command cancelled"));
                             } else {
+                                let was_waiting = app.goal_continuation_waiting;
                                 engine_handle.cancel();
+                                if was_waiting {
+                                    app.goal_continuation_waiting = false;
+                                    app.status_message = Some(
+                                        app.tr(MessageId::GoalContinuationStopped).to_string(),
+                                    );
+                                    continue;
+                                }
                                 mark_active_turn_cancelled_locally(app);
                                 current_streaming_text.clear();
                                 stream_display_clock.reset();

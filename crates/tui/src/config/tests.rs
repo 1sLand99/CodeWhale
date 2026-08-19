@@ -215,15 +215,18 @@ fn goal_max_continuations_loads_from_goal_table() -> Result<()> {
         crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS
     );
     assert_eq!(config.goal_max_continuations(), 0);
+    assert_eq!(config.goal_continuation_delay_seconds(), 0);
 
     // Explicit backstop override.
     let config: Config = toml::from_str(
         r#"
 [goal]
 max_continuations = 25
+continuation_delay_seconds = 300
 "#,
     )?;
     assert_eq!(config.goal_max_continuations(), 25);
+    assert_eq!(config.goal_continuation_delay_seconds(), 300);
 
     // 0 = unlimited; token/time budgets are telemetry only.
     let config: Config = toml::from_str(
@@ -233,6 +236,20 @@ max_continuations = 0
 "#,
     )?;
     assert_eq!(config.goal_max_continuations(), 0);
+    assert_eq!(config.goal_continuation_delay_seconds(), 0);
+
+    // Bound accidental giant cadences; this remains a turn loop, not a
+    // replacement for durable low-frequency automations.
+    let config: Config = toml::from_str(
+        r#"
+[goal]
+continuation_delay_seconds = 999999999
+"#,
+    )?;
+    assert_eq!(
+        config.goal_continuation_delay_seconds(),
+        crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS
+    );
 
     Ok(())
 }

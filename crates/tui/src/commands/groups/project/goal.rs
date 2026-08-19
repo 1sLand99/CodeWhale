@@ -139,7 +139,8 @@ fn goal_status(app: &App) -> CommandResult {
         "Goal {state}: \"{obj}\" · elapsed {elapsed}{budget_str} · continuations {}",
         app.hunt.continuation_count
     );
-    if app.hunt.verdict == HuntVerdict::Hunting && !app.is_loading {
+    if app.hunt.verdict == HuntVerdict::Hunting && !app.is_loading && !app.goal_continuation_waiting
+    {
         line.push_str(" · ");
         line.push_str(&app.tr(MessageId::GoalStatusIdleHint));
     }

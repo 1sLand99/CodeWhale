@@ -282,6 +282,16 @@ pub enum Event {
     /// `create_goal` or `update_goal` tool calls.
     GoalUpdated { snapshot: GoalSnapshot },
 
+    /// The interactive engine is in the configured quiet period before one
+    /// already-authorized goal continuation. This is lifecycle state, not a
+    /// status string: Esc/Ctrl+C can cancel it without pretending a provider
+    /// turn is still in flight.
+    GoalContinuationWaiting { delay_seconds: u64 },
+
+    /// The between-turn quiet period ended. `interrupted` distinguishes a
+    /// user/external cancel from normal expiry or a goal status control.
+    GoalContinuationWaitEnded { interrupted: bool },
+
     /// Context compaction started.
     CompactionStarted {
         id: String,

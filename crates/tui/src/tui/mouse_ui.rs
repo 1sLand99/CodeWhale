@@ -1475,7 +1475,7 @@ pub(crate) enum CtrlCDisposition {
 pub(crate) fn ctrl_c_disposition(app: &App) -> CtrlCDisposition {
     if selection_has_content(app) {
         CtrlCDisposition::CopySelection
-    } else if app.is_loading {
+    } else if app.is_loading || app.goal_continuation_waiting {
         CtrlCDisposition::CancelTurn
     } else if app.quit_is_armed() {
         CtrlCDisposition::ConfirmExit

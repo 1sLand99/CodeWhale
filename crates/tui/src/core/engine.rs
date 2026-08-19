@@ -352,6 +352,10 @@ pub struct EngineConfig {
     /// the backstop so only completion, blocked state, or the continuation
     /// limit stops an operate-mode goal run.
     pub goal_max_continuations: u32,
+    /// Delay between successful interactive goal turns. `0` continues
+    /// immediately; positive values opt coordinator goals into a cancellable
+    /// quiet period (#5508).
+    pub goal_continuation_delay_seconds: u64,
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
@@ -479,6 +483,7 @@ impl Default for EngineConfig {
             goal_token_budget: None,
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
+            goal_continuation_delay_seconds: 0,
             allowed_tools: None,
             disallowed_tools: None,
             max_tool_calls: None,
@@ -816,6 +821,13 @@ struct ScheduledGoalContinuation {
     id: u64,
     dynamic_tools: Vec<DynamicToolSpec>,
     enqueued: bool,
+    /// `Some` only while the configured between-turn quiet period is active.
+    /// Once it expires the same schedule record becomes the existing queued
+    /// `ContinueGoal` token; there is no second scheduler.
+    ready_at: Option<Instant>,
+    /// Retained after expiry so a cancellation racing the timer can still
+    /// publish an interrupted wait receipt before provider dispatch.
+    was_delayed: bool,
 }
 
 enum SendMessageOutcome {
@@ -1746,13 +1758,32 @@ impl Engine {
         self.record_applied_runtime_authority(authority);
     }
 
-    fn schedule_goal_continuation(&mut self, dynamic_tools: Vec<DynamicToolSpec>) {
-        if let Some(scheduled) = self.scheduled_goal_continuation.as_mut() {
-            // A normal user turn or idle child handoff can finish while the
-            // prior synthetic token is already queued. Refresh that one token
-            // instead of multiplying autonomous turns and provider spend.
-            scheduled.dynamic_tools = dynamic_tools;
+    async fn schedule_goal_continuation(&mut self, dynamic_tools: Vec<DynamicToolSpec>) {
+        let delay_seconds = self.config.goal_continuation_delay_seconds;
+        let ready_at =
+            (delay_seconds > 0).then(|| Instant::now() + Duration::from_secs(delay_seconds));
+        if self.scheduled_goal_continuation.is_some() {
+            let should_announce = {
+                let scheduled = self
+                    .scheduled_goal_continuation
+                    .as_mut()
+                    .expect("scheduled continuation checked above");
+                // A normal user turn or idle child handoff can finish while
+                // the prior synthetic token is already queued. Refresh that
+                // one token instead of multiplying autonomous turns and spend.
+                scheduled.dynamic_tools = dynamic_tools;
+                if !scheduled.enqueued {
+                    scheduled.ready_at = ready_at;
+                }
+                delay_seconds > 0 && !scheduled.enqueued
+            };
             self.try_flush_pending_goal_continuation();
+            if should_announce {
+                let _ = self
+                    .tx_event
+                    .send(Event::GoalContinuationWaiting { delay_seconds })
+                    .await;
+            }
             return;
         }
 
@@ -1762,15 +1793,29 @@ impl Engine {
             id: self.goal_continuation_schedule_seq,
             dynamic_tools,
             enqueued: false,
+            ready_at,
+            was_delayed: delay_seconds > 0,
         });
         self.try_flush_pending_goal_continuation();
+        if delay_seconds > 0 {
+            let _ = self
+                .tx_event
+                .send(Event::GoalContinuationWaiting { delay_seconds })
+                .await;
+        }
     }
 
-    fn cancel_scheduled_goal_continuation(&mut self) {
-        if self.scheduled_goal_continuation.take().is_some() {
+    async fn cancel_scheduled_goal_continuation(&mut self, interrupted: bool) {
+        if let Some(scheduled) = self.scheduled_goal_continuation.take() {
             tracing::debug!(
                 "cancelled an outstanding goal continuation after a non-completed turn"
             );
+            if scheduled.was_delayed {
+                let _ = self
+                    .tx_event
+                    .send(Event::GoalContinuationWaitEnded { interrupted })
+                    .await;
+            }
         }
     }
 
@@ -1863,6 +1908,9 @@ impl Engine {
         if scheduled.enqueued {
             return;
         }
+        if scheduled.ready_at.is_some() {
+            return;
+        }
         let schedule_id = scheduled.id;
 
         match self.tx_op.try_send(Op::ContinueGoal {
@@ -1893,22 +1941,65 @@ impl Engine {
     }
 
     async fn next_run_input(&mut self, host_managed_turns: bool) -> Option<EngineRunInput> {
-        // A full mailbox means queued controls must run first. Retrying at the
-        // top of each receive appends the continuation behind the remaining
-        // controls as soon as one slot becomes available.
-        self.try_flush_pending_goal_continuation();
-        if self.has_scheduled_goal_continuation() {
-            // The synthetic token sits behind every operation that was already
-            // queued when it was scheduled. Drain FIFO operations through that
-            // token before accepting an idle child completion, whether or not
-            // the mailbox happened to be full. Consuming or cancelling the
-            // schedule marker restores normal select fairness immediately.
-            self.rx_op
-                .recv()
-                .await
-                .map(|op| EngineRunInput::Operation(Box::new(op)))
-        } else {
-            loop {
+        loop {
+            // A full mailbox means queued controls must run first. Retrying at
+            // the top of each receive appends the continuation behind the
+            // remaining controls as soon as one slot becomes available.
+            self.try_flush_pending_goal_continuation();
+            if self.has_scheduled_goal_continuation() {
+                let (enqueued, ready_at) = self
+                    .scheduled_goal_continuation
+                    .as_ref()
+                    .map(|scheduled| (scheduled.enqueued, scheduled.ready_at))
+                    .expect("scheduled continuation checked above");
+                if enqueued {
+                    // The synthetic token sits behind every operation that was
+                    // already queued when it was scheduled. Drain FIFO through
+                    // that token before accepting an idle child completion.
+                    return self
+                        .rx_op
+                        .recv()
+                        .await
+                        .map(|op| EngineRunInput::Operation(Box::new(op)));
+                }
+
+                if let Some(ready_at) = ready_at {
+                    let cancel = self.cancel_token.clone();
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            self.cancel_scheduled_goal_continuation(true).await;
+                            continue;
+                        }
+                        // Goal status controls and ordinary user messages stay
+                        // responsive throughout the wait. A pause/clear action
+                        // cancels this exact record in its normal handler.
+                        op = self.rx_op.recv() => {
+                            return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                        }
+                        () = tokio::time::sleep(ready_at.saturating_duration_since(Instant::now())) => {
+                            if let Some(scheduled) = self.scheduled_goal_continuation.as_mut()
+                                && scheduled.ready_at == Some(ready_at)
+                            {
+                                scheduled.ready_at = None;
+                                let _ = self.tx_event.send(Event::GoalContinuationWaitEnded {
+                                    interrupted: false,
+                                }).await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // A record that is ready but could not enter the full mailbox
+                // waits for one queued control. The next loop pass retries the
+                // same coalesced token, so there is no spin or duplicate turn.
+                return self
+                    .rx_op
+                    .recv()
+                    .await
+                    .map(|op| EngineRunInput::Operation(Box::new(op)));
+            } else {
                 let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
                 tokio::select! {
                     op = self.rx_op.recv() => {
@@ -2006,7 +2097,7 @@ impl Engine {
                     "Background shell work finished; continuing the active goal".to_string(),
                 ))
                 .await;
-            self.schedule_goal_continuation(Vec::new());
+            self.schedule_goal_continuation(Vec::new()).await;
             return;
         }
         let route = match self.current_runtime_route() {
@@ -2145,6 +2236,15 @@ impl Engine {
                         dynamic_tools,
                         engine_schedule_id,
                     } => {
+                        // Cancellation can race the delay expiry after the
+                        // coalesced token entered the mailbox. Re-check the
+                        // same turn token before consuming the schedule so an
+                        // interrupt at the boundary never starts a provider
+                        // request and is not erased by the next turn's reset.
+                        if engine_schedule_id.is_some() && self.cancel_token.is_cancelled() {
+                            self.cancel_scheduled_goal_continuation(true).await;
+                            continue;
+                        }
                         let Some(dynamic_tools) = self
                             .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
                         else {
@@ -3355,7 +3455,7 @@ impl Engine {
             return;
         }
 
-        self.cancel_scheduled_goal_continuation();
+        self.cancel_scheduled_goal_continuation(false).await;
         match outcome {
             SendMessageOutcome::NotStarted { error } => {
                 let message = self.goal_turn_not_started_message(error.as_deref());
@@ -3488,6 +3588,9 @@ impl Engine {
     /// status to `SharedGoalState` so the cross-turn continuation loop respects
     /// it. This does NOT dispatch a model turn — it's a control-plane update.
     async fn handle_set_goal_status(&mut self, status: GoalStatus, clear: bool) {
+        if clear || status != GoalStatus::Active {
+            self.cancel_scheduled_goal_continuation(true).await;
+        }
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if clear {
@@ -4429,7 +4532,7 @@ impl Engine {
             // Queue a typed continuation instead of freezing an Active goal
             // snapshot into a generic message. The operation re-reads the live
             // state when consumed, after any already-queued goal controls.
-            self.schedule_goal_continuation(dynamic_tools);
+            self.schedule_goal_continuation(dynamic_tools).await;
         } else {
             self.reconcile_non_completed_goal_turn(&outcome).await;
         }

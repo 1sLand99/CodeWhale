@@ -2190,6 +2190,12 @@ pub struct GoalConfig {
     /// control ends the run.
     #[serde(default)]
     pub max_continuations: Option<u32>,
+    /// Optional quiet period between successful cross-turn continuations.
+    /// `0` preserves immediate continuation. Positive values make long-lived
+    /// coordinator goals yield visibly between turns instead of sleeping
+    /// inside a provider turn.
+    #[serde(default)]
+    pub continuation_delay_seconds: Option<u64>,
 }
 
 /// One configurable footer item.
@@ -6900,6 +6906,17 @@ impl Config {
             .as_ref()
             .and_then(|goal| goal.max_continuations)
             .unwrap_or(crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS)
+    }
+
+    /// Quiet period between successful interactive goal turns (#5508).
+    /// Absent/zero keeps the existing immediate-continuation behavior.
+    #[must_use]
+    pub fn goal_continuation_delay_seconds(&self) -> u64 {
+        self.goal
+            .as_ref()
+            .and_then(|goal| goal.continuation_delay_seconds)
+            .unwrap_or(0)
+            .min(crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS)
     }
 
     /// Resolve the explicit local-memory backend.

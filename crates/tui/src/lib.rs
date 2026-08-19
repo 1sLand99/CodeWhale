@@ -11571,6 +11571,7 @@ async fn run_exec_agent(
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
         goal_max_continuations: execution_config.goal_max_continuations(),
+        goal_continuation_delay_seconds: execution_config.goal_continuation_delay_seconds(),
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls: None,

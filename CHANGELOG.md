@@ -100,6 +100,11 @@ abort under load.
   menu, named on the idle welcome and footer, and occupy the first three
   default Hotbar slots. `/auto` turns on Auto-Review (the existing
   permission posture) and says when to use the other two instead (#5439).
+- `feat(tui): add cancellable cadence to continuous goals` (M-Maciej) —
+  `[goal] continuation_delay_seconds` gives coordinator goals a visible quiet
+  period between successful turns while reusing the existing coalesced goal
+  continuation token; Esc, Ctrl+C, pause/done/blocked/clear cancel before the
+  next provider request, and failures never continue (#5508).
 - `feat(tui): add command context adapters and migration gate (FEAT-015)`
   (aboimpinto) — TUI-owned capability facets, a dual-path dispatch seam, and
   source-aware CI enforcement so a command slice cannot claim to be migrated
@@ -136,6 +141,9 @@ abort under load.
 
 ### Contributors
 
+- M-Maciej (@M-Maciej) — the real-world organization-coordinator use case and
+  5–30 minute cadence requirement behind cancellable cross-turn goal delays
+  (#5508).
 - cyq1017 (@cyq1017) — approval outcomes are persisted before execution can
   proceed: receipts commit to a session-owned log first, unpersistable
   evidence blocks the tool, stale decisions are rejected, and resume

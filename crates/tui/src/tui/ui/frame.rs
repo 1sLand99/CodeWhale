@@ -282,6 +282,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         goal_token_budget: app.hunt.token_budget,
         goal_status: app.hunt.verdict.goal_status(),
         goal_max_continuations: config.goal_max_continuations(),
+        goal_continuation_delay_seconds: config.goal_continuation_delay_seconds(),
         locale_tag: app.ui_locale.tag().to_string(),
         workshop: {
             crate::tools::large_output_router::WorkshopConfig::install_active(

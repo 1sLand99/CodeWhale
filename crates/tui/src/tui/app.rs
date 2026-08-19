@@ -1291,6 +1291,8 @@ pub struct App {
     pub workflow_config: codewhale_config::WorkflowConfigToml,
     /// Effective `[goal] max_continuations` backstop; `0` means unlimited.
     pub goal_max_continuations: u32,
+    /// Typed engine lifecycle state for the cancellable between-turn wait.
+    pub goal_continuation_waiting: bool,
     /// Effective explicit/managed filesystem scope captured at startup. The
     /// named permission posture supplies the default when this is `None`.
     pub configured_sandbox_mode: Option<String>,

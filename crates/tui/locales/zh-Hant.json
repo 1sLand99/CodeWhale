@@ -1587,5 +1587,8 @@
   "AutoReceiptOn": "已開啟自動審核。/goal 盯住一個目標；/workflow 執行腳本。",
   "AutoReceiptPlanNote": "切換到工作或 Operate 之前，計劃模式仍為唯讀。",
   "EmptyStateOrchestrationLabel": "繼續推進",
-  "OnboardTipsLine5": "較長的工作請選 /auto（審核）、/goal（單一目標）或 /workflow（腳本）。"
+  "OnboardTipsLine5": "較長的工作請選 /auto（審核）、/goal（單一目標）或 /workflow（腳本）。",
+  "GoalContinuationWaiting": "目標執行中 · {delay} 後開始下一輪 · 按 Esc、Ctrl+C 或使用 /goal pause 可停止待執行的繼續操作",
+  "GoalContinuationReady": "目標繼續操作已就緒；佇列中的控制命令會在下一輪之前執行。",
+  "GoalContinuationStopped": "已停止待執行的目標繼續操作；目標仍保持執行狀態。"
 }

@@ -1587,5 +1587,8 @@
   "AutoReceiptOn": "Auto-Review aktif. /goal menjaga satu tujuan; /workflow menjalankan skrip.",
   "AutoReceiptPlanNote": "Plan tetap hanya-baca sampai Anda pindah ke Work atau Operate.",
   "EmptyStateOrchestrationLabel": "Lanjutkan",
-  "OnboardTipsLine5": "Untuk pekerjaan lebih panjang pilih /auto (peninjau), /goal (satu tujuan), atau /workflow (skrip)."
+  "OnboardTipsLine5": "Untuk pekerjaan lebih panjang pilih /auto (peninjau), /goal (satu tujuan), atau /workflow (skrip).",
+  "GoalContinuationWaiting": "Sasaran aktif · giliran berikutnya dalam {delay} · Esc, Ctrl+C, atau /goal pause menghentikan kelanjutan tertunda",
+  "GoalContinuationReady": "Kelanjutan sasaran siap; kontrol dalam antrean dijalankan sebelum giliran berikutnya.",
+  "GoalContinuationStopped": "Kelanjutan sasaran tertunda dihentikan; sasaran tetap aktif."
 }
