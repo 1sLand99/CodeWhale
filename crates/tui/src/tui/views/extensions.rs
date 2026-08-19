@@ -851,6 +851,7 @@ impl ExtensionsView {
         Self::from_snapshot_with_locale(ExtensionsSnapshot::from_app(app), tab, app.ui_locale)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn from_snapshot(snapshot: ExtensionsSnapshot, tab: ExtensionsTab) -> Self {
         Self::from_snapshot_with_locale(snapshot, tab, Locale::En)
