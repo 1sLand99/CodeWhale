@@ -7,13 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.10] - Unreleased candidate
+## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
-
-These notes describe the v0.9.10 source candidate. It is not a published
-install until the tag ships; `latest` still resolves to the previous
-release.
 
 Codewhale v0.9.10 is a retention-and-identity release: the shell and
 transcript can no longer retain unbounded tool output in memory or on disk,
@@ -26,6 +22,23 @@ abort under load.
 
 ### Fixed
 
+- The constitution checkpoint now leads with the bundled balanced agreement;
+  the default path writes no custom constitution. The startup launch surface
+  distinguishes read-only Chat from folder-bound, approval-gated Work.
+- Tabby and other IME bridges no longer observe a stale visible caret while a
+  frame diff is being painted; Codewhale hides the cursor during the diff,
+  restores the canonical composer cell, and only then reveals it again
+  (BrathonBai, #5023).
+- Pre-header HTTP/2/SSE transport failures get one bounded HTTP/1.1 retry;
+  authentication, provider-semantic, response-body, and already-pinned HTTP/1
+  failures remain fail-closed (demian-welt, #4683).
+- MCP `tools/call` images now travel as bounded typed content instead of
+  leaking base64 through model-visible JSON. Direct and parallel calls share
+  the same MIME, size, validation, and one-image boundary (PR #5515 by
+  @cacdcaecawae).
+- Linux npm installs and updates race GitHub Releases against the CNB mirror
+  at the checksum-manifest layer, then download from the first verified source
+  without making users wait through a doomed slow-source timeout.
 - `CODEWHALE_PREFER_BWRAP` now applies the documented Linux sandbox override,
   and Codewhale-era names own build metadata, hook session/tool-call IDs, and
   sandbox child markers. The corresponding `DEEPSEEK_*` names remain as 0.9.x
@@ -96,6 +109,30 @@ abort under load.
 
 ### Added
 
+- `/extensions` and `/plugins` open one localized inventory for Hooks,
+  Plugins, local Marketplace catalogs, Skills, and MCP. Reviewed suggestions
+  include Playwright, Chrome DevTools, Cua Computer Use, Browser Use, and the
+  sandbox runtime without granting trust or installing anything on open.
+- Turn Inspector now opens the newest turn and pages across complete recorded
+  user, reasoning, tool/subagent, and assistant output with page-scoped search,
+  copy, and export (sky-sun-moon, #1682).
+- Background tasks have bounded incremental persistence, durable terminal
+  reasons, truthful timeout/cancellation receipts, restart recovery, and
+  interruptible continuous-goal delays (#5497, #5508).
+- `/title` once again controls the terminal window title independently from
+  `/rename`, survives session save/load, and sanitizes control, bidi, and
+  zero-width characters (PR #5509 by @SparkofSpike).
+- MCP snapshots preserve whether capabilities were advertised by the server,
+  discovered through the bounded legacy fallback, or not observed (#4170).
+- `codewhale auth status --diagnostic` reports canonical paths, isolation
+  source, backend class, and value-free provider-source presence without
+  opening credential stores or creating/migrating state (#2369).
+- `codewhale doctor --probe-search` performs an explicit credential-free,
+  policy-checked transport probe for the selected search provider; ordinary
+  doctor and JSON output remain offline (#5442).
+- The safe deferred `read_media` tool is available to supported read-only
+  roles, and history receipts distinguish localized tool execution outcomes
+  without exposing raw payloads (#5102).
 - **npm Linux x64 first-party source selection.** The wrapper concurrently
   fetches the GitHub Releases and CNB checksum manifests for the exact
   package version, locks the first source whose HTTP response and manifest
@@ -147,6 +184,35 @@ abort under load.
 
 ### Contributors
 
+- [Sh1Zuku](https://github.com/SparkofSpike) (`@SparkofSpike`) — restored
+  `/title` as an independent, persistent terminal-window title in PR #5509,
+  in addition to the Tier 1 Chinese and Indonesian documentation work below.
+- [Sun Zhenyuan](https://github.com/bistack) (`@bistack`) — extracted the
+  turn-loop stream processor in PR #5514 while preserving retry, cancellation,
+  usage, TTFT, steering, and partial-response behavior.
+- [OctoBored](https://github.com/OctoBored) (`@OctoBored`) — supplied the
+  working no-token Star History mirror used across the localized README set
+  after the canonical chart endpoint began returning a restricted placeholder
+  (#5510).
+- [cacdcaecawae](https://github.com/cacdcaecawae) (`@cacdcaecawae`) — added
+  provider-neutral typed MCP image forwarding in PR #5515; the harvested
+  version also makes malformed image fields produce a visible omission receipt.
+- [DingYong4223](https://github.com/DingYong4223) (`@DingYong4223`) — reported
+  the narrow-terminal completion truncation closed by the bounded hover reveal
+  (#998). Thanks also to @AiurArtanis and @formp3 for identifying the affected
+  completion surfaces.
+- [sky-sun-moon](https://github.com/sky-sun-moon) (`@sky-sun-moon`) — reported
+  the missing full per-turn input, reasoning, tool, and assistant pages that
+  shaped Turn Inspector navigation (#1682).
+- [cy2311](https://github.com/cy2311) (`@cy2311`) — reported the Windows launch
+  path that now ships and installs a Windows Terminal-aware batch launcher
+  (#1854).
+- [demian-welt](https://github.com/demian-welt) (`@demian-welt`) — provided the
+  reproducible pre-header SSE transport failure behind the bounded HTTP/1.1
+  retry (#4683).
+- [BrathonBai](https://github.com/BrathonBai) (`@BrathonBai`) — reported the
+  Tabby/CJK IME candidate-window jump that led to the hide-diff-position-show
+  cursor transaction (#5023).
 - M-Maciej (@M-Maciej) — the real-world organization-coordinator use case and
   5–30 minute cadence requirement behind cancellable cross-turn goal delays
   (#5508).
