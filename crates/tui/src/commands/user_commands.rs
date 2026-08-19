@@ -33,7 +33,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::tools::goal::GoalStatus;
 #[cfg(test)]
 use crate::tui::app::{App, AppAction};
 
