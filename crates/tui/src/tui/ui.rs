@@ -1353,7 +1353,14 @@ fn preview_effective_base_prompt(app: &mut App, config: &Config) {
 }
 
 async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManager) -> bool {
-    let tasks = task_manager.list_tasks(None).await;
+    let tasks = match app.current_session_id.as_deref() {
+        Some(session_id) => {
+            task_manager
+                .list_tasks_for_owner(None, None, session_id)
+                .await
+        }
+        None => Vec::new(),
+    };
     let previously_active_durable_ids = app
         .task_panel
         .iter()

@@ -1350,12 +1350,37 @@ impl TaskManager {
         limit: Option<usize>,
         workspace: Option<&Path>,
     ) -> Vec<TaskSummary> {
+        self.list_tasks_visible_to(limit, workspace, None).await
+    }
+
+    /// List tasks owned by a session, newest first, optionally scoped to a workspace.
+    ///
+    /// Ownerless legacy records fail closed and are not model-visible.
+    pub async fn list_tasks_for_owner(
+        &self,
+        limit: Option<usize>,
+        workspace: Option<&Path>,
+        owner_session_id: &str,
+    ) -> Vec<TaskSummary> {
+        self.list_tasks_visible_to(limit, workspace, Some(owner_session_id))
+            .await
+    }
+
+    async fn list_tasks_visible_to(
+        &self,
+        limit: Option<usize>,
+        workspace: Option<&Path>,
+        owner_session_id: Option<&str>,
+    ) -> Vec<TaskSummary> {
         let state = self.state.lock().await;
         let mut items = state
             .tasks
             .values()
             .filter(|record| {
                 workspace.is_none_or(|workspace| record.workspace.as_path() == workspace)
+                    && owner_session_id.is_none_or(|owner_session_id| {
+                        record.owner_session_id.as_deref() == Some(owner_session_id)
+                    })
             })
             .map(TaskSummary::from)
             .collect::<Vec<_>>();
@@ -1368,8 +1393,43 @@ impl TaskManager {
 
     /// Retrieve a task by full id or prefix.
     pub async fn get_task(&self, id_or_prefix: &str) -> Result<TaskRecord> {
+        self.get_task_visible_to(id_or_prefix, None).await
+    }
+
+    /// Retrieve a session-owned task by full id or prefix.
+    ///
+    /// Ownership is applied before id resolution so foreign records cannot
+    /// disclose their existence through exact matches or prefix ambiguity.
+    pub async fn get_task_for_owner(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskRecord> {
+        self.get_task_visible_to(id_or_prefix, Some(owner_session_id))
+            .await
+    }
+
+    /// Retrieve the exact owned task stamped onto a trusted runtime thread.
+    ///
+    /// The runtime thread supplies a full durable id rather than model input.
+    /// Legacy ownerless tasks fail closed even when restored as active.
+    pub(crate) async fn get_task_for_active_runtime(&self, task_id: &str) -> Result<TaskRecord> {
         let state = self.state.lock().await;
-        let id = resolve_task_id(&state.tasks, id_or_prefix)?;
+        state
+            .tasks
+            .get(task_id)
+            .filter(|task| task.owner_session_id.is_some())
+            .cloned()
+            .ok_or_else(|| anyhow!("Task not found: {task_id}"))
+    }
+
+    async fn get_task_visible_to(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: Option<&str>,
+    ) -> Result<TaskRecord> {
+        let state = self.state.lock().await;
+        let id = resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?;
         state
             .tasks
             .get(&id)
@@ -1379,8 +1439,37 @@ impl TaskManager {
 
     /// Cancel a queued or running task by id/prefix.
     pub async fn cancel_task(&self, id_or_prefix: &str) -> Result<TaskCancellation> {
+        self.cancel_task_visible_to(id_or_prefix, None).await
+    }
+
+    /// Cancel a queued or running task owned by the given session.
+    ///
+    /// Ownerless legacy and foreign records fail closed.
+    pub async fn cancel_task_for_owner(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskCancellation> {
+        self.cancel_task_visible_to(id_or_prefix, Some(owner_session_id))
+            .await
+    }
+
+    /// Cancel the exact owned task stamped onto a trusted runtime thread.
+    pub(crate) async fn cancel_task_for_active_runtime(
+        &self,
+        task_id: &str,
+    ) -> Result<TaskCancellation> {
+        self.get_task_for_active_runtime(task_id).await?;
+        self.cancel_task(task_id).await
+    }
+
+    async fn cancel_task_visible_to(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: Option<&str>,
+    ) -> Result<TaskCancellation> {
         let mut state = self.state.lock().await;
-        let id = resolve_task_id(&state.tasks, id_or_prefix)?;
+        let id = resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?;
         let now = Utc::now();
 
         let mut cancel_running = false;
@@ -2333,13 +2422,23 @@ fn trim_task_timeline(entries: &mut Vec<TaskTimelineEntry>) {
     }
 }
 
-fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> Result<String> {
-    if tasks.contains_key(id_or_prefix) {
+fn resolve_task_id_visible_to(
+    tasks: &HashMap<String, TaskRecord>,
+    id_or_prefix: &str,
+    owner_session_id: Option<&str>,
+) -> Result<String> {
+    let visible = |record: &TaskRecord| {
+        owner_session_id.is_none_or(|owner_session_id| {
+            record.owner_session_id.as_deref() == Some(owner_session_id)
+        })
+    };
+    if tasks.get(id_or_prefix).is_some_and(visible) {
         return Ok(id_or_prefix.to_string());
     }
     let matches = tasks
-        .keys()
-        .filter(|id| id.starts_with(id_or_prefix))
+        .iter()
+        .filter(|(id, record)| id.starts_with(id_or_prefix) && visible(record))
+        .map(|(id, _)| id)
         .cloned()
         .collect::<Vec<_>>();
     match matches.len() {
@@ -2351,6 +2450,10 @@ fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> R
             matches.len()
         ),
     }
+}
+
+fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> Result<String> {
+    resolve_task_id_visible_to(tasks, id_or_prefix, None)
 }
 
 fn summarize_json(value: &Value) -> Option<String> {
@@ -2704,6 +2807,129 @@ mod tests {
             .await;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].workspace, PathBuf::from("/tmp/workspace-a"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_controls_are_session_owned_and_legacy_records_fail_closed() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root), Arc::new(MockExecutor)).await?;
+
+        let mut session_a = sample_task_record();
+        session_a.id = "task_dead000000000001".to_string();
+        session_a.owner_session_id = Some("session-a".to_string());
+        session_a.status = TaskStatus::Completed;
+        session_a.created_at = Utc::now() - chrono::Duration::seconds(3);
+
+        let mut session_b = sample_task_record();
+        session_b.id = "task_dead000000000002".to_string();
+        session_b.owner_session_id = Some("session-b".to_string());
+        session_b.status = TaskStatus::Completed;
+        session_b.created_at = Utc::now() - chrono::Duration::seconds(2);
+
+        let mut session_b_newest = sample_task_record();
+        session_b_newest.id = "task_beef000000000002".to_string();
+        session_b_newest.owner_session_id = Some("session-b".to_string());
+        session_b_newest.status = TaskStatus::Completed;
+        session_b_newest.created_at = Utc::now();
+
+        let mut legacy = sample_task_record();
+        legacy.id = "task_dead000000000003".to_string();
+        legacy.owner_session_id = None;
+        legacy.status = TaskStatus::Completed;
+        legacy.created_at = Utc::now() - chrono::Duration::seconds(1);
+
+        {
+            let mut state = manager.state.lock().await;
+            for record in [
+                session_a.clone(),
+                session_b.clone(),
+                session_b_newest.clone(),
+                legacy.clone(),
+            ] {
+                state.tasks.insert(record.id.clone(), record);
+            }
+        }
+
+        let session_b_list = manager
+            .list_tasks_for_owner(Some(1), None, "session-b")
+            .await;
+        assert_eq!(session_b_list.len(), 1);
+        assert_eq!(session_b_list[0].id, session_b_newest.id);
+
+        let session_b_prefix = manager.get_task_for_owner("task_dead", "session-b").await?;
+        assert_eq!(session_b_prefix.id, session_b.id);
+        assert!(
+            manager
+                .get_task_for_owner(&session_a.id, "session-b")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Task not found")
+        );
+        assert!(
+            manager
+                .get_task_for_owner(&legacy.id, "session-b")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Task not found")
+        );
+        assert!(
+            manager
+                .get_task_for_active_runtime(&legacy.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Task not found"),
+            "legacy ownerless active tasks must fail closed"
+        );
+        assert_eq!(
+            manager.get_task_for_active_runtime(&session_a.id).await?.id,
+            session_a.id
+        );
+
+        assert!(
+            manager
+                .cancel_task_for_owner(&session_a.id, "session-b")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Task not found")
+        );
+        assert_eq!(
+            manager.get_task(&session_a.id).await?.status,
+            TaskStatus::Completed
+        );
+        assert!(
+            manager
+                .cancel_task_for_owner(&legacy.id, "session-b")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Task not found")
+        );
+
+        let own = manager
+            .cancel_task_for_owner(&session_b.id, "session-b")
+            .await?;
+        assert_eq!(own.disposition, TaskCancelDisposition::AlreadyFinished);
+        let active_own = manager
+            .cancel_task_for_active_runtime(&session_a.id)
+            .await?;
+        assert_eq!(
+            active_own.disposition,
+            TaskCancelDisposition::AlreadyFinished
+        );
+        assert_eq!(
+            manager
+                .get_task_for_owner(&session_a.id, "session-a")
+                .await?
+                .id,
+            session_a.id,
+            "switching A to B and back must restore A's controls"
+        );
         Ok(())
     }
 

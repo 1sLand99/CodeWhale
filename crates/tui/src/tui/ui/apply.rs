@@ -1637,6 +1637,11 @@ pub(crate) async fn apply_command_result(
                 let _ = engine_handle.send(Op::PurgeContext).await;
             }
             AppAction::TaskAdd { prompt } => {
+                let owner_session_id = app
+                    .current_session_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                app.current_session_id = Some(owner_session_id.clone());
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
                     model: Some(app.model.clone()),
@@ -1645,7 +1650,7 @@ pub(crate) async fn apply_command_result(
                     allow_shell: Some(app.allow_shell),
                     trust_mode: Some(app.trust_mode),
                     auto_approve: Some(app_auto_approve_enabled(app)),
-                    owner_session_id: app.current_session_id.clone(),
+                    owner_session_id: Some(owner_session_id),
                 };
                 match task_manager.add_task(request).await {
                     Ok(task) => {
@@ -1667,7 +1672,14 @@ pub(crate) async fn apply_command_result(
                 refresh_active_task_panel(app, task_manager).await;
             }
             AppAction::TaskList => {
-                let tasks = task_manager.list_tasks(Some(30)).await;
+                let tasks = match app.current_session_id.as_deref() {
+                    Some(session_id) => {
+                        task_manager
+                            .list_tasks_for_owner(Some(30), None, session_id)
+                            .await
+                    }
+                    None => Vec::new(),
+                };
                 refresh_active_task_panel(app, task_manager).await;
                 app.add_message(HistoryCell::System {
                     content: format_task_list(&tasks),
@@ -1692,16 +1704,26 @@ pub(crate) async fn apply_command_result(
                     app.status_message = Some(status);
                 }
             },
-            AppAction::TaskShow { id } => match task_manager.get_task(&id).await {
-                Ok(task) => open_task_pager(app, &task),
-                Err(err) => {
-                    app.add_message(HistoryCell::System {
-                        content: format!("Task lookup failed: {err}"),
-                    });
+            AppAction::TaskShow { id } => {
+                let task = match app.current_session_id.as_deref() {
+                    Some(session_id) => task_manager.get_task_for_owner(&id, session_id).await,
+                    None => Err(anyhow::anyhow!("Task not found: {id}")),
+                };
+                match task {
+                    Ok(task) => open_task_pager(app, &task),
+                    Err(err) => {
+                        app.add_message(HistoryCell::System {
+                            content: format!("Task lookup failed: {err}"),
+                        });
+                    }
                 }
-            },
+            }
             AppAction::TaskCancel { id } => {
-                match task_manager.cancel_task(&id).await {
+                let cancellation = match app.current_session_id.as_deref() {
+                    Some(session_id) => task_manager.cancel_task_for_owner(&id, session_id).await,
+                    None => Err(anyhow::anyhow!("Task not found: {id}")),
+                };
+                match cancellation {
                     Ok(cancellation) => {
                         app.add_message(HistoryCell::System {
                             content: format!(

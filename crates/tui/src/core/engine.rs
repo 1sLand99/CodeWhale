@@ -5200,7 +5200,10 @@ impl Engine {
 
         let mut seen_tasks = HashSet::new();
         if let Some(task_manager) = self.config.runtime_services.task_manager.as_ref() {
-            for task in task_manager.list_tasks(None).await {
+            for task in task_manager
+                .list_tasks_for_owner(None, None, session_id)
+                .await
+            {
                 let external = format!("task:{}", task.id);
                 if !candidates.contains(&external) {
                     continue;

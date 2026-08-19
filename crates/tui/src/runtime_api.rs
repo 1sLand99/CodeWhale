@@ -4289,18 +4289,29 @@ async fn block_thread_goal(
     Ok(Json(updated))
 }
 
+/// Runtime-authenticated administrative task inventory.
+///
+/// Unlike in-session TUI/model controls, the Runtime API token authorizes the
+/// caller for the whole host runtime, so these endpoints intentionally span
+/// sessions. Running with `--insecure` explicitly opts out of that host boundary.
 async fn list_tasks(
     State(state): State<RuntimeApiState>,
     Query(query): Query<TasksQuery>,
 ) -> Result<Json<TasksResponse>, ApiError> {
-    let tasks = state
-        .task_manager
-        .list_tasks_scoped(query.limit, query.workspace.as_deref())
-        .await;
+    let tasks = match query.workspace.as_deref() {
+        Some(workspace) => {
+            state
+                .task_manager
+                .list_tasks_scoped(query.limit, Some(workspace))
+                .await
+        }
+        None => state.task_manager.list_tasks(query.limit).await,
+    };
     let counts = state.task_manager.counts().await;
     Ok(Json(TasksResponse { tasks, counts }))
 }
 
+/// Runtime-authenticated administrative task lookup across host sessions.
 async fn get_task(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -4313,6 +4324,7 @@ async fn get_task(
     Ok(Json(task))
 }
 
+/// Runtime-authenticated administrative task cancellation across host sessions.
 async fn cancel_task(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
