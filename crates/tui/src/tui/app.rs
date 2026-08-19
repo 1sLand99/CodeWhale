@@ -1087,7 +1087,17 @@ pub struct PendingRouteSave {
 /// those providers, matching how startup reads it back.
 fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
     let route = format!("{provider_identity}/{model}");
-    match crate::settings::Settings::transact(|settings| {
+    match try_persist_route_as_startup_default(provider_identity, model) {
+        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+        Err(err) => format!("Save failed: {err}"),
+    }
+}
+
+fn try_persist_route_as_startup_default(
+    provider_identity: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    crate::settings::Settings::transact(|settings| {
         settings.default_provider = Some(provider_identity.to_string());
         settings.set_model_for_provider(provider_identity, model);
         if matches!(
@@ -1098,10 +1108,7 @@ fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> Str
             settings.set("default_model", model)?;
         }
         Ok(())
-    }) {
-        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
-        Err(err) => format!("Save failed: {err}"),
-    }
+    })
 }
 
 pub struct App {
@@ -2193,15 +2200,28 @@ impl App {
     /// next launch reopened the old route. An explicit request now always
     /// reports what it did.
     pub fn save_live_route_as_startup_default(&mut self) -> String {
+        match self.try_save_live_route_as_startup_default() {
+            Ok(receipt) => receipt,
+            Err(err) => format!("Save failed: {err}"),
+        }
+    }
+
+    /// Persist the live route with a typed failure for onboarding, whose next
+    /// transition depends on knowing that the restart route actually landed.
+    pub(crate) fn try_save_live_route_as_startup_default(&mut self) -> anyhow::Result<String> {
         let provider_identity = self.provider_identity_for_persistence().to_string();
         let model = if self.auto_model {
             "auto".to_string()
         } else {
             self.model.clone()
         };
-        // This explicit decision resolves the pending prompt.
+        try_persist_route_as_startup_default(&provider_identity, &model)?;
+        // Resolve the prompt only after the write lands. If persistence fails,
+        // keep the retry available instead of discarding the operator's route.
         self.pending_route_save = None;
-        persist_route_as_startup_default(&provider_identity, &model)
+        Ok(format!(
+            "Remembered {provider_identity}/{model} as the startup default (settings.toml)."
+        ))
     }
 
     /// Record that the live session route changed to `provider_identity` /

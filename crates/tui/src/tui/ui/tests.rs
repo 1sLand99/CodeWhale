@@ -7200,6 +7200,20 @@ async fn successful_custom_provider_activation_completes_onboarding() {
         OnboardingState::Provider,
         "a successfully activated custom route must complete provider onboarding"
     );
+    let settings = crate::settings::Settings::load().expect("reload custom startup route");
+    assert_eq!(
+        settings.default_provider.as_deref(),
+        Some("fixture-local"),
+        "named custom onboarding must persist the exact identity, not `custom`",
+    );
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("fixture-local"))
+            .map(String::as_str),
+        Some("fixture-model"),
+    );
 }
 
 #[tokio::test]
@@ -7229,6 +7243,13 @@ async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
     assert!(!switched);
     assert_eq!(app.onboarding, OnboardingState::Provider);
     assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("reload failed custom setup settings")
+            .default_provider,
+        None,
+        "a failed activation must not persist the route it never reached",
+    );
 }
 
 #[tokio::test]
@@ -7460,6 +7481,143 @@ api_key = "arcee-key"
     let pending = app.pending_route_save.as_ref().expect("pending save");
     assert_eq!(pending.provider_identity, "xiaomi-mimo");
     assert_eq!(pending.model, "mimo-v2.5-pro");
+}
+
+/// The provider step is the first run's explicit startup-route decision, not
+/// an ordinary session-local `/provider` preview. Persist it in user-global
+/// settings so a completed Ollama setup cannot restart on DeepSeek merely
+/// because the compatibility config still carries a DeepSeek root default.
+#[test]
+fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
+    let _home = SettingsHomeGuard::new();
+    let config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH")
+        .map(PathBuf::from)
+        .expect("isolated config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    let original_config = "default_text_model = \"deepseek-v4-pro\"\n";
+    std::fs::write(&config_path, original_config).expect("seed compatibility config");
+
+    let config = Config::load(Some(config_path.clone()), None).expect("load first-run config");
+    let mut app = Box::new(App::new(create_test_options(), &config));
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_missing_key_recovery = false;
+    app.trust_mode = true;
+    // `switch_provider` already has focused session-local coverage above.
+    // Recreate its successful live-route result here so this regression stays
+    // centered on the missing onboarding completion write and restart load.
+    app.set_provider_identity(ApiProvider::Ollama, ApiProvider::Ollama.as_str());
+    app.set_model_selection(crate::config::DEFAULT_OLLAMA_MODEL.to_string());
+    app.note_session_route_change(
+        ApiProvider::Ollama.as_str(),
+        crate::config::DEFAULT_OLLAMA_MODEL,
+    );
+    record_provider_model_setup_progress(&mut app, &config);
+    assert_eq!(app.api_provider, ApiProvider::Ollama);
+    assert_eq!(app.model, crate::config::DEFAULT_OLLAMA_MODEL);
+
+    complete_provider_picker_onboarding(&mut app, ApiProvider::Ollama);
+
+    let settings = crate::settings::Settings::load().expect("reload onboarding settings");
+    assert_eq!(settings.default_provider.as_deref(), Some("ollama"));
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("ollama"))
+            .map(String::as_str),
+        Some(crate::config::DEFAULT_OLLAMA_MODEL),
+    );
+    assert!(app.pending_route_save.is_none());
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Remembered ollama/deepseek-v4-flash")),
+        "onboarding must truthfully receipt the durable startup route: {:?}",
+        app.status_message,
+    );
+
+    // The route belongs to user-global startup settings. Do not rewrite a
+    // folder's compatibility config as a side effect of onboarding.
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("reload config bytes"),
+        original_config,
+    );
+
+    // Selecting a keyless route is not a health check. Setup state must keep
+    // that distinction so an unavailable local runtime still receives the
+    // existing attention/doctor treatment instead of being called healthy.
+    let state = codewhale_config::SetupState::load()
+        .expect("load setup state")
+        .expect("provider setup state");
+    let result = state
+        .steps
+        .get(&codewhale_config::SetupStep::ProviderModel)
+        .and_then(|entry| entry.result.as_deref())
+        .expect("provider/model setup result");
+    assert!(result.contains("provider=ollama"), "{result}");
+    assert!(result.contains("health=attemptable"), "{result}");
+
+    // Finish the remaining first-run screens, then reconstruct from the same
+    // on-disk config a second launch would read. Drop the first `App` before
+    // constructing the second: the production lifecycle never keeps two of
+    // this deliberately large state object on one thread stack at once.
+    app.finish_onboarding_without_feature_intro();
+    drop(app);
+    let restart_config = Config::load(Some(config_path), None).expect("reload restart config");
+    let restarted = Box::new(App::new(create_test_options(), &restart_config));
+    assert_eq!(restarted.api_provider, ApiProvider::Ollama);
+    assert_eq!(restarted.model, crate::config::DEFAULT_OLLAMA_MODEL);
+    assert_ne!(
+        restarted.onboarding,
+        OnboardingState::Provider,
+        "a keyless Ollama startup must not reopen DeepSeek credential recovery",
+    );
+    assert!(!restarted.onboarding_needs_api_key);
+}
+
+#[test]
+fn failed_first_run_route_persistence_keeps_provider_setup_active() {
+    let _lock = crate::test_support::lock_test_env();
+    let tmp = TempDir::new().expect("settings tempdir");
+    let bad_home = tmp.path().join("codewhale-home-file");
+    std::fs::write(&bad_home, "not a directory").expect("bad home file");
+    let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path().as_os_str());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str());
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", bad_home.as_os_str());
+    let _deepseek_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let _codewhale_config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _codewhale_provider = crate::test_support::EnvVarGuard::remove("CODEWHALE_PROVIDER");
+    let _deepseek_provider = crate::test_support::EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+
+    let mut app = Box::new(create_test_app());
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    app.set_provider_identity(ApiProvider::Ollama, ApiProvider::Ollama.as_str());
+    app.set_model_selection(crate::config::DEFAULT_OLLAMA_MODEL.to_string());
+    app.note_session_route_change(
+        ApiProvider::Ollama.as_str(),
+        crate::config::DEFAULT_OLLAMA_MODEL,
+    );
+
+    complete_provider_picker_onboarding(&mut app, ApiProvider::Ollama);
+
+    assert_eq!(app.onboarding, OnboardingState::Provider);
+    assert_eq!(app.onboarding_provider, ApiProvider::Ollama);
+    assert!(app.onboarding_needs_api_key);
+    assert!(
+        app.pending_route_save.is_some(),
+        "a failed write must retain the route-save retry",
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Save failed:")),
+        "a failed restart-route write must stay visible: {:?}",
+        app.status_message,
+    );
 }
 
 #[tokio::test]
@@ -14204,12 +14362,15 @@ fn onboarding_escape_is_routed_to_the_provider_picker_not_intercepted() {
 /// just satisfied.
 #[test]
 fn external_grant_reuse_completes_provider_onboarding() {
+    let _home = SettingsHomeGuard::new();
     let mut app = create_test_app();
     app.onboarding = OnboardingState::Provider;
     app.onboarding_needs_api_key = true;
     app.onboarding_missing_key_recovery = true;
     app.offline_mode = true;
     app.trust_mode = true;
+    app.set_provider_identity(ApiProvider::Xai, ApiProvider::Xai.as_str());
+    app.set_model_selection(crate::config::DEFAULT_XAI_MODEL.to_string());
 
     complete_provider_picker_onboarding(&mut app, crate::config::ApiProvider::Xai);
 
@@ -14221,6 +14382,16 @@ fn external_grant_reuse_completes_provider_onboarding() {
     assert_eq!(app.onboarding_provider, crate::config::ApiProvider::Xai);
     assert!(!app.onboarding_needs_api_key);
     assert!(!app.offline_mode);
+    let settings = crate::settings::Settings::load().expect("reload onboarding default");
+    assert_eq!(settings.default_provider.as_deref(), Some("xai"));
+    assert_eq!(
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get("xai"))
+            .map(String::as_str),
+        Some(crate::config::DEFAULT_XAI_MODEL),
+    );
 }
 
 #[test]
