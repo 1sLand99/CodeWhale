@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:79856d0c10be -->
 # Codewhale
 
 وكيل برمجة مفتوح المصدر لطرفيّتك — أحضر نموذجك بنفسك.
@@ -137,3 +137,5 @@ Operate عندما يكون المحرّر فارغًا — ومع النص يك
 [MIT](LICENSE). مشروع مجتمعي مستقل، غير مرتبط بأي مزوّد نماذج.
 
 ![Codewhale يفتح ثلاثة وكلاء فرعيين scout للقراءة فقط في طرفية](assets/fanout.gif)
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:79856d0c10be -->
 # Codewhale
 
 Агент для програмування з відкритим кодом у вашому терміналі — модель приносите ви.
@@ -153,3 +153,5 @@ Operate; якщо в полі є текст, `Tab` доповнює слеш-к�
 провайдером моделей.
 
 ![Codewhale розгалужує три read-only scout-субагенти паралельно в терміналі](assets/fanout.gif)
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)

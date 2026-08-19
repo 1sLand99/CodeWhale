@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:79856d0c10be -->
 # Codewhale
 
 Un agente di programmazione open source per il tuo terminale — porta il tuo modello.
@@ -156,3 +156,5 @@ sull'esperienza di agente nel terminale.
 fornitore di modelli.
 
 ![Codewhale che dispiega tre sottoagenti scout in sola lettura in un terminale](assets/fanout.gif)
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)

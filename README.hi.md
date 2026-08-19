@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:79856d0c10be -->
 # Codewhale
 
 आपके टर्मिनल के लिए एक ओपन सोर्स कोडिंग एजेंट — मॉडल आप लाएँ।
@@ -144,3 +144,5 @@ Whale Brother परिवार में स्वागत के लिए, 
 [MIT](LICENSE)। एक स्वतंत्र सामुदायिक परियोजना, किसी मॉडल प्रदाता से संबद्ध नहीं।
 
 ![टर्मिनल में तीन केवल-पढ़ने योग्य scout सबएजेंट फैलाता Codewhale](assets/fanout.gif)
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)

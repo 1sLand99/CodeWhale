@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:79856d0c10be -->
 # Codewhale
 
 Un agent de programació de codi obert per al teu terminal — porta el teu propi model.
@@ -156,3 +156,5 @@ l'experiència d'agent al terminal.
 models.
 
 ![Codewhale desplegant tres subagents scout de només lectura en un terminal](assets/fanout.gif)
+
+[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
