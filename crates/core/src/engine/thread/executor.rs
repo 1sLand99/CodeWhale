@@ -1,7 +1,7 @@
-//! Turn executor — the `monitor_turn` / `handle_deepseek_turn` leg
+//! Turn executor — the `monitor_turn` / `run_turn` leg
 //! (issue #5261 / #3313).
 //!
-//! This will own `handle_deepseek_turn`, the steer/subagent drains,
+//! This will own `run_turn`, the steer/subagent drains,
 //! `refresh_system_prompt()`, `should_compact`/`compact_messages_safe`,
 //! `MessageRequest` build, parallel tool exec, `StuckGuard`/
 //! `ReadRepeatGuard`/`ToolCallBudget`, and stream retry budget. The move

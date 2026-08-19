@@ -5,7 +5,7 @@
 //! motion, persisted JSON shape unchanged:
 //! - `store` — `RuntimeThreadStore` / persisted JSON state
 //!   (`<root>/{threads,turns,items,events}` + `state.json`)
-//! - `executor` — turn execution (`monitor_turn`, `handle_deepseek_turn`,
+//! - `executor` — turn execution (`monitor_turn`, `run_turn`,
 //!   steer/subagent drains, `refresh_system_prompt`, compaction, parallel
 //!   tool exec, `StuckGuard`/`ReadRepeatGuard`/`ToolCallBudget`, stream retry)
 //! - `events` — `RuntimeEventEnvelope` mapping + `EventMsg` fan-out

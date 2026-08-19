@@ -3681,7 +3681,7 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
     assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    let (status, error) = engine.run_turn(&mut turn, policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let mut events = handle.rx_event.write().await;
@@ -3739,7 +3739,7 @@ async fn run_budgeted_read_turn(
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     let mut events = handle.rx_event.write().await;
     let completions = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
@@ -4499,7 +4499,7 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let request = mock.last_request().expect("mock request");
@@ -4580,9 +4580,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     ));
     let first_policy = test_tool_surface(&engine, first_registry, None, AppMode::Agent);
     let mut first_turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut first_turn, first_policy, None)
-        .await;
+    let (status, error) = engine.run_turn(&mut first_turn, first_policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(first_turn.usage.input_tokens, 7);
     assert_eq!(first_turn.usage.output_tokens, 11);
@@ -4613,9 +4611,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     ));
     let second_policy = test_tool_surface(&engine, second_registry, None, AppMode::Agent);
     let mut second_turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut second_turn, second_policy, None)
-        .await;
+    let (status, error) = engine.run_turn(&mut second_turn, second_policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let kernel = engine.repl_kernel.as_ref().expect("persistent kernel");
@@ -4668,7 +4664,7 @@ async fn snapshot_for_catalog(
         crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.to_path_buf()));
     let surface = test_tool_surface(&engine, registry, catalog, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(2);
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     std::iter::from_fn(|| events.try_recv().ok())
@@ -4731,7 +4727,7 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     let snapshots = std::iter::from_fn(|| events.try_recv().ok())
@@ -4792,9 +4788,7 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
     let policy = test_tool_surface(&engine, registry, tools, AppMode::Agent);
 
     let mut turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut turn, policy, Some(surface))
-        .await;
+    let (status, error) = engine.run_turn(&mut turn, policy, Some(surface)).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let mut events = handle.rx_event.write().await;
@@ -5548,7 +5542,7 @@ async fn duplicate_raw_read_errors_each_touch_the_working_set() {
         let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
         let mut turn = crate::core::turn::TurnContext::new(8);
 
-        let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+        let (status, error) = engine.run_turn(&mut turn, surface, None).await;
 
         assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
         engine

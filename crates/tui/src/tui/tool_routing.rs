@@ -27,7 +27,7 @@ pub(super) fn handle_tool_call_started(
     input: &serde_json::Value,
 ) {
     // #2511: ToolCallBefore gate moved to turn-loop planning loop
-    // (Engine::handle_deepseek_turn). Removing observer-only firing
+    // (Engine::run_turn). Removing observer-only firing
     // here to avoid double-firing hooks for each tool call.
     // Hooks that need observation can configure ToolCallBefore on
     // the turn-loop gate — it processes the denial (exit code 2).

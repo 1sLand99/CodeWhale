@@ -509,7 +509,7 @@ impl Engine {
         result.map(|_| ())
     }
 
-    pub(super) async fn handle_deepseek_turn(
+    pub(super) async fn run_turn(
         &mut self,
         turn: &mut TurnContext,
         tool_policy: ToolSurfacePolicy,
@@ -4854,7 +4854,7 @@ pub(super) fn resolve_auto_effort(
                 })
                 .unwrap_or_default();
 
-            // is_subagent is false here — handle_deepseek_turn runs in the
+            // is_subagent is false here — run_turn runs in the
             // main engine (not a sub-agent's inner loop). Sub-agents have
             // their own turn pass and can pass is_subagent=true when they
             // call this function directly.
@@ -5181,7 +5181,7 @@ mod tests {
     /// persist site fired before those continuations were known.
     ///
     /// Limitation: this tests the extracted pure decision, not the full async
-    /// `handle_deepseek_turn` loop (driving it would need a mock DeepSeek
+    /// `run_turn` loop (driving it would need a mock provider
     /// client + session + channels — far beyond a surgical fix and unlike any
     /// existing turn-loop test, which all pin pure helpers the same way). The
     /// wiring at the `tool_uses.is_empty()` tail (capture-then-decide, with the

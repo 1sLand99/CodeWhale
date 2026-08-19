@@ -69,7 +69,7 @@ total); dependencies and the linker are not where the time is.
 copies**. Largest single function is the `rust_i18n` backend closure
 (`_RUST_I18N_BACKEND::{closure#0}`, 311,782 lines, 3.8 % of the crate on
 its own — the 15 locale packs are compiled into a match by the `i18n!`
-macro), then `run_event_loop` 27 k, `Engine::handle_deepseek_turn` 26 k,
+macro), then `run_event_loop` 27 k, `Engine::run_turn` 26 k,
 `RuntimeThreadManager::monitor_turn` 16 k, then serde `Deserialize`
 expansions for `Config`/`ProvidersConfig`/`Settings` (5–6 k each, several
 copies per toml deserializer).

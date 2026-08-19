@@ -4159,7 +4159,7 @@ impl Engine {
             )
             .into(),
             // Provisional. Replaced with the true wire-boundary instant
-            // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
+            // when `run_turn` emits `Event::RouteDispatched`.
             dispatched_at: turn_started_at,
         };
         turn.pending_route = Some(TurnRoute {
@@ -4387,13 +4387,10 @@ impl Engine {
         // killing the whole engine-event-loop task — which left the UI stuck
         // on "working" forever with the engine silently dead (#2583, #1269).
         use futures_util::FutureExt as _;
-        let turn_result = std::panic::AssertUnwindSafe(self.handle_deepseek_turn(
-            &mut turn,
-            surface,
-            Some(tool_surface),
-        ))
-        .catch_unwind()
-        .await;
+        let turn_result =
+            std::panic::AssertUnwindSafe(self.run_turn(&mut turn, surface, Some(tool_surface)))
+                .catch_unwind()
+                .await;
         let (status, error) = match turn_result {
             Ok(outcome) => outcome,
             Err(panic) => {
