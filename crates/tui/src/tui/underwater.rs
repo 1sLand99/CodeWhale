@@ -336,19 +336,10 @@ const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
 const IDLE_SHIMMER_BAND_HALF_WIDTH: f32 = 0.38;
 const IDLE_SHIMMER_STRENGTH: f32 = 0.33;
 
-/// The build-version string the header renders. Since #5245 an unstamped
-/// local build reports `0.9.4 (dev)` while CI/release carries a sha, so the
-/// header's width choreography (which lengths of version stamp fit at which
-/// terminal width) is environment-dependent. Tests that assert on those
-/// width breakpoints override this to a fixed value so they measure the
-/// layout, not the ambient build's sha length.
+/// The build-version string the header renders. An unstamped local build uses
+/// the build script's development marker while CI/release carries its source
+/// stamp; the header always reports that real build provenance.
 fn shell_build_version() -> Cow<'static, str> {
-    #[cfg(test)]
-    {
-        if let Some(version) = tests::build_version_override() {
-            return Cow::Owned(version);
-        }
-    }
     Cow::Borrowed(env!("CODEWHALE_BUILD_VERSION"))
 }
 
