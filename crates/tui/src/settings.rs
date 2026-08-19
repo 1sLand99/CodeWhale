@@ -1666,7 +1666,7 @@ impl Settings {
             ),
             (
                 "mention_walk_depth",
-                "Maximum @-mention workspace walk depth; 0 means unlimited (default 6)",
+                "Maximum @-mention workspace walk depth; 0 means unlimited (default 10)",
             ),
             (
                 "mention_menu_behavior",
@@ -3474,6 +3474,15 @@ mod tests {
         assert_eq!(settings.mention_menu_limit, 128);
         assert_eq!(settings.mention_walk_depth, 10);
         assert_eq!(settings.mention_menu_behavior, "fuzzy");
+        let mention_help = Settings::available_settings()
+            .into_iter()
+            .find(|(key, _)| *key == "mention_walk_depth")
+            .map(|(_, desc)| desc)
+            .expect("mention_walk_depth help");
+        assert!(
+            mention_help.contains("default 10"),
+            "help text still lists the pre-v0.8.50 default: {mention_help}"
+        );
 
         settings
             .set("mention_menu_limit", "256")
