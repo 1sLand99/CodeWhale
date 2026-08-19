@@ -412,7 +412,6 @@ fn rendered_roster_shape() {
 
     let rows = build_agent_roster(&[parent, scout, builder], 212_000);
     let text = render_agent_roster(&rows, "main");
-    println!("{text}");
     assert!(text.contains("1/2 agents done"), "{text}");
     assert!(text.contains("step 7 · apply_patch"), "{text}");
     assert!(text.contains("↓ 306.7k"), "{text}");

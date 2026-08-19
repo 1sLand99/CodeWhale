@@ -621,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_media_spec_metadata_and_capabilities() {
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         assert_eq!(tool.name(), "read_media");
         assert!(tool.capabilities().contains(&ToolCapability::ReadOnly));
         assert!(tool.capabilities().contains(&ToolCapability::Sandboxable));
@@ -640,7 +640,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path());
         ctx.route_capabilities.image_input = CapabilityState::Supported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({
             "path": "test.png",
             "detail": "auto"
@@ -673,7 +673,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path());
         ctx.route_capabilities.image_input = CapabilityState::Supported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({
             "path": "photo.jpg",
             "detail": "low"
@@ -701,7 +701,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path());
         ctx.route_capabilities.image_input = CapabilityState::Supported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
 
         // 1. Valid crop
         let valid_input = json!({
@@ -782,7 +782,7 @@ mod tests {
 
         let mut ctx = ToolContext::new(dir.path());
         ctx.route_capabilities.image_input = CapabilityState::Supported;
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
 
         // Low detail -> max 1024
         let low_input = json!({ "path": "large.png", "detail": "low" });
@@ -816,7 +816,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path());
         ctx.route_capabilities.image_input = CapabilityState::Unsupported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "img.png" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         let err_msg = err.to_string();
@@ -830,7 +830,7 @@ mod tests {
     async fn read_media_missing_file_fails_actionable() {
         let dir = tempdir().unwrap();
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "nonexistent.png" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         assert!(err.to_string().contains("image file does not exist"));
@@ -843,7 +843,7 @@ mod tests {
         std::fs::write(&img_path, b"").unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "empty.png" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         assert!(err.to_string().contains("image file is empty"));
@@ -856,7 +856,7 @@ mod tests {
         std::fs::write(&bad_path, b"not a real image payload at all").unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "corrupted.png" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         assert!(
@@ -872,7 +872,7 @@ mod tests {
         std::fs::write(&svg_path, b"<svg><circle r='10'/></svg>").unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "vector.svg" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         let msg = err.to_string();
@@ -893,7 +893,7 @@ mod tests {
             .expect("write config");
 
         let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "config.toml" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         assert!(
@@ -927,7 +927,7 @@ mod tests {
         {
             // Case 1: Default context (no symlink follow outside workspace) -> path escape error
             let ctx_default = ToolContext::new(ws_tmp.path().to_path_buf());
-            let tool = ReadMediaTool::default();
+            let tool = ReadMediaTool;
             let input = json!({ "path": "fake_image.png" });
             let err_default = tool
                 .execute_rich(input.clone(), &ctx_default)
@@ -957,7 +957,7 @@ mod tests {
     async fn read_media_path_escape_is_rejected() {
         let dir = tempdir().unwrap();
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let input = json!({ "path": "../../etc/shadow" });
         let err = tool.execute_rich(input, &ctx).await.unwrap_err();
         assert!(
@@ -979,7 +979,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path()).with_cancel_token(cancel_token);
         ctx.route_capabilities.image_input = CapabilityState::Supported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let err = tool
             .execute_rich(json!({ "path": "cancel.png" }), &ctx)
             .await
@@ -996,7 +996,7 @@ mod tests {
         let mut ctx = ToolContext::new(dir.path()).with_cancel_token(cancel_token);
         ctx.route_capabilities.image_input = CapabilityState::Supported;
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         // A non-existent file path would normally fail with "image file does not exist",
         // but when cancelled before dispatch, it must abort with Cancelled without touching disk.
         let input = json!({ "path": "nonexistent_before_dispatch.png" });
@@ -1020,7 +1020,7 @@ mod tests {
         std::fs::write(&img_path, &png_data).unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let rich = tool
             .execute_rich(json!({ "path": "wire.png" }), &ctx)
             .await
@@ -1145,7 +1145,7 @@ mod tests {
         std::fs::write(&bomb_path, &fake_png).unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let err = tool
             .execute_rich(json!({ "path": "bomb.png" }), &ctx)
             .await
@@ -1170,7 +1170,7 @@ mod tests {
         std::fs::write(&gif_path, cursor.into_inner()).unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let rich = tool
             .execute_rich(json!({ "path": "anim.gif" }), &ctx)
             .await
@@ -1191,7 +1191,7 @@ mod tests {
         std::fs::write(&webp_path, webp_bytes).unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let rich = tool
             .execute_rich(json!({ "path": "image.webp" }), &ctx)
             .await
@@ -1209,7 +1209,7 @@ mod tests {
         let png_data = create_test_png(20, 20, [50, 50, 50, 255]);
         std::fs::write(&img_path, &png_data).unwrap();
 
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
 
         // 1. Supported route
         let mut ctx_sup = ToolContext::new(dir.path());
@@ -1239,7 +1239,7 @@ mod tests {
         std::fs::write(&img_path, &png_data).unwrap();
 
         let ctx = ToolContext::new(dir.path());
-        let tool = ReadMediaTool::default();
+        let tool = ReadMediaTool;
         let rich = tool
             .execute_rich(json!({ "path": "safe.png" }), &ctx)
             .await

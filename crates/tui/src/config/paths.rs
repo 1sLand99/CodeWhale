@@ -25,10 +25,10 @@ pub(crate) fn default_config_path() -> anyhow::Result<PathBuf> {
 pub(crate) fn try_default_config_path() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     {
-        return with_test_state_path(try_default_config_path_from_environment, || {
+        with_test_state_path(try_default_config_path_from_environment, || {
             Ok(crate::test_support::unsealed_test_state_root()
                 .join(codewhale_config::CONFIG_FILE_NAME))
-        });
+        })
     }
 
     #[cfg(not(test))]
@@ -73,12 +73,12 @@ pub(crate) fn codewhale_home_dir() -> Result<Option<PathBuf>, codewhale_paths::P
 pub(crate) fn home_config_path() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        return with_test_state_path(home_config_path_from_environment, || {
+        with_test_state_path(home_config_path_from_environment, || {
             Some(
                 crate::test_support::unsealed_test_state_root()
                     .join(codewhale_config::CONFIG_FILE_NAME),
             )
-        });
+        })
     }
 
     #[cfg(not(test))]
@@ -124,7 +124,7 @@ pub(crate) fn canonicalize_or_keep(path: &Path) -> PathBuf {
 pub(crate) fn env_config_path() -> Result<Option<PathBuf>, codewhale_paths::PathOverrideError> {
     #[cfg(test)]
     {
-        return with_test_state_path(env_config_path_unlocked, || Ok(None));
+        with_test_state_path(env_config_path_unlocked, || Ok(None))
     }
     #[cfg(not(test))]
     {
@@ -212,10 +212,10 @@ pub(crate) fn default_memory_path() -> Option<PathBuf> {
 fn default_user_state_path(name: &str) -> Option<PathBuf> {
     #[cfg(test)]
     {
-        return with_test_state_path(
+        with_test_state_path(
             || default_user_state_path_from_environment(name),
             || Some(crate::test_support::unsealed_test_state_root().join(name)),
-        );
+        )
     }
 
     #[cfg(not(test))]

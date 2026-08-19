@@ -5451,8 +5451,10 @@ mod tests {
 
     #[test]
     fn recommended_commit_does_not_change_runtime_or_provider_state() {
-        let mut state = SetupState::default();
-        state.runtime_posture_source = RuntimePostureSource::Confirmed;
+        let mut state = SetupState {
+            runtime_posture_source: RuntimePostureSource::Confirmed,
+            ..SetupState::default()
+        };
         state.set_step(
             SetupStep::ProviderModel,
             StepEntry::new(

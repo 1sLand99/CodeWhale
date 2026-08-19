@@ -1524,7 +1524,7 @@ mod tests {
             })
             .collect();
         assert!(
-            groups.iter().any(|label| *label == "Navigation"),
+            groups.contains(&"Navigation"),
             "shortcuts should surface Navigation: {groups:?}"
         );
         assert!(

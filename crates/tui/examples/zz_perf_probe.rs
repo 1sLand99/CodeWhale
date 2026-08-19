@@ -2,6 +2,7 @@ mod models {
     pub use codewhale_core::request::{ContentBlock, Message};
 }
 #[path = "../src/session_tree.rs"]
+#[allow(dead_code)] // The probe intentionally exercises only the journal hot paths.
 mod session_tree;
 
 use models::Message;
