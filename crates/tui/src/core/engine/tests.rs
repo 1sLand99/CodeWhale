@@ -9085,7 +9085,7 @@ fn representative_runtime_context_fixture_is_stable_and_contains_expected_marker
         };
         assert_eq!(
             payload["stages"][current.name]["delta_bytes"],
-            current.flat.len() - previous.flat.len(),
+            current.normalized.len() - previous.normalized.len(),
             "representative {} delta must be computed from its adjacent stages",
             current.name
         );

@@ -17349,7 +17349,12 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_scoped_npm_package_spec_without_cwd_is_not_a_path_warning() {
-        for command in ["npx", "npx.cmd", "/opt/homebrew/bin/npx"] {
+        let absolute_npx = if cfg!(windows) {
+            r"C:\Program Files\nodejs\npx.cmd"
+        } else {
+            "/opt/homebrew/bin/npx"
+        };
+        for command in ["npx", "npx.cmd", absolute_npx] {
             let server = make_server(
                 Some(command),
                 &["-y", "@playwright/mcp@0.0.79", "--isolated"],
