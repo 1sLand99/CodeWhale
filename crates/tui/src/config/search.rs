@@ -97,6 +97,11 @@ impl SearchProvider {
             Self::Sofya => "sofya",
         }
     }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "bing, duckduckgo, firecrawl, tavily, bocha, metaso, searxng, baidu, volcengine, sofya"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

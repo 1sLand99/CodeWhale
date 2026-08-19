@@ -2,21 +2,24 @@
 
 use super::CommandResult;
 use crate::config::{
-    ApiProvider, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS, DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
-    DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_XIAOMI_MIMO_BASE_URL,
-    MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
+    ApiProvider, CompletionSound, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
+    DEFAULT_SUBAGENT_API_TIMEOUT_SECS, DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
     MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
-    MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, SubagentsConfig,
-    XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key, normalize_custom_model_id,
-    normalize_model_name_for_provider, validate_route,
+    MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, NotificationConfigUpdate,
+    NotificationMethod, NotificationsConfig, SearchProvider, SearchProviderSource,
+    SubagentCompletionNotification, SubagentsConfig, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL,
+    clear_active_provider_api_key, normalize_custom_model_id, normalize_model_name_for_provider,
+    validate_route,
 };
 use crate::config_persistence::{
     persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_subagents_bool_key, persist_subagents_integer_key, persist_tui_integer_key,
+    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_bool_key,
+    persist_table_integer_key, persist_table_string_key, persist_tui_integer_key,
     persist_unset_root_key,
 };
 use crate::config_ui::{ConfigUiMode, parse_mode};
-use crate::localization::{MessageId, resolve_locale};
+use crate::localization::{MessageId, resolve_locale, tr};
 use crate::settings::Settings;
 use crate::tui::app::{
     App, AppAction, AppMode, OnboardingState, ReasoningEffort, SettingSelection, VimMode,
@@ -85,6 +88,16 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     if first_word.is_some_and(|token| token.eq_ignore_ascii_case("subagents")) {
         let rest = raw_words.next().unwrap_or("").trim();
         return subagents_config_command(app, rest);
+    }
+    if first_word.is_some_and(|token| token.eq_ignore_ascii_case("search")) {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return search_config_command(app, rest);
+    }
+    if first_word.is_some_and(|token| {
+        token.eq_ignore_ascii_case("notifications") || token.eq_ignore_ascii_case("notification")
+    }) {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return notifications_config_command(app, rest);
     }
     // `/config preset <name> [--save|-s]` — apply a bundled settings preset (#3478).
     if first_word.is_some_and(|token| token.eq_ignore_ascii_case("preset")) {
@@ -221,6 +234,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
     if let Some(subagent_key) = key.strip_prefix("subagents.") {
         return show_subagents_setting(app, subagent_key);
     }
+    if let Some(notifications_key) = key.strip_prefix("notifications.") {
+        return show_notifications_setting(app, notifications_key);
+    }
     fn locale_display(l: crate::localization::Locale) -> &'static str {
         match l {
             crate::localization::Locale::En => "en",
@@ -354,6 +370,20 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
+        "thinking_preview_lines" | "thinking_preview" => {
+            Some(app.thinking_preview_lines.to_string())
+        }
+        "help_expand_groups" | "help_expanded" => Some(
+            if app.help_expand_groups {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
+        "pin_last_prompt" | "pin_prompt" => {
+            Some(if app.pin_last_prompt { "true" } else { "false" }.to_string())
+        }
         "thinking_highlight" | "reasoning_highlight" => Some(
             if app.thinking_highlight {
                 "true"
@@ -464,6 +494,15 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 settings.workspace_follow_symlinks
             )
         }),
+        "search" | "search.provider" | "search_provider" => load_command_config(app)
+            .ok()
+            .map(|config| search_provider_display(&config, app.ui_locale)),
+        "prompt_suggestion" => load_command_config(app)
+            .ok()
+            .map(|config| prompt_suggestion_display(&config)),
+        "notifications" => load_command_config(app)
+            .ok()
+            .map(|config| notifications_summary(&config)),
         _ => {
             let known = Settings::available_settings()
                 .iter()
@@ -731,6 +770,9 @@ fn config_editability_audit(app: &App) -> CommandResult {
     } else {
         app.approval_mode.permission_chip_label()
     };
+    let search_audit_note = tr(app.ui_locale, MessageId::ConfigAuditSearchProvider);
+    let prompt_audit_note = tr(app.ui_locale, MessageId::ConfigAuditPromptSuggestion);
+    let notifications_audit_note = tr(app.ui_locale, MessageId::ConfigAuditNotifications);
 
     let rows = [
         (
@@ -876,6 +918,27 @@ fn config_editability_audit(app: &App) -> CommandResult {
             "Updates TUI file completion now; engine tools require restart.",
         ),
         (
+            "search.provider",
+            search_provider_display(&config, app.ui_locale),
+            "runtime+persisted",
+            "/config search.provider <name> --save",
+            search_audit_note.as_ref(),
+        ),
+        (
+            "prompt_suggestion",
+            prompt_suggestion_display(&config),
+            "runtime+persisted",
+            "/config prompt_suggestion <true|false> --save",
+            prompt_audit_note.as_ref(),
+        ),
+        (
+            "notifications",
+            notifications_summary(&config),
+            "runtime+persisted",
+            "/config notifications <method|threshold_secs|quiet|completion_sound> <value> --save",
+            notifications_audit_note.as_ref(),
+        ),
+        (
             "instructions",
             file_only_status(config.instructions.as_ref().map(|v| !v.is_empty())),
             "file-only restart",
@@ -942,6 +1005,409 @@ fn file_only_status(configured: Option<bool>) -> String {
         Some(true) => "configured".to_string(),
         Some(false) => "empty".to_string(),
         None => "unset".to_string(),
+    }
+}
+
+fn search_provider_display(config: &Config, locale: crate::localization::Locale) -> String {
+    let resolved = config.search_provider_resolution();
+    let source = match resolved.source {
+        SearchProviderSource::Default => tr(locale, MessageId::ConfigDefaultValue)
+            .trim_matches(&['(', ')'][..])
+            .to_string(),
+        SearchProviderSource::Config => "config.toml".to_string(),
+        SearchProviderSource::EnvOverride => "CODEWHALE_SEARCH_PROVIDER".to_string(),
+    };
+    tr(locale, MessageId::ConfigCommandSource)
+        .replace("{value}", resolved.provider.as_str())
+        .replace("{source}", &source)
+}
+
+fn prompt_suggestion_display(config: &Config) -> String {
+    config.prompt_suggestion_enabled().to_string()
+}
+
+fn notifications_for_edit(config: &Config) -> NotificationsConfig {
+    config.notifications_config()
+}
+
+fn notifications_summary(config: &Config) -> String {
+    let notifications = notifications_for_edit(config);
+    format!(
+        "method={} threshold={}s sound={} quiet={}",
+        notifications.method.as_str(),
+        notifications.threshold_secs,
+        notifications.completion_sound.as_str(),
+        notifications.quiet
+    )
+}
+
+fn search_config_command(app: &mut App, raw: &str) -> CommandResult {
+    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
+    if persist {
+        tokens.pop();
+    }
+
+    match tokens.as_slice() {
+        [] | ["status"] | ["provider"] => show_single_setting(app, "search.provider"),
+        ["provider", value] | [value] => set_search_provider(app, value, persist),
+        _ => CommandResult::error(format!(
+            "{} /config search.provider <{}> [--save]",
+            tr(app.ui_locale, MessageId::HelpUsageLabel),
+            SearchProvider::names_hint()
+        )),
+    }
+}
+
+fn set_search_provider(app: &mut App, value: &str, persist: bool) -> CommandResult {
+    let Some(provider) = SearchProvider::parse(value) else {
+        return CommandResult::error(
+            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                .replace("{key}", "search.provider")
+                .replace("{value}", value)
+                .replace("{choices}", SearchProvider::names_hint()),
+        );
+    };
+
+    let scope = if persist {
+        match persist_table_string_key(
+            app.config_path.as_deref(),
+            "search",
+            "provider",
+            provider.as_str(),
+        ) {
+            Ok(path) => format!(
+                "{} {}",
+                tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                path.display()
+            ),
+            Err(err) => {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
+                        .replace("{setting}", "search.provider")
+                        .replace("{error}", &err.to_string()),
+                );
+            }
+        }
+    } else {
+        tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
+    };
+
+    CommandResult::with_message_and_action(
+        tr(app.ui_locale, MessageId::ConfigSearchUpdated)
+            .replace("{value}", provider.as_str())
+            .replace("{scope}", &scope),
+        AppAction::UpdateSearchProvider { provider },
+    )
+}
+
+fn set_prompt_suggestion(app: &mut App, value: &str, persist: bool) -> CommandResult {
+    let enabled = match parse_config_bool(value) {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            return CommandResult::error(
+                tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                    .replace("{key}", "prompt_suggestion")
+                    .replace("{value}", value)
+                    .replace("{choices}", "on, off, true, false, yes, no"),
+            );
+        }
+    };
+    let scope = if persist {
+        match persist_root_bool_key(app.config_path.as_deref(), "prompt_suggestion", enabled) {
+            Ok(path) => format!(
+                "{} {}",
+                tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                path.display()
+            ),
+            Err(err) => {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
+                        .replace("{setting}", "prompt_suggestion")
+                        .replace("{error}", &err.to_string()),
+                );
+            }
+        }
+    } else {
+        tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
+    };
+    CommandResult::with_message_and_action(
+        tr(app.ui_locale, MessageId::ConfigPromptSuggestionUpdated)
+            .replace("{value}", &enabled.to_string())
+            .replace("{scope}", &scope),
+        AppAction::UpdatePromptSuggestion { enabled },
+    )
+}
+
+fn notifications_config_command(app: &mut App, raw: &str) -> CommandResult {
+    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
+    if persist {
+        tokens.pop();
+    }
+
+    match tokens.as_slice() {
+        [] | ["status"] => show_notifications_status(app),
+        [key] => show_notifications_setting(app, key),
+        [key, value] => set_notifications_value(app, key, value, persist),
+        _ => CommandResult::error(format!(
+            "{} /config notifications [status|method|threshold_secs|include_summary|quiet|completion_sound|subagent_completion <value>] [--save]",
+            tr(app.ui_locale, MessageId::HelpUsageLabel)
+        )),
+    }
+}
+
+fn show_notifications_status(app: &App) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let notifications = notifications_for_edit(&config);
+    let lines = [
+        "[notifications] — config.toml".to_string(),
+        format!("method = {}", notifications.method.as_str()),
+        format!("threshold_secs = {}", notifications.threshold_secs),
+        format!("include_summary = {}", notifications.include_summary),
+        format!("quiet = {}", notifications.quiet),
+        format!(
+            "completion_sound = {}",
+            notifications.completion_sound.as_str()
+        ),
+        format!(
+            "subagent_completion = {}",
+            notifications.subagent_completion.as_str()
+        ),
+        String::new(),
+        tr(app.ui_locale, MessageId::ConfigNotificationsSetHint).into_owned(),
+    ];
+    CommandResult::message(lines.join("\n"))
+}
+
+fn show_notifications_setting(app: &App, key: &str) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let Some(key) = canonical_notifications_key(key) else {
+        return CommandResult::error(
+            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                .replace("{key}", "notifications")
+                .replace("{value}", key)
+                .replace("{choices}", "/config notifications status"),
+        );
+    };
+    let notifications = notifications_for_edit(&config);
+    let value = notifications_field_display(&notifications, key);
+    CommandResult::message(format!("notifications.{key} = {value}"))
+}
+
+fn set_notifications_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
+    let Some(key) = canonical_notifications_key(key) else {
+        return CommandResult::error(
+            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                .replace("{key}", "notifications")
+                .replace("{value}", key)
+                .replace("{choices}", "/config notifications status"),
+        );
+    };
+
+    let (update, save_result) = match key {
+        "method" => {
+            let Some(method) = NotificationMethod::parse(value) else {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", "notifications.method")
+                        .replace("{value}", value)
+                        .replace("{choices}", NotificationMethod::names_hint()),
+                );
+            };
+            (
+                NotificationConfigUpdate::Method(method),
+                persist.then(|| {
+                    persist_table_string_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "method",
+                        method.as_str(),
+                    )
+                }),
+            )
+        }
+        "threshold_secs" => {
+            let threshold = match value.trim().parse::<u64>() {
+                Ok(threshold) => threshold,
+                Err(_) => {
+                    return CommandResult::error(
+                        tr(app.ui_locale, MessageId::ConfigNotificationsWholeNumber).into_owned(),
+                    );
+                }
+            };
+            (
+                NotificationConfigUpdate::ThresholdSecs(threshold),
+                persist.then(|| {
+                    persist_table_integer_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "threshold_secs",
+                        threshold,
+                    )
+                }),
+            )
+        }
+        "include_summary" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(_) => {
+                    return CommandResult::error(
+                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                            .replace("{key}", "notifications.include_summary")
+                            .replace("{value}", value)
+                            .replace("{choices}", "on, off, true, false, yes, no"),
+                    );
+                }
+            };
+            (
+                NotificationConfigUpdate::IncludeSummary(enabled),
+                persist.then(|| {
+                    persist_table_bool_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "include_summary",
+                        enabled,
+                    )
+                }),
+            )
+        }
+        "quiet" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(_) => {
+                    return CommandResult::error(
+                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                            .replace("{key}", "notifications.quiet")
+                            .replace("{value}", value)
+                            .replace("{choices}", "on, off, true, false, yes, no"),
+                    );
+                }
+            };
+            (
+                NotificationConfigUpdate::Quiet(enabled),
+                persist.then(|| {
+                    persist_table_bool_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "quiet",
+                        enabled,
+                    )
+                }),
+            )
+        }
+        "completion_sound" => {
+            let Some(sound) = CompletionSound::parse(value) else {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", "notifications.completion_sound")
+                        .replace("{value}", value)
+                        .replace("{choices}", CompletionSound::names_hint()),
+                );
+            };
+            (
+                NotificationConfigUpdate::CompletionSound(sound),
+                persist.then(|| {
+                    persist_table_string_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "completion_sound",
+                        sound.as_str(),
+                    )
+                }),
+            )
+        }
+        "subagent_completion" => {
+            let Some(mode) = SubagentCompletionNotification::parse(value) else {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", "notifications.subagent_completion")
+                        .replace("{value}", value)
+                        .replace("{choices}", SubagentCompletionNotification::names_hint()),
+                );
+            };
+            (
+                NotificationConfigUpdate::SubagentCompletion(mode),
+                persist.then(|| {
+                    persist_table_string_key(
+                        app.config_path.as_deref(),
+                        "notifications",
+                        "subagent_completion",
+                        mode.as_str(),
+                    )
+                }),
+            )
+        }
+        _ => unreachable!("canonical notifications key"),
+    };
+
+    let scope = if let Some(result) = save_result {
+        match result {
+            Ok(path) => format!(
+                "{} {}",
+                tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                path.display()
+            ),
+            Err(err) => {
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
+                        .replace("{setting}", &format!("notifications.{key}"))
+                        .replace("{error}", &err.to_string()),
+                );
+            }
+        }
+    } else {
+        tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
+    };
+
+    let display_value = notification_update_display(update);
+    CommandResult::with_message_and_action(
+        tr(app.ui_locale, MessageId::ConfigNotificationUpdated)
+            .replace("{key}", key)
+            .replace("{value}", &display_value)
+            .replace("{scope}", &scope),
+        AppAction::UpdateNotification { update },
+    )
+}
+
+fn notification_update_display(update: NotificationConfigUpdate) -> String {
+    match update {
+        NotificationConfigUpdate::Method(value) => value.as_str().to_string(),
+        NotificationConfigUpdate::ThresholdSecs(value) => value.to_string(),
+        NotificationConfigUpdate::IncludeSummary(value) => value.to_string(),
+        NotificationConfigUpdate::Quiet(value) => value.to_string(),
+        NotificationConfigUpdate::CompletionSound(value) => value.as_str().to_string(),
+        NotificationConfigUpdate::SubagentCompletion(value) => value.as_str().to_string(),
+    }
+}
+
+fn canonical_notifications_key(key: &str) -> Option<&'static str> {
+    match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "method" => Some("method"),
+        "threshold_secs" | "threshold" => Some("threshold_secs"),
+        "include_summary" | "summary" => Some("include_summary"),
+        "quiet" => Some("quiet"),
+        "completion_sound" | "sound" => Some("completion_sound"),
+        "subagent_completion" => Some("subagent_completion"),
+        _ => None,
+    }
+}
+
+fn notifications_field_display(notifications: &NotificationsConfig, key: &str) -> String {
+    match key {
+        "method" => notifications.method.as_str().to_string(),
+        "threshold_secs" => notifications.threshold_secs.to_string(),
+        "include_summary" => notifications.include_summary.to_string(),
+        "quiet" => notifications.quiet.to_string(),
+        "completion_sound" => notifications.completion_sound.as_str().to_string(),
+        "subagent_completion" => notifications.subagent_completion.as_str().to_string(),
+        _ => unreachable!("canonical notifications key"),
     }
 }
 
@@ -1436,6 +1902,9 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     if let Some(subagent_key) = key.strip_prefix("subagents.") {
         return set_subagents_config_value(app, subagent_key, value, persist);
     }
+    if let Some(notifications_key) = key.strip_prefix("notifications.") {
+        return set_notifications_value(app, notifications_key, value, persist);
+    }
 
     // Refuse before *anything* — before the disk write, and before the live
     // `App` mutation each arm performs. Placing the check at the top is what
@@ -1846,6 +2315,11 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 AppAction::UpdateStreamChunkTimeout(resolved),
             );
         }
+        "search" | "search.provider" | "search_provider" => {
+            return set_search_provider(app, value, persist);
+        }
+        "prompt_suggestion" => return set_prompt_suggestion(app, value, persist),
+        "notifications" => return notifications_config_command(app, value),
         _ => {}
     }
 
@@ -1962,6 +2436,18 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "thinking_default_expanded" | "thinking_expanded" => {
             app.thinking_default_expanded = settings.thinking_default_expanded;
             app.mark_history_updated();
+        }
+        "thinking_preview_lines" | "thinking_preview" => {
+            app.thinking_preview_lines = settings.thinking_preview_lines;
+            app.mark_history_updated();
+        }
+        "help_expand_groups" | "help_expanded" => {
+            app.help_expand_groups = settings.help_expand_groups;
+            app.needs_redraw = true;
+        }
+        "pin_last_prompt" | "pin_prompt" => {
+            app.pin_last_prompt = settings.pin_last_prompt;
+            app.needs_redraw = true;
         }
         "thinking_highlight" | "reasoning_highlight" => {
             app.thinking_highlight = settings.thinking_highlight;
@@ -2520,6 +3006,8 @@ mod tests {
                 EnvVarGuard::remove("NO_ANIMATIONS"),
                 EnvVarGuard::remove("TERM_PROGRAM"),
                 EnvVarGuard::remove("PTYXIS_VERSION"),
+                EnvVarGuard::remove("CODEWHALE_SEARCH_PROVIDER"),
+                EnvVarGuard::remove("DEEPSEEK_SEARCH_PROVIDER"),
             ];
             Self {
                 _vars: vars,
@@ -3570,10 +4058,20 @@ heartbeat_timeout_secs = 1
             r#"
 base_url = "https://api.from-config.local/v1"
 instructions = ["~/global.md"]
+prompt_suggestion = true
 
 [subagents]
 enabled = false
 max_concurrent = 4
+
+[search]
+provider = "bing"
+
+[notifications]
+method = "osc9"
+threshold_secs = 45
+quiet = true
+completion_sound = "off"
 "#,
         )
         .unwrap();
@@ -3601,6 +4099,20 @@ max_concurrent = 4
         assert!(msg.contains("| runtime | /config context_window"), "{msg}");
         assert!(msg.contains("instructions | configured | file-only restart"));
         assert!(msg.contains("network | unset | file-only"));
+        assert!(
+            msg.contains("search.provider | bing (source: config.toml) | runtime+persisted"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("prompt_suggestion | true | runtime+persisted"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains(
+                "notifications | method=osc9 threshold=45s sound=off quiet=true | runtime+persisted"
+            ),
+            "{msg}"
+        );
 
         app.mode = AppMode::Plan;
         let plan_msg = config_command(&mut app, Some("audit"))
@@ -3610,6 +4122,168 @@ max_concurrent = 4
             plan_msg.contains("effective_permissions | Read Only | runtime"),
             "{plan_msg}"
         );
+    }
+
+    #[test]
+    fn config_command_shows_search_prompt_suggestion_and_notifications() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-config-discovery-show-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+prompt_suggestion = true
+
+[search]
+provider = "tavily"
+
+[notifications]
+method = "bel"
+threshold_secs = 12
+quiet = false
+completion_sound = "bell"
+"#,
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let search = config_command(&mut app, Some("search.provider"));
+        assert!(!search.is_error, "{:?}", search.message);
+        assert_eq!(
+            search.message.as_deref(),
+            Some("search.provider = tavily (source: config.toml)")
+        );
+
+        let suggestion = config_command(&mut app, Some("prompt_suggestion"));
+        assert!(!suggestion.is_error, "{:?}", suggestion.message);
+        assert_eq!(
+            suggestion.message.as_deref(),
+            Some("prompt_suggestion = true")
+        );
+
+        let notifications = config_command(&mut app, Some("notifications"));
+        let notifications_msg = notifications.message.expect("notifications status");
+        assert!(!notifications.is_error, "{notifications_msg}");
+        assert!(
+            notifications_msg.contains("method = bel"),
+            "{notifications_msg}"
+        );
+        assert!(
+            notifications_msg.contains("threshold_secs = 12"),
+            "{notifications_msg}"
+        );
+        assert!(
+            notifications_msg.contains("completion_sound = bell"),
+            "{notifications_msg}"
+        );
+    }
+
+    #[test]
+    fn config_command_sets_search_prompt_suggestion_and_notifications() {
+        let temp_root = tempfile::tempdir().expect("isolated config dir");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = temp_root.path().join("custom-config.toml");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+
+        let search = config_command(&mut app, Some("search.provider duckduckgo --save"));
+        assert!(!search.is_error, "{:?}", search.message);
+        match search.action {
+            Some(AppAction::UpdateSearchProvider { provider }) => {
+                assert_eq!(provider, SearchProvider::DuckDuckGo);
+            }
+            other => panic!("expected UpdateSearchProvider, got {other:?}"),
+        }
+
+        let suggestion = config_command(&mut app, Some("prompt_suggestion true --save"));
+        assert!(!suggestion.is_error, "{:?}", suggestion.message);
+        match suggestion.action {
+            Some(AppAction::UpdatePromptSuggestion { enabled }) => assert!(enabled),
+            other => panic!("expected UpdatePromptSuggestion, got {other:?}"),
+        }
+
+        let notifications = config_command(&mut app, Some("notifications method osc9 --save"));
+        assert!(!notifications.is_error, "{:?}", notifications.message);
+        match notifications.action {
+            Some(AppAction::UpdateNotification {
+                update: NotificationConfigUpdate::Method(method),
+            }) => assert_eq!(method, NotificationMethod::Osc9),
+            other => panic!("expected UpdateNotification method, got {other:?}"),
+        }
+
+        let saved = fs::read_to_string(&config_path).unwrap();
+        assert!(saved.contains("provider = \"duckduckgo\""), "{saved}");
+        assert!(saved.contains("prompt_suggestion = true"), "{saved}");
+        assert!(saved.contains("method = \"osc9\""), "{saved}");
+
+        let loaded = Config::load(Some(config_path), None).expect("reloaded config");
+        assert_eq!(loaded.search_provider(), SearchProvider::DuckDuckGo);
+        assert!(loaded.prompt_suggestion_enabled());
+        assert_eq!(
+            loaded.notifications_config().method,
+            NotificationMethod::Osc9
+        );
+    }
+
+    #[test]
+    fn session_only_notification_commands_emit_composable_field_deltas() {
+        let temp_root = tempfile::tempdir().expect("isolated config dir");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = temp_root.path().join("custom-config.toml");
+        fs::write(
+            &config_path,
+            "[notifications]\nmethod = \"bel\"\nthreshold_secs = 12\nquiet = false\n",
+        )
+        .expect("persisted notification config");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        let mut live = NotificationsConfig {
+            threshold_secs: 12,
+            ..NotificationsConfig::default()
+        };
+
+        for command in ["notifications method osc9", "notifications quiet true"] {
+            let result = config_command(&mut app, Some(command));
+            assert!(!result.is_error, "{:?}", result.message);
+            let Some(AppAction::UpdateNotification { update }) = result.action else {
+                panic!("expected notification field delta for {command}");
+            };
+            live.apply_update(update);
+        }
+
+        assert_eq!(live.method, NotificationMethod::Osc9);
+        assert!(live.quiet);
+        assert_eq!(live.threshold_secs, 12);
+    }
+
+    #[test]
+    fn config_command_rejects_invalid_search_and_notification_values() {
+        let mut app = create_test_app();
+        let search = config_command(&mut app, Some("search.provider not-a-backend"));
+        assert!(search.is_error);
+        let search_msg = search.message.unwrap();
+        assert!(
+            search_msg.contains("Invalid search.provider"),
+            "{search_msg}"
+        );
+        assert!(search_msg.contains("firecrawl"), "{search_msg}");
+
+        let notifications = config_command(&mut app, Some("notifications method semaphore"));
+        assert!(notifications.is_error);
+        let notifications_msg = notifications.message.unwrap();
+        assert!(
+            notifications_msg.contains("Invalid notifications.method"),
+            "{notifications_msg}"
+        );
+        assert!(notifications_msg.contains("osc9"), "{notifications_msg}");
     }
 
     #[test]

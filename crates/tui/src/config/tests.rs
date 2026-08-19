@@ -1196,6 +1196,51 @@ fn search_provider_resolution_reports_env_override_source() {
 }
 
 #[test]
+fn live_search_provider_update_preserves_environment_precedence() {
+    let _guard = lock_test_env();
+    let previous_codewhale = env::var_os("CODEWHALE_SEARCH_PROVIDER");
+    let previous_deepseek = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
+    unsafe {
+        env::set_var("CODEWHALE_SEARCH_PROVIDER", "bocha");
+        env::remove_var("DEEPSEEK_SEARCH_PROVIDER");
+    }
+    let mut config = Config::default();
+
+    let effective = config.set_search_provider(SearchProvider::DuckDuckGo);
+
+    unsafe {
+        EnvGuard::restore_var("CODEWHALE_SEARCH_PROVIDER", previous_codewhale);
+        EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", previous_deepseek);
+    }
+    assert_eq!(effective, SearchProvider::Bocha);
+    assert_eq!(
+        config.search.and_then(|search| search.provider),
+        Some(SearchProvider::DuckDuckGo),
+        "the requested config value should still be retained beneath the override"
+    );
+}
+
+#[test]
+fn notification_defaults_and_live_updates_share_one_consistent_model() {
+    let mut notifications = NotificationsConfig::default();
+    assert_eq!(notifications.threshold_secs, 30);
+    assert_eq!(
+        Config::default().notifications_config().threshold_secs,
+        notifications.threshold_secs
+    );
+
+    notifications.apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9));
+    notifications.apply_update(NotificationConfigUpdate::Quiet(true));
+
+    assert_eq!(notifications.method, NotificationMethod::Osc9);
+    assert!(notifications.quiet);
+    assert_eq!(
+        notifications.threshold_secs, 30,
+        "field deltas must preserve both defaults and earlier live edits"
+    );
+}
+
+#[test]
 fn search_provider_env_override_accepts_baidu() {
     let _guard = lock_test_env();
     let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");

@@ -1586,6 +1586,15 @@ Common settings keys:
   selected block, so setting this to `true` inverts the default without
   removing per-block folding. This is useful in SSH/tmux environments where
   the Space binding may be intercepted.
+- `thinking_preview_lines` (integer, default `2`): how many body rows a
+  **collapsed** completed thought still shows. `0` is header-only; `10` is
+  the older dump. Live streaming preview is unchanged. Expand a block with
+  Space, or set `thinking_default_expanded` to open every block.
+- `help_expand_groups` (on/off, default off): start Help/shortcuts with every
+  group expanded. Default folds the long tail (Grok-style); type-to-filter
+  still unfolds matches.
+- `pin_last_prompt` (on/off, default on): pin the last user prompt at the top
+  of the transcript viewport after it scrolls off.
 - `show_tool_details` (on/off)
 - `inline_diffs` (`full`, `summary`, or `off`; default `full`): controls the
   inline presentation of successful structured File mutations. `full` shows a

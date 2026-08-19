@@ -1736,7 +1736,7 @@ pub enum NotificationCondition {
 }
 
 /// Notification delivery method (mirrors `tui::notifications::Method`).
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationMethod {
     /// Auto-detect: picks the best protocol for the current terminal
@@ -1753,6 +1753,38 @@ pub enum NotificationMethod {
     Ghostty,
     /// Disable notifications.
     Off,
+}
+
+impl NotificationMethod {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "osc9" | "osc-9" | "osc_9" => Some(Self::Osc9),
+            "bel" | "bell" => Some(Self::Bel),
+            "kitty" => Some(Self::Kitty),
+            "ghostty" => Some(Self::Ghostty),
+            "off" | "none" | "disable" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Osc9 => "osc9",
+            Self::Bel => "bel",
+            Self::Kitty => "kitty",
+            Self::Ghostty => "ghostty",
+            Self::Off => "off",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "auto, osc9, bel, kitty, ghostty, off"
+    }
 }
 
 fn default_threshold_secs() -> u64 {
@@ -1774,6 +1806,34 @@ pub enum CompletionSound {
     File,
 }
 
+impl CompletionSound {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "disable" | "disabled" => Some(Self::Off),
+            "beep" => Some(Self::Beep),
+            "bell" | "bel" => Some(Self::Bell),
+            "file" => Some(Self::File),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Beep => "beep",
+            Self::Bell => "bell",
+            Self::File => "file",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "off, beep, bell, file"
+    }
+}
+
 /// Controls when per-subagent completion notifications fire during fleet /
 /// workflow runs. Turn-completion notifications are unaffected.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -1790,8 +1850,34 @@ pub enum SubagentCompletionNotification {
     Off,
 }
 
+impl SubagentCompletionNotification {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "always" => Some(Self::Always),
+            "final-only" | "finalonly" | "final" => Some(Self::FinalOnly),
+            "off" | "none" | "never" | "disable" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::FinalOnly => "final-only",
+            Self::Off => "off",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "always, final-only, off"
+    }
+}
+
 /// Desktop-notification configuration (OSC 9 / BEL on turn completion).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NotificationsConfig {
     /// Delivery method: `auto` | `osc9` | `bel` | `off`. Default: `auto`.
     /// `auto` resolves to OSC 9 for iTerm.app / Ghostty / WezTerm / Cmux
@@ -1844,6 +1930,51 @@ pub struct NotificationsConfig {
     /// one to `false` to silence that event kind without touching the rest.
     #[serde(default)]
     pub events: NotificationEventsConfig,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            method: NotificationMethod::default(),
+            threshold_secs: default_threshold_secs(),
+            include_summary: false,
+            subagent_completion: SubagentCompletionNotification::default(),
+            completion_sound: CompletionSound::default(),
+            sound_file: None,
+            event_sound: EventSoundConfig::default(),
+            quiet: false,
+            events: NotificationEventsConfig::default(),
+        }
+    }
+}
+
+/// One live `[notifications]` scalar edit.
+///
+/// Keeping edits as deltas prevents a later session-only command from
+/// replacing earlier live changes with a freshly loaded disk snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationConfigUpdate {
+    Method(NotificationMethod),
+    ThresholdSecs(u64),
+    IncludeSummary(bool),
+    Quiet(bool),
+    CompletionSound(CompletionSound),
+    SubagentCompletion(SubagentCompletionNotification),
+}
+
+impl NotificationsConfig {
+    pub fn apply_update(&mut self, update: NotificationConfigUpdate) {
+        match update {
+            NotificationConfigUpdate::Method(value) => self.method = value,
+            NotificationConfigUpdate::ThresholdSecs(value) => self.threshold_secs = value,
+            NotificationConfigUpdate::IncludeSummary(value) => self.include_summary = value,
+            NotificationConfigUpdate::Quiet(value) => self.quiet = value,
+            NotificationConfigUpdate::CompletionSound(value) => self.completion_sound = value,
+            NotificationConfigUpdate::SubagentCompletion(value) => {
+                self.subagent_completion = value;
+            }
+        }
+    }
 }
 
 fn default_notification_event_enabled() -> bool {
@@ -4300,6 +4431,15 @@ impl Config {
     #[must_use]
     pub fn search_provider(&self) -> SearchProvider {
         self.search_provider_resolution().provider
+    }
+
+    /// Store a session/config provider choice and return the effective runtime
+    /// provider after applying the documented environment precedence.
+    pub fn set_search_provider(&mut self, provider: SearchProvider) -> SearchProvider {
+        self.search
+            .get_or_insert_with(SearchConfig::default)
+            .provider = Some(provider);
+        self.search_provider()
     }
 
     /// Return `true` if the `[auto] cost_saving = true` opt-in is set

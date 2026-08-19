@@ -222,6 +222,17 @@ pub enum MessageId {
     ConfigSectionExperimental,
     ConfigScopeSession,
     ConfigScopeSaved,
+    ConfigCommandSource,
+    ConfigCommandInvalidValue,
+    ConfigSearchUpdated,
+    ConfigPromptSuggestionUpdated,
+    ConfigNotificationsSetHint,
+    ConfigNotificationUpdated,
+    ConfigNotificationsWholeNumber,
+    ConfigAuditSearchProvider,
+    ConfigAuditPromptSuggestion,
+    ConfigAuditNotifications,
+    ConfigHelpDiscoverable,
     ConfigEditCancelled,
     ConfigEditTitlePrefix,
     ConfigEditScopeLabel,
@@ -1791,6 +1802,17 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigSectionExperimental,
     MessageId::ConfigScopeSession,
     MessageId::ConfigScopeSaved,
+    MessageId::ConfigCommandSource,
+    MessageId::ConfigCommandInvalidValue,
+    MessageId::ConfigSearchUpdated,
+    MessageId::ConfigPromptSuggestionUpdated,
+    MessageId::ConfigNotificationsSetHint,
+    MessageId::ConfigNotificationUpdated,
+    MessageId::ConfigNotificationsWholeNumber,
+    MessageId::ConfigAuditSearchProvider,
+    MessageId::ConfigAuditPromptSuggestion,
+    MessageId::ConfigAuditNotifications,
+    MessageId::ConfigHelpDiscoverable,
     MessageId::ConfigEditCancelled,
     MessageId::ConfigEditTitlePrefix,
     MessageId::ConfigEditScopeLabel,
@@ -3862,6 +3884,36 @@ mod tests {
                 locale.tag()
             );
         }
+    }
+
+    #[test]
+    fn config_command_prose_is_translated_in_complete_locales() {
+        let ids = [
+            MessageId::ConfigCommandSource,
+            MessageId::ConfigCommandInvalidValue,
+            MessageId::ConfigSearchUpdated,
+            MessageId::ConfigPromptSuggestionUpdated,
+            MessageId::ConfigNotificationsSetHint,
+            MessageId::ConfigNotificationUpdated,
+            MessageId::ConfigNotificationsWholeNumber,
+            MessageId::ConfigAuditSearchProvider,
+            MessageId::ConfigAuditPromptSuggestion,
+            MessageId::ConfigAuditNotifications,
+            MessageId::ConfigHelpDiscoverable,
+        ];
+        for locale in Locale::shipped_complete() {
+            for id in ids {
+                let localized = tr(*locale, id);
+                assert!(!localized.trim().is_empty(), "{} {id:?}", locale.tag());
+                if *locale != Locale::En {
+                    assert_ne!(localized, tr(Locale::En, id), "{} {id:?}", locale.tag());
+                }
+            }
+        }
+
+        assert!(tr(Locale::En, MessageId::ConfigCommandSource).contains("{source}"));
+        assert!(tr(Locale::En, MessageId::ConfigCommandInvalidValue).contains("{choices}"));
+        assert!(tr(Locale::En, MessageId::ConfigNotificationUpdated).contains("{scope}"));
     }
 
     #[test]

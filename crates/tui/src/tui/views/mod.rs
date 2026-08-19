@@ -1818,8 +1818,29 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "thinking_preview_lines".to_string(),
+                value: settings.thinking_preview_lines.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "thinking_highlight".to_string(),
                 value: settings.thinking_highlight.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "help_expand_groups".to_string(),
+                value: settings.help_expand_groups.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "pin_last_prompt".to_string(),
+                value: settings.pin_last_prompt.to_string(),
                 editable: true,
                 scope: ConfigScope::Saved,
             },
@@ -3055,6 +3076,15 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
         "thinking_default_expanded" => {
             "expand model reasoning by default; Space still toggles each block"
         }
+        "thinking_preview_lines" => {
+            "collapsed completed-thought preview rows (default 2; 0=header-only; 10=older dump)"
+        }
+        "help_expand_groups" => {
+            "start Help/shortcuts with every group expanded; default folds the long tail"
+        }
+        "pin_last_prompt" => {
+            "pin the last user prompt at the top of the transcript when it scrolls off"
+        }
         "thinking_highlight" => {
             "fill the model reasoning background; the dashed rail remains visible when off"
         }
@@ -3107,6 +3137,8 @@ fn config_boolean_key(key: &str) -> bool {
             | "show_thinking"
             | "thinking_default_expanded"
             | "thinking_highlight"
+            | "help_expand_groups"
+            | "pin_last_prompt"
             | "show_tool_details"
             | "composer_border"
             | "composer_multiline_mode"
@@ -3128,6 +3160,7 @@ fn config_integer_key(key: &str) -> bool {
             | "work_surface_side_width"
             | "mention_menu_limit"
             | "mention_walk_depth"
+            | "thinking_preview_lines"
             | "auto_compact_threshold_percent"
             | "max_history"
             | "fleet.exec.max_spawn_depth"
@@ -6425,6 +6458,7 @@ context_window = 262144
                 "reasoning_effort",
                 "show_thinking",
                 "thinking_default_expanded",
+                "thinking_preview_lines",
                 "thinking_highlight"
             ]
         );

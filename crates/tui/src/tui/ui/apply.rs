@@ -1283,6 +1283,24 @@ pub(crate) async fn apply_command_result(
                     })
                     .await;
             }
+            AppAction::UpdateSearchProvider { provider } => {
+                let effective_provider = config.set_search_provider(provider);
+                let _ = engine_handle
+                    .send(Op::SetSearchProvider {
+                        provider: effective_provider,
+                    })
+                    .await;
+            }
+            AppAction::UpdatePromptSuggestion { enabled } => {
+                config.prompt_suggestion = Some(enabled);
+            }
+            AppAction::UpdateNotification { update } => {
+                config
+                    .notifications
+                    .get_or_insert_with(crate::config::NotificationsConfig::default)
+                    .apply_update(update);
+                let _ = crate::tui::notifications::settings(config);
+            }
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
             }

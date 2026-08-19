@@ -53,6 +53,8 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
                 help.push_str(
                     "\n\n  Provider context window: set `context_window = 262144` under the active `[providers.<name>]` table to cap a 1M model to 256K. Use `/config context_window` to inspect the configured and effective values.",
                 );
+                help.push('\n');
+                help.push_str(&tr(app.ui_locale, MessageId::ConfigHelpDiscoverable));
             }
             return CommandResult::message(help);
         }
@@ -71,7 +73,8 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
 
     // Show help overlay
     if app.view_stack.top_kind() != Some(ModalKind::Help) {
-        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills);
+        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills)
+            .with_groups_expanded(app.help_expand_groups);
         app.view_stack.push(help);
     }
     CommandResult::ok()
@@ -843,6 +846,9 @@ mod tests {
         assert!(msg.contains("Usage: /config"));
         assert!(msg.contains("context_window = 262144"));
         assert!(msg.contains("/config context_window"));
+        assert!(msg.contains("/config search.provider"));
+        assert!(msg.contains("/config prompt_suggestion"));
+        assert!(msg.contains("/config notifications"));
     }
 
     #[test]

@@ -230,6 +230,11 @@ pub enum Op {
         heartbeat_timeout_secs: u64,
     },
 
+    /// Update the web-search backend for subsequent tool calls.
+    SetSearchProvider {
+        provider: crate::config::SearchProvider,
+    },
+
     /// Replace the engine's merged Fleet roster after the setup wizard saves a
     /// project or personal profile. Subsequent turns can use the new role
     /// immediately instead of requiring an application restart.

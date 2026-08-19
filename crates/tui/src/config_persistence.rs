@@ -216,6 +216,16 @@ pub(crate) fn persist_table_string_key(
     persist_table_value_key(config_path, table_name, key, value.into())
 }
 
+pub(crate) fn persist_table_integer_key(
+    config_path: Option<&Path>,
+    table_name: &str,
+    key: &str,
+    value: u64,
+) -> anyhow::Result<PathBuf> {
+    let value = i64::try_from(value).context("integer value is too large for TOML")?;
+    persist_table_value_key(config_path, table_name, key, value.into())
+}
+
 fn persist_table_value_key(
     config_path: Option<&Path>,
     table_name: &str,

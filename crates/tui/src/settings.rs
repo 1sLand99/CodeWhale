@@ -355,8 +355,21 @@ pub struct Settings {
     /// users where the Space key may be captured by the terminal layer.
     #[serde(default)]
     pub thinking_default_expanded: bool,
+    /// Collapsed completed-thought preview rows. Default 2 (compact).
+    /// Set `10` for the older dump, or `0` for header-only. Full expand is
+    /// still `thinking_default_expanded` / Space.
+    #[serde(default = "default_thinking_preview_lines")]
+    pub thinking_preview_lines: usize,
     /// Keep thinking visible while disabling its filled background treatment.
     pub thinking_highlight: bool,
+    /// When true, Help/shortcuts groups start expanded. Default false folds
+    /// the long tail. Type-to-filter still unfolds matches.
+    #[serde(default)]
+    pub help_expand_groups: bool,
+    /// Pin the last user prompt at the top of the transcript when it has
+    /// scrolled off. Default on.
+    #[serde(default = "default_true")]
+    pub pin_last_prompt: bool,
     /// Show detailed tool output
     pub show_tool_details: bool,
     /// Successful structured File mutation evidence: full, summary, or off.
@@ -555,7 +568,10 @@ impl Default for Settings {
             // never displace the actual conversation in the default TUI.
             show_thinking: false,
             thinking_default_expanded: false,
+            thinking_preview_lines: default_thinking_preview_lines(),
             thinking_highlight: true,
+            help_expand_groups: false,
+            pin_last_prompt: true,
             show_tool_details: false,
             inline_diffs: "full".to_string(),
             locale: "auto".to_string(),
@@ -1280,8 +1296,18 @@ impl Settings {
             "thinking_default_expanded" | "thinking_expanded" => {
                 self.thinking_default_expanded = parse_bool(value)?;
             }
+            "thinking_preview_lines" | "thinking_preview" => {
+                self.thinking_preview_lines =
+                    parse_usize_setting("thinking_preview_lines", value)?.min(40);
+            }
             "thinking_highlight" | "reasoning_highlight" => {
                 self.thinking_highlight = parse_bool(value)?;
+            }
+            "help_expand_groups" | "help_expanded" => {
+                self.help_expand_groups = parse_bool(value)?;
+            }
+            "pin_last_prompt" | "pin_prompt" => {
+                self.pin_last_prompt = parse_bool(value)?;
             }
             "show_tool_details" | "tool_details" => {
                 self.show_tool_details = parse_bool(value)?;
@@ -1526,7 +1552,16 @@ impl Settings {
             "  thinking_expanded:   {}",
             self.thinking_default_expanded
         ));
+        lines.push(format!(
+            "  thinking_preview:    {}",
+            self.thinking_preview_lines
+        ));
         lines.push(format!("  thinking_highlight: {}", self.thinking_highlight));
+        lines.push(format!(
+            "  help_expand_groups:  {}",
+            self.help_expand_groups
+        ));
+        lines.push(format!("  pin_last_prompt:    {}", self.pin_last_prompt));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
         lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
         lines.push(format!("  locale:            {}", self.locale));
@@ -1678,8 +1713,20 @@ impl Settings {
                 "Expand model thinking by default; Space still toggles: on/off",
             ),
             (
+                "thinking_preview_lines",
+                "Collapsed completed-thought preview rows (default 2, 0=header-only, 10=older dump)",
+            ),
+            (
                 "thinking_highlight",
                 "Fill the thinking/reasoning background: on/off",
+            ),
+            (
+                "help_expand_groups",
+                "Start Help/shortcuts with every group expanded: on/off (default off)",
+            ),
+            (
+                "pin_last_prompt",
+                "Pin the last user prompt at the top when it scrolls off: on/off (default on)",
             ),
             ("show_tool_details", "Show detailed tool output: on/off"),
             (
@@ -2498,6 +2545,14 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn default_thinking_preview_lines() -> usize {
+    2
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn parse_usize_setting(key: &str, value: &str) -> Result<usize> {
     value.trim().parse::<usize>().map_err(|_| {
         anyhow::anyhow!(
@@ -3137,6 +3192,28 @@ mod tests {
             toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
                 .expect("restore settings");
         assert!(restored.thinking_default_expanded);
+    }
+
+    #[test]
+    fn density_knobs_default_compact_and_persist() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.thinking_preview_lines, 2);
+        assert!(!settings.help_expand_groups);
+        assert!(settings.pin_last_prompt);
+
+        settings.set("thinking_preview_lines", "10").unwrap();
+        settings.set("help_expand_groups", "true").unwrap();
+        settings.set("pin_last_prompt", "false").unwrap();
+        assert_eq!(settings.thinking_preview_lines, 10);
+        assert!(settings.help_expand_groups);
+        assert!(!settings.pin_last_prompt);
+
+        let restored: Settings =
+            toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
+                .expect("restore settings");
+        assert_eq!(restored.thinking_preview_lines, 10);
+        assert!(restored.help_expand_groups);
+        assert!(!restored.pin_last_prompt);
     }
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).

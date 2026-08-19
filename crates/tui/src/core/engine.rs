@@ -2680,6 +2680,9 @@ impl Engine {
                             .await;
                         tracing::info!(target: "advisor", "advisor watcher {state}");
                     }
+                    Op::SetSearchProvider { provider } => {
+                        self.config.search_provider = provider;
+                    }
                     Op::Shutdown => {
                         break;
                     }

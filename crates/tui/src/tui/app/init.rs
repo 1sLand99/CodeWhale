@@ -277,6 +277,9 @@ impl App {
         let show_thinking = settings.show_thinking;
         let thinking_highlight = settings.thinking_highlight;
         let thinking_default_expanded = settings.thinking_default_expanded;
+        let thinking_preview_lines = settings.thinking_preview_lines;
+        let help_expand_groups = settings.help_expand_groups;
+        let pin_last_prompt = settings.pin_last_prompt;
         let show_tool_details = settings.show_tool_details;
         let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
@@ -794,6 +797,9 @@ impl App {
             show_thinking,
             thinking_highlight,
             thinking_default_expanded,
+            thinking_preview_lines,
+            help_expand_groups,
+            pin_last_prompt,
             verbose_transcript: false,
             show_tool_details,
             inline_diff_mode,
