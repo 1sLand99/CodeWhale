@@ -48,3 +48,12 @@ describe("canonical host", () => {
     expect(res.headers.get("Strict-Transport-Security")).toContain("max-age=");
   });
 });
+
+describe("dotted well-known paths", () => {
+  it("does not locale-prefix /llms.txt", () => {
+    const res = middleware(request("https://codewhale.net/llms.txt", "codewhale.net"));
+    expect(res.status).not.toBe(307);
+    expect(res.status).not.toBe(308);
+    expect(res.headers.get("location")).toBeNull();
+  });
+});

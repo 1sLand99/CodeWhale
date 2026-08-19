@@ -2990,6 +2990,40 @@ html[lang="ko"] .ocean-column h2 {
   max-width: 52rem;
 }
 
+.docs-breadcrumb {
+  margin-bottom: 1.15rem;
+  color: var(--ink-mute);
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+
+.docs-breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.docs-breadcrumb li:not(:last-child)::after {
+  content: "/";
+  margin-inline: 0.5em;
+  color: var(--ink-mute);
+}
+
+.docs-breadcrumb a {
+  color: var(--indigo);
+}
+
+.docs-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.docs-breadcrumb [aria-current="page"] {
+  color: var(--ink);
+}
+
 .docs-search-block {
   margin-bottom: 2.25rem;
 }

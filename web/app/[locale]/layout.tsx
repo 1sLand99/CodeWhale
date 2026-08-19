@@ -4,7 +4,9 @@ import { Nav } from "@/components/nav";
 import { Footer } from "@/components/footer";
 import { localeDirection, locales, type Locale } from "@/lib/i18n/config";
 import { getChrome, getHome } from "@/lib/i18n/dictionaries";
+import { serializeJsonLd } from "@/lib/json-ld";
 import { buildPageMetadata } from "@/lib/page-meta";
+import { buildSiteJsonLd } from "@/lib/site-schema";
 import "../globals.css";
 
 // Fraunces is the newspaper-era display face the community asked to keep —
@@ -66,6 +68,7 @@ export default async function LocaleLayout({
   // RTL locales (e.g. ar) set the document direction from the canonical
   // registry so the browser handles bidirectional layout from the root.
   const dir = localeDirection(locale);
+  const siteJsonLd = buildSiteJsonLd(locale);
 
   return (
     <html
@@ -75,6 +78,10 @@ export default async function LocaleLayout({
       suppressHydrationWarning
     >
       <body>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: serializeJsonLd(siteJsonLd) }}
+        />
         {/* Apply the persisted docs theme before paint so there is no flash.
             "auto" leaves data-theme unset and defers to prefers-color-scheme. */}
         <script

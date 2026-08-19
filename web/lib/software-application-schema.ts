@@ -1,6 +1,7 @@
 import type { PublishedReleaseFact } from "./facts";
 import { REPO_URL } from "./i18n/links";
 import { IDENTITY_PHRASE, SITE_NAME, SITE_URL } from "./page-meta";
+import { ORGANIZATION_ID } from "./site-schema";
 
 /**
  * Structured product data for the release-backed install page.
@@ -24,6 +25,6 @@ export function buildSoftwareApplicationJsonLd(
     license: `${REPO_URL}/blob/main/LICENSE`,
     codeRepository: REPO_URL,
     downloadUrl: `${SITE_URL}/en/install`,
-    author: { "@type": "Organization", name: SITE_NAME, url: SITE_URL },
+    author: { "@id": ORGANIZATION_ID },
   };
 }

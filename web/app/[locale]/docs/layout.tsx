@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DocsBreadcrumb } from "@/components/docs-breadcrumb";
 import { DocsSidebar } from "@/components/docs-sidebar";
 import { Whale } from "@/components/whale";
 import { getDocsShell } from "@/lib/i18n/dictionaries";
@@ -48,7 +49,10 @@ export default async function DocsLayout({
       </section>
 
       <div className="portal-container docs-shell min-w-0">
-        <article className="docs-content min-w-0">{children}</article>
+        <article className="docs-content min-w-0">
+          <DocsBreadcrumb locale={locale} />
+          {children}
+        </article>
         <DocsSidebar locale={locale} />
       </div>
     </div>

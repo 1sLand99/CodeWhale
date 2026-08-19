@@ -4,18 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { docsTopicIsCurrent } from "@/lib/docs-navigation";
 import {
+  DOC_CATEGORY_LABELS,
   docTopicHref,
   docTopicIsExternal,
   getTopicsByCategory,
 } from "@/lib/docs-map";
-
-const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
-  "getting-started": { en: "Getting started", zh: "入门" },
-  "core-concepts": { en: "Core concepts", zh: "核心概念" },
-  reference: { en: "Reference", zh: "参考" },
-  extending: { en: "Extending", zh: "扩展" },
-  operations: { en: "Operations", zh: "运维" },
-};
 
 export function DocsSidebar({ locale }: { locale: string }) {
   const isZh = locale === "zh";
@@ -35,9 +28,7 @@ export function DocsSidebar({ locale }: { locale: string }) {
           {[...byCategory.entries()].map(([category, topics]) => (
             <div key={category} className="docs-sidebar-group">
               <div className="docs-sidebar-category">
-                {isZh
-                  ? CATEGORY_LABELS[category]?.zh ?? category
-                  : CATEGORY_LABELS[category]?.en ?? category}
+                {isZh ? DOC_CATEGORY_LABELS[category].zh : DOC_CATEGORY_LABELS[category].en}
               </div>
               <ul>
                 {topics.map((topic) => {

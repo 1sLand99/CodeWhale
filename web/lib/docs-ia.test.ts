@@ -206,6 +206,15 @@ describe("navigation parity and accessibility", () => {
     expect(css).toContain(".skip-link:focus-visible");
   });
 
+  it("keeps the docs trail on the docs-map registry", () => {
+    const docsLayout = webText("app/[locale]/docs/layout.tsx");
+    const docsMap = webText("lib/docs-map.ts");
+    expect(docsMap).toContain("sidebar, breadcrumbs, and drift/parity checks");
+    expect(docsMap).toContain("export const DOC_CATEGORY_LABELS");
+    expect(docsLayout).toContain("<DocsBreadcrumb locale={locale} />");
+    expect(css).toContain(".docs-breadcrumb");
+  });
+
   it("keeps responsive breakpoints for the getting-started steps", () => {
     // 4-up grid by default, 2-up at the tablet breakpoint, 1-up on phones —
     // the same responsive ladder as the existing workflow steps.

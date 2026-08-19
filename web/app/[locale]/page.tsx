@@ -13,6 +13,7 @@ import { getFacts } from "@/lib/facts";
 import { fetchFeed } from "@/lib/github";
 import { fill, getChrome, getHome, splitToken } from "@/lib/i18n/dictionaries";
 import { REPO_ISSUES_URL, REPO_RELEASES_URL, REPO_URL, DISCORD_URL } from "@/lib/i18n/links";
+import { serializeJsonLd } from "@/lib/json-ld";
 import { getEnv } from "@/lib/kv";
 import { buildSoftwareApplicationJsonLd } from "@/lib/software-application-schema";
 import type { FeedItem } from "@/lib/types";
@@ -66,7 +67,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
     <div className="product-home paper-home">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }}
       />
       {/* Entrance motion for the below-fold sections: the marks are the
           data-reveal / data-reveal-group attributes in this tree; the
