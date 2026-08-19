@@ -41,6 +41,25 @@ fn env_off_beats_cli_on_end_to_end() {
     );
 }
 
+/// A real endpoint must remain queued locally instead of becoming short-CLI
+/// network latency. The next interactive session owns delivery.
+#[test]
+fn short_cli_exit_persists_without_network_delivery() {
+    let evidence = dispatch_and_read_telemetry_with_endpoint(None, None);
+    let pending = evidence
+        .pending
+        .expect("short CLI must seal its pending telemetry before process exit");
+    assert!(
+        pending.contains("\"event\":\"session_start\"")
+            && pending.contains("\"event\":\"session_end\""),
+        "the pending buffer must contain the complete short CLI session: {pending}"
+    );
+    assert!(
+        evidence.dry_run.is_none(),
+        "a configured endpoint must stay pending rather than use the dry-run sink"
+    );
+}
+
 /// A value the resolver cannot parse resolves to off, rather than falling
 /// through to the flag.
 #[test]
@@ -111,11 +130,19 @@ fn config_set_true_reenables_a_historical_decline() {
 struct DispatchEvidence {
     telemetry_dir_exists: bool,
     dry_run: Option<String>,
+    pending: Option<String>,
 }
 
 /// Run the real dispatcher into a keyless in-process command and report the
 /// telemetry state it actually left behind.
 fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence {
+    dispatch_and_read_telemetry_with_endpoint(telemetry_env, Some(""))
+}
+
+fn dispatch_and_read_telemetry_with_endpoint(
+    telemetry_env: Option<&str>,
+    endpoint: Option<&str>,
+) -> DispatchEvidence {
     let fixture = TempDir::new().expect("fixture root");
     let home = fixture.path().join("home");
     let codewhale_home = fixture.path().join("codewhale-home");
@@ -125,12 +152,11 @@ fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence 
     }
 
     let config_path = fixture.path().join("config.toml");
-    fs::write(
-        &config_path,
-        // An explicitly empty endpoint is the network-free dry-run sink.
-        "telemetry = true\ntelemetry_endpoint = \"\"\n",
-    )
-    .expect("write config");
+    let mut config = "telemetry = true\n".to_string();
+    if let Some(endpoint) = endpoint {
+        config.push_str(&format!("telemetry_endpoint = {endpoint:?}\n"));
+    }
+    fs::write(&config_path, config).expect("write config");
 
     let mut command = Command::new(codewhale_binary());
     command
@@ -171,9 +197,15 @@ fn dispatch_and_read_telemetry(telemetry_env: Option<&str>) -> DispatchEvidence 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => panic!("read telemetry dry-run sink: {error}"),
     };
+    let pending = match fs::read_to_string(telemetry_dir.join("buffer.jsonl")) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read telemetry pending buffer: {error}"),
+    };
     DispatchEvidence {
         telemetry_dir_exists: telemetry_dir.exists(),
         dry_run,
+        pending,
     }
 }
 

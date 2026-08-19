@@ -1862,10 +1862,12 @@ pub(crate) fn apply_tui_telemetry_decision(
 
 /// Close the armed session and flush, bounded.
 ///
-/// Short CLI (`config`, `doctor`, `auth`, …) records `session_end` and
-/// returns. The 3s shutdown flush is a TUI/exec concern: a hung TLS
-/// handshake must not hold `codewhale config list` for the full timeout.
-/// The on-disk buffer ships on the next armed interactive session.
+/// Short CLI (`config`, `doctor`, `auth`, …) records `session_end`, seals the
+/// local queue within a much smaller deadline, and returns. The 3s network
+/// flush is a TUI/exec concern: a hung TLS handshake must not hold
+/// `codewhale config list`. A configured endpoint remains buffered for the
+/// next interactive session; an explicitly empty endpoint writes its local
+/// dry-run batch immediately.
 async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Surface) {
     if !codewhale_telemetry::is_armed() {
         return;
@@ -1879,6 +1881,8 @@ async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Su
     }
     codewhale_telemetry::record(telemetry_session_end());
     if surface == codewhale_telemetry::Surface::Cli {
+        let _ =
+            codewhale_telemetry::persist_local_blocking(codewhale_telemetry::CLI_PERSIST_TIMEOUT);
         return;
     }
     // `shutdown_blocking` parks a thread waiting on the writer, so it goes to
