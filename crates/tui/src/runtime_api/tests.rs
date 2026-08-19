@@ -231,6 +231,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
         system_prompt: None,
         context_references: Vec::new(),
         artifacts: Vec::new(),
+        approval_receipts: Vec::new(),
         work_state: None,
         last_auto_route: None,
     }
