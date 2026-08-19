@@ -64,6 +64,9 @@ abort under load.
   gets a verdict instead of a cancelled pending run. A hermetic Safety
   gate job runs authorization tests in under 15 minutes (test bankruptcy
   restructuring — no tests deleted).
+- Short CLI no longer waits up to three seconds for a telemetry POST on
+  exit; `session_end` is recorded and the buffer ships on the next
+  interactive session.
 
 ### Added
 

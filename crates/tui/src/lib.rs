@@ -1854,7 +1854,12 @@ pub(crate) fn apply_tui_telemetry_decision(
 }
 
 /// Close the armed session and flush, bounded.
-async fn finish_telemetry(outcome: &Result<()>) {
+///
+/// Short CLI (`config`, `doctor`, `auth`, …) records `session_end` and
+/// returns. The 3s shutdown flush is a TUI/exec concern: a hung TLS
+/// handshake must not hold `codewhale config list` for the full timeout.
+/// The on-disk buffer ships on the next armed interactive session.
+async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Surface) {
     if !codewhale_telemetry::is_armed() {
         return;
     }
@@ -1866,6 +1871,9 @@ async fn finish_telemetry(outcome: &Result<()>) {
         codewhale_telemetry::set_exit_class(codewhale_telemetry::ExitClass::Error);
     }
     codewhale_telemetry::record(telemetry_session_end());
+    if surface == codewhale_telemetry::Surface::Cli {
+        return;
+    }
     // `shutdown_blocking` parks a thread waiting on the writer, so it goes to
     // the blocking pool, and it is bounded there. The persistence actor's
     // unbounded `let _ = task.await` next door is not a pattern to copy here: a
@@ -1935,7 +1943,7 @@ async fn run_async_main_inner(
         pending_telemetry_notice,
     )
     .await;
-    finish_telemetry(&outcome).await;
+    finish_telemetry(&outcome, surface).await;
     outcome
 }
 
