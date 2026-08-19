@@ -40,6 +40,17 @@ abort under load.
 
 ### Added
 
+- `feat(tui): add command context adapters and migration gate (FEAT-015)`
+  (aboimpinto) — TUI-owned capability facets, a dual-path dispatch seam, and
+  source-aware CI enforcement so a command slice cannot claim to be migrated
+  while it still accepts concrete `App`. Zero production commands migrate in
+  this slice (#5316).
+- `feat(web): move docs/hooks and docs/troubleshooting onto the dictionary
+  spine` (Lstarsky0) — both pages now read copy from the locale dictionaries
+  instead of inline bilingual literals (#5337).
+- `docs(i18n): complete Tier 1 of Chinese docs localization` (SparkofSpike) —
+  Chinese and Indonesian docs move to `docs/zh_hans/` and `docs/id/`, with
+  redirect stubs at the old paths for one release cycle (#5482).
 - `feat(tui): show repository context in git chrome` (wuisabel-gif) — the TUI
   header now identifies the active repository or linked worktree before the
   branch and dirty marker, so operators can see where the agent is working
