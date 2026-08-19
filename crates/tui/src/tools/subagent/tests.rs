@@ -7246,6 +7246,7 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             "notify",
             "project_map",
             "read",
+            "read_media",
             "request_user_input",
             "retrieve_tool_result",
             "todo_write",

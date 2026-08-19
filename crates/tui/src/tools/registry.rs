@@ -906,7 +906,7 @@ impl ToolRegistryBuilder {
     #[must_use]
     pub fn with_read_media_tool(self) -> Self {
         use super::read_media::ReadMediaTool;
-        self.with_tool(Arc::new(ReadMediaTool::default()))
+        self.with_tool(Arc::new(ReadMediaTool))
     }
 
     /// Include the `load_skill` tool (#434) so the model can pull a
