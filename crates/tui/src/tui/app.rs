@@ -1651,6 +1651,10 @@ pub struct App {
     /// Last non-contended Work snapshot captured in this App. The outer
     /// option distinguishes "never captured" from a captured empty state.
     pub(crate) last_known_work_state: Option<Option<SessionWorkState>>,
+    /// Latest bounded runtime goal projection. Persistence stores this beside
+    /// the owning saved session so a resumed process rebuilds the same goal
+    /// control state instead of inferring it from transcript prose.
+    pub(crate) last_known_goal_state: Option<crate::session_manager::SessionGoalState>,
     /// Metadata for the active session, cached in memory so automatic
     /// checkpoints never synchronously reload and parse a growing JSON file on
     /// the UI thread.

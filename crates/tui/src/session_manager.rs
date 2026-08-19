@@ -12,6 +12,7 @@ use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
 use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
+use crate::tools::goal::{GoalPauseReason, GoalSnapshot};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
 use crate::tui::file_mention::ContextReference;
@@ -31,6 +32,10 @@ const MAX_SESSIONS: usize = 50;
 /// picker's rename prompt has always enforced.
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
 const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
+const SESSION_GOALS_DIR: &str = ".goals";
+const CURRENT_SESSION_GOAL_SCHEMA_VERSION: u32 = 1;
+const MAX_SESSION_GOAL_OBJECTIVE_CHARS: usize = 8_192;
+const MAX_SESSION_GOAL_FILE_BYTES: u64 = 64 * 1_024;
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
 const CURRENT_QUEUE_SCHEMA_VERSION: u32 = 1;
 
@@ -500,6 +505,137 @@ pub struct SessionWorkState {
     pub plan: PlanSnapshot,
 }
 
+/// Bounded goal projection persisted beside the owning saved session.
+///
+/// This intentionally excludes completion prose, verifier output, transcripts,
+/// and filesystem evidence. The saved session already owns conversation
+/// history; restart only needs the typed control state that makes the next turn
+/// continue the same objective without trusting text reconstructed from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionGoalState {
+    #[serde(default = "current_session_goal_schema_version")]
+    pub schema_version: u32,
+    pub objective: String,
+    pub status: SessionGoalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub time_used_seconds: u64,
+    #[serde(default)]
+    pub continuation_count: u32,
+    #[serde(default)]
+    pub elapsed_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<GoalPauseReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionGoalStatus {
+    Active,
+    Paused,
+    Complete,
+    Blocked,
+}
+
+const fn current_session_goal_schema_version() -> u32 {
+    CURRENT_SESSION_GOAL_SCHEMA_VERSION
+}
+
+impl SessionGoalState {
+    /// Convert a runtime update into the durable, bounded session contract.
+    /// The canonical empty runtime snapshot removes the sidecar.
+    pub fn from_runtime(snapshot: &GoalSnapshot) -> io::Result<Option<Self>> {
+        if snapshot.objective.is_none() && snapshot.status.trim() == "none" {
+            return Ok(None);
+        }
+        let objective = snapshot
+            .objective
+            .as_deref()
+            .map(str::trim)
+            .filter(|objective| !objective.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "goal snapshot has no objective")
+            })?;
+        let status = match snapshot.status.trim() {
+            "active" => SessionGoalStatus::Active,
+            "paused" => SessionGoalStatus::Paused,
+            "complete" => SessionGoalStatus::Complete,
+            "blocked" => SessionGoalStatus::Blocked,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("goal snapshot has unsupported status '{other}'"),
+                ));
+            }
+        };
+        let state = Self {
+            schema_version: CURRENT_SESSION_GOAL_SCHEMA_VERSION,
+            objective: objective.to_string(),
+            status,
+            token_budget: snapshot.token_budget,
+            tokens_used: snapshot.tokens_used,
+            time_used_seconds: snapshot.time_used_seconds,
+            continuation_count: snapshot.continuation_count,
+            elapsed_seconds: snapshot.elapsed_seconds.unwrap_or_default(),
+            pause_reason: snapshot.pause_reason,
+        };
+        state.validate()?;
+        Ok(Some(state))
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if self.schema_version > CURRENT_SESSION_GOAL_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Session goal schema v{} is newer than supported v{}",
+                    self.schema_version, CURRENT_SESSION_GOAL_SCHEMA_VERSION
+                ),
+            ));
+        }
+        let objective = self.objective.trim();
+        if objective.is_empty() || objective.chars().count() > MAX_SESSION_GOAL_OBJECTIVE_CHARS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Session goal objective must contain 1..={MAX_SESSION_GOAL_OBJECTIVE_CHARS} characters"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn to_runtime_snapshot(&self) -> GoalSnapshot {
+        GoalSnapshot {
+            objective: Some(self.objective.clone()),
+            status: match self.status {
+                SessionGoalStatus::Active => "active",
+                SessionGoalStatus::Paused => "paused",
+                SessionGoalStatus::Complete => "complete",
+                SessionGoalStatus::Blocked => "blocked",
+            }
+            .to_string(),
+            token_budget: self.token_budget,
+            tokens_used: self.tokens_used,
+            time_used_seconds: self.time_used_seconds,
+            continuation_count: self.continuation_count,
+            elapsed_seconds: Some(self.elapsed_seconds),
+            evidence: None,
+            blocker: None,
+            pause_reason: self.pause_reason,
+            completion_verification: None,
+            advisories: Vec::new(),
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+        }
+    }
+}
+
 impl SessionWorkState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -804,6 +940,67 @@ impl SessionManager {
         self.sessions_dir.join("checkpoints")
     }
 
+    fn session_goals_dir(&self) -> PathBuf {
+        self.sessions_dir.join(SESSION_GOALS_DIR)
+    }
+
+    fn checked_existing_session_goals_dir(&self) -> std::io::Result<Option<PathBuf>> {
+        let dir = self.session_goals_dir();
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Session goal store {} must be a real directory",
+                    dir.display()
+                ),
+            ));
+        }
+        Ok(Some(dir))
+    }
+
+    fn ensure_session_goals_dir(&self) -> std::io::Result<PathBuf> {
+        if let Some(dir) = self.checked_existing_session_goals_dir()? {
+            return Ok(dir);
+        }
+        let dir = self.session_goals_dir();
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        self.checked_existing_session_goals_dir()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Session goal store {} was not created", dir.display()),
+            )
+        })
+    }
+
+    fn validated_session_goal_path(&self, session_id: &str) -> std::io::Result<PathBuf> {
+        let id = self.validated_session_id(session_id)?;
+        Ok(self.session_goals_dir().join(format!("{id}.json")))
+    }
+
+    fn checked_existing_session_goal_file(path: &Path) -> std::io::Result<bool> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Session goal {} must be a regular file", path.display()),
+            ));
+        }
+        Ok(true)
+    }
+
     fn validated_checkpoint_path(&self, session_id: &str) -> std::io::Result<PathBuf> {
         let trimmed = self.validated_session_id(session_id)?;
         // Reserved file names inside `checkpoints/` must never collide with a
@@ -835,6 +1032,54 @@ impl SessionManager {
     /// Return the resolved sessions directory path.
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+
+    /// Persist the bounded goal control state for one saved session.
+    /// `None` is the canonical clear operation and is idempotent.
+    pub fn save_session_goal(
+        &self,
+        session_id: &str,
+        goal: Option<&SessionGoalState>,
+    ) -> std::io::Result<()> {
+        let path = self.validated_session_goal_path(session_id)?;
+        let Some(goal) = goal else {
+            if self.checked_existing_session_goals_dir()?.is_some() && path.exists() {
+                fs::remove_file(path)?;
+            }
+            return Ok(());
+        };
+        goal.validate()?;
+        self.ensure_session_goals_dir()?;
+        Self::checked_existing_session_goal_file(&path)?;
+        let content = serde_json::to_string_pretty(goal)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        write_atomic(&path, content.as_bytes())
+    }
+
+    /// Load a saved session's durable goal, rejecting malformed or future
+    /// records instead of silently starting a different objective.
+    pub fn load_session_goal(&self, session_id: &str) -> std::io::Result<Option<SessionGoalState>> {
+        let path = self.validated_session_goal_path(session_id)?;
+        if self.checked_existing_session_goals_dir()?.is_none()
+            || !Self::checked_existing_session_goal_file(&path)?
+        {
+            return Ok(None);
+        }
+        let file_len = fs::metadata(&path)?.len();
+        if file_len > MAX_SESSION_GOAL_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Session goal {} is {file_len} bytes; maximum is {MAX_SESSION_GOAL_FILE_BYTES}",
+                    path.display()
+                ),
+            ));
+        }
+        let raw = fs::read_to_string(path)?;
+        let goal: SessionGoalState = serde_json::from_str(&raw)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        goal.validate()?;
+        Ok(Some(goal))
     }
 
     /// Save a session to disk using atomic write (temp file + fsync + rename).
@@ -1422,6 +1667,7 @@ impl SessionManager {
     /// Delete a session by ID
     pub fn delete_session(&self, id: &str) -> std::io::Result<()> {
         let path = self.validated_session_path(id)?;
+        self.save_session_goal(id, None)?;
         fs::remove_file(path)?;
         self.clear_session_boot_owner(id);
         let session_dir = self.sessions_dir.join(id.trim());
@@ -2268,6 +2514,62 @@ mod tests {
                 cache_control: None,
             }],
         }
+    }
+
+    #[test]
+    fn session_goal_sidecar_round_trips_control_state_without_model_output() {
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let runtime = GoalSnapshot {
+            objective: Some("finish the provider migration".to_string()),
+            status: "paused".to_string(),
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 67,
+            continuation_count: 4,
+            elapsed_seconds: Some(91),
+            evidence: Some("Bearer credential-shaped-model-output".to_string()),
+            blocker: Some("/arbitrary/private/path".to_string()),
+            pause_reason: Some(GoalPauseReason::User),
+            completion_verification: None,
+            advisories: Vec::new(),
+            last_gap_fingerprint: None,
+            repeated_gap_count: 0,
+        };
+        let durable = SessionGoalState::from_runtime(&runtime)
+            .expect("valid runtime goal")
+            .expect("non-empty durable goal");
+
+        manager
+            .save_session_goal(session_id, Some(&durable))
+            .expect("save goal");
+        let raw = fs::read_to_string(
+            sessions_dir
+                .join(SESSION_GOALS_DIR)
+                .join(format!("{session_id}.json")),
+        )
+        .expect("read goal sidecar");
+        assert!(!raw.contains("credential-shaped-model-output"));
+        assert!(!raw.contains("/arbitrary/private/path"));
+
+        let reopened = SessionManager::new(sessions_dir).expect("reopen manager");
+        let restored = reopened
+            .load_session_goal(session_id)
+            .expect("load goal")
+            .expect("persisted goal");
+        assert_eq!(restored, durable);
+        assert_eq!(restored.to_runtime_snapshot().objective, runtime.objective);
+        assert_eq!(restored.to_runtime_snapshot().status, "paused");
+
+        reopened
+            .save_session_goal(session_id, None)
+            .expect("clear goal");
+        assert_eq!(
+            reopened.load_session_goal(session_id).expect("load clear"),
+            None
+        );
     }
 
     /// Coverage state round-trips with the money it qualifies, and a session

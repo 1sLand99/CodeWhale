@@ -170,7 +170,7 @@ impl GoalStatus {
 }
 
 /// Why an otherwise unfinished goal is paused.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalPauseReason {
     User,

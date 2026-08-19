@@ -884,6 +884,7 @@ impl App {
             backtrack: crate::tui::backtrack::BacktrackState::new(),
             current_session_id: None,
             last_known_work_state: None,
+            last_known_goal_state: None,
             current_session_metadata: None,
             session_artifacts: Vec::new(),
             trust_mode: yolo_compat || configured_trust_mode,

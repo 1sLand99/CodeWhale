@@ -266,6 +266,13 @@ pub(crate) fn apply_message_submit_outcome(
 }
 
 pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot) -> bool {
+    let durable_goal = match crate::session_manager::SessionGoalState::from_runtime(snapshot) {
+        Ok(goal) => goal,
+        Err(error) => {
+            tracing::warn!("ignoring invalid runtime goal snapshot: {error}");
+            return false;
+        }
+    };
     // An explicit engine-side clear is represented by the one canonical empty
     // state emitted by GoalState::snapshot. Require both fields so a malformed
     // objective-less Active/Blocked update cannot erase valid visible state.
@@ -279,6 +286,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
             || app.hunt.finished_at.is_some()
             || app.hunt.verdict != HuntVerdict::default();
         app.hunt = crate::tui::app::HuntState::default();
+        app.last_known_goal_state = None;
         return changed;
     }
 
@@ -308,6 +316,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         || app.hunt.pause_reason != snapshot.pause_reason
         || app.hunt.verdict != verdict;
     if !changed {
+        app.last_known_goal_state = durable_goal;
         return false;
     }
 
@@ -330,7 +339,9 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     app.hunt.pause_reason = snapshot.pause_reason;
     app.hunt.verdict = verdict;
     if objective_changed || app.hunt.started_at.is_none() {
-        app.hunt.started_at = Some(Instant::now());
+        let now = Instant::now();
+        let elapsed = std::time::Duration::from_secs(snapshot.elapsed_seconds.unwrap_or_default());
+        app.hunt.started_at = now.checked_sub(elapsed).or(Some(now));
     }
     // Freeze the elapsed timer the first time a goal leaves the active state.
     // Paused (Wounded) goals freeze too — usage snapshots keep arriving while
@@ -345,6 +356,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         }
         HuntVerdict::Hunting => app.hunt.finished_at = None,
     }
+    app.last_known_goal_state = durable_goal;
     true
 }
 
@@ -2589,15 +2601,29 @@ pub(crate) async fn apply_codewhale_owned_xai_login(
     switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await
 }
 
+#[cfg(test)]
 pub(crate) fn apply_loaded_session(
     app: &mut App,
     config: &mut Config,
     session: &SavedSession,
 ) -> Result<(), String> {
+    apply_loaded_session_with_goal(app, config, session, None)
+}
+
+pub(crate) fn apply_loaded_session_with_goal(
+    app: &mut App,
+    config: &mut Config,
+    session: &SavedSession,
+    goal: Option<&crate::session_manager::SessionGoalState>,
+) -> Result<(), String> {
     if app.session_transition_blocked() {
         return Err(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
+    }
+    if let Some(goal) = goal {
+        goal.validate()
+            .map_err(|error| format!("saved session goal is invalid: {error}"))?;
     }
     let provider_identity = config.resolve_persisted_provider_identity(
         Some(&session.metadata.model_provider),
@@ -2669,6 +2695,15 @@ pub(crate) fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
+    // Goal state is session-owned just like Work state. A legacy/no-goal
+    // session clears the previous session's objective; a durable sidecar
+    // rebuilds both the visible hunt and the EngineConfig seeded below.
+    app.hunt = crate::tui::app::HuntState::default();
+    app.last_known_goal_state = None;
+    if let Some(goal) = goal {
+        let snapshot = goal.to_runtime_snapshot();
+        let _ = apply_goal_snapshot_to_app(app, &snapshot);
+    }
     restore_loaded_session_provider(app, config, provider_identity);
     // Session records do not own a reasoning preference. `set_model_selection`
     // restores the raw explicit global preference for Auto (or releases an
@@ -2806,7 +2841,10 @@ pub(crate) fn apply_loaded_session_config_snapshot(
     let previous_provider = app.api_provider;
     let previous_provider_identity = app.provider_identity_for_persistence().to_string();
     let previous_workspace = app.workspace.clone();
-    apply_loaded_session(app, &mut next_config, session)?;
+    let goal = SessionManager::default_location()
+        .and_then(|manager| manager.load_session_goal(&session.metadata.id))
+        .map_err(|error| format!("saved session goal could not be loaded: {error}"))?;
+    apply_loaded_session_with_goal(app, &mut next_config, session, goal.as_ref())?;
     // A file load reads a fresh disk snapshot. Even when the route's enum and
     // exact identity are unchanged, endpoint, key, headers, TLS, or retry
     // settings may have changed. Rebuild from that same validated snapshot so

@@ -13,6 +13,26 @@ pub(super) fn event_owner_is_active(
     !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
 }
 
+fn persist_current_session_goal(app: &App) -> Result<(), String> {
+    let session_id = app
+        .current_session_id
+        .as_deref()
+        .ok_or_else(|| "session id is not established".to_string())?;
+    let manager = SessionManager::default_location()
+        .map_err(|error| format!("could not open the session store: {error}"))?;
+    manager
+        .save_session_goal(session_id, app.last_known_goal_state.as_ref())
+        .map_err(|error| error.to_string())
+}
+
+fn surface_goal_persistence_failure(app: &mut App, error: &str) {
+    app.push_status_toast(
+        format!("Goal progress is not durable yet: {error}"),
+        StatusToastLevel::Warning,
+        None,
+    );
+}
+
 /// Apply Space only to the owner stored by the final render pass.
 pub(super) fn handle_transcript_space(app: &mut App) -> bool {
     let Some((owner, reasoning_target)) = app.viewport.transcript_cache.take_transcript_action()
@@ -313,15 +333,22 @@ pub async fn run_tui(
             };
 
         match load_result {
-            Ok(Some(saved)) => match apply_loaded_session(&mut app, config, &saved) {
-                Ok(()) => {
-                    app.status_message = Some(format!(
-                        "Resumed session: {}",
-                        crate::session_manager::truncate_id(&saved.metadata.id)
-                    ));
+            Ok(Some(saved)) => match manager.load_session_goal(&saved.metadata.id) {
+                Ok(goal) => {
+                    match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
+                        Ok(()) => {
+                            app.status_message = Some(format!(
+                                "Resumed session: {}",
+                                crate::session_manager::truncate_id(&saved.metadata.id)
+                            ));
+                        }
+                        Err(err) => {
+                            app.status_message = Some(format!("Failed to restore session: {err}"));
+                        }
+                    }
                 }
                 Err(err) => {
-                    app.status_message = Some(format!("Failed to restore session: {err}"));
+                    app.status_message = Some(format!("Failed to restore session goal: {err}"));
                 }
             },
             Ok(None) => {
@@ -1982,6 +2009,9 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::GoalUpdated { snapshot } => {
                         if apply_goal_snapshot_to_app(app, &snapshot) {
                             transcript_batch_updated = true;
+                            if let Err(error) = persist_current_session_goal(app) {
+                                surface_goal_persistence_failure(app, &error);
+                            }
                         }
                     }
                     EngineEvent::GoalContinuationWaiting { delay_seconds } => {
@@ -2009,6 +2039,11 @@ pub(crate) async fn run_event_loop(
                         workspace,
                     } => {
                         app.current_session_id = Some(session_id.clone());
+                        if app.last_known_goal_state.is_some()
+                            && let Err(error) = persist_current_session_goal(app)
+                        {
+                            surface_goal_persistence_failure(app, &error);
+                        }
                         app.context_token_cache.borrow_mut().clear();
                         app.api_messages = messages;
                         app.system_prompt = system_prompt;
