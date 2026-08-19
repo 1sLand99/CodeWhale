@@ -10,11 +10,11 @@
 //!
 //! Two disciplines make the zero-request assertions non-vacuous:
 //!
-//! 1. `default_on_posts_exactly_one_batch` proves the client works.
-//!    Without it every "sends zero requests" test would also pass against a
-//!    client that never sends anything at all.
-//! 2. Every off-test points at a live recorder and exercises an explicit
-//!    persistent or run-scoped opt-out.
+//! 1. Short CLI tests prove enabled runs persist complete local sessions while
+//!    disabled runs create no telemetry state. Short commands deliberately do
+//!    not wait for network delivery.
+//! 2. Full `exec` tests prove the buffered events reach a live recorder while
+//!    respecting the same persistent and run-scoped opt-outs.
 //!
 //! The recorder is `http://127.0.0.1:<port>` — loopback, which is the one place
 //! `validate_endpoint` permits plaintext, and a packet that never leaves the
@@ -163,9 +163,9 @@ impl Fixture {
     }
 
     /// The cheapest subcommand that still traverses the whole telemetry
-    /// lifecycle: arm, `session_start`, dispatch, `session_end`, shutdown
-    /// flush. `completions` loads no config of its own and touches no network,
-    /// so anything the recorder sees came from telemetry.
+    /// lifecycle: arm, `session_start`, dispatch, `session_end`, local
+    /// persistence. `completions` loads no config of its own, so its telemetry
+    /// state cannot be confused with subcommand-owned state.
     fn run_completions(&self) -> Output {
         let mut command = self.command();
         command.args([
@@ -292,42 +292,53 @@ async fn assert_no_batches(server: &MockServer, why: &str) {
     );
 }
 
-async fn assert_one_batch(server: &MockServer, why: &str) -> Value {
-    let batches = recorded_batches(server).await;
-    assert_eq!(batches.len(), 1, "{why}: one session is one batch");
-    batches.into_iter().next().expect("one batch")
+fn buffered_events(fixture: &Fixture) -> Vec<Value> {
+    let path = fixture.telemetry_root().join("buffer.jsonl");
+    let body = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "read locally buffered telemetry at {}: {error}",
+            path.display()
+        )
+    });
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|error| {
+                panic!("buffered telemetry must be JSON: {error}\nline: {line}")
+            })
+        })
+        .collect()
 }
 
-// ── The client works ─────────────────────────────────────────────────────
+async fn assert_short_cli_buffered_without_network(
+    fixture: &Fixture,
+    server: &MockServer,
+    why: &str,
+) {
+    assert_no_batches(server, why).await;
+    let events = buffered_events(fixture);
+    assert!(
+        events.iter().any(|event| event["event"] == "session_start"),
+        "{why}: the local buffer must carry the session it describes: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event["event"] == "session_end"),
+        "{why}: local persistence must carry session_end: {events:?}"
+    );
+}
 
-/// Without this, every zero-request test below would also pass against a
-/// client that never sends anything.
+// ── Short CLI persistence works ──────────────────────────────────────────
+
+/// Short CLI commands must preserve the session for a later interactive flush
+/// without making command latency depend on the telemetry endpoint.
 #[tokio::test(flavor = "current_thread")]
-async fn default_on_posts_exactly_one_batch() {
+async fn default_on_buffers_one_complete_session_without_network() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
 
     fixture.run_completions();
 
-    let batch = assert_one_batch(&server, "the documented default").await;
-    assert_eq!(batch["schema_version"], 1);
-    assert_eq!(batch["surface"], "cli");
-    assert!(
-        batch["install_id"]
-            .as_str()
-            .is_some_and(|id| id.len() == 36),
-        "install_id must be a UUID, got {:?}",
-        batch["install_id"]
-    );
-    let events = batch["events"].as_array().expect("events array");
-    assert!(
-        events.iter().any(|event| event["event"] == "session_start"),
-        "a batch must carry the session it describes: {batch}"
-    );
-    assert!(
-        events.iter().any(|event| event["event"] == "session_end"),
-        "the shutdown flush must carry session_end: {batch}"
-    );
+    assert_short_cli_buffered_without_network(&fixture, &server, "the documented default").await;
 }
 
 // ── Off is real ──────────────────────────────────────────────────────────
@@ -348,6 +359,10 @@ async fn config_file_only_opt_out_sends_zero_requests() {
     assert!(output.status.success());
 
     assert_no_batches(&server, "`telemetry = false` in the config file").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "a fresh config-file opt-out must create no telemetry state"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -370,6 +385,10 @@ async fn telemetry_disabled_by_env_sends_zero_requests() {
         .expect("run codewhale-tui completions");
 
     assert_no_batches(&server, "`CODEWHALE_TELEMETRY=0`").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "a fresh run-scoped opt-out must create no telemetry state"
+    );
 }
 
 /// An unparseable env value fails **closed**, rather than falling through to
@@ -394,25 +413,34 @@ async fn an_unparseable_telemetry_env_value_sends_zero_requests() {
         .expect("run codewhale-tui completions");
 
     assert_no_batches(&server, "`CODEWHALE_TELEMETRY=maybe`").await;
+    assert!(
+        !fixture.telemetry_root().exists(),
+        "a fresh forced-off run must create no telemetry state"
+    );
 }
 
 /// A fresh headless run follows the documented default even before the
 /// interactive disclosure has been shown.
 #[tokio::test(flavor = "current_thread")]
-async fn telemetry_enabled_without_notice_posts_one_batch() {
+async fn telemetry_enabled_without_notice_buffers_a_complete_session() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     // Deliberately no `record_notice`.
 
     fixture.run_completions();
 
-    assert_one_batch(&server, "default-on without a notice decision").await;
+    assert_short_cli_buffered_without_network(
+        &fixture,
+        &server,
+        "default-on without a notice decision",
+    )
+    .await;
 }
 
 /// A prior acceptance does not pause counting when the disclosure version
 /// changes; the refreshed notice is still owed on the next interactive run.
 #[tokio::test(flavor = "current_thread")]
-async fn a_stale_accepted_notice_version_posts_one_batch() {
+async fn a_stale_accepted_notice_version_buffers_a_complete_session() {
     let server = start_recorder().await;
     let fixture = Fixture::new().with_endpoint(&server.uri());
     fixture.write_config("telemetry = true\n");
@@ -424,7 +452,8 @@ async fn a_stale_accepted_notice_version_posts_one_batch() {
 
     fixture.run_completions();
 
-    assert_one_batch(
+    assert_short_cli_buffered_without_network(
+        &fixture,
         &server,
         "an acceptance recorded for an older notice version",
     )
@@ -609,7 +638,12 @@ async fn skip_onboarding_writes_no_telemetry_decision() {
             "skip-onboarding must leave the telemetry decision unset"
         );
     }
-    assert_one_batch(&server, "`--skip-onboarding` follows the default").await;
+    assert_short_cli_buffered_without_network(
+        &fixture,
+        &server,
+        "`--skip-onboarding` follows the default",
+    )
+    .await;
 }
 
 // ── Payload red lines, through a real turn ───────────────────────────────
