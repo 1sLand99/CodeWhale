@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use codewhale_execpolicy::ExecPolicyEngine;
@@ -10815,16 +10817,46 @@ pub fn active_provider_uses_env_only_api_key(config: &Config) -> bool {
 /// provider table directly (never runs legacy migration, never opens a
 /// write-capable backend). Returns the key only when it reads as a real
 /// literal, not a placeholder.
+struct UserGlobalConfigCache {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    json: serde_json::Value,
+}
+
+fn user_global_config_json() -> Option<serde_json::Value> {
+    static CACHE: Mutex<Option<UserGlobalConfigCache>> = Mutex::new(None);
+    let path = codewhale_config::default_config_path().ok()?;
+    let meta = fs::metadata(&path).ok()?;
+    let modified = meta.modified().ok();
+    let len = meta.len();
+    let mut guard = CACHE.lock().ok()?;
+    if let Some(cached) = guard.as_ref()
+        && cached.path == path
+        && cached.modified == modified
+        && cached.len == len
+    {
+        return Some(cached.json.clone());
+    }
+    let text = fs::read_to_string(&path).ok()?;
+    let doc: codewhale_config::ConfigToml = toml::from_str(&text).ok()?;
+    let json = serde_json::to_value(&doc).ok()?;
+    *guard = Some(UserGlobalConfigCache {
+        path,
+        modified,
+        len,
+        json: json.clone(),
+    });
+    Some(json)
+}
+
 fn user_global_config_api_key(provider: ApiProvider) -> Option<String> {
     if provider == ApiProvider::Custom {
         // Custom providers are per-config by nature; the probe applies to
         // built-in ids whose keys are saved under the user-global file.
         return None;
     }
-    let path = codewhale_config::default_config_path().ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc: codewhale_config::ConfigToml = toml::from_str(&text).ok()?;
-    let json = serde_json::to_value(&doc).ok()?;
+    let json = user_global_config_json()?;
     let provider_config_key = provider.metadata().map_or_else(
         || provider.as_str(),
         |metadata| metadata.provider_config_key(),

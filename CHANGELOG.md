@@ -70,6 +70,8 @@ abort under load.
 - `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
   the empty palette and bare `/` menu instead of only under Advanced
   (#5442, #5439).
+- The model picker no longer re-parses `~/.codewhale/config.toml` once per
+  provider when deciding who has a saved key.
 
 ### Added
 
