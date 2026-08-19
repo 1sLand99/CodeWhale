@@ -106,7 +106,7 @@ main, header, footer, nav { position: relative; z-index: 1; }
 
 /* ---------- type ---------- */
 .font-display { font-family: var(--font-display), "Fraunces", "Noto Serif SC", Georgia, serif; }
-.font-cjk { font-family: "Noto Serif SC", "Source Han Serif SC", serif; }
+.font-cjk { font-family: var(--font-cjk), "Noto Serif SC", "Source Han Serif SC", serif; }
 
 /* CJK paragraph rhythm — looser leading, wider tracking for body; tighter for headings */
 .cjk-body {

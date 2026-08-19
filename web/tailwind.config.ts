@@ -29,9 +29,9 @@ export default {
         // resolves the same stack). Space Grotesk was never loaded — naming it
         // here only produced a utility that silently fell back to sans-serif.
         display: ["var(--font-display)", '"Fraunces"', '"Noto Serif SC"', "Georgia", "serif"],
-        body: ['"IBM Plex Sans"', '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
-        cjk: ['"Noto Serif SC"', '"Source Han Serif SC"', "serif"],
-        mono: ['"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],
+        body: ["var(--font-body)", '"IBM Plex Sans"', '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
+        cjk: ["var(--font-cjk)", '"Noto Serif SC"', '"Source Han Serif SC"', "serif"],
+        mono: ["var(--font-mono)", '"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],
       },
       letterSpacing: {
         crisp: "-0.018em",

@@ -59,7 +59,10 @@ describe("page metadata", () => {
         card: "summary_large_image",
         title,
         description,
-        images: [`${SITE_URL}/opengraph-image`],
+        // The card must carry its own alt text: Twitter reads
+        // `twitter:image:alt` and does not inherit `og:image:alt` once a
+        // `twitter:image` tag is present.
+        images: [{ url: `${SITE_URL}/opengraph-image`, alt: OG_ALT }],
       });
     },
   );
