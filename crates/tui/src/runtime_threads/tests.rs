@@ -2681,6 +2681,52 @@ fn runtime_event_sequences_serialize_across_real_processes() -> Result<()> {
 }
 
 #[test]
+fn events_from_offset_does_not_reread_earlier_records() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let thread_id = "thr_cursor";
+    for index in 0..3 {
+        store.append_event_transaction(
+            thread_id.to_string(),
+            None,
+            None,
+            "cursor.event".to_string(),
+            json!({ "index": index }),
+            Duration::from_secs(1),
+        )?;
+    }
+
+    let (first, cursor) = store.events_from_offset(thread_id, 0, None)?;
+    assert_eq!(first.len(), 3);
+    assert!(cursor > 0);
+    let (empty, same_cursor) = store.events_from_offset(thread_id, cursor, None)?;
+    assert!(empty.is_empty());
+    assert_eq!(same_cursor, cursor);
+
+    store.append_event_transaction(
+        thread_id.to_string(),
+        None,
+        None,
+        "cursor.event".to_string(),
+        json!({ "index": 3 }),
+        Duration::from_secs(1),
+    )?;
+    let (tail, next_cursor) = store.events_from_offset(thread_id, cursor, None)?;
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].payload["index"], 3);
+    assert!(next_cursor > cursor);
+
+    let (limited, limited_cursor) = store.events_from_offset(thread_id, 0, Some(2))?;
+    assert_eq!(limited.len(), 2);
+    assert!(limited_cursor < next_cursor);
+    let (rest, _) = store.events_from_offset(thread_id, limited_cursor, None)?;
+    assert_eq!(rest.len(), 2);
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
 fn runtime_event_lock_timeout_is_non_mutating_and_holder_death_releases_lock() -> Result<()> {
     let dir = test_runtime_dir();
     let store = RuntimeThreadStore::open(dir.clone())?;

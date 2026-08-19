@@ -2005,13 +2005,14 @@ mod tests {
         async fn execute(
             &self,
             _task: ExecutionTask,
-            _events: mpsc::UnboundedSender<TaskExecutionEvent>,
+            _events: mpsc::Sender<TaskExecutionEvent>,
             _cancel: CancellationToken,
         ) -> TaskExecutionResult {
             TaskExecutionResult {
                 status: TaskStatus::Completed,
                 result_text: Some("done".to_string()),
                 error: None,
+                terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
             }
         }
     }
@@ -2021,13 +2022,14 @@ mod tests {
         async fn execute(
             &self,
             _task: ExecutionTask,
-            _events: mpsc::UnboundedSender<TaskExecutionEvent>,
+            _events: mpsc::Sender<TaskExecutionEvent>,
             _cancel: CancellationToken,
         ) -> TaskExecutionResult {
             TaskExecutionResult {
                 status: TaskStatus::Completed,
                 result_text: Some(AUTOMATION_WATCHER_NO_REPORT_SENTINEL.to_string()),
                 error: None,
+                terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
             }
         }
     }
@@ -2041,6 +2043,7 @@ mod tests {
             default_mode: "plan".to_string(),
             allow_shell: true,
             trust_mode: true,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
         }
     }
 

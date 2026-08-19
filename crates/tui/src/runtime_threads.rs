@@ -1308,6 +1308,45 @@ impl RuntimeThreadStore {
         Ok(out)
     }
 
+    /// Incremental JSONL replay from a byte cursor. The returned cursor only
+    /// advances past complete newline-terminated records so a live tail can
+    /// be retried without rereading earlier history.
+    pub fn events_from_offset(
+        &self,
+        thread_id: &str,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> Result<(Vec<RuntimeEventRecord>, u64)> {
+        let path = self.events_path(thread_id)?;
+        self.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
+            reject_symlinked_store_dir(&self.events_dir)?;
+            if !path.exists() {
+                return Ok((Vec::new(), offset));
+            }
+            let mut file =
+                open_runtime_store_file(&path, "Runtime event cursor replay", |options| {
+                    options.read(true);
+                })?;
+            let committed_len = file
+                .metadata()
+                .with_context(|| format!("Failed to inspect {}", path.display()))?
+                .len();
+            let start = offset.min(committed_len);
+            file.seek(SeekFrom::Start(start))?;
+            let mut reader = BufReader::new(file.take(committed_len.saturating_sub(start)));
+            let mut out = Vec::new();
+            let mut cursor = start;
+            while let Some((event, consumed)) = read_complete_event_bytes(&mut reader, &path)? {
+                cursor += consumed;
+                out.push(event);
+                if limit.is_some_and(|limit| out.len() >= limit) {
+                    break;
+                }
+            }
+            Ok((out, cursor))
+        })
+    }
+
     fn publish_event_replay(
         &self,
         thread_id: &str,
@@ -5671,6 +5710,19 @@ impl RuntimeThreadManager {
             .context("Runtime event history task failed")?
     }
 
+    pub(crate) async fn events_from_offset_async(
+        &self,
+        thread_id: &str,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> Result<(Vec<RuntimeEventRecord>, u64)> {
+        let store = self.store.clone();
+        let thread_id = thread_id.to_string();
+        tokio::task::spawn_blocking(move || store.events_from_offset(&thread_id, offset, limit))
+            .await
+            .context("Runtime event cursor task failed")?
+    }
+
     pub(crate) async fn replay_events(
         &self,
         thread_id: &str,
@@ -8142,6 +8194,14 @@ fn read_complete_event(
     reader: &mut impl BufRead,
     path: &Path,
 ) -> Result<Option<RuntimeEventRecord>> {
+    Ok(read_complete_event_bytes(reader, path)?.map(|(event, _)| event))
+}
+
+fn read_complete_event_bytes(
+    reader: &mut impl BufRead,
+    path: &Path,
+) -> Result<Option<(RuntimeEventRecord, u64)>> {
+    let mut skipped = 0u64;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -8155,12 +8215,13 @@ fn read_complete_event(
         if !line.ends_with('\n') {
             return Ok(None);
         }
+        skipped += u64::try_from(line.len()).unwrap_or(u64::MAX);
         if line.trim().is_empty() {
             continue;
         }
         let event = serde_json::from_str(&line)
             .with_context(|| format!("Failed to parse event line in {}", path.display()))?;
-        return Ok(Some(event));
+        return Ok(Some((event, skipped)));
     }
 }
 

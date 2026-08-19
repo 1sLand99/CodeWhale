@@ -178,24 +178,28 @@ impl crate::task_manager::TaskExecutor for MockExecutor {
     async fn execute(
         &self,
         _task: crate::task_manager::ExecutionTask,
-        events: mpsc::UnboundedSender<crate::task_manager::TaskExecutionEvent>,
+        events: mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> crate::task_manager::TaskExecutionResult {
-        let _ = events.send(crate::task_manager::TaskExecutionEvent::Status {
-            message: "started".to_string(),
-        });
+        let _ = events
+            .send(crate::task_manager::TaskExecutionEvent::Status {
+                message: "started".to_string(),
+            })
+            .await;
         sleep(Duration::from_millis(100)).await;
         if cancel.is_cancelled() {
             return crate::task_manager::TaskExecutionResult {
                 status: crate::task_manager::TaskStatus::Canceled,
                 result_text: None,
                 error: None,
+                terminal_reason: crate::task_manager::TaskTerminalReason::Canceled,
             };
         }
         crate::task_manager::TaskExecutionResult {
             status: crate::task_manager::TaskStatus::Completed,
             result_text: Some("ok".to_string()),
             error: None,
+            terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
         }
     }
 }
@@ -818,6 +822,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             default_mode: "agent".to_string(),
             allow_shell: false,
             trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
         },
         Arc::new(MockExecutor),
     )

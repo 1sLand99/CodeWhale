@@ -20926,6 +20926,7 @@ mod work_sidebar_projection_tests {
             lifecycle_seq: 1,
             hunt_verdict: None,
             error: None,
+            terminal_reason: None,
             thread_id: None,
             turn_id: None,
             owner_session_id: owner_session_id.map(str::to_string),
