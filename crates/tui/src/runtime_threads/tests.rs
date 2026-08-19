@@ -9535,3 +9535,358 @@ fn summary_strip_handles_missing_end_sentinel() {
     let stripped = strip_summary_section(&broken);
     assert_eq!(stripped, "Base.");
 }
+
+/// Release acceptance: the full two-task Agent Mail matrix in one run, with
+/// evidence written to disk. Run explicitly:
+///   CODEWHALE_MAIL_ACCEPTANCE_DIR=/Volumes/VIXinSSD/CW/artifacts/... \
+///     cargo test -p codewhale-tui --lib agent_mail_release_acceptance -- --ignored
+#[tokio::test]
+#[ignore = "release acceptance: run explicitly with CODEWHALE_MAIL_ACCEPTANCE_DIR"]
+async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
+    use codewhale_protocol::agent_mail::AGENT_MAIL_EVENT_READ;
+    use std::time::Instant as StdInstant;
+
+    let runtime_dir = test_runtime_dir();
+    let workspace = runtime_dir.join("workspace-shared");
+    let foreign_workspace = runtime_dir.join("workspace-foreign");
+    fs::create_dir_all(&workspace)?;
+    fs::create_dir_all(&foreign_workspace)?;
+    let artifacts = std::env::var("CODEWHALE_MAIL_ACCEPTANCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| runtime_dir.join("acceptance-artifacts"));
+    fs::create_dir_all(&artifacts)?;
+
+    let manager = test_manager(runtime_dir.clone())?;
+    let task_a = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            task_id: Some("task_a".to_string()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    let task_b = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace),
+            task_id: Some("task_b".to_string()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    let task_foreign = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(foreign_workspace),
+            task_id: Some("task_foreign".to_string()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+    let harness_b = install_mock_engine(&manager, &task_b.id).await;
+
+    let credential_summary = "Handoff: the staging token OPENAI_API_KEY=[REDACTED-VALUE] \
+        must rotate; scratch DB dump lives under /tmp/private/staging.sql. \
+        Verify the deploy checklist before the next release cut.";
+
+    // (1) Queue-only mail A -> B; B persists it without sampling (no turn).
+    let m1 = manager
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_m1",
+            &task_a.id,
+            &task_b.id,
+            "task_a",
+            credential_summary,
+            AgentMailDeliveryMode::QueueOnly,
+        ))
+        .await?;
+    assert!(!m1.idempotent_replay);
+    assert_eq!(m1.envelope.status, AgentMailStatus::Queued);
+    let serialized = serde_json::to_string(&m1.envelope)?;
+    assert!(!serialized.contains("sk-fixture-secret"), "{serialized}");
+    assert!(!serialized.contains("/tmp/private"), "{serialized}");
+    assert!(serialized.contains("redacted-credential"), "{serialized}");
+    assert!(serialized.contains("redacted-path"), "{serialized}");
+    assert!(
+        manager.store.list_turns_for_thread(&task_b.id)?.is_empty(),
+        "queue-only mail must not sample the destination"
+    );
+
+    // (2) Replaying the same envelope is idempotent — no duplicate event.
+    let m1_replay = manager
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_m1",
+            &task_a.id,
+            &task_b.id,
+            "task_a",
+            credential_summary,
+            AgentMailDeliveryMode::QueueOnly,
+        ))
+        .await?;
+    assert!(m1_replay.idempotent_replay);
+    assert_eq!(m1_replay.envelope, m1.envelope);
+    assert_eq!(
+        mail_event_count(&manager, &task_b.id, AGENT_MAIL_EVENT_QUEUED),
+        1
+    );
+
+    // (3) Unauthorized cross-workspace delivery fails closed.
+    let denied = manager
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_foreign",
+            &task_a.id,
+            &task_foreign.id,
+            "task_a",
+            "cross workspace attempt",
+            AgentMailDeliveryMode::QueueOnly,
+        ))
+        .await
+        .expect_err("cross-workspace mail must fail closed")
+        .to_string();
+    assert!(denied.contains("ownership denied"), "{denied}");
+    assert!(
+        manager
+            .list_agent_mail_for_thread(&task_foreign.id)
+            .await?
+            .is_empty()
+    );
+
+    // (4) A real terminal turn on B is the safe boundary: the wake envelope
+    // delivers exactly once; the queue-only envelope stays queued.
+    let m2 = manager
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_m2",
+            &task_a.id,
+            &task_b.id,
+            "task_a",
+            "Wake: the fixture suite now passes; land the follow-up step.",
+            AgentMailDeliveryMode::WakeAtSafeBoundary,
+        ))
+        .await?;
+    let explicit_turn = manager
+        .start_turn(
+            &task_b.id,
+            StartTurnRequest {
+                prompt: "ordinary work turn on task B".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    harness_b
+        .tx_event
+        .send(EngineEvent::MessageComplete { index: 0 })
+        .await?;
+    harness_b
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let explicit_terminal = wait_for_terminal_turn(
+        &manager,
+        &explicit_turn.id,
+        TURN_SETTLEMENT_DEADLOCK_TIMEOUT,
+    )
+    .await?;
+    assert_eq!(explicit_terminal.status, RuntimeTurnStatus::Completed);
+
+    let deadline = StdInstant::now() + Duration::from_secs(10);
+    let (m2_delivered, wake_turns) = loop {
+        let inbox = manager.list_agent_mail_for_thread(&task_b.id).await?;
+        let envelope = inbox
+            .iter()
+            .find(|mail| mail.message_id.as_str() == "mail_accept_m2")
+            .expect("wake envelope present");
+        let turns = manager
+            .store
+            .list_turns_for_thread(&task_b.id)?
+            .into_iter()
+            .filter(|turn| turn.agent_mail_message_id.as_deref() == Some("mail_accept_m2"))
+            .count();
+        if envelope.status == AgentMailStatus::Delivered && turns == 1 {
+            break (envelope.clone(), turns);
+        }
+        if StdInstant::now() > deadline {
+            anyhow::bail!(
+                "wake delivery did not settle: status={:?} turns={turns}",
+                envelope.status
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        wake_turns, 1,
+        "wake mail must produce exactly one follow-up"
+    );
+    assert!(m2_delivered.delivery_turn_id.is_some());
+    assert_eq!(
+        mail_event_count(&manager, &task_b.id, AGENT_MAIL_EVENT_DELIVERING),
+        1
+    );
+    assert_eq!(
+        mail_event_count(&manager, &task_b.id, AGENT_MAIL_EVENT_DELIVERED),
+        1
+    );
+    let inbox_after_boundary = manager.list_agent_mail_for_thread(&task_b.id).await?;
+    let m1_after = inbox_after_boundary
+        .iter()
+        .find(|mail| mail.message_id.as_str() == "mail_accept_m1")
+        .expect("queue-only envelope present");
+    assert_eq!(
+        m1_after.status,
+        AgentMailStatus::Queued,
+        "queue-only mail must wait for an explicit delivery request"
+    );
+
+    // (5) Read transition publishes exactly one READ event.
+    let m2_read = manager
+        .mark_agent_mail_read(&task_b.id, &m2.envelope.message_id)
+        .await?;
+    assert_eq!(m2_read.status, AgentMailStatus::Read);
+    assert!(m2_read.read_at.is_some());
+    assert_eq!(
+        mail_event_count(&manager, &task_b.id, AGENT_MAIL_EVENT_READ),
+        1
+    );
+
+    // (6) Queued mail survives a full runtime restart; replay stays idempotent.
+    let m3 = manager
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_m3",
+            &task_a.id,
+            &task_b.id,
+            "task_a",
+            "Post-restart handoff: re-run the acceptance matrix.",
+            AgentMailDeliveryMode::QueueOnly,
+        ))
+        .await?;
+    drop(manager);
+    let reopened = test_manager(runtime_dir.clone())?;
+    let inbox_restarted = reopened.list_agent_mail_for_thread(&task_b.id).await?;
+    assert!(
+        inbox_restarted
+            .iter()
+            .any(|mail| mail.message_id == m3.envelope.message_id
+                && mail.status == AgentMailStatus::Queued)
+    );
+    assert!(
+        inbox_restarted
+            .iter()
+            .any(|mail| mail.message_id == m2.envelope.message_id
+                && mail.status == AgentMailStatus::Read)
+    );
+    let m1_restart_replay = reopened
+        .queue_agent_mail(agent_mail_request(
+            "mail_accept_m1",
+            &task_a.id,
+            &task_b.id,
+            "task_a",
+            credential_summary,
+            AgentMailDeliveryMode::QueueOnly,
+        ))
+        .await?;
+    assert!(m1_restart_replay.idempotent_replay);
+    // one queued event per envelope (m1, m2, m3) — replay added none
+    assert_eq!(
+        mail_event_count(&reopened, &task_b.id, AGENT_MAIL_EVENT_QUEUED),
+        3
+    );
+
+    // (7) Evidence: sanitized envelopes, persisted events, turn receipts,
+    // restart state, and a SHA-256 manifest.
+    let envelopes = reopened.list_agent_mail_for_thread(&task_b.id).await?;
+    let envelope_dump = serde_json::to_string_pretty(&envelopes)?;
+    assert!(!envelope_dump.contains("sk-fixture-secret"));
+    assert!(!envelope_dump.contains("/tmp/private"));
+    fs::write(artifacts.join("envelopes-b.sanitized.json"), &envelope_dump)?;
+
+    let events = reopened.events_since(&task_b.id, None)?;
+    let mut event_lines = String::new();
+    for event in &events {
+        event_lines.push_str(&serde_json::to_string(event)?);
+        event_lines.push('\n');
+    }
+    assert!(!event_lines.contains("sk-fixture-secret"));
+    fs::write(artifacts.join("events-b.jsonl"), &event_lines)?;
+
+    let turns_b = reopened.store.list_turns_for_thread(&task_b.id)?;
+    let turn_receipts: Vec<_> = turns_b
+        .iter()
+        .map(|turn| {
+            serde_json::json!({
+                "turn_id": turn.id,
+                "status": turn.status,
+                "agent_mail_message_id": turn.agent_mail_message_id,
+                "input_summary": turn.input_summary,
+                "created_at": turn.created_at,
+            })
+        })
+        .collect();
+    let stub_request_counts = serde_json::json!({
+        "task_b_explicit_user_turns": 1,
+        "task_b_agent_mail_follow_up_turns": 1,
+        "task_b_turns_total": turn_receipts.len(),
+        "task_a_provider_requests": 0,
+        "note": "mock engine channel; queue-only mail sampled zero turns",
+    });
+    fs::write(
+        artifacts.join("turns-b.json"),
+        serde_json::to_string_pretty(&turn_receipts)?,
+    )?;
+    fs::write(
+        artifacts.join("stub-request-counts.json"),
+        serde_json::to_string_pretty(&stub_request_counts)?,
+    )?;
+    fs::write(
+        artifacts.join("restart-inbox-b.json"),
+        serde_json::to_string_pretty(&inbox_restarted)?,
+    )?;
+    fs::write(
+        artifacts.join("boundary-receipt.md"),
+        format!(
+            "# Agent Mail acceptance boundary receipt\n\n\
+             explicit turn {} -> {:?}\n\
+             wake envelope {} -> {:?} (delivery_turn_id={:?})\n\
+             queue-only envelope {} stayed {:?} across the boundary\n",
+            explicit_terminal.id,
+            explicit_terminal.status,
+            m2.envelope.message_id,
+            m2_delivered.status,
+            m2_delivered.delivery_turn_id,
+            m1.envelope.message_id,
+            m1_after.status,
+        ),
+    )?;
+
+    let mut manifest = serde_json::Map::new();
+    for name in [
+        "envelopes-b.sanitized.json",
+        "events-b.jsonl",
+        "turns-b.json",
+        "stub-request-counts.json",
+        "restart-inbox-b.json",
+        "boundary-receipt.md",
+    ] {
+        let bytes = fs::read(artifacts.join(name))?;
+        manifest.insert(
+            name.to_string(),
+            serde_json::json!({
+                "sha256": crate::hashing::sha256_hex(&bytes),
+                "bytes": bytes.len(),
+            }),
+        );
+    }
+    fs::write(
+        artifacts.join("manifest.json"),
+        serde_json::to_string_pretty(&serde_json::Value::Object(manifest))?,
+    )?;
+    Ok(())
+}
+
+fn mail_event_count(manager: &RuntimeThreadManager, thread_id: &str, event_name: &str) -> usize {
+    manager
+        .events_since(thread_id, None)
+        .expect("events readable")
+        .into_iter()
+        .filter(|event| event.event == event_name)
+        .count()
+}
