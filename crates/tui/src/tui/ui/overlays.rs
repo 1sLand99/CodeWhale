@@ -31,7 +31,9 @@ pub(crate) fn open_setup_checkpoint_if_due(
     // A fresh wizard invalidates any in-flight model draft from a prior one.
     let _ = app.next_draft_gen();
     app.view_stack
-        .push(crate::tui::setup::SetupWizardView::new_for_app(app, config));
+        .push(crate::tui::setup::SetupWizardView::new_checkpoint_for_app(
+            app, config,
+        ));
     true
 }
 

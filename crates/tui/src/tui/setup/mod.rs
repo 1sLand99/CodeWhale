@@ -162,6 +162,11 @@ pub struct SetupWizardView {
     state: SetupState,
     selected: usize,
     locale: Locale,
+    /// The full `/setup` surface owns a ten-step rail. The versioned
+    /// working-agreement checkpoint is a standalone handoff, including when
+    /// it follows first-run onboarding, so it must not borrow that rail's
+    /// `4/10` position.
+    show_wizard_progress: bool,
     facts: SetupRuntimeFacts,
     guided_draft: GuidedConstitutionDraft,
     /// First-run shows one plain-language initiative choice. The six-axis
@@ -2247,6 +2252,7 @@ impl SetupWizardView {
             state,
             selected,
             locale,
+            show_wizard_progress: true,
             facts: SetupRuntimeFacts::default(),
             guided_draft: GuidedConstitutionDraft::default(),
             constitution_advanced: false,
@@ -2265,6 +2271,15 @@ impl SetupWizardView {
     #[must_use]
     pub fn new_for_app(app: &App, config: &Config) -> Self {
         Self::new_with_facts(
+            load_setup_state_for_app(app, config),
+            app.ui_locale,
+            SetupRuntimeFacts::from_app_config(app, config),
+        )
+    }
+
+    #[must_use]
+    pub fn new_checkpoint_for_app(app: &App, config: &Config) -> Self {
+        Self::new_checkpoint_with_facts(
             load_setup_state_for_app(app, config),
             app.ui_locale,
             SetupRuntimeFacts::from_app_config(app, config),
@@ -2302,6 +2317,7 @@ impl SetupWizardView {
             state,
             selected,
             locale,
+            show_wizard_progress: true,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             constitution_advanced: false,
@@ -2327,6 +2343,7 @@ impl SetupWizardView {
             state,
             selected: visible_step_index(step),
             locale,
+            show_wizard_progress: true,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             constitution_advanced: false,
@@ -2339,6 +2356,30 @@ impl SetupWizardView {
             runtime_preset: SetupRuntimePreset::default(),
             runtime_preset_preview_seen: false,
             body_scroll: 0,
+        }
+    }
+
+    fn new_checkpoint_with_facts(
+        state: SetupState,
+        locale: Locale,
+        facts: SetupRuntimeFacts,
+    ) -> Self {
+        let mut view = Self::new_at_with_facts(state, locale, SetupStep::Constitution, facts);
+        view.show_wizard_progress = false;
+        view
+    }
+
+    fn surface_title(&self) -> String {
+        let wizard_title = tr(self.locale, MessageId::SetupWizardTitle);
+        if self.show_wizard_progress {
+            format!(
+                "{wizard_title} · {} {}/{}",
+                tr(self.locale, MessageId::SetupWizardProgress),
+                self.selected + 1,
+                STEP_SPECS.len()
+            )
+        } else {
+            wizard_title.into_owned()
         }
     }
 
@@ -3126,20 +3167,7 @@ impl ModalView for SetupWizardView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let progress = format!(
-            "{} {}/{}",
-            tr(self.locale, MessageId::SetupWizardProgress),
-            self.selected + 1,
-            STEP_SPECS.len()
-        );
-        let inner = render_underwater_surface(
-            area,
-            buf,
-            format!(
-                "{} · {progress}",
-                tr(self.locale, MessageId::SetupWizardTitle)
-            ),
-        );
+        let inner = render_underwater_surface(area, buf, self.surface_title());
         let simple_constitution =
             self.selected_step() == SetupStep::Constitution && !self.constitution_advanced;
         let mut hints = if simple_constitution {
@@ -5246,6 +5274,74 @@ mod tests {
             start_in_agent_mode: true,
             skip_onboarding: false,
             ..crate::test_support::test_tui_options(workspace)
+        }
+    }
+
+    fn rendered_setup_text(view: &SetupWizardView, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn constitution_checkpoint_uses_standalone_title_at_wide_and_compact_sizes() {
+        let checkpoint = SetupWizardView::new_checkpoint_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupRuntimeFacts::default(),
+        );
+        let full_wizard = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts::default(),
+        );
+
+        for (width, height) in [(80, 24), (40, 12)] {
+            let checkpoint_text = rendered_setup_text(&checkpoint, width, height);
+            assert!(
+                checkpoint_text.contains("Setup"),
+                "{width}x{height}: standalone title must remain visible:\n{checkpoint_text}"
+            );
+            assert!(
+                checkpoint_text.contains("Working agreement"),
+                "{width}x{height}: checkpoint purpose must remain visible:\n{checkpoint_text}"
+            );
+            assert!(
+                !checkpoint_text.contains("Step 4/10"),
+                "{width}x{height}: checkpoint must not regress into the ten-step wizard:\n{checkpoint_text}"
+            );
+
+            let wizard_text = rendered_setup_text(&full_wizard, width, height);
+            assert!(
+                wizard_text.contains("Setup · Step 4/10"),
+                "{width}x{height}: explicit setup wizard must retain real progress:\n{wizard_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_checkpoint_title_reuses_each_locale_pack() {
+        for &locale in Locale::shipped() {
+            let checkpoint = SetupWizardView::new_checkpoint_with_facts(
+                SetupState::default(),
+                locale,
+                SetupRuntimeFacts::default(),
+            );
+            assert_eq!(
+                checkpoint.surface_title(),
+                tr(locale, MessageId::SetupWizardTitle),
+                "{}: checkpoint title must reuse the localized standalone title",
+                locale.tag(),
+            );
         }
     }
 
