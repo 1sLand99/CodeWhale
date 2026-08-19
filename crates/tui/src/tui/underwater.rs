@@ -1911,6 +1911,57 @@ mod tests {
         );
     }
 
+    /// The compact-layout rebuild has its own span and width accounting, so
+    /// #5512 stays fixed only if the selected mark survives that path too.
+    /// Exercise every representative layout width from the TUI contract,
+    /// including the 40-column floor and both normal/wide transitions.
+    #[test]
+    fn status_indicator_owns_one_leading_slot_at_every_supported_width() {
+        for width in [40, 60, 80, 100, 140] {
+            let render = |value: &str| {
+                let mut app = test_app();
+                app.status_indicator = value.to_string();
+                header_text(&app, width)
+            };
+
+            let cw = render("cw");
+            let whale = render("whale");
+            let dots = render("dots");
+            let off = render("off");
+
+            assert!(
+                cw.starts_with("cw  "),
+                "{width}-column header lost the cw mark: {cw:?}"
+            );
+            assert_eq!(
+                cw.matches("cw").count(),
+                1,
+                "{width}-column header duplicated the cw mark: {cw:?}"
+            );
+            assert_eq!(
+                whale, cw,
+                "{width}-column legacy whale setting must use the cw mark"
+            );
+            assert!(
+                dots.starts_with("◍  "),
+                "{width}-column header lost the idle dots mark: {dots:?}"
+            );
+            assert_eq!(
+                dots.matches('◍').count(),
+                1,
+                "{width}-column header duplicated the dots mark: {dots:?}"
+            );
+            assert!(
+                !off.starts_with("cw  ") && !off.starts_with("◍  "),
+                "{width}-column off setting retained a status mark: {off:?}"
+            );
+            assert_ne!(
+                off, cw,
+                "{width}-column off setting must reclaim the mark slot"
+            );
+        }
+    }
+
     fn header_text(app: &App, width: u16) -> String {
         let area = Rect::new(0, 0, width, 1);
         let mut buf = Buffer::empty(area);
