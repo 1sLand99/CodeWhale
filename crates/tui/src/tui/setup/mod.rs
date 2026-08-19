@@ -164,6 +164,10 @@ pub struct SetupWizardView {
     locale: Locale,
     facts: SetupRuntimeFacts,
     guided_draft: GuidedConstitutionDraft,
+    /// First-run shows one plain-language initiative choice. The six-axis
+    /// editor remains available explicitly, but never competes with the
+    /// recommended path on first paint.
+    constitution_advanced: bool,
     freeform_note: String,
     editing_freeform_note: bool,
     guided_preview_seen: bool,
@@ -2030,7 +2034,7 @@ fn autonomy_priority(preference: AutonomyPreference, locale: Locale) -> &'static
             "Stop and ask before editing files, running commands, or choosing between ambiguous product paths."
         }
         (_, AutonomyPreference::Balanced) => {
-            "Act directly on clear low-risk tasks; confirm before risky, destructive, or ambiguous actions."
+            "Do clear, low-risk work; ask before risky, destructive, or unclear work."
         }
         (_, AutonomyPreference::Autonomous) => {
             "Batch routine safe work, then stop for destructive, credential, publishing, high-cost, legal, or security-risk actions."
@@ -2245,6 +2249,7 @@ impl SetupWizardView {
             locale,
             facts: SetupRuntimeFacts::default(),
             guided_draft: GuidedConstitutionDraft::default(),
+            constitution_advanced: false,
             freeform_note: String::new(),
             editing_freeform_note: false,
             guided_preview_seen: false,
@@ -2299,6 +2304,7 @@ impl SetupWizardView {
             locale,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
+            constitution_advanced: false,
             freeform_note: String::new(),
             editing_freeform_note: false,
             guided_preview_seen: false,
@@ -2323,6 +2329,7 @@ impl SetupWizardView {
             locale,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
+            constitution_advanced: false,
             freeform_note: String::new(),
             editing_freeform_note: false,
             guided_preview_seen: false,
@@ -2337,11 +2344,13 @@ impl SetupWizardView {
 
     fn move_next(&mut self) {
         self.selected = (self.selected + 1).min(STEP_SPECS.len().saturating_sub(1));
+        self.constitution_advanced = false;
         self.body_scroll = 0;
     }
 
     fn move_back(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.constitution_advanced = false;
         self.body_scroll = 0;
     }
 
@@ -2631,21 +2640,56 @@ impl SetupWizardView {
         })
     }
 
-    fn commit_guided_constitution(&mut self) -> ViewAction {
-        if !self.guided_preview_seen {
-            return self.preview_guided_constitution();
+    fn open_constitution_advanced(&mut self) -> ViewAction {
+        self.constitution_advanced = true;
+        self.body_scroll = 0;
+        ViewAction::None
+    }
+
+    fn close_constitution_advanced(&mut self) -> ViewAction {
+        self.constitution_advanced = false;
+        self.editing_freeform_note = false;
+        self.body_scroll = 0;
+        ViewAction::None
+    }
+
+    /// The first-run path is intentionally one decision: how much initiative
+    /// Codewhale should take. This saves guidance only. Runtime approval,
+    /// sandbox, shell, network, trust, and MCP policy remain untouched.
+    fn commit_simple_constitution(&mut self) -> ViewAction {
+        match self.facts.constitution_file {
+            // Existing law is the safest default on an update checkpoint.
+            // Keep it byte-for-byte and only advance setup state.
+            SetupConstitutionFileState::Loaded => {
+                return self.commit_existing_constitution_unchanged();
+            }
+            // Do not overwrite a file the user attempted to provide when it
+            // cannot be parsed or read. The bundled floor remains active and
+            // Advanced exposes the explicit repair/regenerate choices.
+            SetupConstitutionFileState::Empty
+            | SetupConstitutionFileState::Invalid
+            | SetupConstitutionFileState::Unreadable
+            | SetupConstitutionFileState::PathError => {
+                return self.commit_constitution(SetupCommitKind::BundledConstitution);
+            }
+            SetupConstitutionFileState::NotChecked | SetupConstitutionFileState::Missing => {}
         }
 
-        let (constitution, authoring) = match self.model_draft.as_deref() {
-            // Model drafts arrive sanitized + bounded from the untrusted-JSON
-            // gate; ratify exactly what was previewed.
-            Some(draft) => (draft.clone(), ConstitutionAuthoring::ModelDrafted),
-            None => (
-                self.guided_draft
-                    .to_constitution_with_freeform(self.locale, self.freeform_note_for_draft()),
-                ConstitutionAuthoring::Guided,
-            ),
-        };
+        // The compiled constitution already embodies the balanced posture:
+        // act on clear reversible work, ask when ambiguity is costly, and
+        // require express authorization for irreversible or external effects.
+        // Accepting the recommendation therefore records Bundled rather than
+        // pinning a generated user-global fork that would miss future bundled
+        // law improvements. Only Customize writes a GuidedCustom file.
+        self.commit_constitution(SetupCommitKind::BundledConstitution)
+    }
+
+    fn commit_custom_constitution(
+        &mut self,
+        constitution: UserConstitution,
+        authoring: ConstitutionAuthoring,
+        result_prefix: &str,
+    ) -> ViewAction {
         let mut state = self.state.clone();
         state.complete_constitution_checkpoint(
             CONSTITUTION_CHECKPOINT_VERSION,
@@ -2662,19 +2706,10 @@ impl SetupWizardView {
             .constitution_preview_hash
             .as_deref()
             .unwrap_or("unknown");
-        let result = match authoring {
-            ConstitutionAuthoring::ModelDrafted => format!(
-                "model-drafted constitution ratified ({}) preview_hash={hash}",
-                self.model_draft_label.as_deref().unwrap_or("model")
-            ),
-            ConstitutionAuthoring::Guided => {
-                format!("guided custom constitution preview_hash={hash}")
-            }
-        };
         state.set_step(
             SetupStep::Constitution,
             StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
-                .with_result(result),
+                .with_result(format!("{result_prefix} preview_hash={hash}")),
         );
         self.state = state.clone();
         ViewAction::EmitAndClose(ViewEvent::SetupConstitutionCommitRequested {
@@ -2682,6 +2717,31 @@ impl SetupWizardView {
             state,
             message: tr(self.locale, MessageId::SetupCheckpointDoneGuided).to_string(),
         })
+    }
+
+    fn commit_guided_constitution(&mut self) -> ViewAction {
+        if !self.guided_preview_seen {
+            return self.preview_guided_constitution();
+        }
+
+        let (constitution, authoring) = match self.model_draft.as_deref() {
+            // Model drafts arrive sanitized + bounded from the untrusted-JSON
+            // gate; ratify exactly what was previewed.
+            Some(draft) => (draft.clone(), ConstitutionAuthoring::ModelDrafted),
+            None => (
+                self.guided_draft
+                    .to_constitution_with_freeform(self.locale, self.freeform_note_for_draft()),
+                ConstitutionAuthoring::Guided,
+            ),
+        };
+        let result_prefix = match authoring {
+            ConstitutionAuthoring::ModelDrafted => format!(
+                "model-drafted constitution ratified ({})",
+                self.model_draft_label.as_deref().unwrap_or("model")
+            ),
+            ConstitutionAuthoring::Guided => "guided custom constitution".to_string(),
+        };
+        self.commit_custom_constitution(constitution, authoring, &result_prefix)
     }
 
     fn preview_guided_constitution(&mut self) -> ViewAction {
@@ -2829,35 +2889,19 @@ impl SetupWizardView {
         })
     }
 
-    /// Complete the checkpoint by keeping the existing valid
-    /// `constitution.json` exactly as it stands (#3794). First `K` previews
-    /// the rendered law; second `K` records the choice. The file is never
-    /// rewritten — only `setup_state.json` changes, through the same commit
-    /// event as every other completion.
-    fn commit_keep_existing_constitution(&mut self) -> ViewAction {
+    fn load_existing_constitution(&self) -> Option<UserConstitution> {
         if self.facts.constitution_file != SetupConstitutionFileState::Loaded {
-            return ViewAction::None;
+            return None;
         }
         // Re-read the live file so a stale card cannot ratify a file that
         // has since become invalid; any non-loaded state leaves the key inert.
-        let Ok(load) = UserConstitution::load() else {
+        UserConstitution::load().ok()?.constitution().cloned()
+    }
+
+    fn commit_existing_constitution_unchanged(&mut self) -> ViewAction {
+        let Some(constitution) = self.load_existing_constitution() else {
             return ViewAction::None;
         };
-        let Some(constitution) = load.constitution() else {
-            return ViewAction::None;
-        };
-        if !self.existing_preview_seen {
-            self.existing_preview_seen = true;
-            let content = constitution_ratification_text(
-                self.locale,
-                constitution,
-                &DraftProvenance::Existing,
-            );
-            return ViewAction::Emit(ViewEvent::OpenTextPager {
-                title: ratification_preview_title(self.locale).to_string(),
-                content,
-            });
-        }
         let mut state = self.state.clone();
         state.complete_constitution_checkpoint(
             CONSTITUTION_CHECKPOINT_VERSION,
@@ -2871,10 +2915,35 @@ impl SetupWizardView {
             StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
                 .with_result("existing constitution kept unchanged"),
         );
+        self.state = state.clone();
         ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested {
             state,
             message: tr(self.locale, MessageId::SetupCheckpointDoneKept).to_string(),
         })
+    }
+
+    /// Complete the checkpoint by keeping the existing valid
+    /// `constitution.json` exactly as it stands (#3794). First `K` previews
+    /// the rendered law; second `K` records the choice. The file is never
+    /// rewritten — only `setup_state.json` changes, through the same commit
+    /// event as every other completion.
+    fn commit_keep_existing_constitution(&mut self) -> ViewAction {
+        let Some(constitution) = self.load_existing_constitution() else {
+            return ViewAction::None;
+        };
+        if !self.existing_preview_seen {
+            self.existing_preview_seen = true;
+            let content = constitution_ratification_text(
+                self.locale,
+                &constitution,
+                &DraftProvenance::Existing,
+            );
+            return ViewAction::Emit(ViewEvent::OpenTextPager {
+                title: ratification_preview_title(self.locale).to_string(),
+                content,
+            });
+        }
+        self.commit_existing_constitution_unchanged()
     }
 
     fn status_label(&self, status: StepStatus) -> Cow<'static, str> {
@@ -2903,6 +2972,24 @@ impl ModalView for SetupWizardView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         if let Some(action) = self.handle_freeform_note_key(key) {
             return action;
+        }
+        if self.selected_step() == SetupStep::Constitution && !self.constitution_advanced {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
+                KeyCode::Left | KeyCode::Char('b') => {
+                    self.move_back();
+                    ViewAction::None
+                }
+                KeyCode::Char('c') => self.open_constitution_advanced(),
+                KeyCode::Enter => self.commit_simple_constitution(),
+                _ => ViewAction::None,
+            };
+        }
+        if self.selected_step() == SetupStep::Constitution
+            && self.constitution_advanced
+            && key.code == KeyCode::Esc
+        {
+            return self.close_constitution_advanced();
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
@@ -3031,7 +3118,7 @@ impl ModalView for SetupWizardView {
     }
 
     fn handle_paste(&mut self, text: &str) -> bool {
-        if self.selected_step() != SetupStep::Constitution {
+        if self.selected_step() != SetupStep::Constitution || !self.constitution_advanced {
             return false;
         }
         self.append_freeform_note_text(text);
@@ -3053,23 +3140,51 @@ impl ModalView for SetupWizardView {
                 tr(self.locale, MessageId::SetupWizardTitle)
             ),
         );
-        let mut hints = vec![
-            ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
-            ActionHint::new(
-                "N",
-                tr(self.locale, MessageId::SetupActionContinue).to_string(),
-            ),
-            ActionHint::new("S", tr(self.locale, MessageId::SetupActionSkip).to_string()),
-            ActionHint::new(
-                "R",
-                tr(self.locale, MessageId::SetupActionRetry).to_string(),
-            ),
-            ActionHint::new(
-                "PgUp/Dn",
-                tr(self.locale, MessageId::SetupActionScrollBody).to_string(),
-            ),
-        ];
-        if self.selected_step() == SetupStep::Constitution {
+        let simple_constitution =
+            self.selected_step() == SetupStep::Constitution && !self.constitution_advanced;
+        let mut hints = if simple_constitution {
+            vec![
+                ActionHint::new(
+                    "Enter",
+                    tr(
+                        self.locale,
+                        if self.facts.constitution_file == SetupConstitutionFileState::Loaded {
+                            MessageId::SetupActionKeepExisting
+                        } else {
+                            MessageId::SetupActionUseRecommended
+                        },
+                    )
+                    .to_string(),
+                ),
+                ActionHint::new(
+                    "C",
+                    tr(self.locale, MessageId::SetupActionCustomize).to_string(),
+                ),
+                ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
+                ActionHint::new(
+                    "Esc",
+                    tr(self.locale, MessageId::SetupActionCancel).to_string(),
+                ),
+            ]
+        } else {
+            vec![
+                ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
+                ActionHint::new(
+                    "N",
+                    tr(self.locale, MessageId::SetupActionContinue).to_string(),
+                ),
+                ActionHint::new("S", tr(self.locale, MessageId::SetupActionSkip).to_string()),
+                ActionHint::new(
+                    "R",
+                    tr(self.locale, MessageId::SetupActionRetry).to_string(),
+                ),
+                ActionHint::new(
+                    "PgUp/Dn",
+                    tr(self.locale, MessageId::SetupActionScrollBody).to_string(),
+                ),
+            ]
+        };
+        if self.selected_step() == SetupStep::Constitution && self.constitution_advanced {
             hints.push(ActionHint::new(
                 "1-6",
                 tr(self.locale, MessageId::SetupActionTuneGuided).to_string(),
@@ -3140,76 +3255,89 @@ impl ModalView for SetupWizardView {
                 tr(self.locale, MessageId::SetupActionConfig).to_string(),
             ));
         }
-        hints.extend([
-            ActionHint::new(
-                "U",
-                tr(self.locale, MessageId::SetupActionUseBundled).to_string(),
-            ),
-            ActionHint::new(
-                "D",
-                tr(self.locale, MessageId::SetupActionDefer).to_string(),
-            ),
-            ActionHint::new(
-                "Esc",
-                tr(self.locale, MessageId::SetupActionCancel).to_string(),
-            ),
-        ]);
+        if !simple_constitution {
+            hints.extend([
+                ActionHint::new(
+                    "U",
+                    tr(self.locale, MessageId::SetupActionUseBundled).to_string(),
+                ),
+                ActionHint::new(
+                    "D",
+                    tr(self.locale, MessageId::SetupActionDefer).to_string(),
+                ),
+                ActionHint::new(
+                    "Esc",
+                    tr(
+                        self.locale,
+                        if self.selected_step() == SetupStep::Constitution {
+                            MessageId::SetupActionBack
+                        } else {
+                            MessageId::SetupActionCancel
+                        },
+                    )
+                    .to_string(),
+                ),
+            ]);
+        }
         let content_area = render_modal_footer(inner, buf, &hints);
         let spec = self.selected_spec();
-        let mut lines = vec![
-            Line::from(Span::styled(
-                tr(self.locale, spec.title_id()).to_string(),
-                Style::default()
-                    .fg(palette::WHALE_INFO)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::raw(tr(self.locale, spec.why_id()).to_string())),
-            Line::from(""),
-        ];
+        let title = Line::from(Span::styled(
+            tr(self.locale, spec.title_id()).to_string(),
+            Style::default()
+                .fg(palette::WHALE_INFO)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let why = Line::from(Span::raw(tr(self.locale, spec.why_id()).to_string()));
+        let mut lines = if simple_constitution {
+            vec![title, why]
+        } else {
+            vec![title, Line::from(""), why, Line::from("")]
+        };
         lines.extend(self.selected_step_detail_lines());
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            tr(self.locale, MessageId::SetupWizardWhy).to_string(),
-            Style::default().fg(palette::TEXT_MUTED),
-        )));
-        lines.push(Line::from(""));
-        for (idx, step) in STEP_SPECS.iter().enumerate() {
-            let selected = idx == self.selected;
-            let status = self.state.status(step.id());
-            let status_color = match status {
-                StepStatus::InProgress => palette::WHALE_LIVE,
-                StepStatus::NeedsAction => palette::WHALE_HUMAN,
-                StepStatus::Verified => palette::STATUS_SUCCESS,
-                StepStatus::Failed => palette::STATUS_ERROR,
-                StepStatus::NotStarted
-                | StepStatus::Recommended
-                | StepStatus::Optional
-                | StepStatus::Deferred
-                | StepStatus::Skipped => palette::TEXT_MUTED,
-            };
-            let marker = crate::tui::glyphs::selection_marker(selected);
-            let style = if selected {
-                Style::default()
-                    .fg(palette::TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(palette::TEXT_MUTED)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{marker} "), style),
-                Span::styled(tr(self.locale, step.title_id()).to_string(), style),
-                Span::raw("  "),
-                Span::styled(
-                    self.status_label(status).to_string(),
-                    Style::default().fg(status_color),
-                ),
-            ]));
+        if !simple_constitution {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupWizardWhy).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+            lines.push(Line::from(""));
+            for (idx, step) in STEP_SPECS.iter().enumerate() {
+                let selected = idx == self.selected;
+                let status = self.state.status(step.id());
+                let status_color = match status {
+                    StepStatus::InProgress => palette::WHALE_LIVE,
+                    StepStatus::NeedsAction => palette::WHALE_HUMAN,
+                    StepStatus::Verified => palette::STATUS_SUCCESS,
+                    StepStatus::Failed => palette::STATUS_ERROR,
+                    StepStatus::NotStarted
+                    | StepStatus::Recommended
+                    | StepStatus::Optional
+                    | StepStatus::Deferred
+                    | StepStatus::Skipped => palette::TEXT_MUTED,
+                };
+                let marker = crate::tui::glyphs::selection_marker(selected);
+                let style = if selected {
+                    Style::default()
+                        .fg(palette::TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(palette::TEXT_MUTED)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{marker} "), style),
+                    Span::styled(tr(self.locale, step.title_id()).to_string(), style),
+                    Span::raw("  "),
+                    Span::styled(
+                        self.status_label(status).to_string(),
+                        Style::default().fg(status_color),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::raw(
+                tr(self.locale, MessageId::SetupCheckpointLayerOrder).to_string(),
+            )));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::raw(
-            tr(self.locale, MessageId::SetupCheckpointLayerOrder).to_string(),
-        )));
         let wrap_width = usize::from(content_area.width).max(1);
         let visual_rows: usize = lines
             .iter()
@@ -3236,7 +3364,10 @@ impl SetupWizardView {
         match self.selected_step() {
             SetupStep::ProviderModel => self.provider_model_detail_lines(),
             SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
-            SetupStep::Constitution => self.constitution_detail_lines(),
+            SetupStep::Constitution if self.constitution_advanced => {
+                self.constitution_detail_lines()
+            }
+            SetupStep::Constitution => self.constitution_simple_lines(),
             SetupStep::OperateFleet => self.operate_fleet_detail_lines(),
             SetupStep::Hotbar => self.hotbar_detail_lines(),
             SetupStep::ToolsMcp => self.tools_mcp_detail_lines(),
@@ -3245,6 +3376,64 @@ impl SetupWizardView {
             SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
+    }
+
+    fn constitution_simple_lines(&self) -> Vec<Line<'static>> {
+        if self.facts.constitution_file == SetupConstitutionFileState::Loaded {
+            return vec![
+                self.detail_row(
+                    MessageId::SetupConstitutionExistingLabel,
+                    &self
+                        .facts
+                        .constitution_file
+                        .label(self.state.constitution_choice, self.locale),
+                ),
+                Line::from(Span::styled(
+                    tr(
+                        self.locale,
+                        MessageId::SetupConstitutionExistingDefaultDetail,
+                    )
+                    .to_string(),
+                    Style::default().fg(palette::TEXT_MUTED),
+                )),
+            ];
+        }
+        if !matches!(
+            self.facts.constitution_file,
+            SetupConstitutionFileState::NotChecked | SetupConstitutionFileState::Missing
+        ) {
+            return vec![
+                self.detail_row(
+                    MessageId::SetupConstitutionExistingLabel,
+                    &self
+                        .facts
+                        .constitution_file
+                        .label(self.state.constitution_choice, self.locale),
+                ),
+                Line::from(Span::styled(
+                    tr(self.locale, MessageId::SetupConstitutionRepairDefaultDetail).to_string(),
+                    Style::default().fg(palette::TEXT_MUTED),
+                )),
+            ];
+        }
+
+        let recommendation = format!(
+            "{} · {}",
+            tr(self.locale, MessageId::SetupStatusRecommended),
+            autonomy_label(AutonomyPreference::Balanced, self.locale)
+        );
+        vec![
+            Line::from(Span::styled(
+                recommendation,
+                Style::default()
+                    .fg(palette::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                autonomy_priority(AutonomyPreference::Balanced, self.locale).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
     }
 
     fn provider_model_detail_lines(&self) -> Vec<Line<'static>> {
@@ -5043,6 +5232,14 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn customize(view: &mut SetupWizardView) {
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('c'))),
+            ViewAction::None
+        ));
+        assert!(view.constitution_advanced);
+    }
+
     fn setup_test_options(workspace: std::path::PathBuf) -> crate::tui::app::TuiOptions {
         crate::tui::app::TuiOptions {
             allow_shell: true,
@@ -5093,7 +5290,12 @@ mod tests {
     }
 
     #[test]
-    fn bundled_constitution_commit_marks_checkpoint_complete() {
+    fn recommended_constitution_commit_marks_checkpoint_complete() {
+        let _guard = crate::test_support::lock_test_env();
+        let fresh_home = tempfile::TempDir::new().expect("fresh CODEWHALE_HOME");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", fresh_home.path());
+        let constitution_path = UserConstitution::path().expect("constitution path");
+        assert!(!constitution_path.exists());
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
 
         let action = view.handle_key(key(KeyCode::Enter));
@@ -5101,15 +5303,23 @@ mod tests {
         let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, message }) =
             action
         else {
-            panic!("expected setup-state commit event");
+            panic!("default Enter must only commit setup state");
         };
         assert_eq!(
             state.constitution_checkpoint_completed_for.as_deref(),
             Some(CONSTITUTION_CHECKPOINT_VERSION)
         );
         assert_eq!(state.constitution_choice, ConstitutionChoice::Bundled);
+        assert_eq!(state.constitution_source, ConstitutionSource::Bundled);
+        assert_eq!(state.constitution_validity, ConstitutionValidity::Unknown);
+        assert_eq!(state.constitution_authoring, None);
+        assert_eq!(state.constitution_preview_hash, None);
         assert_eq!(state.status(SetupStep::Constitution), StepStatus::Verified);
-        assert!(message.contains("Constitution checkpoint complete"));
+        assert!(message.contains("bundled/default"));
+        assert!(
+            !constitution_path.exists(),
+            "accepting the default must not pin a user-global constitution"
+        );
     }
 
     #[test]
@@ -5117,11 +5327,11 @@ mod tests {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
         assert_eq!(view.selected_step(), SetupStep::Constitution);
 
-        let action = view.handle_key(key(KeyCode::Right));
-        assert!(matches!(action, ViewAction::None));
-        assert_eq!(view.selected_step(), SetupStep::OperateFleet);
-
         let action = view.handle_key(key(KeyCode::Char('b')));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(view.selected_step(), SetupStep::TrustSandbox);
+
+        let action = view.handle_key(key(KeyCode::Right));
         assert!(matches!(action, ViewAction::None));
         assert_eq!(view.selected_step(), SetupStep::Constitution);
 
@@ -5141,8 +5351,152 @@ mod tests {
     }
 
     #[test]
+    fn customize_and_escape_return_to_the_simple_choice() {
+        let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        assert!(!view.constitution_advanced);
+
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('c'))),
+            ViewAction::None
+        ));
+        assert!(view.constitution_advanced);
+        assert!(
+            lines_to_text(view.selected_step_detail_lines()).contains("Purpose:"),
+            "Customize must preserve the full six-axis editor"
+        );
+
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Esc)),
+            ViewAction::None
+        ));
+        assert!(!view.constitution_advanced);
+        assert!(
+            lines_to_text(view.selected_step_detail_lines()).contains("recommended · balanced")
+        );
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Esc)),
+            ViewAction::Close
+        ));
+    }
+
+    #[test]
+    fn simple_constitution_surface_has_one_primary_and_one_secondary_path() {
+        let view = SetupWizardView::new(SetupState::default(), Locale::En);
+        let text = lines_to_text(view.selected_step_detail_lines());
+
+        assert!(text.contains("recommended · balanced"), "{text}");
+        assert!(text.contains("clear, low-risk work"), "{text}");
+        for advanced_only in [
+            "Choice:",
+            "Source:",
+            "Preview hash:",
+            "Purpose:",
+            "Evidence:",
+            "Expert override:",
+        ] {
+            assert!(!text.contains(advanced_only), "{text}");
+        }
+    }
+
+    #[test]
+    fn recommended_choice_and_consequence_remain_visible_at_40x12() {
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buffer = Buffer::empty(area);
+        SetupWizardView::new(SetupState::default(), Locale::En).render(area, &mut buffer);
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Working agreement"), "{text}");
+        assert!(text.contains("recommended · balanced"), "{text}");
+        assert!(text.contains("clear, low-risk work"), "{text}");
+        assert!(text.contains("risky, destructive, or unclear"), "{text}");
+        assert!(text.contains("Enter use recommended"), "{text}");
+        assert!(text.contains("C customize"), "{text}");
+        assert!(!text.contains("Choice:"), "{text}");
+        assert!(!text.contains("1-6 tune"), "{text}");
+    }
+
+    #[test]
+    fn simple_constitution_copy_has_shipped_locale_parity() {
+        let english_why = tr(Locale::En, MessageId::SetupStepConstitutionWhy);
+        for locale in Locale::shipped() {
+            let view = SetupWizardView::new(SetupState::default(), *locale);
+            let text = lines_to_text(view.constitution_simple_lines());
+            assert!(
+                text.contains(autonomy_label(AutonomyPreference::Balanced, *locale)),
+                "{}: {text}",
+                locale.tag()
+            );
+            assert!(
+                text.contains(autonomy_priority(AutonomyPreference::Balanced, *locale)),
+                "{}: {text}",
+                locale.tag()
+            );
+            if *locale != Locale::En {
+                assert_ne!(
+                    tr(*locale, MessageId::SetupStepConstitutionWhy),
+                    english_why,
+                    "{} reused English simple copy",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recommended_commit_does_not_change_runtime_or_provider_state() {
+        let mut state = SetupState::default();
+        state.runtime_posture_source = RuntimePostureSource::Confirmed;
+        state.set_step(
+            SetupStep::ProviderModel,
+            StepEntry::new(
+                StepStatus::NeedsAction,
+                true,
+                CONSTITUTION_CHECKPOINT_VERSION,
+            )
+            .with_result("missing auth; setup remains skippable"),
+        );
+        let mut view = SetupWizardView::new_at_with_facts(
+            state,
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts {
+                constitution_file: SetupConstitutionFileState::Missing,
+                ..SetupRuntimeFacts::default()
+            },
+        );
+
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, .. }) =
+            view.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected recommended commit");
+        };
+
+        assert_eq!(state.constitution_choice, ConstitutionChoice::Bundled);
+        assert_eq!(
+            state.runtime_posture_source,
+            RuntimePostureSource::Confirmed
+        );
+        assert_eq!(
+            state.status(SetupStep::ProviderModel),
+            StepStatus::NeedsAction,
+            "provider/API-key readiness must remain separate"
+        );
+    }
+
+    #[test]
     fn skip_and_retry_emit_setup_state_commits() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('c'))),
+            ViewAction::None
+        ));
 
         let action = view.handle_key(key(KeyCode::Char('s')));
 
@@ -5192,6 +5546,7 @@ mod tests {
             SetupStep::Constitution,
             SetupRuntimeFacts::default(),
         );
+        view.open_constitution_advanced();
 
         let action = view.handle_key(key(KeyCode::Char('s')));
 
@@ -5315,6 +5670,7 @@ mod tests {
     #[test]
     fn guided_constitution_requires_preview_before_save() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        customize(&mut view);
 
         let action = view.handle_key(key(KeyCode::Char('g')));
 
@@ -5889,6 +6245,7 @@ mod tests {
     #[test]
     fn guided_constitution_answers_shape_preview_and_saved_payload() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        customize(&mut view);
         for key_char in ['1', '2', '3', '4', '5', '6'] {
             assert!(matches!(
                 view.handle_key(key(KeyCode::Char(key_char))),
@@ -5959,6 +6316,7 @@ mod tests {
     #[test]
     fn freeform_note_previews_saves_and_stays_advisory() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        customize(&mut view);
 
         let first_preview = view.handle_key(key(KeyCode::Char('g')));
         assert!(matches!(
@@ -5999,6 +6357,7 @@ mod tests {
     #[test]
     fn changing_guided_answer_requires_fresh_preview() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        customize(&mut view);
 
         let first_preview = view.handle_key(key(KeyCode::Char('g')));
         assert!(matches!(
@@ -6084,6 +6443,7 @@ mod tests {
         // guided flow stands untouched.
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
         assert_eq!(view.selected_step(), SetupStep::Constitution);
+        customize(&mut view);
 
         let action = view.handle_key(key(KeyCode::Char('a')));
 
@@ -6099,6 +6459,7 @@ mod tests {
             SetupStep::Constitution,
             ready_facts("GLM-5.2"),
         );
+        customize(&mut view);
         // Tune one answer first: the request must carry the tuned draft.
         assert!(matches!(
             view.handle_key(key(KeyCode::Char('2'))),
@@ -6134,6 +6495,7 @@ mod tests {
             SetupStep::Constitution,
             ready_facts("GLM-5.2"),
         );
+        customize(&mut view);
 
         let (title, content) =
             view.install_model_draft(sample_model_draft(), "GLM-5.2".to_string());
@@ -6171,6 +6533,7 @@ mod tests {
     #[test]
     fn deterministic_ratification_records_guided_authoring() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+        customize(&mut view);
 
         view.handle_key(key(KeyCode::Char('g')));
         let action = view.handle_key(key(KeyCode::Char('g')));
@@ -6194,6 +6557,7 @@ mod tests {
             SetupStep::Constitution,
             ready_facts("GLM-5.2"),
         );
+        customize(&mut view);
         let _ = view.install_model_draft(sample_model_draft(), "GLM-5.2".to_string());
 
         // Changing any answer makes the model draft stale law.
@@ -6231,6 +6595,7 @@ mod tests {
             SetupStep::Constitution,
             ready_facts("GLM-5.2"),
         );
+        customize(&mut view);
         let _ = view.install_model_draft(sample_model_draft(), "GLM-5.2".to_string());
 
         assert!(view.handle_paste("Prefer local examples before broad rewrites."));
@@ -6282,6 +6647,7 @@ mod tests {
             SetupStep::Constitution,
             ready_facts("GLM-5.2"),
         );
+        customize(&mut view);
         let _ = view.install_model_draft(sample_model_draft(), "GLM-5.2".to_string());
         let ViewAction::EmitAndClose(ViewEvent::SetupConstitutionCommitRequested {
             constitution,
@@ -6646,7 +7012,7 @@ mod tests {
                 }
             }
             let mut stack = ViewStack::new();
-            stack.push(SetupWizardView::new_at_with_facts(
+            let mut view = SetupWizardView::new_at_with_facts(
                 SetupState::default(),
                 Locale::En,
                 SetupStep::Constitution,
@@ -6654,7 +7020,9 @@ mod tests {
                     constitution_file: SetupConstitutionFileState::Loaded,
                     ..SetupRuntimeFacts::default()
                 },
-            ));
+            );
+            view.constitution_advanced = true;
+            stack.push(view);
             stack.render(area, &mut buf);
 
             let rows: Vec<String> = (0..h)
@@ -6669,7 +7037,7 @@ mod tests {
                 "Purpose:",
                 "preview/ratify",
                 "use bundled",
-                "cancel",
+                "Esc back",
             ] {
                 assert!(text.contains(label), "{w}x{h}: missing '{label}'");
             }
@@ -6732,6 +7100,95 @@ mod tests {
     }
 
     #[test]
+    fn simple_recommended_choice_persists_and_round_trips() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts {
+                constitution_file: SetupConstitutionFileState::Missing,
+                ..SetupRuntimeFacts::default()
+            },
+        );
+
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, .. }) =
+            view.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected recommended setup-state commit");
+        };
+        state.save().expect("persist bundled choice");
+
+        let loaded = UserConstitution::load().expect("load constitution");
+        assert!(matches!(loaded, UserConstitutionLoad::Missing));
+        let loaded_state = SetupState::load().expect("load state").expect("state");
+        assert_eq!(
+            loaded_state.constitution_choice,
+            ConstitutionChoice::Bundled
+        );
+        assert_eq!(loaded_state.constitution_authoring, None);
+    }
+
+    #[test]
+    fn simple_enter_keeps_existing_constitution_byte_for_byte() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let existing = guided_constitution_template(Locale::En);
+        persist_user_constitution_choice(&existing, &SetupState::default())
+            .expect("write existing constitution");
+        let path = UserConstitution::path().expect("constitution path");
+        let bytes_before = std::fs::read(&path).expect("existing bytes");
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts {
+                constitution_file: SetupConstitutionFileState::Loaded,
+                ..SetupRuntimeFacts::default()
+            },
+        );
+
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, .. }) =
+            view.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected keep-existing state commit");
+        };
+        assert_eq!(state.constitution_choice, ConstitutionChoice::GuidedCustom);
+        assert_eq!(std::fs::read(&path).expect("bytes after"), bytes_before);
+    }
+
+    #[test]
+    fn simple_enter_never_overwrites_invalid_constitution() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let path = UserConstitution::path().expect("constitution path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        let invalid = b"{ this is not valid constitution json }";
+        std::fs::write(&path, invalid).expect("write invalid fixture");
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts {
+                constitution_file: SetupConstitutionFileState::Invalid,
+                ..SetupRuntimeFacts::default()
+            },
+        );
+
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, .. }) =
+            view.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("invalid file should fall back without a constitution write event");
+        };
+        assert_eq!(state.constitution_choice, ConstitutionChoice::Bundled);
+        assert_eq!(std::fs::read(&path).expect("bytes after"), invalid);
+    }
+
+    #[test]
     fn keep_existing_constitution_previews_then_completes_without_rewriting() {
         let _guard = crate::test_support::lock_test_env();
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -6754,6 +7211,7 @@ mod tests {
             SetupStep::Constitution,
             facts,
         );
+        customize(&mut view);
 
         // The card offers the keep path.
         let text = lines_to_text(view.constitution_detail_lines());
@@ -6818,6 +7276,7 @@ mod tests {
                 SetupStep::Constitution,
                 facts,
             );
+            customize(&mut view);
             let text = lines_to_text(view.constitution_detail_lines());
             assert!(
                 !text.contains("K Keep your existing constitution"),
@@ -7787,6 +8246,7 @@ mod tests {
                 ..SetupRuntimeFacts::default()
             },
         );
+        view.open_constitution_advanced();
         let wrap_width = 76usize;
         let visible_rows = 10usize;
         let mut lines = view.constitution_detail_lines();
