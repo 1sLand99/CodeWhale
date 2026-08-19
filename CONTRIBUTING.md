@@ -139,20 +139,17 @@ default. A single shared `CARGO_TARGET_DIR` remains valid only for
 serialized trunk work. See
 [`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md).
 
-Some suites are slow, platform-bound, or intentionally excluded from the
-default run; treat them as documented isolation cases rather than
-failures of the normal gate:
+Some checks are platform-bound or intentionally excluded from an ordinary
+change. Choose them for the risk they answer rather than treating every
+available suite as ritual. Visible TUI behavior is accepted in the actual
+terminal at the sizes and interaction path affected by the change; the former
+full-screen PTY assertion suite was removed because it froze layout and copy
+while missing product quality.
 
-- **PTY snapshots** (`cargo test -p codewhale-tui --test pty qa_pty
-  --locked`) are Unix-only and internally serialized. One recovery-boot
-  case is `#[ignore]`d for a documented input-starvation issue. When a
-  PTY case fails, rerun that exact case in isolation and diagnose the
-  rendered frame before calling it a flake; `run_verifiers_background_*`
-  is the one known full-suite-parallelism flake that passes in
-  isolation.
-- **Release runtime QA** (`cargo test -p codewhale-tui --test pty
-  release_runtime_qa --locked`) includes an `#[ignore]`d 32-worker storm
-  benchmark that is only run explicitly for evidence gathering.
+- **Long-running process acceptance** should use a sealed local home, local
+  fixtures, and the real binary. Record the terminal size, inputs, visible
+  result, and any filesystem side effect instead of adding a full-screen
+  golden.
 - **OCR** (`image_ocr`) uses the macOS Vision framework or a locally
   installed `tesseract`; its platform-specific paths are
   `cfg(target_os = "macos")`-gated and depend on host tooling.

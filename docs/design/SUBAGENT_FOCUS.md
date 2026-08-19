@@ -1,11 +1,11 @@
 # Subagent focus — one child, one conversation, one composer target
 
 Status: implemented on `work/v098-agent-focus-20260815` (TUI + runtime
-contract), on by default, no settings key. Evidence: unit tests in
-`crates/tui/src/tui/agent_focus.rs`, `crates/tui/src/tui/work_surface/mod.rs`,
-`crates/tui/src/tui/phase_strip.rs`, `crates/tui/src/tools/subagent/tests.rs`;
-real-PTY journey `crates/tui/tests/pty/agent_focus_pty.rs` (42×150, 32×120,
-16×60 frames captured with `CODEWHALE_FOCUS_CAPTURE_DIR`).
+contract), on by default, no settings key. Its acceptance surface is the actual
+terminal: focus a worker, send a follow-up, confirm that the composer target and
+transcript agree, and return to the main conversation. Historical automated PTY
+captures were removed because they froze layout geometry instead of protecting
+the runtime contract.
 
 ## What Claude Code does (the reference behaviour)
 
@@ -98,8 +98,8 @@ through `←`/`↓` and `/agents`.
 - Whale role badges: rail rows and the focus banner render the worker name
   through `agent_focus::agent_display_label`; a badge can be prefixed there
   without touching the focus logic.
-- Compact tier (< 60 cols): the strip already collapses; the focus banner and
-  chip are one line each and were verified at 16×60.
+- Compact tier (< 60 cols): the strip collapses; keep the focus banner and chip
+  to one line each and inspect the current product when this surface changes.
 
 ### Not done / follow-ups
 

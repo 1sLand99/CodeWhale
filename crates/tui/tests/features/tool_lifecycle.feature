@@ -1,8 +1,8 @@
 Feature: Tool call lifecycle
   Scenario: Happy path lists the current directory through a tool
     # This executable slice asserts the public exec stream and mocked LLM border.
-    # The real Unix PTY screen slice in qa_pty.rs asserts the matching Work,
-    # statusline, idle BlueWhale, live tool-card, and settled-transcript border.
+    # Visible Work, status, tool-card, and transcript behavior is inspected in
+    # the actual terminal when that product surface changes.
     Given an offline CodeWhale workspace containing:
       | path      | kind   |
       | README.md | file   |

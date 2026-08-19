@@ -1274,7 +1274,7 @@ fn discover_honors_a_hidden_root_directory() {
     );
 }
 
-/// Mirrors the qa_pty `skills_menu_shows_local_and_global_skills`
+/// Exercises the local/global skill inventory independent of terminal layout.
 /// scenario without the PTY harness: a workspace-level skill in
 /// `.agents/skills/` and a global skill in `~/.codewhale/skills/`
 /// must both be discoverable.
