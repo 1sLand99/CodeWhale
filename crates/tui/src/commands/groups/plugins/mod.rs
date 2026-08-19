@@ -57,7 +57,7 @@ impl CommandGroup for PluginsCommands {
 
 pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
     name: "plugin",
-    aliases: &["plugins"],
+    aliases: &["plugins", "extensions"],
     usage: "/plugin [list|show|suggest|validate|export|install|import|update|uninstall|trust|enable|disable|revoke|reload|tools|marketplace]",
     description_id: MessageId::CmdPluginDescription,
 };
@@ -93,7 +93,10 @@ fn plugins_with_kimi_home_override(
         .split_whitespace()
         .collect::<Vec<_>>();
     match words.as_slice() {
-        [] | ["list"] => list_bundles_and_legacy_tools(app),
+        [] => CommandResult::action(AppAction::OpenExtensions {
+            tab: crate::tui::views::extensions::ExtensionsTab::Plugins,
+        }),
+        ["list"] => list_bundles_and_legacy_tools(app),
         ["help"] => CommandResult::message(format!(
             "{}\n\n/plugin import kimi [list]\n/plugin import kimi approve <name> <content-hash>",
             tr(app.ui_locale, MessageId::CmdPluginBundleUsage)

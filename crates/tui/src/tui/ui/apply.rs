@@ -1493,6 +1493,12 @@ pub(crate) async fn apply_command_result(
                         ));
                 }
             }
+            AppAction::OpenExtensions { tab } => {
+                if app.view_stack.top_kind() != Some(ModalKind::Extensions) {
+                    app.view_stack
+                        .push(crate::tui::views::extensions::ExtensionsView::new(app, tab));
+                }
+            }
             AppAction::OpenFleetList => {
                 if app.view_stack.top_kind() != Some(ModalKind::FleetList) {
                     app.view_stack

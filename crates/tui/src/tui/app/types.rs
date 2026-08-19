@@ -913,6 +913,10 @@ pub enum AppAction {
     OpenThemePicker,
     /// Open the `/skills` manager — audit inventory + owned mutations.
     OpenSkillsManager,
+    /// Open the unified, read-only extensions inventory on a specific tab.
+    OpenExtensions {
+        tab: crate::tui::views::extensions::ExtensionsTab,
+    },
     /// Open `/fleet` — the saved named-Fleet list (the primary Fleet surface).
     OpenFleetList,
     /// Open the `/fleet` roster — the saved-party view of the agent team.

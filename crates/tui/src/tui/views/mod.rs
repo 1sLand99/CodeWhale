@@ -29,6 +29,7 @@ use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::menu_style;
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
+pub mod extensions;
 pub mod fleet_detail;
 pub mod fleet_list;
 pub mod fleet_roster;
@@ -68,6 +69,9 @@ pub enum ModalKind {
     ContextMenu,
     ContextInspector,
     SkillsManager,
+    /// Unified, read-only extensions inventory. Mutations delegate to the
+    /// existing Hooks / Plugins / Skills / MCP command controllers.
+    Extensions,
     /// Native git worktree manager (list / create / switch / compare).
     WorktreeManager,
 }
