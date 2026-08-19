@@ -105,6 +105,26 @@ test("authoritative release inventory contains seven targets and 34 bridge asset
   }
 });
 
+test("NSIS installer ships the Windows Terminal launcher and Start Menu shortcut", () => {
+  const nsi = fs.readFileSync(path.join(repoRoot, "scripts/installer/codewhale.nsi"), "utf8");
+  const bat = fs.readFileSync(path.join(repoRoot, "scripts/installer/codewhale.bat"), "utf8");
+
+  assert.match(nsi, /^\s*File "codewhale\.bat"\s*$/m);
+  assert.match(
+    nsi,
+    /CreateShortCut "\$SMPROGRAMS\\\$\{PRODUCT_NAME\}\\\$\{PRODUCT_NAME\}\.lnk" "\$INSTDIR\\bin\\codewhale\.bat"/,
+  );
+  assert.match(nsi, /^\s*Delete "\$INSTDIR\\bin\\codewhale\.bat"\s*$/m);
+  assert.match(nsi, /^\s*Delete "\$SMPROGRAMS\\\$\{PRODUCT_NAME\}\\\$\{PRODUCT_NAME\}\.lnk"\s*$/m);
+  assert.match(nsi, /^\s*RMDir "\$SMPROGRAMS\\\$\{PRODUCT_NAME\}"\s*$/m);
+
+  assert.match(bat, /where wt >nul 2>nul/);
+  assert.match(bat, /wt --title Codewhale cmd \/k "%~dp0codewhale\.exe"/);
+  assert.match(bat, /"%~dp0codewhale\.exe"/);
+  assert.doesNotMatch(bat, /codewhale-windows-x64\.exe/);
+  assert.ok(bat.startsWith("@echo off\r\n"), "installer launcher must use CRLF like the zip launcher");
+});
+
 test("assembly creates and verifies the exact release asset directory", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codewhale-asset-assembly-"));
   const input = path.join(tempRoot, "input");
