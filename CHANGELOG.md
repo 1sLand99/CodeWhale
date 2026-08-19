@@ -24,6 +24,10 @@ abort under load.
 
 ### Fixed
 
+- Windows default launch prefers Windows Terminal: zip archives ship
+  `codewhale.bat` (CRLF, `wt.exe` then the exe), `install.bat` copies that
+  launcher, and the NSIS Start Menu shortcut opens it instead of the raw
+  binary (#1854).
 - `fix(tui): make the header status mark honour its setting` — `status_indicator`
   did nothing for three of its four documented values. The header hardcoded a
   leading `cw` span *and* asked for a second mark beside the effort chip, then

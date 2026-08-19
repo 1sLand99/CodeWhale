@@ -24,6 +24,10 @@ const {
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 
+function toCrlf(text) {
+  return text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+}
+
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
@@ -118,11 +122,20 @@ test("NSIS installer ships the Windows Terminal launcher and Start Menu shortcut
   assert.match(nsi, /^\s*Delete "\$SMPROGRAMS\\\$\{PRODUCT_NAME\}\\\$\{PRODUCT_NAME\}\.lnk"\s*$/m);
   assert.match(nsi, /^\s*RMDir "\$SMPROGRAMS\\\$\{PRODUCT_NAME\}"\s*$/m);
 
-  assert.match(bat, /where wt >nul 2>nul/);
-  assert.match(bat, /wt --title Codewhale cmd \/k "%~dp0codewhale\.exe"/);
-  assert.match(bat, /"%~dp0codewhale\.exe"/);
-  assert.doesNotMatch(bat, /codewhale-windows-x64\.exe/);
-  assert.ok(bat.startsWith("@echo off\r\n"), "installer launcher must use CRLF like the zip launcher");
+  const batNormalized = bat.replace(/\r\n/g, "\n");
+  assert.match(batNormalized, /where wt >nul 2>nul/);
+  assert.match(batNormalized, /wt --title Codewhale cmd \/k "%~dp0codewhale\.exe"/);
+  assert.match(batNormalized, /"%~dp0codewhale\.exe"/);
+  assert.doesNotMatch(batNormalized, /codewhale-windows-x64\.exe/);
+  assert.ok(
+    batNormalized.startsWith("@echo off\n"),
+    "installer launcher must start with @echo off",
+  );
+  assert.match(
+    windowsLauncherContents(),
+    /\r\n/,
+    "the GitHub/npm codewhale.bat asset must be generated with CRLF",
+  );
 });
 
 test("assembly creates and verifies the exact release asset directory", async () => {
@@ -213,16 +226,74 @@ test("bundle helper emits reproducible timestamped tar and zip archives from pat
         `${entry} should retain the source commit timestamp`,
       );
     }
-    const portableEntries = execFileSync(
-      "unzip",
-      ["-Z1", path.join(output, "codewhale-windows-arm64-portable.zip")],
-      { encoding: "utf8" },
-    ).trim().split("\n").sort();
+    const expectedLauncher = toCrlf(
+      fs.readFileSync(path.join(repoRoot, "scripts/installer/codewhale.bat"), "utf8"),
+    );
+    const expectedInstallBat = toCrlf(
+      fs.readFileSync(path.join(repoRoot, "scripts/release/install.bat"), "utf8"),
+    );
+    const zipListing = (name) =>
+      execFileSync("unzip", ["-Z1", path.join(output, name)], { encoding: "utf8" })
+        .trim()
+        .split("\n")
+        .sort();
+    const zipFile = (archive, inner) =>
+      execFileSync("unzip", ["-p", path.join(output, archive), inner]);
+
+    assert.deepEqual(zipListing("codewhale-windows-x64.zip"), [
+      "codewhale-windows-x64/",
+      "codewhale-windows-x64/codew.exe",
+      "codewhale-windows-x64/codewhale.bat",
+      "codewhale-windows-x64/codewhale.exe",
+      "codewhale-windows-x64/install.bat",
+    ]);
+    assert.deepEqual(zipListing("codewhale-windows-arm64.zip"), [
+      "codewhale-windows-arm64/",
+      "codewhale-windows-arm64/codew.exe",
+      "codewhale-windows-arm64/codewhale.bat",
+      "codewhale-windows-arm64/codewhale.exe",
+      "codewhale-windows-arm64/install.bat",
+    ]);
+    const portableEntries = zipListing("codewhale-windows-arm64-portable.zip");
     assert.deepEqual(portableEntries, [
       "codewhale-windows-arm64-portable/",
       "codewhale-windows-arm64-portable/codew.exe",
+      "codewhale-windows-arm64-portable/codewhale.bat",
       "codewhale-windows-arm64-portable/codewhale.exe",
     ]);
+    assert.deepEqual(zipListing("codewhale-windows-x64-portable.zip"), [
+      "codewhale-windows-x64-portable/",
+      "codewhale-windows-x64-portable/codew.exe",
+      "codewhale-windows-x64-portable/codewhale.bat",
+      "codewhale-windows-x64-portable/codewhale.exe",
+    ]);
+
+    for (const [archive, prefix, includeInstall] of [
+      ["codewhale-windows-x64.zip", "codewhale-windows-x64", true],
+      ["codewhale-windows-arm64.zip", "codewhale-windows-arm64", true],
+      ["codewhale-windows-x64-portable.zip", "codewhale-windows-x64-portable", false],
+      ["codewhale-windows-arm64-portable.zip", "codewhale-windows-arm64-portable", false],
+    ]) {
+      const launcher = zipFile(archive, `${prefix}/codewhale.bat`);
+      assert.deepEqual(
+        launcher,
+        Buffer.from(expectedLauncher, "utf8"),
+        `${archive} must ship the NSIS launcher with CRLF`,
+      );
+      assert.match(launcher.toString("utf8"), /where wt >nul 2>nul/);
+      assert.match(launcher.toString("utf8"), /codewhale\.exe/);
+      assert.doesNotMatch(launcher.toString("utf8"), /codewhale-windows-x64\.exe/);
+      if (includeInstall) {
+        const installBat = zipFile(archive, `${prefix}/install.bat`);
+        assert.deepEqual(
+          installBat,
+          Buffer.from(expectedInstallBat, "utf8"),
+          `${archive} install.bat must be staged with CRLF`,
+        );
+        assert.match(installBat.toString("utf8"), /codewhale\.bat/);
+      }
+    }
+
     const zipExtracted = path.join(tempRoot, "zip extracted");
     fs.mkdirSync(zipExtracted);
     execFileSync(
@@ -230,7 +301,7 @@ test("bundle helper emits reproducible timestamped tar and zip archives from pat
       ["-qq", path.join(output, "codewhale-windows-arm64-portable.zip"), "-d", zipExtracted],
       { env: { ...process.env, TZ: "UTC" }, stdio: "pipe" },
     );
-    for (const entry of ["codewhale.exe", "codew.exe"]) {
+    for (const entry of ["codewhale.exe", "codew.exe", "codewhale.bat"]) {
       assert.equal(
         Math.trunc(
           fs.statSync(path.join(zipExtracted, "codewhale-windows-arm64-portable", entry)).mtimeMs / 1000,

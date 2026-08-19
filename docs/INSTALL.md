@@ -231,6 +231,10 @@ codewhale --version   # prints the published version that was installed
 
 `postinstall` downloads the matching `codewhale` and `codew` binaries from the GitHub
 release, verifies a SHA-256 manifest, and exposes `codewhale` and `codew` on your `PATH`.
+On Windows, run those commands from **Windows Terminal** rather than `cmd.exe` so fonts
+and colors match the supported TUI. The GitHub Release also publishes `codewhale.bat`
+next to the bare x64 exe; that launcher prefers `wt.exe` and falls back to a direct
+launch when Windows Terminal is absent.
 
 Useful environment variables:
 
@@ -526,7 +530,9 @@ The manifest is at [`packaging/winget/Hmbown.CodeWhale.yaml`](../packaging/winge
 (also mirrored at [`.winget/Hmbown.CodeWhale.yaml`](../.winget/Hmbown.CodeWhale.yaml)) and lists both
 the NSIS installer (`CodeWhaleSetup.exe`, per-user, adds `%LOCALAPPDATA%\Programs\CodeWhale\bin` to the user PATH)
 and the portable ZIP fallback (`codewhale-windows-x64.zip` / `codewhale-windows-arm64.zip`). winget
-selects the matching architecture automatically; both install only the single binary (`codewhale.exe` + `codew.exe`).
+selects the matching architecture automatically; both install the single binary (`codewhale.exe` + `codew.exe`).
+The zips also include `codewhale.bat`. Double-click that launcher (not the raw `.exe`) so the first
+window is Windows Terminal when it is installed.
 
 Update via `winget upgrade Hmbown.CodeWhale` or `codewhale update`. The winget package is
 maintained outside this repo's release workflow and can lag GitHub/npm/Cargo releases by one
@@ -559,8 +565,13 @@ ARM64 binaries.
 
 - Installs `codewhale.exe` and `codew.exe` side-by-side (single binary, no `codewhale-tui.exe`) into
   `%LOCALAPPDATA%\Programs\CodeWhale\bin`
+- Installs `codewhale.bat`, which prefers Windows Terminal (`wt.exe`) when it is on `PATH` and
+  otherwise launches the exe directly
+- Creates a current-user Start Menu shortcut that opens that launcher, not the raw `.exe`
 - Adds the install directory to the **current user** `PATH`
 - Registers in Windows **Apps & Features** for easy uninstall
+
+Uninstall removes the binaries, `codewhale.bat`, the Start Menu shortcut, and the user `PATH` entry.
 
 **Silent install** (for IT admins, SCCM, Intune):
 

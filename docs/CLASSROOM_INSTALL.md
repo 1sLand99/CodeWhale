@@ -33,6 +33,7 @@ CodeWhaleSetup.exe /S
 The silent installer:
 - Installs to `%LOCALAPPDATA%\Programs\CodeWhale\bin`
 - Adds the bin directory to the **current user** PATH
+- Installs `codewhale.bat` and a current-user Start Menu shortcut that prefers Windows Terminal
 - Registers in Windows "Apps & Features" for uninstall
 
 ### Option B — Interactive install

@@ -292,7 +292,9 @@ The publish helper is idempotent for reruns: already-published crate versions ar
 - byte-identical `codew-*` command assets copied from that runtime
 - for v0.9.5 only, byte-identical `codewhale-tui-*` compatibility filenames so
   installed v0.9.4 clients can discover and complete the one-runtime upgrade
-- `codewhale.bat` for the Windows npm launcher
+- `codewhale.bat` for the Windows npm/GitHub x64 launcher, and the same
+  filename inside Windows zip archives and the NSIS install (those copies
+  launch `codewhale.exe` and prefer Windows Terminal)
 - platform `.tar.gz` / `.zip` archives and `CodeWhaleSetup.exe`
 
 The release job also uploads `codewhale-artifacts-sha256.txt` and

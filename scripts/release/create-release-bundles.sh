@@ -60,6 +60,18 @@ bundle_dir="$(cd "${bundle_dir}" && pwd)"
 manifest="${bundle_dir}/codewhale-bundles-sha256.txt"
 : > "${manifest}"
 
+# Windows archives must contain CRLF batch files regardless of the builder's
+# working-tree line endings (`* text=auto` checks out LF on macOS/Linux).
+write_crlf_file() {
+  local src="$1"
+  local dest="$2"
+  if [[ ! -f "${src}" ]]; then
+    echo "missing Windows launcher or install script: ${src}" >&2
+    exit 1
+  fi
+  awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "${src}" > "${dest}"
+}
+
 bundle() {
   local platform="$1"
   local cli_src="$2"
@@ -102,10 +114,20 @@ bundle() {
       "${stage_dir}/${shim_dst}"
   fi
 
+  # Regular and portable Windows zips ship the Terminal-aware launcher (#1854).
+  # The GitHub flat asset `codewhale.bat` still targets the x64 release filename;
+  # archives rename the binary to codewhale.exe, so they reuse the NSIS launcher.
+  if [[ "${platform}" == windows-* ]]; then
+    write_crlf_file \
+      scripts/installer/codewhale.bat \
+      "${stage_dir}/codewhale.bat"
+  fi
+
   if [[ "${variant}" != "portable" ]]; then
     if [[ "${platform}" == windows-* ]]; then
-      cp scripts/release/install.bat "${stage_dir}/"
-      sed -i 's/$/\r/' "${stage_dir}/install.bat" 2>/dev/null || true
+      write_crlf_file \
+        scripts/release/install.bat \
+        "${stage_dir}/install.bat"
     else
       cp scripts/release/install.sh "${stage_dir}/"
       chmod +x "${stage_dir}/install.sh"

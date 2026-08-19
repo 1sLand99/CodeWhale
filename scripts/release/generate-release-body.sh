@@ -98,15 +98,17 @@ cd codewhale-<platform>
 
 **Windows:**
 - For the installer path, run \`CodeWhaleSetup.exe\`; it installs
-  \`codewhale.exe\` and \`codew.exe\` under
-  \`%LOCALAPPDATA%\\Programs\\CodeWhale\\bin\` and adds that directory to the
-  current-user PATH.
+  \`codewhale.exe\`, \`codew.exe\`, and \`codewhale.bat\` under
+  \`%LOCALAPPDATA%\\Programs\\CodeWhale\\bin\`, adds that directory to the
+  current-user PATH, and creates a Start Menu shortcut that prefers
+  Windows Terminal (\`wt.exe\`) when it is installed.
 - Extract the archive for your machine: \`codewhale-windows-x64.zip\` or
   \`codewhale-windows-arm64.zip\`
-- Run \`install.bat\` (copies to \`%USERPROFILE%\\bin\`)
+- Double-click \`codewhale.bat\` (not the raw \`.exe\`) to launch
+- Run \`install.bat\` to copy the binaries and launcher to \`%USERPROFILE%\\bin\`
 - Add \`%USERPROFILE%\\bin\` to your PATH
 
-The **portable** Windows archive skips the install script — extract and run from any directory. The NSIS installer is currently unsigned and may trigger Windows SmartScreen until a signing certificate is wired into the release pipeline.
+The **portable** Windows archive skips the install script — extract and run \`codewhale.bat\` from any directory. The NSIS installer is currently unsigned and may trigger Windows SmartScreen until a signing certificate is wired into the release pipeline.
 
 Each platform also has **bare, unarchived** \`codewhale-<platform>\` and
 \`codew-<platform>\` assets. The seven \`codewhale-tui-<platform>\` filenames
