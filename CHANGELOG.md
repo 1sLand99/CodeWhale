@@ -22,6 +22,9 @@ abort under load.
 
 ### Fixed
 
+- `/model` now keeps the current Z.ai default (`GLM-5.3`) visible when an
+  older installation has an explicit `GLM-5.2` route saved. The saved 5.2
+  route remains exact; choosing 5.3 sends and remembers the distinct 5.3 ID.
 - The constitution checkpoint now leads with the bundled balanced agreement;
   the default path writes no custom constitution. The startup launch surface
   distinguishes read-only Chat from folder-bound, approval-gated Work.

@@ -1258,6 +1258,31 @@ mod tests {
     }
 
     #[test]
+    fn model_command_keeps_glm_53_as_its_own_wire_id() {
+        let _settings = SettingsPathGuard::new();
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        app.model_ids_passthrough = false;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.auto_model = false;
+
+        let result = model(&mut app, Some("glm-5.3"));
+
+        assert!(!result.is_error, "GLM-5.3 is valid on Z.ai: {result:?}");
+        assert_eq!(app.model, crate::config::ZAI_GLM_5_3_MODEL);
+        assert_eq!(
+            app.provider_models.get("zai").map(String::as_str),
+            Some(crate::config::ZAI_GLM_5_3_MODEL)
+        );
+        assert_eq!(
+            app.pending_route_save
+                .as_ref()
+                .map(|pending| pending.model.as_str()),
+            Some(crate::config::ZAI_GLM_5_3_MODEL)
+        );
+    }
+
+    #[test]
     fn two_sessions_keep_independent_provider_model_routes() {
         // #3227: two App instances sharing one settings/config path. A is on
         // Z.ai/GLM; B switches to DeepSeek and picks a DeepSeek model. B must

@@ -1439,10 +1439,32 @@ fn model_row_enabled_for_app(app: &App, config: &Config, row: &ModelPickerRow) -
     {
         return true;
     }
-    config
+    let configured_model = config
         .provider_config_for(provider)
-        .and_then(|entry| entry.model.as_deref())
-        .is_some_and(|model| model.eq_ignore_ascii_case(&row.id))
+        .and_then(|entry| entry.model.as_deref());
+    if configured_model.is_some_and(|model| model.eq_ignore_ascii_case(&row.id)) {
+        return true;
+    }
+
+    // A Z.ai route saved before GLM-5.3 became the provider default normally
+    // carries an explicit GLM-5.2 choice. Keep that exact route intact, but do
+    // not let the conservative Configured view hide the current default and
+    // make `/model` look permanently stuck on 5.2. Once Z.ai has any enabled
+    // model, surface GLM-5.3 alongside it; selecting the row still sends the
+    // distinct GLM-5.3 wire id through the ordinary transactional route flow.
+    provider == ApiProvider::Zai
+        && row
+            .id
+            .eq_ignore_ascii_case(crate::config::DEFAULT_ZAI_MODEL)
+        && (app
+            .enabled_provider_models
+            .get(provider_identity)
+            .is_some_and(|models| !models.is_empty())
+            || app
+                .provider_models
+                .get(provider_identity)
+                .is_some_and(|model| !model.trim().is_empty())
+            || configured_model.is_some_and(|model| !model.trim().is_empty()))
 }
 
 fn push_provider_model_rows(
@@ -3989,6 +4011,62 @@ mod tests {
                 .contains(&crate::config::DEFAULT_TOGETHER_MODEL),
             "explicitly enabled Together model should join the ordinary chooser"
         );
+    }
+
+    #[test]
+    fn saved_zai_52_route_surfaces_and_selects_glm_53_in_configured_view() {
+        let (mut app, _default_config, _lock) = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+
+        // This is the real upgrade shape: the provider was configured while
+        // 5.2 was the default, so its exact saved route must remain 5.2 while
+        // the ordinary picker also exposes the now-current 5.3 default.
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                zai: crate::config::ProviderConfig {
+                    api_key: Some("zai-picker-test-key".to_string()),
+                    model: Some(crate::config::ZAI_GLM_5_2_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+
+        let mut view = ModelPickerView::new(&app, &config);
+        let zai_rows = view
+            .visible_model_rows()
+            .into_iter()
+            .filter(|row| row.provider == Some(crate::config::ApiProvider::Zai))
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zai_rows,
+            vec![
+                crate::config::DEFAULT_ZAI_MODEL,
+                crate::config::ZAI_GLM_5_2_MODEL
+            ],
+            "the current default must be visible without rewriting the saved 5.2 route"
+        );
+
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| {
+                row.provider == Some(crate::config::ApiProvider::Zai)
+                    && row.id == crate::config::DEFAULT_ZAI_MODEL
+            })
+            .expect("GLM-5.3 row is selectable");
+        assert!(matches!(
+            view.build_event(),
+            ViewEvent::ModelPickerApplied {
+                provider: Some(crate::config::ApiProvider::Zai),
+                model,
+                ..
+            } if model == crate::config::ZAI_GLM_5_3_MODEL
+        ));
     }
 
     #[test]
