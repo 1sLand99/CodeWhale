@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The TUI header now identifies the active repository or linked worktree before
+  the branch and dirty marker, so operators can see where the agent is working
+  without opening the worktree manager (#5437).
+
 ## [0.9.9] - 2026-08-18
 
 Codewhale v0.9.9 is a truth-and-resilience release: the shell tool can no
