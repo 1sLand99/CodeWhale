@@ -23,6 +23,7 @@ const DEFAULT_MAX_CHARS: usize = 200_000;
 const MAX_MAX_CHARS: usize = 1_000_000;
 const FALLBACK_MAX_CHARS: usize = 4000;
 const REVIEW_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const REVIEW_CLIENT_UNAVAILABLE: &str = "Review tool requires an active Codewhale model client";
 
 const REVIEW_SYSTEM_PROMPT: &str = "You are a senior code reviewer. Return ONLY valid JSON with \
 the following schema:\n\
@@ -469,9 +470,7 @@ impl ToolSpec for ReviewTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let Some(client) = self.client.clone() else {
-            return Err(ToolError::not_available(
-                "Review tool requires an active DeepSeek client".to_string(),
-            ));
+            return Err(ToolError::not_available(REVIEW_CLIENT_UNAVAILABLE));
         };
 
         let target = required_str(&input, "target")?.trim();
@@ -904,6 +903,24 @@ fn parse_pr_url(url: &str) -> Option<PullRequestRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_review_client_uses_codewhale_provider_neutral_language() {
+        let tool = ReviewTool::new(None, "unused".to_string());
+        let context = ToolContext::new(PathBuf::from("."));
+
+        let error = tool
+            .execute(json!({}), &context)
+            .await
+            .expect_err("review requires a configured model client")
+            .to_string();
+
+        assert_eq!(
+            error,
+            "Failed to locate tool: Review tool requires an active Codewhale model client"
+        );
+        assert!(!error.contains("DeepSeek"));
+    }
 
     fn fixture_git(workspace: &Path, args: &[&str]) -> std::process::Output {
         let mut command = crate::dependencies::Git::command().expect("git test dependency");

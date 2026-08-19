@@ -1,4 +1,4 @@
-//! MCP server implementation for exposing DeepSeek tools over stdio.
+//! MCP server implementation for exposing Codewhale tools over stdio.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
@@ -369,10 +369,7 @@ impl McpServer {
             code: -32000,
             message: format!("Failed to load config: {e}"),
         })?;
-        let client = DeepSeekClient::new(&config).map_err(|e| RpcError {
-            code: -32000,
-            message: format!("Failed to create DeepSeek client: {e}"),
-        })?;
+        let client = DeepSeekClient::new(&config).map_err(model_client_init_error)?;
 
         // Build message list
         let user_message = Message {
@@ -419,10 +416,7 @@ impl McpServer {
 
         let response = runtime
             .block_on(client.create_message(request))
-            .map_err(|e| RpcError {
-                code: -32000,
-                message: format!("DeepSeek API call failed: {e}"),
-            })?;
+            .map_err(model_provider_call_error)?;
 
         // A provider-declared incomplete reply must not enter the stored
         // thread or be returned as a successful answer. The billed usage is
@@ -624,6 +618,20 @@ struct RpcError {
     message: String,
 }
 
+fn model_client_init_error(error: impl std::fmt::Display) -> RpcError {
+    RpcError {
+        code: -32000,
+        message: format!("Failed to create Codewhale model client: {error}"),
+    }
+}
+
+fn model_provider_call_error(error: impl std::fmt::Display) -> RpcError {
+    RpcError {
+        code: -32000,
+        message: format!("Model provider call failed: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +694,25 @@ mod tests {
             resources.get("nextCursor").is_none(),
             "resources/list must omit nextCursor when there are no more pages"
         );
+    }
+
+    #[test]
+    fn model_failures_use_codewhale_provider_neutral_language() {
+        let init = model_client_init_error("missing credential");
+        assert_eq!(init.code, -32000);
+        assert_eq!(
+            init.message,
+            "Failed to create Codewhale model client: missing credential"
+        );
+
+        let request = model_provider_call_error("route unavailable");
+        assert_eq!(request.code, -32000);
+        assert_eq!(
+            request.message,
+            "Model provider call failed: route unavailable"
+        );
+
+        assert!(!init.message.contains("DeepSeek"));
+        assert!(!request.message.contains("DeepSeek"));
     }
 }
