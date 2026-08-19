@@ -150,6 +150,20 @@ pub fn resolve_release_query(channel: ReleaseChannel) -> ReleaseQuery {
 /// CNB mirror if `CODEWHALE_USE_CNB_MIRROR` is set. Returns `None` when no
 /// override is configured.
 pub fn release_base_url_from_env(version: &str) -> Option<String> {
+    if let Some(base_url) = explicit_release_base_url_from_env() {
+        return Some(base_url);
+    }
+    if std::env::var(CNB_MIRROR_ENV).is_ok() {
+        return Some(cnb_release_base_url(version));
+    }
+    None
+}
+
+/// Reads an operator-supplied release base URL, ignoring the CNB mirror flag.
+///
+/// Kept separate from [`release_base_url_from_env`] so callers can tell an
+/// explicit mirror directory apart from "use the CNB mirror for this version".
+pub fn explicit_release_base_url_from_env() -> Option<String> {
     for env_name in [
         RELEASE_BASE_URL_ENV,
         LEGACY_RELEASE_BASE_URL_ENV,
@@ -162,11 +176,24 @@ pub fn release_base_url_from_env(version: &str) -> Option<String> {
             }
         }
     }
-
-    if std::env::var(CNB_MIRROR_ENV).is_ok() {
-        return Some(cnb_release_base_url(version));
-    }
     None
+}
+
+/// True when `CODEWHALE_USE_CNB_MIRROR` is the override actually in effect —
+/// it is set, and no explicit base URL outranks it.
+pub fn cnb_mirror_override_active() -> bool {
+    explicit_release_base_url_from_env().is_none() && std::env::var(CNB_MIRROR_ENV).is_ok()
+}
+
+/// True when the first-party CNB mirror publishes release binaries for this
+/// target.
+///
+/// The CNB tag pipeline (`.cnb.yml`) builds exactly one artifact set — Linux
+/// x64, statically linked against musl. Every other platform is served by
+/// canonical GitHub Releases or by an explicit
+/// [`RELEASE_BASE_URL_ENV`] mirror, so the updater must not offer CNB there.
+pub fn cnb_mirror_supports_target(os: &str, rust_arch: &str) -> bool {
+    os == "linux" && rust_arch == "x86_64"
 }
 
 /// Constructs the CNB mirror asset URL for a given version tag.
@@ -573,6 +600,41 @@ mod tests {
             release_base_url_from_env("1.0.0"),
             Some("https://explicit.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn cnb_mirror_override_is_active_only_without_an_explicit_base_url() {
+        let _env = ReleaseEnvGuard::clear();
+        assert!(!cnb_mirror_override_active());
+
+        set_release_env(CNB_MIRROR_ENV, "1");
+        assert!(cnb_mirror_override_active());
+
+        set_release_env(RELEASE_BASE_URL_ENV, "https://explicit.example.com");
+        assert!(
+            !cnb_mirror_override_active(),
+            "an explicit base URL outranks the CNB flag"
+        );
+    }
+
+    #[test]
+    fn cnb_mirror_publishes_linux_x64_only() {
+        assert!(cnb_mirror_supports_target("linux", "x86_64"));
+
+        for (os, arch) in [
+            ("linux", "aarch64"),
+            ("linux", "riscv64"),
+            ("macos", "x86_64"),
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+            ("android", "aarch64"),
+        ] {
+            assert!(
+                !cnb_mirror_supports_target(os, arch),
+                "CNB must not claim {os}/{arch}"
+            );
+        }
     }
 
     #[test]

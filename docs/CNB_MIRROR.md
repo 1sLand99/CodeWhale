@@ -152,8 +152,53 @@ expired:
 ## Binary release assets and `codewhale update`
 
 CNB now builds Linux x64 assets for `v*` tags from the source-controlled
-`.cnb.yml` pipeline. GitHub remains the canonical macOS/Windows release matrix. Users
-behind GitHub-blocking networks should use one of these paths:
+`.cnb.yml` pipeline. GitHub remains the canonical macOS/Windows release matrix.
+
+### Automatic source selection (Linux x64)
+
+On Linux x64, `codewhale update` picks its asset source before it downloads
+anything large. Once the target tag is known, it requests
+`codewhale-artifacts-sha256.txt` for that exact tag from GitHub Releases and
+from the CNB release **at the same time**, and takes the first source that
+answers with a manifest listing `codewhale-linux-x64`. The straggler's answer is
+discarded.
+
+Three properties this relies on:
+
+- **The manifest is the probe.** It is a few hundred bytes, so a blocked or slow
+  source loses in about the time its connection takes to fail — the user never
+  waits out a stalled multi-megabyte asset download, and no timeout is doing the
+  choosing.
+- **Manifest and binary come from the same source.** CNB builds its own
+  artifacts from the tagged source (musl-static, not GitHub's glibc build), so
+  the two manifests describe different bytes and are not interchangeable. The
+  winning source supplies both, and a checksum mismatch fails the update rather
+  than falling back to the loser.
+- **Selection never changes which release is installed.** The tag still comes
+  from GitHub's stable-release or beta-release lookup, so `--beta` keeps its
+  meaning; only where the bytes for that tag are fetched from is decided by the
+  probe.
+
+`codewhale update` and `codewhale update --check` both print the result as a
+`Release source:` line, and the post-install summary repeats it, so the source a
+given binary came from is recoverable after the fact.
+
+Every other target keeps a single canonical source: CNB publishes Linux x64 and
+nothing else, so macOS, Windows, Android, and Linux arm64 do not race CNB;
+Linux riscv64 remains explicitly unsupported. All supported self-update paths
+are nevertheless checksum-required: the chosen source must publish a valid
+`codewhale-artifacts-sha256.txt` entry for the exact platform binary, or
+`codewhale update` stops before downloading that binary. There is no
+unverified-install fallback.
+
+Setting `CODEWHALE_RELEASE_BASE_URL` (or a legacy alias) or
+`CODEWHALE_USE_CNB_MIRROR` turns selection off entirely — an explicitly named
+source is used as named, including its own checksum manifest, with
+`CODEWHALE_RELEASE_BASE_URL` outranking `CODEWHALE_USE_CNB_MIRROR`.
+
+### Manual paths
+
+Users behind GitHub-blocking networks can also select a source explicitly:
 
 - **`cargo install`** from the CNB mirror:
   ```bash
