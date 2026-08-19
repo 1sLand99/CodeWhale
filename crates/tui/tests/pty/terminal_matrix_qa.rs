@@ -776,7 +776,11 @@ fn help_overlay_advertises_the_chords_this_matrix_drives() -> Result<()> {
         harness.send(keys::key::backspaces(advertised.chars().count()))?;
         expect_frame(
             &mut harness,
-            |frame| frame.contains("Ctrl+C") && frame.contains("Esc"),
+            |frame| {
+                frame.contains("Type to filter")
+                    && frame.contains("entries")
+                    && !frame.contains("matches")
+            },
             KEY_TIMEOUT,
             "help filter never cleared",
         )?;
