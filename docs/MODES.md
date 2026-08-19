@@ -234,9 +234,10 @@ that path. Codewhale's autonomous posture adds only the single stateless
 guardian request described above; deterministic hard blocks remain
 non-bypassable.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
-  while deliberate user questions remain available. Non-bypassable safety,
-  repository-law, and managed-policy holds fail closed as hard blocks instead
-  of contradicting Full Access with an approval modal.
+  while deliberate user questions remain available. Non-bypassable registered
+  holds auto-approve instead of opening a contradictory modal. Repository-law
+  and managed-policy holds fail closed as hard blocks instead of contradicting
+  Full Access with an approval modal.
 - `never`: blocks any tool that is not considered safe/read-only; deliberate
   user questions remain available.
 
