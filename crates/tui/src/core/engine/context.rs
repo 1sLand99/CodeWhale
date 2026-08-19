@@ -8,9 +8,9 @@ use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
 use crate::error_taxonomy::ErrorCategory;
 use crate::models::SystemPrompt;
-pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
 #[cfg(test)]
-pub(super) use crate::route_budget::{TURN_MAX_OUTPUT_TOKENS, effective_max_output_tokens};
+pub(super) use crate::route_budget::effective_max_output_tokens;
+pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
 use crate::tools::spec::ToolResult;
 use codewhale_config::route::RouteLimits;
 use serde_json::Value;
@@ -516,15 +516,11 @@ pub(super) fn extract_compaction_summary_prompt(
 /// of disabling preflight; custom long-context deployments can still advertise
 /// their window with a `-256k`/`-1024k` model suffix.
 ///
-/// The reserved-output term is window-dependent:
-///   * `window >= 500K` (V4-class large-context) -> [`TURN_MAX_OUTPUT_TOKENS`]
-///     (262K). Preserves the "leave room for interleaved thinking" contract.
-///   * `window < 500K` (smaller / self-hosted, e.g. a 256K vLLM Qwen window)
-///     -> [`effective_max_output_tokens`], i.e. what the API actually caps
-///     output at. Reserving the full 262K here would compute
-///     `256K - 262K - 1K`, which underflows `checked_sub` to `None` and
-///     *silently disables every preflight and emergency recovery path* — the
-///     session then runs until the provider hard-rejects on context length.
+/// The reserved-output term is the route-effective request cap: exactly what
+/// the API can receive after explicit overrides, compatibility/route ceilings,
+/// and the route window are intersected. A second hidden reasoning reserve
+/// would make preflight disagree with the wire request and can cause premature
+/// compaction on otherwise valid large-window inputs.
 #[cfg(test)]
 pub(super) fn context_input_budget_for_provider(
     provider: ApiProvider,
@@ -535,8 +531,8 @@ pub(super) fn context_input_budget_for_provider(
 
 /// Public so external callers (e.g. a host/bridge deriving its own compaction
 /// trigger line) can reuse the *exact* same internal input-budget math — window
-/// minus the window-dependent output reservation (`route_output_reservation_for_window`,
-/// which encodes the ≥500K→262K vs smaller-window split) minus headroom —
+/// minus the route-effective output reservation
+/// (`route_output_reservation`) minus headroom —
 /// instead of re-deriving those constants and silently drifting from the engine.
 /// Pass `input_tokens = 0` to get the full emergency input budget for the route.
 pub fn context_input_budget_for_route(

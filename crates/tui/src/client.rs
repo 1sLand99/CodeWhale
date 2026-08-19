@@ -21,7 +21,9 @@ use codewhale_config::catalog::{
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::provider::WireFormat;
-use codewhale_config::route::{LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver};
+use codewhale_config::route::{
+    LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver,
+};
 use codewhale_config::{auth_mode_disables_api_key, is_upstream_auth_header};
 
 use crate::config::{
@@ -185,6 +187,11 @@ pub struct DeepSeekClient {
     provider_identity: String,
     billing_surface: Option<String>,
     billing_mode: crate::cost_status::RouteBillingMode,
+    /// Non-secret limits frozen from the same resolved candidate as the
+    /// endpoint and wire model. Auxiliary calls carry only this client, so
+    /// they must not reconstruct output caps with `None` and discard a custom
+    /// route's context window.
+    route_limits: Option<RouteLimits>,
     /// ChatGPT account id captured through the same consent-gated credential
     /// resolution as the Codex bearer token.
     pub(super) codex_account_id: Option<String>,
@@ -452,6 +459,7 @@ impl Clone for DeepSeekClient {
             provider_identity: self.provider_identity.clone(),
             billing_surface: self.billing_surface.clone(),
             billing_mode: self.billing_mode,
+            route_limits: self.route_limits,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
             retry: self.retry.clone(),
@@ -1024,10 +1032,18 @@ impl DeepSeekClient {
                 .map_err(anyhow::Error::msg)?;
             return Self::from_candidate(&route.config, &route.candidate);
         }
+        let default_model = config.default_model();
+        let route_limits =
+            crate::route_runtime::resolve_runtime_route(config, api_provider, Some(&default_model))
+                .ok()
+                .and_then(|route| {
+                    crate::route_budget::known_route_limits(route.candidate.limits())
+                });
         Self::from_parts(
             config.deepseek_base_url(),
-            config.default_model(),
+            default_model,
             provider_wire_format_for_config(api_provider, Some(config)),
+            route_limits,
             config,
         )
     }
@@ -1046,6 +1062,7 @@ impl DeepSeekClient {
             candidate.endpoint().base_url.clone(),
             candidate.wire_model_id().as_str().to_string(),
             candidate.protocol(),
+            crate::route_budget::known_route_limits(candidate.limits()),
             config,
         )
     }
@@ -1059,6 +1076,7 @@ impl DeepSeekClient {
         base_url: String,
         default_model: String,
         wire_format: WireFormat,
+        route_limits: Option<RouteLimits>,
         config: &Config,
     ) -> Result<Self> {
         let api_provider = config.api_provider();
@@ -1163,6 +1181,7 @@ impl DeepSeekClient {
             provider_identity,
             billing_surface,
             billing_mode,
+            route_limits,
             codex_account_id,
             wire_format,
             retry,
@@ -1256,22 +1275,16 @@ impl DeepSeekClient {
     }
 
     /// Resolve `model` through the central route resolver and rebuild this
-    /// client when a ModelAware provider maps it to a different wire protocol
-    /// than the one bound at construction (#5042). `Ok(None)` means the
-    /// existing binding is already correct for `model`. Mirrors the
-    /// resolution in `bind_request_to_protocol`, but at a seam where the
-    /// caller can still rebind instead of failing the first send.
+    /// client whenever its exact wire identity, limits, or protocol differs
+    /// from the route bound at construction (#5042). `Ok(None)` means the
+    /// existing binding is already exact for `model`. This includes
+    /// same-protocol switches: an OpenAI-compatible client for model A must not
+    /// carry A's route limits into model B merely because both speak Chat.
     pub(crate) fn rebound_for_model_protocol(
         &self,
         config: Option<&Config>,
         model: &str,
     ) -> Result<Option<Self>> {
-        let model_aware = self.api_provider.metadata().is_some_and(|provider| {
-            provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
-        });
-        if !model_aware {
-            return Ok(None);
-        }
         static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
         let candidate = RESOLVER
             .get_or_init(RouteResolver::new)
@@ -1283,8 +1296,23 @@ impl DeepSeekClient {
                 limit_overrides: Vec::new(),
             })
             .map_err(anyhow::Error::msg)?;
-        if candidate.protocol() == self.wire_format {
+        let candidate_limits = crate::route_budget::known_route_limits(candidate.limits());
+        if candidate.protocol() == self.wire_format
+            && candidate.wire_model_id().as_str() == self.default_model
+            && candidate_limits == self.route_limits
+        {
             return Ok(None);
+        }
+        if candidate.protocol() == self.wire_format {
+            // Same-protocol model switches keep the already-authenticated,
+            // endpoint-bound transport but must freeze the alternate model's
+            // exact wire identity and limits. This path is also what makes a
+            // model-aware client usable in embedded/test runtimes that do not
+            // retain the original Config after construction.
+            let mut rebound = self.clone();
+            rebound.default_model = candidate.wire_model_id().as_str().to_string();
+            rebound.route_limits = candidate_limits;
+            return Ok(Some(rebound));
         }
         let config = config.ok_or_else(|| {
             anyhow::anyhow!(
@@ -1298,16 +1326,19 @@ impl DeepSeekClient {
         Self::from_candidate(config, &candidate).map(Some)
     }
 
-    fn bind_request_to_protocol(&self, mut request: MessageRequest) -> Result<MessageRequest> {
+    fn bind_request_to_protocol(
+        &self,
+        mut request: MessageRequest,
+    ) -> Result<(MessageRequest, Option<RouteLimits>)> {
         let model_aware = self.api_provider.metadata().is_some_and(|provider| {
             provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
         });
-        if !model_aware {
-            return Ok(request);
+        if !model_aware && request.model.trim() == self.default_model {
+            return Ok((request, self.route_limits));
         }
 
         static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
-        let candidate = RESOLVER
+        let candidate = match RESOLVER
             .get_or_init(RouteResolver::new)
             .resolve(&RouteRequest {
                 explicit_provider: self.api_provider.kind(),
@@ -1315,8 +1346,17 @@ impl DeepSeekClient {
                 saved_provider_model: None,
                 base_url_override: Some(self.base_url.clone()),
                 limit_overrides: Vec::new(),
-            })
-            .map_err(anyhow::Error::msg)?;
+            }) {
+            Ok(candidate) => candidate,
+            Err(error) if model_aware => return Err(anyhow::Error::msg(error)),
+            Err(_) => {
+                // A fixed-protocol gateway may legitimately accept an id that
+                // is newer than our offline catalog. Preserve the caller's
+                // model, but fail closed on limits instead of reusing the
+                // bound default model's envelope.
+                return Ok((request, None));
+            }
+        };
         if candidate.protocol() != self.wire_format {
             bail!(
                 "{} model {:?} uses {:?}, but this client is bound to {:?}; resolve a new model route before sending",
@@ -1327,7 +1367,8 @@ impl DeepSeekClient {
             );
         }
         request.model = candidate.wire_model_id().as_str().to_string();
-        Ok(request)
+        let route_limits = crate::route_budget::known_route_limits(candidate.limits());
+        Ok((request, route_limits))
     }
 
     #[cfg(test)]
@@ -1789,7 +1830,23 @@ impl DeepSeekClient {
         request: MessageRequest,
         stream: bool,
     ) -> Result<PreparedOutboundRequest> {
+        let clamp_output_cap = |mut request: MessageRequest, route_limits: Option<RouteLimits>| {
+            let route_cap =
+                self.effective_max_output_tokens_with_limits(&request.model, route_limits);
+            if request.max_tokens > route_cap {
+                tracing::debug!(
+                    requested_max_tokens = request.max_tokens,
+                    route_max_tokens = route_cap,
+                    model = %request.model,
+                    "clamped outbound max_tokens to the resolved route envelope"
+                );
+                request.max_tokens = route_cap;
+            }
+            request
+        };
         if self.api_provider == crate::config::ApiProvider::Antigravity {
+            let request =
+                clamp_output_cap(self.prepare_model_bound_request(request), self.route_limits);
             let body = cloud_code::build_generate_content_body(&request)?;
             let url = cloud_code::stream_generate_content_url(&self.base_url);
             return Ok(PreparedOutboundRequest::new(
@@ -1802,8 +1859,9 @@ impl DeepSeekClient {
                 CallerStreamMode::from_stream_flag(stream),
             ));
         }
-        let mut request =
+        let (request, request_route_limits) =
             self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
+        let mut request = clamp_output_cap(request, request_route_limits);
         if self.is_local_ds4_model(&request.model)
             && let Some(tools) = request.tools.as_mut()
         {
@@ -1931,6 +1989,49 @@ impl DeepSeekClient {
         self.api_provider
     }
 
+    /// Route limits frozen with this client at resolution time.
+    #[must_use]
+    pub fn route_limits(&self) -> Option<RouteLimits> {
+        self.route_limits
+    }
+
+    /// Output cap for a request dispatched by this exact client route.
+    #[must_use]
+    pub fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        let route_limits = if requested_model.trim() == self.default_model {
+            self.route_limits
+        } else {
+            static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
+            RESOLVER
+                .get_or_init(RouteResolver::new)
+                .resolve(&RouteRequest {
+                    explicit_provider: self.api_provider.kind(),
+                    model_selector: Some(LogicalModelRef::from(requested_model)),
+                    saved_provider_model: None,
+                    base_url_override: Some(self.base_url.clone()),
+                    limit_overrides: Vec::new(),
+                })
+                .ok()
+                .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits()))
+        };
+        self.effective_max_output_tokens_with_limits(requested_model, route_limits)
+    }
+
+    #[must_use]
+    fn effective_max_output_tokens_with_limits(
+        &self,
+        requested_model: &str,
+        route_limits: Option<RouteLimits>,
+    ) -> u32 {
+        let wire_model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
+        crate::route_budget::effective_max_output_tokens_for_route(
+            self.api_provider,
+            &wire_model,
+            route_limits,
+        )
+    }
+
     /// Secret-free receipt for the exact base endpoint and credential
     /// generation this client was constructed with.
     ///
@@ -2025,11 +2126,7 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
-        let max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
-            self.api_provider,
-            &model,
-            None,
-        );
+        let max_tokens = self.effective_max_output_tokens(&model);
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -2722,6 +2819,14 @@ impl LlmClient for DeepSeekClient {
 
     fn billing_base_url(&self) -> Option<&str> {
         Some(&self.base_url)
+    }
+
+    fn route_limits(&self) -> Option<RouteLimits> {
+        DeepSeekClient::route_limits(self)
+    }
+
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        DeepSeekClient::effective_max_output_tokens(self, requested_model)
     }
 
     fn effective_route_envelope(
@@ -3613,6 +3718,7 @@ impl DeepSeekClient {
         }
         let url = api_url_with_suffix(&self.base_url, "beta/completions", None);
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
+        let max_tokens = max_tokens.min(self.effective_max_output_tokens(&model));
         let body = json!({
             "model": model,
             "prompt": prompt,
@@ -10366,6 +10472,216 @@ mod tests {
         assert_eq!(from_candidate.base_url, from_new.base_url);
         assert_eq!(from_candidate.default_model, from_new.default_model);
         assert_eq!(from_candidate.api_provider, from_new.api_provider);
+    }
+
+    fn route_cap_test_client(wire_format: WireFormat, limits: RouteLimits) -> DeepSeekClient {
+        let config = Config {
+            provider: Some("custom".to_string()),
+            api_key: Some("route-cap-test".to_string()),
+            base_url: Some("https://route-cap.example/v1".to_string()),
+            default_text_model: Some("DeepSeek-V4-Flash".to_string()),
+            ..Config::default()
+        };
+        DeepSeekClient::from_parts(
+            "https://route-cap.example/v1".to_string(),
+            "DeepSeek-V4-Flash".to_string(),
+            wire_format,
+            Some(limits),
+            &config,
+        )
+        .expect("route cap test client")
+    }
+
+    #[test]
+    fn outbound_seam_clamps_every_dialect_to_the_exact_route_envelope() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        for (limits, expected) in [
+            (
+                RouteLimits {
+                    context_tokens: Some(327_680),
+                    ..RouteLimits::default()
+                },
+                325_632_u64,
+            ),
+            (
+                RouteLimits {
+                    context_tokens: Some(327_680),
+                    output_tokens: Some(100_000),
+                    ..RouteLimits::default()
+                },
+                100_000,
+            ),
+            (
+                RouteLimits {
+                    context_tokens: Some(327_680),
+                    output_tokens: Some(128),
+                    ..RouteLimits::default()
+                },
+                128,
+            ),
+        ] {
+            for (wire_format, body_field) in [
+                (WireFormat::ChatCompletions, "max_tokens"),
+                (WireFormat::Responses, "max_output_tokens"),
+                (WireFormat::AnthropicMessages, "max_tokens"),
+            ] {
+                let client = route_cap_test_client(wire_format, limits);
+                let prepared = client
+                    .prepare_outbound_request(
+                        MessageRequest {
+                            model: "DeepSeek-V4-Flash".to_string(),
+                            messages: vec![Message {
+                                role: "user".to_string(),
+                                content: vec![ContentBlock::Text {
+                                    text: "route cap".to_string(),
+                                    cache_control: None,
+                                }],
+                            }],
+                            max_tokens: 384_000,
+                            system: None,
+                            tools: None,
+                            tool_choice: None,
+                            metadata: None,
+                            thinking: None,
+                            reasoning_effort: Some("max".to_string()),
+                            stream: Some(false),
+                            temperature: None,
+                            top_p: None,
+                        },
+                        false,
+                    )
+                    .expect("request prepares through preview/wire seam");
+                assert_eq!(
+                    prepared.body[body_field].as_u64(),
+                    Some(expected),
+                    "wire={wire_format:?} limits={limits:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_protocol_model_switch_rebinds_exact_candidate_identity_and_limits() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(ProvidersConfig {
+                openrouter: ProviderConfig {
+                    api_key: Some("openrouter-route-cap-test".to_string()),
+                    base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                    model: Some("deepseek/deepseek-v4-pro".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::new(&config).expect("OpenRouter client resolves");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+        assert!(client.route_limits.is_some());
+
+        let rebound = client
+            .rebound_for_model_protocol(Some(&config), "qwen/qwen3.6-flash")
+            .expect("same-protocol alternate route resolves")
+            .expect("model/limit identity change requires a rebound");
+        assert_eq!(rebound.wire_format, WireFormat::ChatCompletions);
+        assert_eq!(rebound.default_model, "qwen/qwen3.6-flash");
+        assert_ne!(rebound.route_limits, client.route_limits);
+
+        let pro_cap = client.effective_max_output_tokens("deepseek/deepseek-v4-pro");
+        let alternate_cap = client.effective_max_output_tokens("qwen/qwen3.6-flash");
+        assert!(
+            alternate_cap < pro_cap,
+            "fixture must prove a smaller same-protocol alternate route: pro={pro_cap}, alternate={alternate_cap}"
+        );
+        assert_eq!(
+            alternate_cap,
+            rebound.effective_max_output_tokens("qwen/qwen3.6-flash"),
+            "the original bound client and rebound client must resolve the same alternate envelope"
+        );
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "qwen/qwen3.6-flash".to_string(),
+                    messages: vec![Message {
+                        role: "user".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "alternate route cap".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 384_000,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: Some("max".to_string()),
+                    stream: Some(false),
+                    temperature: None,
+                    top_p: None,
+                },
+                false,
+            )
+            .expect("same-protocol alternate prepares");
+        assert_eq!(prepared.body["max_tokens"], json!(alternate_cap));
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fim_non_message_request_is_clamped_to_bound_route() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/beta/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"text": "middle"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base_url = format!("{}/v1", server.uri());
+        let config = Config {
+            provider: Some("custom".to_string()),
+            api_key: Some("fim-cap-test".to_string()),
+            base_url: Some(base_url.clone()),
+            default_text_model: Some("local-fim".to_string()),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::from_parts(
+            base_url,
+            "local-fim".to_string(),
+            WireFormat::ChatCompletions,
+            Some(RouteLimits {
+                context_tokens: Some(327_680),
+                output_tokens: Some(128),
+                ..RouteLimits::default()
+            }),
+            &config,
+        )
+        .expect("FIM route client");
+
+        assert_eq!(
+            client
+                .fim_completion("local-fim", "prefix", "suffix", 4_096)
+                .await
+                .expect("FIM response"),
+            "middle"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded FIM request");
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("FIM JSON");
+        assert_eq!(body["max_tokens"], json!(128));
     }
 
     #[test]

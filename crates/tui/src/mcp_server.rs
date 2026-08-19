@@ -398,11 +398,7 @@ impl McpServer {
         let request = MessageRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                request_route.provider,
-                &request_route.model,
-                None,
-            ),
+            max_tokens: client.effective_max_output_tokens(&request_route.model),
             system: None,
             tools: None,
             tool_choice: None,

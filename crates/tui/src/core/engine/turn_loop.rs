@@ -796,6 +796,16 @@ impl Engine {
                     self.api_provider,
                     &self.session.model,
                 );
+                let route_input_limit =
+                    crate::route_budget::route_input_limit_tokens(self.active_route_limits);
+                let input_ceiling_source =
+                    route_input_limit.map_or("window-minus-output-headroom", |limit| {
+                        if u64::from(limit) <= budget.input_budget_ceiling {
+                            "route-declared-input-limit"
+                        } else {
+                            "window-minus-output-headroom"
+                        }
+                    });
                 tracing::debug!(
                     target: "context_budget",
                     provider = self.api_provider.as_str(),
@@ -810,8 +820,10 @@ impl Engine {
                     ),
                     reserved_response_headroom_tokens = budget.output_cap_tokens,
                     safety_headroom_tokens = crate::context_budget::CONTEXT_HEADROOM_TOKENS,
+                    resolved_route_input_limit_tokens = ?route_input_limit,
                     estimated_input_tokens = estimated_input,
                     input_budget_ceiling_tokens = budget.input_budget_ceiling,
+                    input_budget_ceiling_source = input_ceiling_source,
                     remaining_input_budget_tokens = budget.available_input_tokens,
                     compaction_trigger_tokens = budget.compaction_trigger_tokens,
                     trigger = if triggered { "preflight-token-budget" } else { "none" },

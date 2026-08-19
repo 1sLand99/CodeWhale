@@ -111,7 +111,7 @@ impl Engine {
             .with_goal_tools(self.config.goal_state.clone());
 
         builder = builder
-            .with_review_tool(client, model.to_string())
+            .with_review_tool(client.clone(), model.to_string())
             .with_user_input_tool();
 
         if self.config.features.enabled(Feature::WebSearch) {
@@ -129,7 +129,7 @@ impl Engine {
         if self.config.features.enabled(Feature::VisionModel)
             && let Some(ref vision_config) = self.config.vision_config
         {
-            builder = builder.with_vision_tools(vision_config.clone());
+            builder = builder.with_vision_tools(vision_config.clone(), client.clone());
         }
 
         // Register the `notify` tool unconditionally (#1322). It has no

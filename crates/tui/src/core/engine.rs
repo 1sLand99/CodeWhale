@@ -4745,11 +4745,7 @@ impl Engine {
             &self.session.messages,
             &self.session.model,
             self.session.reasoning_effort.clone(),
-            effective_max_output_tokens_for_route(
-                self.api_provider,
-                &self.session.model,
-                self.active_route_limits,
-            ),
+            client.effective_max_output_tokens(&self.session.model),
         )
         .await
         {

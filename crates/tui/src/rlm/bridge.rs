@@ -61,6 +61,8 @@ pub(crate) trait RlmLlmClient: Send + Sync {
         dispatched_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::cost_status::EffectiveRouteEnvelope;
 
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32;
+
     fn create_message_boxed(
         &self,
         request: MessageRequest,
@@ -75,6 +77,10 @@ impl RlmLlmClient for ModelClientRlmAdapter {
     ) -> crate::cost_status::EffectiveRouteEnvelope {
         self.client
             .effective_route_envelope(requested_model, dispatched_at)
+    }
+
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        self.client.effective_max_output_tokens(requested_model)
     }
 
     fn create_message_boxed(
@@ -96,6 +102,10 @@ where
         dispatched_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::cost_status::EffectiveRouteEnvelope {
         LlmClient::effective_route_envelope(self, requested_model, dispatched_at)
+    }
+
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        LlmClient::effective_max_output_tokens(self, requested_model)
     }
 
     fn create_message_boxed(
@@ -144,11 +154,9 @@ impl RlmBridge {
         let request_route = self
             .client
             .effective_route_envelope(&self.child_model, chrono::Utc::now());
-        let route_max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
-            request_route.provider,
-            &request_route.model,
-            None,
-        );
+        let route_max_tokens = self
+            .client
+            .effective_max_output_tokens(&request_route.model);
         let request = MessageRequest {
             // The Python helper accepts `model=` for older snippets, but it is
             // intentionally not authoritative. RLM child calls are pinned to

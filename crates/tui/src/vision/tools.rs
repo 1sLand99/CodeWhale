@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 
+use crate::client::DeepSeekClient;
+use crate::config::ApiProvider;
 use crate::config::VisionModelConfig;
 use crate::llm_client::{LlmError, RetryConfig, sanitize_http_error_body, with_retry};
 use crate::tools::spec::{
@@ -16,16 +18,30 @@ use crate::tools::spec::{
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
     client: reqwest::Client,
+    route_client: Option<DeepSeekClient>,
 }
 
 impl ImageAnalyzeTool {
+    #[cfg(test)]
     #[must_use]
     pub fn new(config: VisionModelConfig) -> Self {
+        Self::new_with_route_client(config, None)
+    }
+
+    #[must_use]
+    pub fn new_with_route_client(
+        config: VisionModelConfig,
+        route_client: Option<DeepSeekClient>,
+    ) -> Self {
         let client = crate::tls::reqwest_client_builder()
             .timeout(Duration::from_secs(120))
             .build()
             .expect("Failed to build HTTP client");
-        Self { config, client }
+        Self {
+            config,
+            client,
+            route_client,
+        }
     }
 
     async fn read_image_file(path: &Path) -> Result<(String, String), ToolError> {
@@ -143,9 +159,30 @@ impl ImageAnalyzeTool {
         } else {
             "max_tokens"
         };
-        payload[token_limit_field] = json!(crate::route_budget::effective_max_output_tokens(
-            &self.config.model
-        ));
+        let configured_base = self.base_url();
+        let route_cap = self
+            .route_client
+            .as_ref()
+            .filter(|client| {
+                client.base_url().trim_end_matches('/') == configured_base.trim_end_matches('/')
+            })
+            .map_or_else(
+                || {
+                    // A standalone `[vision_model]` route has no resolved
+                    // max-model-len fact. Do not guess one or let a process
+                    // override turn a capability maximum into an unbounded
+                    // request; a matched active client above carries exact
+                    // route limits when the vision route is shared.
+                    crate::route_budget::effective_max_output_tokens_for_route(
+                        ApiProvider::Custom,
+                        &self.config.model,
+                        None,
+                    )
+                    .min(65_536)
+                },
+                |client| client.effective_max_output_tokens(&self.config.model),
+            );
+        payload[token_limit_field] = json!(route_cap);
 
         payload
     }
@@ -303,6 +340,17 @@ mod tests {
         }
     }
 
+    fn standalone_vision_cap(model: &str) -> u64 {
+        u64::from(
+            crate::route_budget::effective_max_output_tokens_for_route(
+                ApiProvider::Custom,
+                model,
+                None,
+            )
+            .min(65_536),
+        )
+    }
+
     #[test]
     fn tool_metadata_is_read_only_and_named_image_analyze() {
         let tool = ImageAnalyzeTool::new(fake_config());
@@ -344,9 +392,7 @@ mod tests {
 
         assert_eq!(
             payload.get("max_tokens").and_then(Value::as_u64),
-            Some(u64::from(crate::route_budget::effective_max_output_tokens(
-                &tool.config.model
-            )))
+            Some(standalone_vision_cap(&tool.config.model))
         );
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("max_completion_tokens").is_none());
@@ -363,9 +409,7 @@ mod tests {
 
         assert_eq!(
             payload.get("max_completion_tokens").and_then(Value::as_u64),
-            Some(u64::from(crate::route_budget::effective_max_output_tokens(
-                &tool.config.model
-            )))
+            Some(standalone_vision_cap(&tool.config.model))
         );
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("max_tokens").is_none());
@@ -382,11 +426,43 @@ mod tests {
 
         assert_eq!(
             payload.get("max_completion_tokens").and_then(Value::as_u64),
-            Some(u64::from(crate::route_budget::effective_max_output_tokens(
-                &tool.config.model
-            )))
+            Some(standalone_vision_cap(&tool.config.model))
         );
         assert!(payload.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn matched_vision_route_uses_bound_client_window_cap() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let base_url = "http://127.0.0.1:18080/v1".to_string();
+        let model = "DeepSeek-V4-Flash".to_string();
+        let client = DeepSeekClient::new(&crate::config::Config {
+            provider: Some("vllm".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                vllm: crate::config::ProviderConfig {
+                    base_url: Some(base_url.clone()),
+                    model: Some(model.clone()),
+                    context_window: Some(327_680),
+                    ..crate::config::ProviderConfig::default()
+                },
+                ..crate::config::ProvidersConfig::default()
+            }),
+            ..crate::config::Config::default()
+        })
+        .expect("bound vLLM client");
+        let tool = ImageAnalyzeTool::new_with_route_client(
+            VisionModelConfig {
+                model,
+                api_key: None,
+                base_url: Some(base_url),
+            },
+            Some(client),
+        );
+
+        let payload = tool.request_payload("describe", "abc123", "image/png");
+        assert_eq!(payload["max_tokens"], 325_632);
     }
 
     #[tokio::test]

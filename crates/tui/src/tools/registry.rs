@@ -1027,9 +1027,16 @@ impl ToolRegistryBuilder {
     /// Register the `image_analyze` vision tool.
     /// Only registered when `[vision_model]` is configured in config.toml.
     #[must_use]
-    pub fn with_vision_tools(self, config: crate::config::VisionModelConfig) -> Self {
+    pub fn with_vision_tools(
+        self,
+        config: crate::config::VisionModelConfig,
+        route_client: Option<DeepSeekClient>,
+    ) -> Self {
         use crate::vision::tools::ImageAnalyzeTool;
-        self.with_tool(Arc::new(ImageAnalyzeTool::new(config)))
+        self.with_tool(Arc::new(ImageAnalyzeTool::new_with_route_client(
+            config,
+            route_client,
+        )))
     }
 
     /// Include request_user_input tool.
@@ -1279,6 +1286,7 @@ impl ToolRegistryBuilder {
         plan_state: super::plan::SharedPlanState,
     ) -> Self {
         let speech_client = client.clone();
+        let vision_client = client.clone();
         let verify_client = client.clone();
         let verify_model = model.clone();
         let mut builder = self
@@ -1307,7 +1315,7 @@ impl ToolRegistryBuilder {
             builder = builder.with_remember_tool().with_native_memory_tools();
         }
         if let Some(vision_config) = options.vision_config {
-            builder = builder.with_vision_tools(vision_config);
+            builder = builder.with_vision_tools(vision_config, vision_client);
         }
 
         builder.with_notify_tool()

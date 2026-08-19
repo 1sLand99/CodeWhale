@@ -52,10 +52,14 @@ pub(super) fn build_responses_body_for_provider(
     if !is_deepseek {
         body["store"] = json!(false);
     }
+    // Every Responses route receives the same resolved request envelope as
+    // Chat and Messages. Omitting this field let auxiliary Responses calls
+    // escape the central route cap and made preview unable to prove the wire
+    // allowance.
+    if request.max_tokens > 0 {
+        body["max_output_tokens"] = json!(request.max_tokens);
+    }
     if is_deepseek {
-        if request.max_tokens > 0 {
-            body["max_output_tokens"] = json!(request.max_tokens);
-        }
         if let Some(temperature) = request.temperature {
             body["temperature"] = json!(temperature);
         }

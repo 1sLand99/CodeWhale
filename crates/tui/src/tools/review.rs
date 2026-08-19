@@ -504,11 +504,7 @@ impl ToolSpec for ReviewTool {
             // A review is a deliberative call: on thinking-default routes the
             // reasoning stream shares this budget, so it gets the route's
             // normal output allowance, not a review-only ceiling.
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                route.provider,
-                &route.model,
-                None,
-            ),
+            max_tokens: client.effective_max_output_tokens(&route.model),
             system: Some(SystemPrompt::Text(REVIEW_SYSTEM_PROMPT.to_string())),
             tools: None,
             tool_choice: None,

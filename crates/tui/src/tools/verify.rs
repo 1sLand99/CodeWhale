@@ -455,11 +455,7 @@ self-check of whether what you just did is actually correct and complete."
         // The critic runs at elevated reasoning, so its output allowance must
         // be the route's normal one: a small fixed cap is consumed by the
         // reasoning stream on thinking routes and truncates every critique.
-        let max_tokens = crate::route_budget::effective_max_output_tokens_for_route(
-            route.provider,
-            &route.model,
-            None,
-        );
+        let max_tokens = client.effective_max_output_tokens(&route.model);
         let run = VERIFY_ACTIVE
             .scope(
                 (),

@@ -10656,11 +10656,9 @@ async fn run_subagent(
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                request_route.provider,
-                &request_route.model,
-                None,
-            ),
+            max_tokens: runtime
+                .client
+                .effective_max_output_tokens(&request_route.model),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: has_tools.then(|| json!({ "type": "auto" })),

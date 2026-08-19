@@ -1,6 +1,6 @@
 use super::*;
 
-use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
+use super::context::COMPACTION_SUMMARY_MARKER;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     auto_review_block_tool_error, initial_stream_error_user_message, merge_new_runtime_mcp_tools,
@@ -13556,12 +13556,15 @@ fn context_budget_reserves_output_and_headroom() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // the internal effective_max_output_tokens() call sees a stable env.
     let _lock = lock_test_env();
-    // V4 has a 1M context window — the only family that comfortably hosts
-    // a 256K output reservation without saturating the input budget to 0.
+    // Preflight reserves exactly the route-effective output request plus the
+    // shared safety headroom, even on a 1M route.
     let budget = context_input_budget_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro")
         .expect("deepseek-v4-pro should have a known context window");
     let v4_window: usize = 1_000_000;
-    let expected = v4_window - (TURN_MAX_OUTPUT_TOKENS as usize) - 1_024usize;
+    let expected = v4_window
+        - effective_max_output_tokens_for_route(ApiProvider::Deepseek, "deepseek-v4-pro", None)
+            as usize
+        - 1_024usize;
     assert_eq!(budget, expected);
 }
 
@@ -13635,6 +13638,33 @@ fn route_context_budget_prefers_resolved_route_limits() {
     assert_eq!(budget.window_tokens, 128_000);
     assert_eq!(budget.output_cap_tokens, 32_768);
     assert_eq!(budget.available_input_tokens, 34_208);
+}
+
+#[test]
+fn route_input_limit_blocks_oversized_preflight_before_transport() {
+    let _lock = lock_test_env();
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(1_000_000),
+        input_tokens: Some(128_000),
+        output_tokens: Some(64_000),
+    };
+    let estimated_input = 200_000;
+    let budget = route_context_budget_for_route(
+        ApiProvider::Vllm,
+        "DeepSeek-V4-Flash",
+        Some(limits),
+        estimated_input,
+    )
+    .expect("resolved route limits should produce the turn-loop preflight budget");
+
+    assert_eq!(budget.window_tokens, 1_000_000);
+    assert_eq!(budget.output_cap_tokens, 64_000);
+    assert_eq!(budget.input_budget_ceiling, 128_000);
+    assert_eq!(budget.available_input_tokens, 0);
+    assert!(
+        estimated_input > usize::try_from(budget.input_budget_ceiling).unwrap(),
+        "the turn-loop preflight must recover before constructing a network request"
+    );
 }
 
 #[test]
@@ -13846,8 +13876,8 @@ fn effective_max_output_tokens_env_override_returns_positive_value() {
     let _lock = lock_test_env();
     let _guard = ScopedDeepSeekMaxOutputTokens::set("16384");
 
-    // Override applies regardless of model — V4 hosted, V4 flash, sub-500K
-    // self-hosted all return the env value verbatim.
+    // Override applies regardless of model — V4 hosted, V4 flash, and
+    // self-hosted routes all return the env value verbatim before route clamps.
     assert_eq!(effective_max_output_tokens("deepseek-v4-pro"), 16_384);
     assert_eq!(effective_max_output_tokens("deepseek-v4-flash"), 16_384);
     assert_eq!(effective_max_output_tokens("qwen3-32b-256k"), 16_384);
@@ -13877,23 +13907,23 @@ fn effective_max_output_tokens_env_override_rejects_zero_and_invalid() {
 }
 
 #[test]
-fn internal_context_budget_tiers_reserved_output_by_window() {
+fn internal_context_budget_uses_the_wire_cap_across_window_sizes() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // both branches below see a stable env.
     let _lock = lock_test_env();
-    // Large-context (>=500K) models reserve the full TURN_MAX_OUTPUT_TOKENS
-    // headroom so long V4 sessions don't compact prematurely.
+    // Large routes use the same effective output cap that reaches the wire.
     let internal_budget =
         context_input_budget_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro")
             .expect("V4 should have a known context window");
     let v4_window: usize = 1_000_000;
-    let expected_internal = v4_window - (TURN_MAX_OUTPUT_TOKENS as usize) - 1_024usize;
+    let expected_internal = v4_window
+        - effective_max_output_tokens_for_route(ApiProvider::Deepseek, "deepseek-v4-pro", None)
+            as usize
+        - 1_024usize;
     assert_eq!(internal_budget, expected_internal);
 
-    // Sub-500K windows cross into the effective-cap branch: a 256K self-hosted
-    // deployment must yield a usable positive budget rather than None. The
-    // previous formula reserved the full 262K and computed 256K - 262K - 1K,
-    // which underflowed to None and silently disabled preflight/recovery.
+    // A 256K self-hosted deployment uses the same rule and yields a usable
+    // positive budget rather than silently disabling preflight/recovery.
     let small_window_budget =
         context_input_budget_for_provider(ApiProvider::Openai, "qwen3-32b-256k")
             .expect("a 256K-suffix model must yield Some budget via the effective-cap branch");

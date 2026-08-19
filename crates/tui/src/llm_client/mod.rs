@@ -89,6 +89,21 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// Non-secret limits frozen with the resolved route, when available.
+    fn route_limits(&self) -> Option<codewhale_config::route::RouteLimits> {
+        None
+    }
+
+    /// Output cap for a request sent through this exact client route.
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        let route = self.effective_route_envelope(requested_model, chrono::Utc::now());
+        crate::route_budget::effective_max_output_tokens_for_route(
+            route.provider,
+            &route.model,
+            self.route_limits(),
+        )
+    }
+
     /// Freeze the non-secret effective route immediately before a request is
     /// dispatched. Implementations with richer configured identity/billing
     /// facts should override this fail-closed default.
