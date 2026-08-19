@@ -27,6 +27,10 @@ function sha256(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+function hasExactHostname(value, expectedHostname) {
+  return new URL(value).hostname === expectedHostname;
+}
+
 function manifestFor(files) {
   return Object.entries(files)
     .map(([name, body]) => `${sha256(body)}  ${name}`)
@@ -186,7 +190,7 @@ test("CNB wins when its checksum manifest validates first", async () => {
     linuxSelectOptions({
       fetchText: async (url, opts) => {
         fetched.push(url);
-        if (url.includes("github.com")) {
+        if (hasExactHostname(url, "github.com")) {
           githubSignal = opts && opts.signal;
           return hangUntilAbort(opts && opts.signal);
         }
@@ -204,8 +208,8 @@ test("CNB wins when its checksum manifest validates first", async () => {
   assert.equal(source.checksums.get(CODEWHALE_ASSET), sha256(cnbBody));
   assert.notEqual(source.checksums.get(CODEWHALE_ASSET), sha256(githubBody));
   assert.equal(githubSignal && githubSignal.aborted, true);
-  assert.ok(fetched.some((url) => url.includes("cnb.cool")));
-  assert.ok(fetched.some((url) => url.includes("github.com")));
+  assert.ok(fetched.some((url) => hasExactHostname(url, "cnb.cool")));
+  assert.ok(fetched.some((url) => hasExactHostname(url, "github.com")));
   assert.ok(fetched.every((url) => url.endsWith(CHECKSUM_MANIFEST)));
 });
 
@@ -216,7 +220,7 @@ test("GitHub wins when its checksum manifest validates first", async () => {
   const source = await _internal.selectReleaseSource(
     linuxSelectOptions({
       fetchText: async (url, opts) => {
-        if (url.includes("cnb.cool")) {
+        if (hasExactHostname(url, "cnb.cool")) {
           cnbSignal = opts && opts.signal;
           return hangUntilAbort(opts && opts.signal);
         }
@@ -242,7 +246,7 @@ test("one unavailable first-party source does not block the valid source", async
     linuxSelectOptions({
       fetchText: async (url) => {
         fetched.push(url);
-        if (url.includes("cnb.cool")) {
+        if (hasExactHostname(url, "cnb.cool")) {
           const err = new Error("Request failed with status 404: " + url);
           err.name = "HttpStatusError";
           err.status = 404;
@@ -372,7 +376,7 @@ test("locked source downloads each required binary once from the winner", async 
     linuxSelectOptions({
       fetchText: async (url, opts) => {
         manifestFetches.push(url);
-        if (url.includes("github.com")) {
+        if (hasExactHostname(url, "github.com")) {
           return hangUntilAbort(opts && opts.signal);
         }
         return manifestFor({
@@ -426,7 +430,7 @@ test("locked source downloads each required binary once from the winner", async 
     `${cnbReleaseBaseUrl(VERSION)}${CODEW_ASSET}`,
   ]);
   assert.ok(manifestFetches.every((url) => url.endsWith(CHECKSUM_MANIFEST)));
-  assert.ok(!binaryDownloads.some((url) => url.includes("github.com")));
+  assert.ok(!binaryDownloads.some((url) => hasExactHostname(url, "github.com")));
   assert.equal(await fs.promises.readFile(path.join(dir, "codewhale"), "utf8"), cnbWhale.toString());
   assert.equal(
     await fs.promises.readFile(path.join(dir, "codewhale.source"), "utf8"),
@@ -682,7 +686,7 @@ test("source selection is visible in progress output", async () => {
     await _internal.selectReleaseSource(
       linuxSelectOptions({
         fetchText: async (url, opts) => {
-          if (url.includes("github.com")) {
+          if (hasExactHostname(url, "github.com")) {
             return hangUntilAbort(opts && opts.signal);
           }
           return manifestFor({

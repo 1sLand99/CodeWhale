@@ -3925,7 +3925,8 @@ mod tests {
     };
     use crate::client::responses::build_responses_body;
     use crate::config::{
-        DEFAULT_EDENAI_MODEL, DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig,
+        DEFAULT_EDENAI_MODEL, DEFAULT_TELECOMJS_MODEL, OPENROUTER_QWEN_3_6_FLASH_MODEL,
+        ProviderConfig, ProvidersConfig,
     };
     use crate::models::{
         ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
@@ -10587,28 +10588,28 @@ mod tests {
         assert!(client.route_limits.is_some());
 
         let rebound = client
-            .rebound_for_model_protocol(Some(&config), "qwen/qwen3.6-flash")
+            .rebound_for_model_protocol(Some(&config), OPENROUTER_QWEN_3_6_FLASH_MODEL)
             .expect("same-protocol alternate route resolves")
             .expect("model/limit identity change requires a rebound");
         assert_eq!(rebound.wire_format, WireFormat::ChatCompletions);
-        assert_eq!(rebound.default_model, "qwen/qwen3.6-flash");
+        assert_eq!(rebound.default_model, OPENROUTER_QWEN_3_6_FLASH_MODEL);
         assert_ne!(rebound.route_limits, client.route_limits);
 
         let pro_cap = client.effective_max_output_tokens("deepseek/deepseek-v4-pro");
-        let alternate_cap = client.effective_max_output_tokens("qwen/qwen3.6-flash");
+        let alternate_cap = client.effective_max_output_tokens(OPENROUTER_QWEN_3_6_FLASH_MODEL);
         assert!(
             alternate_cap < pro_cap,
             "fixture must prove a smaller same-protocol alternate route: pro={pro_cap}, alternate={alternate_cap}"
         );
         assert_eq!(
             alternate_cap,
-            rebound.effective_max_output_tokens("qwen/qwen3.6-flash"),
+            rebound.effective_max_output_tokens(OPENROUTER_QWEN_3_6_FLASH_MODEL),
             "the original bound client and rebound client must resolve the same alternate envelope"
         );
         let prepared = client
             .prepare_outbound_request(
                 MessageRequest {
-                    model: "qwen/qwen3.6-flash".to_string(),
+                    model: OPENROUTER_QWEN_3_6_FLASH_MODEL.to_string(),
                     messages: vec![Message {
                         role: "user".to_string(),
                         content: vec![ContentBlock::Text {
