@@ -329,9 +329,10 @@ fn write_atomic_with_permissions(
     }
 
     // Reclaim our own strays before adding another (see the function docs).
-    // Private policy only: a workspace directory belongs to the user, and a
-    // file of theirs that happens to match this shape is not ours to delete.
-    if permission_policy == AtomicWritePermissions::Private {
+    // Private permission policy is also used for user-chosen destinations
+    // such as `/save <path>`; only sweep Codewhale-owned state/config dirs.
+    if permission_policy == AtomicWritePermissions::Private && is_codewhale_owned_state_dir(parent)
+    {
         sweep_stale_atomic_write_temps(parent);
     }
 
@@ -386,6 +387,22 @@ fn write_atomic_with_permissions(
     Ok(())
 }
 
+/// True when `dir` is under `$CODEWHALE_HOME` / `~/.codewhale`, or the ambient
+/// `~/.deepseek` legacy root when that root is still in play.
+fn is_codewhale_owned_state_dir(dir: &Path) -> bool {
+    if dir.as_os_str().is_empty() {
+        return false;
+    }
+    let primary = codewhale_paths::codewhale_home().ok().flatten();
+    let legacy = (!codewhale_paths::codewhale_home_is_explicit())
+        .then(codewhale_paths::legacy_deepseek_home)
+        .flatten();
+    [primary, legacy]
+        .into_iter()
+        .flatten()
+        .any(|root| !root.as_os_str().is_empty() && dir.starts_with(root))
+}
+
 /// Remove `.tmpXXXXXX` files this writer stranded in `dir` on an earlier run.
 ///
 /// `NamedTempFile` deletes itself on drop, so an ordinary failure — or an
@@ -397,8 +414,10 @@ fn write_atomic_with_permissions(
 ///
 /// Deliberately conservative, because this deletes files under `$HOME`:
 ///
-/// - **Private-policy directories only** — Codewhale's own config/state dirs,
-///   never a user workspace (enforced at the call site).
+/// - **Product directories only** — parent must be under `$CODEWHALE_HOME`
+///   (or `~/.codewhale`) or the ambient `~/.deepseek` legacy root. User-chosen
+///   destinations such as `/save <path>` keep the private permission policy
+///   but are not swept (enforced at the call site).
 /// - **Exact shape only** — `tempfile`'s default naming is the literal prefix
 ///   `.tmp` followed by exactly six alphanumerics and nothing else. A user file
 ///   called `.tmp`, `.tmpfile`, or `.tmp-backup` does not match.
@@ -1223,18 +1242,109 @@ mod atomic_write_tests {
         assert!(real_file.exists());
     }
 
+    /// Seal HOME / CODEWHALE_HOME to `tmp` so sweep policy is deterministic
+    /// and never inspects the developer's real `~/.codewhale`.
+    fn seal_product_home(
+        tmp: &std::path::Path,
+    ) -> (std::path::PathBuf, Vec<crate::test_support::EnvVarGuard>) {
+        use crate::test_support::EnvVarGuard;
+
+        let product = tmp.join("product-home");
+        std::fs::create_dir_all(&product).expect("create product home");
+        let guards = vec![
+            EnvVarGuard::set("HOME", tmp),
+            EnvVarGuard::set("USERPROFILE", tmp),
+            EnvVarGuard::set("CODEWHALE_HOME", &product),
+            EnvVarGuard::remove("CODEWHALE_CONFIG_PATH"),
+            EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH"),
+            EnvVarGuard::remove("DEEPSEEK_HOME"),
+        ];
+        (product, guards)
+    }
+
     #[test]
-    fn a_private_atomic_write_collects_strays_without_disturbing_the_write() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let stray = dir.path().join(".tmpCCCCCC");
+    fn a_private_atomic_write_in_a_product_dir_collects_strays() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (product, _guards) = seal_product_home(tmp.path());
+
+        assert!(
+            super::is_codewhale_owned_state_dir(&product),
+            "sealed CODEWHALE_HOME must count as a product dir"
+        );
+
+        let stray = product.join(".tmpCCCCCC");
         std::fs::write(&stray, b"stranded by a SIGKILL").expect("write stray");
         age_past_the_threshold(&stray);
 
-        let target = dir.path().join("state.json");
+        let target = product.join("state.json");
         super::write_atomic(&target, b"{\"ok\":true}").expect("atomic write");
 
         assert_eq!(std::fs::read(&target).expect("read back"), b"{\"ok\":true}");
         assert!(!stray.exists(), "the write reclaimed the earlier stray");
+    }
+
+    #[test]
+    fn a_private_atomic_write_to_a_user_chosen_dest_does_not_sweep() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (_product, _guards) = seal_product_home(tmp.path());
+        let user_dir = tmp.path().join("user-chosen");
+        std::fs::create_dir_all(&user_dir).expect("create user dest");
+
+        assert!(
+            !super::is_codewhale_owned_state_dir(&user_dir),
+            "user-chosen dest must not count as a product dir: {}",
+            user_dir.display()
+        );
+
+        let stray = user_dir.join(".tmpDDDDDD");
+        std::fs::write(&stray, b"user or concurrent tempfile").expect("write stray");
+        age_past_the_threshold(&stray);
+
+        let target = user_dir.join("session.json");
+        super::write_atomic(&target, b"{\"ok\":true}").expect("atomic write");
+
+        assert_eq!(std::fs::read(&target).expect("read back"), b"{\"ok\":true}");
+        assert!(
+            stray.exists(),
+            "/save <path> and other user-chosen dests must not sweep the parent"
+        );
+    }
+
+    #[test]
+    fn atomic_write_product_dir_detection_matches_codewhale_home_not_siblings() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (product, explicit_guards) = seal_product_home(tmp.path());
+        let sibling = tmp.path().join("product-home-extra");
+        std::fs::create_dir_all(&sibling).expect("create sibling");
+
+        assert!(super::is_codewhale_owned_state_dir(&product));
+        assert!(super::is_codewhale_owned_state_dir(
+            &product.join("sessions")
+        ));
+        assert!(!super::is_codewhale_owned_state_dir(&sibling));
+        assert!(!super::is_codewhale_owned_state_dir(tmp.path()));
+        drop(explicit_guards);
+
+        use crate::test_support::EnvVarGuard;
+        let _home = EnvVarGuard::set("HOME", tmp.path());
+        let _userprofile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _no_explicit = EnvVarGuard::remove("CODEWHALE_HOME");
+        let _no_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _no_legacy_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        let _no_legacy_home = EnvVarGuard::remove("DEEPSEEK_HOME");
+
+        assert!(super::is_codewhale_owned_state_dir(
+            &tmp.path().join(".codewhale").join("sessions")
+        ));
+        assert!(super::is_codewhale_owned_state_dir(
+            &tmp.path().join(".deepseek")
+        ));
+        assert!(!super::is_codewhale_owned_state_dir(
+            &tmp.path().join("user-chosen")
+        ));
     }
 }
 
