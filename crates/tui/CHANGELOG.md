@@ -17,11 +17,55 @@ mid-turn history inserts no longer strand in-flight tool rows, every agent
 that ran this session is visible from `/agents list`, the PTY acceptance
 lane has a stall watchdog and bounded CI steps, approval outcomes are
 durable and fail closed (cyq1017, #5360), and three $HOME disk leaks are
-reclaimed. Test threads get an 8 MiB stack so the lib suite can no longer
+reclaimed. Extension surfaces now name their real state and act only
+through the reviewed install and trust flows, and sub-agent, shell, task,
+and workflow state is owned by the session that created it (#5518). Test
+threads get an 8 MiB stack so the lib suite can no longer
 abort under load.
 
 ### Fixed
 
+- The Extensions (`/plugin`) Marketplace is no longer a read-only list.
+  Every recommendation and stored candidate names its truthful state and
+  primary action — Add, Enable, Configured, or Unavailable — and Enter or a
+  mouse click runs that action through the existing reviewed `/mcp add
+  recommended`, `/mcp enable`, and `/plugin` install/trust controllers, so
+  no second trust path exists. Browser Use and Sandbox Runtime stay
+  honestly Unavailable with their real setup routing instead of implying an
+  install Codewhale cannot perform.
+- The Extensions MCP tab now renders one honest inventory: the header count
+  and the visible rows derive from the same configured-server set, so
+  `MCP (6)` can no longer sit above two rendered rows. Disabled servers
+  stay visible and labeled disabled instead of silently disappearing, and
+  configured servers absent from the live snapshot list as not-yet-inspected
+  with their own explicit reload affordance through the MCP command
+  controller.
+- Installed plugin rows now act on their real state: Enter opens an active
+  bundle (`/plugin show`), offers Enable for a trusted-but-disabled bundle,
+  or routes an untrusted bundle to the existing trust review — through the
+  same confirmation and persistence controllers as the slash commands.
+- Sub-agent handoffs and rosters, background shell jobs, durable tasks,
+  delayed continuations, and workflow controls are now scoped to the
+  session that owns them. Records carry immutable root-session ownership,
+  stale completion-channel payloads are rejected before deduplication,
+  background work drains and reports only to its owning session, and
+  legacy ownerless jobs fail closed (#5518 failure class reported by
+  @hxfhd; the report's exact JavaScript provenance was not claimed as
+  reproduced).
+- The resolved route envelope now reaches every outbound model call: all
+  wire dialects and auxiliary calls clamp at the shared transport seam
+  under one wire/reservation budget, provider input limits are honored, and
+  switching models on the same protocol no longer inherits the previous
+  model's limits (#5516, #5518).
+- First-run continuity: the chosen onboarding provider persists across
+  restarts, a missing first-run config no longer interrupts the flow, and
+  the automatic working-agreement checkpoint renders as a standalone setup
+  handoff instead of regressing the onboarding rail to the full wizard's
+  4/10 progress.
+- Explicitly worded natural-language `/goal` declarations now create a
+  durable goal in the provider-neutral engine before model dispatch, while
+  ordinary tasks and quoted transcripts stay out of goal mode and prose
+  acknowledgement alone can no longer stand in for goal creation.
 - `/model` now keeps the current Z.ai default (`GLM-5.3`) visible when an
   older installation has an explicit `GLM-5.2` route saved. The saved 5.2
   route remains exact; choosing 5.3 sends and remembers the distinct 5.3 ID.
@@ -243,6 +287,11 @@ abort under load.
 - @thejayjetson — the header status-indicator report that pinned the
   regression to a specific setting, with every value, theme, and
   `fancy_animations` combination already ruled out (#5512).
+- hxfhd (@hxfhd) — reported the deterministic cross-session contamination
+  class behind this release's session-ownership boundary, plus route
+  budgeting evidence (#5518).
+- sfdzhmr (@sfdzhmr) — reported the route budgeting root causes that exact
+  route-limit propagation now closes (#5516).
 
 ## [0.9.9] - 2026-08-18
 

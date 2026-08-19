@@ -90,6 +90,11 @@ notes, and relevant issue/PR comments.
   status-indicator report that pinned the regression to a specific setting,
   having already ruled out every value, both themes, `fancy_animations`, the
   terminal auto-off rules, and a clean `codewhale doctor` (#5512)
+- **[hxfhd](https://github.com/hxfhd)** — reported the deterministic
+  cross-session contamination class behind this release's session-ownership
+  boundary, plus route budgeting evidence (#5518)
+- **[sfdzhmr](https://github.com/sfdzhmr)** — reported the route budgeting
+  root causes that exact route-limit propagation now closes (#5516)
 
 </details>
 
