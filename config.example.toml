@@ -130,8 +130,10 @@ check_interval_hours = 24
 #
 # Invalid slots are skipped with a warning, duplicate slots use the last entry,
 # and unknown actions are preserved so the UI can show a disabled entry.
-# Slash commands can be bound as slash.<name>, for example slash.mode. Commands
-# that require arguments pre-fill the composer instead of running incomplete.
+# Slash commands can be bound as slash.<name>, for example slash.workflow.
+# `/hotbar on` writes the default slots: slash.workflow, slash.goal, slash.auto,
+# then Plan/Work/Operate, palette, and sidebar. Commands that require arguments
+# pre-fill the composer instead of running incomplete.
 #
 # [[hotbar]]
 # slot = 1

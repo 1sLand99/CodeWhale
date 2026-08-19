@@ -254,7 +254,7 @@
   "CmdHomeDescription": "आँकड़ों और त्वरित क्रियाओं सहित होम डैशबोर्ड दिखाएँ",
   "CmdHooksDescription": "कॉन्फ़िगर किए गए लाइफ़साइकिल हुक सूचीबद्ध करें (केवल-पठन)",
   "CmdAgentDescription": "स्थायी सब-एजेंट सत्र खोलें",
-  "CmdGoalDescription": "वैकल्पिक टोकन बजट के साथ सत्र लक्ष्य सेट करें",
+  "CmdGoalDescription": "कई टर्न तक एक ही लक्ष्य पर काम जारी रखें",
   "CmdInitDescription": "प्रोजेक्ट के लिए AGENTS.md बनाएँ",
   "CmdLspDescription": "LSP डायग्नोस्टिक्स चालू/बंद करें",
   "CmdShareDescription": "वर्तमान सत्र को साझा करने योग्य वेब URL के रूप में एक्सपोर्ट करें",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "क्लिपबोर्ड कॉपी विफल: {error}. कुछ भी नहीं लिखा गया; स्पष्ट पाठ दृश्य के लिए `stdout` के साथ फिर चलाएँ",
   "CmdStructcopyReceiptTooLarge": "संरचनात्मक-कॉपी रसीद मेटाडेटा {bytes}-बाइट आउटपुट सीमा से अधिक है; इसे भेजने से इनकार",
   "CmdFleetDescription": "Fleet वर्कर और ऑर्केस्ट्रेशन स्थिति देखें और सेटअप करें",
-  "CmdWorkflowDescription": "वर्तमान कार्य को वर्कफ़्लो के रूप में ऑर्केस्ट्रेट करें",
+  "CmdWorkflowDescription": "क्रम या फैन-आउट ज़रूरी हो तो मल्टी-एजेंट स्क्रिप्ट चलाएँ",
   "CmdHotbarDescription": "Hotbar सेटअप खोलें",
   "CmdSetupDescription": "संविधान-प्रथम सेटअप खोलें",
   "CmdSubagentsDescription": "Fleet स्थिति के लिए संगतता शॉर्टकट",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "केवल-पढ़ने शेल",
   "AgentFocusPostureShellNone": "शेल नहीं",
   "GoalReceiptSet": "लक्ष्य सेट: \"{objective}\" · /goal प्रगति दिखाता है · /goal pause या /goal clear इसे रोकता है",
-  "GoalStatusIdleHint": "अभी नहीं चल रहा — जारी रखने के लिए संदेश भेजें या /goal resume"
+  "GoalStatusIdleHint": "अभी नहीं चल रहा — जारी रखने के लिए संदेश भेजें या /goal resume",
+  "CmdAutoDescription": "Auto-Review से काम करें — लक्ष्य या वर्कफ़्लो के बिना",
+  "AutoReceiptOn": "Auto-Review चालू है। /goal एक लक्ष्य रखता है; /workflow स्क्रिप्ट चलाता है।",
+  "AutoReceiptPlanNote": "Work या Operate पर जाने तक Plan केवल पढ़ने योग्य रहता है।",
+  "EmptyStateOrchestrationLabel": "जारी रखें",
+  "OnboardTipsLine5": "लंबे काम के लिए /auto (समीक्षा), /goal (एक लक्ष्य) या /workflow (स्क्रिप्ट) चुनें।"
 }

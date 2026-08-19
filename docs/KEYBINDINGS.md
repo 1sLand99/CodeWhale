@@ -104,14 +104,14 @@ Since #3807 a missing `hotbar` key renders **no bar** — fresh configs show no 
 
 | Slot | Chord   | Default action     | Label     |
 |------|---------|--------------------|-----------|
-| 1    | `Alt-1` | `voice.toggle`     | `voice`   |
-| 2    | `Alt-2` | `session.compact`  | `compact` |
-| 3    | `Alt-3` | `mode.plan`        | `plan`    |
-| 4    | `Alt-4` | `mode.agent`       | `agent`   |
-| 5    | `Alt-5` | `mode.operate`     | `operate` |
-| 6    | `Alt-6` | `palette.open`     | `palette` |
-| 7    | `Alt-7` | `sidebar.toggle`   | `side`    |
-| 8    | `Alt-8` | `trust.toggle`     | `trust`   |
+| 1    | `Alt-1` | `slash.workflow`   | `wf`      |
+| 2    | `Alt-2` | `slash.goal`       | `goal`    |
+| 3    | `Alt-3` | `slash.auto`       | `auto`    |
+| 4    | `Alt-4` | `mode.plan`        | `plan`    |
+| 5    | `Alt-5` | `mode.agent`       | `agent`   |
+| 6    | `Alt-6` | `mode.operate`     | `operate` |
+| 7    | `Alt-7` | `palette.open`     | `palette` |
+| 8    | `Alt-8` | `sidebar.toggle`   | `side`    |
 
 | Focus state | Hotbar behavior |
 |-------------|-----------------|

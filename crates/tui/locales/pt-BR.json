@@ -257,7 +257,7 @@
   "CmdHomeDescription": "Exibir o painel inicial com estatísticas e ações rápidas",
   "CmdHooksDescription": "Listar hooks de ciclo de vida configurados (somente leitura)",
   "CmdAgentDescription": "Abrir uma sessão persistente de sub-agente",
-  "CmdGoalDescription": "Definir uma meta de sessão com orçamento de tokens opcional",
+  "CmdGoalDescription": "Continuar um único objetivo ao longo de vários turnos",
   "CmdInitDescription": "Gerar AGENTS.md para o projeto",
   "CmdLspDescription": "Alternar diagnóstico LSP ligado ou desligado",
   "CmdShareDescription": "Exportar a sessão atual como uma URL web compartilhável",
@@ -397,7 +397,7 @@
   "CmdStructcopyReceiptTooLarge": "Os metadados do recibo de cópia estrutural excedem o limite de saída de {bytes} bytes; a emissão foi recusada",
   "CmdFleetDescription": "Inspecionar e configurar workers do Fleet e orquestração",
   "CmdLaneDescription": "Inspecionar e controlar Lanes duráveis (Workflows em execução)",
-  "CmdWorkflowDescription": "Orquestrar o trabalho atual como um workflow",
+  "CmdWorkflowDescription": "Executar um script multiagente quando ordem ou fan-out importam",
   "CmdHotbarDescription": "Abrir configuração da Hotbar",
   "CmdSetupDescription": "Abrir configuração com constituição primeiro",
   "CmdSubagentsDescription": "Atalho de compatibilidade para o status do Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell somente leitura",
   "AgentFocusPostureShellNone": "sem shell",
   "GoalReceiptSet": "Meta definida: \"{objective}\" · /goal mostra o progresso · /goal pause ou /goal clear interrompe",
-  "GoalStatusIdleHint": "parada no momento — envie uma mensagem ou /goal resume para continuar"
+  "GoalStatusIdleHint": "parada no momento — envie uma mensagem ou /goal resume para continuar",
+  "CmdAutoDescription": "Trabalhe com Auto-Review — sem meta ou workflow",
+  "AutoReceiptOn": "Auto-Review ligado. /goal mantém um objetivo; /workflow executa um script.",
+  "AutoReceiptPlanNote": "Plan permanece somente leitura até você mudar para Work ou Operate.",
+  "EmptyStateOrchestrationLabel": "Continuar",
+  "OnboardTipsLine5": "Para trabalho mais longo, escolha /auto (revisão), /goal (um objetivo) ou /workflow (script)."
 }

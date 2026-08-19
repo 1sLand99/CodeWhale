@@ -257,7 +257,7 @@
   "CmdHomeDescription": "Show home dashboard with stats and quick actions",
   "CmdHooksDescription": "List configured lifecycle hooks (read-only)",
   "CmdAgentDescription": "Open a persistent sub-agent session",
-  "CmdGoalDescription": "Set a session goal with optional token budget",
+  "CmdGoalDescription": "Keep working toward one objective across turns",
   "CmdInitDescription": "Generate AGENTS.md for project",
   "CmdLspDescription": "Toggle LSP diagnostics on or off",
   "CmdShareDescription": "Export current session as a shareable web URL",
@@ -397,7 +397,7 @@
   "CmdStructcopyReceiptTooLarge": "Structural-copy receipt metadata exceeds the {bytes}-byte output cap; refusing to emit it",
   "CmdFleetDescription": "Inspect and set up Fleet workers and orchestration state",
   "CmdLaneDescription": "Inspect and control durable Lanes (running Workflows)",
-  "CmdWorkflowDescription": "Orchestrate the current work as a workflow",
+  "CmdWorkflowDescription": "Run a repeatable workflow when order or fan-out matters",
   "CmdHotbarDescription": "Open Hotbar setup",
   "CmdSetupDescription": "Open constitution-first setup",
   "CmdSubagentsDescription": "Compatibility shortcut for Fleet status",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "read-only shell",
   "AgentFocusPostureShellNone": "no shell",
   "GoalReceiptSet": "Goal set: \"{objective}\" · /goal shows progress · /goal pause or /goal clear stops it",
-  "GoalStatusIdleHint": "not running now — send a message or /goal resume to continue"
+  "GoalStatusIdleHint": "not running now — send a message or /goal resume to continue",
+  "CmdAutoDescription": "Work with Auto-Review — skip a goal or workflow",
+  "AutoReceiptOn": "Auto-Review on. /goal keeps one objective; /workflow runs a script.",
+  "AutoReceiptPlanNote": "Plan stays Read Only until you switch to Work or Operate.",
+  "EmptyStateOrchestrationLabel": "Keep going",
+  "OnboardTipsLine5": "For longer work pick /auto (reviewer), /goal (one objective), or /workflow (a script)."
 }

@@ -254,7 +254,7 @@
   "CmdHomeDescription": "Home-Dashboard mit Statistiken und Schnellaktionen anzeigen",
   "CmdHooksDescription": "Konfigurierte Lifecycle-Hooks auflisten (schreibgeschützt)",
   "CmdAgentDescription": "Persistente Sub-Agent-Sitzung öffnen",
-  "CmdGoalDescription": "Sitzungsziel mit optionalem Token-Budget setzen",
+  "CmdGoalDescription": "Über mehrere Turns hinweg an einem Ziel weiterarbeiten",
   "CmdInitDescription": "AGENTS.md für das Projekt erzeugen",
   "CmdLspDescription": "LSP-Diagnosen ein- oder ausschalten",
   "CmdShareDescription": "Aktuelle Sitzung als teilbare Web-URL exportieren",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "Kopieren in die Zwischenablage fehlgeschlagen: {error}. Es wurde nichts geschrieben; für eine explizite Textansicht erneut mit `stdout` ausführen",
   "CmdStructcopyReceiptTooLarge": "Die Beleg-Metadaten der strukturellen Kopie überschreiten das Ausgabelimit von {bytes} Bytes; Ausgabe wird verweigert",
   "CmdFleetDescription": "Fleet-Worker und Orchestrierungsstatus ansehen und einrichten",
-  "CmdWorkflowDescription": "Aktuelle Arbeit als Workflow orchestrieren",
+  "CmdWorkflowDescription": "Multi-Agent-Skript ausführen, wenn Reihenfolge oder Fan-out zählen",
   "CmdHotbarDescription": "Hotbar-Setup öffnen",
   "CmdSetupDescription": "Setup mit Verfassung zuerst öffnen",
   "CmdSubagentsDescription": "Kompatibilitäts-Kurzbefehl für Fleet-Status",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "Nur-Lese-Shell",
   "AgentFocusPostureShellNone": "keine Shell",
   "GoalReceiptSet": "Ziel gesetzt: \"{objective}\" · /goal zeigt den Fortschritt · /goal pause oder /goal clear beendet es",
-  "GoalStatusIdleHint": "läuft gerade nicht — Nachricht senden oder /goal resume zum Fortsetzen"
+  "GoalStatusIdleHint": "läuft gerade nicht — Nachricht senden oder /goal resume zum Fortsetzen",
+  "CmdAutoDescription": "Mit Auto-Review arbeiten — ohne Ziel oder Workflow",
+  "AutoReceiptOn": "Auto-Review an. /goal hält ein Ziel; /workflow führt ein Skript aus.",
+  "AutoReceiptPlanNote": "Plan bleibt schreibgeschützt, bis du zu Work oder Operate wechselst.",
+  "EmptyStateOrchestrationLabel": "Weiterarbeiten",
+  "OnboardTipsLine5": "Für längere Arbeit: /auto (Prüfung), /goal (ein Ziel) oder /workflow (Skript)."
 }

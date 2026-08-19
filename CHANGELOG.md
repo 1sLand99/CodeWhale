@@ -90,6 +90,10 @@ abort under load.
   validate, and downloads binaries only from that source. Explicit
   `CODEWHALE_RELEASE_BASE_URL` / `CODEWHALE_USE_CNB_MIRROR=1` still skip the
   race; other targets stay on GitHub.
+- `/workflow`, `/goal`, and `/auto` are pinned at the top of the empty `/`
+  menu, named on the idle welcome and footer, and occupy the first three
+  default Hotbar slots. `/auto` turns on Auto-Review (the existing
+  permission posture) and says when to use the other two instead (#5439).
 - `feat(tui): add command context adapters and migration gate (FEAT-015)`
   (aboimpinto) — TUI-owned capability facets, a dual-path dispatch seam, and
   source-aware CI enforcement so a command slice cannot claim to be migrated

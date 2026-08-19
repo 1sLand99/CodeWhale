@@ -254,7 +254,7 @@
   "CmdHomeDescription": "Tampilkan dasbor beranda dengan statistik dan aksi cepat",
   "CmdHooksDescription": "Tampilkan hook siklus hidup terkonfigurasi (hanya baca)",
   "CmdAgentDescription": "Buka sesi sub-agen persisten",
-  "CmdGoalDescription": "Tetapkan tujuan sesi dengan anggaran token opsional",
+  "CmdGoalDescription": "Terus mengerjakan satu tujuan lintas giliran",
   "CmdInitDescription": "Buat AGENTS.md untuk proyek",
   "CmdLspDescription": "Aktifkan atau nonaktifkan diagnostik LSP",
   "CmdShareDescription": "Ekspor sesi saat ini sebagai URL web yang dapat dibagikan",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "Penyalinan ke papan klip gagal: {error}. Tidak ada yang ditulis; jalankan lagi dengan `stdout` untuk tampilan teks eksplisit",
   "CmdStructcopyReceiptTooLarge": "Metadata tanda terima salinan struktural melampaui batas keluaran {bytes} bita; penerbitannya ditolak",
   "CmdFleetDescription": "Periksa dan siapkan worker Fleet serta status orkestrasi",
-  "CmdWorkflowDescription": "Orkestrasikan pekerjaan saat ini sebagai alur kerja",
+  "CmdWorkflowDescription": "Jalankan skrip multi-agen saat urutan atau fan-out penting",
   "CmdHotbarDescription": "Buka penyiapan Hotbar",
   "CmdSetupDescription": "Buka penyiapan konstitusi-dulu",
   "CmdSubagentsDescription": "Pintasan kompatibilitas untuk status Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell hanya-baca",
   "AgentFocusPostureShellNone": "tanpa shell",
   "GoalReceiptSet": "Tujuan ditetapkan: \"{objective}\" · /goal menampilkan progres · /goal pause atau /goal clear menghentikannya",
-  "GoalStatusIdleHint": "tidak sedang berjalan — kirim pesan atau /goal resume untuk melanjutkan"
+  "GoalStatusIdleHint": "tidak sedang berjalan — kirim pesan atau /goal resume untuk melanjutkan",
+  "CmdAutoDescription": "Bekerja dengan Auto-Review — tanpa tujuan atau workflow",
+  "AutoReceiptOn": "Auto-Review aktif. /goal menjaga satu tujuan; /workflow menjalankan skrip.",
+  "AutoReceiptPlanNote": "Plan tetap hanya-baca sampai Anda pindah ke Work atau Operate.",
+  "EmptyStateOrchestrationLabel": "Lanjutkan",
+  "OnboardTipsLine5": "Untuk pekerjaan lebih panjang pilih /auto (peninjau), /goal (satu tujuan), atau /workflow (skrip)."
 }

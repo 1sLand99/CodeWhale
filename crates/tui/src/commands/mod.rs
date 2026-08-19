@@ -952,7 +952,7 @@ mod tests {
         // Consistency: group-iterated command count must match registry.
         // FEAT-015 registers one test-only contextual command (`/feat015ctx`)
         // under `#[cfg(test)]` to prove the dual-path seam (D6); the nine
-        // production groups remain exactly 95 commands.
+        // production groups remain exactly 96 commands.
         let test_only_count = command_infos()
             .iter()
             .filter(|info| info.name == "feat015ctx")
@@ -1081,7 +1081,15 @@ mod tests {
 
     #[test]
     fn flagship_orchestration_and_workspace_commands_are_visible_at_the_palette_root() {
-        for name in ["goal", "hooks", "tokens", "translate", "workspace"] {
+        for name in [
+            "auto",
+            "goal",
+            "hooks",
+            "tokens",
+            "translate",
+            "workflow",
+            "workspace",
+        ] {
             let info = registry()
                 .get_info(name)
                 .unwrap_or_else(|| panic!("/{name} must be registered"));
@@ -1094,6 +1102,10 @@ mod tests {
                 "/{name} must not stay on the Advanced discovery list"
             );
         }
+        assert_eq!(
+            traits::ORCHESTRATION_DISCOVERY_COMMANDS,
+            ["workflow", "goal", "auto"]
+        );
     }
 
     #[test]

@@ -257,7 +257,7 @@
   "CmdHomeDescription": "統計とクイックアクション付きのホームダッシュボードを表示",
   "CmdHooksDescription": "設定済みのライフサイクルフックを一覧表示（読み取り専用）",
   "CmdAgentDescription": "永続サブエージェントセッションを開く",
-  "CmdGoalDescription": "トークンバジェット付きのセッション目標を設定",
+  "CmdGoalDescription": "複数ターンにわたって一つの目標を追い続ける",
   "CmdInitDescription": "プロジェクト用に AGENTS.md を生成",
   "CmdLspDescription": "LSP 診断のオン・オフを切り替え",
   "CmdShareDescription": "現在のセッションを共有可能な Web URL としてエクスポート",
@@ -397,7 +397,7 @@
   "CmdStructcopyReceiptTooLarge": "構造化コピーのレシートメタデータが出力上限の{bytes}バイトを超えたため、出力を拒否しました",
   "CmdFleetDescription": "Fleet ワーカーとオーケストレーション状態を確認・設定",
   "CmdLaneDescription": "永続化された Lane（実行中の Workflow）を確認・制御",
-  "CmdWorkflowDescription": "現在の作業をワークフローとして編成する",
+  "CmdWorkflowDescription": "順序や並列が必要なときにマルチエージェント脚本を実行する",
   "CmdHotbarDescription": "Hotbar設定を開く",
   "CmdSetupDescription": "憲法ファーストのセットアップを開く",
   "CmdSubagentsDescription": "Fleet ステータスへの互換ショートカット",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "読み取り専用シェル",
   "AgentFocusPostureShellNone": "シェル不可",
   "GoalReceiptSet": "目標を設定: 「{objective}」 · /goal で進捗表示 · /goal pause または /goal clear で停止",
-  "GoalStatusIdleHint": "現在は実行中ではありません — メッセージを送るか /goal resume で続行"
+  "GoalStatusIdleHint": "現在は実行中ではありません — メッセージを送るか /goal resume で続行",
+  "CmdAutoDescription": "Auto-Review で作業する — ゴールやワークフローは不要",
+  "AutoReceiptOn": "Auto-Review をオンにしました。/goal は一つの目標、/workflow は脚本です。",
+  "AutoReceiptPlanNote": "Work または Operate に切り替えるまで Plan は読み取り専用です。",
+  "EmptyStateOrchestrationLabel": "続ける",
+  "OnboardTipsLine5": "長い作業は /auto（審査）、/goal（一つの目標）、/workflow（脚本）から選びます。"
 }

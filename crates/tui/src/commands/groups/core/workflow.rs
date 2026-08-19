@@ -10,7 +10,8 @@
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
-use crate::tui::app::{App, AppAction};
+use crate::tui::app::{App, AppAction, AppMode};
+use crate::tui::approval::ApprovalMode;
 
 use super::CommandResult;
 
@@ -223,6 +224,43 @@ fn workflow_cancel(app: &App, run_id: &str) -> CommandResult {
     }
 }
 
+/// `/auto` is the third orchestration choice: work with Auto-Review.
+/// Host-only alias for the existing permission posture — no new runtime (#5439).
+pub(in crate::commands) const AUTO_COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "auto",
+    aliases: &[],
+    usage: "/auto",
+    description_id: MessageId::CmdAutoDescription,
+};
+
+pub(in crate::commands) struct AutoCmd;
+
+impl RegisterCommand for AutoCmd {
+    fn info() -> &'static CommandInfo {
+        &AUTO_COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        auto(app, arg)
+    }
+}
+
+pub fn auto(app: &mut App, arg: Option<&str>) -> CommandResult {
+    if arg.map(str::trim).is_some_and(|value| !value.is_empty()) {
+        return CommandResult::error("Usage: /auto");
+    }
+    if let Err(reason) = app.apply_auto_review_posture() {
+        return CommandResult::error(reason);
+    }
+
+    let mut message = app.tr(MessageId::AutoReceiptOn).into_owned();
+    if app.mode == AppMode::Plan {
+        message.push(' ');
+        message.push_str(app.tr(MessageId::AutoReceiptPlanNote).as_ref());
+    }
+    CommandResult::message(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +273,30 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         App::new(options, &crate::config::Config::default())
+    }
+
+    #[test]
+    fn auto_sets_auto_review_and_explains_the_trio() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.set_agent_approval_posture(ApprovalMode::Suggest);
+
+        let result = auto(&mut app, None);
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(app.approval_mode, ApprovalMode::Auto);
+        let text = result.message.as_deref().unwrap();
+        assert!(text.contains("Auto-Review"));
+        assert!(text.contains("/goal"));
+        assert!(text.contains("/workflow"));
+        assert!(result.action.is_none());
+    }
+
+    #[test]
+    fn auto_rejects_arguments() {
+        let mut app = test_app();
+        let result = auto(&mut app, Some("now"));
+        assert!(result.is_error);
+        assert!(result.message.as_deref().unwrap().contains("Usage: /auto"));
     }
 
     #[test]

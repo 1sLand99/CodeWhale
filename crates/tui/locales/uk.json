@@ -254,7 +254,7 @@
   "CmdHomeDescription": "Показати домашню панель зі статистикою та швидкими діями",
   "CmdHooksDescription": "Показати налаштовані хуки життєвого циклу (лише читання)",
   "CmdAgentDescription": "Відкрити постійний сеанс субагента",
-  "CmdGoalDescription": "Задати ціль сеансу з необов'язковим бюджетом токенів",
+  "CmdGoalDescription": "Продовжувати одну ціль упродовж кількох ходів",
   "CmdInitDescription": "Згенерувати AGENTS.md для проєкту",
   "CmdLspDescription": "Увімкнути або вимкнути діагностику LSP",
   "CmdShareDescription": "Експортувати поточний сеанс як веб-URL для поширення",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "Копіювання до буфера обміну не вдалося: {error}. Нічого не записано; запустіть знову з `stdout` для явного текстового вигляду",
   "CmdStructcopyReceiptTooLarge": "Метадані квитанції структурного копіювання перевищують ліміт виводу в {bytes} байтів; вивід відхилено",
   "CmdFleetDescription": "Переглянути й налаштувати воркерів Fleet та стан оркестрації",
-  "CmdWorkflowDescription": "Оркеструвати поточну роботу як робочий процес",
+  "CmdWorkflowDescription": "Запустити мультиагентний скрипт, коли важливі порядок або fan-out",
   "CmdHotbarDescription": "Відкрити налаштування Hotbar",
   "CmdSetupDescription": "Відкрити налаштування, що починається з конституції",
   "CmdSubagentsDescription": "Сумісне скорочення для стану Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell лише читання",
   "AgentFocusPostureShellNone": "без shell",
   "GoalReceiptSet": "Ціль задано: «{objective}» · /goal показує прогрес · /goal pause або /goal clear зупиняє",
-  "GoalStatusIdleHint": "зараз не виконується — надішліть повідомлення або /goal resume, щоб продовжити"
+  "GoalStatusIdleHint": "зараз не виконується — надішліть повідомлення або /goal resume, щоб продовжити",
+  "CmdAutoDescription": "Працювати з Auto-Review — без цілі чи workflow",
+  "AutoReceiptOn": "Auto-Review увімкнено. /goal тримає одну ціль; /workflow запускає скрипт.",
+  "AutoReceiptPlanNote": "Plan лишається лише для читання, доки ви не перейдете в Work або Operate.",
+  "EmptyStateOrchestrationLabel": "Продовжувати",
+  "OnboardTipsLine5": "Для довшої роботи оберіть /auto (перевірка), /goal (одна ціль) або /workflow (скрипт)."
 }

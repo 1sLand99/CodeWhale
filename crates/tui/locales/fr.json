@@ -254,7 +254,7 @@
   "CmdHomeDescription": "Afficher le tableau de bord avec stats et actions rapides",
   "CmdHooksDescription": "Lister les hooks de cycle de vie configurés (lecture seule)",
   "CmdAgentDescription": "Ouvrir une session de sous-agent persistante",
-  "CmdGoalDescription": "Définir un objectif de session avec budget de tokens optionnel",
+  "CmdGoalDescription": "Continuer vers un seul objectif sur plusieurs tours",
   "CmdInitDescription": "Générer un AGENTS.md pour le projet",
   "CmdLspDescription": "Activer ou désactiver les diagnostics LSP",
   "CmdShareDescription": "Exporter la session en cours en URL web partageable",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "Échec de la copie vers le presse-papiers : {error}. Rien n'a été écrit ; relancez avec `stdout` pour un affichage texte explicite",
   "CmdStructcopyReceiptTooLarge": "Les métadonnées du reçu de copie structurelle dépassent la limite de sortie de {bytes} octets ; émission refusée",
   "CmdFleetDescription": "Inspecter et configurer les workers Fleet et l'état d'orchestration",
-  "CmdWorkflowDescription": "Orchestrer le travail en cours comme un workflow",
+  "CmdWorkflowDescription": "Lancer un script multi-agents quand l'ordre ou le fan-out compte",
   "CmdHotbarDescription": "Ouvrir la configuration Hotbar",
   "CmdSetupDescription": "Ouvrir la configuration axée constitution",
   "CmdSubagentsDescription": "Raccourci de compatibilité pour le statut Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell en lecture seule",
   "AgentFocusPostureShellNone": "sans shell",
   "GoalReceiptSet": "Objectif défini : « {objective} » · /goal affiche la progression · /goal pause ou /goal clear l'arrête",
-  "GoalStatusIdleHint": "à l'arrêt pour l'instant — envoyez un message ou /goal resume pour continuer"
+  "GoalStatusIdleHint": "à l'arrêt pour l'instant — envoyez un message ou /goal resume pour continuer",
+  "CmdAutoDescription": "Travailler avec Auto-Review — sans objectif ni workflow",
+  "AutoReceiptOn": "Auto-Review activé. /goal suit un objectif ; /workflow lance un script.",
+  "AutoReceiptPlanNote": "Plan reste en lecture seule jusqu'au passage en Work ou Operate.",
+  "EmptyStateOrchestrationLabel": "Continuer",
+  "OnboardTipsLine5": "Pour un travail plus long, choisissez /auto (revue), /goal (un objectif) ou /workflow (script)."
 }

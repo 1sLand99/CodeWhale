@@ -254,7 +254,7 @@
   "CmdHomeDescription": "Mostra el tauler inicial amb estadístiques i accions ràpides",
   "CmdHooksDescription": "Llista els hooks de cicle de vida configurats (només lectura)",
   "CmdAgentDescription": "Obre una sessió persistent de subagent",
-  "CmdGoalDescription": "Defineix un objectiu de sessió amb pressupost de tokens opcional",
+  "CmdGoalDescription": "Continuar un sol objectiu al llarg de diversos torns",
   "CmdInitDescription": "Genera l'AGENTS.md per al projecte",
   "CmdLspDescription": "Activa o desactiva els diagnòstics LSP",
   "CmdShareDescription": "Exporta la sessió actual com a URL web compartible",
@@ -393,7 +393,7 @@
   "CmdStructcopyClipboardFailed": "Ha fallat la còpia al porta-retalls: {error}. No s'ha escrit res; torna-ho a executar amb `stdout` per a una vista de text explícita",
   "CmdStructcopyReceiptTooLarge": "Les metadades del rebut de còpia estructural superen el límit de sortida de {bytes} bytes; no s'emetran",
   "CmdFleetDescription": "Inspecciona i configura els treballadors de Fleet i l'estat d'orquestració",
-  "CmdWorkflowDescription": "Orquestra el treball actual com a workflow",
+  "CmdWorkflowDescription": "Executar un script multiagent quan importen l'ordre o el fan-out",
   "CmdHotbarDescription": "Obre la configuració de Hotbar",
   "CmdSetupDescription": "Obre el Setup amb la constitució primer",
   "CmdSubagentsDescription": "Drecera de compatibilitat per a l'estat de Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell de només lectura",
   "AgentFocusPostureShellNone": "sense shell",
   "GoalReceiptSet": "Objectiu establert: \"{objective}\" · /goal mostra el progrés · /goal pause o /goal clear l'atura",
-  "GoalStatusIdleHint": "no s'està executant — envia un missatge o /goal resume per continuar"
+  "GoalStatusIdleHint": "no s'està executant — envia un missatge o /goal resume per continuar",
+  "CmdAutoDescription": "Treballa amb Auto-Review — sense objectiu ni workflow",
+  "AutoReceiptOn": "Auto-Review activat. /goal manté un objectiu; /workflow executa un script.",
+  "AutoReceiptPlanNote": "Plan resta només de lectura fins que passis a Work o Operate.",
+  "EmptyStateOrchestrationLabel": "Continuar",
+  "OnboardTipsLine5": "Per a feina més llarga, tria /auto (revisió), /goal (un objectiu) o /workflow (script)."
 }

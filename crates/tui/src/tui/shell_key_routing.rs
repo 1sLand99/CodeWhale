@@ -141,13 +141,14 @@ fn footer_action_hints_for_platform_and_ascii(
         is_macos,
         ascii_safe,
     );
+    let orch = crate::commands::traits::orchestration_slash_hint();
     if include_context {
         format!(
-            "{details}:{{output}} · {}:{{context}} · {help}:{{keys}}",
+            "{details}:{{output}} · {}:{{context}} · {help}:{{keys}} · {orch}",
             binding(ShellBindingId::ContextInspector).footer_chord
         )
     } else {
-        format!("{details}:{{output}} · {help}:{{keys}}")
+        format!("{details}:{{output}} · {help}:{{keys}} · {orch}")
     }
 }
 
@@ -261,6 +262,10 @@ mod tests {
                 if is_macos {
                     assert!(hints.contains("fn+F1:"), "{hints}");
                 }
+                assert!(
+                    hints.contains("/workflow /goal /auto"),
+                    "idle footer must advertise the orchestration trio: {hints}"
+                );
                 if include_context {
                     assert!(hints.contains("/context:"), "{hints}");
                 }

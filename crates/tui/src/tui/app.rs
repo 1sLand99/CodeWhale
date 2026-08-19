@@ -3054,6 +3054,24 @@ impl App {
         );
     }
 
+    /// Host path for `/auto`: persist Auto-Review as the TUI permission
+    /// posture without inventing a second runtime. Same write as Shift+Tab
+    /// landing on Auto-Review; Plan stays read-only and only the Act baseline
+    /// moves.
+    pub fn apply_auto_review_posture(&mut self) -> Result<(), String> {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
+            return Err(self.setting_locked_message(MessageId::SettingSubjectPermissions));
+        }
+        if self.approval_policy_locked() {
+            return Err("Permissions are controlled by config or managed requirements".to_string());
+        }
+        Self::persist_permission_posture(ApprovalMode::Auto)
+            .map_err(|err| format!("could not save TUI posture ({err})"))?;
+        self.set_agent_approval_posture(ApprovalMode::Auto);
+        self.needs_redraw = true;
+        Ok(())
+    }
+
     /// Update the durable Act approval choice. Entering Full Access enables
     /// trust mode; leaving it removes that implicit elevation while preserving
     /// an independently enabled trust baseline in other posture transitions.

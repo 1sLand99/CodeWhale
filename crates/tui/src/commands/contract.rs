@@ -145,6 +145,7 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
         "cmd_agent_description" => MessageId::CmdAgentDescription,
         "cmd_anchor_description" => MessageId::CmdAnchorDescription,
         "cmd_attach_description" => MessageId::CmdAttachDescription,
+        "cmd_auto_description" => MessageId::CmdAutoDescription,
         "cmd_auth_description" => MessageId::CmdAuthDescription,
         "cmd_automation_description" => MessageId::CmdAutomationDescription,
         "cmd_balance_description" => MessageId::CmdBalanceDescription,

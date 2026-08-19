@@ -3773,7 +3773,25 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         }
         2
     };
-    entries.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name)));
+    // Bare `/` pins the orchestration trio first so the shipped surfaces
+    // are the first selections, not buried alphabetically (#5439). Typed prefixes
+    // keep the existing rank/alpha order.
+    let orch_rank = |entry: &SlashMenuEntry| -> u8 {
+        if !prefix_lower.is_empty() {
+            return 1;
+        }
+        let command_key = entry.name.trim_start_matches('/');
+        match commands::traits::orchestration_discovery_rank(command_key) {
+            Some(idx) => u8::try_from(idx).unwrap_or(0),
+            None => 3,
+        }
+    };
+    entries.sort_by(|a, b| {
+        orch_rank(a)
+            .cmp(&orch_rank(b))
+            .then_with(|| rank(a).cmp(&rank(b)))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     entries.dedup_by(|a, b| a.name == b.name);
     entries.into_iter().take(limit).collect()
 }
@@ -5049,6 +5067,32 @@ mod tests {
         let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(hints.iter().any(|hint| hint.name == "/config"));
         assert!(hints.iter().any(|hint| hint.name == "/links"));
+    }
+
+    #[test]
+    fn empty_slash_menu_pins_the_orchestration_trio_first() {
+        let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        let names: Vec<&str> = hints.iter().map(|hint| hint.name.as_str()).collect();
+        assert_eq!(
+            &names[..3],
+            ["/workflow", "/goal", "/auto"],
+            "bare / must pin the orchestration trio (#5439): {names:?}"
+        );
+        let workflow = hints
+            .iter()
+            .find(|hint| hint.name == "/workflow")
+            .expect("/workflow");
+        let goal = hints
+            .iter()
+            .find(|hint| hint.name == "/goal")
+            .expect("/goal");
+        let auto = hints
+            .iter()
+            .find(|hint| hint.name == "/auto")
+            .expect("/auto");
+        assert!(workflow.description.contains("repeatable workflow"));
+        assert!(goal.description.contains("objective"));
+        assert!(auto.description.contains("Auto-Review"));
     }
 
     #[test]
@@ -6445,6 +6489,7 @@ mod tests {
             "the idle action must not imply that built-in Fleet roles still require setup"
         );
         assert!(rendered.contains("/help or Ctrl+K"));
+        assert!(rendered.contains("Keep going  /workflow /goal /auto"));
         assert!(!rendered.contains("Model  /model"));
         assert!(!rendered.contains("Rules  /constitution"));
     }
@@ -6590,6 +6635,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("Fleet ready  /fleet setup"));
+        assert!(rendered.contains("/workflow /goal /auto"));
         assert!(!rendered.contains("▗▄▄"));
     }
 

@@ -257,7 +257,7 @@
   "CmdHomeDescription": "显示主页面板，含统计与快捷操作",
   "CmdHooksDescription": "列出已配置的生命周期钩子（只读）",
   "CmdAgentDescription": "打开持久子代理会话",
-  "CmdGoalDescription": "设置带有可选令牌预算的会话目标",
+  "CmdGoalDescription": "跨多轮持续推进同一个目标",
   "CmdInitDescription": "为项目生成 AGENTS.md",
   "CmdLspDescription": "切换 LSP 诊断的开启或关闭",
   "CmdShareDescription": "将当前会话导出为可共享的 Web URL",
@@ -397,7 +397,7 @@
   "CmdStructcopyReceiptTooLarge": "结构化复制回执元数据超过 {bytes} 字节的输出上限；拒绝输出",
   "CmdFleetDescription": "查看与配置 Fleet 工作节点及编排状态",
   "CmdLaneDescription": "查看与控制持久化的 Lane（运行中的工作流）",
-  "CmdWorkflowDescription": "将当前工作编排为工作流",
+  "CmdWorkflowDescription": "当需要阶段、顺序或多路并行时运行多智能体脚本",
   "CmdHotbarDescription": "打开 Hotbar 设置",
   "CmdSetupDescription": "打开以宪章为核心的设置",
   "CmdSubagentsDescription": "Fleet 状态的兼容快捷方式",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "只读 shell",
   "AgentFocusPostureShellNone": "无 shell",
   "GoalReceiptSet": "已设定目标：“{objective}” · /goal 查看进度 · /goal pause 或 /goal clear 停止",
-  "GoalStatusIdleHint": "当前未运行 — 发送消息或 /goal resume 以继续"
+  "GoalStatusIdleHint": "当前未运行 — 发送消息或 /goal resume 以继续",
+  "CmdAutoDescription": "用自动审核工作——不必先设目标或工作流",
+  "AutoReceiptOn": "已开启自动审核。/goal 盯住一个目标；/workflow 运行脚本。",
+  "AutoReceiptPlanNote": "在切换到工作或 Operate 之前，计划模式仍为只读。",
+  "EmptyStateOrchestrationLabel": "继续推进",
+  "OnboardTipsLine5": "更长的任务用 /auto（审核）、/goal（单一目标）或 /workflow（脚本）。"
 }

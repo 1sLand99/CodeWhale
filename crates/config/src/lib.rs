@@ -1299,14 +1299,14 @@ pub struct ProviderChain {
 pub const HOTBAR_SLOT_COUNT: u8 = 8;
 
 pub const DEFAULT_HOTBAR_ACTIONS: [&str; HOTBAR_SLOT_COUNT as usize] = [
-    "voice.toggle",
-    "session.compact",
+    "slash.workflow",
+    "slash.goal",
+    "slash.auto",
     "mode.plan",
     "mode.agent",
     "mode.operate",
     "palette.open",
     "sidebar.toggle",
-    "trust.toggle",
 ];
 
 /// On-disk schema for one `[[hotbar]]` table.

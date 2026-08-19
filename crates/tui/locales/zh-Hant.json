@@ -185,7 +185,7 @@
   "CmdTreeDescription": "以樹狀結構顯示工作階段歷史（葉節點為目前分支）",
   "CmdBranchDescription": "將目前分支移至現有工作階段項目，不重寫歷史記錄",
   "CmdResumeDescription": "恢復工作階段，也可匯入已匯出的工作階段 JSON 檔案",
-  "CmdGoalDescription": "設定帶有可選令牌預算的工作階段目標",
+  "CmdGoalDescription": "跨多輪持續推進同一個目標",
   "CmdHelpDescription": "理解概念、命令與快捷鍵",
   "CmdHfDescription": "檢查 Hugging Face MCP 設定和概念",
   "CmdHomeDescription": "顯示主頁面板，含統計與快捷操作",
@@ -353,7 +353,7 @@
   "CmdVoiceControlDescription": "切換語音控制：AI 輔助的語音聽寫（結合當前輸入內容）",
   "CmdVoiceDescription": "切換語音輸入：錄製語音並轉錄為文字",
   "CmdVoiceSendDescription": "切換語音自動傳送：轉錄以「發送」或「send it」結尾時自動提交",
-  "CmdWorkflowDescription": "將目前工作編排為工作流程",
+  "CmdWorkflowDescription": "需要階段、順序或多路並行時執行多智能體腳本",
   "CmdWorkspaceDescription": "顯示或切換目前工作空間",
   "CommandPaletteSubtitle": "查找並執行一個操作",
   "CommandPaletteTitle": "命令",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "唯讀 shell",
   "AgentFocusPostureShellNone": "無 shell",
   "GoalReceiptSet": "已設定目標：「{objective}」 · /goal 查看進度 · /goal pause 或 /goal clear 停止",
-  "GoalStatusIdleHint": "目前未執行 — 傳送訊息或 /goal resume 以繼續"
+  "GoalStatusIdleHint": "目前未執行 — 傳送訊息或 /goal resume 以繼續",
+  "CmdAutoDescription": "以自動審核工作——不必先設目標或工作流程",
+  "AutoReceiptOn": "已開啟自動審核。/goal 盯住一個目標；/workflow 執行腳本。",
+  "AutoReceiptPlanNote": "切換到工作或 Operate 之前，計劃模式仍為唯讀。",
+  "EmptyStateOrchestrationLabel": "繼續推進",
+  "OnboardTipsLine5": "較長的工作請選 /auto（審核）、/goal（單一目標）或 /workflow（腳本）。"
 }

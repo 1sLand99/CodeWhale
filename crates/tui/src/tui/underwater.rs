@@ -1358,8 +1358,8 @@ pub(crate) const AMBIENT_MIN_CHAT_HEIGHT: u16 = 16;
 /// Companion column floor, same reasoning as [`AMBIENT_MIN_CHAT_HEIGHT`].
 pub(crate) const AMBIENT_MIN_CHAT_WIDTH: u16 = 60;
 
-/// Build the post-launch idle composition. It is deliberately not a command
-/// dashboard: one brand mark, one context line, and one quiet Fleet setup path.
+/// Build the post-launch idle composition: brand, workspace context, Fleet,
+/// help, and the orchestration trio (`/workflow /goal /auto`).
 ///
 /// Expressed in terms of the ambient floor constants so the layout rule that
 /// reserves the rows and the gate that spends them cannot disagree. (The old
@@ -1639,6 +1639,26 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
                 Span::styled(
                     help_hint.into_owned(),
                     Style::default().fg(app.ui_theme.text_soft),
+                ),
+            ]));
+        }
+        if area.height >= 8 {
+            let orch_label = tr(app.ui_locale, MessageId::EmptyStateOrchestrationLabel);
+            let orch_commands = crate::commands::traits::orchestration_slash_hint();
+            let orch = format!("{orch_label}  {orch_commands}");
+            let inset = " ".repeat(width.saturating_sub(orch.width()) / 2);
+            lines.push(Line::from(vec![
+                Span::raw(inset),
+                Span::styled(
+                    orch_label.into_owned(),
+                    Style::default().fg(app.ui_theme.text_soft),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    orch_commands,
+                    Style::default()
+                        .fg(app.ui_theme.accent_primary)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
         }

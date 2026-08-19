@@ -257,7 +257,7 @@
   "CmdHomeDescription": "Hiển thị bảng điều khiển trang chủ với số liệu thống kê và hành động nhanh",
   "CmdHooksDescription": "Liệt kê các lifecycle hook đã cấu hình (chỉ đọc)",
   "CmdAgentDescription": "Mở một phiên sub-agent nền",
-  "CmdGoalDescription": "Đặt mục tiêu cho phiên với giới hạn token tùy chọn",
+  "CmdGoalDescription": "Tiếp tục một mục tiêu xuyên suốt nhiều lượt",
   "CmdInitDescription": "Tạo tệp AGENTS.md cho dự án",
   "CmdLspDescription": "Bật hoặc tắt tính năng chẩn đoán LSP",
   "CmdShareDescription": "Xuất phiên hiện tại thành một liên kết web có thể chia sẻ",
@@ -397,7 +397,7 @@
   "CmdStructcopyReceiptTooLarge": "Siêu dữ liệu biên nhận sao chép cấu trúc vượt quá giới hạn đầu ra {bytes} byte; từ chối xuất dữ liệu",
   "CmdFleetDescription": "Xem và thiết lập worker Fleet cùng trạng thái điều phối",
   "CmdLaneDescription": "Xem và điều khiển các Lane bền vững (Workflow đang chạy)",
-  "CmdWorkflowDescription": "Điều phối công việc hiện tại thành một workflow",
+  "CmdWorkflowDescription": "Chạy script đa tác nhân khi thứ tự hoặc fan-out quan trọng",
   "CmdHotbarDescription": "Mở thiết lập Hotbar",
   "CmdSetupDescription": "Mở thiết lập ưu tiên hiến pháp",
   "CmdSubagentsDescription": "Phím tắt tương thích cho trạng thái Fleet",
@@ -1502,5 +1502,10 @@
   "AgentFocusPostureShellReadOnly": "shell chỉ đọc",
   "AgentFocusPostureShellNone": "không shell",
   "GoalReceiptSet": "Đã đặt mục tiêu: \"{objective}\" · /goal hiển thị tiến độ · /goal pause hoặc /goal clear để dừng",
-  "GoalStatusIdleHint": "hiện không chạy — gửi tin nhắn hoặc /goal resume để tiếp tục"
+  "GoalStatusIdleHint": "hiện không chạy — gửi tin nhắn hoặc /goal resume để tiếp tục",
+  "CmdAutoDescription": "Làm việc với Auto-Review — không cần goal hay workflow",
+  "AutoReceiptOn": "Đã bật Auto-Review. /goal giữ một mục tiêu; /workflow chạy script.",
+  "AutoReceiptPlanNote": "Plan vẫn chỉ đọc cho đến khi bạn chuyển sang Work hoặc Operate.",
+  "EmptyStateOrchestrationLabel": "Tiếp tục",
+  "OnboardTipsLine5": "Công việc dài hơn: chọn /auto (xem xét), /goal (một mục tiêu) hoặc /workflow (script)."
 }
