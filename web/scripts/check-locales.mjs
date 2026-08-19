@@ -32,6 +32,8 @@ const OPTIONAL_FILES = [
   "docs-troubleshooting.ts",
   "docs-configuration.ts",
   "docs-constitution.ts",
+  "docs-fleet.ts",
+  "docs-modes.ts",
 ];
 
 /** Top-level keys of the exported object literal (two-space indented `key:`). */

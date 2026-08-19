@@ -16,9 +16,11 @@ import type {
   ChromeDict,
   DocsConfigurationDict,
   DocsConstitutionDict,
+  DocsFleetDict,
   DocsGuideDict,
   DocsHooksDict,
   DocsShellDict,
+  DocsModesDict,
   DocsTroubleshootingDict,
   HomeDict,
 } from "./types";
@@ -36,6 +38,10 @@ import { docsConfiguration as enDocsConfiguration } from "./en/docs-configuratio
 import { docsConfiguration as zhDocsConfiguration } from "./zh/docs-configuration";
 import { docsConstitution as enDocsConstitution } from "./en/docs-constitution";
 import { docsConstitution as zhDocsConstitution } from "./zh/docs-constitution";
+import { docsFleet as enDocsFleet } from "./en/docs-fleet";
+import { docsFleet as zhDocsFleet } from "./zh/docs-fleet";
+import { docsModes as enDocsModes } from "./en/docs-modes";
+import { docsModes as zhDocsModes } from "./zh/docs-modes";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -161,6 +167,14 @@ const DOCS_CONSTITUTION: Record<string, DocsConstitutionDict> = {
   zh: zhDocsConstitution,
 };
 
+const DOCS_FLEET: Record<string, DocsFleetDict> = {
+  zh: zhDocsFleet,
+};
+
+const DOCS_MODES: Record<string, DocsModesDict> = {
+  zh: zhDocsModes,
+};
+
 export function getChrome(locale: string): ChromeDict {
   return CHROME[locale] ?? enChrome;
 }
@@ -193,6 +207,14 @@ export function getDocsConstitution(locale: string): DocsConstitutionDict {
   return DOCS_CONSTITUTION[locale] ?? enDocsConstitution;
 }
 
+export function getDocsFleet(locale: string): DocsFleetDict {
+  return DOCS_FLEET[locale] ?? enDocsFleet;
+}
+
+export function getDocsModes(locale: string): DocsModesDict {
+  return DOCS_MODES[locale] ?? enDocsModes;
+}
+
 /**
  * Select one side of a legacy `{ en, zh }` content pair by locale. This is
  * the transitional bridge for `web/lib/content/` modules that still carry
@@ -213,6 +235,8 @@ export const EN_DOCS_HOOKS = enDocsHooks;
 export const EN_DOCS_TROUBLESHOOTING = enDocsTroubleshooting;
 export const EN_DOCS_CONFIGURATION = enDocsConfiguration;
 export const EN_DOCS_CONSTITUTION = enDocsConstitution;
+export const EN_DOCS_FLEET = enDocsFleet;
+export const EN_DOCS_MODES = enDocsModes;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */

@@ -392,3 +392,38 @@ export interface DocsConstitutionDict {
   configurationLink: string;
   sourceNote: string;
 }
+
+/** `app/[locale]/docs/fleet/page.tsx`. */
+export interface DocsFleetDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  runTitle: string;
+  runLead: string;
+  statusLead: string;
+  profilesTitle: string;
+  profilesLead: string;
+  workflowTitle: string;
+  workflowLead: string;
+  workflowLimits: string;
+  sourceNote: string;
+}
+
+/** `app/[locale]/docs/modes/page.tsx`. */
+export interface DocsModesDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  modes: [string, string][];
+  switchingTitle: string;
+  switchingLead: string;
+  switchingCommandLead: string;
+  permissionsTitle: string;
+  permissionsLead: string;
+  postures: [string, string][];
+  sourceNote: string;
+}
