@@ -31,6 +31,7 @@ env:
 jobs:
   pin:
     name: Pin caller SHA to this run
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Require source_sha equals github.sha
@@ -51,6 +52,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.platform }}
+    timeout-minutes: 90
     # FreeBSD is a source-build target validated via `cargo check --target x86_64-unknown-freebsd -p codewhale-cli --locked`
     # (see packaging/freebsd/README.md and docs/INSTALL.md#freebsd). The 7×1 prebuilt matrix stays 7 targets;
     # FreeBSD has no prebuilt asset, no npm binary, and no matrix bloat — it builds from source.
@@ -278,6 +280,7 @@ jobs:
           overwrite: true
 
   bundle:
+    timeout-minutes: 15
     needs: build
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
@@ -312,6 +315,7 @@ jobs:
           overwrite: true
 
   windows-installer:
+    timeout-minutes: 15
     needs: build
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: windows-latest
@@ -352,6 +356,7 @@ jobs:
           overwrite: true
 
   assemble:
+    timeout-minutes: 15
     needs: [bundle, windows-installer]
     if: ${{ !cancelled() && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' }}
     runs-on: ubuntu-latest
@@ -377,6 +382,7 @@ jobs:
           overwrite: true
 
   smoke:
+    timeout-minutes: 15
     needs: assemble
     if: ${{ !cancelled() && needs.assemble.result == 'success' }}
     runs-on: ubuntu-latest

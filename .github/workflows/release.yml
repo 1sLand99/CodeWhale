@@ -24,6 +24,7 @@ env:
 
 jobs:
   resolve:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -113,6 +114,7 @@ jobs:
         run: node scripts/release/ensure-release-assets-absent.js "${GITHUB_REPOSITORY}" "${TAG}"
 
   parity:
+    timeout-minutes: 20
     needs: resolve
     runs-on: ubuntu-latest
     steps:
@@ -195,6 +197,7 @@ jobs:
     needs: [artifacts, resolve]
     if: ${{ !cancelled() && needs.artifacts.result == 'success' }}
     name: Docker ${{ matrix.platform }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -316,6 +319,7 @@ jobs:
           overwrite: true
 
   docker:
+    timeout-minutes: 30
     needs: [docker-build, resolve]
     if: ${{ !cancelled() && needs.docker-build.result == 'success' }}
     runs-on: ubuntu-latest
@@ -420,6 +424,7 @@ jobs:
           docker run --rm --entrypoint codew "${IMAGE}" --version
 
   release:
+    timeout-minutes: 30
     needs: [artifacts, docker, resolve]
     if: ${{ !cancelled() && needs.artifacts.result == 'success' && needs.docker.result == 'success' }}
     runs-on: ubuntu-latest
@@ -469,6 +474,7 @@ jobs:
           fail_on_unmatched_files: true
 
   npm:
+    timeout-minutes: 20
     needs: [release, resolve]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
@@ -513,6 +519,7 @@ jobs:
         run: npm publish --access public
 
   homebrew:
+    timeout-minutes: 20
     needs: [release, resolve]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest

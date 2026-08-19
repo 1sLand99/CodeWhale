@@ -476,6 +476,60 @@ assert.doesNotMatch(
   "the CLI dispatcher must leave auto routing to the provider-aware runtime",
 );
 
+// #5496: every release-lane job carries an explicit `timeout-minutes`.
+//
+// GitHub's default is 360 minutes, so an assigned-but-dead runner sits for six
+// hours before anything reclaims it — observed on the v0.9.9 train as a job
+// stuck `in_progress` with 404 logs. Timeouts are containment, not recovery:
+// the runbook keeps the 404-log cancel/rerun rule for infrastructure failures.
+//
+// A job that calls a reusable workflow (`uses:`) cannot carry the key at all —
+// GitHub rejects it — so the callee owns its own caps. That is why the artifact
+// bounds live in release-artifacts.yml rather than in its callers.
+function jobsWithoutTimeout(source) {
+  const lines = source.split("\n");
+  const jobsAt = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+  assert.notEqual(jobsAt, -1, "workflow must declare jobs");
+  const offenders = [];
+  for (let i = jobsAt + 1; i < lines.length; i += 1) {
+    const header = lines[i].match(/^  ([A-Za-z0-9_-]+):\s*$/);
+    if (!header) continue;
+    let reusable = false;
+    let capped = false;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (/^  [A-Za-z0-9_-]+:\s*$/.test(lines[j])) break;
+      if (/^    uses:/.test(lines[j])) reusable = true;
+      if (/^    timeout-minutes:\s*\d+\s*$/.test(lines[j])) capped = true;
+    }
+    if (!reusable && !capped) offenders.push(header[1]);
+  }
+  return offenders;
+}
+
+for (const [name, source] of [
+  ["release-candidate.yml", candidate],
+  ["release-artifacts.yml", artifacts],
+  ["release.yml", release],
+  ["release-republish.yml", republish],
+  ["ci.yml", ci],
+  ["nightly.yml", nightly],
+]) {
+  assert.deepEqual(
+    jobsWithoutTimeout(source),
+    [],
+    `${name}: every job must set timeout-minutes (#5496)`,
+  );
+}
+
+// The Windows artifact build historically runs 40-45 minutes, so its cap has to
+// keep real margin — a tight bound here fails healthy releases.
+const buildTimeout = artifacts.match(/^  build:\n(?:.*\n)*?    timeout-minutes: (\d+)$/m);
+assert.ok(buildTimeout, "release-artifacts build job must be capped");
+assert.ok(
+  Number(buildTimeout[1]) >= 60,
+  `artifact build cap ${buildTimeout[1]}m leaves no margin over a healthy 40-45m Windows build`,
+);
+
 console.log(
   "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",
 );

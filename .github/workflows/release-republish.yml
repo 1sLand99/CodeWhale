@@ -39,6 +39,7 @@ permissions:
 
 jobs:
   resolve:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -100,6 +101,7 @@ jobs:
             "${EXPECTED_SHA}"
 
   docker:
+    timeout-minutes: 30
     needs: resolve
     if: ${{ contains(inputs.channels, 'docker') }}
     runs-on: ubuntu-latest
@@ -169,6 +171,7 @@ jobs:
           docker run --rm --entrypoint codew "${IMAGE}" --version
 
   homebrew:
+    timeout-minutes: 20
     needs: resolve
     if: ${{ contains(inputs.channels, 'homebrew') }}
     runs-on: ubuntu-latest
