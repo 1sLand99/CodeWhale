@@ -14,8 +14,10 @@
  */
 import type {
   ChromeDict,
+  DocsConstitutionDict,
   DocsGuideDict,
   DocsHooksDict,
+  DocsRuntimeApiDict,
   DocsShellDict,
   DocsTroubleshootingDict,
   HomeDict,
@@ -30,6 +32,10 @@ import { docsHooks as enDocsHooks } from "./en/docs-hooks";
 import { docsHooks as zhDocsHooks } from "./zh/docs-hooks";
 import { docsTroubleshooting as enDocsTroubleshooting } from "./en/docs-troubleshooting";
 import { docsTroubleshooting as zhDocsTroubleshooting } from "./zh/docs-troubleshooting";
+import { docsConstitution as enDocsConstitution } from "./en/docs-constitution";
+import { docsConstitution as zhDocsConstitution } from "./zh/docs-constitution";
+import { docsRuntimeApi as enDocsRuntimeApi } from "./en/docs-runtime-api";
+import { docsRuntimeApi as zhDocsRuntimeApi } from "./zh/docs-runtime-api";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -147,6 +153,14 @@ const DOCS_TROUBLESHOOTING: Record<string, DocsTroubleshootingDict> = {
   zh: zhDocsTroubleshooting,
 };
 
+const DOCS_CONSTITUTION: Record<string, DocsConstitutionDict> = {
+  zh: zhDocsConstitution,
+};
+
+const DOCS_RUNTIME_API: Record<string, DocsRuntimeApiDict> = {
+  zh: zhDocsRuntimeApi,
+};
+
 export function getChrome(locale: string): ChromeDict {
   return CHROME[locale] ?? enChrome;
 }
@@ -171,6 +185,14 @@ export function getDocsTroubleshooting(locale: string): DocsTroubleshootingDict 
   return DOCS_TROUBLESHOOTING[locale] ?? enDocsTroubleshooting;
 }
 
+export function getDocsConstitution(locale: string): DocsConstitutionDict {
+  return DOCS_CONSTITUTION[locale] ?? enDocsConstitution;
+}
+
+export function getDocsRuntimeApi(locale: string): DocsRuntimeApiDict {
+  return DOCS_RUNTIME_API[locale] ?? enDocsRuntimeApi;
+}
+
 /**
  * Select one side of a legacy `{ en, zh }` content pair by locale. This is
  * the transitional bridge for `web/lib/content/` modules that still carry
@@ -189,6 +211,8 @@ export const EN_DOCS_GUIDE = enDocsGuide;
 export const EN_DOCS_SHELL = enDocsShell;
 export const EN_DOCS_HOOKS = enDocsHooks;
 export const EN_DOCS_TROUBLESHOOTING = enDocsTroubleshooting;
+export const EN_DOCS_CONSTITUTION = enDocsConstitution;
+export const EN_DOCS_RUNTIME_API = enDocsRuntimeApi;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */

@@ -30,6 +30,8 @@ const OPTIONAL_FILES = [
   "docs-shell.ts",
   "docs-hooks.ts",
   "docs-troubleshooting.ts",
+  "docs-constitution.ts",
+  "docs-runtime-api.ts",
 ];
 
 /** Top-level keys of the exported object literal (two-space indented `key:`). */
