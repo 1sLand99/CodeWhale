@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:acee66e62ab0 -->
+<!-- source: README.md sha256:d4367bdef21a -->
 # Codewhale
 
 Terminaliniz için açık kaynak bir kodlama ajanı — modeli siz getirin.
@@ -159,4 +159,4 @@ bağlı değildir.
 
 ![Codewhale bir terminalde üç salt okunur scout alt ajanını açıyor](assets/fanout.gif)
 
-[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

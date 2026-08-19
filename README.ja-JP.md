@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:acee66e62ab0 -->
+<!-- source: README.md sha256:d4367bdef21a -->
 # Codewhale
 
 ターミナルで動くオープンソースのコーディングエージェント — モデルはあなたが持ち込む。
@@ -99,4 +99,4 @@ Issue、PR、再現手順、ログ、機能要望は、どれもここでは本�
 
 ![ターミナルで 3 つの読み取り専用 scout サブエージェントを並列起動する Codewhale](assets/fanout.gif)
 
-[![Star History Chart](https://api.star-history.com/chart?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://www.star-history.com/?repos=Hmbown%2FCodeWhale&type=date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
