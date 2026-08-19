@@ -33,6 +33,13 @@ def measurement_command() -> list[str]:
         "cargo",
         "test",
         "--locked",
+        # Match the feature set CI's `cargo nextest run --workspace
+        # --all-features` already built. Default features are a *different*
+        # unification (this crate's `--all-features` adds `web` and
+        # `long-running-tests`), so asking for them here rebuilt the crate and
+        # its dependents from scratch — ten minutes of the macOS leg spent
+        # recompiling artifacts the previous step had already produced.
+        "--all-features",
         "-p",
         "codewhale-tui",
         "--lib",
