@@ -288,19 +288,24 @@ impl RunningToolFacts {
 const WORKING_BUBBLE_FRAMES: [&str; 8] = ["⠀", "⢀", "⣀", "⣄", "⣤", "⣦", "⣶", "⣿"];
 const COMPLETION_BREATH_MS: u128 = 800;
 const COMPLETION_RELEASE_MS: u128 = 560;
-const IDLE_WHALE_SPOUT_ROW: &str = "   ˚";
-const IDLE_WHALE_ROWS: [&str; 3] = [
-    "  ▗▄▄▄▄▄▄▄▄▄▄▄▖      ▚△▞",
-    " ▐██·███████████▙━━━━▞",
-    "  ▝▀▀▀▀▀▀▀▀▀▀▀▀▘",
-];
+/// Signal Cut hero mark. The Whale Teams roster (CWC 2026-08-15) reads
+/// head-left, blunt nose, swept dorsal on an arched back, a short tail stock
+/// that stays body mass (`▙▄▄▞`) and rises into the attached crown fluke
+/// `▚△▞`. The fluke's notch `△` sits directly above the rising stock tip
+/// `▞`, so the tail reads as one continuous animal instead of a bar with a
+/// shape floating past it. The belly carries one cyan current cut. The glyph
+/// vocabulary is the one `whales::art` uses for the six-role portraits.
+const IDLE_WHALE_SPOUT_ROW: &str = "    ˚";
+const IDLE_WHALE_ROWS: [&str; 3] = ["  ▗▄▄▟▄▄▄▄▄▖  ▚△▞", " ▐█·████████▙▄▄▞", "  ▝▀▀▀▀▀▀▀▀▘"];
 
-const UWU_IDLE_WHALE_SPOUT_ROW: &str = "   ˚✦";
-const UWU_IDLE_WHALE_ROWS: [&str; 3] = [
-    " ▗▄▄▄▄▄▄▄▄▄▄▄▖    ▚△▞",
-    "▐█░·░█████████▙▄▄▞",
-    " ▝▀▀▀▀▀▀▀▀▀▀▀▘",
-];
+/// Soft variant: same silhouette, one body cell shorter, blush around the eye
+/// and a sparkle beside the spout.
+const UWU_IDLE_WHALE_SPOUT_ROW: &str = "    ˚✦";
+const UWU_IDLE_WHALE_ROWS: [&str; 3] = ["  ▗▄▄▟▄▄▄▄▖  ▚△▞", " ▐█░·░█████▙▄▄▞", "  ▝▀▀▀▀▀▀▀▘"];
+
+/// The belly row is the mark's cyan current cut, not gold body mass; it holds
+/// still while the caustic sweep travels across the gold rows above it.
+const IDLE_WHALE_CURRENT_ROW: usize = 2;
 
 const IDLE_SHIMMER_CYCLE_MS: u128 = 4_000;
 const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
@@ -1447,6 +1452,14 @@ fn idle_whale_rows(app: &App) -> [&'static str; 3] {
     }
 }
 
+/// Signal Current cyan owns the spout and the belly cut. It resolves through
+/// the same Whale Teams ink the `/fleet` portraits use, so every theme gets
+/// the brand cyan lifted to the secondary-chrome contrast floor rather than a
+/// per-theme guess.
+fn idle_whale_current_color(app: &App) -> Color {
+    crate::tui::whales::WhaleInk::from_theme(&app.ui_theme).current
+}
+
 fn idle_whale_row_spans(
     text: &'static str,
     row: usize,
@@ -1519,10 +1532,8 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         let elapsed_ms = app.ocean_started_at.elapsed().as_millis();
         let spout = idle_whale_spout_row(app);
         let rows = idle_whale_rows(app);
-        let mut mark = vec![vec![Span::styled(
-            spout,
-            Style::default().fg(app.ui_theme.accent_secondary),
-        )]];
+        let current = idle_whale_current_color(app);
+        let mut mark = vec![vec![Span::styled(spout, Style::default().fg(current))]];
         // Soft uwu: sakura blush/sparkle glyphs; classic keeps body peach + text eye.
         let highlight = if idle_whale_is_uwu(app) {
             app.ui_theme.accent_primary
@@ -1530,12 +1541,19 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
             app.ui_theme.text_body
         };
         mark.extend(rows.iter().enumerate().map(|(row, text)| {
+            // The belly cut is water, not chrome: it holds the flat brand cyan
+            // while the caustic sweep travels across the gold body above it.
+            let is_current = row == IDLE_WHALE_CURRENT_ROW;
             idle_whale_row_spans(
                 text,
                 row,
                 elapsed_ms,
-                animated,
-                app.ui_theme.accent_action,
+                animated && !is_current,
+                if is_current {
+                    current
+                } else {
+                    app.ui_theme.accent_action
+                },
                 app.ui_theme.text_body,
                 highlight,
             )
@@ -2672,7 +2690,7 @@ mod tests {
         let block_inset = (width - block_width) / 2;
 
         assert_eq!(
-            block_width, 24,
+            block_width, 17,
             "the crown-fluke mark should stay quiet at 60 cols"
         );
         for row in std::iter::once(IDLE_WHALE_SPOUT_ROW).chain(IDLE_WHALE_ROWS) {
@@ -2713,7 +2731,7 @@ mod tests {
         let block_width = idle_whale_block_width(UWU_IDLE_WHALE_SPOUT_ROW, &UWU_IDLE_WHALE_ROWS);
         let block_inset = (width - block_width) / 2;
 
-        assert_eq!(block_width, 21);
+        assert_eq!(block_width, 16);
         for row in std::iter::once(UWU_IDLE_WHALE_SPOUT_ROW).chain(UWU_IDLE_WHALE_ROWS) {
             let line = rendered
                 .iter()
@@ -2750,10 +2768,10 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "   o",
-                r"  .###########.      \^/",
-                " |##.############----/",
-                "  .############.",
+                "    o",
+                r"  .########.  \^/",
+                " |#.###########/",
+                "  .########.",
             ]
         );
         assert!(rows.iter().all(|row| row.is_ascii()));
