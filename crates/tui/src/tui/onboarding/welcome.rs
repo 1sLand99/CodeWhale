@@ -107,20 +107,27 @@ mod tests {
     }
 
     #[test]
-    fn welcome_copy_centers_constitution_first_setup() {
+    fn welcome_copy_names_workspace_restore_and_tokens() {
         let mut app = test_app_with_locale(Locale::En);
         app.onboarding_needs_api_key = false;
         app.trust_mode = true;
         let body = body(&app);
 
-        // The dual meaning of "code" opens the arc: software and law.
-        assert!(body.contains("Code means two things"));
-        assert!(body.contains("the law this agent works under"));
+        // First-run copy names shipped capabilities, not only the constitution.
+        assert!(body.contains("/workspace"));
+        assert!(body.contains("/restore"));
+        assert!(body.contains("/tokens"));
         assert!(body.contains("only these screens will appear"));
         assert!(body.contains(
-            "Next: choose language -> pick a look -> learn modes and permissions -> setup tips."
+            "Next: choose language -> pick a look -> learn modes and permissions -> what you can do."
         ));
+        // The lead dropped the constitution metaphor, so the standing-guidance
+        // line has to name its own subject rather than dangle off it.
+        assert!(body.contains("Standing guidance ships with valid defaults"));
         assert!(body.contains("/constitution"));
+        assert!(!body.contains("Code means two things"));
+        // `/restore` reverts files; `/undo` drops a turn. Do not blur them.
+        assert!(!body.contains("rewind a turn"));
         assert!(!body.contains("add an API key"));
         assert!(!body.contains("land in the chat"));
     }
@@ -144,7 +151,7 @@ mod tests {
         let body = body(&app);
 
         assert!(body.contains(
-            "Next: choose language -> pick a look -> connect API key -> trust workspace -> learn modes and permissions -> setup tips."
+            "Next: choose language -> pick a look -> connect API key -> trust workspace -> learn modes and permissions -> what you can do."
         ));
     }
 
@@ -156,9 +163,13 @@ mod tests {
 
         let body = body(&app);
 
-        assert!(body.contains("Codewhale 会与你协作完成工作"));
+        assert!(body.contains("/workspace"));
+        assert!(body.contains("/restore"));
+        assert!(body.contains("/tokens"));
         assert!(!body.contains("代码在这里有两层含义"));
-        assert!(body.contains("接下来：选择语言 -> 选择外观 -> 了解模式与权限 -> 设置提示。"));
+        // The last step is named with the same phrase the tips screen titles
+        // itself, so the preview and the screen read as one thing.
+        assert!(body.contains("接下来：选择语言 -> 选择外观 -> 了解模式与权限 -> 你能做什么。"));
         assert!(!body.contains("Press Enter"));
     }
 }

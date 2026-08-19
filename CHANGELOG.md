@@ -79,6 +79,12 @@ abort under load.
 - `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
   the empty palette and bare `/` menu instead of only under Advanced
   (#5442, #5439).
+- Welcome, the last onboarding tips screen, and `/home` name
+  `/workspace`, `/restore`, and `/tokens` instead of opening on
+  governance and setup. That copy says `/restore` rolls workspace
+  files back to a per-turn snapshot rather than rewinding a turn,
+  which is what `/undo` does, and `/home` aligns its `/links` row to
+  the same command column as the rest of the list (#5442).
 - The model picker no longer re-parses `~/.codewhale/config.toml` once per
   provider when deciding who has a saved key.
 

@@ -657,6 +657,9 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
     // Quick actions section
     let _ = writeln!(stats, "\n{}", tr(locale, MessageId::HomeQuickActions));
     let _ = writeln!(stats, "--------------------------------------------");
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickWorkspace));
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickRestore));
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickTokens));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickLinks));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickSkills));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickConfig));
@@ -1690,7 +1693,10 @@ mod tests {
         let msg = result
             .message
             .expect("home dashboard should return message");
-        assert!(msg.contains("/links      - Codewhale, community & provider links"));
+        assert!(msg.contains("/workspace   - Switch folders or worktrees"));
+        assert!(msg.contains("/restore     - Roll files back to a turn snapshot"));
+        assert!(msg.contains("/tokens      - Show session spend and context"));
+        assert!(msg.contains("/links       - Codewhale, community & provider links"));
         assert!(msg.contains("/config      - Inspect and change settings"));
         assert!(
             !msg.lines()

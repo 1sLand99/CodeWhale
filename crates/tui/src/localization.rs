@@ -694,6 +694,9 @@ pub enum MessageId {
     HomeQuickSubagents,
     HomeQuickTaskList,
     HomeQuickHelp,
+    HomeQuickWorkspace,
+    HomeQuickRestore,
+    HomeQuickTokens,
     HomeModeTips,
     HomeAgentModeTip,
     HomeAgentModeReviewTip,
@@ -2283,6 +2286,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::HomeQuickSubagents,
     MessageId::HomeQuickTaskList,
     MessageId::HomeQuickHelp,
+    MessageId::HomeQuickWorkspace,
+    MessageId::HomeQuickRestore,
+    MessageId::HomeQuickTokens,
     MessageId::HomeModeTips,
     MessageId::HomeAgentModeTip,
     MessageId::HomeAgentModeReviewTip,
@@ -4059,10 +4065,12 @@ mod tests {
         assert!(setup_intro.contains("Codewhale"));
         assert!(setup_intro.contains("宪章"));
         assert!(!setup_intro.contains("代码"));
+        // The romanized-brand guard lives on `setup_intro` above: the welcome
+        // lead names commands, not the product, so asserting "Codewhale" here
+        // would only force a brand into copy that does not need one (#5442).
         let welcome = tr(Locale::ZhHans, MessageId::OnboardWelcomeLead);
-        assert!(welcome.contains("Codewhale"));
         assert!(!welcome.contains("代码"));
-        assert!(tr(Locale::ZhHans, MessageId::OnboardTipsLine2).contains("/constitution"));
+        assert!(tr(Locale::ZhHans, MessageId::OnboardTipsLine4).contains("/constitution"));
         assert!(
             tr(
                 Locale::ZhHans,
@@ -4070,6 +4078,146 @@ mod tests {
             )
             .contains("constitution.json")
         );
+    }
+
+    #[test]
+    fn onboarding_and_home_name_flagship_capabilities_in_every_complete_pack() {
+        // #5442: welcome, last-step tips, and /home must name the shipped
+        // surfaces a new user never finds from governance copy alone.
+        for locale in Locale::shipped_complete() {
+            for id in [
+                MessageId::OnboardWelcomeLead,
+                MessageId::OnboardTipsLine1,
+                MessageId::OnboardTipsLine2,
+                MessageId::OnboardTipsLine3,
+                MessageId::HomeQuickWorkspace,
+                MessageId::HomeQuickRestore,
+                MessageId::HomeQuickTokens,
+            ] {
+                let text = tr(*locale, id);
+                assert!(!text.trim().is_empty(), "{} {id:?} is empty", locale.tag());
+            }
+            let welcome = tr(*locale, MessageId::OnboardWelcomeLead);
+            assert!(
+                welcome.contains("/workspace")
+                    && welcome.contains("/restore")
+                    && welcome.contains("/tokens"),
+                "{} welcome lead lost a flagship command: {welcome}",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::OnboardTipsLine1).contains("/workspace"),
+                "{} tips line 1 must name /workspace",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::OnboardTipsLine2).contains("/restore"),
+                "{} tips line 2 must name /restore",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::OnboardTipsLine3).contains("/tokens"),
+                "{} tips line 3 must name /tokens",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::HomeQuickWorkspace).contains("/workspace"),
+                "{} /home lost /workspace",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::HomeQuickRestore).contains("/restore"),
+                "{} /home lost /restore",
+                locale.tag()
+            );
+            assert!(
+                tr(*locale, MessageId::HomeQuickTokens).contains("/tokens"),
+                "{} /home lost /tokens",
+                locale.tag()
+            );
+            // The welcome preview names the final step; the step it names is
+            // the tips screen, so the two must be one phrase, not two. Case is
+            // the only permitted difference (the title is title-cased).
+            assert_eq!(
+                tr(*locale, MessageId::OnboardWelcomeStepTips).to_lowercase(),
+                tr(*locale, MessageId::OnboardTipsTitle).to_lowercase(),
+                "{} names the last onboarding step differently than the screen titles itself",
+                locale.tag()
+            );
+            if *locale != Locale::En {
+                assert_ne!(
+                    tr(*locale, MessageId::OnboardWelcomeLead),
+                    tr(Locale::En, MessageId::OnboardWelcomeLead),
+                    "{} still ships the English welcome lead",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn home_quick_action_rows_share_one_command_column_in_every_pack() {
+        // The quick-action block is a fixed-width list. The command name and
+        // its padding are composed in English and must survive translation
+        // byte-for-byte, or the column goes ragged in that locale alone.
+        const ROWS: &[MessageId] = &[
+            MessageId::HomeQuickWorkspace,
+            MessageId::HomeQuickRestore,
+            MessageId::HomeQuickTokens,
+            MessageId::HomeQuickLinks,
+            MessageId::HomeQuickSkills,
+            MessageId::HomeQuickConfig,
+            MessageId::HomeQuickSettings,
+            MessageId::HomeQuickModel,
+            MessageId::HomeQuickSubagents,
+            MessageId::HomeQuickTaskList,
+            MessageId::HomeQuickHelp,
+        ];
+        for id in ROWS {
+            let english = tr(Locale::En, *id);
+            let dash = english.find(" - ").expect("quick-action row separator");
+            let prefix = &english[..dash + " - ".len()];
+            for locale in Locale::shipped_complete() {
+                let row = tr(*locale, *id);
+                assert!(
+                    row.starts_with(prefix),
+                    "{} {id:?} moved the command column: expected prefix {prefix:?}, got {row:?}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restore_copy_never_promises_to_rewind_the_conversation() {
+        // #5442: `/restore` rolls *workspace files* back to a snapshot. `/undo`
+        // is what drops a conversation turn. Onboarding and /home copy that
+        // says "rewind a turn" sends new users to the wrong command.
+        for locale in Locale::shipped_complete() {
+            for id in [
+                MessageId::OnboardWelcomeLead,
+                MessageId::OnboardTipsLine2,
+                MessageId::HomeQuickRestore,
+            ] {
+                let text = tr(*locale, id);
+                assert!(
+                    text.contains("/restore"),
+                    "{} {id:?} stopped naming /restore: {text}",
+                    locale.tag()
+                );
+            }
+        }
+        for id in [
+            MessageId::OnboardWelcomeLead,
+            MessageId::OnboardTipsLine2,
+            MessageId::HomeQuickRestore,
+        ] {
+            let english = tr(Locale::En, id);
+            assert!(
+                !english.contains("rewind a turn") && !english.contains("rewind turn"),
+                "{id:?} describes /restore as rewinding a turn: {english}"
+            );
+        }
     }
 
     #[test]
