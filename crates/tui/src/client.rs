@@ -3655,6 +3655,27 @@ mod provider_native_search;
 mod responses;
 mod stream_entry;
 
+#[cfg(test)]
+pub(crate) fn anthropic_tool_result_content_for_test(
+    content: &str,
+    content_blocks: Option<&[Value]>,
+) -> Value {
+    anthropic::anthropic_tool_result_content(content, content_blocks)
+}
+
+#[cfg(test)]
+pub(crate) fn responses_tool_output_for_test(
+    content: &str,
+    content_blocks: Option<&[Value]>,
+) -> Value {
+    responses::responses_tool_output(content, content_blocks)
+}
+
+#[cfg(test)]
+pub(crate) fn chat_messages_for_test(messages: &[crate::models::Message]) -> Vec<Value> {
+    chat::build_chat_messages(None, messages, "gpt-4o")
+}
+
 fn extract_sse_data_value(line: &str) -> Option<&str> {
     line.strip_prefix("data:")
         .map(|value| value.strip_prefix(' ').unwrap_or(value))

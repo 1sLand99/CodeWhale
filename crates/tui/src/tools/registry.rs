@@ -902,6 +902,13 @@ impl ToolRegistryBuilder {
         }
     }
 
+    /// Include the `read_media` tool for safe multimodal media inspection.
+    #[must_use]
+    pub fn with_read_media_tool(self) -> Self {
+        use super::read_media::ReadMediaTool;
+        self.with_tool(Arc::new(ReadMediaTool::default()))
+    }
+
     /// Include the `load_skill` tool (#434) so the model can pull a
     /// SKILL.md body + companion file list into context with one
     /// call instead of `read_file` + `list_dir` against the path
@@ -1248,6 +1255,7 @@ impl ToolRegistryBuilder {
             .with_revert_turn_tool()
             .with_pandoc_tools()
             .with_image_ocr_tools()
+            .with_read_media_tool()
             .with_finance_tool();
 
         match shell_policy {

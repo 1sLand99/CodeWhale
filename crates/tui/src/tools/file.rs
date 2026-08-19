@@ -426,7 +426,7 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// secret-store directories. Other dotfiles remain readable. Model-bound
 /// redaction is still required because shell tools can read these files and
 /// arbitrary commands can print credentials without reading a file at all.
-fn is_codewhale_credential_path(path: &Path) -> bool {
+pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
     let candidate = canonical_path_for_credential_guard(path);
 
     if let Ok(active_config) = codewhale_config::resolve_config_path(None)

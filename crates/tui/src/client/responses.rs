@@ -659,7 +659,7 @@ impl DeepSeekClient {
     }
 }
 
-fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Value {
+pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Value {
     let (image, omitted) = crate::image_attach::provider_tool_result_image_refs(content_blocks);
     let content = crate::image_attach::tool_result_text_with_omission(content, omitted);
     let Some((mime_type, data)) = image else {

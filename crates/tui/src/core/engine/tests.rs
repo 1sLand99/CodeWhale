@@ -8230,6 +8230,22 @@ async fn registry_discovery_and_start_handlers_exist_in_agent_and_plan_modes() {
             )
             .build(engine.build_tool_context(mode, false));
         assert!(registry.contains("registry_sync"), "missing in {mode:?}");
+        assert!(registry.contains("read_media"), "missing in {mode:?}");
+        let media_tools = registry
+            .to_api_tools_with_cache(true)
+            .into_iter()
+            .filter(|tool| tool.name == "read_media")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            media_tools.len(),
+            1,
+            "read_media must be registered exactly once in {mode:?}"
+        );
+        assert_eq!(
+            media_tools[0].defer_loading,
+            Some(true),
+            "read_media must remain default-off/deferred in {mode:?}"
+        );
         assert!(
             registry.contains("start_registry_mcp_server"),
             "missing in {mode:?}"
