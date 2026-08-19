@@ -953,6 +953,7 @@ impl ExecCell {
             && self.interaction.is_none()
     }
 
+    #[allow(dead_code)]
     pub(super) fn render(
         &self,
         width: u16,
@@ -1654,6 +1655,7 @@ impl GenericToolCell {
     /// `mode` controls multi-line output handling: `Live` caps at
     /// `TOOL_OUTPUT_LINE_LIMIT` rows with a "+N more" affordance;
     /// `Transcript` emits the full output.
+    #[allow(dead_code)]
     pub fn lines_with_mode(
         &self,
         width: u16,

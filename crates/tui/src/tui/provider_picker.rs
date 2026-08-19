@@ -3573,7 +3573,7 @@ impl ProviderPickerView {
             }
             if let Some(env) = template.api_key_env() {
                 detail.push(Line::from(Span::styled(
-                    format!("{env}"),
+                    env.to_string(),
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
             }

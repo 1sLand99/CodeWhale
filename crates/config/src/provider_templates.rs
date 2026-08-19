@@ -244,7 +244,6 @@ pub fn provider_setup_templates() -> &'static [ProviderSetupTemplate] {
 }
 
 /// Templates that persist as named OpenAI-compatible tables.
-#[must_use]
 pub fn compatible_provider_setup_templates() -> impl Iterator<Item = &'static ProviderSetupTemplate>
 {
     TEMPLATES.iter().filter(|template| template.is_compatible())
