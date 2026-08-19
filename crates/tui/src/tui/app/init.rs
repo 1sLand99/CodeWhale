@@ -1017,7 +1017,12 @@ impl App {
             workspace_follow_symlinks: settings.workspace_follow_symlinks,
             session_title: None,
             window_title: None,
-            title_default: config.title.clone(),
+            title_default: config
+                .title
+                .as_deref()
+                .map(crate::session_manager::sanitize_session_title)
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty()),
             receipt_text: None,
             receipt_started_at: None,
             tool_evidence: Vec::new(),

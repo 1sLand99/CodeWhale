@@ -297,9 +297,12 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             };
             Some(config.deepseek_base_url())
         }
+        // `/config title` reports the config-level default, not a session's
+        // `/title` override. The latter is intentionally a separate setting
+        // and is reported by bare `/title`.
         "title" | "window_title" | "tab_title" => Some(
-            app.window_title_prefix()
-                .map(str::to_string)
+            app.title_default
+                .clone()
                 .unwrap_or_else(|| "(unset)".to_string()),
         ),
         "provider_url" | "provider_base_url" | "endpoint" => {
@@ -2233,7 +2236,12 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             );
         }
         "title" | "window_title" | "tab_title" => {
-            let value = value.trim();
+            // Keep the config setter under the same terminal-control and
+            // bidi/zero-width policy as `/title` and `/rename`. Persist the
+            // normalized value too, so a restart cannot reintroduce bytes the
+            // live session already discarded.
+            let sanitized = crate::session_manager::sanitize_session_title(value);
+            let value = sanitized.trim();
             if value.is_empty() {
                 return CommandResult::error(
                     "title cannot be empty; use /title off to clear a session title",
@@ -3087,6 +3095,48 @@ mod tests {
             );
             assert!(text.contains("max_continuations"), "{token}: {text}");
         }
+    }
+
+    #[test]
+    fn title_config_reports_the_default_not_the_session_override() {
+        let config = Config {
+            title: Some(" workspace\u{1b}]0;ignored\u{7}\u{202e}-default ".to_string()),
+            ..Config::default()
+        };
+        let mut app = create_test_app_with_config(&config);
+        assert_eq!(
+            app.title_default.as_deref(),
+            Some("workspace]0;ignored-default")
+        );
+        app.window_title = Some("session-override".to_string());
+
+        let shown = show_single_setting(&app, "title");
+
+        assert_eq!(
+            shown.message.as_deref(),
+            Some("title = workspace]0;ignored-default")
+        );
+    }
+
+    #[test]
+    fn title_config_normalizes_the_live_and_persisted_default() {
+        let dir = tempfile::tempdir().expect("isolated config dir");
+        let config_path = dir.path().join("config.toml");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+
+        let result = set_config_value(
+            &mut app,
+            "title",
+            " Ev\u{1b}]0;PWNED\u{7}il\u{202e} Beta ",
+            true,
+        );
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(app.title_default.as_deref(), Some("Ev]0;PWNEDil Beta"));
+        assert!(app.needs_redraw);
+        let loaded = Config::load(Some(config_path), None).expect("reload saved config");
+        assert_eq!(loaded.title.as_deref(), Some("Ev]0;PWNEDil Beta"));
     }
 
     /// The shipped preset must survive its own preflight, or `/config preset
