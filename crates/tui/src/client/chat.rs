@@ -2545,7 +2545,7 @@ fn build_chat_messages_with_reasoning(
                 logging::warn(
                     "Substituting placeholder reasoning_content for DeepSeek tool-call assistant message",
                 );
-                reasoning_content = String::from("(reasoning omitted)");
+                reasoning_content = String::from(REASONING_REPLAY_PLACEHOLDER);
                 has_reasoning = true;
             }
 
@@ -2927,7 +2927,7 @@ pub(super) fn sanitize_thinking_mode_messages_for_route(
             .and_then(Value::as_str)
             .is_none_or(|s| s.trim().is_empty());
         if has_tool_calls && needs_placeholder {
-            msg["reasoning_content"] = json!("(reasoning omitted)");
+            msg["reasoning_content"] = json!(REASONING_REPLAY_PLACEHOLDER);
             substitutions = substitutions.saturating_add(1);
             logging::warn(format!(
                 "Final sanitizer: forced reasoning_content placeholder on assistant[{idx}]",
@@ -3312,6 +3312,19 @@ fn has_deepseek_r_series_marker(model_lower: &str) -> bool {
     })
 }
 
+/// Transport-only reasoning replay placeholder. DeepSeek-family chat wires
+/// reject assistant tool-call messages with an empty `reasoning_content`, so
+/// the request serializer substitutes this string for replay only. Providers
+/// that mirror assistant history (GLM-5.x) stream the substituted field back
+/// as a live reasoning delta; ingest must drop that exact echo so a wire-only
+/// placeholder never becomes a persisted or displayed thinking block.
+pub(crate) const REASONING_REPLAY_PLACEHOLDER: &str = "(reasoning omitted)";
+
+#[must_use]
+pub(crate) fn is_reasoning_replay_placeholder(text: &str) -> bool {
+    text.trim() == REASONING_REPLAY_PLACEHOLDER
+}
+
 fn reasoning_delta(
     value: &Value,
     choice_index: u32,
@@ -3322,6 +3335,9 @@ fn reasoning_delta(
         .or_else(|| value.get("reasoning"))
         .and_then(Value::as_str)
     {
+        if is_reasoning_replay_placeholder(reasoning) {
+            return None;
+        }
         return Some(reasoning.to_string());
     }
 
@@ -3349,6 +3365,9 @@ fn reasoning_message_text(value: &Value) -> Option<String> {
         .or_else(|| value.get("reasoning"))
         .and_then(Value::as_str)
     {
+        if is_reasoning_replay_placeholder(reasoning) {
+            return None;
+        }
         return Some(reasoning.to_string());
     }
     value
