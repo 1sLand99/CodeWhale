@@ -1,11 +1,11 @@
-//! Diagnostic dispatch (`doctor`, `setup --status`) runs the real in-process
-//! TUI entry via `run_tui_in_process` — the single `codewhale` binary calls
-//! `codewhale_tui::run` directly, so there is no sibling TUI binary to delegate
-//! to anymore (#5259 single-binary argv0 dispatch). These invariants stay: the
-//! dispatcher must not migrate legacy secrets, must not rewrite legacy
-//! settings, and must not create any state under a sealed HOME when running a
-//! read-only diagnostic. `doctor --context-json` must still emit a
-//! machine-readable context source map (`{"entries":[...]}`).
+//! Diagnostic dispatch must be read-only whether the command uses the real
+//! in-process TUI entry (`doctor`, `setup --status`) or stays in the CLI
+//! (`auth status --diagnostic`). The single `codewhale` binary has no sibling
+//! TUI executable to delegate to (#5259 single-binary argv0 dispatch). These
+//! invariants stay: the dispatcher must not migrate legacy secrets, must not
+//! rewrite legacy settings, and must not create any state under a sealed HOME.
+//! `doctor --context-json` must still emit a machine-readable context source
+//! map (`{"entries":[...]}`).
 
 #![cfg(unix)]
 
@@ -19,12 +19,14 @@ use tempfile::TempDir;
 #[test]
 fn dispatcher_diagnostics_are_in_process_and_read_only() {
     // (cli args, whether stdout must be a JSON object carrying an `entries`
-    // array). Only `doctor --context-json` carries the context source map.
-    for (args, expects_entries_json) in [
-        (&["doctor"][..], false),
-        (&["doctor", "--json"][..], false),
-        (&["doctor", "--context-json"][..], true),
-        (&["setup", "--status"][..], false),
+    // array, whether this is the structural auth diagnostic). Only
+    // `doctor --context-json` carries the context source map.
+    for (args, expects_entries_json, expects_auth_diagnostic) in [
+        (&["doctor"][..], false, false),
+        (&["doctor", "--json"][..], false, false),
+        (&["doctor", "--context-json"][..], true, false),
+        (&["setup", "--status"][..], false, false),
+        (&["auth", "status", "--diagnostic"][..], false, true),
     ] {
         let fixture = TempDir::new().expect("fixture root");
         let sealed_home = fixture.path().join("sealed-home");
@@ -78,6 +80,48 @@ fn dispatcher_diagnostics_are_in_process_and_read_only() {
                 "doctor --context-json must carry an `entries` array\nstdout:\n{}",
                 String::from_utf8_lossy(&output.stdout)
             );
+        }
+
+        if expects_auth_diagnostic {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(
+                    "auth diagnostic (structural only; credential values are never printed and provider credential stores were not opened)"
+                ),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "codewhale home: {}",
+                    codewhale_config::quote_os_path(&codewhale_home)
+                )),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "config: {}",
+                    codewhale_config::quote_os_path(&codewhale_home.join("config.toml"))
+                )),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "settings: {}",
+                    codewhale_config::quote_os_path(&codewhale_home.join("settings.toml"))
+                )),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains("secret backend: file (inspection: metadata_only)"),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(
+                    "legacy secret store: suppressed by explicit CODEWHALE_HOME isolation"
+                ),
+                "{stdout}"
+            );
+            assert!(!stdout.contains("synthetic-legacy-fixture"), "{stdout}");
         }
 
         assert_eq!(
