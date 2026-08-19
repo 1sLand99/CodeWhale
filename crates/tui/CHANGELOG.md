@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.10] - Unreleased candidate
 
+- Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
+
 These notes describe the v0.9.10 source candidate. It is not a published
 install until the tag ships; `latest` still resolves to the previous
 release.
@@ -24,6 +26,14 @@ abort under load.
 
 ### Fixed
 
+- `CODEWHALE_PREFER_BWRAP` now applies the documented Linux sandbox override,
+  and Codewhale-era names own build metadata, hook session/tool-call IDs, and
+  sandbox child markers. The corresponding `DEEPSEEK_*` names remain as 0.9.x
+  compatibility aliases (#5443).
+- Windows default launch prefers Windows Terminal: zip archives ship
+  `codewhale.bat` (CRLF, `wt.exe` then the exe), `install.bat` copies that
+  launcher, and the NSIS Start Menu shortcut opens it instead of the raw
+  binary (#1854).
 - `fix(tui): make the header status mark honour its setting` — `status_indicator`
   did nothing for three of its four documented values. The header hardcoded a
   leading `cw` span *and* asked for a second mark beside the effort chip, then
@@ -48,9 +58,6 @@ abort under load.
   proceeds; unpersistable evidence blocks the tool; resume reconstructs
   closed and interrupted approvals (#5360).
 - `test(tui): break the LazyLock/env-barrier deadlock in the test harness`.
-- `test(tui): do not treat lock_test_env as a license to read a populated
-  ~/.codewhale/config.toml` — config paths now require the same EnvVarGuard
-  seal settings already used (#5355, #5359).
 - `ci: give test threads the 8 MiB stack they need` — the lib suite aborted
   with SIGABRT under load on the default 2 MiB stack.
 - YOLO entry points honor a locked approval policy: `--yolo`, `/mode yolo`,
@@ -67,17 +74,43 @@ abort under load.
   gets a verdict instead of a cancelled pending run. A hermetic Safety
   gate job runs authorization tests in under 15 minutes (test bankruptcy
   restructuring — no tests deleted).
+- Config-fixture tests no longer honor `lock_test_env` as a license to
+  read a populated `~/.codewhale/config.toml`; they need an `EnvVarGuard`
+  like settings already did. Safety-gate and CNB workspace tests pin a
+  hermetic `CODEWHALE_HOME`. `exec_persistent_service` is serialized in
+  nextest and inside the cargo-test binary instead of dropped (#5355).
 - Short CLI no longer waits up to three seconds for a telemetry POST on
   exit; `session_end` is recorded and the buffer ships on the next
   interactive session.
 - `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
   the empty palette and bare `/` menu instead of only under Advanced
   (#5442, #5439).
+- Welcome, the last onboarding tips screen, and `/home` name
+  `/workspace`, `/restore`, and `/tokens` instead of opening on
+  governance and setup. That copy says `/restore` rolls workspace
+  files back to a per-turn snapshot rather than rewinding a turn,
+  which is what `/undo` does, and `/home` aligns its `/links` row to
+  the same command column as the rest of the list (#5442).
 - The model picker no longer re-parses `~/.codewhale/config.toml` once per
   provider when deciding who has a saved key.
 
 ### Added
 
+- **npm Linux x64 first-party source selection.** The wrapper concurrently
+  fetches the GitHub Releases and CNB checksum manifests for the exact
+  package version, locks the first source whose HTTP response and manifest
+  validate, and downloads binaries only from that source. Explicit
+  `CODEWHALE_RELEASE_BASE_URL` / `CODEWHALE_USE_CNB_MIRROR=1` still skip the
+  race; other targets stay on GitHub.
+- `/workflow`, `/goal`, and `/auto` are pinned at the top of the empty `/`
+  menu, named on the idle welcome and footer, and occupy the first three
+  default Hotbar slots. `/auto` turns on Auto-Review (the existing
+  permission posture) and says when to use the other two instead (#5439).
+- `feat(tui): add cancellable cadence to continuous goals` (M-Maciej) —
+  `[goal] continuation_delay_seconds` gives coordinator goals a visible quiet
+  period between successful turns while reusing the existing coalesced goal
+  continuation token; Esc, Ctrl+C, pause/done/blocked/clear cancel before the
+  next provider request, and failures never continue (#5508).
 - `feat(tui): add command context adapters and migration gate (FEAT-015)`
   (aboimpinto) — TUI-owned capability facets, a dual-path dispatch seam, and
   source-aware CI enforcement so a command slice cannot claim to be migrated
@@ -114,6 +147,9 @@ abort under load.
 
 ### Contributors
 
+- M-Maciej (@M-Maciej) — the real-world organization-coordinator use case and
+  5–30 minute cadence requirement behind cancellable cross-turn goal delays
+  (#5508).
 - cyq1017 (@cyq1017) — approval outcomes are persisted before execution can
   proceed: receipts commit to a session-owned log first, unpersistable
   evidence blocks the tool, stale decisions are rejected, and resume

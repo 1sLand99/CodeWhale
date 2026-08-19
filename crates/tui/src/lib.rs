@@ -192,7 +192,7 @@ fn install_rustls_crypto_provider() {
     name = "codewhale-tui",
     bin_name = "codewhale-tui",
     author,
-    version = env!("DEEPSEEK_BUILD_VERSION"),
+    version = env!("CODEWHALE_BUILD_VERSION"),
     about = "Codewhale terminal coding agent",
     long_about = "Terminal-native TUI and CLI for open-source and open-weight coding models.\n\nRun 'codewhale' to start.\n\nProvider routes include DeepSeek, Arcee, Hugging Face, OpenRouter, Xiaomi MiMo, local vLLM/SGLang/Ollama, and more."
 )]
@@ -4154,7 +4154,7 @@ async fn run_doctor(
 
     // Version info
     println!("{}", "Version Information:".bold());
-    println!("  codewhale-tui: {}", env!("DEEPSEEK_BUILD_VERSION"));
+    println!("  codewhale-tui: {}", env!("CODEWHALE_BUILD_VERSION"));
     println!("  rust: {}", rustc_version());
     println!();
 

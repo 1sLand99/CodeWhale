@@ -349,7 +349,7 @@ fn shell_build_version() -> Cow<'static, str> {
             return Cow::Owned(version);
         }
     }
-    Cow::Borrowed(env!("DEEPSEEK_BUILD_VERSION"))
+    Cow::Borrowed(env!("CODEWHALE_BUILD_VERSION"))
 }
 
 impl ShellPhase {

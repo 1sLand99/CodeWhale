@@ -8917,6 +8917,20 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
     {
         config.sandbox_backend = Some(value);
     }
+    if let Ok(value) = codewhale_env_var("CODEWHALE_PREFER_BWRAP", "DEEPSEEK_PREFER_BWRAP") {
+        let primary_is_set = std::env::var("CODEWHALE_PREFER_BWRAP")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        let legacy_is_set = std::env::var("DEEPSEEK_PREFER_BWRAP")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !primary_is_set && legacy_is_set {
+            tracing::warn!(
+                "DEEPSEEK_PREFER_BWRAP is deprecated; use CODEWHALE_PREFER_BWRAP (the legacy alias is removed in 0.10.0)"
+            );
+        }
+        config.prefer_bwrap = Some(value == "1" || value.eq_ignore_ascii_case("true"));
+    }
     if let Ok(value) =
         std::env::var("CODEWHALE_SANDBOX_URL").or_else(|_| std::env::var("DEEPSEEK_SANDBOX_URL"))
     {

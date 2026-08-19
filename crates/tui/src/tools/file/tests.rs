@@ -95,7 +95,7 @@ async fn contract_read_reports_huge_first_line_with_exact_bash_fallback() {
 }
 
 #[tokio::test]
-async fn pi_read_offset_oob_and_limit_continuation_match_contract() {
+async fn contract_read_offset_oob_and_limit_continuation_match_contract() {
     let temporary = tempfile::tempdir().expect("tempdir");
     std::fs::write(temporary.path().join("lines.txt"), "one\ntwo\nthree").expect("fixture");
     let context = ToolContext::new(temporary.path());
@@ -122,7 +122,7 @@ async fn pi_read_offset_oob_and_limit_continuation_match_contract() {
 }
 
 #[tokio::test]
-async fn pi_read_uses_magic_not_extension_for_images() {
+async fn contract_read_uses_magic_not_extension_for_images() {
     let temporary = tempfile::tempdir().expect("tempdir");
     std::fs::write(temporary.path().join("plain.png"), "ordinary text").expect("text fixture");
     std::fs::write(
@@ -148,15 +148,15 @@ async fn pi_read_uses_magic_not_extension_for_images() {
 }
 
 #[test]
-fn pi_edit_preparation_accepts_string_and_legacy_recovery_forms() {
-    let encoded = prepare_pi_edit_input(json!({
+fn contract_edit_preparation_accepts_string_and_legacy_recovery_forms() {
+    let encoded = prepare_contract_edit_input(json!({
         "path": "doc.txt",
         "edits": "[{\"oldText\":\"a\",\"newText\":\"b\"}]"
     }))
     .expect("encoded edits");
     assert_eq!(encoded["edits"][0], json!({"oldText": "a", "newText": "b"}));
 
-    let recovered = prepare_pi_edit_input(json!({
+    let recovered = prepare_contract_edit_input(json!({
         "path": "doc.txt",
         "edits": {"malformed": true},
         "oldText": "a",
@@ -172,9 +172,9 @@ fn pi_edit_preparation_accepts_string_and_legacy_recovery_forms() {
 }
 
 #[test]
-fn pi_edit_fuzzy_normalization_preserves_untouched_lines() {
+fn contract_edit_fuzzy_normalization_preserves_untouched_lines() {
     let original = "untouched line  \nShe said “hello”—today.   \ntail  \n";
-    let updated = apply_pi_edits(
+    let updated = apply_contract_edits(
         original,
         &[ContractEdit {
             index: 0,
@@ -188,12 +188,12 @@ fn pi_edit_fuzzy_normalization_preserves_untouched_lines() {
 }
 
 #[tokio::test]
-async fn pi_edit_preserves_bom_and_crlf_without_prior_read() {
+async fn contract_edit_preserves_bom_and_crlf_without_prior_read() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let path = temporary.path().join("doc.txt");
     std::fs::write(&path, "\u{FEFF}alpha\r\nbeta\r\n").expect("fixture");
     let context = ToolContext::new(temporary.path());
-    let result = EditFileTool::execute_pi_edits(
+    let result = EditFileTool::execute_contract_edits(
         json!({
             "path": "doc.txt",
             "edits": [{"oldText": "alpha\nbeta", "newText": "one\ntwo"}]
@@ -213,7 +213,7 @@ async fn pi_edit_preserves_bom_and_crlf_without_prior_read() {
 }
 
 #[tokio::test]
-async fn queued_parallel_pi_edits_preserve_both_changes() {
+async fn queued_parallel_contract_edits_preserve_both_changes() {
     let temporary = tempfile::tempdir().expect("tempdir");
     let path = temporary.path().join("doc.txt");
     std::fs::write(&path, "alpha\nbeta\ngamma\n").expect("fixture");
@@ -222,14 +222,14 @@ async fn queued_parallel_pi_edits_preserve_both_changes() {
     let second_context = context.clone();
 
     let first = tokio::spawn(async move {
-        EditFileTool::execute_pi_edits(
+        EditFileTool::execute_contract_edits(
             json!({"path": "doc.txt", "edits": [{"oldText": "alpha", "newText": "A"}]}),
             &first_context,
         )
         .await
     });
     let second = tokio::spawn(async move {
-        EditFileTool::execute_pi_edits(
+        EditFileTool::execute_contract_edits(
             json!({"path": "doc.txt", "edits": [{"oldText": "gamma", "newText": "G"}]}),
             &second_context,
         )
@@ -271,7 +271,7 @@ async fn cancelled_queued_pi_write_never_starts() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn pi_edit_rejects_read_only_target_before_atomic_replace() {
+async fn contract_edit_rejects_read_only_target_before_atomic_replace() {
     use std::os::unix::fs::PermissionsExt;
 
     let temporary = tempfile::tempdir().expect("tempdir");
@@ -279,7 +279,7 @@ async fn pi_edit_rejects_read_only_target_before_atomic_replace() {
     std::fs::write(&path, "alpha\n").expect("fixture");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("readonly");
     let context = ToolContext::new(temporary.path());
-    let result = EditFileTool::execute_pi_edits(
+    let result = EditFileTool::execute_contract_edits(
         json!({"path": "readonly.txt", "edits": [{"oldText": "alpha", "newText": "beta"}]}),
         &context,
     )

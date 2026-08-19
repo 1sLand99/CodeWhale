@@ -391,7 +391,8 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 #
 # prefer_bwrap = false  # default — use Landlock only
 #
-# Env override: DEEPSEEK_PREFER_BWRAP=true
+# Env override: CODEWHALE_PREFER_BWRAP=true
+# Legacy alias (deprecated until 0.10.0): DEEPSEEK_PREFER_BWRAP=true
 #
 # With prefer_bwrap = true, the sandbox gets a private /dev and /proc plus a
 # writable isolated /tmp by default, so toolchains work without widening the

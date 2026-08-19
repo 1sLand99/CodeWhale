@@ -26,6 +26,10 @@ abort under load.
 
 ### Fixed
 
+- `CODEWHALE_PREFER_BWRAP` now applies the documented Linux sandbox override,
+  and Codewhale-era names own build metadata, hook session/tool-call IDs, and
+  sandbox child markers. The corresponding `DEEPSEEK_*` names remain as 0.9.x
+  compatibility aliases (#5443).
 - Windows default launch prefers Windows Terminal: zip archives ship
   `codewhale.bat` (CRLF, `wt.exe` then the exe), `install.bat` copies that
   launcher, and the NSIS Start Menu shortcut opens it instead of the raw

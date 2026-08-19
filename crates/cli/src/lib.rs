@@ -187,7 +187,7 @@ fn parse_provider_identifier(value: &str) -> std::result::Result<String, String>
 #[derive(Debug, Parser)]
 #[command(
     name = "codewhale",
-    version = env!("DEEPSEEK_BUILD_VERSION"),
+    version = env!("CODEWHALE_BUILD_VERSION"),
     bin_name = "codewhale",
     override_usage = "codewhale [OPTIONS] [PROMPT]\n       codewhale [OPTIONS] <COMMAND> [ARGS]"
 )]

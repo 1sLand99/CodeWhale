@@ -574,6 +574,7 @@ impl SandboxManager {
 
         // Add sandbox indicator to environment
         let mut env = spec.env.clone();
+        env.insert("CODEWHALE_SANDBOX".to_string(), "seatbelt".to_string());
         env.insert("DEEPSEEK_SANDBOX".to_string(), "seatbelt".to_string());
 
         ExecEnv {
@@ -610,6 +611,7 @@ impl SandboxManager {
         );
 
         let mut env = spec.env.clone();
+        env.insert("CODEWHALE_SANDBOX".to_string(), "bwrap".to_string());
         env.insert("DEEPSEEK_SANDBOX".to_string(), "bwrap".to_string());
 
         ExecEnv {
@@ -635,8 +637,13 @@ impl SandboxManager {
 
         let mut env = spec.env.clone();
         let kind = windows::select_best_kind(&spec.sandbox_policy, &spec.cwd);
+        env.insert("CODEWHALE_SANDBOX".to_string(), format!("windows:{kind}"));
         env.insert("DEEPSEEK_SANDBOX".to_string(), format!("windows:{kind}"));
         if !spec.sandbox_policy.has_network_access() {
+            env.insert(
+                "CODEWHALE_SANDBOX_BLOCK_NETWORK".to_string(),
+                "1".to_string(),
+            );
             env.insert(
                 "DEEPSEEK_SANDBOX_BLOCK_NETWORK".to_string(),
                 "1".to_string(),
@@ -1013,6 +1020,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn sandbox_child_env_exports_codewhale_marker_and_legacy_alias() {
+        let manager = SandboxManager {
+            forced_sandbox: Some(SandboxType::MacosSeatbelt),
+            ..SandboxManager::default()
+        };
+        let spec = CommandSpec::shell("true", PathBuf::from("/tmp"), Duration::from_secs(5));
+        let env = manager.prepare(&spec);
+
+        assert_eq!(
+            env.env.get("CODEWHALE_SANDBOX").map(String::as_str),
+            Some("seatbelt")
+        );
+        assert_eq!(
+            env.env.get("DEEPSEEK_SANDBOX").map(String::as_str),
+            Some("seatbelt")
+        );
+    }
+
+    #[test]
     fn test_parity_manager_default_no_bwrap() {
         let manager = SandboxManager::default();
         let spec = CommandSpec::shell("true", PathBuf::from("/tmp"), Duration::from_secs(5))
@@ -1020,7 +1047,9 @@ mod tests {
         let env = manager.prepare(&spec);
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
+            let primary_marker = env.env.get("CODEWHALE_SANDBOX");
             let marker = env.env.get("DEEPSEEK_SANDBOX");
+            assert!(primary_marker.is_none());
             assert!(marker.is_none());
             assert_eq!(env.sandbox_type, SandboxType::None);
         }
@@ -1036,12 +1065,15 @@ mod tests {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
             if crate::sandbox::bwrap::is_available() {
+                let primary_marker = env.env.get("CODEWHALE_SANDBOX");
                 let marker = env.env.get("DEEPSEEK_SANDBOX");
+                assert_eq!(primary_marker.map(String::as_str), Some("bwrap"));
                 assert_eq!(marker.map(String::as_str), Some("bwrap"));
                 assert_eq!(env.sandbox_type, SandboxType::LinuxBubblewrap);
                 assert_eq!(env.program(), bwrap::BWRAP_PATH);
             } else {
                 assert_eq!(env.sandbox_type, SandboxType::None);
+                assert!(!env.env.contains_key("CODEWHALE_SANDBOX"));
                 assert!(!env.env.contains_key("DEEPSEEK_SANDBOX"));
             }
         }

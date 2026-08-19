@@ -1,11 +1,11 @@
 //! Shared build-script helpers for the `codewhale-cli`, `codewhale-tui`, and
 //! `codewhale-telemetry` build scripts: rerun-condition declarations, the
-//! embedded `DEEPSEEK_BUILD_VERSION` metadata, and the release-only build sha.
+//! embedded `CODEWHALE_BUILD_VERSION` metadata, and the release-only build sha.
 //! Only call these functions from a build script — they emit `cargo:`
 //! directives on stdout.
 //!
 //! Two different shas live here and they are not interchangeable.
-//! `DEEPSEEK_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *the build the
+//! `CODEWHALE_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *the build the
 //! environment asked for* (`DEEPSEEK_BUILD_SHA`/`GITHUB_SHA`); an unstamped
 //! local build renders a `(dev)` marker instead.
 //! `CODEWHALE_RELEASE_BUILD_SHA` describes a *published* binary and has no
@@ -41,7 +41,7 @@ pub fn declare_rerun_conditions(_manifest_dir: &Path) {
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
 }
 
-/// Emit `cargo:rustc-env=DEEPSEEK_BUILD_VERSION=...` — the package version,
+/// Emit `cargo:rustc-env=CODEWHALE_BUILD_VERSION=...` — the package version,
 /// suffixed with the short build SHA when the environment supplied one
 /// (`DEEPSEEK_BUILD_SHA`, then `GITHUB_SHA`), or with the literal `dev`
 /// marker when it did not. `CODEWHALE_BUILD_COMMIT` is emitted only in the
@@ -57,6 +57,9 @@ pub fn emit_build_version(_manifest_dir: &Path, package_version: &str) {
         .map(|sha| format!("{package_version} ({sha})"))
         .unwrap_or_else(|| format!("{package_version} (dev)"));
 
+    println!("cargo:rustc-env=CODEWHALE_BUILD_VERSION={build_version}");
+    // Keep the pre-rebrand compile-time name through the 0.9.x compatibility
+    // window for downstream crates that still use `env!` with it.
     println!("cargo:rustc-env=DEEPSEEK_BUILD_VERSION={build_version}");
     if let Some(commit) = commit {
         println!("cargo:rustc-env=CODEWHALE_BUILD_COMMIT={commit}");

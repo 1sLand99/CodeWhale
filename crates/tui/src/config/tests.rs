@@ -1460,6 +1460,33 @@ fn codewhale_search_base_url_env_wins_over_legacy_alias() {
 }
 
 #[test]
+fn codewhale_prefer_bwrap_env_wins_over_legacy_alias() {
+    let _guard = lock_test_env();
+    let _primary = EnvVarGuard::set("CODEWHALE_PREFER_BWRAP", "false");
+    let _legacy = EnvVarGuard::set("DEEPSEEK_PREFER_BWRAP", "true");
+    let mut config = Config {
+        prefer_bwrap: Some(true),
+        ..Config::default()
+    };
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.prefer_bwrap, Some(false));
+}
+
+#[test]
+fn legacy_prefer_bwrap_env_remains_a_compatible_alias() {
+    let _guard = lock_test_env();
+    let _primary = EnvVarGuard::remove("CODEWHALE_PREFER_BWRAP");
+    let _legacy = EnvVarGuard::set("DEEPSEEK_PREFER_BWRAP", "true");
+    let mut config = Config::default();
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.prefer_bwrap, Some(true));
+}
+
+#[test]
 fn search_provider_resolution_ignores_invalid_env_override() {
     let _guard = lock_test_env();
     let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");

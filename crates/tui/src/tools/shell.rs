@@ -3982,7 +3982,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        BashTool::pi_delegate().capabilities()
+        BashTool::contract_delegate().capabilities()
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
@@ -3991,12 +3991,12 @@ impl ToolSpec for LowercaseBashTool {
 
     fn approval_requirement_for(&self, input: &serde_json::Value) -> ApprovalRequirement {
         let translated = contract_bash_legacy_input(input).unwrap_or_else(|_| input.clone());
-        BashTool::pi_delegate().approval_requirement_for(&translated)
+        BashTool::contract_delegate().approval_requirement_for(&translated)
     }
 
     fn is_read_only_for(&self, input: &serde_json::Value) -> bool {
         contract_bash_legacy_input(input)
-            .is_ok_and(|translated| BashTool::pi_delegate().is_read_only_for(&translated))
+            .is_ok_and(|translated| BashTool::contract_delegate().is_read_only_for(&translated))
     }
 
     fn supports_parallel_for(&self, input: &serde_json::Value) -> bool {
@@ -4009,7 +4009,9 @@ impl ToolSpec for LowercaseBashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let translated = contract_bash_legacy_input(&input)?;
-        BashTool::pi_delegate().execute(translated, context).await
+        BashTool::contract_delegate()
+            .execute(translated, context)
+            .await
     }
 }
 
@@ -4067,7 +4069,7 @@ pub struct BashTool {
     name: &'static str,
     forced_action: Option<&'static str>,
     read_only: bool,
-    pi_timeout: bool,
+    optional_timeout: bool,
 }
 
 pub(crate) fn readonly_bash_input_schema() -> serde_json::Value {
@@ -4090,7 +4092,7 @@ impl BashTool {
             name,
             forced_action: None,
             read_only: false,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
@@ -4099,7 +4101,7 @@ impl BashTool {
             name,
             forced_action: None,
             read_only: true,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
@@ -4108,16 +4110,16 @@ impl BashTool {
             name,
             forced_action: Some(action),
             read_only: false,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
-    const fn pi_delegate() -> Self {
+    const fn contract_delegate() -> Self {
         Self {
             name: "bash",
             forced_action: Some("run"),
             read_only: false,
-            pi_timeout: true,
+            optional_timeout: true,
         }
     }
 }
@@ -4331,7 +4333,7 @@ impl ToolSpec for BashTool {
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }
         enforce_readonly_github_network_policy(command, context)?;
-        let timeout_ms = if self.pi_timeout {
+        let timeout_ms = if self.optional_timeout {
             input
                 .get("timeout_ms")
                 .map(|value| {
@@ -4573,7 +4575,7 @@ impl ToolSpec for BashTool {
 
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
-            if self.pi_timeout {
+            if self.optional_timeout {
                 return Err(ToolError::not_available(
                     "bash is unavailable with this external sandbox backend because it cannot preserve combined streaming output and timeout semantics. Use the native sandbox or search for the backend-specific shell tool.",
                 ));
@@ -4770,7 +4772,7 @@ impl ToolSpec for BashTool {
                 policy_override,
                 extra_env,
                 matches!(context.shell_policy, ShellPolicy::ReadOnly),
-                if self.pi_timeout {
+                if self.optional_timeout {
                     (1, BASH_MAX_TIMEOUT_MS)
                 } else {
                     (1_000, 600_000)
@@ -4797,7 +4799,7 @@ impl ToolSpec for BashTool {
                     .cancel_token
                     .as_ref()
                     .is_some_and(|token| token.is_cancelled());
-                if self.pi_timeout {
+                if self.optional_timeout {
                     return finish_contract_bash_result(result, timeout_ms, context);
                 }
                 let task_id_str = result.task_id.clone().unwrap_or_default();
