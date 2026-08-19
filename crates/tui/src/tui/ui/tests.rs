@@ -3936,8 +3936,8 @@ fn selected_reasoning_hint_and_space_share_one_owner() {
 fn mouse_selection_redraws_and_retargets_reasoning_with_unchanged_revisions() {
     let mut app = create_test_app();
     app.history = vec![
-        long_reasoning("first", false),
-        long_reasoning("second", false),
+        oversized_reasoning("first", false),
+        oversized_reasoning("second", false),
     ];
     app.resync_history_revisions();
     let _ = render_underwater_test_app(&mut app, 100, 32);
@@ -4069,8 +4069,12 @@ fn reasoning_preview_spends_available_viewport_rows_before_truncating() {
         );
         assert_eq!(
             compact.viewport.last_transcript_total,
-            if streaming { 14 } else { 12 },
-            "the compact 12/10-row fallback must remain intact when no viewport rows are free: {compact_surface}"
+            if streaming {
+                14
+            } else {
+                compact.viewport.last_transcript_visible
+            },
+            "streaming keeps its 12-row fallback while completed thought spends the visible viewport before truncating: {compact_surface}"
         );
     }
 }
@@ -4268,9 +4272,12 @@ fn visible_older_reasoning_owns_space_over_a_newer_offscreen_tool() {
         Some(1)
     );
 
-    app.viewport.transcript_scroll = TranscriptScroll::at_line(9);
+    // The configurable two-line completed preview puts the Space affordance
+    // immediately after the header + body, so scroll one row to keep that
+    // action visible while the newer tool remains below the viewport.
+    app.viewport.transcript_scroll = TranscriptScroll::at_line(1);
     let surface = render_underwater_test_app(&mut app, 60, 8);
-    assert_eq!(app.viewport.last_transcript_top, 9);
+    assert_eq!(app.viewport.last_transcript_top, 1);
     assert_eq!(reasoning_hint_cells(&app), vec![0]);
     assert!(surface.contains("Space:expand"), "{surface}");
     assert_eq!(
@@ -10578,7 +10585,7 @@ fn hotbar_alt_digit_is_blocked_while_inline_selectors_are_open() {
 fn hotbar_dispatches_bound_slot_and_ignores_empty_slot() {
     let mut app = create_test_app();
     // #3807: a fresh config has no bindings, so opt in with the default slots
-    // (slot 4 = mode.agent) to exercise dispatch of a bound slot.
+    // (slot 5 = mode.agent) to exercise dispatch of a bound slot.
     let config = Config {
         hotbar: Some(codewhale_config::default_hotbar_bindings_toml()),
         ..Config::default()
@@ -10587,7 +10594,7 @@ fn hotbar_dispatches_bound_slot_and_ignores_empty_slot() {
     app.mode = AppMode::Plan;
     app.needs_redraw = false;
 
-    let dispatch = dispatch_hotbar_slot(&mut app, &config, 4).expect("hotbar dispatch");
+    let dispatch = dispatch_hotbar_slot(&mut app, &config, 5).expect("hotbar dispatch");
     assert!(matches!(
         dispatch,
         Some(HotbarDispatch::AppAction(AppAction::ModeChanged(

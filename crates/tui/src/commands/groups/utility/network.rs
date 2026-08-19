@@ -304,14 +304,14 @@ mod tests {
     use crate::config::Config;
     use crate::tui::app::{App, TuiOptions};
     use std::env;
-    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct EnvGuard {
-        home: Option<OsString>,
-        userprofile: Option<OsString>,
-        deepseek_config_path: Option<OsString>,
+        _home: crate::test_support::EnvVarGuard,
+        _userprofile: crate::test_support::EnvVarGuard,
+        _codewhale_config_path: crate::test_support::EnvVarGuard,
+        _deepseek_config_path: crate::test_support::EnvVarGuard,
         _lock: crate::test_support::TestEnvLock,
     }
 
@@ -319,41 +319,18 @@ mod tests {
         fn new(home: &Path) -> Self {
             let lock = crate::test_support::lock_test_env();
             let config_path = home.join(".deepseek").join("config.toml");
-            let home_prev = env::var_os("HOME");
-            let userprofile_prev = env::var_os("USERPROFILE");
-            let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
-
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                env::set_var("HOME", home.as_os_str());
-                env::set_var("USERPROFILE", home.as_os_str());
-                env::set_var("DEEPSEEK_CONFIG_PATH", config_path.as_os_str());
-            }
-
             Self {
-                home: home_prev,
-                userprofile: userprofile_prev,
-                deepseek_config_path: deepseek_config_prev,
+                _home: crate::test_support::EnvVarGuard::set("HOME", home),
+                _userprofile: crate::test_support::EnvVarGuard::set("USERPROFILE", home),
+                _codewhale_config_path: crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_CONFIG_PATH",
+                    &config_path,
+                ),
+                _deepseek_config_path: crate::test_support::EnvVarGuard::set(
+                    "DEEPSEEK_CONFIG_PATH",
+                    &config_path,
+                ),
                 _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            restore_env("HOME", self.home.take());
-            restore_env("USERPROFILE", self.userprofile.take());
-            restore_env("DEEPSEEK_CONFIG_PATH", self.deepseek_config_path.take());
-        }
-    }
-
-    fn restore_env(key: &str, value: Option<OsString>) {
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            if let Some(value) = value {
-                env::set_var(key, value);
-            } else {
-                env::remove_var(key);
             }
         }
     }

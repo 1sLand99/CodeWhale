@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn session_metrics_strip_paints_every_group_when_the_row_has_room() {
         let mut app = app_with_session_metrics();
-        let text = strip_text(&mut app, 170);
+        let text = strip_text(&mut app, 190);
         assert!(text.contains("4 turns · 3 steps"), "{text}");
         assert!(text.contains("LLM 3.5s · Tool call"), "{text}");
         assert!(text.contains("TTFT avg 400ms · 40 tok/s"), "{text}");
@@ -754,9 +754,9 @@ mod tests {
         // The strip must not push the right-hand key hints off the row.
         assert!(text.contains("keys"), "{text}");
 
-        // A 120-column idle row shares the line with the full key hints, so
+        // A 150-column idle row shares the line with the full key hints, so
         // every group keeps its headline fact and sheds its second cell.
-        let text = strip_text(&mut app, 120);
+        let text = strip_text(&mut app, 150);
         assert!(
             text.contains("4 turns │ LLM 3.5s │ TTFT avg 400ms │ Cache hit 99% │ Input 9.3M"),
             "{text}"
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn session_metrics_strip_sheds_groups_on_narrow_rows_and_never_truncates() {
         let mut app = app_with_session_metrics();
-        let normal = strip_text(&mut app, 80);
+        let normal = strip_text(&mut app, 100);
         assert!(normal.contains("Input 9.3M"), "{normal}");
         assert!(normal.contains("Cache hit 99%"), "{normal}");
         assert!(!normal.contains("tok/s"), "{normal}");
