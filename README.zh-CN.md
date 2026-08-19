@@ -26,6 +26,8 @@ Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个�
 npm install -g codewhale
 ```
 
+在 Linux x64（含 OpenHarmony x64）上，npm 包装器会同时向 GitHub Releases 和 CNB 第一方镜像请求该版本的小型校验清单（`codewhale-artifacts-sha256.txt`），采用先验证通过的来源下载二进制，而不会等待 GitHub 大文件超时。若设置了 `CODEWHALE_RELEASE_BASE_URL` 或 `CODEWHALE_USE_CNB_MIRROR=1`，则按你指定的来源执行，不再竞速。CNB 仅提供 Linux x64；其他平台仍走 GitHub 或完整镜像。安装进度和 `<binary>.source` 回执会标明选中的来源。校验失败会直接报错，不会混用两个来源的清单和二进制。
+
 Cargo、Docker、Nix、Scoop、预编译归档、Android/Termux,以及面向无法访问 GitHub 用户的 CNB 镜像,均见 [docs/INSTALL.md](docs/INSTALL.md)。从 `deepseek-tui` 迁移过来?你的配置和会话可以直接沿用——见 [docs/REBRAND.md](docs/REBRAND.md)。
 
 ## 使用

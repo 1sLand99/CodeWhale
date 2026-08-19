@@ -202,31 +202,36 @@ Users behind GitHub-blocking networks can also select a source explicitly:
 
 - **`cargo install`** from the CNB mirror:
   ```bash
-  cargo install --git https://cnb.cool/codewhale.net/codewhale --tag vX.Y.Z codewhale-cli
-  cargo install --git https://cnb.cool/codewhale.net/codewhale --tag vX.Y.Z codewhale-tui
+  cargo install --git https://cnb.cool/codewhale.net/codewhale --tag vX.Y.Z codewhale-cli --locked
   ```
-  (Both binaries are required — the dispatcher and the TUI ship
-  separately; see `AGENTS.md` for the two-binary install rationale.)
+  The current `codewhale` binary runs the TUI in-process. Cargo users who want
+  the optional short command can add a `codew` symlink beside it; a separate
+  `codewhale-tui` install is not required.
   Linux build-time dependencies (`build-essential`, `pkg-config`,
   `libdbus-1-dev` on Debian/Ubuntu) are required — see
   [INSTALL.md](INSTALL.md#4-install-via-cargo-any-tier-1-rust-target).
 
 - **CNB release assets** for Linux x64, when the matching CNB tag pipeline has
   completed successfully. Download `codewhale-linux-x64`, `codew-linux-x64`,
-  `codewhale-tui-linux-x64`, and `codewhale-artifacts-sha256.txt` from the CNB
-  release for `vX.Y.Z`, then verify the binaries against the manifest. The npm
-  wrapper can select this source with `CODEWHALE_USE_CNB_MIRROR=1` on Linux x64
-  and OpenHarmony x64 only; other platforms must use GitHub or a complete
-  `CODEWHALE_RELEASE_BASE_URL` mirror.
+  and `codewhale-artifacts-sha256.txt` from the CNB release for `vX.Y.Z`, then
+  verify the binaries against the manifest. The published
+  `codewhale-tui-linux-x64` file is a legacy-client bridge and is not required
+  by current installs. On Linux x64 and OpenHarmony x64 the npm wrapper probes
+  that CNB checksum manifest concurrently with GitHub Releases for the exact
+  package version and locks onto the first source whose HTTP response and
+  manifest validate — it does not wait for a slow GitHub binary download. Set
+  `CODEWHALE_USE_CNB_MIRROR=1` to force CNB only, or
+  `CODEWHALE_RELEASE_BASE_URL` to skip the race. Other platforms must use
+  GitHub or a complete `CODEWHALE_RELEASE_BASE_URL` mirror.
 
-- **`DEEPSEEK_TUI_RELEASE_BASE_URL`** environment variable, if a
-  CDN mirror of release assets exists. The npm
-  wrapper installer and `codewhale update` read this variable to redirect
-  binary downloads. For `codewhale update`, also set
-  `DEEPSEEK_TUI_VERSION=X.Y.Z` so the updater can label the mirrored
+- **`CODEWHALE_RELEASE_BASE_URL`** environment variable, if a CDN mirror of
+  release assets exists. The npm wrapper installer and `codewhale update` read
+  this variable to redirect binary downloads. For `codewhale update`, also set
+  `CODEWHALE_VERSION=X.Y.Z` so the updater can label the mirrored
   release without contacting GitHub. The directory pointed to must contain
   `codewhale-artifacts-sha256.txt` and the platform binaries; format matches
-  a GitHub Release asset directory.
+  a GitHub Release asset directory. The earlier `DEEPSEEK_TUI_*` names remain
+  accepted as compatibility aliases.
 
 ## Clone from CNB
 

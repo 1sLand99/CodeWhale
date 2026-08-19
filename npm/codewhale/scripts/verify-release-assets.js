@@ -16,6 +16,7 @@ const pkg = require("../package.json");
 
 function resolveBinaryVersion() {
   const configuredVersion =
+    process.env.CODEWHALE_VERSION ||
     process.env.DEEPSEEK_TUI_VERSION ||
     process.env.DEEPSEEK_VERSION ||
     pkg.codewhaleBinaryVersion || pkg.deepseekBinaryVersion ||
@@ -24,7 +25,12 @@ function resolveBinaryVersion() {
 }
 
 function resolveRepo() {
-  return process.env.DEEPSEEK_TUI_GITHUB_REPO || process.env.DEEPSEEK_GITHUB_REPO || "Hmbown/CodeWhale";
+  return (
+    process.env.CODEWHALE_GITHUB_REPO ||
+    process.env.DEEPSEEK_TUI_GITHUB_REPO ||
+    process.env.DEEPSEEK_GITHUB_REPO ||
+    "Hmbown/CodeWhale"
+  );
 }
 
 function hasReleaseBaseOverride() {

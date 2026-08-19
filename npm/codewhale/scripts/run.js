@@ -9,6 +9,9 @@ function isVersionFlag(args = process.argv.slice(2)) {
 
 function printVersionFallback(binaryName) {
   const binVersion =
+    process.env.CODEWHALE_VERSION ||
+    process.env.DEEPSEEK_TUI_VERSION ||
+    process.env.DEEPSEEK_VERSION ||
     pkg.codewhaleBinaryVersion || pkg.deepseekBinaryVersion || pkg.version;
   console.log(`${binaryName} (npm wrapper) v${pkg.version}`);
   console.log(`binary version: v${binVersion}`);

@@ -229,35 +229,45 @@ npm install -g codewhale
 codewhale --version   # prints the published version that was installed
 ```
 
-`postinstall` downloads the matching `codewhale` and `codew` binaries from the GitHub
-release, verifies a SHA-256 manifest, and exposes `codewhale` and `codew` on your `PATH`.
-On Windows, run those commands from **Windows Terminal** rather than `cmd.exe` so fonts
-and colors match the supported TUI. The GitHub Release also publishes `codewhale.bat`
-next to the bare x64 exe; that launcher prefers `wt.exe` and falls back to a direct
-launch when Windows Terminal is absent.
+`postinstall` downloads the matching `codewhale` and `codew` binaries, verifies
+them against that source's SHA-256 manifest, and exposes `codewhale` and `codew`
+on your `PATH`.
+
+On **Linux x64** (including OpenHarmony x64) the wrapper does **not** wait for
+a slow GitHub binary download or a long failure timeout. Unless you set an
+explicit release base URL or `CODEWHALE_USE_CNB_MIRROR=1`, it concurrently
+fetches the small `codewhale-artifacts-sha256.txt` manifests from GitHub
+Releases and the first-party CNB release for the exact package version, accepts
+the first source whose HTTP response and manifest validate for the required
+assets, cancels the other probe, and downloads the binaries only from that
+locked source. CNB publishes Linux x64 only; other targets keep the GitHub-only
+path. The selected source is printed in install progress and written to
+`<binary>.source` next to the downloaded file. A checksum or source mismatch
+fails closed.
+
+On Windows, run those commands from **Windows Terminal** rather than `cmd.exe`
+so fonts and colors match the supported TUI. The GitHub Release also publishes
+`codewhale.bat` next to the bare x64 exe; that launcher prefers `wt.exe` and
+falls back to a direct launch when Windows Terminal is absent.
 
 Useful environment variables:
 
 | Variable                            | Purpose                                                                                |
 | ----------------------------------- | -------------------------------------------------------------------------------------- |
-| `DEEPSEEK_TUI_VERSION`              | Pin which release the wrapper downloads (defaults to `codewhaleBinaryVersion`)         |
-| `DEEPSEEK_VERSION`                  | Fallback alias, checked after `DEEPSEEK_TUI_VERSION`                                   |
-| `DEEPSEEK_TUI_GITHUB_REPO`          | Point the downloader at a fork (`owner/repo`)                                          |
-| `DEEPSEEK_TUI_RELEASE_BASE_URL`     | Override the download root (e.g. an internal mirror or release-asset proxy)            |
-| `DEEPSEEK_TUI_FORCE_DOWNLOAD=1`     | Re-download even if a cached binary marker matches                                     |
-| `DEEPSEEK_TUI_DISABLE_INSTALL=1`    | Skip the `postinstall` download entirely (CI smoke, vendored binaries)                 |
-| `DEEPSEEK_TUI_OPTIONAL_INSTALL=1`   | Don't fail `npm install` on download/extract errors — useful in CI matrices            |
+| `CODEWHALE_RELEASE_BASE_URL`        | Override the download root. Skips the Linux x64 GitHub/CNB race.                        |
+| `CODEWHALE_USE_CNB_MIRROR=1`        | Force the CNB first-party mirror on Linux x64 / OpenHarmony x64. Other targets fail.   |
+| `CODEWHALE_VERSION`                 | Pin which release the wrapper downloads (defaults to `codewhaleBinaryVersion`).        |
+| `CODEWHALE_GITHUB_REPO`             | Point the downloader at a fork (`owner/repo`).                                          |
+| `CODEWHALE_FORCE_DOWNLOAD=1`        | Re-download even if a cached binary marker matches.                                    |
+| `CODEWHALE_DISABLE_INSTALL=1`       | Skip the `postinstall` download entirely (CI smoke, vendored binaries).                 |
+| `CODEWHALE_OPTIONAL_INSTALL=1`      | Don't fail `npm install` on retryable download errors — useful in CI matrices.          |
+| `CODEWHALE_QUIET_INSTALL=1`         | Suppress installer progress messages.                                                   |
+| `CODEWHALE_DOWNLOAD_TIMEOUT_MS`     | Override the total download budget in milliseconds.                                     |
+| `CODEWHALE_DOWNLOAD_STALL_MS`       | Override the no-progress stall budget in milliseconds.                                  |
 
-These keep the `DEEPSEEK_*` spelling because the npm wrapper reads exactly
-these names — plus the non-`_TUI_` legacy fallbacks `DEEPSEEK_VERSION`,
-`DEEPSEEK_GITHUB_REPO`, `DEEPSEEK_RELEASE_BASE_URL`, `DEEPSEEK_OPTIONAL_INSTALL`,
-`DEEPSEEK_FORCE_DOWNLOAD`, `DEEPSEEK_DISABLE_INSTALL`, and the download
-timeout/stall variables (`DEEPSEEK_TUI_DOWNLOAD_TIMEOUT_MS` /
-`DEEPSEEK_DOWNLOAD_TIMEOUT_MS`, `DEEPSEEK_TUI_DOWNLOAD_STALL_MS` /
-`DEEPSEEK_DOWNLOAD_STALL_MS`) — all resolved in `npm/codewhale/scripts/install.js`.
-There is
-no `CODEWHALE_VERSION` — setting it has no effect. (The `CODEWHALE_*` rename
-applies to the runtime's own environment variables, not to the installer.)
+The corresponding `DEEPSEEK_TUI_*` and `DEEPSEEK_*` variables remain accepted
+as legacy aliases, after the canonical `CODEWHALE_*` names. New automation and
+support instructions should use only the Codewhale names.
 
 > **Slow npm download from mainland China?** If `npm install` itself is slow
 > (not just the postinstall binary download), use an npm registry mirror:
@@ -799,10 +809,17 @@ cargo install codewhale-cli --locked
 
 ### npm download is slow or times out from mainland China
 
-Set `CODEWHALE_RELEASE_BASE_URL` to a mirrored release-asset directory
-(rsproxy, TUNA, Tencent COS, Aliyun OSS), or skip npm entirely and use the
-Cargo mirror setup in [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
-The legacy `DEEPSEEK_TUI_RELEASE_BASE_URL` name is still accepted.
+On Linux x64 the npm wrapper already probes GitHub Releases and the CNB
+first-party checksum manifests in parallel and downloads binaries only from
+the first source that validates. You do not need `CODEWHALE_USE_CNB_MIRROR=1`
+for that automatic path.
+
+If both first-party sources fail, set `CODEWHALE_RELEASE_BASE_URL` to a
+mirrored release-asset directory (rsproxy, TUNA, Tencent COS, Aliyun OSS),
+or skip npm entirely and use the Cargo mirror setup in
+[Section 4](#4-install-via-cargo-any-tier-1-rust-target). The legacy
+`DEEPSEEK_TUI_RELEASE_BASE_URL` name is still accepted. `CODEWHALE_USE_CNB_MIRROR=1`
+still forces CNB only on Linux x64 / OpenHarmony x64.
 
 ### `codewhale update` is blocked by GitHub from mainland China
 
@@ -822,7 +839,7 @@ If you operate a binary asset mirror, `codewhale update` can use it directly:
 
 ```bash
 CODEWHALE_RELEASE_BASE_URL=https://your-mirror.example.com/CodeWhale/vX.Y.Z/ \
-DEEPSEEK_TUI_VERSION=X.Y.Z \
+CODEWHALE_VERSION=X.Y.Z \
 codewhale update
 ```
 
@@ -950,9 +967,11 @@ target/debug/build/libsqlite3-sys-*/build-script-build
 
 If `codewhale` waits several seconds and prints `connect ETIMEDOUT` or
 `EAI_AGAIN` while fetching from `github.com`, the npm wrapper installed
-successfully but the prebuilt binary download from GitHub Releases is blocked
-or unreliable on your network. This download is separate from the npm registry
-package download.
+successfully but the prebuilt binary download is blocked or unreliable on
+your network. This download is separate from the npm registry package
+download. On Linux x64 the wrapper first races the small GitHub and CNB
+checksum manifests and does not wait for a full GitHub binary to time out
+before using a valid CNB manifest.
 
 Use one of these paths:
 
@@ -963,10 +982,10 @@ Use one of these paths:
    codewhale
    ```
 
-2. Mirror the release assets internally and set `DEEPSEEK_TUI_RELEASE_BASE_URL`:
+2. Mirror the release assets internally and set `CODEWHALE_RELEASE_BASE_URL`:
 
    ```bash
-   export DEEPSEEK_TUI_RELEASE_BASE_URL=https://your-mirror.example.com/CodeWhale/
+   export CODEWHALE_RELEASE_BASE_URL=https://your-mirror.example.com/CodeWhale/
    codewhale
    ```
 

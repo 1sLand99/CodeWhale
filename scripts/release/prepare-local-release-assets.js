@@ -22,6 +22,7 @@ async function sha256(filePath) {
 
 async function main() {
   const prepareAllAssets =
+    process.env.CODEWHALE_PREPARE_ALL_ASSETS === "1" ||
     process.env.DEEPSEEK_TUI_PREPARE_ALL_ASSETS === "1" ||
     process.env.DEEPSEEK_PREPARE_ALL_ASSETS === "1";
   const outputDir = path.resolve(

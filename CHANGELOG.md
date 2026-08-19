@@ -84,6 +84,12 @@ abort under load.
 
 ### Added
 
+- **npm Linux x64 first-party source selection.** The wrapper concurrently
+  fetches the GitHub Releases and CNB checksum manifests for the exact
+  package version, locks the first source whose HTTP response and manifest
+  validate, and downloads binaries only from that source. Explicit
+  `CODEWHALE_RELEASE_BASE_URL` / `CODEWHALE_USE_CNB_MIRROR=1` still skip the
+  race; other targets stay on GitHub.
 - `feat(tui): add command context adapters and migration gate (FEAT-015)`
   (aboimpinto) — TUI-owned capability facets, a dual-path dispatch seam, and
   source-aware CI enforcement so a command slice cannot claim to be migrated

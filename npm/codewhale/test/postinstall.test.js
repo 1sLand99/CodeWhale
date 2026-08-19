@@ -11,6 +11,7 @@ test("postinstall opts into optional install mode", () => {
 test("optional install can be enabled by command-line flag or env", () => {
   assert.equal(_internal.isOptionalInstall(["--optional"], {}), true);
   assert.equal(_internal.isOptionalInstall([], {}), false);
+  assert.equal(_internal.isOptionalInstall([], { CODEWHALE_OPTIONAL_INSTALL: "1" }), true);
   assert.equal(_internal.isOptionalInstall([], { DEEPSEEK_TUI_OPTIONAL_INSTALL: "1" }), true);
   assert.equal(_internal.isOptionalInstall([], { DEEPSEEK_OPTIONAL_INSTALL: "1" }), true);
 });
