@@ -260,7 +260,7 @@ fn execute_shell(
     timeout_ms: u64,
     background: bool,
 ) -> Result<ShellResult> {
-    manager.execute_with_options_env(
+    manager.execute_with_options_env_for_session(
         command,
         working_dir,
         timeout_ms,
@@ -269,6 +269,7 @@ fn execute_shell(
         false,
         None,
         HashMap::new(),
+        "workspace",
     )
 }
 
@@ -1345,6 +1346,67 @@ async fn drain_finished_jobs_reports_once() {
     assert!(!manager.may_have_undelivered_completion());
 }
 
+#[tokio::test]
+async fn background_job_is_hidden_from_replacement_session_and_resumes_once_for_owner() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx_a = ToolContext::new(tmp.path()).with_state_namespace("session-a");
+    let ctx_b = ctx_a.clone().with_state_namespace("session-b");
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": echo_command("owned-by-a"), "background": true}),
+            &ctx_a,
+        )
+        .await
+        .expect("start A background job");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = ctx_b.shell_manager.lock().expect("shell manager");
+    assert!(manager.list_jobs_for_session("session-b").is_empty());
+    assert!(
+        manager
+            .inspect_job_for_session("session-b", &task_id)
+            .is_err()
+    );
+    assert!(
+        manager
+            .write_stdin_for_session("session-b", &task_id, "foreign", false)
+            .is_err()
+    );
+    assert!(manager.kill_for_session("session-b", &task_id).is_err());
+
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+    let owned = manager
+        .list_jobs_for_session("session-a")
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("A job remains visible to A");
+    assert_eq!(owned.owner_session_id, "session-a");
+    assert!(
+        manager
+            .drain_finished_jobs_with_evidence_for_session("session-b")
+            .is_empty(),
+        "B must not claim A's completion"
+    );
+    assert!(manager.has_finished_unreported_jobs_for_session("session-a"));
+    let first = manager.drain_finished_jobs_with_evidence_for_session("session-a");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].event.owner_session_id, "session-a");
+    assert!(first[0].event.stdout_tail.contains("owned-by-a"));
+    assert!(
+        manager
+            .drain_finished_jobs_with_evidence_for_session("session-a")
+            .is_empty(),
+        "A completion is delivered exactly once"
+    );
+}
+
 #[test]
 fn completion_evidence_preserves_arbitrary_stream_bytes() {
     use base64::Engine as _;
@@ -1366,6 +1428,7 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
         stdout: stdout.clone(),
         stderr: stderr.clone(),
@@ -2587,7 +2650,17 @@ async fn exec_shell_cancel_kills_descendant_process_group() {
         .shell_manager
         .lock()
         .expect("shell manager")
-        .execute_with_options_env(&command, None, 60_000, true, None, false, None, env)
+        .execute_with_options_env_for_session(
+            &command,
+            None,
+            60_000,
+            true,
+            None,
+            false,
+            None,
+            env,
+            &ctx.state_namespace,
+        )
         .expect("start descendant tree");
     let task_id = started.task_id.expect("task id");
     let descendant = wait_for_shell_pid_file(&pid_file);

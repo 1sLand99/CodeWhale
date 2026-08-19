@@ -220,6 +220,10 @@ pub struct ShellJobSnapshot {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    /// Immutable root session that launched the job. Empty legacy records are
+    /// intentionally hidden from session-scoped completion drains.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_session_id: String,
 }
 
 /// Once-only completion event for a tracked background shell job.
@@ -243,6 +247,8 @@ pub struct ShellCompletionEvent {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_session_id: String,
 }
 
 /// Byte evidence captured alongside a bounded completion event. Exact unless
@@ -929,6 +935,7 @@ pub struct BackgroundShell {
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
+    owner_session_id: String,
     ownership: ShellOwnership,
     stdout_buffer: SharedRawOutput,
     stderr_buffer: Option<SharedRawOutput>,
@@ -1015,6 +1022,7 @@ struct ShellSpawnIntentGuard {
 
 struct ShellSpawnContext {
     owner_agent: Option<ShellJobOwner>,
+    owner_session_id: String,
     work_lifecycle: Option<ShellWorkLifecycle>,
 }
 
@@ -1516,6 +1524,7 @@ impl BackgroundShell {
                 .owner_agent
                 .as_ref()
                 .map(|owner| owner.agent_name.clone()),
+            owner_session_id: self.owner_session_id.clone(),
         }
     }
 
@@ -1549,6 +1558,7 @@ impl BackgroundShell {
             linked_task_id: snapshot.linked_task_id,
             owner_agent_id: snapshot.owner_agent_id,
             owner_agent_name: snapshot.owner_agent_name,
+            owner_session_id: snapshot.owner_session_id,
         }
     }
 
@@ -1697,6 +1707,20 @@ impl std::fmt::Debug for ShellManager {
 }
 
 impl ShellManager {
+    fn require_session_owner(&self, task_id: &str, active_session_id: &str) -> Result<()> {
+        let owned = self.processes.get(task_id).is_some_and(|shell| {
+            !active_session_id.is_empty() && shell.owner_session_id == active_session_id
+        }) || self.stale_jobs.get(task_id).is_some_and(|job| {
+            !active_session_id.is_empty() && job.owner_session_id == active_session_id
+        });
+        if owned {
+            Ok(())
+        } else {
+            // Do not disclose whether the id exists in another session.
+            Err(anyhow!("Task {task_id} not found"))
+        }
+    }
+
     /// Create a new `ShellManager` with default (no sandbox) policy.
     pub fn new(workspace: PathBuf) -> Self {
         Self {
@@ -1741,6 +1765,7 @@ impl ShellManager {
                 sandbox_type: SandboxType::None,
                 linked_task_id: None,
                 owner_agent: None,
+                owner_session_id: String::new(),
                 ownership: ShellOwnership::Managed,
                 stdout_buffer: new_shared_raw_output(),
                 stderr_buffer: Some(new_shared_raw_output()),
@@ -1814,6 +1839,7 @@ impl ShellManager {
     /// that is merged into the spawned process environment. Used by the
     /// `shell_env` hook injection path (#456).
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn execute_with_options_env(
         &mut self,
         command: &str,
@@ -1838,9 +1864,42 @@ impl ShellManager {
         )
     }
 
+    /// Launch a parent-owned job stamped to the immutable root session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_options_env_for_session(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_session_id: &str,
+    ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner_and_work(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            None,
+            owner_session_id.to_string(),
+            None,
+            None,
+            false,
+            (1_000, 600_000),
+        )
+    }
+
     /// Same as `execute_with_options_env`, with optional background-job owner
     /// attribution for sub-agent launched jobs.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn execute_with_options_env_for_owner(
         &mut self,
         command: &str,
@@ -1863,6 +1922,41 @@ impl ShellManager {
             policy_override,
             extra_env,
             owner_agent,
+            String::new(),
+            None,
+            None,
+            false,
+            (1_000, 600_000),
+        )
+    }
+
+    /// Test-only owner-aware launch with an explicit immutable session owner.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
+    pub fn execute_with_options_env_for_owner_and_session(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_agent: Option<ShellJobOwner>,
+        owner_session_id: &str,
+    ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner_and_work(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            owner_agent,
+            owner_session_id.to_string(),
             None,
             None,
             false,
@@ -1883,6 +1977,7 @@ impl ShellManager {
         policy_override: Option<ExecutionSandboxPolicy>,
         extra_env: HashMap<String, String>,
         owner_agent: Option<ShellJobOwner>,
+        owner_session_id: String,
         work_lifecycle: Option<ShellWorkLifecycle>,
         readonly_workspace: Option<&std::path::Path>,
         persist_pending: bool,
@@ -1938,6 +2033,7 @@ impl ShellManager {
                 tty,
                 ShellSpawnContext {
                     owner_agent,
+                    owner_session_id,
                     work_lifecycle,
                 },
                 persist_pending,
@@ -2282,6 +2378,7 @@ impl ShellManager {
     ) -> Result<ShellResult> {
         let ShellSpawnContext {
             owner_agent,
+            owner_session_id,
             work_lifecycle,
         } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
@@ -2479,6 +2576,7 @@ impl ShellManager {
             sandbox_type,
             linked_task_id: None,
             owner_agent,
+            owner_session_id,
             ownership: if persist_pending {
                 ShellOwnership::PersistPending
             } else {
@@ -2616,6 +2714,17 @@ impl ShellManager {
         Ok(())
     }
 
+    pub fn write_stdin_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        input: &str,
+        close: bool,
+    ) -> Result<()> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.write_stdin(task_id, input, close)
+    }
+
     /// Get incremental output from a background process, consuming any new output.
     fn get_output_delta(
         &mut self,
@@ -2705,7 +2814,17 @@ impl ShellManager {
         shell.snapshot()
     }
 
+    pub fn kill_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+    ) -> Result<ShellResult> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.kill(task_id)
+    }
+
     /// Kill every currently running background shell process.
+    #[cfg(test)]
     pub fn kill_running(&mut self) -> Result<Vec<ShellResult>> {
         let ids = self
             .processes
@@ -2714,6 +2833,27 @@ impl ShellManager {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
 
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.kill(&id)?);
+        }
+        Ok(results)
+    }
+
+    pub fn kill_running_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> Result<Vec<ShellResult>> {
+        let ids = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| {
+                shell.status == ShellStatus::Running
+                    && !active_session_id.is_empty()
+                    && shell.owner_session_id == active_session_id
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
             results.push(self.kill(&id)?);
@@ -2802,12 +2942,35 @@ impl ShellManager {
     }
 
     /// Poll a background process and return incremental output.
+    #[cfg(test)]
     pub fn poll_delta(
         &mut self,
         task_id: &str,
         wait: bool,
         timeout_ms: u64,
     ) -> Result<ShellDeltaResult> {
+        self.get_output_delta(task_id, wait, timeout_ms)
+    }
+
+    pub fn poll_delta_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        wait: bool,
+        timeout_ms: u64,
+    ) -> Result<ShellDeltaResult> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.get_output_delta(task_id, wait, timeout_ms)
+    }
+
+    fn get_output_delta_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        wait: bool,
+        timeout_ms: u64,
+    ) -> Result<ShellDeltaResult> {
+        self.require_session_owner(task_id, active_session_id)?;
         self.get_output_delta(task_id, wait, timeout_ms)
     }
 
@@ -2837,6 +3000,15 @@ impl ShellManager {
         Err(anyhow!("Task {task_id} not found"))
     }
 
+    pub fn inspect_job_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+    ) -> Result<ShellJobDetail> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.inspect_job(task_id)
+    }
+
     /// List all live and known-stale background shell jobs for the TUI.
     pub fn list_jobs(&mut self) -> Vec<ShellJobSnapshot> {
         for shell in self.processes.values_mut() {
@@ -2859,11 +3031,22 @@ impl ShellManager {
         jobs
     }
 
+    pub fn list_jobs_for_session(&mut self, active_session_id: &str) -> Vec<ShellJobSnapshot> {
+        if active_session_id.is_empty() {
+            return Vec::new();
+        }
+        self.list_jobs()
+            .into_iter()
+            .filter(|job| job.owner_session_id == active_session_id)
+            .collect()
+    }
+
     /// Whether a finished parent-owned job's completion is waiting to be
     /// claimed. Unlike
     /// [`Self::may_have_undelivered_completion`] this polls, so it reports
     /// readiness the moment the process exits; the engine's idle shell wake
     /// uses it to fire exactly when evidence exists.
+    #[cfg(test)]
     pub(crate) fn has_finished_unreported_jobs(&mut self) -> bool {
         self.processes.values_mut().any(|shell| {
             shell.poll();
@@ -2873,14 +3056,46 @@ impl ShellManager {
         })
     }
 
+    pub(crate) fn has_finished_unreported_jobs_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> bool {
+        !active_session_id.is_empty()
+            && self.processes.values_mut().any(|shell| {
+                shell.poll();
+                shell.owner_session_id == active_session_id
+                    && shell.owner_agent.is_none()
+                    && shell.status != ShellStatus::Running
+                    && !shell.completion_reported
+            })
+    }
+
     /// Drain once-only completion events together with lossless stream bytes.
     /// The engine publishes the bytes outside this manager's mutex and puts
     /// only the bounded event plus resulting handle into model context.
+    #[cfg(test)]
     pub(crate) fn drain_finished_jobs_with_evidence(&mut self) -> Vec<ShellCompletionEvidence> {
+        self.drain_finished_jobs_with_evidence_inner(None)
+    }
+
+    pub(crate) fn drain_finished_jobs_with_evidence_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> Vec<ShellCompletionEvidence> {
+        self.drain_finished_jobs_with_evidence_inner(Some(active_session_id))
+    }
+
+    fn drain_finished_jobs_with_evidence_inner(
+        &mut self,
+        active_session_id: Option<&str>,
+    ) -> Vec<ShellCompletionEvidence> {
         let mut completions = Vec::new();
         for shell in self.processes.values_mut() {
             shell.poll();
-            if shell.status != ShellStatus::Running && !shell.completion_reported {
+            let owned = active_session_id.is_none_or(|session_id| {
+                !session_id.is_empty() && shell.owner_session_id == session_id
+            });
+            if owned && shell.status != ShellStatus::Running && !shell.completion_reported {
                 shell.completion_reported = true;
                 completions.push(shell.completion_evidence());
                 // The bytes are now in the caller's hands (they become a durable
@@ -2914,29 +3129,51 @@ impl ShellManager {
     /// `completion_reported`: preview is read-only. A running job counts as
     /// pending because it can finish before production drains completions; in
     /// that race an exact request body cannot be proved without mutation.
+    #[cfg(test)]
     pub fn may_have_undelivered_completion(&self) -> bool {
         self.processes
             .values()
             .any(|shell| shell.owner_agent.is_none() && !shell.completion_reported)
     }
 
+    pub fn may_have_undelivered_completion_for_session(&self, active_session_id: &str) -> bool {
+        !active_session_id.is_empty()
+            && self.processes.values().any(|shell| {
+                shell.owner_session_id == active_session_id
+                    && shell.owner_agent.is_none()
+                    && !shell.completion_reported
+            })
+    }
+
     /// Return agent owners whose tracked shell work is still running. The
     /// engine uses this to keep a worker's heartbeat alive while its only
     /// pending work is an explicitly tracked background shell task.
+    #[cfg(test)]
     pub fn running_owner_agent_ids(&mut self) -> Vec<String> {
+        self.running_owner_agent_ids_inner(None)
+    }
+
+    pub fn running_owner_agent_ids_for_session(&mut self, active_session_id: &str) -> Vec<String> {
+        self.running_owner_agent_ids_inner(Some(active_session_id))
+    }
+
+    fn running_owner_agent_ids_inner(&mut self, active_session_id: Option<&str>) -> Vec<String> {
         let mut owners = self
             .processes
             .values_mut()
             .filter_map(|shell| {
                 shell.poll();
-                (shell.status == ShellStatus::Running)
-                    .then(|| {
-                        shell
-                            .owner_agent
-                            .as_ref()
-                            .map(|owner| owner.agent_id.clone())
-                    })
-                    .flatten()
+                (shell.status == ShellStatus::Running
+                    && active_session_id.is_none_or(|session_id| {
+                        !session_id.is_empty() && shell.owner_session_id == session_id
+                    }))
+                .then(|| {
+                    shell
+                        .owner_agent
+                        .as_ref()
+                        .map(|owner| owner.agent_id.clone())
+                })
+                .flatten()
             })
             .collect::<Vec<_>>();
         owners.sort();
@@ -2974,6 +3211,7 @@ impl ShellManager {
                 linked_task_id,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                owner_session_id: String::new(),
             },
         );
     }
@@ -3795,6 +4033,7 @@ async fn execute_foreground_via_background(
             policy_override,
             extra_env,
             owner,
+            context.state_namespace.clone(),
             lifecycle,
             direct_argv.then_some(context.workspace.as_path()),
             false,
@@ -4747,6 +4986,7 @@ impl ToolSpec for BashTool {
                 policy_override,
                 extra_env,
                 shell_job_owner_from_context(context),
+                context.state_namespace.clone(),
                 shell_work_lifecycle_from_context(context),
                 None,
                 persist,
@@ -5030,7 +5270,7 @@ impl BashTool {
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             let delta = manager
-                .get_output_delta(task_id, false, timeout_ms)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, timeout_ms)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             (delta, false)
         };
@@ -5086,7 +5326,12 @@ impl BashTool {
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             if !interaction_input.is_empty() || close_stdin {
                 manager
-                    .write_stdin(task_id, interaction_input, close_stdin)
+                    .write_stdin_for_session(
+                        &context.state_namespace,
+                        task_id,
+                        interaction_input,
+                        close_stdin,
+                    )
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             }
         }
@@ -5103,7 +5348,7 @@ impl BashTool {
                     .lock()
                     .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
                 let delta = manager
-                    .get_output_delta(task_id, false, 0)
+                    .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?;
                 let mut result = build_shell_delta_tool_result(delta, context);
                 if let Some(metadata) = result.metadata.as_mut()
@@ -5120,7 +5365,7 @@ impl BashTool {
                     .lock()
                     .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
                 manager
-                    .get_output_delta(task_id, false, 0)
+                    .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?
             };
 
@@ -5150,7 +5395,7 @@ impl BashTool {
 
         if cancel_all {
             let results = manager
-                .kill_running()
+                .kill_running_for_session(&context.state_namespace)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             if results.is_empty() {
                 return Ok(ToolResult {
@@ -5186,7 +5431,7 @@ impl BashTool {
 
         let task_id = required_task_id(input)?;
         let result = manager
-            .kill(task_id)
+            .kill_for_session(&context.state_namespace, task_id)
             .map_err(|err| ToolError::execution_failed(err.to_string()))?;
         let task_id = result
             .task_id
@@ -5406,7 +5651,7 @@ async fn wait_for_shell_delta_cancellable(
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             let delta = manager
-                .get_output_delta(task_id, false, 0)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             append_shell_delta_output(&mut stdout_accum, &mut stderr_accum, &delta.result);
             return Ok((
@@ -5428,7 +5673,7 @@ async fn wait_for_shell_delta_cancellable(
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             manager
-                .get_output_delta(task_id, false, 0)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?
         };
 

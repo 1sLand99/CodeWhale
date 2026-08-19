@@ -14641,29 +14641,6 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
     let marker = tmp.path().join("survivor-marker.txt");
     let shell_manager = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
 
-    // Background sleep-then-write: still running at interrupt time, and its
-    // write lands only after the UI would have said "interrupted".
-    let task_id = {
-        let mut manager = shell_manager.lock().expect("shell manager");
-        let result = manager
-            .execute_with_options_env(
-                &format!("sleep 5 && touch '{}'", marker.display()),
-                None,
-                60_000,
-                true,
-                None,
-                false,
-                None,
-                HashMap::new(),
-            )
-            .expect("spawn background job");
-        result.task_id.expect("background task id")
-    };
-    assert!(
-        !marker.exists(),
-        "marker must not exist before the interrupt"
-    );
-
     let runtime_services = crate::tools::spec::RuntimeToolServices {
         shell_manager: Some(shell_manager.clone()),
         ..crate::tools::spec::RuntimeToolServices::default()
@@ -14677,6 +14654,32 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new(engine_config, &Config::default());
+
+    // Background sleep-then-write: still running at interrupt time, and its
+    // write lands only after the UI would have said "interrupted". Stamp the
+    // engine's immutable session owner so a replacement session cannot see or
+    // control it.
+    let task_id = {
+        let mut manager = shell_manager.lock().expect("shell manager");
+        let result = manager
+            .execute_with_options_env_for_session(
+                &format!("sleep 5 && touch '{}'", marker.display()),
+                None,
+                60_000,
+                true,
+                None,
+                false,
+                None,
+                HashMap::new(),
+                &engine.session.id,
+            )
+            .expect("spawn background job");
+        result.task_id.expect("background task id")
+    };
+    assert!(
+        !marker.exists(),
+        "marker must not exist before the interrupt"
+    );
 
     engine.emit_interrupted_survivor_status().await;
 
@@ -18223,6 +18226,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
+    let owner_session_id = engine.session.id.clone();
 
     let stdout_body = format!("stdout-start-{}-stdout-end", "o".repeat(2_048));
     let stderr_body = format!("stderr-start-{}-stderr-end", "e".repeat(2_048));
@@ -18235,7 +18239,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
     let task_id = {
         let mut shell = engine.shell_manager.lock().expect("shell manager");
         let started = shell
-            .execute_with_options_env_for_owner(
+            .execute_with_options_env_for_owner_and_session(
                 &command,
                 None,
                 30_000,
@@ -18245,6 +18249,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
                 None,
                 std::collections::HashMap::new(),
                 None,
+                &owner_session_id,
             )
             .expect("start background job");
         started.task_id.expect("background task id")
@@ -18440,11 +18445,12 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         ..Default::default()
     };
     let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let owner_session_id = engine.session.id.clone();
 
     let _task_id = {
         let mut shell = engine.shell_manager.lock().expect("shell manager");
         let started = shell
-            .execute_with_options_env_for_owner(
+            .execute_with_options_env_for_owner_and_session(
                 "echo shell-wake-done",
                 None,
                 30_000,
@@ -18454,6 +18460,7 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
                 None,
                 std::collections::HashMap::new(),
                 None,
+                &owner_session_id,
             )
             .expect("start background job");
         started.task_id.expect("background task id")

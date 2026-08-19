@@ -1423,46 +1423,51 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
         .iter()
         .map(|entry| entry.id.clone())
         .collect::<HashSet<_>>();
-    let (shell_entries, shell_background_completed): (Vec<TaskPanelEntry>, bool) =
-        match app.runtime_services.shell_manager.as_ref() {
-            Some(shell_mgr) => match shell_mgr.try_lock() {
-                Ok(mut mgr) => {
-                    let jobs = mgr.list_jobs();
-                    let completed = newly_completed_id(
-                        prev_shell_ids.iter().map(String::as_str).collect(),
-                        jobs.iter()
-                            .filter(|job| {
-                                matches!(job.status, crate::tools::shell::ShellStatus::Completed)
-                            })
-                            .map(|job| job.id.as_str()),
-                    );
-                    let entries = jobs
-                        .into_iter()
+    let (shell_entries, shell_background_completed): (Vec<TaskPanelEntry>, bool) = match app
+        .runtime_services
+        .shell_manager
+        .as_ref()
+    {
+        Some(shell_mgr) => match shell_mgr.try_lock() {
+            Ok(mut mgr) => {
+                let jobs = mgr
+                    .list_jobs_for_session(app.current_session_id.as_deref().unwrap_or_default());
+                let completed = newly_completed_id(
+                    prev_shell_ids.iter().map(String::as_str).collect(),
+                    jobs.iter()
                         .filter(|job| {
-                            matches!(job.status, crate::tools::shell::ShellStatus::Running)
+                            matches!(job.status, crate::tools::shell::ShellStatus::Completed)
                         })
-                        .map(|job| TaskPanelEntry {
-                            id: job.id,
-                            status: "running".to_string(),
-                            prompt_summary: format!("shell: {}", job.command),
-                            duration_ms: Some(job.elapsed_ms),
-                            kind: TaskPanelEntryKind::Background,
-                            stale: job.stale,
-                            elapsed_since_output_ms: job.elapsed_since_output_ms,
-                            owner_agent_id: job.owner_agent_id,
-                            owner_agent_name: job.owner_agent_name,
-                            current_tool: None,
-                            role: None,
-                            files_touched: 0,
-                        })
-                        .collect();
-                    (entries, completed)
-                }
-                // Contended: keep the last known snapshot rather than blocking.
-                Err(_) => (prev_shell_entries, false),
-            },
-            None => (Vec::new(), false),
-        };
+                        .map(|job| job.id.as_str()),
+                );
+                let entries = jobs
+                    .into_iter()
+                    .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
+                    .map(|job| TaskPanelEntry {
+                        id: job.id,
+                        status: "running".to_string(),
+                        prompt_summary: format!("shell: {}", job.command),
+                        duration_ms: Some(job.elapsed_ms),
+                        kind: TaskPanelEntryKind::Background,
+                        stale: job.stale,
+                        elapsed_since_output_ms: job.elapsed_since_output_ms,
+                        owner_agent_id: job.owner_agent_id,
+                        owner_agent_name: job.owner_agent_name,
+                        current_tool: None,
+                        role: None,
+                        files_touched: 0,
+                    })
+                    .collect();
+                (entries, completed)
+            }
+            // Contended: keep the last known snapshot rather than blocking.
+            // A retained frame could belong to the session that was just
+            // replaced. Fail closed on contention instead of showing it
+            // in the new conversation.
+            Err(_) => (Vec::new(), false),
+        },
+        None => (Vec::new(), false),
+    };
     entries.extend(shell_entries);
 
     // Report whether anything visible changed so the idle tick can skip the
@@ -1497,7 +1502,7 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
         let Ok(mut mgr) = shell_mgr.try_lock() else {
             return false;
         };
-        mgr.list_jobs()
+        mgr.list_jobs_for_session(app.current_session_id.as_deref().unwrap_or_default())
             .into_iter()
             .map(|job| (job.id.clone(), job))
             .collect::<std::collections::HashMap<_, _>>()

@@ -319,7 +319,9 @@ impl Engine {
         let completions = self
             .shell_manager
             .lock()
-            .map(|mut manager| manager.drain_finished_jobs_with_evidence())
+            .map(|mut manager| {
+                manager.drain_finished_jobs_with_evidence_for_session(&self.session.id)
+            })
             .unwrap_or_default();
         completions
             .into_iter()
@@ -355,7 +357,7 @@ impl Engine {
         let owners = self
             .shell_manager
             .lock()
-            .map(|mut manager| manager.running_owner_agent_ids())
+            .map(|mut manager| manager.running_owner_agent_ids_for_session(&self.session.id))
             .unwrap_or_default();
         if owners.is_empty() {
             return;
@@ -369,8 +371,9 @@ impl Engine {
     async fn drain_subagent_completion_events(&mut self, status_label: &str) -> usize {
         let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
-            if let Some(completion) = super::claim_subagent_completion(
+            if let Some(completion) = super::claim_subagent_completion_for_session(
                 &mut self.delivered_subagent_completion_ids,
+                &self.session.id,
                 completion,
             ) {
                 completions.push(completion);
@@ -379,17 +382,23 @@ impl Engine {
 
         let synthesized = {
             let manager = self.subagent_manager.read().await;
-            manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
+            manager.terminal_results_excluding_for_session(
+                &self.session.id,
+                &self.delivered_subagent_completion_ids,
+            )
         };
         for result in synthesized {
             let report_ref =
                 crate::tools::subagent::spill_subagent_final_report(&self.session.id, &result);
-            let completion = crate::tools::subagent::subagent_completion_from_result_with_ref(
-                &result,
-                report_ref.as_deref(),
-            );
-            if let Some(completion) = super::claim_subagent_completion(
+            let completion =
+                crate::tools::subagent::subagent_completion_from_result_with_ref_for_session(
+                    &self.session.id,
+                    &result,
+                    report_ref.as_deref(),
+                );
+            if let Some(completion) = super::claim_subagent_completion_for_session(
                 &mut self.delivered_subagent_completion_ids,
+                &self.session.id,
                 completion,
             ) {
                 completions.push(completion);
@@ -5013,11 +5022,12 @@ mod tests {
             ..Default::default()
         };
         let (engine, _handle) = Engine::new(config, &Config::default());
+        let owner_session_id = engine.session.id.clone();
 
         let (parent_task_id, child_task_id) = {
             let mut shell = engine.shell_manager.lock().expect("shell manager");
             let parent = shell
-                .execute_with_options_env_for_owner(
+                .execute_with_options_env_for_owner_and_session(
                     "echo parent-shell-done",
                     None,
                     30_000,
@@ -5027,12 +5037,13 @@ mod tests {
                     None,
                     std::collections::HashMap::new(),
                     None,
+                    &owner_session_id,
                 )
                 .expect("start parent background job")
                 .task_id
                 .expect("parent background task id");
             let child = shell
-                .execute_with_options_env_for_owner(
+                .execute_with_options_env_for_owner_and_session(
                     "echo child-shell-done",
                     None,
                     30_000,
@@ -5045,6 +5056,7 @@ mod tests {
                         agent_id: "agent_child".to_string(),
                         agent_name: "child".to_string(),
                     }),
+                    &owner_session_id,
                 )
                 .expect("start child background job")
                 .task_id
@@ -5112,11 +5124,12 @@ mod tests {
             ..Default::default()
         };
         let (mut engine, _handle) = Engine::new(config, &Config::default());
+        let owner_session_id = engine.session.id.clone();
 
         let task_id = {
             let mut shell = engine.shell_manager.lock().expect("shell manager");
             shell
-                .execute_with_options_env_for_owner(
+                .execute_with_options_env_for_owner_and_session(
                     "echo child-shell-done",
                     None,
                     30_000,
@@ -5129,6 +5142,7 @@ mod tests {
                         agent_id: "agent_child".to_string(),
                         agent_name: "child".to_string(),
                     }),
+                    &owner_session_id,
                 )
                 .expect("start child background job")
                 .task_id
@@ -5214,6 +5228,7 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                owner_session_id: "session-test".to_string(),
             }],
             "",
         )
@@ -5237,6 +5252,7 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                owner_session_id: "session-test".to_string(),
             },
         ]);
         let text = match &message.content[0] {

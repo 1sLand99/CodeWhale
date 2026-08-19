@@ -82,6 +82,7 @@ async fn pending_shell_completion_makes_the_body_unavailable_without_draining_it
     let identity = deepseek_identity();
     let (mut engine, _handle, _tmp) = preview_engine(&config);
     engine.config.features.disable(Feature::Mcp);
+    let owner_session_id = engine.session.id.clone();
 
     {
         let mut manager = engine.shell_manager.lock().expect("shell manager");
@@ -91,7 +92,7 @@ async fn pending_shell_completion_makes_the_body_unavailable_without_draining_it
             "sleep 30"
         };
         manager
-            .execute_with_options_env(
+            .execute_with_options_env_for_session(
                 command,
                 None,
                 30_000,
@@ -100,9 +101,10 @@ async fn pending_shell_completion_makes_the_body_unavailable_without_draining_it
                 false,
                 None,
                 std::collections::HashMap::new(),
+                &owner_session_id,
             )
             .expect("background shell starts");
-        assert!(manager.may_have_undelivered_completion());
+        assert!(manager.may_have_undelivered_completion_for_session(&owner_session_id));
     }
 
     let planned = plan(&config, &identity, false, "inspect the next request").await;
@@ -127,7 +129,7 @@ async fn pending_shell_completion_makes_the_body_unavailable_without_draining_it
 
     let mut manager = engine.shell_manager.lock().expect("shell manager");
     assert!(
-        manager.may_have_undelivered_completion(),
+        manager.may_have_undelivered_completion_for_session(&owner_session_id),
         "preview must not drain or report the completion"
     );
     let _ = manager.kill_running();

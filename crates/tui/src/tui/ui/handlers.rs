@@ -639,58 +639,72 @@ pub(crate) fn handle_shell_job_action(app: &mut App, action: crate::tui::app::Sh
             return;
         }
     };
+    let active_session_id = app.current_session_id.clone().unwrap_or_default();
 
     match action {
         crate::tui::app::ShellJobAction::List => {
-            let jobs = manager.list_jobs();
+            let jobs = manager.list_jobs_for_session(&active_session_id);
             add_shell_job_message(app, format_shell_job_list(&jobs));
         }
-        crate::tui::app::ShellJobAction::Show { id } => match manager.inspect_job(&id) {
-            Ok(detail) => open_shell_job_pager(app, &detail),
-            Err(err) => add_shell_job_message(app, format!("Command lookup failed: {err}")),
-        },
+        crate::tui::app::ShellJobAction::Show { id } => {
+            match manager.inspect_job_for_session(&active_session_id, &id) {
+                Ok(detail) => open_shell_job_pager(app, &detail),
+                Err(err) => add_shell_job_message(app, format!("Command lookup failed: {err}")),
+            }
+        }
         crate::tui::app::ShellJobAction::Poll { id, wait } => {
-            match manager.poll_delta(&id, wait, if wait { 5_000 } else { 1_000 }) {
+            match manager.poll_delta_for_session(
+                &active_session_id,
+                &id,
+                wait,
+                if wait { 5_000 } else { 1_000 },
+            ) {
                 Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
                 Err(err) => add_shell_job_message(app, format!("Command poll failed: {err}")),
             }
         }
         crate::tui::app::ShellJobAction::SendStdin { id, input, close } => {
-            match manager.write_stdin(&id, &input, close) {
-                Ok(()) => match manager.poll_delta(&id, false, 1_000) {
-                    Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
-                    Err(err) => {
-                        add_shell_job_message(
-                            app,
-                            format!("Command input sent; poll failed: {err}"),
-                        );
+            match manager.write_stdin_for_session(&active_session_id, &id, &input, close) {
+                Ok(()) => {
+                    match manager.poll_delta_for_session(&active_session_id, &id, false, 1_000) {
+                        Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
+                        Err(err) => {
+                            add_shell_job_message(
+                                app,
+                                format!("Command input sent; poll failed: {err}"),
+                            );
+                        }
                     }
-                },
+                }
                 Err(err) => add_shell_job_message(app, format!("Command input failed: {err}")),
             }
         }
-        crate::tui::app::ShellJobAction::Cancel { id } => match manager.kill(&id) {
-            Ok(result) => add_shell_job_message(app, format_shell_poll(&result)),
-            Err(err) => add_shell_job_message(app, format!("Command cancel failed: {err}")),
-        },
-        crate::tui::app::ShellJobAction::CancelAll => match manager.kill_running() {
-            Ok(results) => {
-                let count = results.len();
-                if count == 0 {
-                    add_shell_job_message(app, "No running commands to cancel.".to_string());
-                } else {
-                    let tasks: Vec<String> = results
-                        .iter()
-                        .filter_map(|result| result.task_id.clone())
-                        .collect();
-                    add_shell_job_message(
-                        app,
-                        format!("Canceled {count} command(s): {}", tasks.join(", ")),
-                    );
-                }
+        crate::tui::app::ShellJobAction::Cancel { id } => {
+            match manager.kill_for_session(&active_session_id, &id) {
+                Ok(result) => add_shell_job_message(app, format_shell_poll(&result)),
+                Err(err) => add_shell_job_message(app, format!("Command cancel failed: {err}")),
             }
-            Err(err) => add_shell_job_message(app, format!("Command cancel-all failed: {err}")),
-        },
+        }
+        crate::tui::app::ShellJobAction::CancelAll => {
+            match manager.kill_running_for_session(&active_session_id) {
+                Ok(results) => {
+                    let count = results.len();
+                    if count == 0 {
+                        add_shell_job_message(app, "No running commands to cancel.".to_string());
+                    } else {
+                        let tasks: Vec<String> = results
+                            .iter()
+                            .filter_map(|result| result.task_id.clone())
+                            .collect();
+                        add_shell_job_message(
+                            app,
+                            format!("Canceled {count} command(s): {}", tasks.join(", ")),
+                        );
+                    }
+                }
+                Err(err) => add_shell_job_message(app, format!("Command cancel-all failed: {err}")),
+            }
+        }
     }
 }
 

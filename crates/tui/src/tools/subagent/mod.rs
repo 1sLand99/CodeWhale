@@ -6263,6 +6263,7 @@ impl SubAgentManager {
         self.get_result(&agent_id)
     }
 
+    #[cfg(test)]
     pub fn terminal_results_excluding(
         &self,
         delivered_ids: &std::collections::HashSet<String>,
@@ -6276,7 +6277,6 @@ impl SubAgentManager {
     /// owner matching prevents a completed child from the previous
     /// conversation being synthesized into the new turn. Empty legacy owners
     /// do not match and therefore fail closed.
-    #[allow(dead_code)] // Turn-loop call site is integrated in the companion budget lane.
     pub(crate) fn terminal_results_excluding_for_session(
         &self,
         active_session_id: &str,
@@ -7900,7 +7900,12 @@ impl ToolSpec for AgentTool {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
             }
         }
-        touch_running_shell_owners(&self.manager, &context.execution.shell_manager).await;
+        touch_running_shell_owners(
+            &self.manager,
+            &context.execution.shell_manager,
+            &context.state_namespace,
+        )
+        .await;
         let verbose = input
             .get("verbose")
             .and_then(Value::as_bool)
@@ -7987,7 +7992,12 @@ async fn inspect_agent_from_input(
 
     if let Some(agent_ref) = parse_agent_ref(input)? {
         let (snapshot, worker_record, evicted_ids) = {
-            touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
+            touch_running_shell_owners(
+                &manager,
+                &context.execution.shell_manager,
+                &context.state_namespace,
+            )
+            .await;
             let mut manager = manager.write().await;
             manager.cleanup(COMPLETED_AGENT_RETENTION);
             let evicted_ids = manager.drain_pending_handle_evictions();
@@ -8071,7 +8081,12 @@ async fn inspect_agent_from_input(
     }
 
     let (snapshots, evicted_ids) = {
-        touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
+        touch_running_shell_owners(
+            &manager,
+            &context.execution.shell_manager,
+            &context.state_namespace,
+        )
+        .await;
         let mut manager = manager.write().await;
         manager.cleanup(COMPLETED_AGENT_RETENTION);
         let evicted_ids = manager.drain_pending_handle_evictions();
@@ -8149,12 +8164,13 @@ async fn inspect_agent_from_input(
 async fn touch_running_shell_owners(
     manager: &SharedSubAgentManager,
     shell_manager: &SharedShellManager,
+    active_session_id: &str,
 ) {
     let owner_ids = {
         let Ok(mut shell_manager) = shell_manager.lock() else {
             return;
         };
-        shell_manager.running_owner_agent_ids()
+        shell_manager.running_owner_agent_ids_for_session(active_session_id)
     };
     if owner_ids.is_empty() {
         return;
@@ -9560,6 +9576,7 @@ pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAge
 
 /// Completion builder that names the persisted full report in the truncation
 /// footer when `report_ref` is available; see `spill_subagent_final_report`.
+#[cfg(test)]
 pub(crate) fn subagent_completion_from_result_with_ref(
     result: &SubAgentResult,
     report_ref: Option<&str>,

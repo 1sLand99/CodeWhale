@@ -568,7 +568,7 @@ fn start_background_gates(
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_with_options_env(
+            manager.execute_with_options_env_for_session(
                 &command,
                 Some(&cwd),
                 BACKGROUND_GATE_TIMEOUT_MS,
@@ -577,6 +577,7 @@ fn start_background_gates(
                 false,
                 context.elevated_sandbox_policy.clone(),
                 env,
+                &context.state_namespace,
             )
         };
 

@@ -6451,6 +6451,7 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
     );
     jobs.insert(
@@ -6473,6 +6474,7 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
     );
 
@@ -6536,6 +6538,7 @@ fn shell_live_output_update_marks_stale_running_job_static() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
     );
 
@@ -6613,6 +6616,7 @@ fn shell_live_output_update_finalizes_background_exec_output() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
     );
 
@@ -6697,6 +6701,7 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
     );
 

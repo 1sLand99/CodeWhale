@@ -2082,7 +2082,7 @@ impl Engine {
     fn idle_shell_wake_armed(&self) -> bool {
         self.shell_manager
             .lock()
-            .map(|manager| manager.may_have_undelivered_completion())
+            .map(|manager| manager.may_have_undelivered_completion_for_session(&self.session.id))
             .unwrap_or(false)
     }
 
@@ -2090,7 +2090,7 @@ impl Engine {
     fn finished_background_shell_pending(&self) -> bool {
         self.shell_manager
             .lock()
-            .map(|mut manager| manager.has_finished_unreported_jobs())
+            .map(|mut manager| manager.has_finished_unreported_jobs_for_session(&self.session.id))
             .unwrap_or(false)
     }
 
@@ -2128,7 +2128,11 @@ impl Engine {
                 let finished = self
                     .shell_manager
                     .lock()
-                    .map(|mut manager| manager.drain_finished_jobs_with_evidence().len())
+                    .map(|mut manager| {
+                        manager
+                            .drain_finished_jobs_with_evidence_for_session(&self.session.id)
+                            .len()
+                    })
                     .unwrap_or(0);
                 let _ = self
                     .tx_event
@@ -4797,7 +4801,7 @@ impl Engine {
             return Vec::new();
         };
         manager
-            .list_jobs()
+            .list_jobs_for_session(&self.session.id)
             .into_iter()
             .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
             .map(|job| {

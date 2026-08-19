@@ -610,10 +610,9 @@ impl Engine {
             reasons.push("pending LSP diagnostics would be injected as a synthetic message");
         }
 
-        let shell_completion_may_be_injected = self
-            .shell_manager
-            .lock()
-            .map_or(true, |manager| manager.may_have_undelivered_completion());
+        let shell_completion_may_be_injected = self.shell_manager.lock().map_or(true, |manager| {
+            manager.may_have_undelivered_completion_for_session(&self.session.id)
+        });
         if shell_completion_may_be_injected {
             reasons.push("a background shell completion may be injected before the request");
         }
