@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "추가",
+  "ExtensionsActionEnable": "활성화",
   "ExtensionsActionFocus": "포커스",
   "ExtensionsActionFold": "접기",
   "ExtensionsActionTabs": "탭",

@@ -422,6 +422,8 @@ pub enum MessageId {
     McpCapabilitiesNotObserved,
     CmdMemoryDescription,
     CmdPluginDescription,
+    ExtensionsActionAdd,
+    ExtensionsActionEnable,
     ExtensionsActionFocus,
     ExtensionsActionFold,
     ExtensionsActionTabs,
@@ -2149,6 +2151,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::McpCapabilitiesLegacyFallback,
     MessageId::McpCapabilitiesNotObserved,
     MessageId::CmdPluginDescription,
+    MessageId::ExtensionsActionAdd,
+    MessageId::ExtensionsActionEnable,
     MessageId::ExtensionsActionFocus,
     MessageId::ExtensionsActionFold,
     MessageId::ExtensionsActionTabs,
@@ -4736,7 +4740,7 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 77, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 79, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",

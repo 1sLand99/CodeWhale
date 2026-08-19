@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "adicionar",
+  "ExtensionsActionEnable": "ativar",
   "ExtensionsActionFocus": "foco",
   "ExtensionsActionFold": "recolher",
   "ExtensionsActionTabs": "abas",

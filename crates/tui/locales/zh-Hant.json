@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "新增",
+  "ExtensionsActionEnable": "啟用",
   "ExtensionsActionFocus": "焦點",
   "ExtensionsActionFold": "摺疊",
   "ExtensionsActionTabs": "分頁",

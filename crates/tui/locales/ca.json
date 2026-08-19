@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "afegeix",
+  "ExtensionsActionEnable": "activa",
   "ExtensionsActionFocus": "focus",
   "ExtensionsActionFold": "plega",
   "ExtensionsActionTabs": "pestanyes",

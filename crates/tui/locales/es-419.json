@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "agregar",
+  "ExtensionsActionEnable": "habilitar",
   "ExtensionsActionFocus": "foco",
   "ExtensionsActionFold": "plegar",
   "ExtensionsActionTabs": "pestañas",

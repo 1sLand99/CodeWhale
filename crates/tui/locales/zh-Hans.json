@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "添加",
+  "ExtensionsActionEnable": "启用",
   "ExtensionsActionFocus": "焦点",
   "ExtensionsActionFold": "折叠",
   "ExtensionsActionTabs": "标签页",

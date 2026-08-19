@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "追加",
+  "ExtensionsActionEnable": "有効化",
   "ExtensionsActionFocus": "フォーカス",
   "ExtensionsActionFold": "折りたたむ",
   "ExtensionsActionTabs": "タブ",

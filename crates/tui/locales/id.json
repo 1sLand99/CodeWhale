@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "tambahkan",
+  "ExtensionsActionEnable": "aktifkan",
   "ExtensionsActionFocus": "fokus",
   "ExtensionsActionFold": "lipat",
   "ExtensionsActionTabs": "tab",

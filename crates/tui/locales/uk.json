@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "додати",
+  "ExtensionsActionEnable": "увімкнути",
   "ExtensionsActionFocus": "фокус",
   "ExtensionsActionFold": "згорнути",
   "ExtensionsActionTabs": "вкладки",

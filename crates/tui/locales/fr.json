@@ -1,4 +1,6 @@
 {
+  "ExtensionsActionAdd": "ajouter",
+  "ExtensionsActionEnable": "activer",
   "ExtensionsActionFocus": "focus",
   "ExtensionsActionFold": "replier",
   "ExtensionsActionTabs": "onglets",

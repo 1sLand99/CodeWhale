@@ -19,8 +19,8 @@ use ratatui::{
 };
 
 use super::{
-    ModalKind, ModalView, ViewAction, render_modal_footer, render_underwater_surface,
-    truncate_view_text,
+    CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
+    render_underwater_surface, truncate_view_text,
 };
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
@@ -162,6 +162,7 @@ impl PluginProduct {
                     ("source", &self.source_reference),
                 ],
             ),
+            action: None,
         }
     }
 }
@@ -173,6 +174,30 @@ pub struct ExtensionItem {
     pub description: String,
     pub state: String,
     pub detail: String,
+    pub action: Option<ExtensionAction>,
+}
+
+/// A row affordance. Executable actions route back through the existing slash
+/// command controller; status-only actions explain why Enter will not mutate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionAction {
+    Command { label: String, command: String },
+    Status { label: String },
+}
+
+impl ExtensionAction {
+    fn label(&self) -> &str {
+        match self {
+            Self::Command { label, .. } | Self::Status { label } => label,
+        }
+    }
+
+    fn command(&self) -> Option<&str> {
+        match self {
+            Self::Command { command, .. } => Some(command),
+            Self::Status { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +229,9 @@ impl ExtensionsSnapshot {
         snapshot.tabs[ExtensionsTab::Marketplace.index()] = marketplace_model(app, app.ui_locale);
         snapshot.tabs[ExtensionsTab::Skills.index()] = skills_model(app, app.ui_locale);
         snapshot.tabs[ExtensionsTab::Mcp.index()] = mcp_model(app, app.ui_locale);
-        snapshot.with_recommendations(reviewed_product_catalog(app.ui_locale), app.ui_locale)
+        snapshot
+            .with_recommendations(reviewed_product_catalog(app.ui_locale), app.ui_locale)
+            .with_recommended_actions(app)
     }
 
     #[must_use]
@@ -221,6 +248,77 @@ impl ExtensionsSnapshot {
                         .collect(),
                 },
             );
+        }
+        self
+    }
+
+    fn with_recommended_actions(mut self, app: &App) -> Self {
+        let configured = crate::mcp::load_config_with_workspace_and_plugins(
+            &app.mcp_config_path,
+            &app.workspace,
+            app.plugin_registry.as_ref(),
+        )
+        .ok();
+        let Some(group) = self.tabs[ExtensionsTab::Marketplace.index()]
+            .groups
+            .iter_mut()
+            .find(|group| group.id == "recommended")
+        else {
+            return self;
+        };
+
+        if configured.is_none() {
+            for item in &mut group.items {
+                item.action = Some(ExtensionAction::Status {
+                    label: tr(app.ui_locale, MessageId::PickerActionUnavailable).into_owned(),
+                });
+            }
+            return self;
+        }
+
+        for item in &mut group.items {
+            let recommendation = match item.id.as_str() {
+                "playwright-browser" => Some(("playwright", "playwright")),
+                "chrome-devtools" => Some(("chrome-devtools", "chrome-devtools")),
+                "cua-computer-use" => Some(("cua-driver", "cua")),
+                _ => None,
+            };
+            if let Some((server_name, recommendation_id)) = recommendation {
+                match configured
+                    .as_ref()
+                    .and_then(|config| config.servers.get(server_name))
+                {
+                    None => {
+                        item.state =
+                            tr(app.ui_locale, MessageId::ExtensionsStateAvailable).into_owned();
+                        item.action = Some(ExtensionAction::Command {
+                            label: tr(app.ui_locale, MessageId::ExtensionsActionAdd).into_owned(),
+                            command: format!("/mcp add recommended {recommendation_id}"),
+                        });
+                    }
+                    Some(server) if !server.is_enabled() => {
+                        item.state =
+                            tr(app.ui_locale, MessageId::HotbarSetupStatusDisabled).into_owned();
+                        item.action = Some(ExtensionAction::Command {
+                            label: tr(app.ui_locale, MessageId::ExtensionsActionEnable)
+                                .into_owned(),
+                            command: format!("/mcp enable {server_name}"),
+                        });
+                    }
+                    Some(_) => {
+                        item.state =
+                            tr(app.ui_locale, MessageId::PickerActionConfigured).into_owned();
+                        item.action = Some(ExtensionAction::Status {
+                            label: tr(app.ui_locale, MessageId::PickerActionConfigured)
+                                .into_owned(),
+                        });
+                    }
+                }
+            } else {
+                item.action = Some(ExtensionAction::Status {
+                    label: tr(app.ui_locale, MessageId::PickerActionUnavailable).into_owned(),
+                });
+            }
         }
         self
     }
@@ -350,6 +448,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     ),
                 ],
             ),
+            action: None,
         })
         .collect::<Vec<_>>();
     let problems = config
@@ -369,6 +468,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: problem.summary(),
+            action: None,
         })
         .collect::<Vec<_>>();
     let mut groups = Vec::new();
@@ -539,6 +639,22 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             crate::plugins::types::PluginScope::Workspace => 2,
         };
         let diagnostic_count = plugin.diagnostics.len();
+        let action = if plugin.active() {
+            ExtensionAction::Command {
+                label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
+                command: format!("/plugin show {}", plugin.name()),
+            }
+        } else if plugin.trusted() && !plugin.enabled {
+            ExtensionAction::Command {
+                label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+                command: format!("/plugin enable {}", plugin.name()),
+            }
+        } else {
+            ExtensionAction::Command {
+                label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
+                command: format!("/plugin trust {}", plugin.name()),
+            }
+        };
         by_scope[scope].push(ExtensionItem {
             id: plugin.id.as_str().to_string(),
             label: plugin.name().to_string(),
@@ -565,6 +681,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     ("diagnostics", &diagnostic_count.to_string()),
                 ],
             ),
+            action: Some(action),
         });
     }
     let labels = [
@@ -672,6 +789,21 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                                 ],
                             )
                         },
+                        action: if !candidate.has_errors() && candidate.install_plan.is_supported()
+                        {
+                            Some(ExtensionAction::Command {
+                                label: tr(locale, MessageId::ExtensionsActionAdd).into_owned(),
+                                command: format!(
+                                    "/plugin marketplace install {} {}",
+                                    catalog.id.as_str(),
+                                    candidate.name
+                                ),
+                            })
+                        } else {
+                            Some(ExtensionAction::Status {
+                                label: tr(locale, MessageId::PickerActionUnavailable).into_owned(),
+                            })
+                        },
                     })
                     .collect(),
             }
@@ -711,6 +843,7 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             }
             .into_owned(),
             detail: skill.safe_display_path,
+            action: None,
         };
         if let Some(position) = position {
             groups[position].items.push(item);
@@ -729,67 +862,120 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
 }
 
 fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
-    let Some(snapshot) = app.mcp_snapshot.as_ref() else {
-        return ExtensionsTabModel {
-            groups: Vec::new(),
-            problem: (app.mcp_configured_count > 0).then(|| {
-                localize(
-                    locale,
-                    MessageId::ExtensionsMcpRefresh,
-                    &[("count", &app.mcp_configured_count.to_string())],
-                )
-            }),
-        };
-    };
-    let items = snapshot
-        .servers
-        .iter()
-        .map(|server| ExtensionItem {
-            id: server.name.clone(),
-            label: server.name.clone(),
-            description: localize(
-                locale,
-                MessageId::ExtensionsMcpSummary,
-                &[
-                    ("transport", &server.transport.to_string()),
-                    ("tools", &server.tools.len().to_string()),
-                    ("resources", &server.resources.len().to_string()),
-                ],
-            ),
-            state: if !server.enabled {
-                tr(locale, MessageId::HotbarSetupStatusDisabled)
-            } else if server.connected {
-                tr(locale, MessageId::ExtensionsStateConnected)
-            } else if server.error.is_some() {
-                tr(locale, MessageId::ExtensionsStateError)
+    let configured = crate::mcp::load_config_with_workspace_and_plugins(
+        &app.mcp_config_path,
+        &app.workspace,
+        app.plugin_registry.as_ref(),
+    )
+    .ok();
+    let snapshot = app.mcp_snapshot.as_ref();
+    // Configured names are the count authority used by the surrounding shell.
+    // Snapshot data enriches those exact rows; it must never independently
+    // filter the list down to only the last discovered subset.
+    let names = configured.as_ref().map_or_else(
+        || {
+            snapshot
+                .into_iter()
+                .flat_map(|snapshot| snapshot.servers.iter().map(|server| server.name.clone()))
+                .collect::<BTreeSet<_>>()
+        },
+        |config| config.servers.keys().cloned().collect::<BTreeSet<_>>(),
+    );
+    let total = names.len();
+    let items: Vec<_> = names
+        .into_iter()
+        .map(|name| {
+            let observed = snapshot
+                .and_then(|snapshot| snapshot.servers.iter().find(|server| server.name == name));
+            let config = configured
+                .as_ref()
+                .and_then(|configured| configured.servers.get(&name));
+            let enabled = observed
+                .map(|server| server.enabled)
+                .or_else(|| config.map(crate::mcp::McpServerConfig::is_enabled))
+                .unwrap_or(true);
+            let action = if !enabled
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            {
+                ExtensionAction::Command {
+                    label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+                    command: format!("/mcp enable {name}"),
+                }
             } else {
-                tr(locale, MessageId::PickerActionConfigured)
+                ExtensionAction::Status {
+                    label: tr(locale, MessageId::PickerActionConfigured).into_owned(),
+                }
+            };
+            ExtensionItem {
+                id: name.clone(),
+                label: name,
+                description: observed.map_or_else(String::new, |server| {
+                    localize(
+                        locale,
+                        MessageId::ExtensionsMcpSummary,
+                        &[
+                            ("transport", &server.transport),
+                            ("tools", &server.tools.len().to_string()),
+                            ("resources", &server.resources.len().to_string()),
+                        ],
+                    )
+                }),
+                state: if !enabled {
+                    tr(locale, MessageId::HotbarSetupStatusDisabled)
+                } else if observed.is_some_and(|server| server.connected) {
+                    tr(locale, MessageId::ExtensionsStateConnected)
+                } else if observed.is_some_and(|server| server.error.is_some()) {
+                    tr(locale, MessageId::ExtensionsStateError)
+                } else {
+                    tr(locale, MessageId::PickerActionConfigured)
+                }
+                .into_owned(),
+                // The passive snapshot can carry a command line or URL. Do
+                // not mirror either into this broad inventory surface.
+                detail: observed.map_or_else(
+                    || {
+                        localize(
+                            locale,
+                            MessageId::ExtensionsMcpRefresh,
+                            &[("count", &total.to_string())],
+                        )
+                    },
+                    |server| {
+                        server.error.clone().unwrap_or_else(|| {
+                            localize(
+                                locale,
+                                MessageId::ExtensionsMcpDetail,
+                                &[
+                                    ("tools", &server.tools.len().to_string()),
+                                    ("resources", &server.resources.len().to_string()),
+                                    ("prompts", &server.prompts.len().to_string()),
+                                ],
+                            )
+                        })
+                    },
+                ),
+                action: Some(action),
             }
-            .into_owned(),
-            // The passive snapshot can carry a command line or URL. Do not
-            // mirror either into a broad inventory surface: arguments and URL
-            // query strings may contain operator secrets. The dedicated MCP
-            // manager owns its already-redacted connection detail.
-            detail: server.error.clone().unwrap_or_else(|| {
-                localize(
-                    locale,
-                    MessageId::ExtensionsMcpDetail,
-                    &[
-                        ("tools", &server.tools.len().to_string()),
-                        ("resources", &server.resources.len().to_string()),
-                        ("prompts", &server.prompts.len().to_string()),
-                    ],
-                )
-            }),
         })
         .collect();
     ExtensionsTabModel {
-        groups: vec![ExtensionGroup {
-            id: "servers".into(),
-            label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
-            items,
-        }],
-        problem: None,
+        groups: (!items.is_empty())
+            .then(|| ExtensionGroup {
+                id: "servers".into(),
+                label: tr(locale, MessageId::ExtensionsGroupServers).into_owned(),
+                items,
+            })
+            .into_iter()
+            .collect(),
+        problem: (configured.is_none() && app.mcp_configured_count > total).then(|| {
+            localize(
+                locale,
+                MessageId::ExtensionsMcpRefresh,
+                &[("count", &app.mcp_configured_count.to_string())],
+            )
+        }),
     }
 }
 
@@ -933,18 +1119,30 @@ impl ExtensionsView {
             (self.selected[index] as isize + delta).rem_euclid(len as isize) as usize;
     }
 
-    fn activate_selected(&mut self) {
+    fn activate_selected(&mut self) -> ViewAction {
         let selected = self.selected[self.active_tab.index()];
-        let group = match self.visible_entries().get(selected).copied() {
-            Some(VisibleEntry::Group(group)) => Some(group.clone()),
-            _ => None,
-        };
-        if let Some(group) = group {
-            let key = self.fold_key(&group);
-            if !self.folded_groups.remove(&key) {
-                self.folded_groups.insert(key);
+        match self.visible_entries().get(selected).copied() {
+            Some(VisibleEntry::Group(group)) => {
+                let group = group.clone();
+                let key = self.fold_key(&group);
+                if !self.folded_groups.remove(&key) {
+                    self.folded_groups.insert(key);
+                }
+                self.clamp_selection();
+                ViewAction::None
             }
-            self.clamp_selection();
+            Some(VisibleEntry::Item(_, item)) => item
+                .action
+                .as_ref()
+                .and_then(ExtensionAction::command)
+                .map_or(ViewAction::None, |command| {
+                    ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                        action: CommandPaletteAction::ExecuteCommand {
+                            command: command.to_string(),
+                        },
+                    })
+                }),
+            _ => ViewAction::None,
         }
     }
 
@@ -962,7 +1160,12 @@ impl ExtensionsView {
                 &[("count", &group.items.len().to_string())],
             ),
             Some(VisibleEntry::Item(_, item)) => {
-                format!("{} · {} · {}", item.label, item.state, item.detail)
+                let action = item
+                    .action
+                    .as_ref()
+                    .map(|action| format!(" · {}", action.label()))
+                    .unwrap_or_default();
+                format!("{} · {}{action} · {}", item.label, item.state, item.detail)
             }
             Some(VisibleEntry::Problem(problem)) => problem.to_string(),
             Some(VisibleEntry::Empty) | None => {
@@ -982,6 +1185,10 @@ fn item_matches(item: &ExtensionItem, query: &str) -> bool {
         || item.description.to_lowercase().contains(query)
         || item.state.to_lowercase().contains(query)
         || item.detail.to_lowercase().contains(query)
+        || item
+            .action
+            .as_ref()
+            .is_some_and(|action| action.label().to_lowercase().contains(query))
 }
 
 impl ModalView for ExtensionsView {
@@ -1059,8 +1266,7 @@ impl ModalView for ExtensionsView {
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.focus = ExtensionsFocus::List;
-                self.activate_selected();
-                ViewAction::None
+                self.activate_selected()
             }
             _ => ViewAction::None,
         }
@@ -1099,7 +1305,7 @@ impl ModalView for ExtensionsView {
             drop(hits);
             self.focus = ExtensionsFocus::List;
             self.selected[self.active_tab.index()] = row;
-            self.activate_selected();
+            return self.activate_selected();
         }
         ViewAction::None
     }
@@ -1229,10 +1435,18 @@ impl ModalView for ExtensionsView {
                     )
                 }
                 VisibleEntry::Item(_, item) => {
+                    let action = item
+                        .action
+                        .as_ref()
+                        .map(|action| format!("[{}] ", action.label()))
+                        .unwrap_or_default();
                     if spacious && !item.description.is_empty() {
-                        format!("  {} [{}] — {}", item.label, item.state, item.description)
+                        format!(
+                            "  {action}{} [{}] — {}",
+                            item.label, item.state, item.description
+                        )
                     } else {
-                        format!("  {} [{}]", item.label, item.state)
+                        format!("  {action}{} [{}]", item.label, item.state)
                     }
                 }
                 VisibleEntry::Problem(problem) => format!("! {problem}"),
@@ -1267,11 +1481,21 @@ impl ModalView for ExtensionsView {
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
             super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
+        let enter_label = match entries.get(selected).copied() {
+            Some(VisibleEntry::Item(_, item)) => item
+                .action
+                .as_ref()
+                .map(|action| action.label().to_string())
+                .unwrap_or_else(|| {
+                    tr(self.locale, MessageId::AutomationActionInspect).into_owned()
+                }),
+            _ => tr(self.locale, MessageId::ExtensionsActionFold).into_owned(),
+        };
         let full_hints = [
             super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionFocus)),
             super::ActionHint::new("[ ]", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("↑↓", tr(self.locale, MessageId::LaunchHintMove)),
-            super::ActionHint::new("Enter", tr(self.locale, MessageId::ExtensionsActionFold)),
+            super::ActionHint::new("Enter", enter_label),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
             super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
@@ -1295,8 +1519,12 @@ impl ModalView for ExtensionsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::mcp::{McpServerCapabilityMetadata, McpServerSnapshot};
+    use crate::tui::app::TuiOptions;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     fn item(id: &str, label: &str, description: &str) -> ExtensionItem {
         ExtensionItem {
@@ -1305,6 +1533,7 @@ mod tests {
             description: description.into(),
             state: "ready".into(),
             detail: format!("detail-{id}"),
+            action: None,
         }
     }
 
@@ -1346,6 +1575,39 @@ mod tests {
             .collect()
     }
 
+    fn test_app(workspace: &std::path::Path) -> App {
+        let mut app = App::new(
+            TuiOptions {
+                use_alt_screen: false,
+                max_subagents: 2,
+                ..crate::test_support::test_tui_options(PathBuf::from(workspace))
+            },
+            &Config::default(),
+        );
+        app.plugin_registry = std::sync::Arc::new(crate::plugins::PluginRegistry::empty(workspace));
+        app.mcp_config_path = workspace.join("mcp.json");
+        app
+    }
+
+    fn mcp_server(name: &str) -> McpServerSnapshot {
+        McpServerSnapshot {
+            name: name.into(),
+            enabled: true,
+            required: false,
+            transport: "stdio".into(),
+            command_or_url: "omitted".into(),
+            connect_timeout: 10,
+            execute_timeout: 60,
+            read_timeout: 120,
+            connected: false,
+            error: None,
+            capability_metadata: McpServerCapabilityMetadata::NotObserved,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
     struct ViewWidget<'a>(&'a ExtensionsView);
 
     impl Widget for ViewWidget<'_> {
@@ -1380,6 +1642,133 @@ mod tests {
 
         assert!(view.folded_groups.contains("1:recommended"));
         assert_eq!(view.visible_entries().len(), 3);
+    }
+
+    #[test]
+    fn marketplace_enter_emits_existing_command_controller_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut view = ExtensionsView::new(&app, ExtensionsTab::Marketplace);
+        view.selected[ExtensionsTab::Marketplace.index()] = view
+            .visible_entries()
+            .iter()
+            .position(|entry| {
+                matches!(entry, VisibleEntry::Item(_, item) if item.id == "playwright-browser")
+            })
+            .unwrap();
+
+        let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command }
+            }) if command == "/mcp add recommended playwright"
+        ));
+    }
+
+    #[test]
+    fn marketplace_mouse_click_emits_the_same_existing_command_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = test_app(temp.path());
+        let mut view = ExtensionsView::new(&app, ExtensionsTab::Marketplace);
+        let target = view
+            .visible_entries()
+            .iter()
+            .position(|entry| {
+                matches!(entry, VisibleEntry::Item(_, item) if item.id == "playwright-browser")
+            })
+            .unwrap();
+        let rendered = render_text(&view, 100, 24);
+        assert!(rendered.contains("[add] Playwright Browser"), "{rendered}");
+        let rect = view
+            .hits
+            .borrow()
+            .rows
+            .iter()
+            .find_map(|(rect, row)| (*row == target).then_some(*rect))
+            .unwrap();
+
+        let action = view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command }
+            }) if command == "/mcp add recommended playwright"
+        ));
+    }
+
+    #[test]
+    fn recommendations_are_state_aware_without_inventing_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("mcp.json"),
+            r#"{"mcpServers":{"playwright":{"command":"npx","enabled":false},"chrome-devtools":{"command":"npx","enabled":true}}}"#,
+        )
+        .unwrap();
+        let app = test_app(temp.path());
+
+        let snapshot = ExtensionsSnapshot::from_app(&app);
+        let rows = &snapshot.tab(ExtensionsTab::Marketplace).groups[0].items;
+        let playwright = rows
+            .iter()
+            .find(|row| row.id == "playwright-browser")
+            .unwrap();
+        let chrome = rows.iter().find(|row| row.id == "chrome-devtools").unwrap();
+        let cua = rows
+            .iter()
+            .find(|row| row.id == "cua-computer-use")
+            .unwrap();
+        let browser_use = rows.iter().find(|row| row.id == "browser-use").unwrap();
+
+        assert!(matches!(
+            playwright.action.as_ref(),
+            Some(ExtensionAction::Command { command, .. }) if command == "/mcp enable playwright"
+        ));
+        assert!(matches!(
+            chrome.action,
+            Some(ExtensionAction::Status { .. })
+        ));
+        assert!(matches!(
+            cua.action.as_ref(),
+            Some(ExtensionAction::Command { command, .. }) if command == "/mcp add recommended cua"
+        ));
+        assert!(matches!(
+            browser_use.action,
+            Some(ExtensionAction::Status { .. })
+        ));
+        assert_eq!(browser_use.action.as_ref().unwrap().label(), "unavailable");
+    }
+
+    #[test]
+    fn six_configured_servers_render_six_rows_even_with_two_row_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("mcp.json"),
+            r#"{"mcpServers":{"alpha":{"command":"true"},"beta":{"command":"true"},"gamma":{"command":"true"},"delta":{"command":"true"},"epsilon":{"command":"true"},"zeta":{"command":"true"}}}"#,
+        )
+        .unwrap();
+        let mut app = test_app(temp.path());
+        app.mcp_configured_count = 6;
+        app.mcp_snapshot = Some(crate::mcp::McpManagerSnapshot {
+            config_path: app.mcp_config_path.clone(),
+            config_exists: true,
+            reload_required: false,
+            servers: vec![mcp_server("alpha"), mcp_server("beta")],
+        });
+
+        let snapshot = ExtensionsSnapshot::from_app(&app);
+        let groups = &snapshot.tab(ExtensionsTab::Mcp).groups;
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].items.len(), 6);
+        assert!(groups[0].items.iter().any(|item| item.id == "zeta"));
     }
 
     #[test]
@@ -1419,6 +1808,16 @@ mod tests {
         assert!(text.contains("Browser Pack"), "{text}");
         assert!(text.contains("Esc"), "{text}");
         assert!(!text.contains("controls a browser"), "{text}");
+    }
+
+    #[test]
+    fn compact_marketplace_keeps_the_action_before_truncating_product_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = test_app(temp.path());
+        let view = ExtensionsView::new(&app, ExtensionsTab::Marketplace);
+        let text = render_text(&view, 40, 12);
+
+        assert!(text.contains("[add] Playwright Browser"), "{text}");
     }
 
     #[test]
