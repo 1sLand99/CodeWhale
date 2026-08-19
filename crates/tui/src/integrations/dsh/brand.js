@@ -11,8 +11,8 @@ function CodewhaleBrand() {
 		"}" +
 		"#codewhale-brand-mark{" +
 		"display:grid;place-items:center;width:34px;height:34px;flex:0 0 auto;border-radius:10px;background:#03070d;box-shadow:0 8px 22px rgba(0,0,0,.42);" +
-		"#codewhale-brand-mark svg{display:block;width:24px;height:24px;}" +
 		"}" +
+		"#codewhale-brand-mark svg{display:block;width:24px;height:24px;}" +
 		"#codewhale-brand-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:5px;}" +
 		"#codewhale-brand-kicker{display:block;color:var(--dsw-alias-state-business-primary,#f6c453);font-size:9px;font-weight:800;letter-spacing:2.1px;white-space:nowrap;}" +
 		"#codewhale-brand-name{display:block;color:var(--dsw-alias-label-primary,#f6f2e8);font-size:15px;font-weight:850;letter-spacing:1.7px;white-space:nowrap;}" +

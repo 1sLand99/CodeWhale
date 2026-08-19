@@ -748,6 +748,72 @@ fn skin_flag_does_not_change_the_patch_overlay_bytes() {
 }
 
 #[test]
+fn brand_lockup_css_rules_are_not_accidentally_nested() {
+    // The Signal Current mark's `svg` rule was authored *inside* the
+    // `#codewhale-brand-mark { ... }` block. CSS nesting resolves a bare
+    // nested selector against its parent, so `#codewhale-brand-mark svg`
+    // nested under `#codewhale-brand-mark` means
+    // "#codewhale-brand-mark #codewhale-brand-mark svg" — which matches
+    // nothing, and the mark silently fell back to its inline width/height
+    // attributes. Brace depth is the cheap invariant that catches it.
+    let js = skin::bundle_client_js(true);
+    let css_start = js
+        .find("#codewhale-brand-lockup{")
+        .expect("brand lockup css block");
+    // Walk only the concatenated CSS string literals for the brand block.
+    let css_region = &js[css_start..];
+    let end = css_region
+        .find("return React.createElement(")
+        .unwrap_or(css_region.len());
+    let css_region = &css_region[..end];
+
+    let mut depth = 0i32;
+    let mut max_depth = 0i32;
+    for ch in css_region.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            panic!("unbalanced brace in brand lockup css");
+        }
+    }
+    assert_eq!(depth, 0, "brand lockup css must close every rule it opens");
+    // A media query is the only legitimate nesting level in this sheet.
+    assert!(
+        max_depth <= 2,
+        "brand lockup css nests {max_depth} deep; only @media may nest, \
+         so a selector was authored inside a declaration block"
+    );
+
+    // The mark's own sizing rule must be a top-level rule, not nested: it is
+    // what makes the inline SVG a block box inside the grid cell. In the
+    // emitted CSS that means it is preceded by a closing brace, never by a
+    // declaration.
+    let marker = "#codewhale-brand-mark svg{display:block;width:24px;height:24px;}";
+    let at = css_region
+        .find(marker)
+        .expect("the mark's svg sizing rule must be emitted");
+    // The bundle embeds this file's JS source verbatim, so the text before the
+    // rule still carries string-concatenation punctuation. Strip that and the
+    // last meaningful CSS character must be a closing brace.
+    let preceding: String = css_region[..at]
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '"' && *c != '+')
+        .collect();
+    assert!(
+        preceding.ends_with('}'),
+        "the mark's svg rule must follow a closing brace, not sit inside a \
+         declaration block; it is preceded by: {:?}",
+        &preceding[preceding.len().saturating_sub(60)..]
+    );
+}
+
+#[test]
 fn bundle_client_js_is_deterministic_override_tokens_and_not_a_stylesheet() {
     let a = skin::bundle_client_js(true);
     let b = skin::bundle_client_js(true);
