@@ -808,8 +808,13 @@ window it cannot justify — it falls back to a conservative value, labels it
 - `auto_compact` (settings.toml, on/off): turns automatic compaction off
   entirely; `/compact` and Ctrl+L stay available.
 - `CODEWHALE_MAX_OUTPUT_TOKENS` (environment variable; legacy alias
-  `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap, which is
-  otherwise derived from the window. There is no `max_output_tokens` key in
+  `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap. Without an
+  override, Codewhale starts at the safe `65536` request cap and intersects it
+  with any smaller documented model or route ceiling; a catalog `max_output`
+  such as DeepSeek V4's 384K remains a capability ceiling, not the amount every
+  response requests. Explicit overrides are preserved within the resolved
+  route context window, and preflight/emergency budgeting reserves the same
+  effective value on routes below 500K. There is no `max_output_tokens` key in
   `config.toml`.
 
 See [Settings File](#settings-file-persistent-ui-preferences) for the
@@ -1687,7 +1692,7 @@ separate:
 | Quantity | Meaning | Allowed to drive |
 |---|---|---|
 | Active request input estimate | Conservative estimate of the next request's live system prompt and transcript payload. | Header/footer context percent, auto-compaction trigger, opt-in Flash seam trigger, and emergency overflow preflight. |
-| Reserved response headroom | The internal turn budget plus safety headroom. v0.8.16 keeps normal turns at `262144` reserved output tokens and adds `1024` safety tokens for context-window checks, even though V4 capability metadata reports the official `384000` max output. | Emergency overflow budget checks only. |
+| Reserved response headroom | The effective request cap plus `1024` safety tokens on routes below 500K. Normal no-override requests start at `65536`; a smaller route/provider ceiling narrows that value, and an explicit output override raises it only within the resolved route window. Large routes retain the conservative `262144` internal reasoning allowance, but never reserve less than the value that can reach the wire. | Emergency overflow budget checks only. |
 | Cumulative API usage | Provider-reported input plus output tokens summed across completed API calls; multi-tool turns may count the same stable prefix more than once. | Session usage and approximate cost telemetry only. |
 | Prompt cache hit/miss | Provider cache telemetry for the most recent call when available. | Cache-hit display and cost estimation only; never compaction or seam triggers. |
 | Context percent | Active request input estimate divided by the model context window. | Display only; it mirrors the active-input basis used by context safeguards. |

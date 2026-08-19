@@ -570,9 +570,11 @@ a published OpenAI-compatible host ship here (#5350).
 - Sub-agent details show the resolved model, fleet role, and type. Labels
   use the session/role name instead of a generic Agent N (#5371, #5287).
 
-- Documented catalogue output ceilings (DeepSeek V4 384K) are honored on
-  the request. A clean output-limit stop continues the turn instead of
-  killing it (#5373).
+- Documented catalogue output ceilings (including DeepSeek V4's 384K maximum)
+  remain authoritative bounds, while ordinary requests start at a safe 64K
+  cap and explicit overrides can raise it within the resolved route window. A
+  clean output-limit stop continues the turn instead of killing it (#5373,
+  #5516, #5518). Thanks @sfdzhmr and @hxfhd for the route evidence.
 
 - Ollama Cloud is a first-class hosted provider (`/provider ollama-cloud`)
   on the official OpenAI-compatible `https://ollama.com/v1` route. Local

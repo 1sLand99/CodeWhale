@@ -13704,18 +13704,56 @@ fn effective_max_output_tokens_caps_api_request_for_large_window_models() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // v4_cap and flash_cap below see the same env state.
     let _lock = lock_test_env();
-    // Hosted V4 documents a 384K output ceiling in the bundled catalogue.
-    // That raise is intentional (#5373): the generic 65K floor is only the
-    // fallback for undescribed models. Self-hosted vLLM/SGLang stay
-    // RouteDeclaredUnknown and do not inherit this number.
+    // Hosted V4 documents a 384K capability ceiling in the bundled catalogue,
+    // but a ceiling is not a safe no-config request size. The operator can
+    // still request a larger value explicitly; the automatic request starts
+    // at the ordinary 64K cap (#5516/#5518).
     let v4_cap = effective_max_output_tokens("deepseek-v4-pro");
     assert_eq!(
-        v4_cap, 384_000,
-        "hosted V4 must use the documented catalogue ceiling, got {v4_cap}"
+        v4_cap, 65_536,
+        "hosted V4 must not turn the 384K capability maximum into the default request, got {v4_cap}"
     );
 
     let flash_cap = effective_max_output_tokens("deepseek-v4-flash");
     assert_eq!(v4_cap, flash_cap);
+}
+
+#[test]
+fn reasoning_max_does_not_add_a_second_deepseek_v4_output_reservation() {
+    let _lock = lock_test_env();
+    let _codewhale = EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+    let _deepseek = EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(327_680),
+        input_tokens: None,
+        output_tokens: None,
+    };
+    let cap =
+        effective_max_output_tokens_for_route(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits));
+    let request = codewhale_core::request::prepare_primary_turn_request(
+        codewhale_core::request::PrimaryTurnRequest {
+            model: "DeepSeek-V4-Flash".to_string(),
+            messages: Vec::new(),
+            max_tokens: cap,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            reasoning_effort: Some("max".to_string()),
+        },
+    );
+    let budget = route_context_budget_for_route(
+        ApiProvider::Vllm,
+        "DeepSeek-V4-Flash",
+        Some(limits),
+        105_000,
+    )
+    .expect("max-reasoning vLLM route budget");
+
+    assert_eq!(request.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(request.max_tokens, 65_536);
+    assert_eq!(budget.output_cap_tokens, u64::from(request.max_tokens));
+    assert_eq!(budget.input_budget_ceiling, 261_120);
+    assert!(budget.available_input_tokens > 0);
 }
 
 struct ScopedDeepSeekMaxOutputTokens {

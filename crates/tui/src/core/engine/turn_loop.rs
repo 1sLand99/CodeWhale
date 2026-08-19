@@ -782,14 +782,42 @@ impl Engine {
                 }
             }
 
-            if let Some(input_budget) = context_input_budget_for_route(
+            let estimated_input = self.estimated_input_tokens();
+            if let Some(budget) = route_context_budget_for_route(
                 self.api_provider,
                 &self.session.model,
                 self.active_route_limits,
-                0,
+                estimated_input,
             ) {
-                let estimated_input = self.estimated_input_tokens();
-                if estimated_input > input_budget {
+                let input_budget =
+                    usize::try_from(budget.input_budget_ceiling).unwrap_or(usize::MAX);
+                let triggered = estimated_input > input_budget;
+                let output_ceiling = crate::route_budget::output_ceiling_source(
+                    self.api_provider,
+                    &self.session.model,
+                );
+                tracing::debug!(
+                    target: "context_budget",
+                    provider = self.api_provider.as_str(),
+                    model = %self.session.model,
+                    resolved_route_window_tokens = budget.window_tokens,
+                    resolved_model_output_ceiling_tokens = ?output_ceiling.clamp_tokens(),
+                    resolved_model_output_ceiling_source = output_ceiling.as_str(),
+                    effective_request_output_cap_tokens = effective_max_output_tokens_for_route(
+                        self.api_provider,
+                        &self.session.model,
+                        self.active_route_limits,
+                    ),
+                    reserved_response_headroom_tokens = budget.output_cap_tokens,
+                    safety_headroom_tokens = crate::context_budget::CONTEXT_HEADROOM_TOKENS,
+                    estimated_input_tokens = estimated_input,
+                    input_budget_ceiling_tokens = budget.input_budget_ceiling,
+                    remaining_input_budget_tokens = budget.available_input_tokens,
+                    compaction_trigger_tokens = budget.compaction_trigger_tokens,
+                    trigger = if triggered { "preflight-token-budget" } else { "none" },
+                    "resolved route context budget"
+                );
+                if triggered {
                     if context_recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
                         let message = format!(
                             "Context remains above model limit after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts \
