@@ -919,6 +919,7 @@ mod tests {
         std::fs::write(&real_config, "api_key = \"secret_in_home\"\n").expect("write config");
 
         // Create a symlink in the workspace pointing to the credentials
+        #[cfg(unix)]
         let symlink_path = ws_tmp.path().join("fake_image.png");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_config, &symlink_path).expect("create symlink");

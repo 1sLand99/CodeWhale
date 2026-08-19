@@ -7,7 +7,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Agent,
-    #[allow(dead_code)]
     Auto,
     /// Legacy compatibility alias; resolves to [`Self::Agent`] + bypass approvals.
     Yolo,
@@ -106,7 +105,6 @@ impl AppMode {
         }
     }
 
-    #[allow(dead_code)]
     /// Description shown in help or onboarding text.
     pub fn description(self) -> &'static str {
         match self {

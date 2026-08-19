@@ -3010,6 +3010,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
     let now = std::time::Instant::now();
     let mut shell = BackgroundShell {
         id: "killed-reader".to_string(),
+        owner_session_id: "windows-test-session".to_string(),
         command: "test".to_string(),
         working_dir: std::path::PathBuf::from("."),
         status: ShellStatus::Killed,

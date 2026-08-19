@@ -364,7 +364,7 @@ impl HistoryCell {
         }
     }
 
-    #[allow(dead_code)] // retained for focused/detail renderers and direct rendering tests
+    #[cfg(test)]
     pub fn lines_with_options(
         &self,
         width: u16,
@@ -497,7 +497,6 @@ impl HistoryCell {
         (lines, reasoning_action)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn lines_with_copy_metadata(
         &self,
         width: u16,
@@ -953,7 +952,7 @@ impl ExecCell {
             && self.interaction.is_none()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn render(
         &self,
         width: u16,
