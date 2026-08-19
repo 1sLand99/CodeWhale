@@ -273,13 +273,7 @@ pub fn render_agent_roster(rows: &[AgentRosterRow], parent_label: &str) -> Strin
             continue;
         }
         out.push_str(&render_row(row, rows, 1));
-        for child in children_by_parent
-            .get(row.run_id.as_str())
-            .into_iter()
-            .flatten()
-        {
-            out.push_str(&render_row(child, rows, 2));
-        }
+        append_descendants(&mut out, row.run_id.as_str(), &children_by_parent, rows, 2);
     }
     out.push_str(&render_totals(rows));
     out
@@ -314,6 +308,25 @@ fn render_totals(rows: &[AgentRosterRow]) -> String {
         or_dash(input.map(|t| format!("↓ {}", format_tokens(t)))),
         or_dash(output.map(|t| format!("↑ {}", format_tokens(t)))),
     )
+}
+
+fn append_descendants(
+    out: &mut String,
+    parent_run_id: &str,
+    children_by_parent: &BTreeMap<&str, Vec<&AgentRosterRow>>,
+    all: &[AgentRosterRow],
+    depth: usize,
+) {
+    for child in children_by_parent.get(parent_run_id).into_iter().flatten() {
+        out.push_str(&render_row(child, all, depth));
+        append_descendants(
+            out,
+            child.run_id.as_str(),
+            children_by_parent,
+            all,
+            depth + 1,
+        );
+    }
 }
 
 fn render_row(row: &AgentRosterRow, all: &[AgentRosterRow], depth: usize) -> String {

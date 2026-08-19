@@ -240,8 +240,6 @@ pub fn set_live_session(session_id: Option<&str>) {
     }
 }
 
-/// Is this session currently owned by an in-process interactive surface?
-#[must_use]
 /// The canonical session-id shape: a hyphenated UUID, `8-4-4-4-12` hex.
 ///
 /// Used to gate directory removal, so it is deliberately exact rather than
@@ -258,6 +256,11 @@ fn is_session_uuid(name: &str) -> bool {
         .all(|(group, width)| group.len() == width && group.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// Is this session currently owned by **this process's** interactive surface?
+///
+/// The registry is process-local. Reclamation must not treat a missing entry
+/// here as proof that no other Codewhale process still owns the directory.
+#[must_use]
 pub fn is_live_session(session_id: &str) -> bool {
     live_sessions()
         .read()
@@ -1448,8 +1451,10 @@ impl SessionManager {
     /// - `checkpoints/<id>.json` does not exist — a crashed session's evidence
     ///   must outlive its missing document, since that is exactly what
     ///   recovery reads;
-    /// - the session is not live in this or any other process
-    ///   (`is_live_session`).
+    /// - the session is not live in *this* process (`is_live_session`).
+    ///   That check is process-local; a second Codewhale sharing `$HOME`
+    ///   is not visible here, so reclaim also requires the session
+    ///   document and checkpoint to be gone.
     ///
     /// Best effort throughout: a failure to read the directory or remove an
     /// entry is ignored rather than failing the save that triggered it.

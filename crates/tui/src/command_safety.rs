@@ -1341,11 +1341,7 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
         }
 
         if ARGV_PASSTHROUGH_WRAPPERS.contains(&word.as_str()) {
-            let rest: Vec<String> = current[start + 1..]
-                .iter()
-                .skip_while(|t| t.starts_with('-'))
-                .cloned()
-                .collect();
+            let rest = skip_passthrough_prefix(&word, &current[start + 1..]);
             if rest.is_empty() {
                 return Some(current);
             }
@@ -1359,6 +1355,28 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
         return Some(normalized);
     }
     None
+}
+
+/// `timeout 10 rm`, `nice -n 19 rm`, and `ionice -c 3 rm` put a numeric
+/// operand *after* the flags. Skipping only `starts_with('-')` left that
+/// operand as the "command" and the destructive `rm` unclassified.
+fn skip_passthrough_prefix(wrapper: &str, args: &[String]) -> Vec<String> {
+    let mut i = 0;
+    while i < args.len() && args[i].starts_with('-') {
+        i += 1;
+    }
+    if matches!(wrapper, "timeout" | "nice" | "ionice")
+        && i < args.len()
+        && looks_like_numeric_operand(&args[i])
+    {
+        i += 1;
+    }
+    args[i..].to_vec()
+}
+
+fn looks_like_numeric_operand(token: &str) -> bool {
+    let trimmed = token.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit() || b == b'.')
 }
 
 fn primary_token_index(tokens: &[String]) -> Option<usize> {
@@ -1776,6 +1794,10 @@ mod destructive_composition_tests {
             r#"/bin/rm -rf /"#,
             r#"env FOO=1 sudo /usr/bin/rm -rf ~"#,
             r#"nohup rm -rf /"#,
+            r#"timeout 10 rm -rf /"#,
+            r#"timeout --foreground 5s rm -rf ~"#,
+            r#"nice -n 19 rm -rf /"#,
+            r#"ionice -c 3 rm -rf $HOME"#,
         ] {
             assert_eq!(
                 analyze_command(command).level,

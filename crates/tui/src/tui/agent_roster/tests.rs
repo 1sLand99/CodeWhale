@@ -256,6 +256,34 @@ fn a_workflow_parent_aggregates_its_children_as_n_of_m_done() {
 }
 
 #[test]
+fn a_grandchild_is_rendered_under_its_parent_not_dropped() {
+    let mut parent = record("workflow", 1_000);
+    parent.status = AgentWorkerStatus::Running;
+    let parent_run = parent.spec.run_id.clone();
+    let mut child = record("builder", 2_000);
+    child.parent_run_id = Some(parent_run.clone());
+    child.spec.parent_run_id = Some(parent_run);
+    child.status = AgentWorkerStatus::Running;
+    let child_run = child.spec.run_id.clone();
+    let mut grandchild = record("scout", 3_000);
+    grandchild.parent_run_id = Some(child_run);
+    grandchild.spec.parent_run_id = Some(child.spec.run_id.clone());
+    grandchild.status = AgentWorkerStatus::Running;
+
+    let rows = build_agent_roster(&[parent, child, grandchild], 9_000);
+    let text = render_agent_roster(&rows, "main");
+    assert!(
+        text.contains("scout"),
+        "a third-level agent must appear in /agents list:\n{text}"
+    );
+    assert_eq!(text.matches("scout").count(), 1, "{text}");
+    assert!(
+        text.contains("      "),
+        "a grandchild should be indented under its parent:\n{text}"
+    );
+}
+
+#[test]
 fn an_orphaned_child_still_appears_when_its_parent_is_not_in_the_roster() {
     // The parent's record can age out of the ledger before the child's does.
     let mut child = record("orphan", 2_000);
