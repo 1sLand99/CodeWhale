@@ -482,106 +482,30 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct EnvGuard {
-        home: Option<OsString>,
-        userprofile: Option<OsString>,
-        codewhale_home: Option<OsString>,
-        codewhale_config_path: Option<OsString>,
-        deepseek_config_path: Option<OsString>,
+        _home: crate::test_support::EnvVarGuard,
+        _userprofile: crate::test_support::EnvVarGuard,
+        _codewhale_home: crate::test_support::EnvVarGuard,
+        _codewhale_config_path: crate::test_support::EnvVarGuard,
+        _deepseek_config_path: crate::test_support::EnvVarGuard,
         _lock: crate::test_support::TestEnvLock,
     }
 
     impl EnvGuard {
         fn new(home: &Path) -> Self {
             let lock = crate::test_support::lock_test_env();
-            let home_str = OsString::from(home.as_os_str());
             let config_path = home.join(".deepseek").join("config.toml");
-            let config_str = OsString::from(config_path.as_os_str());
-            let home_prev = env::var_os("HOME");
-            let userprofile_prev = env::var_os("USERPROFILE");
-            let codewhale_home_prev = env::var_os("CODEWHALE_HOME");
-            let codewhale_config_prev = env::var_os("CODEWHALE_CONFIG_PATH");
-            let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
-
-            // Safety: test-only environment mutation guarded by process-wide mutex.
-            unsafe {
-                env::set_var("HOME", &home_str);
-                env::set_var("USERPROFILE", &home_str);
-                env::remove_var("CODEWHALE_HOME");
-                env::remove_var("CODEWHALE_CONFIG_PATH");
-                env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
-            }
-
             Self {
-                home: home_prev,
-                userprofile: userprofile_prev,
-                codewhale_home: codewhale_home_prev,
-                codewhale_config_path: codewhale_config_prev,
-                deepseek_config_path: deepseek_config_prev,
+                _home: crate::test_support::EnvVarGuard::set("HOME", home),
+                _userprofile: crate::test_support::EnvVarGuard::set("USERPROFILE", home),
+                _codewhale_home: crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME"),
+                _codewhale_config_path: crate::test_support::EnvVarGuard::remove(
+                    "CODEWHALE_CONFIG_PATH",
+                ),
+                _deepseek_config_path: crate::test_support::EnvVarGuard::set(
+                    "DEEPSEEK_CONFIG_PATH",
+                    &config_path,
+                ),
                 _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(value) = self.home.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("HOME", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("HOME");
-                }
-            }
-
-            if let Some(value) = self.userprofile.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("USERPROFILE", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("USERPROFILE");
-                }
-            }
-
-            if let Some(value) = self.codewhale_home.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("CODEWHALE_HOME", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("CODEWHALE_HOME");
-                }
-            }
-
-            if let Some(value) = self.codewhale_config_path.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("CODEWHALE_CONFIG_PATH", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("CODEWHALE_CONFIG_PATH");
-                }
-            }
-
-            if let Some(value) = self.deepseek_config_path.take() {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::set_var("DEEPSEEK_CONFIG_PATH", value);
-                }
-            } else {
-                // Safety: test-only environment mutation guarded by a global mutex.
-                unsafe {
-                    env::remove_var("DEEPSEEK_CONFIG_PATH");
-                }
             }
         }
     }

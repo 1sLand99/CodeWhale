@@ -26,7 +26,6 @@ use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -1187,15 +1186,16 @@ impl ConfigPathEnvGuard {
 
 struct SettingsHomeGuard {
     _tmp: TempDir,
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_codewhale_home: Option<OsString>,
-    previous_deepseek_config_path: Option<OsString>,
-    previous_codewhale_provider: Option<OsString>,
-    previous_deepseek_provider: Option<OsString>,
-    previous_xdg_config_home: Option<OsString>,
-    previous_appdata: Option<OsString>,
-    previous_localappdata: Option<OsString>,
+    _home: crate::test_support::EnvVarGuard,
+    _userprofile: crate::test_support::EnvVarGuard,
+    _codewhale_home: crate::test_support::EnvVarGuard,
+    _codewhale_config_path: crate::test_support::EnvVarGuard,
+    _deepseek_config_path: crate::test_support::EnvVarGuard,
+    _codewhale_provider: crate::test_support::EnvVarGuard,
+    _deepseek_provider: crate::test_support::EnvVarGuard,
+    _xdg_config_home: crate::test_support::EnvVarGuard,
+    _appdata: crate::test_support::EnvVarGuard,
+    _localappdata: crate::test_support::EnvVarGuard,
     _lock: crate::test_support::TestEnvLock,
 }
 
@@ -1203,71 +1203,35 @@ impl SettingsHomeGuard {
     fn new() -> Self {
         let lock = crate::test_support::lock_test_env();
         let tmp = TempDir::new().expect("settings tempdir");
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_codewhale_home = std::env::var_os("CODEWHALE_HOME");
-        let previous_deepseek_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        let previous_codewhale_provider = std::env::var_os("CODEWHALE_PROVIDER");
-        let previous_deepseek_provider = std::env::var_os("DEEPSEEK_PROVIDER");
-        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let previous_appdata = std::env::var_os("APPDATA");
-        let previous_localappdata = std::env::var_os("LOCALAPPDATA");
         let codewhale_home = tmp.path().join(".codewhale");
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::set_var("USERPROFILE", tmp.path());
-            std::env::set_var("CODEWHALE_HOME", &codewhale_home);
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", codewhale_home.join("config.toml"));
-            std::env::remove_var("CODEWHALE_PROVIDER");
-            std::env::remove_var("DEEPSEEK_PROVIDER");
-            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("xdg-config"));
-            std::env::set_var("APPDATA", tmp.path().join("appdata"));
-            std::env::set_var("LOCALAPPDATA", tmp.path().join("localappdata"));
-        }
         Self {
+            _home: crate::test_support::EnvVarGuard::set("HOME", tmp.path()),
+            _userprofile: crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path()),
+            _codewhale_home: crate::test_support::EnvVarGuard::set(
+                "CODEWHALE_HOME",
+                &codewhale_home,
+            ),
+            _codewhale_config_path: crate::test_support::EnvVarGuard::remove(
+                "CODEWHALE_CONFIG_PATH",
+            ),
+            _deepseek_config_path: crate::test_support::EnvVarGuard::set(
+                "DEEPSEEK_CONFIG_PATH",
+                codewhale_home.join("config.toml"),
+            ),
+            _codewhale_provider: crate::test_support::EnvVarGuard::remove("CODEWHALE_PROVIDER"),
+            _deepseek_provider: crate::test_support::EnvVarGuard::remove("DEEPSEEK_PROVIDER"),
+            _xdg_config_home: crate::test_support::EnvVarGuard::set(
+                "XDG_CONFIG_HOME",
+                tmp.path().join("xdg-config"),
+            ),
+            _appdata: crate::test_support::EnvVarGuard::set("APPDATA", tmp.path().join("appdata")),
+            _localappdata: crate::test_support::EnvVarGuard::set(
+                "LOCALAPPDATA",
+                tmp.path().join("localappdata"),
+            ),
             _tmp: tmp,
-            previous_home,
-            previous_userprofile,
-            previous_codewhale_home,
-            previous_deepseek_config_path,
-            previous_codewhale_provider,
-            previous_deepseek_provider,
-            previous_xdg_config_home,
-            previous_appdata,
-            previous_localappdata,
             _lock: lock,
         }
-    }
-}
-
-impl Drop for SettingsHomeGuard {
-    fn drop(&mut self) {
-        fn restore(key: &str, previous: Option<OsString>) {
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                match previous {
-                    Some(previous) => std::env::set_var(key, previous),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-
-        restore("HOME", self.previous_home.take());
-        restore("USERPROFILE", self.previous_userprofile.take());
-        restore("CODEWHALE_HOME", self.previous_codewhale_home.take());
-        restore(
-            "DEEPSEEK_CONFIG_PATH",
-            self.previous_deepseek_config_path.take(),
-        );
-        restore(
-            "CODEWHALE_PROVIDER",
-            self.previous_codewhale_provider.take(),
-        );
-        restore("DEEPSEEK_PROVIDER", self.previous_deepseek_provider.take());
-        restore("XDG_CONFIG_HOME", self.previous_xdg_config_home.take());
-        restore("APPDATA", self.previous_appdata.take());
-        restore("LOCALAPPDATA", self.previous_localappdata.take());
     }
 }
 

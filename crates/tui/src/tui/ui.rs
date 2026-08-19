@@ -3185,12 +3185,12 @@ mod provider_key_validation_tests {
     use super::*;
     use crate::core::engine::mock_engine_handle;
     use ratatui::{buffer::Buffer, layout::Rect};
-    use std::ffi::OsString;
     use tempfile::TempDir;
 
     struct ConfigPathEnvGuard {
         _tmp: TempDir,
-        previous: Option<OsString>,
+        _codewhale_config_path: crate::test_support::EnvVarGuard,
+        _deepseek_config_path: crate::test_support::EnvVarGuard,
         _lock: crate::test_support::TestEnvLock,
     }
 
@@ -3201,35 +3201,24 @@ mod provider_key_validation_tests {
             let config_path = tmp.path().join(".codewhale").join("config.toml");
             std::fs::create_dir_all(config_path.parent().expect("config parent"))
                 .expect("config dir");
-            let previous = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-            }
             Self {
                 _tmp: tmp,
-                previous,
+                _codewhale_config_path: crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_CONFIG_PATH",
+                    &config_path,
+                ),
+                _deepseek_config_path: crate::test_support::EnvVarGuard::set(
+                    "DEEPSEEK_CONFIG_PATH",
+                    &config_path,
+                ),
                 _lock: lock,
             }
         }
 
         fn config_path(&self) -> PathBuf {
-            std::env::var_os("DEEPSEEK_CONFIG_PATH")
+            std::env::var_os("CODEWHALE_CONFIG_PATH")
                 .map(PathBuf::from)
                 .expect("config path set")
-        }
-    }
-
-    impl Drop for ConfigPathEnvGuard {
-        fn drop(&mut self) {
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                if let Some(previous) = self.previous.take() {
-                    std::env::set_var("DEEPSEEK_CONFIG_PATH", previous);
-                } else {
-                    std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-                }
-            }
         }
     }
 

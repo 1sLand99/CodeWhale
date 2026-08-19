@@ -17,9 +17,16 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+async fn serialize_persistent_service_tests() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -325,6 +332,7 @@ const SERVICE_COMMAND: &str = "echo $$ > service.pid; exec sleep 600";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn successful_exec_releases_persisted_service() {
+    let _serial = serialize_persistent_service_tests().await;
     let server = start_mock_llm(SERVICE_COMMAND, final_answer_sse(), None).await;
     let workspace = TempDir::new().expect("workspace tempdir");
     let home = TempDir::new().expect("home tempdir");
@@ -377,6 +385,7 @@ async fn successful_exec_releases_persisted_service() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_exec_kills_pending_service_and_exits_nonzero() {
+    let _serial = serialize_persistent_service_tests().await;
     let server = start_mock_llm(SERVICE_COMMAND, incomplete_answer_sse(), None).await;
     let workspace = TempDir::new().expect("workspace tempdir");
     let home = TempDir::new().expect("home tempdir");
@@ -415,6 +424,7 @@ async fn failed_exec_kills_pending_service_and_exits_nonzero() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn terminating_signal_kills_pending_service_and_exits_nonzero() {
+    let _serial = serialize_persistent_service_tests().await;
     // Hold the second model turn open long past the signal.
     let server = start_mock_llm(
         SERVICE_COMMAND,

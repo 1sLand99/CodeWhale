@@ -48,6 +48,9 @@ abort under load.
   proceeds; unpersistable evidence blocks the tool; resume reconstructs
   closed and interrupted approvals (#5360).
 - `test(tui): break the LazyLock/env-barrier deadlock in the test harness`.
+- `test(tui): do not treat lock_test_env as a license to read a populated
+  ~/.codewhale/config.toml` — config paths now require the same EnvVarGuard
+  seal settings already used (#5355, #5359).
 - `ci: give test threads the 8 MiB stack they need` — the lib suite aborted
   with SIGABRT under load on the default 2 MiB stack.
 - YOLO entry points honor a locked approval policy: `--yolo`, `/mode yolo`,

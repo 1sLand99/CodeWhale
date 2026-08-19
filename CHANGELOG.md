@@ -68,6 +68,11 @@ abort under load.
   gets a verdict instead of a cancelled pending run. A hermetic Safety
   gate job runs authorization tests in under 15 minutes (test bankruptcy
   restructuring — no tests deleted).
+- Config-fixture tests no longer honor `lock_test_env` as a license to
+  read a populated `~/.codewhale/config.toml`; they need an `EnvVarGuard`
+  like settings already did. Safety-gate and CNB workspace tests pin a
+  hermetic `CODEWHALE_HOME`. `exec_persistent_service` is serialized in
+  nextest and inside the cargo-test binary instead of dropped (#5355).
 - Short CLI no longer waits up to three seconds for a telemetry POST on
   exit; `session_end` is recorded and the buffer ships on the next
   interactive session.

@@ -254,9 +254,12 @@ jobs:
       - name: Hermetic safety and authorization tests
         env:
           HOME: ${{ runner.temp }}/cw-hermetic-home
+          USERPROFILE: ${{ runner.temp }}/cw-hermetic-home
+          CODEWHALE_HOME: ${{ runner.temp }}/cw-hermetic-home/.codewhale
           RUST_MIN_STACK: "8388608"
         run: |
-          mkdir -p "${HOME}"
+          mkdir -p "${HOME}" "${CODEWHALE_HOME}"
+          unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME || true
           cargo test -p codewhale-tui --lib --locked -- command_safety auto_review authority sandbox
           cargo test -p codewhale-execpolicy --locked
 

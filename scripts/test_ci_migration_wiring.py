@@ -113,6 +113,16 @@ class CiWiringTests(unittest.TestCase):
         self.assertIn("name: Safety gate", ci)
         self.assertIn("Hermetic safety and authorization tests", ci)
 
+    def test_safety_gate_is_hermetic_for_config_home(self) -> None:
+        ci = load_ci()
+        start = ci.index("Hermetic safety and authorization tests")
+        next_step = ci.index("- name:", start + 1)
+        block = ci[start:next_step]
+        self.assertIn("CODEWHALE_HOME:", block)
+        self.assertIn("cw-hermetic-home", block)
+        self.assertIn("unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME", block)
+        self.assertIn("command_safety auto_review authority sandbox", block)
+
     def test_valid_wiring_passes_all_assertions(self) -> None:
         # The live workflow must satisfy every structural invariant above.
         ci = load_ci()

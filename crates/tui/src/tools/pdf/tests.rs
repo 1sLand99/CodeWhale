@@ -51,7 +51,10 @@ async fn shared_adapter_forwards_page_window_and_returns_stdout() {
     let (temporary, binary) = executable_script(
         "#!/bin/sh\nprintf 'args:%s\\n' \"$*\"\nprintf 'page one\\fpage two\\n'\n",
     );
-    let request = PdfTextCommand::test(binary.as_os_str(), Duration::from_secs(1), None);
+    // Success-path budget, not a tightness proof. Under a loaded cargo-test
+    // process a 1s spawn of `#!/bin/sh` timed out as TimedOut (#5355). The
+    // neighboring test still uses 50ms to prove the timeout path.
+    let request = PdfTextCommand::test(binary.as_os_str(), Duration::from_secs(10), None);
     let input = temporary.path().join("input with spaces.pdf");
     std::fs::write(&input, b"fixture bytes").expect("fixture");
     let text = extract_path(&input, Some((2, 4)), request)

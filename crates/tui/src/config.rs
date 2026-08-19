@@ -7471,6 +7471,16 @@ use paths::{
 pub(crate) use paths::{effective_home_dir, expand_path};
 
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
+    #[cfg(test)]
+    {
+        if !crate::test_support::guarded_environment_provides_state_paths() {
+            return vec![
+                crate::test_support::unsealed_test_state_root()
+                    .join(codewhale_config::CONFIG_FILE_NAME),
+            ];
+        }
+    }
+
     match env_config_path() {
         Ok(Some(path)) => return vec![path],
         Ok(None) => {}
@@ -7572,22 +7582,6 @@ pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<P
         return Ok(Some(expand_pathbuf(path)));
     }
 
-    #[cfg(test)]
-    {
-        let honor_guarded_environment = crate::test_support::current_thread_holds_test_env_lock();
-        crate::test_support::with_test_env_lock(|| {
-            if honor_guarded_environment {
-                try_default_config_path().map(Some)
-            } else {
-                Ok(Some(
-                    crate::test_support::isolated_test_state_root()
-                        .join(codewhale_config::CONFIG_FILE_NAME),
-                ))
-            }
-        })
-    }
-
-    #[cfg(not(test))]
     try_default_config_path().map(Some)
 }
 

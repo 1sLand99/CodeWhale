@@ -420,6 +420,30 @@ assert.match(
   /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked/,
   "CNB must serialize the memory-heavy Rust gate and preserve the workspace test stack contract",
 );
+assert.match(
+  cnbRustGates[1],
+  /export HOME="\$\{hermetic_home\}"[\s\S]*export CODEWHALE_HOME="\$\{hermetic_home\}\/\.codewhale"[\s\S]*unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME/,
+  "CNB workspace tests must not read a populated runner ~/.codewhale (#5355)",
+);
+
+const nextest = read(".config/nextest.toml");
+const integrationGroup = nextest.search(/^filter = 'binary\(integration\)'$/m);
+const telemetryGroup = nextest.indexOf(
+  "filter = 'binary(integration) & test(/^telemetry_contract::/)'",
+);
+const execGroup = nextest.indexOf(
+  "filter = 'binary(integration) & test(/^exec_persistent_service::/)'",
+);
+assert.ok(integrationGroup >= 0, "nextest must bound the integration binary");
+assert.ok(
+  telemetryGroup >= 0 && telemetryGroup < integrationGroup,
+  "telemetry-contract override must precede binary(integration); first matching group wins",
+);
+assert.ok(
+  execGroup >= 0 && execGroup < integrationGroup,
+  "exec_persistent_service override must precede binary(integration); first matching group wins",
+);
+assert.match(nextest, /exec-persistent-service = \{ max-threads = 1 \}/);
 assert.equal(
   (cnb.match(/^\s+- \*rust_workspace_gates_stage$/gm) || []).length,
   2,

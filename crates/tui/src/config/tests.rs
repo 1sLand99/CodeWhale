@@ -1463,6 +1463,13 @@ fn search_provider_resolution_ignores_invalid_env_override() {
 }
 
 struct EnvGuard {
+    // Seal path overrides through EnvVarGuard so default_config_path honors
+    // this fixture instead of the isolated test root (#5355, #5359).
+    _sealed_home: EnvVarGuard,
+    _sealed_userprofile: EnvVarGuard,
+    _sealed_codewhale_home: EnvVarGuard,
+    _sealed_codewhale_config_path: EnvVarGuard,
+    _sealed_deepseek_config_path: EnvVarGuard,
     home: Option<OsString>,
     userprofile: Option<OsString>,
     codewhale_home: Option<OsString>,
@@ -1666,13 +1673,13 @@ impl EnvGuard {
         let hf_base_url_prev = env::var_os("HF_BASE_URL");
         let huggingface_model_prev = env::var_os("HUGGINGFACE_MODEL");
         let hf_model_prev = env::var_os("HF_MODEL");
+        let sealed_home = EnvVarGuard::set("HOME", &home_str);
+        let sealed_userprofile = EnvVarGuard::set("USERPROFILE", &home_str);
+        let sealed_codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let sealed_codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let sealed_deepseek_config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_str);
         // Safety: test-only environment mutation guarded by a global mutex.
         unsafe {
-            env::set_var("HOME", &home_str);
-            env::set_var("USERPROFILE", &home_str);
-            env::remove_var("CODEWHALE_HOME");
-            env::remove_var("CODEWHALE_CONFIG_PATH");
-            env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
             env::remove_var("CODEWHALE_SECRET_BACKEND");
             env::remove_var("DEEPSEEK_SECRET_BACKEND");
             env::remove_var("DEEPSEEK_PROVIDER");
@@ -1768,6 +1775,11 @@ impl EnvGuard {
             env::remove_var("HF_MODEL");
         }
         Self {
+            _sealed_home: sealed_home,
+            _sealed_userprofile: sealed_userprofile,
+            _sealed_codewhale_home: sealed_codewhale_home,
+            _sealed_codewhale_config_path: sealed_codewhale_config_path,
+            _sealed_deepseek_config_path: sealed_deepseek_config_path,
             home: home_prev,
             userprofile: userprofile_prev,
             codewhale_home: codewhale_home_prev,
@@ -5353,8 +5365,6 @@ fn non_unicode_codewhale_home_is_preserved_by_config_owned_user_paths() -> Resul
 #[test]
 fn codewhale_config_path_env_wins_over_legacy_env() -> Result<()> {
     let _lock = lock_test_env();
-    let prev_codewhale = env::var_os("CODEWHALE_CONFIG_PATH");
-    let prev_deepseek = env::var_os("DEEPSEEK_CONFIG_PATH");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -5366,18 +5376,10 @@ fn codewhale_config_path_env_wins_over_legacy_env() -> Result<()> {
     ));
     let preferred = temp_root.join("preferred.toml");
     let legacy = temp_root.join("legacy.toml");
-
-    unsafe {
-        env::set_var("CODEWHALE_CONFIG_PATH", &preferred);
-        env::set_var("DEEPSEEK_CONFIG_PATH", &legacy);
-    }
+    let _codewhale_config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &preferred);
+    let _legacy_config = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &legacy);
 
     assert_eq!(env_config_path().unwrap().unwrap(), preferred);
-
-    unsafe {
-        EnvGuard::restore_var("CODEWHALE_CONFIG_PATH", prev_codewhale);
-        EnvGuard::restore_var("DEEPSEEK_CONFIG_PATH", prev_deepseek);
-    }
 
     Ok(())
 }

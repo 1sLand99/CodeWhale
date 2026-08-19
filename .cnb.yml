@@ -34,6 +34,15 @@
     cargo fmt --all -- --check
     cargo check --workspace --all-targets --locked
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    # Hermetic HOME so libtest's shared process cannot see a populated
+    # ~/.codewhale/config.toml (#5355 config-fixture family). Tests stay in
+    # the suite; isolation is scheduling, not deletion.
+    hermetic_home="${TMPDIR:-/tmp}/cw-cnb-hermetic-home-$$"
+    mkdir -p "${hermetic_home}/.codewhale"
+    export HOME="${hermetic_home}"
+    export USERPROFILE="${hermetic_home}"
+    export CODEWHALE_HOME="${hermetic_home}/.codewhale"
+    unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME || true
     RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked
     # Parity gates as first-class steps so drift surfaces as a named failure,
     # not a buried workspace-test entry. Mirrors release.yml's parity job.
