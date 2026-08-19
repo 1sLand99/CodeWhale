@@ -1887,6 +1887,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
     engine
         .tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_during_backpressure".to_string(),
             payload: "ready child completion".to_string(),
         })
@@ -1983,6 +1984,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     engine
         .tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_without_backpressure".to_string(),
             payload: "ready child completion".to_string(),
         })
@@ -3192,11 +3194,13 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new(engine_config, &config);
+    let owner_session_id = engine.session.id.clone();
     let tx_subagent_completion = engine.tx_subagent_completion.clone();
     let run_task = tokio::spawn(engine.run());
 
     tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id,
             agent_id: "agent_deferred".to_string(),
             payload: "deferred child result".to_string(),
         })
@@ -3270,14 +3274,17 @@ fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
 
     let mut delivered = HashSet::new();
     let first = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_same".to_string(),
         payload: "first delivery".to_string(),
     };
     let duplicate = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_same".to_string(),
         payload: "duplicate delivery".to_string(),
     };
     let second = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_other".to_string(),
         payload: "other delivery".to_string(),
     };
@@ -3288,6 +3295,43 @@ fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
     assert_eq!(
         delivered,
         HashSet::from(["agent_same".to_string(), "agent_other".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn session_switch_drops_old_completion_before_deduplication() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, _handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    engine.session.id = "session-new".to_string();
+    let messages_before = engine.session.messages.len();
+
+    engine
+        .handle_idle_subagent_completion(SubAgentCompletion {
+            owner_session_id: "session-old".to_string(),
+            agent_id: "agent_same".to_string(),
+            payload: "foreign task state".to_string(),
+        })
+        .await;
+
+    assert_eq!(engine.session.messages.len(), messages_before);
+    assert!(engine.delivered_subagent_completion_ids.is_empty());
+    assert!(
+        claim_subagent_completion_for_session(
+            &mut engine.delivered_subagent_completion_ids,
+            "session-new",
+            SubAgentCompletion {
+                owner_session_id: "session-new".to_string(),
+                agent_id: "agent_same".to_string(),
+                payload: "current task state".to_string(),
+            },
+        )
+        .is_some(),
+        "the rejected foreign completion must not suppress the same id in the active session"
     );
 }
 
@@ -3312,6 +3356,7 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
 
     engine
         .handle_idle_subagent_completion(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_retryable".to_string(),
             payload: "completed work".to_string(),
         })
@@ -3323,10 +3368,12 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
             .contains("agent_retryable"),
         "a completion that never reached the transcript must remain retryable"
     );
+    let owner_session_id = engine.session.id.clone();
     assert!(
         claim_subagent_completion(
             &mut engine.delivered_subagent_completion_ids,
             SubAgentCompletion {
+                owner_session_id,
                 agent_id: "agent_retryable".to_string(),
                 payload: "retry".to_string(),
             },

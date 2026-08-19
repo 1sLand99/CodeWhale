@@ -804,6 +804,24 @@ fn claim_subagent_completion(
         .then_some(completion)
 }
 
+fn claim_subagent_completion_for_session(
+    delivered_ids: &mut HashSet<String>,
+    active_session_id: &str,
+    completion: SubAgentCompletion,
+) -> Option<SubAgentCompletion> {
+    if completion.owner_session_id != active_session_id {
+        tracing::warn!(
+            target: "subagent",
+            agent_id = %completion.agent_id,
+            owner_session_id = %completion.owner_session_id,
+            active_session_id,
+            "discarding sub-agent completion for an inactive session"
+        );
+        return None;
+    }
+    claim_subagent_completion(delivered_ids, completion)
+}
+
 #[derive(Debug)]
 enum GoalContinuationAction {
     Inactive,
@@ -3258,15 +3276,19 @@ impl Engine {
 
     async fn handle_idle_subagent_completion(&mut self, first: SubAgentCompletion) {
         let mut completions = Vec::new();
-        if let Some(completion) =
-            claim_subagent_completion(&mut self.delivered_subagent_completion_ids, first)
-        {
+        if let Some(completion) = claim_subagent_completion_for_session(
+            &mut self.delivered_subagent_completion_ids,
+            &self.session.id,
+            first,
+        ) {
             completions.push(completion);
         }
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
-            if let Some(completion) =
-                claim_subagent_completion(&mut self.delivered_subagent_completion_ids, completion)
-            {
+            if let Some(completion) = claim_subagent_completion_for_session(
+                &mut self.delivered_subagent_completion_ids,
+                &self.session.id,
+                completion,
+            ) {
                 completions.push(completion);
             }
         }

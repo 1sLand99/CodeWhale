@@ -1957,6 +1957,11 @@ struct PersistedSubAgent {
     /// "from_prior_session" because it can't match any current id.
     #[serde(default)]
     session_boot_id: String,
+    /// Root conversation that launched this child. Records written before
+    /// this field existed deserialize to empty and are never eligible for
+    /// completion synthesis (fail closed).
+    #[serde(default)]
+    owner_session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2017,6 +2022,11 @@ fn clamp_child_max_spawn_depth(child_spawn_depth: u32, requested_max_depth: u32)
 /// transcript per the constitution (`prompts/text.rs`, `BASE_PROMPT`).
 #[derive(Debug, Clone)]
 pub struct SubAgentCompletion {
+    /// Root session that owned the child when it was launched. Completion
+    /// channels outlive individual conversations, so consumers must compare
+    /// this immutable owner with the active session before deduplicating or
+    /// injecting the payload.
+    pub owner_session_id: String,
     /// The completing child's agent id. Held for routing/logging — the
     /// engine's turn loop does not currently key on it (it just injects
     /// the payload), but downstream tooling and tests need the field.
@@ -2072,7 +2082,11 @@ impl SubAgentTerminalDeliveryContext {
     /// Running until all three sends have been attempted.
     fn deliver(&self, result: &SubAgentResult) {
         let report_ref = spill_subagent_final_report(&self.session_id, result);
-        let completion = subagent_completion_from_result_with_ref(result, report_ref.as_deref());
+        let completion = subagent_completion_from_result_with_ref_for_session(
+            &self.session_id,
+            result,
+            report_ref.as_deref(),
+        );
 
         if self.spawn_depth > 0
             && let Some(tx) = self.parent_completion_tx.as_ref()
@@ -2966,6 +2980,9 @@ pub struct SubAgent {
     /// against the manager's `current_session_boot_id` to classify the
     /// agent as in-session vs prior-session at list time.
     pub session_boot_id: String,
+    /// Immutable root conversation owner. Empty is a legacy/unattached value
+    /// and must never match an active session.
+    owner_session_id: String,
     pub workspace: PathBuf,
     /// Internal completion/cancellation arbitration bit. While set, the task
     /// has won the right to publish its terminal notifications, but the public
@@ -3019,6 +3036,7 @@ impl SubAgent {
             last_activity_at: started_at,
             allowed_tools,
             session_boot_id,
+            owner_session_id: String::new(),
             workspace,
             completion_claimed: false,
             terminal_delivery: None,
@@ -3998,6 +4016,7 @@ impl SubAgentManager {
                 allowed_tools: agent.allowed_tools.clone().unwrap_or_default(),
                 updated_at_ms: now_ms,
                 session_boot_id: agent.session_boot_id.clone(),
+                owner_session_id: agent.owner_session_id.clone(),
             });
         }
         agents.sort_by(|a, b| a.id.cmp(&b.id));
@@ -4223,6 +4242,7 @@ impl SubAgentManager {
                 // manager treats that the same as a non-matching id —
                 // i.e. agent classified as prior-session.
                 session_boot_id: persisted.session_boot_id,
+                owner_session_id: persisted.owner_session_id,
                 completion_claimed: false,
                 terminal_delivery: None,
                 work_lifecycle: None,
@@ -6132,6 +6152,7 @@ impl SubAgentManager {
                     return Err(error);
                 }
             };
+        agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
         self.register_worker(worker_spec);
         if let Some(scope) = budget_scope {
@@ -6246,11 +6267,37 @@ impl SubAgentManager {
         &self,
         delivered_ids: &std::collections::HashSet<String>,
     ) -> Vec<SubAgentResult> {
+        self.terminal_results_excluding_inner(None, delivered_ids)
+    }
+
+    /// Return terminal direct-child results owned by the active root session.
+    ///
+    /// The manager and its persisted roster can survive `SyncSession`; exact
+    /// owner matching prevents a completed child from the previous
+    /// conversation being synthesized into the new turn. Empty legacy owners
+    /// do not match and therefore fail closed.
+    #[allow(dead_code)] // Turn-loop call site is integrated in the companion budget lane.
+    pub(crate) fn terminal_results_excluding_for_session(
+        &self,
+        active_session_id: &str,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> Vec<SubAgentResult> {
+        self.terminal_results_excluding_inner(Some(active_session_id), delivered_ids)
+    }
+
+    fn terminal_results_excluding_inner(
+        &self,
+        active_session_id: Option<&str>,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> Vec<SubAgentResult> {
         let mut results = self
             .agents
             .values()
             .filter(|agent| agent.status != SubAgentStatus::Running)
             .filter(|agent| agent.session_boot_id == self.current_session_boot_id)
+            .filter(|agent| {
+                active_session_id.is_none_or(|session_id| agent.owner_session_id == session_id)
+            })
             .filter(|agent| {
                 self.worker_records
                     .get(&agent.id)
@@ -9311,6 +9358,7 @@ async fn run_subagent_task(task: SubAgentTask) {
             && !agent.completion_claimed
             && agent.terminal_delivery.is_none()
         {
+            agent.owner_session_id = delivery.session_id.clone();
             agent.terminal_delivery = Some(delivery);
         }
     }
@@ -9498,6 +9546,7 @@ pub(crate) fn emit_parent_completion(
         return false;
     };
     let _ = tx.send(SubAgentCompletion {
+        owner_session_id: runtime.context.state_namespace.clone(),
         agent_id: agent_id.to_string(),
         payload: payload.to_string(),
     });
@@ -9512,6 +9561,17 @@ pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAge
 /// Completion builder that names the persisted full report in the truncation
 /// footer when `report_ref` is available; see `spill_subagent_final_report`.
 pub(crate) fn subagent_completion_from_result_with_ref(
+    result: &SubAgentResult,
+    report_ref: Option<&str>,
+) -> SubAgentCompletion {
+    subagent_completion_from_result_with_ref_for_session("", result, report_ref)
+}
+
+/// Session-owned completion builder used by live delivery and turn synthesis.
+/// An empty owner is reserved for legacy test helpers and is rejected by the
+/// session-aware engine claim path.
+pub(crate) fn subagent_completion_from_result_with_ref_for_session(
+    owner_session_id: &str,
     result: &SubAgentResult,
     report_ref: Option<&str>,
 ) -> SubAgentCompletion {
@@ -9551,6 +9611,7 @@ pub(crate) fn subagent_completion_from_result_with_ref(
         None => format!("{summary}\n{sentinel}"),
     };
     SubAgentCompletion {
+        owner_session_id: owner_session_id.to_string(),
         agent_id: result.agent_id.clone(),
         payload,
     }

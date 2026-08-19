@@ -12838,6 +12838,49 @@ fn session_boot_ids_are_unique_per_manager() {
 }
 
 #[test]
+fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 5);
+    let current_boot = manager.session_boot_id().to_string();
+    insert_prior_session_agent(
+        &mut manager,
+        "completed-a",
+        SubAgentStatus::Completed,
+        &current_boot,
+    );
+    manager
+        .agents
+        .get_mut("completed-a")
+        .expect("inserted agent")
+        .owner_session_id = "session-a".to_string();
+    insert_prior_session_agent(
+        &mut manager,
+        "legacy-ownerless",
+        SubAgentStatus::Completed,
+        &current_boot,
+    );
+
+    let none_delivered = HashSet::new();
+    assert!(
+        manager
+            .terminal_results_excluding_for_session("session-b", &none_delivered)
+            .is_empty(),
+        "a completed child from session A must not be synthesized in session B"
+    );
+
+    let session_a = manager.terminal_results_excluding_for_session("session-a", &none_delivered);
+    assert_eq!(session_a.len(), 1);
+    assert_eq!(session_a[0].agent_id, "completed-a");
+
+    let delivered = HashSet::from(["completed-a".to_string()]);
+    assert!(
+        manager
+            .terminal_results_excluding_for_session("session-a", &delivered)
+            .is_empty(),
+        "returning A -> B -> A must not re-synthesize an already delivered terminal result"
+    );
+}
+
+#[test]
 fn list_filtered_drops_prior_session_terminals_by_default() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 5);
     let current_boot = manager.session_boot_id().to_string();
@@ -12973,7 +13016,7 @@ fn agents_with_empty_boot_id_classify_as_prior_session() {
 }
 
 #[test]
-fn persist_round_trip_preserves_session_boot_id() {
+fn persist_round_trip_preserves_session_and_boot_ownership() {
     let dir = tempdir().expect("tempdir");
     let state_path = dir.path().join(SUBAGENT_STATE_FILE);
 
@@ -12988,6 +13031,11 @@ fn persist_round_trip_preserves_session_boot_id() {
             SubAgentStatus::Completed,
             &original_boot,
         );
+        writer
+            .agents
+            .get_mut("agent_persist")
+            .expect("inserted agent")
+            .owner_session_id = "session-persist".to_string();
         writer
             .persist_state()
             .expect("persist round-trip should write")
@@ -13013,6 +13061,14 @@ fn persist_round_trip_preserves_session_boot_id() {
         .find(|s| s.agent_id == "agent_persist")
         .unwrap();
     assert!(snap.from_prior_session);
+    assert_eq!(
+        reader
+            .agents
+            .get("agent_persist")
+            .expect("reloaded agent")
+            .owner_session_id,
+        "session-persist"
+    );
 }
 
 // === Issue #756: parent-completion wakeup ===
@@ -13042,6 +13098,7 @@ fn emit_parent_completion_fires_for_direct_child() {
 
     assert!(sent, "depth=1 with channel wired should send");
     let received = rx.try_recv().expect("channel should have one message");
+    assert_eq!(received.owner_session_id, runtime.context.state_namespace);
     assert_eq!(received.agent_id, "agent_abc");
     assert_eq!(received.payload, "summary line\n<sentinel/>");
     assert!(rx.try_recv().is_err(), "should be exactly one message");
@@ -13070,6 +13127,7 @@ fn emit_parent_completion_fires_for_nested_child() {
 
     assert!(sent, "depth=2 child should send to its wired parent inbox");
     let received = rx.try_recv().expect("nested completion should be routed");
+    assert_eq!(received.owner_session_id, runtime.context.state_namespace);
     assert_eq!(received.agent_id, "agent_grandchild");
     assert_eq!(received.payload, "nested summary");
 }
@@ -13910,6 +13968,7 @@ fn subagent_completion_skips_empty_evidence_on_failed_child() {
 #[test]
 fn child_completion_runtime_message_preserves_agent_and_provenance_guidance() {
     let message = child_completion_runtime_message(&[SubAgentCompletion {
+        owner_session_id: "session-root".to_string(),
         agent_id: "agent_nested".to_string(),
         payload: "SUMMARY\n### EVIDENCE\n- src/lib.rs:1-3".to_string(),
     }]);
