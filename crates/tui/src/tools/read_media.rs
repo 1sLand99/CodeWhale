@@ -905,6 +905,7 @@ mod tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    #[cfg(unix)]
     #[tokio::test]
     async fn read_media_credential_symlink_escape_is_denied() {
         let _env_lock = crate::test_support::lock_test_env();
@@ -919,12 +920,9 @@ mod tests {
         std::fs::write(&real_config, "api_key = \"secret_in_home\"\n").expect("write config");
 
         // Create a symlink in the workspace pointing to the credentials
-        #[cfg(unix)]
         let symlink_path = ws_tmp.path().join("fake_image.png");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real_config, &symlink_path).expect("create symlink");
 
-        #[cfg(unix)]
         {
             // Case 1: Default context (no symlink follow outside workspace) -> path escape error
             let ctx_default = ToolContext::new(ws_tmp.path().to_path_buf());

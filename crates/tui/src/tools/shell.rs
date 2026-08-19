@@ -3235,7 +3235,7 @@ impl ShellManager {
 
     /// Bytes still held across every tracked job. The retention bound in #5472
     /// is stated in these terms, so the tests assert on them directly.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn retained_output_bytes_total(&self) -> usize {
         self.processes
             .values()

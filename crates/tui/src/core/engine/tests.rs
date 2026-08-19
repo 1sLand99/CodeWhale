@@ -9029,15 +9029,17 @@ fn measure_representative_runtime_context()
     let mut stage_metrics = serde_json::Map::new();
     for (index, stage) in stages.iter().enumerate() {
         let mut metrics = serde_json::json!({
-            "bytes": stage.flat.len(),
+            // Keep byte ceilings host-independent just like the structural
+            // identity: temporary workspace/home paths vary across runners.
+            "bytes": stage.normalized.len(),
             "identity_sha256": crate::hashing::sha256_hex(stage.normalized.as_bytes()),
         });
         if let Some(previous) = index.checked_sub(1).and_then(|i| stages.get(i)) {
             metrics["delta_bytes"] = serde_json::json!(
                 stage
-                    .flat
+                    .normalized
                     .len()
-                    .checked_sub(previous.flat.len())
+                    .checked_sub(previous.normalized.len())
                     .unwrap_or_else(|| panic!(
                         "representative {} stage unexpectedly shrank prompt",
                         stage.name
@@ -9050,8 +9052,8 @@ fn measure_representative_runtime_context()
     let payload = serde_json::json!({
         "fixture_id": REPRESENTATIVE_FIXTURE_ID,
         "stages": stage_metrics,
-        "total_bytes": final_stage.flat.len(),
-        "total_tokens_est": final_stage.flat.len().div_ceil(4),
+        "total_bytes": final_stage.normalized.len(),
+        "total_tokens_est": final_stage.normalized.len().div_ceil(4),
         "system_prompt_blocks": final_blocks,
         "prompts_byte_identical": final_stage.flat == repeated_flat,
     });
