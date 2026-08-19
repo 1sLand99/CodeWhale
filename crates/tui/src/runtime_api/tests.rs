@@ -2063,6 +2063,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             child_route: None,
             launch_manifest: None,
         },
+        owner_session_id: "session-receipt".to_string(),
         actor_kind: "subagent".to_string(),
         parent_run_id: Some("parent_run".to_string()),
         follow_up: AgentRunFollowUpTarget {

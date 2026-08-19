@@ -3781,6 +3781,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
     harness
         .tx_event
         .send(EngineEvent::SubAgentMailbox {
+            owner_session_id: thread.id.clone(),
             turn_id: "engine_route_receipt".to_string(),
             seq: 77,
             message: crate::tools::subagent::MailboxMessage::TokenUsage {
@@ -3887,6 +3888,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
     harness
         .tx_event
         .send(EngineEvent::SubAgentMailbox {
+            owner_session_id: thread.id.clone(),
             turn_id: second_engine_turn.to_string(),
             seq: 77,
             message: crate::tools::subagent::MailboxMessage::TokenUsage {
@@ -4024,10 +4026,12 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
     let harness = install_mock_engine(&manager, &thread.id).await;
     let mut rx_op = harness.rx_op;
     let tx_event = harness.tx_event;
+    let thread_id = thread.id.clone();
     tokio::spawn(async move {
         if matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
             let _ = tx_event
                 .send(EngineEvent::AgentComplete {
+                    owner_session_id: thread_id,
                     id: "stale_agent".to_string(),
                     result: "stale completion".to_string(),
                 })

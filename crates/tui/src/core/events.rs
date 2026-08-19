@@ -351,6 +351,7 @@ pub enum Event {
     // === Sub-Agent Events ===
     /// A sub-agent has been spawned
     AgentSpawned {
+        owner_session_id: String,
         id: String,
         prompt: String,
         parent_run_id: Option<String>,
@@ -367,6 +368,7 @@ pub enum Event {
 
     /// Sub-agent progress update
     AgentProgress {
+        owner_session_id: String,
         id: String,
         status: String,
         activity: AgentProgressEventMeta,
@@ -375,13 +377,18 @@ pub enum Event {
     },
 
     /// Sub-agent completed
-    AgentComplete { id: String, result: String },
+    AgentComplete {
+        owner_session_id: String,
+        id: String,
+        result: String,
+    },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
     /// `Ok` carries the delivery outcome (the target id may differ from the
     /// addressed id when a fork was continued from a checkpoint); `Err` is the
     /// exact reason nothing was delivered.
     SubAgentFollowUp {
+        owner_session_id: String,
         agent_id: String,
         outcome: Result<crate::tools::subagent::UserFollowUpOutcome, String>,
     },
@@ -389,6 +396,7 @@ pub enum Event {
     /// Sub-agent listing plus the same bounded typed coordination projection
     /// used by machine-readable `agents/coordinate inspect`.
     AgentList {
+        owner_session_id: String,
         agents: Vec<SubAgentResult>,
         coordination: CoordinationDetailProjection,
         /// Follow-ups handed to a running child that it has not yet taken at
@@ -405,6 +413,7 @@ pub enum Event {
     /// monotonic seq + the typed `MailboxMessage` so the UI can route each
     /// envelope to the correct in-transcript card.
     SubAgentMailbox {
+        owner_session_id: String,
         /// Engine turn identity. Sequence numbers restart for every mailbox,
         /// so consumers must deduplicate on `(turn_id, seq)`, never `seq`
         /// alone.

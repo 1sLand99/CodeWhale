@@ -23152,3 +23152,17 @@ fn several_mid_turn_messages_still_leave_the_tool_row_resolvable() {
     };
     assert_eq!(exec.status, ToolStatus::Success);
 }
+
+#[test]
+fn subagent_event_ownership_fails_closed_across_session_switches() {
+    use super::event_loop::event_owner_is_active;
+
+    assert!(event_owner_is_active(Some("session-a"), "session-a"));
+    assert!(!event_owner_is_active(Some("session-b"), "session-a"));
+    assert!(!event_owner_is_active(Some("session-a"), ""));
+    assert!(!event_owner_is_active(None, "session-a"));
+    assert!(
+        event_owner_is_active(Some("session-a"), "session-a"),
+        "A -> B -> A restores eligibility only after the active id is A again"
+    );
+}

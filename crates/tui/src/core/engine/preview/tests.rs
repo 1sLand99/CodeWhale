@@ -142,9 +142,11 @@ async fn running_direct_child_fails_closed_without_consuming_or_mutating_state()
     let identity = deepseek_identity();
     let (mut engine, _handle, tmp) = preview_engine(&config);
     engine.config.features.disable(Feature::Mcp);
+    let active_session_id = engine.session.id.clone();
     let mut before = {
         let mut manager = engine.subagent_manager.write().await;
-        manager.insert_test_running_direct_child("preview_pending", tmp.path());
+        let agent_id = manager.insert_test_running_direct_child("preview_pending", tmp.path());
+        manager.assign_test_session_owner(&agent_id, &active_session_id);
         serde_json::to_value(manager.list()).expect("manager snapshot")
     };
     if let Some(rows) = before.as_array_mut() {
@@ -177,9 +179,10 @@ async fn running_direct_child_fails_closed_without_consuming_or_mutating_state()
 
     let mut after = {
         let manager = engine.subagent_manager.read().await;
-        assert!(
-            manager.may_transform_next_parent_request(&engine.delivered_subagent_completion_ids)
-        );
+        assert!(manager.may_transform_next_parent_request_for_session(
+            &active_session_id,
+            &engine.delivered_subagent_completion_ids,
+        ));
         serde_json::to_value(manager.list()).expect("manager snapshot")
     };
     if let Some(rows) = after.as_array_mut() {
@@ -202,9 +205,12 @@ async fn terminal_undelivered_child_fails_closed_without_claiming_delivery() {
     let identity = deepseek_identity();
     let (mut engine, _handle, tmp) = preview_engine(&config);
     engine.config.features.disable(Feature::Mcp);
+    let active_session_id = engine.session.id.clone();
     let agent_id = {
         let mut manager = engine.subagent_manager.write().await;
-        manager.insert_test_terminal_direct_child("preview_terminal", tmp.path())
+        let agent_id = manager.insert_test_terminal_direct_child("preview_terminal", tmp.path());
+        manager.assign_test_session_owner(&agent_id, &active_session_id);
+        agent_id
     };
 
     let planned = plan(&config, &identity, false, "inspect settled child").await;
@@ -217,7 +223,10 @@ async fn terminal_undelivered_child_fails_closed_without_claiming_delivery() {
         "preview must not claim terminal delivery"
     );
     let manager = engine.subagent_manager.read().await;
-    assert!(manager.may_transform_next_parent_request(&engine.delivered_subagent_completion_ids));
+    assert!(manager.may_transform_next_parent_request_for_session(
+        &active_session_id,
+        &engine.delivered_subagent_completion_ids,
+    ));
     assert!(matches!(
         manager
             .get_result(&agent_id)

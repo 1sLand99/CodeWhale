@@ -626,6 +626,7 @@ fn agent_progress_preserves_event_channel_headroom_under_load() {
 
     emit_agent_progress(
         Some(&tx),
+        "session-progress",
         "agent_busy",
         "step 1: requesting model response".to_string(),
         AgentProgressEventMeta::new(AgentWorkerStatus::ModelWait).with_step(1),
@@ -640,6 +641,7 @@ fn agent_progress_preserves_event_channel_headroom_under_load() {
 
     emit_agent_progress(
         Some(&tx),
+        "session-progress",
         "agent_waiting",
         "waiting for user input".to_string(),
         AgentProgressEventMeta::new(AgentWorkerStatus::WaitingForUser),
@@ -671,6 +673,7 @@ fn agent_progress_uses_small_event_channels_without_headroom_reservation() {
 
     emit_agent_progress(
         Some(&tx),
+        "session-progress",
         "agent_small_channel",
         "step 1: requesting model response".to_string(),
         AgentProgressEventMeta::new(AgentWorkerStatus::ModelWait).with_step(1),
@@ -5352,6 +5355,7 @@ async fn agent_tool_status_returns_running_child_projection() {
         let mut manager_guard = manager.write().await;
         manager_guard.agents.insert(agent_id.clone(), agent);
         manager_guard.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+        manager_guard.assign_test_session_owner(&agent_id, "workspace");
         manager_guard.record_worker_event(
             &agent_id,
             AgentWorkerStatus::ModelWait,
@@ -5404,6 +5408,7 @@ async fn agent_tool_status_reconciles_stale_single_agent_projection() {
         let mut manager_guard = manager.write().await;
         manager_guard.agents.insert(agent_id.clone(), agent);
         manager_guard.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+        manager_guard.assign_test_session_owner(&agent_id, "workspace");
     }
 
     let tool = AgentTool::new(Arc::clone(&manager), stub_runtime());
@@ -5450,6 +5455,7 @@ async fn agent_tool_cancel_stops_running_child() {
         let mut manager_guard = manager.write().await;
         manager_guard.agents.insert(agent_id.clone(), agent);
         manager_guard.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+        manager_guard.assign_test_session_owner(&agent_id, "workspace");
     }
 
     let tool = AgentTool::new(Arc::clone(&manager), stub_runtime());
@@ -8752,7 +8758,7 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     ));
     assert!(matches!(
         event_rx.try_recv(),
-        Ok(Event::AgentComplete { id, result })
+        Ok(Event::AgentComplete { id, result, .. })
             if id == agent_id && result.contains(r#""status":"cancelled""#)
     ));
     assert_eq!(
@@ -8779,6 +8785,7 @@ async fn status_projection_reconciles_stale_running_agent() {
         PathBuf::from("."),
         current_boot,
     );
+    agent.owner_session_id = "workspace".to_string();
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
@@ -10793,6 +10800,10 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
     {
         let mut guard = manager.write().await;
+        assert_eq!(
+            guard.insert_test_running_agent("scoped", tmp.path()),
+            "agent_scoped"
+        );
         guard
             .coordination
             .register_claim(
@@ -12830,6 +12841,21 @@ fn insert_prior_session_agent(
     manager.agents.insert(id.to_string(), agent);
 }
 
+fn assign_test_session_owner(
+    manager: &mut SubAgentManager,
+    agent_id: &str,
+    owner_session_id: &str,
+) {
+    manager
+        .agents
+        .get_mut(agent_id)
+        .expect("test agent")
+        .owner_session_id = owner_session_id.to_string();
+    if let Some(record) = manager.worker_records.get_mut(agent_id) {
+        record.owner_session_id = owner_session_id.to_string();
+    }
+}
+
 #[test]
 fn session_boot_ids_are_unique_per_manager() {
     let a = SubAgentManager::new(PathBuf::from("."), 1);
@@ -12877,6 +12903,223 @@ fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
             .terminal_results_excluding_for_session("session-a", &delivered)
             .is_empty(),
         "returning A -> B -> A must not re-synthesize an already delivered terminal result"
+    );
+}
+
+#[test]
+fn active_session_owns_every_roster_and_control_resolution() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
+    let (agent_a, _input_a) =
+        manager.insert_test_running_agent_with_input("session_a", workspace.path());
+    let (agent_b, _input_b) =
+        manager.insert_test_running_agent_with_input("session_b", workspace.path());
+    assign_test_session_owner(&mut manager, &agent_a, "session-a");
+    assign_test_session_owner(&mut manager, &agent_b, "session-b");
+
+    assert_eq!(
+        manager
+            .list_for_session("session-a")
+            .into_iter()
+            .map(|agent| agent.agent_id)
+            .collect::<Vec<_>>(),
+        vec![agent_a.clone()]
+    );
+    assert_eq!(
+        manager
+            .list_worker_records_for_session("session-a")
+            .into_iter()
+            .map(|record| record.spec.worker_id)
+            .collect::<Vec<_>>(),
+        vec![agent_a.clone()]
+    );
+    assert_eq!(
+        manager
+            .get_result_by_ref_for_session("session-a", "session_a")
+            .expect("same-session name alias")
+            .workspace
+            .as_deref(),
+        Some(workspace.path())
+    );
+
+    let foreign_errors = [
+        manager
+            .get_result_by_ref_for_session("session-b", &agent_a)
+            .expect_err("foreign get"),
+        manager
+            .queue_running_parent_message_for_session(
+                "session-b",
+                &agent_a,
+                "foreign message".to_string(),
+            )
+            .expect_err("foreign message"),
+        manager
+            .followup_child_for_session("session-b", &agent_a, "foreign follow-up".to_string())
+            .expect_err("foreign follow-up"),
+        manager
+            .interrupt_child_for_session(
+                "session-b",
+                &agent_a,
+                None,
+                "foreign interrupt".to_string(),
+            )
+            .expect_err("foreign interrupt"),
+        manager
+            .cancel_agent_for_session("session-b", &agent_a)
+            .expect_err("foreign cancel"),
+    ];
+    assert!(
+        foreign_errors
+            .iter()
+            .all(|error| { error.to_string() == "Agent not found in the active session" })
+    );
+    assert_eq!(
+        manager
+            .get_result(&agent_a)
+            .expect("A still running")
+            .status,
+        SubAgentStatus::Running
+    );
+    assert_eq!(manager.queued_mail_depth(&agent_a), None);
+
+    assign_test_session_owner(&mut manager, &agent_b, "session-a");
+    assert!(
+        manager
+            .ensure_caller_controls_descendant_for_session(
+                "session-a",
+                &agent_a,
+                Some(&agent_b),
+                "agent/cancel",
+            )
+            .is_err(),
+        "a child must not cancel a sibling even within the same session"
+    );
+
+    manager
+        .queue_running_parent_message_for_session(
+            "session-a",
+            &agent_a,
+            "same-session message".to_string(),
+        )
+        .expect("same-session message");
+    assert_eq!(manager.queued_mail_depth(&agent_a), Some(1));
+    manager
+        .cancel_agent_for_session("session-a", &agent_a)
+        .expect("same-session cancel");
+    assert!(
+        manager
+            .list_filtered_for_session("session-b", true)
+            .iter()
+            .all(|agent| agent.agent_id != agent_a),
+        "include_archived must never grant foreign visibility"
+    );
+    assert!(
+        manager
+            .list_filtered_for_session("session-a", true)
+            .iter()
+            .any(|agent| agent.agent_id == agent_a),
+        "A -> B -> A restores A's archived control row"
+    );
+}
+
+#[test]
+fn ownerless_legacy_rows_fail_closed_and_scoped_close_preserves_foreign_workers() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
+    let current_boot = manager.session_boot_id().to_string();
+    insert_prior_session_agent(
+        &mut manager,
+        "legacy",
+        SubAgentStatus::Running,
+        &current_boot,
+    );
+    manager.register_worker(make_worker_spec("legacy", workspace.path().to_path_buf()));
+    let legacy = "legacy".to_string();
+    assert!(manager.list_for_session("session-a").is_empty());
+    assert!(
+        manager
+            .list_worker_records_for_session("session-a")
+            .is_empty()
+    );
+    assert!(
+        manager
+            .get_result_by_ref_for_session("session-a", &legacy)
+            .is_err()
+    );
+
+    let agent_a = manager.insert_test_running_agent("close_a", workspace.path());
+    let agent_b = manager.insert_test_running_agent("keep_b", workspace.path());
+    assign_test_session_owner(&mut manager, &agent_a, "session-a");
+    assign_test_session_owner(&mut manager, &agent_b, "session-b");
+
+    assert_eq!(
+        manager.finalize_session_close_for_session("session-a"),
+        1,
+        "paired agent and worker record are one finalized worker"
+    );
+    assert!(manager.agents.contains_key(&legacy));
+    assert_eq!(
+        manager
+            .get_result(&agent_b)
+            .expect("foreign B retained")
+            .status,
+        SubAgentStatus::Running
+    );
+    assert!(
+        !manager
+            .get_worker_record(&agent_b)
+            .expect("foreign B worker retained")
+            .status
+            .is_terminal()
+    );
+}
+
+#[test]
+fn scoped_handle_eviction_drain_preserves_foreign_pending_ids() {
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 2);
+    manager.pending_handle_evictions = vec![
+        ("agent-a".to_string(), "session-a".to_string()),
+        ("agent-b".to_string(), "session-b".to_string()),
+    ];
+
+    assert_eq!(
+        manager.drain_pending_handle_evictions_for_session("session-a"),
+        vec!["agent-a".to_string()]
+    );
+    assert_eq!(
+        manager.drain_pending_handle_evictions_for_session("session-b"),
+        vec!["agent-b".to_string()]
+    );
+}
+
+#[test]
+fn coordination_records_are_visible_and_mutable_only_to_their_owner_session() {
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 2);
+    let recorded = manager
+        .record_coordination_decision(DecisionRecord {
+            decision_id: "decision-session-a".to_string(),
+            subject: "private coordination".to_string(),
+            status: DecisionStatus::Proposed,
+            owner: "root".to_string(),
+            scope: Vec::new(),
+            constraints: Vec::new(),
+            evidence_handles: Vec::new(),
+            version: 1,
+            sequence: 0,
+        })
+        .expect("record decision");
+    manager
+        .stamp_coordination_sequence_for_session(recorded.sequence, "session-a")
+        .expect("stamp owner");
+
+    let a = manager.inspect_coordination_for_session("session-a", None, 24);
+    let b = manager.inspect_coordination_for_session("session-b", None, 24);
+    assert_eq!(a["decisions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(b["decisions"].as_array().map(Vec::len), Some(0));
+    assert!(manager.coordination_decision_is_owned_by_session("session-a", "decision-session-a"));
+    assert!(
+        !manager.coordination_decision_is_owned_by_session("session-b", "decision-session-a"),
+        "B must not gain mutation authority over A's decision"
     );
 }
 
@@ -13036,6 +13279,10 @@ fn persist_round_trip_preserves_session_and_boot_ownership() {
             .get_mut("agent_persist")
             .expect("inserted agent")
             .owner_session_id = "session-persist".to_string();
+        writer.register_worker_for_session(
+            make_worker_spec("headless_persist", dir.path().to_path_buf()),
+            "session-persist",
+        );
         writer
             .persist_state()
             .expect("persist round-trip should write")
@@ -13068,6 +13315,20 @@ fn persist_round_trip_preserves_session_and_boot_ownership() {
             .expect("reloaded agent")
             .owner_session_id,
         "session-persist"
+    );
+    assert_eq!(
+        reader
+            .list_worker_records_for_session("session-persist")
+            .into_iter()
+            .map(|record| record.spec.worker_id)
+            .collect::<Vec<_>>(),
+        vec!["headless_persist".to_string()]
+    );
+    assert!(
+        reader
+            .list_worker_records_for_session("session-other")
+            .is_empty(),
+        "persisted headless worker ownership remains fail-closed"
     );
 }
 
@@ -13448,7 +13709,7 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
     assert_eq!(terminal_events.len(), 1);
     assert!(matches!(
         &terminal_events[0],
-        Event::AgentComplete { id, result }
+        Event::AgentComplete { id, result, .. }
             if id == &snapshot.agent_id && result.contains(r#""status":"cancelled""#)
     ));
 }
@@ -13792,7 +14053,7 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
     ));
     let complete_events = std::iter::from_fn(|| event_rx.try_recv().ok())
         .filter_map(|event| match event {
-            Event::AgentComplete { id, result } => Some((id, result)),
+            Event::AgentComplete { id, result, .. } => Some((id, result)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -16149,6 +16410,7 @@ fn insert_running_agent(inner: &mut SubAgentManager, name: &str) -> String {
         PathBuf::from("."),
         current_boot,
     );
+    agent.owner_session_id = "workspace".to_string();
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
@@ -18561,6 +18823,7 @@ async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
         PathBuf::from("."),
         current_boot,
     );
+    agent.owner_session_id = "workspace".to_string();
     // A live task handle plus a fresh heartbeat keeps the agent Running.
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;

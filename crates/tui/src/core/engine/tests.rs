@@ -1410,6 +1410,92 @@ async fn configured_goal_delay_is_cancellable_without_starting_another_turn() {
 }
 
 #[tokio::test]
+async fn sync_session_boundary_discards_delayed_goal_and_runtime_mcp_capabilities() {
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.id = "session-a".to_string();
+    engine.schedule_goal_continuation(Vec::new()).await;
+    assert!(engine.has_scheduled_goal_continuation());
+    engine.ensure_mcp_pool().await.expect("initialize MCP pool");
+    assert!(engine.mcp_pool.is_some());
+
+    assert_eq!(
+        engine.install_synced_session_id("session-a".to_string()),
+        None
+    );
+    assert!(engine.has_scheduled_goal_continuation());
+    assert!(
+        engine.mcp_pool.is_some(),
+        "same-id reload keeps runtime state"
+    );
+
+    assert_eq!(
+        engine.install_synced_session_id("session-b".to_string()),
+        Some("session-a".to_string())
+    );
+    assert!(!engine.has_scheduled_goal_continuation());
+    assert!(
+        engine.mcp_pool.is_none(),
+        "same-workspace B must not inherit A's runtime-added MCP servers"
+    );
+    assert_eq!(
+        engine.install_synced_session_id("session-a".to_string()),
+        Some("session-b".to_string())
+    );
+    assert!(
+        !engine.has_scheduled_goal_continuation() && engine.mcp_pool.is_none(),
+        "A -> B -> A must not resurrect process-local state from the first A"
+    );
+}
+
+#[tokio::test]
+async fn sync_session_boundary_rejects_an_already_enqueued_goal_token() {
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            goal_continuation_delay_seconds: 0,
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.id = "session-a".to_string();
+    engine.schedule_goal_continuation(Vec::new()).await;
+    assert!(
+        engine
+            .scheduled_goal_continuation
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.enqueued),
+        "fixture must place A's token in the engine mailbox"
+    );
+
+    engine.install_synced_session_id("session-b".to_string());
+    let input = engine
+        .next_run_input(false)
+        .await
+        .expect("queued continuation token");
+    let EngineRunInput::Operation(op) = input else {
+        panic!("expected queued continuation operation");
+    };
+    let Op::ContinueGoal {
+        dynamic_tools,
+        engine_schedule_id,
+    } = *op
+    else {
+        panic!("expected queued continuation token");
+    };
+    assert!(
+        engine
+            .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
+            .is_none(),
+        "B must reject A's already-enqueued synthetic turn token"
+    );
+}
+
+#[tokio::test]
 async fn cancellation_after_delay_expiry_beats_queued_continuation_dispatch() {
     let model = std::sync::Arc::new(FailingGoalModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
@@ -13183,7 +13269,9 @@ async fn sync_session_different_id_finalizes_live_worker() {
 
     let agent_id = {
         let mut manager = manager.write().await;
-        manager.insert_test_running_agent("close", &workspace)
+        let agent_id = manager.insert_test_running_agent("close", &workspace);
+        manager.assign_test_session_owner(&agent_id, "session-a");
+        agent_id
     };
 
     // A different id is a conversation boundary: the live worker must be
@@ -17798,7 +17886,7 @@ fn agent_list_event_carries_the_typed_coordination_projection() {
     use crate::tools::subagent::coord::{DecisionRecord, DecisionStatus};
 
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
-    manager
+    let recorded = manager
         .record_coordination_decision(DecisionRecord {
             decision_id: "decision-event".to_string(),
             subject: "typed event".to_string(),
@@ -17811,16 +17899,21 @@ fn agent_list_event_carries_the_typed_coordination_projection() {
             sequence: 0,
         })
         .expect("record decision");
+    manager
+        .stamp_coordination_sequence_for_session(recorded.sequence, "session-a")
+        .expect("stamp decision owner");
 
     let Event::AgentList {
+        owner_session_id,
         agents,
         coordination,
         ..
-    } = agent_list_event(&manager)
+    } = agent_list_event(&manager, "session-a")
     else {
         panic!("expected AgentList event");
     };
     assert!(agents.is_empty());
+    assert_eq!(owner_session_id, "session-a");
     assert_eq!(coordination.decisions.len(), 1);
     assert_eq!(coordination.decisions[0].decision_id, "decision-event");
     assert_eq!(coordination.decisions[0].status, DecisionStatus::Accepted);
@@ -18017,6 +18110,7 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
     // This must return Err immediately — the handler should never hang.
     let agents = vec![];
     let result = tx_event.try_send(Event::AgentList {
+        owner_session_id: "session-a".to_string(),
         agents,
         coordination: crate::tools::subagent::SubAgentManager::new(PathBuf::from("."), 1)
             .coordination_detail_projection(None, 24),

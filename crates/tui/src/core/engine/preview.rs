@@ -619,7 +619,10 @@ impl Engine {
 
         let queued_completions = !self.rx_subagent_completion.is_empty() || {
             let manager = self.subagent_manager.read().await;
-            manager.may_transform_next_parent_request(&self.delivered_subagent_completion_ids)
+            manager.may_transform_next_parent_request_for_session(
+                &self.session.id,
+                &self.delivered_subagent_completion_ids,
+            )
         };
         if queued_completions {
             reasons.push("a running or undelivered sub-agent completion may be injected");

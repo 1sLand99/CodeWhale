@@ -6,6 +6,13 @@
 
 use super::*;
 
+pub(super) fn event_owner_is_active(
+    current_session_id: Option<&str>,
+    owner_session_id: &str,
+) -> bool {
+    !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
+}
+
 /// Apply Space only to the owner stored by the final render pass.
 pub(super) fn handle_transcript_space(app: &mut App) -> bool {
     let Some((owner, reasoning_target)) = app.viewport.transcript_cache.take_transcript_action()
@@ -2157,13 +2164,18 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::AgentSpawned {
+                        owner_session_id,
                         id,
                         prompt,
                         parent_run_id,
                         spawn_depth,
                         model,
                         route_source: _,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let prompt_summary = bound_agent_activity_text(&prompt);
                         app.agent_progress
                             .insert(id.clone(), format!("starting: {prompt_summary}"));
@@ -2187,12 +2199,17 @@ pub(crate) async fn run_event_loop(
                         subagent_list_refresh_requested = true;
                     }
                     EngineEvent::AgentProgress {
+                        owner_session_id,
                         id,
                         status,
                         activity,
                         parent_run_id,
                         spawn_depth,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let display = bound_agent_activity_text(&friendly_subagent_progress(
                             app, &id, &status,
                         ));
@@ -2254,7 +2271,15 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::AgentComplete { id, result } => {
+                    EngineEvent::AgentComplete {
+                        owner_session_id,
+                        id,
+                        result,
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let subagent_elapsed = app
                             .agent_activity_started_at
                             .or(app.turn_started_at)
@@ -2333,15 +2358,28 @@ pub(crate) async fn run_event_loop(
                         }
                         subagent_list_refresh_requested = true;
                     }
-                    EngineEvent::SubAgentFollowUp { agent_id, outcome } => {
+                    EngineEvent::SubAgentFollowUp {
+                        owner_session_id,
+                        agent_id,
+                        outcome,
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         crate::tui::agent_focus::apply_follow_up_receipt(app, &agent_id, &outcome);
                     }
                     EngineEvent::AgentList {
+                        owner_session_id,
                         agents,
                         coordination,
                         queued_follow_ups,
                         roster,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         app.agent_queued_follow_ups = queued_follow_ups;
                         app.agent_roster = roster;
                         if std::mem::take(&mut app.agent_roster_print_requested) {
@@ -2365,11 +2403,26 @@ pub(crate) async fn run_event_loop(
                         // Individual spawn/complete events already log to history;
                         // full list available via /agents command.
                     }
+                    EngineEvent::AgentSpawned { .. }
+                    | EngineEvent::AgentProgress { .. }
+                    | EngineEvent::AgentComplete { .. }
+                    | EngineEvent::SubAgentFollowUp { .. }
+                    | EngineEvent::AgentList { .. } => {
+                        // Process-local senders can outlive a session switch.
+                        // A foreign event must not mutate the active transcript,
+                        // sidebar, status, observer, or notification surface.
+                        received_engine_event = redraw_requested_before_event;
+                    }
                     EngineEvent::SubAgentMailbox {
+                        owner_session_id,
                         turn_id,
                         seq,
                         message,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let should_refresh_subagents =
                             subagent_message_refreshes_workspace_context(&message);
                         let updated_transcript =
@@ -2397,6 +2450,9 @@ pub(crate) async fn run_event_loop(
                             // AgentProgress redraw throttle.
                             received_engine_event = redraw_requested_before_event;
                         }
+                    }
+                    EngineEvent::SubAgentMailbox { .. } => {
+                        received_engine_event = redraw_requested_before_event;
                     }
                     EngineEvent::WorkflowUi {
                         owner_session_id,

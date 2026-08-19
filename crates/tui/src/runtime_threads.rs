@@ -6596,6 +6596,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::SubAgentMailbox {
+                    owner_session_id,
                     turn_id: mailbox_turn_id,
                     message:
                         crate::tools::subagent::MailboxMessage::TokenUsage {
@@ -6605,7 +6606,7 @@ impl RuntimeThreadManager {
                             ..
                         },
                     ..
-                } => {
+                } if owner_session_id == thread_id => {
                     let belongs_to_turn = engine_turn_id
                         .as_deref()
                         .is_some_and(|started| started == mailbox_turn_id);
@@ -6718,7 +6719,12 @@ impl RuntimeThreadManager {
                         .await?;
                     }
                 }
-                EngineEvent::AgentSpawned { id, prompt, .. } => {
+                EngineEvent::AgentSpawned {
+                    owner_session_id,
+                    id,
+                    prompt,
+                    ..
+                } if owner_session_id == thread_id => {
                     let message = format!(
                         "Sub-agent {id} spawned: {}",
                         summarize_text(&prompt, SUMMARY_LIMIT)
@@ -6747,7 +6753,12 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentProgress { id, status, .. } => {
+                EngineEvent::AgentProgress {
+                    owner_session_id,
+                    id,
+                    status,
+                    ..
+                } if owner_session_id == thread_id => {
                     let message = format!("Sub-agent {id}: {status}");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -6773,7 +6784,11 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentComplete { id, result } => {
+                EngineEvent::AgentComplete {
+                    owner_session_id,
+                    id,
+                    result,
+                } if owner_session_id == thread_id => {
                     let message = format!(
                         "Sub-agent {id} completed: {}",
                         summarize_text(&result, SUMMARY_LIMIT)
@@ -6802,7 +6817,11 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentList { agents, .. } => {
+                EngineEvent::AgentList {
+                    owner_session_id,
+                    agents,
+                    ..
+                } if owner_session_id == thread_id => {
                     let running = agents
                         .iter()
                         .filter(|agent| matches!(agent.status, SubAgentStatus::Running))

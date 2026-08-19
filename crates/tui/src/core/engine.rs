@@ -100,16 +100,21 @@ fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
     }
 }
 
-fn agent_list_event(manager: &SubAgentManager) -> Event {
+fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event {
     // One clock read shared by every row, so elapsed values in a single
     // listing are consistent with each other (#5479).
     let now_ms = crate::tools::subagent::epoch_millis_now();
     Event::AgentList {
-        agents: manager.list(),
-        coordination: manager.coordination_detail_projection(None, 24),
-        queued_follow_ups: manager.queued_follow_up_counts(),
+        owner_session_id: active_session_id.to_string(),
+        agents: manager.list_for_session(active_session_id),
+        coordination: manager.coordination_detail_projection_for_session(
+            active_session_id,
+            None,
+            24,
+        ),
+        queued_follow_ups: manager.queued_follow_up_counts_for_session(active_session_id),
         roster: crate::tui::agent_roster::build_agent_roster(
-            &manager.list_worker_records(),
+            &manager.list_worker_records_for_session(active_session_id),
             now_ms,
         ),
     }
@@ -143,14 +148,15 @@ impl StructuredState {
         cwd: Option<PathBuf>,
         working_set: &WorkingSet,
         subagents: Option<&SharedSubAgentManager>,
+        active_session_id: &str,
     ) -> Self {
         let working_set_summary = working_set.summary_block(&workspace);
 
         let subagent_snapshots = if let Some(handle) = subagents {
             let mut guard = handle.write().await;
-            guard.cleanup(Duration::from_secs(60 * 60));
+            guard.cleanup_for_session(active_session_id, Duration::from_secs(60 * 60));
             guard
-                .list()
+                .list_for_session(active_session_id)
                 .into_iter()
                 .filter(|s| matches!(s.status, SubAgentStatus::Running))
                 .collect()
@@ -917,12 +923,14 @@ fn subagent_mailbox_best_effort_send_permitted(
 /// event channel is closed and the drainer should stop.
 async fn forward_subagent_mailbox_message(
     tx: &mpsc::Sender<Event>,
+    owner_session_id: &str,
     turn_id: &str,
     seq: u64,
     message: MailboxMessage,
     best_effort_sent_at: &mut HashMap<String, Instant>,
 ) -> bool {
     let event = Event::SubAgentMailbox {
+        owner_session_id: owner_session_id.to_string(),
         turn_id: turn_id.to_string(),
         seq,
         message,
@@ -1872,6 +1880,26 @@ impl Engine {
         self.scheduled_goal_continuation.is_some()
     }
 
+    /// Install the conversation identity portion of `SyncSession` and clear
+    /// process-local capabilities that must never cross that boundary. The
+    /// returned id is the conversation being closed; callers use it to scope
+    /// asynchronous fleet finalization before loading the new history.
+    fn install_synced_session_id(&mut self, next_session_id: String) -> Option<String> {
+        let previous_session_id = self.session.id.clone();
+        if next_session_id == previous_session_id {
+            return None;
+        }
+        // A synthetic token may already be queued in `rx_op`; dropping the
+        // authoritative schedule makes that token fail closed when drained.
+        self.scheduled_goal_continuation = None;
+        // Runtime-added MCP servers are conversation capabilities even when
+        // both conversations use the same workspace. Configured servers can
+        // reconnect lazily after the new session is installed.
+        self.mcp_pool = None;
+        self.session.id = next_session_id;
+        Some(previous_session_id)
+    }
+
     fn bounded_redacted_goal_failure_detail(&self, detail: &str) -> Option<String> {
         let detail = detail.trim();
         if detail.is_empty() {
@@ -2385,6 +2413,7 @@ impl Engine {
                         // during a sub-agent fanout no longer contends for the
                         // write lock (against completions/persistence) on every
                         // request. Cleanup still auto-cancels stale agents.
+                        let active_session_id = self.session.id.clone();
                         self.touch_workers_with_running_shells().await;
                         let due = {
                             let manager = self.subagent_manager.read().await;
@@ -2394,11 +2423,14 @@ impl Engine {
                         };
                         let event = if due {
                             let mut manager = self.subagent_manager.write().await;
-                            manager.cleanup(Duration::from_secs(60 * 60));
-                            agent_list_event(&manager)
+                            manager.cleanup_for_session(
+                                &active_session_id,
+                                Duration::from_secs(60 * 60),
+                            );
+                            agent_list_event(&manager, &active_session_id)
                         } else {
                             let manager = self.subagent_manager.read().await;
-                            agent_list_event(&manager)
+                            agent_list_event(&manager, &active_session_id)
                         };
                         // #3802: use non-blocking send — this is a refresh event
                         // that can safely be dropped when the channel is full.
@@ -2410,10 +2442,11 @@ impl Engine {
                         }
                     }
                     Op::CancelSubAgent { agent_id } => {
+                        let active_session_id = self.session.id.clone();
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
-                            match manager.cancel_agent(&agent_id) {
-                                Ok(_) => Ok(agent_list_event(&manager)),
+                            match manager.cancel_agent_for_session(&active_session_id, &agent_id) {
+                                Ok(_) => Ok(agent_list_event(&manager, &active_session_id)),
                                 Err(err) => Err(err),
                             }
                         };
@@ -2435,18 +2468,29 @@ impl Engine {
                         }
                     }
                     Op::FollowUpSubAgent { agent_id, text } => {
+                        let active_session_id = self.session.id.clone();
                         let runtime = self.off_turn_subagent_runtime();
                         let manager_handle = Arc::clone(&self.subagent_manager);
                         let (outcome, refresh) = {
                             let mut manager = self.subagent_manager.write().await;
                             let outcome = manager
-                                .continue_child_from_user(manager_handle, runtime, &agent_id, &text)
+                                .continue_child_from_user_for_session(
+                                    &active_session_id,
+                                    manager_handle,
+                                    runtime,
+                                    &agent_id,
+                                    &text,
+                                )
                                 .map_err(|err| err.to_string());
-                            (outcome, agent_list_event(&manager))
+                            (outcome, agent_list_event(&manager, &active_session_id))
                         };
                         let _ = self
                             .tx_event
-                            .send(Event::SubAgentFollowUp { agent_id, outcome })
+                            .send(Event::SubAgentFollowUp {
+                                owner_session_id: active_session_id,
+                                agent_id,
+                                outcome,
+                            })
                             .await;
                         if let Err(_e) = self.tx_event.try_send(refresh) {
                             tracing::debug!(
@@ -2580,11 +2624,14 @@ impl Engine {
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         let previous_session_id = self.session.id.clone();
-                        if let Some(session_id) = session_id {
-                            self.session.id = session_id;
+                        let next_session_id = if let Some(session_id) = session_id {
+                            session_id
                         } else if messages.is_empty() && system_prompt.is_none() {
-                            self.session.id = uuid::Uuid::new_v4().to_string();
-                        }
+                            uuid::Uuid::new_v4().to_string()
+                        } else {
+                            previous_session_id.clone()
+                        };
+                        let closed_session_id = self.install_synced_session_id(next_session_id);
                         // SyncSession installs a conversation's identity; an id
                         // change IS a conversation boundary in this runtime —
                         // callers must pass their own conversation id for
@@ -2594,9 +2641,12 @@ impl Engine {
                         // must be finalized here or they keep gating writers in
                         // the new conversation (#5372). Same-session reloads
                         // keep their id and are deliberately left untouched.
-                        if self.session.id != previous_session_id {
-                            let finalized =
-                                self.subagent_manager.write().await.finalize_session_close();
+                        if let Some(closed_session_id) = closed_session_id {
+                            let finalized = self
+                                .subagent_manager
+                                .write()
+                                .await
+                                .finalize_session_close_for_session(&closed_session_id);
                             if finalized > 0 {
                                 tracing::info!(
                                     target: "subagent",
@@ -3742,6 +3792,7 @@ impl Engine {
                 std::env::current_dir().ok(),
                 &self.session.working_set,
                 Some(&self.subagent_manager),
+                &self.session.id,
             )
             .await;
             Some(SubAgentForkContext {
@@ -3765,6 +3816,7 @@ impl Engine {
             let foreground_children = Arc::new(ForegroundChildRegistry::new());
             let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
             let tx_event_clone = self.tx_event.clone();
+            let mailbox_owner_session_id = self.session.id.clone();
             let mailbox_turn_id = turn_id.to_string();
             let (flush_tx, mut flush_rx) = tokio::sync::oneshot::channel();
             let drain_handle = spawn_supervised(
@@ -3779,6 +3831,7 @@ impl Engine {
                                 for envelope in receiver.drain_available() {
                                     if !forward_subagent_mailbox_message(
                                         &tx_event_clone,
+                                        &mailbox_owner_session_id,
                                         &mailbox_turn_id,
                                         envelope.seq,
                                         envelope.message,
@@ -3793,6 +3846,7 @@ impl Engine {
                                 let Some(envelope) = envelope else { break };
                                 if !forward_subagent_mailbox_message(
                                     &tx_event_clone,
+                                    &mailbox_owner_session_id,
                                     &mailbox_turn_id,
                                     envelope.seq,
                                     envelope.message,

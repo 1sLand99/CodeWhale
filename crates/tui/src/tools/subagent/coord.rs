@@ -4,7 +4,7 @@
 //! SubAgentManager / mailbox / checkpoint machinery without restoring the
 //! retired lifecycle theater (`agent_open` / `agent_eval` / …).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -91,7 +91,7 @@ impl ToolSpec for AgentsListTool {
         true
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let include_archived = input
             .get("include_archived")
             .and_then(Value::as_bool)
@@ -99,14 +99,22 @@ impl ToolSpec for AgentsListTool {
         let agent_ref = parse_agent_ref(&input)?;
 
         let mut manager = self.manager.write().await;
-        manager.cleanup(COMPLETED_AGENT_RETENTION);
+        manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
         let summaries = if let Some(agent_ref) = agent_ref {
             let summary = manager
-                .coordination_summary_for(&agent_ref, RECENT_PROGRESS_LIMIT)
+                .coordination_summary_for_session(
+                    &context.state_namespace,
+                    &agent_ref,
+                    RECENT_PROGRESS_LIMIT,
+                )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             vec![summary]
         } else {
-            manager.list_coordination_summaries(include_archived, RECENT_PROGRESS_LIMIT)
+            manager.list_coordination_summaries_for_session(
+                &context.state_namespace,
+                include_archived,
+                RECENT_PROGRESS_LIMIT,
+            )
         };
         drop(manager);
 
@@ -183,7 +191,7 @@ impl ToolSpec for AgentsMessageTool {
         ApprovalRequirement::Required
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let agent_ref =
             parse_agent_ref(&input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
         let message = input
@@ -198,14 +206,19 @@ impl ToolSpec for AgentsMessageTool {
         let receipt = {
             let mut manager = self.manager.write().await;
             manager
-                .ensure_caller_controls_descendant(
+                .ensure_caller_controls_descendant_for_session(
+                    &context.state_namespace,
                     &agent_ref,
                     self.caller_agent_id.as_deref(),
                     "agents/message",
                 )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             manager
-                .queue_running_parent_message(&agent_ref, message)
+                .queue_running_parent_message_for_session(
+                    &context.state_namespace,
+                    &agent_ref,
+                    message,
+                )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?
         };
 
@@ -298,7 +311,7 @@ impl ToolSpec for AgentsFollowupTool {
         ApprovalRequirement::Required
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let agent_ref =
             parse_agent_ref(&input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
         let message = input
@@ -317,14 +330,15 @@ impl ToolSpec for AgentsFollowupTool {
         let should_resume = {
             let manager = self.manager.read().await;
             manager
-                .ensure_caller_controls_descendant(
+                .ensure_caller_controls_descendant_for_session(
+                    &context.state_namespace,
                     &agent_ref,
                     self.caller_agent_id.as_deref(),
                     "agents/followup",
                 )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             manager
-                .get_result_by_ref(&agent_ref)
+                .get_result_by_ref_for_session(&context.state_namespace, &agent_ref)
                 .ok()
                 .is_some_and(|snapshot| {
                     matches!(snapshot.status, SubAgentStatus::Interrupted(_))
@@ -340,7 +354,8 @@ impl ToolSpec for AgentsFollowupTool {
                 Some(runtime) => {
                     let mut manager = self.manager.write().await;
                     let snapshot = manager
-                        .resume_from_checkpoint(
+                        .resume_from_checkpoint_for_session(
+                            &context.state_namespace,
                             Arc::clone(&self.manager),
                             runtime,
                             &agent_ref,
@@ -363,14 +378,14 @@ impl ToolSpec for AgentsFollowupTool {
                 None => {
                     let mut manager = self.manager.write().await;
                     manager
-                        .followup_child(&agent_ref, message)
+                        .followup_child_for_session(&context.state_namespace, &agent_ref, message)
                         .map_err(|err| ToolError::invalid_input(err.to_string()))?
                 }
             }
         } else {
             let mut manager = self.manager.write().await;
             manager
-                .followup_child(&agent_ref, message)
+                .followup_child_for_session(&context.state_namespace, &agent_ref, message)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?
         };
 
@@ -384,7 +399,10 @@ impl ToolSpec for AgentsFollowupTool {
             "continued_from_checkpoint": receipt.continued_from_checkpoint,
             "continuation_handle": receipt.continuation_handle,
             "note": receipt.note,
-            "child_route": self.manager.read().await.get_worker_record(&receipt.agent_id)
+            "child_route": self.manager.read().await.get_worker_record_for_session(
+                &context.state_namespace,
+                &receipt.agent_id,
+            )
                 .and_then(|record| record.spec.child_route),
         });
         let mut tool_result = ToolResult::json(&payload)
@@ -395,7 +413,10 @@ impl ToolSpec for AgentsFollowupTool {
             "woke": receipt.woke,
             "continued_from_checkpoint": receipt.continued_from_checkpoint,
             "continuation_handle": receipt.continuation_handle,
-            "child_route": self.manager.read().await.get_worker_record(&receipt.agent_id)
+            "child_route": self.manager.read().await.get_worker_record_for_session(
+                &context.state_namespace,
+                &receipt.agent_id,
+            )
                 .and_then(|record| record.spec.child_route),
         }));
         Ok(tool_result)
@@ -482,13 +503,18 @@ impl ToolSpec for AgentsInterruptTool {
         let (prior, snapshot) = {
             let mut manager = self.manager.write().await;
             manager
-                .interrupt_child(&agent_ref, self.caller_agent_id.as_deref(), reason)
+                .interrupt_child_for_session(
+                    &context.state_namespace,
+                    &agent_ref,
+                    self.caller_agent_id.as_deref(),
+                    reason,
+                )
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?
         };
 
         let worker_record = {
             let manager = self.manager.read().await;
-            manager.get_worker_record(&snapshot.agent_id)
+            manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
         };
         let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let payload = json!({
@@ -645,7 +671,7 @@ async fn wait_for_all_children(
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
             let snapshot = manager
-                .get_result_by_ref(agent_ref)
+                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             if snapshot.status != SubAgentStatus::Running {
                 // Already settled: hand back its outcome rather than an empty
@@ -662,7 +688,7 @@ async fn wait_for_all_children(
             vec![snapshot.agent_id]
         } else {
             manager
-                .list_filtered(false)
+                .list_filtered_for_session(&context.state_namespace, false)
                 .into_iter()
                 .filter(|snapshot| snapshot.status == SubAgentStatus::Running)
                 .map(|snapshot| snapshot.agent_id)
@@ -690,7 +716,7 @@ async fn wait_for_all_children(
             let mut settled = Vec::new();
             let mut still_running = Vec::new();
             for agent_id in &watched {
-                match manager.get_result_by_ref(agent_id) {
+                match manager.get_result_by_ref_for_session(&context.state_namespace, agent_id) {
                     Ok(snapshot) if snapshot.status == SubAgentStatus::Running => {
                         still_running.push(json!({
                             "agent_id": snapshot.agent_id,
@@ -796,7 +822,7 @@ async fn wait_for_activity(
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
             let snap = manager
-                .get_result_by_ref(agent_ref)
+                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             let fp = manager.activity_fingerprint(&snap.agent_id).unwrap_or(0);
             if snap.status != SubAgentStatus::Running {
@@ -816,7 +842,7 @@ async fn wait_for_activity(
             (vec![snap.agent_id.clone()], vec![(snap.agent_id, fp)])
         } else {
             let running = manager
-                .list_filtered(false)
+                .list_filtered_for_session(&context.state_namespace, false)
                 .into_iter()
                 .filter(|s| s.status == SubAgentStatus::Running)
                 .map(|s| s.agent_id)
@@ -860,7 +886,9 @@ async fn wait_for_activity(
             let mut settled = Vec::new();
             let mut activity = Vec::new();
             for (id, base_fp) in &baseline {
-                if let Ok(snap) = manager.get_result_by_ref(id) {
+                if let Ok(snap) =
+                    manager.get_result_by_ref_for_session(&context.state_namespace, id)
+                {
                     if snap.status != SubAgentStatus::Running {
                         settled.push(snap);
                         continue;
@@ -875,7 +903,11 @@ async fn wait_for_activity(
                     }
                 }
             }
-            (settled, activity, manager.running_count())
+            (
+                settled,
+                activity,
+                manager.running_count_for_session(&context.state_namespace),
+            )
         };
 
         if !outcome.0.is_empty() || !outcome.1.is_empty() {
@@ -1639,6 +1671,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreign_session_is_excluded_from_default_and_explicit_list_waits() {
+        let tmp = tempdir().unwrap();
+        let manager = empty_manager(tmp.path());
+        let agent_a = {
+            let mut guard = manager.write().await;
+            let agent_id = guard.insert_test_running_agent("foreign_wait_a", tmp.path());
+            guard.assign_test_session_owner(&agent_id, "session-a");
+            agent_id
+        };
+        let context_b = ToolContext::new(tmp.path()).with_state_namespace("session-b");
+
+        let listed = AgentsListTool::new(Arc::clone(&manager))
+            .execute(json!({}), &context_b)
+            .await
+            .expect("B list");
+        let listed: Value = serde_json::from_str(&listed.content).unwrap();
+        assert_eq!(listed["count"], json!(0));
+
+        let default_wait = dispatch_wait(
+            &json!({ "until": "all", "timeout_secs": 60 }),
+            Arc::clone(&manager),
+            &context_b,
+        )
+        .await
+        .expect("B default wait has no visible children");
+        let default_wait: Value = serde_json::from_str(&default_wait.content).unwrap();
+        assert!(default_wait["settled"].as_array().unwrap().is_empty());
+
+        let error = dispatch_wait(
+            &json!({ "until": "all", "agent_id": agent_a, "timeout_secs": 60 }),
+            manager,
+            &context_b,
+        )
+        .await
+        .expect_err("B explicit wait must reject A")
+        .to_string();
+        assert!(
+            error.contains("Agent not found in the active session"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn wait_until_all_returns_immediately_with_no_children() {
         let tmp = tempdir().unwrap();
         let started = Instant::now();
@@ -2141,6 +2216,13 @@ pub struct CoordinationLedger {
     pub projections: Vec<ContextProjectionReceipt>,
     #[serde(default)]
     pub contentions: Vec<WriteContentionReceipt>,
+    /// Root-session provenance for records whose logical owner (`root`) is
+    /// otherwise shared by every conversation in a workspace. Agent-owned
+    /// records can also be stamped here, but may be resolved through their
+    /// immutable `SubAgent.owner_session_id`. Missing legacy provenance is
+    /// never guessed by active-session views.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub record_sessions: HashMap<u64, String>,
 }
 
 impl Default for CoordinationLedger {
@@ -2153,6 +2235,7 @@ impl Default for CoordinationLedger {
             reconciliations: Vec::new(),
             projections: Vec::new(),
             contentions: Vec::new(),
+            record_sessions: HashMap::new(),
         }
     }
 }
@@ -3155,7 +3238,7 @@ impl ToolSpec for AgentsCoordinateTool {
         input.get("action").and_then(Value::as_str) == Some("inspect")
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let action = input
             .get("action")
             .and_then(Value::as_str)
@@ -3185,7 +3268,8 @@ impl ToolSpec for AgentsCoordinateTool {
         };
         if action == "inspect" {
             let manager = self.manager.read().await;
-            let value = manager.inspect_coordination(
+            let value = manager.inspect_coordination_for_session(
+                &context.state_namespace,
                 bounded_text("subject").as_deref(),
                 input
                     .get("limit")
@@ -3205,6 +3289,36 @@ impl ToolSpec for AgentsCoordinateTool {
         }
 
         let mut manager = self.manager.write().await;
+        if let Some(caller) = self.caller.as_deref() {
+            manager
+                .get_result_by_ref_for_session(&context.state_namespace, caller)
+                .map_err(|_| {
+                    ToolError::invalid_input("Agent not found in the active session".to_string())
+                })?;
+        }
+        if matches!(action, "accept" | "supersede") {
+            let decision_id = bounded_text("decision_id").unwrap_or_default();
+            if !manager
+                .coordination_decision_is_owned_by_session(&context.state_namespace, &decision_id)
+            {
+                return Err(ToolError::invalid_input(
+                    "Coordination decision not found in the active session".to_string(),
+                ));
+            }
+        }
+        if action == "reconcile"
+            && strings("input_decisions").iter().any(|decision_id| {
+                !manager.coordination_decision_is_owned_by_session(
+                    &context.state_namespace,
+                    decision_id,
+                )
+            })
+        {
+            return Err(ToolError::invalid_input(
+                "One or more coordination decisions were not found in the active session"
+                    .to_string(),
+            ));
+        }
         let coordination_before = manager.coordination.clone();
         let mutation = match action {
             "propose" => manager
@@ -3292,13 +3406,54 @@ impl ToolSpec for AgentsCoordinateTool {
                 }),
             _ => unreachable!("coordination action validated above"),
         };
+        let value = match mutation {
+            Ok(value) => value,
+            Err(error) => {
+                // Contention failures deliberately append a durable receipt.
+                // Stamp and persist every sequence allocated by the failed
+                // action before returning its error; validation failures that
+                // did not mutate the ledger allocate nothing.
+                let first_new_sequence = coordination_before.sequence.saturating_add(1);
+                let last_new_sequence = manager.coordination.sequence;
+                for sequence in first_new_sequence..=last_new_sequence {
+                    if let Err(stamp_error) = manager
+                        .stamp_coordination_sequence_for_session(sequence, &context.state_namespace)
+                    {
+                        manager.coordination = coordination_before;
+                        return Err(ToolError::execution_failed(format!(
+                            "{error}; additionally failed to stamp coordination receipt: {stamp_error}"
+                        )));
+                    }
+                }
+                if last_new_sequence >= first_new_sequence
+                    && let Err(persist_error) = manager.persist_state_synchronously()
+                {
+                    manager.coordination = coordination_before;
+                    return Err(ToolError::execution_failed(format!(
+                        "{error}; additionally failed to persist coordination receipt: {persist_error}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        let Some(sequence) = value.get("sequence").and_then(Value::as_u64) else {
+            manager.coordination = coordination_before;
+            return Err(ToolError::execution_failed(format!(
+                "coordination action '{action}' produced no durable sequence"
+            )));
+        };
+        if let Err(error) =
+            manager.stamp_coordination_sequence_for_session(sequence, &context.state_namespace)
+        {
+            manager.coordination = coordination_before;
+            return Err(ToolError::execution_failed(error));
+        }
         if let Err(error) = manager.persist_state_synchronously() {
             manager.coordination = coordination_before;
             return Err(ToolError::execution_failed(format!(
                 "failed to persist coordination action '{action}': {error}"
             )));
         }
-        let value = mutation?;
         ToolResult::json(&value).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 }
