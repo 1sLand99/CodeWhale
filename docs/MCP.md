@@ -16,7 +16,7 @@ Server mode note:
 
 ## Setup wizard vs manual MCP setup (#3407)
 
-The constitution-first `/setup` wizard includes an optional **Tools and MCP**
+The `/setup` hub includes an optional **Tools and MCP**
 step. That step is discovery/readiness only:
 
 | Wizard can do | Still requires manual / explicit action |

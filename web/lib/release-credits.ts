@@ -20,12 +20,25 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
+  "@SparkofSpike",
+  "@bistack",
+  "@OctoBored",
+  "@cacdcaecawae",
   "@cyq1017",
   "@aboimpinto",
   "@wuisabel-gif",
-  "@SparkofSpike",
   "@Lstarsky0",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
-export const RELEASE_HELPERS: string[] = ["@thejayjetson"];
+export const RELEASE_HELPERS: string[] = [
+  "@DingYong4223",
+  "@AiurArtanis",
+  "@formp3",
+  "@sky-sun-moon",
+  "@cy2311",
+  "@demian-welt",
+  "@BrathonBai",
+  "@M-Maciej",
+  "@thejayjetson",
+];

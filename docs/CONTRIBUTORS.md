@@ -32,6 +32,20 @@ notes, and relevant issue/PR comments.
 
 **Merged or adapted contributions**
 
+- **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — restored
+  `/title` as an independent, persistent terminal-window title in PR #5509,
+  and contributed the Tier 1 Chinese and Indonesian documentation move to
+  `docs/zh_hans/` and `docs/id/` with one-release redirect stubs (#5507,
+  epic #5482)
+- **[Sun Zhenyuan / bistack](https://github.com/bistack)** — extracted the
+  turn-loop stream processor in PR #5514 while preserving retry,
+  cancellation, usage, TTFT, steering, and partial-response behavior
+- **[OctoBored](https://github.com/OctoBored)** — supplied the working
+  no-token Star History mirror used by the localized README set after the
+  canonical chart endpoint began returning a restricted placeholder (#5510)
+- **[cacdcaecawae](https://github.com/cacdcaecawae)** — added provider-neutral
+  typed MCP image forwarding in PR #5515; the adapted version also emits a
+  visible omission receipt for malformed image fields
 - **[cyq1017](https://github.com/cyq1017)** — approval outcomes are persisted
   before execution can proceed: receipts commit to a session-owned log first,
   unpersistable evidence blocks the tool, stale decisions are rejected, and
@@ -46,10 +60,6 @@ notes, and relevant issue/PR comments.
   names the active repository or linked worktree before the branch and dirty
   marker, derived from Git's common directory and capped by shell density
   tier (#5511, the repo/worktree slice of #5437)
-- **[SparkofSpike](https://github.com/SparkofSpike)** — Tier 1 of the Chinese
-  docs localization: Chinese and Indonesian documentation moves to
-  `docs/zh_hans/` and `docs/id/`, with redirect stubs held at the old paths
-  for one release cycle (#5507, epic #5482 they filed)
 - **[Lstarsky0](https://github.com/Lstarsky0)** — `docs/hooks` and
   `docs/troubleshooting` move onto the dictionary spine, retiring their inline
   bilingual literals in favor of locale dictionaries with token-aware code
@@ -57,6 +67,25 @@ notes, and relevant issue/PR comments.
 
 **Reports, reproductions, and verification**
 
+- **[DingYong4223](https://github.com/DingYong4223)** — reported the
+  narrow-terminal completion truncation closed by the bounded hover reveal
+  (#998)
+- **[AiurArtanis](https://github.com/AiurArtanis)** and
+  **[formp3](https://github.com/formp3)** — identified the completion surfaces
+  affected by narrow-terminal truncation (#998)
+- **[sky-sun-moon](https://github.com/sky-sun-moon)** — reported the missing
+  full per-turn input, reasoning, tool, and assistant pages that shaped Turn
+  Inspector navigation (#1682)
+- **[cy2311](https://github.com/cy2311)** — reported the Windows launch path
+  now covered by the Windows Terminal-aware batch launcher (#1854)
+- **[demian-welt](https://github.com/demian-welt)** — provided the reproducible
+  pre-header SSE transport failure behind the bounded HTTP/1.1 retry (#4683)
+- **[BrathonBai](https://github.com/BrathonBai)** — reported the Tabby/CJK IME
+  candidate-window jump that led to the cursor hide-diff-position-show
+  transaction (#5023)
+- **[M-Maciej](https://github.com/M-Maciej)** — provided the organization-
+  coordinator use case and 5-30 minute cadence requirement behind cancellable
+  cross-turn goal delays (#5508)
 - **[thejayjetson](https://github.com/thejayjetson)** — the header
   status-indicator report that pinned the regression to a specific setting,
   having already ruled out every value, both themes, `fancy_animations`, the

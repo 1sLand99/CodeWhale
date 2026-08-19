@@ -130,7 +130,9 @@ describe("shared getting-started path", () => {
     expect(first.body.en).toMatch(/Model replies need a provider/);
     // The keyless-launch claim is documented behavior, not invented copy.
     const guide = repoText("docs/GUIDE.md");
-    expect(guide).toContain("On first launch, Codewhale starts with a short constitution-first setup path");
+    expect(guide).toContain(
+      "On first launch, Codewhale opens with a recommended working agreement",
+    );
   });
 
   it("uses only documented commands", () => {

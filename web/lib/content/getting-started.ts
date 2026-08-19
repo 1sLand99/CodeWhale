@@ -8,7 +8,7 @@
  * TRUTH CONTRACT:
  *   - Step copy must match documented behavior in docs/GUIDE.md, docs/MODES.md,
  *     docs/PROVIDERS.md, and docs/FLEET.md. The runtime launches without any
- *     API key (constitution-first setup); model replies require a provider —
+ *     API key (recommended working-agreement setup); model replies require a provider —
  *     hosted key or a keyless loopback route. Do not imply otherwise.
  *   - `href` values are locale-relative (no locale prefix); consumers render
  *     `/${locale}${href}` and the tests assert every target route exists.

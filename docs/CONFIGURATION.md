@@ -40,10 +40,10 @@ controls do not blur together.
 
 ### Managing the user-global constitution (`/setup` and `/constitution`)
 
-On first launch Codewhale runs a short **constitution-first** setup path:
-language → provider/model readiness → runtime posture → create or confirm your
-constitution. The bundled/default constitution is always valid, so you can
-defer; reopen the hub any time with `/setup`.
+On first launch Codewhale offers a recommended **working agreement**. Press
+Enter to accept the balanced bundled/default law, or press `C` to customize a
+full constitution. Provider/model readiness and runtime posture stay separate
+from this guidance, and you can reopen the setup hub any time with `/setup`.
 
 On the **Constitution** step:
 
