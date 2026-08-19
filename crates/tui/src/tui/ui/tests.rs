@@ -1500,25 +1500,38 @@ fn plain_mcp_show_refreshes_discovery_counts() {
 }
 
 #[tokio::test]
-async fn mcp_reload_uses_engine_snapshot_and_clears_pending_state() {
+async fn mcp_enable_persists_and_applies_the_live_tool_pool_in_one_action() {
     use crate::mcp::{McpManagerSnapshot, McpServerSnapshot};
     use crate::tui::app::McpUiAction;
 
+    let temp = tempfile::tempdir().expect("temporary MCP home");
+    let path = temp.path().join("mcp.json");
+    crate::mcp::add_server_config(
+        &path,
+        "fixture".to_string(),
+        Some("fixture-mcp".to_string()),
+        None,
+        Vec::new(),
+        None,
+    )
+    .expect("seed MCP server");
+    crate::mcp::set_server_enabled(&path, "fixture", false).expect("disable MCP server");
+
     let mut app = create_test_app();
-    app.mcp_reload_required = true;
+    app.mcp_config_path = path.clone();
     let config = Config::default();
     let mut mock = mock_engine_handle();
     let handle = mock.handle.clone();
     let snapshot = McpManagerSnapshot {
-        config_path: PathBuf::from("mcp.json"),
+        config_path: path.clone(),
         config_exists: true,
         reload_required: false,
         servers: vec![McpServerSnapshot {
-            name: "ready".to_string(),
+            name: "fixture".to_string(),
             enabled: true,
             required: false,
             transport: "stdio".to_string(),
-            command_or_url: "server".to_string(),
+            command_or_url: "fixture-mcp".to_string(),
             connect_timeout: 5,
             execute_timeout: 5,
             read_timeout: 5,
@@ -1532,21 +1545,41 @@ async fn mcp_reload_uses_engine_snapshot_and_clears_pending_state() {
     };
     let response_snapshot = snapshot.clone();
     let respond = async {
-        match mock.rx_op.recv().await.expect("reload op") {
+        match mock.rx_op.recv().await.expect("automatic reload op") {
             Op::ReloadMcp { config_path, tx } => {
-                assert_eq!(config_path, PathBuf::from("mcp.json"));
+                assert_eq!(config_path, path);
                 let sender = tx.lock().unwrap().take().expect("reload reply sender");
                 sender.send(Ok(response_snapshot)).expect("reload reply");
             }
             other => panic!("unexpected op: {other:?}"),
         }
     };
-    let action = handle_mcp_ui_action(&mut app, &handle, &config, McpUiAction::Reload);
+    let action = handle_mcp_ui_action(
+        &mut app,
+        &handle,
+        &config,
+        McpUiAction::Enable {
+            name: "fixture".to_string(),
+        },
+    );
     tokio::join!(action, respond);
 
+    assert!(
+        crate::mcp::load_config(&app.mcp_config_path)
+            .expect("reload persisted MCP config")
+            .servers
+            .get("fixture")
+            .expect("persisted fixture")
+            .is_enabled(),
+        "the durable config and live pool must advance together",
+    );
     assert!(!app.mcp_reload_required);
     assert_eq!(app.mcp_snapshot.as_ref(), Some(&snapshot));
-    assert_eq!(app.mcp_configured_count, 1);
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content }
+            if content.contains("Enabled MCP server 'fixture'")
+    )));
     assert!(app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::System { content }

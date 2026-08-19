@@ -564,7 +564,13 @@ pub(crate) async fn handle_mcp_ui_action(
         add_mcp_message(app, message);
     }
 
-    let snapshot_result = if is_reload {
+    // A successful MCP mutation is an explicit request to change the tools
+    // available to this running session. Apply it to the engine-owned pool in
+    // the same operation instead of leaving Extensions and `/mcp` users on a
+    // second, easy-to-miss reload step. The standalone reload action remains
+    // the retry/compatibility path for externally edited configuration.
+    let rebuild_live_pool = is_reload || changed;
+    let snapshot_result = if rebuild_live_pool {
         match engine_handle.reload_mcp(path.clone()).await {
             Ok(snapshot) => {
                 app.mcp_reload_required = false;
@@ -615,7 +621,7 @@ pub(crate) async fn handle_mcp_ui_action(
             app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
             open_mcp_manager_pager(app, &snapshot);
         }
-        Err(err) if is_reload => add_mcp_message(
+        Err(err) if rebuild_live_pool => add_mcp_message(
             app,
             format!("MCP reload failed; the live tool pool is unchanged: {err}"),
         ),
