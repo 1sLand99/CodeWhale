@@ -1273,6 +1273,61 @@ fn config_refresh_preserves_active_search_filter() {
 }
 
 #[test]
+fn workflow_ui_events_apply_only_to_the_active_session_owner() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-b".to_string());
+    let a_started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 1,
+        "workflow_goal": "A workflow"
+    });
+
+    assert!(!apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-a",
+        &a_started,
+    ));
+    assert!(
+        app.workflow_panel.is_none(),
+        "foreign event must not mutate B"
+    );
+
+    let b_started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 2,
+        "workflow_goal": "B workflow"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-b",
+        "workflow-b",
+        &b_started,
+    ));
+    assert_eq!(
+        app.workflow_panel
+            .as_ref()
+            .map(|panel| panel.run_id.as_str()),
+        Some("workflow-b")
+    );
+
+    // A -> B -> A restores A's event lane; it never replays through B.
+    app.current_session_id = Some("session-a".to_string());
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-a",
+        &a_started,
+    ));
+    assert_eq!(
+        app.workflow_panel
+            .as_ref()
+            .map(|panel| panel.run_id.as_str()),
+        Some("workflow-a")
+    );
+}
+
+#[test]
 fn workflow_panel_plain_letters_return_to_composer() {
     let mut app = create_test_app();
     app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(

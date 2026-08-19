@@ -2398,9 +2398,16 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::WorkflowUi { run_id, event } => {
-                        // #4122: live typed workflow events → panel + history card.
-                        apply_workflow_ui_event(app, &run_id, &event);
+                    EngineEvent::WorkflowUi {
+                        owner_session_id,
+                        run_id,
+                        event,
+                    } => {
+                        if !apply_owned_workflow_ui_event(app, &owner_session_id, &run_id, &event) {
+                            tracing::debug!("discarding workflow UI event for an inactive session");
+                            received_engine_event = redraw_requested_before_event;
+                            continue;
+                        }
                         // #4095 residual: budget_updated is high-frequency under
                         // multi-agent fan-out. Data is already applied; pace the
                         // repaint like AgentProgress so the panel does not churn.

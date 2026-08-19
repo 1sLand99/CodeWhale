@@ -410,7 +410,11 @@ fn plan_payload(app: &App) -> Result<(&'static str, Value, Value), String> {
 }
 
 fn workflow_payload(app: &App, run_id: &str) -> Result<(&'static str, Value, Value), String> {
-    match crate::tools::workflow::structcopy_run_projection(&app.workspace, run_id) {
+    match crate::tools::workflow::structcopy_run_projection(
+        &app.workspace,
+        run_id,
+        app.current_session_id.as_deref(),
+    ) {
         Some(value) => Ok(("workflow", json!(run_id), value)),
         None => Err(unavailable_message(
             app,
@@ -1544,6 +1548,7 @@ mod tests {
     fn workflow_copy_projects_existing_run_without_side_effects() {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
+        app.current_session_id = Some("structcopy-workflow-test-session".to_string());
 
         // Unknown run, no state: honest error, and the read must not create
         // the workflow journal on disk.
@@ -1566,6 +1571,9 @@ mod tests {
         crate::tools::workflow::structcopy_test_seed_run(
             tmpdir.path(),
             "structcopy-test-run-alpha",
+            app.current_session_id
+                .as_deref()
+                .expect("test session identity"),
         );
         let json = stdout_json(&execute_structcopy(
             &mut app,

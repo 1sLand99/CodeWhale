@@ -126,7 +126,7 @@ use crate::tui::subagent_routing::{handle_subagent_mailbox, reconcile_subagent_a
 #[cfg(test)]
 use crate::tui::tool_routing::exploring_label;
 use crate::tui::tool_routing::{
-    apply_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
+    apply_owned_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
 };
 use crate::tui::ui_text::history_cell_to_text;
 use crate::tui::user_input::UserInputView;

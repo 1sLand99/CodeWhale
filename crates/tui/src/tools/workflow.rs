@@ -314,20 +314,29 @@ struct WorkflowDispatchFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowUiEvent {
     at_ms: u64,
+    /// Conversation that owns this event. Legacy journal entries omit it and
+    /// therefore fail closed at every session-facing projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_session_id: Option<String>,
     #[serde(flatten)]
     kind: WorkflowUiEventKind,
 }
 
 impl WorkflowUiEvent {
-    fn new(kind: WorkflowUiEventKind) -> Self {
+    fn new(owner_session_id: &str, kind: WorkflowUiEventKind) -> Self {
         Self {
             at_ms: now_ms(),
+            owner_session_id: Some(owner_session_id.to_string()),
             kind,
         }
     }
 
-    fn at(at_ms: u64, kind: WorkflowUiEventKind) -> Self {
-        Self { at_ms, kind }
+    fn at(at_ms: u64, owner_session_id: &str, kind: WorkflowUiEventKind) -> Self {
+        Self {
+            at_ms,
+            owner_session_id: Some(owner_session_id.to_string()),
+            kind,
+        }
     }
 
     fn event_type(&self) -> &'static str {
@@ -569,6 +578,11 @@ impl WorkflowUiEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowRunRecord {
     run_id: String,
+    /// Conversation that created the run. `None` means a legacy journal entry
+    /// with unknown ownership and is intentionally invisible/non-mutable from
+    /// every session-facing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_session_id: Option<String>,
     status: WorkflowRunStatus,
     #[serde(default)]
     lifecycle_seq: u64,
@@ -614,6 +628,7 @@ struct WorkflowRunRecord {
 impl WorkflowRunRecord {
     fn new(
         run_id: String,
+        owner_session_id: Option<String>,
         source_path: Option<PathBuf>,
         token_budget: Option<u64>,
         spec: Option<&WorkflowSpec>,
@@ -623,6 +638,7 @@ impl WorkflowRunRecord {
             .unwrap_or_default();
         Self {
             run_id,
+            owner_session_id,
             status: WorkflowRunStatus::Running,
             lifecycle_seq: 1,
             started_at_ms: now_ms(),
@@ -918,8 +934,8 @@ impl ToolSpec for WorkflowTool {
                 )
                 .await
             }
-            WorkflowAction::Status => status_workflow(input, state),
-            WorkflowAction::Cancel => cancel_workflow(input, state).await,
+            WorkflowAction::Status => status_workflow(input, state, &context.state_namespace),
+            WorkflowAction::Cancel => cancel_workflow(input, state, &context.state_namespace).await,
         }
     }
 }
@@ -930,6 +946,9 @@ fn attach_bound_workflow_lifecycles(
 ) -> Result<(), ToolError> {
     let records = lock_mutex(&state.runs)?
         .values()
+        .filter(|record| {
+            record.owner_session_id.as_deref() == Some(context.state_namespace.as_str())
+        })
         .cloned()
         .collect::<Vec<_>>();
     for record in records {
@@ -1036,6 +1055,7 @@ async fn start_workflow(
         };
         let mut record = WorkflowRunRecord::new(
             run_id.clone(),
+            Some(context.state_namespace.clone()),
             source.path.clone(),
             token_budget,
             source.spec.as_ref(),
@@ -1044,6 +1064,7 @@ async fn start_workflow(
         record.plan_approval = Some(plan_approval.clone());
         let started = WorkflowUiEvent::at(
             record.started_at_ms,
+            &context.state_namespace,
             WorkflowUiEventKind::RunStarted {
                 workflow_id: record.workflow_id.clone(),
                 workflow_goal: record.workflow_goal.clone(),
@@ -1071,6 +1092,7 @@ async fn start_workflow(
                 obj.insert("run_id".to_string(), json!(run_id));
             }
             let _ = tx.try_send(Event::WorkflowUi {
+                owner_session_id: context.state_namespace.clone(),
                 run_id: run_id.clone(),
                 event: value,
             });
@@ -1091,6 +1113,7 @@ async fn start_workflow(
 
     let driver = SubAgentWorkflowDriver::new(
         run_id.clone(),
+        context.state_namespace.clone(),
         manager,
         runtime,
         state.clone(),
@@ -1167,20 +1190,22 @@ async fn start_workflow(
         controller.set_run_handle(handle);
     }
 
-    workflow_result_for(&run_id, state)
+    workflow_result_for(&run_id, state, &context.state_namespace)
 }
 
 fn status_workflow(
     input: Value,
     state: Arc<WorkflowWorkspaceState>,
+    owner_session_id: &str,
 ) -> Result<ToolResult, ToolError> {
     if let Some(run_id) = optional_str(&input, "run_id")? {
-        return workflow_result_for(run_id, state);
+        return workflow_result_for(run_id, state, owner_session_id);
     }
     let mut summaries = {
         let runs_guard = lock_mutex(&state.runs)?;
         runs_guard
             .values()
+            .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))
             .map(WorkflowRunRecord::summary)
             .collect::<Vec<_>>()
     };
@@ -1196,10 +1221,11 @@ fn status_workflow(
 async fn cancel_workflow(
     input: Value,
     state: Arc<WorkflowWorkspaceState>,
+    owner_session_id: &str,
 ) -> Result<ToolResult, ToolError> {
     let run_id =
         optional_str(&input, "run_id")?.ok_or_else(|| ToolError::missing_field("run_id"))?;
-    cancel_workflow_run(run_id, state)
+    cancel_workflow_run(run_id, state, owner_session_id)
 }
 
 /// Synchronous cancellation core shared by the model-facing tool action and
@@ -1212,17 +1238,23 @@ async fn cancel_workflow(
 fn cancel_workflow_run(
     run_id: &str,
     state: Arc<WorkflowWorkspaceState>,
+    owner_session_id: &str,
 ) -> Result<ToolResult, ToolError> {
+    // Resolve ownership before touching the controller map or disclosing
+    // status. Foreign and legacy-ownerless ids are indistinguishable from an
+    // unknown run.
+    let current_status = {
+        let runs_guard = lock_mutex(&state.runs)?;
+        let record = runs_guard
+            .get(run_id)
+            .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id));
+        record.map(|record| record.status).ok_or_else(|| {
+            ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
+        })?
+    };
     let controller = {
         let mut controllers_guard = lock_mutex(&state.controllers)?;
         controllers_guard.remove(run_id)
-    };
-    let current_status = {
-        let runs_guard = lock_mutex(&state.runs)?;
-        let record = runs_guard.get(run_id).ok_or_else(|| {
-            ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
-        })?;
-        record.status
     };
     if current_status != WorkflowRunStatus::Running {
         state.reconcile_cancel(run_id, CancelOutcome::AlreadyFinished);
@@ -1231,7 +1263,7 @@ fn cancel_workflow_run(
         {
             state.reconcile_snapshot(record);
         }
-        return workflow_result_for(run_id, state);
+        return workflow_result_for(run_id, state, owner_session_id);
     }
     let live = controller.is_some();
     state.reconcile_cancel(
@@ -1252,9 +1284,12 @@ fn cancel_workflow_run(
         "cancelled; no live process to stop"
     }
     .to_string();
-    let cancelled_event = WorkflowUiEvent::new(WorkflowUiEventKind::RunCancelled {
-        reason: reason.clone(),
-    });
+    let cancelled_event = WorkflowUiEvent::new(
+        owner_session_id,
+        WorkflowUiEventKind::RunCancelled {
+            reason: reason.clone(),
+        },
+    );
     let snapshot = {
         let mut runs_guard = lock_mutex(&state.runs)?;
         let record = runs_guard.get_mut(run_id).ok_or_else(|| {
@@ -1280,7 +1315,7 @@ fn cancel_workflow_run(
     if let Some(controller) = controller {
         controller.driver.emit_ui_event(&cancelled_event);
     }
-    workflow_result_for(run_id, state)
+    workflow_result_for(run_id, state, owner_session_id)
 }
 
 fn workflow_fleet_name(input: &Value) -> Result<Option<String>, ToolError> {
@@ -1775,12 +1810,16 @@ async fn run_workflow_vm(
                 if run_usage.is_some() {
                     record.usage = run_usage.clone();
                 }
-                let budget_event = WorkflowUiEvent::new(budget_event_kind(final_budget));
-                let completed = WorkflowUiEvent::new(WorkflowUiEventKind::RunCompleted {
-                    status: record.status,
-                    error: record.error.clone(),
-                    usage: run_usage.clone(),
-                });
+                let budget_event =
+                    WorkflowUiEvent::new(&driver.owner_session_id, budget_event_kind(final_budget));
+                let completed = WorkflowUiEvent::new(
+                    &driver.owner_session_id,
+                    WorkflowUiEventKind::RunCompleted {
+                        status: record.status,
+                        error: record.error.clone(),
+                        usage: run_usage.clone(),
+                    },
+                );
                 record.push_event(budget_event.clone());
                 record.push_event(completed.clone());
                 // Live stream terminal events even when recorded outside the
@@ -1963,12 +2002,17 @@ fn workflow_config_for(runtime: &SubAgentRuntime) -> codewhale_config::WorkflowC
 fn workflow_result_for(
     run_id: &str,
     state: Arc<WorkflowWorkspaceState>,
+    owner_session_id: &str,
 ) -> Result<ToolResult, ToolError> {
     let record = {
         let runs_guard = lock_mutex(&state.runs)?;
-        runs_guard.get(run_id).cloned().ok_or_else(|| {
-            ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
-        })?
+        runs_guard
+            .get(run_id)
+            .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
+            })?
     };
     let journal_path = state.journal_path().to_path_buf();
     let (payload, bounds) = bounded_run_record_value(&record, &journal_path);
@@ -3254,6 +3298,7 @@ struct RuntimeTaskRecord {
 
 struct SubAgentWorkflowDriver {
     run_id: String,
+    owner_session_id: String,
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
     state: Arc<WorkflowWorkspaceState>,
@@ -3288,6 +3333,7 @@ impl SubAgentWorkflowDriver {
     #[allow(clippy::too_many_arguments)]
     fn new(
         run_id: String,
+        owner_session_id: String,
         manager: SharedSubAgentManager,
         runtime: SubAgentRuntime,
         state: Arc<WorkflowWorkspaceState>,
@@ -3301,6 +3347,7 @@ impl SubAgentWorkflowDriver {
         gate_board.install_gates(&gate_specs);
         let driver = Arc::new(Self {
             run_id,
+            owner_session_id,
             manager,
             runtime,
             state,
@@ -3433,6 +3480,7 @@ impl SubAgentWorkflowDriver {
             obj.insert("run_id".to_string(), json!(self.run_id));
         }
         let _ = tx.try_send(Event::WorkflowUi {
+            owner_session_id: self.owner_session_id.clone(),
             run_id: self.run_id.clone(),
             event: value,
         });
@@ -3449,7 +3497,7 @@ impl SubAgentWorkflowDriver {
         } else {
             false
         };
-        let event = WorkflowUiEvent::new(budget_event_kind(snapshot));
+        let event = WorkflowUiEvent::new(&self.owner_session_id, budget_event_kind(snapshot));
         if changed {
             self.record_run_event(event);
         } else {
@@ -3574,15 +3622,17 @@ impl SubAgentWorkflowDriver {
                     };
                     match board.record_handoff(artifact.clone()) {
                         Ok(()) => {
-                            promotion =
-                                Some(WorkflowUiEvent::new(WorkflowUiEventKind::HandoffPromoted {
+                            promotion = Some(WorkflowUiEvent::new(
+                                &self.owner_session_id,
+                                WorkflowUiEventKind::HandoffPromoted {
                                     artifact_id: artifact.id,
                                     gate_id: spec.id.clone(),
                                     kind: artifact.kind,
                                     from_role: artifact.from_role,
                                     to_role: artifact.to_role,
                                     producer_task_id: record.agent_id.clone(),
-                                }));
+                                },
+                            ));
                         }
                         Err(err) => {
                             state = GateState::Blocked {
@@ -3594,14 +3644,17 @@ impl SubAgentWorkflowDriver {
                         }
                     }
                 }
-                events.push(WorkflowUiEvent::new(WorkflowUiEventKind::GateUpdated {
-                    gate_id: spec.id.clone(),
-                    role: spec.role.clone(),
-                    gate: gate_kind_label(spec.gate).to_string(),
-                    state: state.as_str().to_string(),
-                    blocked_role: spec.blocks_role.clone(),
-                    blocked_reason: state.blocked_reason().map(str::to_string),
-                }));
+                events.push(WorkflowUiEvent::new(
+                    &self.owner_session_id,
+                    WorkflowUiEventKind::GateUpdated {
+                        gate_id: spec.id.clone(),
+                        role: spec.role.clone(),
+                        gate: gate_kind_label(spec.gate).to_string(),
+                        state: state.as_str().to_string(),
+                        blocked_role: spec.blocks_role.clone(),
+                        blocked_reason: state.blocked_reason().map(str::to_string),
+                    },
+                ));
                 if let Some(event) = promotion {
                     events.push(event);
                 }
@@ -3630,8 +3683,9 @@ impl SubAgentWorkflowDriver {
             .workflow_task_label
             .clone()
             .or_else(|| request.label.clone());
-        self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::TaskStarted(
-            Box::new(WorkflowTaskStartedEvent {
+        self.record_run_event(WorkflowUiEvent::new(
+            &self.owner_session_id,
+            WorkflowUiEventKind::TaskStarted(Box::new(WorkflowTaskStartedEvent {
                 task_id: agent_id.to_string(),
                 label,
                 role: request.role.clone(),
@@ -3678,15 +3732,18 @@ impl SubAgentWorkflowDriver {
                 workflow_task_label: metadata.workflow_task_label.clone(),
                 workflow_child_index: metadata.workflow_child_index,
                 fleet_receipt: fleet_receipt.clone(),
-            }),
-        )));
+            })),
+        ));
         // Also surface the decision as a run log line, so the receipt is
         // *visible* in the panel and transcript rather than only structured on
         // an event a UI has to know to unpack.
         if let Some(receipt) = fleet_receipt {
-            self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::Log {
-                message: format!("fleet route {}", receipt.line()),
-            }));
+            self.record_run_event(WorkflowUiEvent::new(
+                &self.owner_session_id,
+                WorkflowUiEventKind::Log {
+                    message: format!("fleet route {}", receipt.line()),
+                },
+            ));
         }
     }
 
@@ -3702,9 +3759,12 @@ impl SubAgentWorkflowDriver {
         receipt: &codewhale_workflow::FleetTaskReceipt,
         error: &str,
     ) {
-        self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::Log {
-            message: orphaned_fleet_receipt_line(receipt, error),
-        }));
+        self.record_run_event(WorkflowUiEvent::new(
+            &self.owner_session_id,
+            WorkflowUiEventKind::Log {
+                message: orphaned_fleet_receipt_line(receipt, error),
+            },
+        ));
     }
 
     fn record_task_request(&self, agent_id: &str, request: &TaskRequest) {
@@ -3751,11 +3811,14 @@ impl SubAgentWorkflowDriver {
                 record.usage = usage;
             }
             if was_running {
-                terminal_event = Some(WorkflowUiEvent::new(WorkflowUiEventKind::TaskCompleted {
-                    task_id: agent_id.to_string(),
-                    status,
-                    usage: record.usage.clone(),
-                }));
+                terminal_event = Some(WorkflowUiEvent::new(
+                    &self.owner_session_id,
+                    WorkflowUiEventKind::TaskCompleted {
+                        task_id: agent_id.to_string(),
+                        status,
+                        usage: record.usage.clone(),
+                    },
+                ));
                 completed_record = Some(record.clone());
             }
         }
@@ -3790,11 +3853,14 @@ impl SubAgentWorkflowDriver {
             .or(failure.phase.as_deref())
             .unwrap_or("task");
         let progress_line = format!("dispatch failed for {slot}: {}", failure.message);
-        let ui_event = WorkflowUiEvent::new(WorkflowUiEventKind::TaskDispatchFailed {
-            label: failure.label.clone(),
-            phase: failure.phase.clone(),
-            message: failure.message.clone(),
-        });
+        let ui_event = WorkflowUiEvent::new(
+            &self.owner_session_id,
+            WorkflowUiEventKind::TaskDispatchFailed {
+                label: failure.label.clone(),
+                phase: failure.phase.clone(),
+                message: failure.message.clone(),
+            },
+        );
         if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
@@ -4010,13 +4076,16 @@ impl SubAgentWorkflowDriver {
             fleet_receipt,
         );
         for artifact in consumed_handoffs {
-            self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::HandoffConsumed {
-                artifact_id: artifact.id,
-                kind: artifact.kind,
-                from_role: artifact.from_role,
-                to_role: artifact.to_role,
-                consumer_task_id: task_id.clone(),
-            }));
+            self.record_run_event(WorkflowUiEvent::new(
+                &self.owner_session_id,
+                WorkflowUiEventKind::HandoffConsumed {
+                    artifact_id: artifact.id,
+                    kind: artifact.kind,
+                    from_role: artifact.from_role,
+                    to_role: artifact.to_role,
+                    consumer_task_id: task_id.clone(),
+                },
+            ));
         }
         self.record_task_request(&task_id, &request_record);
         if let Some(limit) = self.total_budget {
@@ -4086,7 +4155,7 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
             }
             ProgressEvent::Log { message } => (
                 format!("log: {message}"),
-                WorkflowUiEvent::new(WorkflowUiEventKind::Log { message }),
+                WorkflowUiEvent::new(&self.owner_session_id, WorkflowUiEventKind::Log { message }),
             ),
             ProgressEvent::Phase { title } => {
                 if let Ok(mut current) = self.current_phase.lock() {
@@ -4094,7 +4163,10 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                 }
                 (
                     format!("phase: {title}"),
-                    WorkflowUiEvent::new(WorkflowUiEventKind::PhaseStarted { title }),
+                    WorkflowUiEvent::new(
+                        &self.owner_session_id,
+                        WorkflowUiEventKind::PhaseStarted { title },
+                    ),
                 )
             }
             ProgressEvent::TaskSchemaValidationFailed { task_id, message } => {
@@ -4105,10 +4177,10 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                 });
                 (
                     format!("schema validation failed for {task_id}: {message}"),
-                    WorkflowUiEvent::new(WorkflowUiEventKind::TaskSchemaValidationFailed {
-                        task_id,
-                        message,
-                    }),
+                    WorkflowUiEvent::new(
+                        &self.owner_session_id,
+                        WorkflowUiEventKind::TaskSchemaValidationFailed { task_id, message },
+                    ),
                 )
             }
         };
@@ -4953,6 +5025,7 @@ mod journal {
         fn sample_record(run_id: &str, status: WorkflowRunStatus) -> WorkflowRunRecord {
             WorkflowRunRecord {
                 run_id: run_id.to_string(),
+                owner_session_id: Some("session-journal".to_string()),
                 status,
                 lifecycle_seq: 1,
                 started_at_ms: 1,
@@ -4990,6 +5063,7 @@ mod journal {
                 "workflow_abc",
                 &WorkflowUiEvent::at(
                     5,
+                    "session-journal",
                     WorkflowUiEventKind::PhaseStarted {
                         title: "scan".to_string(),
                     },
@@ -5002,6 +5076,7 @@ mod journal {
                 progress: vec!["phase: scan".to_string()],
                 events: vec![WorkflowUiEvent::at(
                     5,
+                    "session-journal",
                     WorkflowUiEventKind::PhaseStarted {
                         title: "scan".to_string(),
                     },
@@ -5013,6 +5088,7 @@ mod journal {
                 "workflow_abc",
                 &WorkflowUiEvent::at(
                     6,
+                    "session-journal",
                     WorkflowUiEventKind::HandoffPromoted {
                         artifact_id: "workflow_abc:scout-1:scout-gate:findings".to_string(),
                         gate_id: "scout-gate".to_string(),
@@ -5027,6 +5103,7 @@ mod journal {
                 "workflow_abc",
                 &WorkflowUiEvent::at(
                     7,
+                    "session-journal",
                     WorkflowUiEventKind::HandoffConsumed {
                         artifact_id: "workflow_abc:scout-1:scout-gate:findings".to_string(),
                         kind: "findings".to_string(),
@@ -5148,8 +5225,12 @@ mod journal {
                 "writing the journal must not insert process-wide live state"
             );
 
-            let line = super::super::host_cancel_workflow(tmp.path(), "workflow_prior")
-                .expect("a journaled run must be visible to host cancel after restart");
+            let line = super::super::host_cancel_workflow(
+                tmp.path(),
+                "workflow_prior",
+                Some("session-journal"),
+            )
+            .expect("a journaled run must be visible to host cancel after restart");
             assert_eq!(line.run_id, "workflow_prior");
             assert_eq!(line.status, "cancelled");
             assert!(
@@ -5185,13 +5266,20 @@ use journal::{WorkflowWorkspaceState, peek_shared_workflow_state, shared_workflo
 /// leaves the process, and raw event/hook payloads never enter the
 /// projection. Returns `None` when `run_id` is unknown to this session;
 /// never creates workspace state or touches the journal.
-pub(crate) fn structcopy_run_projection(workspace: &Path, run_id: &str) -> Option<Value> {
+pub(crate) fn structcopy_run_projection(
+    workspace: &Path,
+    run_id: &str,
+    owner_session_id: Option<&str>,
+) -> Option<Value> {
+    let owner_session_id = owner_session_id?;
     let state = peek_shared_workflow_state(workspace)?;
     let runs = state
         .runs
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let record = runs.get(run_id)?;
+    let record = runs
+        .get(run_id)
+        .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))?;
     let mut value = serde_json::to_value(record.summary()).ok()?;
     if let Some(object) = value.as_object_mut() {
         let source_file = record
@@ -5297,7 +5385,13 @@ fn workflow_journal_exists(workspace: &Path) -> bool {
 /// oldest first. Read-only: never creates the journal or workspace state.
 /// The `/workflow status` command reads this directly so status never costs
 /// a model turn.
-pub(crate) fn host_workflow_runs(workspace: &Path) -> Vec<HostWorkflowRunLine> {
+pub(crate) fn host_workflow_runs(
+    workspace: &Path,
+    owner_session_id: Option<&str>,
+) -> Vec<HostWorkflowRunLine> {
+    let Some(owner_session_id) = owner_session_id else {
+        return Vec::new();
+    };
     let Some(state) = host_workflow_state(workspace) else {
         return Vec::new();
     };
@@ -5305,7 +5399,11 @@ pub(crate) fn host_workflow_runs(workspace: &Path) -> Vec<HostWorkflowRunLine> {
         .runs
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let mut lines: Vec<HostWorkflowRunLine> = runs.values().map(host_run_line).collect();
+    let mut lines: Vec<HostWorkflowRunLine> = runs
+        .values()
+        .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))
+        .map(host_run_line)
+        .collect();
     lines.sort_by_key(|line| line.started_at_ms);
     lines
 }
@@ -5319,11 +5417,15 @@ pub(crate) fn host_workflow_runs(workspace: &Path) -> Vec<HostWorkflowRunLine> {
 pub(crate) fn host_cancel_workflow(
     workspace: &Path,
     run_id: &str,
+    owner_session_id: Option<&str>,
 ) -> Result<HostWorkflowRunLine, String> {
+    let Some(owner_session_id) = owner_session_id else {
+        return Err(format!("Unknown workflow run '{run_id}'."));
+    };
     let Some(state) = host_workflow_state_for_cancel(workspace) else {
         return Err(format!("Unknown workflow run '{run_id}'."));
     };
-    match cancel_workflow_run(run_id, state.clone()) {
+    match cancel_workflow_run(run_id, state.clone(), owner_session_id) {
         Ok(_) => {
             let runs = state
                 .runs
@@ -5340,9 +5442,15 @@ pub(crate) fn host_cancel_workflow(
 /// Seed a minimal run record so `/structcopy` tests can exercise the
 /// workflow projection without standing up the JS VM.
 #[cfg(test)]
-pub(crate) fn structcopy_test_seed_run(workspace: &Path, run_id: &str) {
+pub(crate) fn structcopy_test_seed_run(workspace: &Path, run_id: &str, owner_session_id: &str) {
     let state = shared_workflow_state(workspace);
-    let record = WorkflowRunRecord::new(run_id.to_string(), None, None, None);
+    let record = WorkflowRunRecord::new(
+        run_id.to_string(),
+        Some(owner_session_id.to_string()),
+        None,
+        None,
+        None,
+    );
     state
         .runs
         .lock()
@@ -5374,6 +5482,9 @@ pub(crate) fn reconcile_persisted_workflow_bindings(
     let mut seen = std::collections::HashSet::new();
     let mut changed = 0usize;
     for record in records {
+        if record.owner_session_id.as_deref() != Some(session_id) {
+            continue;
+        }
         let external = format!("workflow:{}", record.run_id);
         if !candidates.contains(&external) {
             continue;
@@ -5411,7 +5522,13 @@ mod tests {
     #[test]
     fn settled_runs_leave_a_report_artifact_under_codewhale_reports() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut record = WorkflowRunRecord::new("workflow_report_1".to_string(), None, None, None);
+        let mut record = WorkflowRunRecord::new(
+            "workflow_report_1".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
         record.status = WorkflowRunStatus::Completed;
         record.workflow_goal = Some("prove the report artifact".to_string());
         record.progress.push("phase: scan".to_string());
@@ -5435,7 +5552,13 @@ mod tests {
     #[test]
     fn running_runs_write_no_report_artifact() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let record = WorkflowRunRecord::new("workflow_report_2".to_string(), None, None, None);
+        let record = WorkflowRunRecord::new(
+            "workflow_report_2".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
         write_run_report_artifact(tmp.path(), &record);
         assert!(
             !tmp.path().join(".codewhale").join("reports").exists(),
@@ -5479,7 +5602,13 @@ mod tests {
     fn restored_workflow_binding_consumes_journal_recovery() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
-        let record = WorkflowRunRecord::new("workflow_restore".to_string(), None, None, None);
+        let record = WorkflowRunRecord::new(
+            "workflow_restore".to_string(),
+            Some("restored-workflow-session".to_string()),
+            None,
+            None,
+            None,
+        );
         state.record_snapshot(&record);
 
         let work = crate::work_graph::new_shared_work_runtime(
@@ -5568,8 +5697,13 @@ mod tests {
     async fn cancellation_without_controller_marks_the_journal_cancelled() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
-        let record =
-            WorkflowRunRecord::new("workflow_missing_controller".to_string(), None, None, None);
+        let record = WorkflowRunRecord::new(
+            "workflow_missing_controller".to_string(),
+            Some("missing-controller-session".to_string()),
+            None,
+            None,
+            None,
+        );
         state
             .runs
             .lock()
@@ -5614,6 +5748,7 @@ mod tests {
         cancel_workflow(
             json!({"run_id": "workflow_missing_controller"}),
             state.clone(),
+            "missing-controller-session",
         )
         .await
         .expect("controller-less cancel must still journal cancelled");
@@ -5644,6 +5779,88 @@ mod tests {
             .find(|node| node.kind == crate::work_graph::NodeKind::Operation)
             .expect("workflow operation");
         assert_eq!(operation.state, crate::work_graph::NodeState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn workflow_controls_are_session_owned_and_legacy_records_fail_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = WorkflowWorkspaceState::open(tmp.path());
+        let record = |run_id: &str, owner: Option<&str>| {
+            WorkflowRunRecord::new(
+                run_id.to_string(),
+                owner.map(str::to_string),
+                None,
+                None,
+                None,
+            )
+        };
+        let legacy_record = {
+            let mut value =
+                serde_json::to_value(record("workflow-legacy", Some("session-from-newer-schema")))
+                    .expect("serialize legacy fixture");
+            value
+                .as_object_mut()
+                .expect("record object")
+                .remove("owner_session_id");
+            serde_json::from_value::<WorkflowRunRecord>(value)
+                .expect("legacy ownerless journal record parses")
+        };
+        assert!(legacy_record.owner_session_id.is_none());
+        {
+            let mut runs = state.runs.lock().expect("runs");
+            runs.insert(
+                "workflow-a".to_string(),
+                record("workflow-a", Some("session-a")),
+            );
+            runs.insert(
+                "workflow-b".to_string(),
+                record("workflow-b", Some("session-b")),
+            );
+            runs.insert("workflow-legacy".to_string(), legacy_record);
+        }
+
+        let listed =
+            status_workflow(json!({}), state.clone(), "session-b").expect("session-owned list");
+        let listed: Value = serde_json::from_str(&listed.content).expect("list json");
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["runs"][0]["run_id"], "workflow-b");
+
+        let empty_dir = tempfile::tempdir().expect("empty tempdir");
+        let empty_state = WorkflowWorkspaceState::open(empty_dir.path());
+        let unknown_a = workflow_result_for("workflow-a", empty_state.clone(), "session-b")
+            .expect_err("unknown A run");
+        let foreign = workflow_result_for("workflow-a", state.clone(), "session-b")
+            .expect_err("foreign run must be hidden");
+        let unknown_legacy = workflow_result_for("workflow-legacy", empty_state, "session-b")
+            .expect_err("unknown legacy-shaped id");
+        let legacy = workflow_result_for("workflow-legacy", state.clone(), "session-b")
+            .expect_err("legacy ownerless run must be hidden");
+        assert_eq!(foreign.to_string(), unknown_a.to_string());
+        assert_eq!(legacy.to_string(), unknown_legacy.to_string());
+
+        cancel_workflow(json!({"run_id": "workflow-a"}), state.clone(), "session-b")
+            .await
+            .expect_err("B cannot cancel A");
+        cancel_workflow(
+            json!({"run_id": "workflow-legacy"}),
+            state.clone(),
+            "session-b",
+        )
+        .await
+        .expect_err("B cannot cancel ownerless legacy work");
+        {
+            let runs = state.runs.lock().expect("runs");
+            assert_eq!(runs["workflow-a"].status, WorkflowRunStatus::Running);
+            assert_eq!(runs["workflow-legacy"].status, WorkflowRunStatus::Running);
+        }
+
+        cancel_workflow(json!({"run_id": "workflow-b"}), state.clone(), "session-b")
+            .await
+            .expect("B can cancel B");
+        assert_eq!(
+            state.runs.lock().expect("runs")["workflow-b"].status,
+            WorkflowRunStatus::Cancelled
+        );
     }
 
     #[test]
@@ -5984,10 +6201,17 @@ permissions = "read_only"
         }];
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                None,
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -6169,10 +6393,17 @@ permissions = "read_only"
         let run_id = "workflow_orphaned_receipt".to_string();
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                None,
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -6394,8 +6625,9 @@ permissions = "read_only"
 
         // It rides the durable task_started event, and older consumers that
         // never saw this field still deserialize.
-        let event = WorkflowUiEvent::new(WorkflowUiEventKind::TaskStarted(Box::new(
-            WorkflowTaskStartedEvent {
+        let event = WorkflowUiEvent::new(
+            "session-test",
+            WorkflowUiEventKind::TaskStarted(Box::new(WorkflowTaskStartedEvent {
                 task_id: "t1".to_string(),
                 label: None,
                 role: request.role.clone(),
@@ -6424,8 +6656,8 @@ permissions = "read_only"
                 workflow_task_label: None,
                 workflow_child_index: None,
                 fleet_receipt: Some(receipt.clone()),
-            },
-        )));
+            })),
+        );
         let payload = serde_json::to_value(&event).expect("serialize");
         let rendered = payload.to_string();
         for expected in [
@@ -8232,10 +8464,17 @@ reviewer = "reviewer"
         };
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                Some(&spec),
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -8402,10 +8641,17 @@ reviewer = "reviewer"
         };
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                Some(&spec),
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -8518,10 +8764,17 @@ reviewer = "reviewer"
         };
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                Some(&spec),
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -8643,10 +8896,17 @@ reviewer = "reviewer"
         };
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                Some(&spec),
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),
@@ -8958,10 +9218,17 @@ reviewer = "reviewer"
         };
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                Some(&spec),
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id,
+            "session-test".to_string(),
             manager,
             runtime,
             state,
@@ -9897,6 +10164,7 @@ FINAL RECEIPT
     fn workflow_ui_event_usage_telemetry_serde_round_trip() {
         let event = WorkflowUiEvent::at(
             7,
+            "session-test",
             WorkflowUiEventKind::TaskCompleted {
                 task_id: "child-1".to_string(),
                 status: IrWorkflowRunStatus::Succeeded,
@@ -9950,6 +10218,7 @@ FINAL RECEIPT
         // consumers see a byte-compatible shape.
         let plain = serde_json::to_value(WorkflowUiEvent::at(
             8,
+            "session-test",
             WorkflowUiEventKind::RunCompleted {
                 status: WorkflowRunStatus::Completed,
                 error: None,
@@ -9962,10 +10231,17 @@ FINAL RECEIPT
 
     #[test]
     fn run_record_event_retention_is_bounded() {
-        let mut record = WorkflowRunRecord::new("workflow_tail".to_string(), None, None, None);
+        let mut record = WorkflowRunRecord::new(
+            "workflow_tail".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
         for index in 0..(WORKFLOW_RUN_EVENTS_MAX_RETAINED + 5) {
             record.push_event(WorkflowUiEvent::at(
                 index as u64,
+                "session-test",
                 WorkflowUiEventKind::Log {
                     message: format!("log {index}"),
                 },
@@ -9992,12 +10268,19 @@ FINAL RECEIPT
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
         let run_id = "workflow_big_run".to_string();
-        let mut record = WorkflowRunRecord::new(run_id.clone(), None, None, None);
+        let mut record = WorkflowRunRecord::new(
+            run_id.clone(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
         record.status = WorkflowRunStatus::Completed;
         // A high-fan-out run: far more events/progress than the model needs.
         for index in 0..200u64 {
             record.push_event(WorkflowUiEvent::at(
                 index,
+                "session-test",
                 WorkflowUiEventKind::Log {
                     message: format!("fan-out event {index}"),
                 },
@@ -10040,7 +10323,7 @@ FINAL RECEIPT
             .expect("runs")
             .insert(run_id.clone(), record);
 
-        let result = workflow_result_for(&run_id, state).expect("status result");
+        let result = workflow_result_for(&run_id, state, "session-test").expect("status result");
         assert!(
             result.content.len() < WORKFLOW_RESULT_MAX_CHARS,
             "bounded payload must stay under {WORKFLOW_RESULT_MAX_CHARS} chars, got {}",
@@ -10134,10 +10417,17 @@ FINAL RECEIPT
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = WorkflowWorkspaceState::open(tmp.path());
         let run_id = "workflow_small_run".to_string();
-        let mut record = WorkflowRunRecord::new(run_id.clone(), None, None, None);
+        let mut record = WorkflowRunRecord::new(
+            run_id.clone(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
         record.status = WorkflowRunStatus::Completed;
         record.push_event(WorkflowUiEvent::at(
             1,
+            "session-test",
             WorkflowUiEventKind::PhaseStarted {
                 title: "scan".to_string(),
             },
@@ -10149,7 +10439,7 @@ FINAL RECEIPT
             .expect("runs")
             .insert(run_id.clone(), record);
 
-        let result = workflow_result_for(&run_id, state).expect("status result");
+        let result = workflow_result_for(&run_id, state, "session-test").expect("status result");
         let payload: Value = serde_json::from_str(&result.content).expect("payload json");
         assert_eq!(payload["events"].as_array().map(Vec::len), Some(1));
         assert_eq!(payload["result"], json!({ "ok": true }));
@@ -10329,10 +10619,17 @@ FINAL RECEIPT
         let run_id = "workflow_budget_heartbeat".to_string();
         state.runs.lock().expect("runs").insert(
             run_id.clone(),
-            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                None,
+            ),
         );
         let driver = SubAgentWorkflowDriver::new(
             run_id.clone(),
+            "session-test".to_string(),
             manager,
             runtime,
             state.clone(),

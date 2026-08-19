@@ -11031,7 +11031,7 @@ async fn forward_direct_workflow_events(
 }
 
 fn emit_direct_workflow_event(event: crate::core::events::Event) -> Result<()> {
-    if let crate::core::events::Event::WorkflowUi { run_id, event } = event {
+    if let crate::core::events::Event::WorkflowUi { run_id, event, .. } = event {
         emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
     }
     Ok(())
@@ -11924,7 +11924,7 @@ async fn run_exec_agent(
             Event::AgentSpawned { .. }
             | Event::AgentProgress { .. }
             | Event::AgentComplete { .. } => {}
-            Event::WorkflowUi { run_id, event }
+            Event::WorkflowUi { run_id, event, .. }
                 if output_format == ExecOutputFormat::StreamJson =>
             {
                 emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;

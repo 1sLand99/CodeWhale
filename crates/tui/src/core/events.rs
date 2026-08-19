@@ -417,6 +417,9 @@ pub enum Event {
     /// object so the TUI can advance the WorkflowPanel and the compact history
     /// card while a run is still in flight (not only on tool complete).
     WorkflowUi {
+        /// Immutable conversation owner. Consumers must compare this before
+        /// revealing or applying any workflow state.
+        owner_session_id: String,
         run_id: String,
         /// Flattened event JSON: `{"type":"task_started", "at_ms":…, …}`.
         /// Callers inject `run_id` on the object when available.

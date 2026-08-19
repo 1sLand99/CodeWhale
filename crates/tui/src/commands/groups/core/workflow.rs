@@ -155,7 +155,10 @@ fn describe_run(line: &crate::tools::workflow::HostWorkflowRunLine, now_ms: u64)
 }
 
 fn workflow_status(app: &App, run_id: &str) -> CommandResult {
-    let runs = crate::tools::workflow::host_workflow_runs(&app.workspace);
+    let runs = crate::tools::workflow::host_workflow_runs(
+        &app.workspace,
+        app.current_session_id.as_deref(),
+    );
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -197,10 +200,13 @@ fn workflow_cancel(app: &App, run_id: &str) -> CommandResult {
         return CommandResult::error("Usage: /workflow cancel [run_id]");
     }
     let target = if run_id.is_empty() {
-        let running: Vec<_> = crate::tools::workflow::host_workflow_runs(&app.workspace)
-            .into_iter()
-            .filter(|line| line.status == "running")
-            .collect();
+        let running: Vec<_> = crate::tools::workflow::host_workflow_runs(
+            &app.workspace,
+            app.current_session_id.as_deref(),
+        )
+        .into_iter()
+        .filter(|line| line.status == "running")
+        .collect();
         match running.as_slice() {
             [] => return CommandResult::message("No workflow is running."),
             [only] => only.run_id.clone(),
@@ -216,7 +222,11 @@ fn workflow_cancel(app: &App, run_id: &str) -> CommandResult {
     } else {
         run_id.to_string()
     };
-    match crate::tools::workflow::host_cancel_workflow(&app.workspace, &target) {
+    match crate::tools::workflow::host_cancel_workflow(
+        &app.workspace,
+        &target,
+        app.current_session_id.as_deref(),
+    ) {
         Ok(line) => CommandResult::message(format!(
             "Workflow {} {} · {}",
             line.run_id, line.status, line.label
@@ -335,6 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut app = test_app();
         app.workspace = dir.path().to_path_buf();
+        app.current_session_id = Some("workflow-host-test-session".to_string());
 
         // Nothing has run in this workspace: status is a plain answer, and it
         // must not create the run journal just to say so.
@@ -358,7 +369,13 @@ mod tests {
         assert!(result.action.is_none());
 
         // A seeded run is listed and described from host state.
-        crate::tools::workflow::structcopy_test_seed_run(dir.path(), "workflow_seed");
+        crate::tools::workflow::structcopy_test_seed_run(
+            dir.path(),
+            "workflow_seed",
+            app.current_session_id
+                .as_deref()
+                .expect("test session identity"),
+        );
         let result = workflow(&mut app, Some("runs"));
         let text = result.message.unwrap();
         assert!(text.contains("workflow_seed"), "{text}");
@@ -374,7 +391,10 @@ mod tests {
         let text = result.message.as_deref().unwrap();
         assert!(text.contains("workflow_seed"), "{text}");
         assert!(text.contains("cancelled"), "{text}");
-        let after = crate::tools::workflow::host_workflow_runs(&app.workspace);
+        let after = crate::tools::workflow::host_workflow_runs(
+            &app.workspace,
+            app.current_session_id.as_deref(),
+        );
         assert_eq!(
             after
                 .iter()

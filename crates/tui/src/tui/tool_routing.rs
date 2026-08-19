@@ -1242,6 +1242,22 @@ pub(super) fn apply_workflow_ui_event(app: &mut App, run_id: &str, event: &serde
     sync_workflow_history_card_from_panel(app);
 }
 
+/// Apply a live workflow event only when its immutable owner is the active
+/// conversation. This check deliberately sits in the mutation helper so every
+/// caller fails closed before touching the panel or transcript history.
+pub(super) fn apply_owned_workflow_ui_event(
+    app: &mut App,
+    owner_session_id: &str,
+    run_id: &str,
+    event: &serde_json::Value,
+) -> bool {
+    if app.current_session_id.as_deref() != Some(owner_session_id) {
+        return false;
+    }
+    apply_workflow_ui_event(app, run_id, event);
+    true
+}
+
 /// Mirror the live WorkflowPanel snapshot into the in-flight (or most recent)
 /// workflow history tool cell so compact/expanded cards stay current.
 fn sync_workflow_history_card_from_panel(app: &mut App) {
