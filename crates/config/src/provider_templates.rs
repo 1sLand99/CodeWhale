@@ -346,11 +346,7 @@ mod tests {
         assert_eq!(zen.docs_url(), Some("https://opencode.ai/docs/zen/"));
         assert_eq!(zen.credential_url(), Some("https://opencode.ai/zen/"));
         assert!(zen.picker_models().len() > 1);
-        assert!(
-            zen.picker_models()
-                .iter()
-                .any(|model| *model == "deepseek-v4-flash")
-        );
+        assert!(zen.picker_models().contains(&"deepseek-v4-flash"));
 
         let go = provider_setup_template("opencode-go").expect("go");
         assert_eq!(
