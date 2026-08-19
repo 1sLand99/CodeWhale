@@ -1697,9 +1697,13 @@ fn push_model_row(
 /// Fresh/live rows stay unmarked; stale and failed caches get an explicit
 /// suffix so users know the live layer is still visible but not current.
 fn catalog_freshness_title_suffix() -> &'static str {
-    match models_dev_live::status().freshness {
+    catalog_freshness_title_suffix_for(models_dev_live::status().freshness)
+}
+
+fn catalog_freshness_title_suffix_for(freshness: ModelsDevFreshness) -> &'static str {
+    match freshness {
         ModelsDevFreshness::Stale => " · stale",
-        ModelsDevFreshness::Failed => " · cache failed",
+        ModelsDevFreshness::Failed => " · refresh failed; catalog available",
         ModelsDevFreshness::Bundled | ModelsDevFreshness::Live => "",
     }
 }
@@ -2966,6 +2970,18 @@ mod tests {
     use super::*;
     use crate::tui::app::{App, TuiOptions};
     use std::path::PathBuf;
+
+    #[test]
+    fn failed_live_catalog_refresh_names_the_working_fallback() {
+        assert_eq!(
+            catalog_freshness_title_suffix_for(ModelsDevFreshness::Failed),
+            " · refresh failed; catalog available"
+        );
+        assert!(
+            !catalog_freshness_title_suffix_for(ModelsDevFreshness::Failed)
+                .contains("cache failed")
+        );
+    }
 
     /// `_lock` bundles the process-wide test-env mutex with a guard that
     /// neutralizes the real Codex CLI OAuth login and model cache on disk. The

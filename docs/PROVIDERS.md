@@ -16,6 +16,15 @@ routes, generic OpenAI-compatible endpoints, the OpenAI Codex/ChatGPT route,
 native Anthropic, and local runtimes all run the same terminal harness against
 the selected provider/model/base URL.
 
+Beginner setup templates (`crates/config/src/provider_templates.rs`) cover
+OpenCode Zen, OpenCode Go, SenseNova, and Agnes. Zen/Go reuse the first-class
+routes below. SenseNova fills a named OpenAI-compatible table on
+`https://token.sensenova.cn/v1` with default model `deepseek-v4-flash`. Agnes
+has no published URL in this repository, so it is catalogued as unpublished
+and does not invent a host. `/provider` `P` opens the list; `S` still fills
+SenseNova; `T` probes `/models` and records reachability only (a 2xx is not
+model-ready).
+
 Sources to keep in sync:
 
 - `crates/config/src/lib.rs` - shared provider IDs, defaults, env precedence.

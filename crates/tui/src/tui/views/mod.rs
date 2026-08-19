@@ -849,6 +849,15 @@ pub enum ViewEvent {
         provider: crate::config::ApiProvider,
         provider_id: Option<String>,
     },
+    /// Emitted by `/provider` `T`: probe `/models` and refresh readiness
+    /// without treating a 2xx as model-ready (#5350).
+    ProviderPickerTestConnection {
+        provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
+        /// Restore Catalog vs Configured after the probe. Must not force
+        /// the all-providers catalog if the user was on configured-only.
+        catalog_view: bool,
+    },
     /// Emitted by the `/mode` picker when the user chooses a mode.
     ModeSelected {
         mode: crate::tui::app::AppMode,
@@ -1355,7 +1364,10 @@ impl SettingsRegistry {
         };
         let kind = if !row.editable {
             SettingKind::ReadOnly
-        } else if matches!(row.key.as_str(), "provider" | "model") {
+        } else if matches!(
+            row.key.as_str(),
+            "provider" | "model" | "provider_templates"
+        ) {
             SettingKind::Action
         } else if config_boolean_key(&row.key) {
             SettingKind::Boolean
@@ -1644,6 +1656,13 @@ impl ConfigView {
                 section: ConfigSection::Provider,
                 key: "provider".to_string(),
                 value: config_provider_row_value(app, &config),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Provider,
+                key: "provider_templates".to_string(),
+                value: codewhale_config::ProviderSetupTemplate::settings_value(),
                 editable: true,
                 scope: ConfigScope::Saved,
             },
@@ -2291,6 +2310,9 @@ impl ConfigView {
     fn setting_description(key: &str) -> &'static str {
         match key {
             "provider" => "Active model provider for this session. Scope: saved route.",
+            "provider_templates" => {
+                "Beginner templates for OpenCode Zen/Go, SenseNova, and unpublished Agnes. Enter opens the list."
+            }
             "model" => "Model id for the active provider. Scope: saved / session route.",
             "approval_mode" => {
                 "Session approval posture (ask / auto). Separate from filesystem sandbox."
@@ -2443,6 +2465,7 @@ impl ConfigView {
         let row = self.rows.get(self.selected_row_index()?)?;
         let command = match row.key.as_str() {
             "provider" if row.editable => "/provider",
+            "provider_templates" if row.editable => "/provider templates",
             "model" if row.editable => "/model",
             _ => return None,
         };
@@ -2778,6 +2801,8 @@ impl ConfigView {
         let hint = config_hint_for_key(self.locale, &row.key);
         let action_id = if row.key == "provider" {
             MessageId::ConfigActionOpenProvider
+        } else if row.key == "provider_templates" {
+            MessageId::ConfigActionOpenProviderTemplates
         } else if row.key == "model" {
             MessageId::ConfigActionOpenModel
         } else if meta.kind == SettingKind::Boolean {
@@ -2909,6 +2934,7 @@ fn experimental_feature_value(effective: bool, default_enabled: bool, configured
 fn config_label_message(key: &str) -> Option<MessageId> {
     Some(match key {
         "provider" => MessageId::ConfigLabelProvider,
+        "provider_templates" => MessageId::ConfigLabelProviderTemplates,
         "base_url" => MessageId::ConfigLabelBaseUrlDeepseek,
         "provider_url" => MessageId::ConfigLabelProviderUrl,
         "model" => MessageId::ConfigLabelModel,
@@ -3003,6 +3029,9 @@ fn humanize_config_key(key: &str) -> String {
 fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
     if key == "provider_url" {
         return tr(locale, MessageId::ConfigHintProviderUrl);
+    }
+    if key == "provider_templates" {
+        return tr(locale, MessageId::ConfigHintProviderTemplates);
     }
     Cow::Borrowed(config_literal_hint_for_key(key))
 }
@@ -5593,6 +5622,7 @@ mod tests {
             .map(|row| row.key.as_str())
             .collect::<Vec<_>>();
         assert!(keys.contains(&"provider"));
+        assert!(keys.contains(&"provider_templates"));
         assert!(keys.contains(&"model"));
         assert!(keys.contains(&"reasoning_effort"));
         assert!(keys.contains(&"base_url"));
@@ -6932,6 +6962,7 @@ context_window = 262144
         };
 
         assert_eq!(kind_for("provider"), SettingKind::Action);
+        assert_eq!(kind_for("provider_templates"), SettingKind::Action);
         assert_eq!(kind_for("model"), SettingKind::Action);
         assert_eq!(kind_for("low_motion"), SettingKind::Boolean);
         assert_eq!(kind_for("default_mode"), SettingKind::Choice);

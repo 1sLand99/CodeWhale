@@ -3465,6 +3465,182 @@ mod provider_key_validation_tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_connection_records_models_probe_not_ready() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        config.provider = Some("openrouter".to_string());
+        if let Some(providers) = config.providers.as_mut() {
+            providers.openrouter.api_key = Some("sk-saved".to_string());
+        }
+        let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            false,
+            &verifier,
+        )
+        .await;
+
+        assert_eq!(
+            verifier.calls(),
+            vec![(
+                ApiProvider::Openrouter,
+                "sk-saved".to_string(),
+                "https://mock.openrouter.test/v1".to_string()
+            )]
+        );
+        let _ = config_env;
+        assert_eq!(config.provider.as_deref(), Some("openrouter"));
+        assert!(
+            app.status_toasts.iter().any(|toast| {
+                toast
+                    .text
+                    .contains("Connection checked (/models returned 2xx)")
+                    && !toast.text.contains("Pick a default model")
+            }),
+            "test connection names reachability only: {:?}",
+            app.status_toasts
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert_eq!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::ConnectionCheckedModelUnchecked,
+        );
+        assert_ne!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::Ready,
+        );
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
+    }
+
+    #[tokio::test]
+    async fn test_connection_without_key_does_not_mark_ready() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            false,
+            &verifier,
+        )
+        .await;
+
+        assert!(verifier.calls().is_empty());
+        let _ = config_env;
+        assert!(
+            app.status_toasts
+                .iter()
+                .any(|toast| toast.text.contains("No API key saved")),
+            "{:?}",
+            app.status_toasts
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert_eq!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::MissingKey,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::MissingKey,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_failure_redacts_the_api_key() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        config.provider = Some("openrouter".to_string());
+        if let Some(providers) = config.providers.as_mut() {
+            providers.openrouter.api_key = Some("sk-saved".to_string());
+        }
+        let verifier = MockProviderKeyVerifier::new(Err(
+            "HTTP 401: upstream echoed sk-saved in a long diagnostic body that must not stay visible"
+                .repeat(4),
+        ));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            true,
+            &verifier,
+        )
+        .await;
+
+        let _ = config_env;
+        let status = app
+            .status_toasts
+            .iter()
+            .map(|toast| toast.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !status.contains("sk-saved"),
+            "probe toast leaked the API key: {status}"
+        );
+        assert!(status.contains("***"), "{status}");
+        assert!(
+            app.provider_picker_memory
+                .as_ref()
+                .is_some_and(|memory| memory.catalog_view),
+            "catalog browsing context must survive the probe"
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert!(matches!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed { .. }
+        ));
+    }
+
     /// #4526: the wizard's StepFun billing-route choice must be the endpoint
     /// the key is probed against, and it must reach disk only once the user
     /// confirms — never as a side effect of validation.

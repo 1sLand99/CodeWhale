@@ -674,10 +674,15 @@ a published OpenAI-compatible host ship here (#5350).
   not stuck on `unverified_live_pricing` (#5241). `kimi-k3` stays
   unpriced until a published rate exists.
 
-- Provider setup ships a SenseNova OpenAI-compatible preset (`S`) on
-  the published `https://token.sensenova.cn/v1` host (#5350). OpenCode
-  Zen/Go stay first-class rows. Agnes has no published URL, so it has
-  no preset.
+- Provider setup ships a typed beginner template catalog (#5350). OpenCode
+  Zen/Go stay first-class key-only rows with their documented hosts and
+  curated models. SenseNova fills a named OpenAI-compatible table on the
+  published `https://token.sensenova.cn/v1` host (`S` or `/provider setup
+  sensenova`). Agnes is listed as unpublished because this repository has
+  no published URL. `/provider` `P` and Settings → beginner templates open
+  the list; `T` tests `/models` and refreshes status without treating 2xx
+  as model-ready. `/model` names a failed Models.dev refresh as
+  `refresh failed; catalog available` instead of `cache failed`.
 
 - Privileged release workflows no longer restore rust-cache, sccache,
   or npm caches after checking out a caller-supplied SHA (CodeQL

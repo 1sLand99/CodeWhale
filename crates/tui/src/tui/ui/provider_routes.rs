@@ -831,7 +831,6 @@ pub(crate) fn picker_provider_identity(
     Ok(identity)
 }
 
-#[cfg(test)]
 pub(crate) fn provider_verification_error_category(
     reason: &str,
 ) -> crate::error_taxonomy::ErrorCategory {

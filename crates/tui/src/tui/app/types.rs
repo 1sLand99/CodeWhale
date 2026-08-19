@@ -888,6 +888,12 @@ pub enum AppAction {
     },
     /// Open the named, keyless DS4 local-runtime preset for review and save.
     OpenDs4Setup,
+    /// Open a beginner provider setup template by catalog id (#5350).
+    OpenTemplateSetup {
+        template_id: String,
+    },
+    /// Open the beginner provider template list.
+    OpenProviderTemplateList,
     /// Run the xAI/Grok device-code flow with the TUI temporarily suspended.
     StartXaiDeviceLogin,
     /// Open the `/mode` picker modal for Act / Plan / Operate.

@@ -1439,6 +1439,64 @@ pub(crate) async fn apply_command_result(
                     );
                 }
             }
+            AppAction::OpenProviderTemplateList => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    app.view_stack.push(
+                        crate::tui::provider_picker::ProviderPickerView::new_for_template_list(
+                            app.api_provider,
+                            config,
+                            runtime_status,
+                        )
+                        .with_locale(app.ui_locale)
+                        .with_provider_health(&app.provider_health),
+                    );
+                }
+            }
+            AppAction::OpenTemplateSetup { template_id } => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    if let Some(picker) =
+                        crate::tui::provider_picker::ProviderPickerView::new_for_template_setup(
+                            app.api_provider,
+                            &template_id,
+                            config,
+                            runtime_status,
+                        )
+                    {
+                        app.view_stack.push(
+                            picker
+                                .with_locale(app.ui_locale)
+                                .with_provider_health(&app.provider_health),
+                        );
+                        let template = codewhale_config::provider_setup_template(&template_id);
+                        let message = match template {
+                            Some(template) if template.is_unpublished() => {
+                                app.tr(MessageId::ProviderTemplateUnpublished).into_owned()
+                            }
+                            Some(template) if template.is_compatible() => app
+                                .tr(MessageId::ProviderTemplateOpenedEnvOnly)
+                                .replace("{id}", &template_id),
+                            _ => app
+                                .tr(MessageId::ProviderTemplateOpened)
+                                .replace("{id}", &template_id),
+                        };
+                        let level = if template.is_some_and(|item| item.is_unpublished()) {
+                            StatusToastLevel::Warning
+                        } else {
+                            StatusToastLevel::Info
+                        };
+                        app.push_status_toast(message, level, Some(8_000));
+                    } else {
+                        app.push_status_toast(
+                            app.tr(MessageId::ProviderTemplateUnknown)
+                                .replace("{id}", &template_id),
+                            StatusToastLevel::Error,
+                            Some(8_000),
+                        );
+                    }
+                }
+            }
             AppAction::StartXaiDeviceLogin => {
                 let _switched =
                     run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
@@ -2102,6 +2160,137 @@ pub(crate) async fn apply_provider_picker_custom_provider(
     switch_provider(app, engine_handle, config, ApiProvider::Custom, model).await
 }
 
+async fn reopen_provider_picker_list(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &Config,
+    selected_provider_id: Option<String>,
+    catalog_view: bool,
+) {
+    let runtime_status = query_provider_runtime_status(engine_handle).await;
+    app.provider_picker_memory = Some(crate::tui::app::ProviderPickerMemory {
+        catalog_view,
+        selected_provider_id,
+    });
+    app.view_stack.push(
+        crate::tui::provider_picker::ProviderPickerView::new_with_runtime_status_and_memory(
+            app.api_provider,
+            config,
+            runtime_status,
+            app.provider_picker_memory.as_ref(),
+        )
+        .with_locale(app.ui_locale)
+        .with_provider_health(&app.provider_health),
+    );
+    app.needs_redraw = true;
+}
+
+pub(crate) async fn apply_provider_picker_test_connection(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    identity: crate::config::ProviderIdentity,
+    catalog_view: bool,
+) {
+    apply_provider_picker_test_connection_with_verifier(
+        app,
+        engine_handle,
+        config,
+        identity,
+        catalog_view,
+        &LiveProviderKeyVerifier,
+    )
+    .await;
+}
+
+fn sanitize_probe_status(reason: &str, api_key: &str) -> String {
+    let mut text = reason.to_string();
+    if let Some(rest) = reason.strip_prefix("HTTP ")
+        && let Some((code, body)) = rest.split_once(':')
+        && let Ok(status) = code.trim().parse::<u16>()
+    {
+        text = crate::llm_client::sanitize_http_error_body(None, status, body.trim());
+    }
+    let secret = api_key.trim();
+    if !secret.is_empty() {
+        text = text.replace(secret, "***");
+    }
+    crate::utils::truncate_with_ellipsis(text.trim(), 120, "…")
+}
+
+pub(crate) async fn apply_provider_picker_test_connection_with_verifier(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    identity: crate::config::ProviderIdentity,
+    catalog_view: bool,
+    verifier: &dyn ProviderKeyVerifier,
+) {
+    let provider = identity.provider;
+    let mut scoped_config = config.clone();
+    scoped_config.provider = Some(identity.key.clone());
+    let selected_id = if provider == ApiProvider::Custom {
+        Some(identity.key.clone())
+    } else {
+        Some(provider.as_str().to_string())
+    };
+    if !crate::client::provider_api_key_verification_is_observed(provider) {
+        app.push_status_toast(
+            app.tr(MessageId::ProviderTestConnectionNoEndpoint)
+                .replace("{provider}", &identity.key),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
+        reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view).await;
+        return;
+    }
+    let api_key = match scoped_config.deepseek_api_key_read_only() {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            app.push_status_toast(
+                app.tr(MessageId::ProviderTestConnectionNeedKey)
+                    .replace("{provider}", &identity.key),
+                StatusToastLevel::Warning,
+                Some(8_000),
+            );
+            reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view)
+                .await;
+            return;
+        }
+    };
+    let base_url = scoped_config.deepseek_base_url();
+    let model = scoped_config.default_model();
+    match verifier.verify(provider, &api_key, &base_url).await {
+        Ok(()) => {
+            app.provider_health
+                .record_models_probe_success(&scoped_config, provider, &model);
+            app.push_status_toast(
+                app.tr(MessageId::ProviderConnectionChecked).into_owned(),
+                StatusToastLevel::Success,
+                Some(8_000),
+            );
+        }
+        Err(reason) => {
+            let safe = sanitize_probe_status(&reason, &api_key);
+            app.provider_health.record_models_probe_failure(
+                &scoped_config,
+                provider,
+                &model,
+                provider_verification_error_category(&reason),
+                &safe,
+            );
+            app.push_status_toast(
+                app.tr(MessageId::ProviderTestConnectionFailed)
+                    .replace("{provider}", &identity.key)
+                    .replace("{error}", &safe),
+                StatusToastLevel::Error,
+                Some(8_000),
+            );
+        }
+    }
+    reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view).await;
+}
+
 pub(crate) async fn apply_provider_picker_api_key(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -2183,8 +2372,8 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
             {
                 app.view_stack.push(picker);
                 app.status_message = Some(
-                    "Connection checked (/models returned 2xx). Pick a default model; model availability is not checked."
-                        .to_string(),
+                    app.tr(MessageId::ProviderConnectionCheckedPickModel)
+                        .into_owned(),
                 );
             } else {
                 app.status_message = Some(format!(

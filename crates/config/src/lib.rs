@@ -12,6 +12,7 @@ pub mod pricing;
 pub mod provider;
 mod provider_defaults;
 mod provider_kind;
+pub mod provider_templates;
 pub mod route;
 pub mod setup_state;
 pub mod user_constitution;
@@ -27,6 +28,11 @@ pub use harness::{
 pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
+pub use provider_templates::{
+    AGNES_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate, SENSENOVA_API_KEY_ENV,
+    SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_MODELS, SENSENOVA_TEMPLATE_ID,
+    compatible_provider_setup_templates, provider_setup_template, provider_setup_templates,
+};
 pub use setup_state::{
     ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource, ConstitutionValidity,
     InheritedConfigFacts, RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
