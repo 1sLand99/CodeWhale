@@ -1,4 +1,4 @@
-# Localization Matrix
+﻿# Localization Matrix
 
 Canonical tracking document for every locale Codewhale ships, is actively
 building, is planning, or has explicitly deferred.
@@ -10,13 +10,17 @@ building, is planning, or has explicitly deferred.
 > per-surface tables below are the per-surface truth. The website registry
 > is `web/lib/i18n/config.ts` (`ALL_LOCALES`): the locale switcher and route
 > generation both derive from it.
+>
+> Docs translations are **not** a locale surface: they live under
+> `docs/zh_hans/` and `docs/id/`, and their status is tracked in
+> `docs/zh_hans/README.md` and issue #5482, not in this matrix.
 
 Customer-visible copy also follows the [Codewhale voice and terminal
 charter](VOICE.md); commands, key names, and glyphs remain code-owned around
 localized prose.
 
-Last updated: 2026-08-16 (README translations for fr, de, zh-TW, hi, tr,
-it, pl, ar, and ca).
+Last updated: 2026-08-18 (docs/zh_hans/ restructure; docs translation
+status tracked outside this matrix, per #5482).
 Source-of-truth README: `README.md` (English, post-#3087).
 
 ## Status legend
@@ -270,3 +274,5 @@ happens.
 - #4790 — Hindi localization + Devanagari terminal-shaping spike
 - #4791 — Ukrainian localization alongside Russian
 - #4749 — Catalan UI language + Galician/Basque assessment
+- #5482 — EPIC(docs): review, partially restructure, and fully localize
+  documentation to Chinese

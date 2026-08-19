@@ -26,7 +26,7 @@ Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkem
 npm install -g codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, arsip biner pra-kemas, Android/Termux, serta mirror CNB bagi siapa pun yang memiliki keterbatasan akses ke GitHub dibahas secara lengkap di [docs/INSTALL.id.md](docs/INSTALL.id.md) ([English](docs/INSTALL.md)). Bermigrasi dari `deepseek-tui`? Konfigurasi dan sesi Anda akan tetap dipertahankan — lihat [docs/REBRAND.id.md](docs/REBRAND.id.md) ([English](docs/REBRAND.md)).
+Cargo, Docker, Nix, Scoop, arsip biner pra-kemas, Android/Termux, serta mirror CNB bagi siapa pun yang memiliki keterbatasan akses ke GitHub dibahas secara lengkap di [docs/id/INSTALL.md](docs/id/INSTALL.md) ([English](docs/INSTALL.md)). Bermigrasi dari `deepseek-tui`? Konfigurasi dan sesi Anda akan tetap dipertahankan — lihat [docs/id/REBRAND.md](docs/id/REBRAND.md) ([English](docs/REBRAND.md)).
 
 ## Penggunaan
 
@@ -64,16 +64,16 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 
 ## Pelajari Lebih Lanjut
 
-- [docs/PROVIDERS.id.md](docs/PROVIDERS.id.md) ([English](docs/PROVIDERS.md)) — setiap rute penyedia: hosted, gateway, dan lokal
-- [docs/FLEET.id.md](docs/FLEET.id.md) ([English](docs/FLEET.md)) — fleet, ledger, dan kelanjutan sesi (resume)
+- [docs/id/PROVIDERS.md](docs/id/PROVIDERS.md) ([English](docs/PROVIDERS.md)) — setiap rute penyedia: hosted, gateway, dan lokal
+- [docs/id/FLEET.md](docs/id/FLEET.md) ([English](docs/FLEET.md)) — fleet, ledger, dan kelanjutan sesi (resume)
 - [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — pencarian eksperimental yang dibekukan dan netral terhadap penyedia di dalam Workflow
-- [docs/CONFIGURATION.id.md](docs/CONFIGURATION.id.md) ([English](docs/CONFIGURATION.md)) — `config.toml`, hooks, dan konstitusi
+- [docs/id/CONFIGURATION.md](docs/id/CONFIGURATION.md) ([English](docs/CONFIGURATION.md)) — `config.toml`, hooks, dan konstitusi
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — bagaimana mode, hooks, aturan izin, batas keamanan, hukum repositori, persetujuan, dan sandbox saling menyusun
 - [docs/HOOKS.md](docs/HOOKS.md) — sebelas event hook siklus hidup TUI, payload-nya, dan tiga di antaranya yang dapat mengarahkan sebuah turn (`codewhale exec` dan subperintah CLI tidak memicu hooks)
-- [docs/WEB.id.md](docs/WEB.id.md) ([English](docs/WEB.md)) — klien browser berbasis loopback-only dan batas autentikasi sekali pakainya
-- [docs/LOCALIZATION.id.md](docs/LOCALIZATION.id.md) ([English](docs/LOCALIZATION.md)) — matriks lokalisasi & panduan terjemahan
+- [docs/id/WEB.md](docs/id/WEB.md) ([English](docs/WEB.md)) — klien browser berbasis loopback-only dan batas autentikasi sekali pakainya
+- [docs/id/LOCALIZATION.md](docs/id/LOCALIZATION.md) ([English](docs/LOCALIZATION.md)) — matriks lokalisasi & panduan terjemahan
 
-Topik lainnya — [mode eksekusi](docs/MODES.id.md) ([English](docs/MODES.md)), [pintasan tombol](docs/KEYBINDINGS.id.md) ([English](docs/KEYBINDINGS.md)), detail sandbox, [MCP](docs/MCP.id.md) ([English](docs/MCP.md)), runtime API, dan arsitektur — tersedia di dalam direktori [docs](docs) serta di [codewhale.net](https://codewhale.net/).
+Topik lainnya — [mode eksekusi](docs/id/MODES.md) ([English](docs/MODES.md)), [pintasan tombol](docs/id/KEYBINDINGS.md) ([English](docs/KEYBINDINGS.md)), detail sandbox, [MCP](docs/id/MCP.md) ([English](docs/MCP.md)), runtime API, dan arsitektur — tersedia di dalam direktori [docs](docs) serta di [codewhale.net](https://codewhale.net/).
 
 ## Kontribusi
 
