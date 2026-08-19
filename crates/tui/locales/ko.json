@@ -480,6 +480,7 @@
   "CmdFleetDescription": "플릿 워커와 오케스트레이션 상태를 확인하고 설정합니다",
   "CmdLaneDescription": "지속되는 Lane(실행 중인 Workflow)을 확인하고 제어합니다",
   "CmdWorkflowDescription": "순서나 병렬 분기가 필요할 때 멀티 에이전트 스크립트를 실행합니다",
+  "CmdWorkflowsDescription": "이 작업 공간의 워크플로 실행 표시 (목록, 취소)",
   "CmdHotbarDescription": "핫바 설정을 엽니다",
   "CmdSetupDescription": "헌법 우선 설정을 엽니다",
   "CmdSubagentsDescription": "Fleet 상태용 호환 단축 명령",

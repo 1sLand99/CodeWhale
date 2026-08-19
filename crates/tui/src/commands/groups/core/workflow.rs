@@ -7,6 +7,10 @@
 //! narrows the run to an explicit objective. Control verbs (`status`,
 //! `cancel`, `settings`, `help`) are answered by the host from the run
 //! journal and live state — they never spend a model turn.
+//!
+//! `/workflows` (separate command, below) is the observation surface: the
+//! live run dashboard. It never orchestrates — that authority belongs to
+//! `/workflow` alone.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
@@ -18,7 +22,7 @@ use super::CommandResult;
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "workflow",
-    aliases: &["workflows", "wf"],
+    aliases: &["wf"],
     usage: "/workflow [objective|run <path>|status [run_id]|cancel [run_id]|settings]",
     description_id: MessageId::CmdWorkflowDescription,
 };
@@ -127,7 +131,8 @@ const WORKFLOW_USAGE: &str =
 /workflow — orchestrate the current work
 /workflow status [run_id] — runs known to this workspace (no model turn)
 /workflow cancel [run_id] — stop a running workflow (no model turn)
-/workflow settings — the effective [workflow] configuration";
+/workflow settings — the effective [workflow] configuration
+/workflows — the live run dashboard (opens in the TUI)";
 
 fn describe_run(line: &crate::tools::workflow::HostWorkflowRunLine, now_ms: u64) -> String {
     let elapsed = line
@@ -234,6 +239,57 @@ fn workflow_cancel(app: &App, run_id: &str) -> CommandResult {
         Err(reason) => CommandResult::error(reason),
     }
 }
+
+/// `/workflows` — the live **run** dashboard (Grok-build parity for the
+/// observation surface). Bare opens the manager view; the host control verbs
+/// (`status`, `cancel`, `settings`) still answer inline from the run journal
+/// so muscle memory from the old `/workflows` alias keeps working — none of
+/// them spend a model turn. Anything else is redirected to `/workflow`, the
+/// only surface that carries orchestration authority: `/workflows` observes
+/// and cancels, it never launches.
+pub(in crate::commands) const WORKFLOWS_COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "workflows",
+    aliases: &[],
+    usage: "/workflows",
+    description_id: MessageId::CmdWorkflowsDescription,
+};
+
+pub(in crate::commands) struct WorkflowsCmd;
+
+impl RegisterCommand for WorkflowsCmd {
+    fn info() -> &'static CommandInfo {
+        &WORKFLOWS_COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        workflows(app, arg)
+    }
+}
+
+pub fn workflows(app: &mut App, arg: Option<&str>) -> CommandResult {
+    let arg = arg.map(str::trim).filter(|value| !value.is_empty());
+    let Some(arg) = arg else {
+        return CommandResult::action(AppAction::OpenWorkflowsManager);
+    };
+    let (verb, rest) = match arg.split_once(char::is_whitespace) {
+        Some((verb, rest)) => (verb, rest.trim()),
+        None => (arg, ""),
+    };
+    match verb {
+        "status" | "runs" | "list" | "inspect" => workflow_status(app, rest),
+        "cancel" | "stop" | "abort" => workflow_cancel(app, rest),
+        "settings" | "config" => super::super::config::workflow_settings(app),
+        "help" | "?" => CommandResult::message(WORKFLOWS_USAGE),
+        _ => CommandResult::error(
+            "/workflows observes runs — it never launches one. Use /workflow <objective> to run one, or bare /workflow to orchestrate the current work.",
+        ),
+    }
+}
+
+const WORKFLOWS_USAGE: &str = "/workflows — open the live run dashboard (no model turn)
+/workflows status [run_id] — the same listing as text
+/workflows cancel [run_id] — stop a running workflow (no model turn)
+/workflows settings — the effective [workflow] configuration";
 
 /// `/auto` is the third orchestration choice: work with Auto-Review.
 /// Host-only alias for the existing permission posture — no new runtime (#5439).
@@ -417,6 +473,45 @@ mod tests {
         assert!(message.contains("`source_path`"), "{message}");
         assert!(message.contains("workflows/tiny.workflow.js"), "{message}");
         assert!(message.contains("do not"), "{message}");
+    }
+
+    #[test]
+    fn workflows_opens_the_run_dashboard_and_keeps_host_verbs_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app();
+        app.workspace = dir.path().to_path_buf();
+        app.current_session_id = Some("workflow-host-test-session".to_string());
+
+        // Bare `/workflows` opens the dashboard: a host action, never a
+        // model turn — observation carries no orchestration authority.
+        let result = workflows(&mut app, None);
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::OpenWorkflowsManager)
+        ));
+
+        // Host control verbs still answer inline (the old alias surface).
+        let result = workflows(&mut app, Some("status"));
+        assert!(!result.is_error);
+        assert!(
+            result.action.is_none(),
+            "status must not send a model message"
+        );
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("No workflow runs")
+        );
+
+        // Orchestration attempts are redirected to /workflow, the only
+        // surface that carries launch authority.
+        let result = workflows(&mut app, Some("audit provider errors"));
+        assert!(result.is_error);
+        assert!(result.action.is_none());
+        assert!(result.message.unwrap().contains("never launches"));
     }
 
     #[test]

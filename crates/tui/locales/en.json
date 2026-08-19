@@ -480,6 +480,7 @@
   "CmdFleetDescription": "Inspect and set up Fleet workers and orchestration state",
   "CmdLaneDescription": "Inspect and control durable Lanes (running Workflows)",
   "CmdWorkflowDescription": "Run a repeatable workflow when order or fan-out matters",
+  "CmdWorkflowsDescription": "Show workflow runs in this workspace (list, cancel)",
   "CmdHotbarDescription": "Open Hotbar setup",
   "CmdSetupDescription": "Open constitution-first setup",
   "CmdSubagentsDescription": "Compatibility shortcut for Fleet status",

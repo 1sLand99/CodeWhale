@@ -436,6 +436,7 @@
   "CmdVoiceDescription": "切換語音輸入：錄製語音並轉錄為文字",
   "CmdVoiceSendDescription": "切換語音自動傳送：轉錄以「發送」或「send it」結尾時自動提交",
   "CmdWorkflowDescription": "需要階段、順序或多路並行時執行多智能體腳本",
+  "CmdWorkflowsDescription": "顯示此工作空間的工作流程執行（列表、取消）",
   "CmdWorkspaceDescription": "顯示或切換目前工作空間",
   "CommandPaletteSubtitle": "查找並執行一個操作",
   "CommandPaletteTitle": "命令",

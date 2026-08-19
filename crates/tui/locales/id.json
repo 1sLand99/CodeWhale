@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "Metadata tanda terima salinan struktural melampaui batas keluaran {bytes} bita; penerbitannya ditolak",
   "CmdFleetDescription": "Periksa dan siapkan worker Fleet serta status orkestrasi",
   "CmdWorkflowDescription": "Jalankan skrip multi-agen saat urutan atau fan-out penting",
+  "CmdWorkflowsDescription": "Tampilkan eksekusi alur kerja di workspace ini (daftar, batalkan)",
   "CmdHotbarDescription": "Buka penyiapan Hotbar",
   "CmdSetupDescription": "Buka penyiapan konstitusi-dulu",
   "CmdSubagentsDescription": "Pintasan kompatibilitas untuk status Fleet",

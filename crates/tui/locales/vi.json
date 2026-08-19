@@ -480,6 +480,7 @@
   "CmdFleetDescription": "Xem và thiết lập worker Fleet cùng trạng thái điều phối",
   "CmdLaneDescription": "Xem và điều khiển các Lane bền vững (Workflow đang chạy)",
   "CmdWorkflowDescription": "Chạy script đa tác nhân khi thứ tự hoặc fan-out quan trọng",
+  "CmdWorkflowsDescription": "Hiển thị các lần chạy quy trình làm việc trong không gian làm việc này (danh sách, hủy)",
   "CmdHotbarDescription": "Mở thiết lập Hotbar",
   "CmdSetupDescription": "Mở thiết lập ưu tiên hiến pháp",
   "CmdSubagentsDescription": "Phím tắt tương thích cho trạng thái Fleet",

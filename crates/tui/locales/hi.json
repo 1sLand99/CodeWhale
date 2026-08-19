@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "संरचनात्मक-कॉपी रसीद मेटाडेटा {bytes}-बाइट आउटपुट सीमा से अधिक है; इसे भेजने से इनकार",
   "CmdFleetDescription": "Fleet वर्कर और ऑर्केस्ट्रेशन स्थिति देखें और सेटअप करें",
   "CmdWorkflowDescription": "क्रम या फैन-आउट ज़रूरी हो तो मल्टी-एजेंट स्क्रिप्ट चलाएँ",
+  "CmdWorkflowsDescription": "इस वर्कस्पेस के वर्कफ़्लो रन दिखाएँ (सूची, रद्द करें)",
   "CmdHotbarDescription": "Hotbar सेटअप खोलें",
   "CmdSetupDescription": "संविधान-प्रथम सेटअप खोलें",
   "CmdSubagentsDescription": "Fleet स्थिति के लिए संगतता शॉर्टकट",

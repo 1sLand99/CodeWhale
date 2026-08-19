@@ -78,6 +78,9 @@ const WORKFLOW_RESULT_MAX_CHARS: usize = 24_000;
 /// In-memory (and snapshot) event retention per run: only the newest events
 /// are kept; older ones remain in the per-event journal lines (#2974).
 const WORKFLOW_RUN_EVENTS_MAX_RETAINED: usize = 1_000;
+/// Progress lines the host detail projection keeps for the run manager's
+/// detail pane — the newest few, matching what a human scans at a glance.
+const HOST_RUN_PROGRESS_TAIL: usize = 3;
 
 #[derive(Clone)]
 pub struct WorkflowTool {
@@ -5251,6 +5254,108 @@ mod journal {
                 .expect("cancelled journal line");
             assert_eq!(replayed.status, WorkflowRunStatus::Cancelled);
         }
+
+        #[test]
+        fn host_run_details_derive_phases_and_child_states_from_the_journal() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let state = WorkflowWorkspaceState::open(tmp.path());
+            let mut record = sample_record("workflow_detail", WorkflowRunStatus::Running);
+            record.workflow_goal = Some("audit provider errors".to_string());
+            record.progress = vec![
+                "phase: scan".to_string(),
+                "child slow-1 done".to_string(),
+                "child slow-2 failed".to_string(),
+            ];
+            state.record_snapshot(&record);
+            drop(state);
+
+            let phase: WorkflowUiEvent = serde_json::from_value(serde_json::json!({
+                "at_ms": 1,
+                "owner_session_id": "session-journal",
+                "type": "phase_started",
+                "title": "scan"
+            }))
+            .expect("phase_started event");
+            let started: WorkflowUiEvent = WorkflowUiEvent::at(
+                2,
+                "session-journal",
+                WorkflowUiEventKind::TaskStarted(Box::new(
+                    super::super::WorkflowTaskStartedEvent {
+                        task_id: "child-1".to_string(),
+                        label: Some("slow-1".to_string()),
+                        role: None,
+                        profile: None,
+                        model: None,
+                        strength: None,
+                        thinking: None,
+                        requested_reasoning: None,
+                        effective_reasoning: None,
+                        resolved_role: Some("explore".to_string()),
+                        resolved_profile: None,
+                        resolved_provider: "deepseek".to_string(),
+                        resolved_model: "deepseek-v4-flash".to_string(),
+                        route_source: "session".to_string(),
+                        child_route: None,
+                        worktree: false,
+                        workspace: None,
+                        git_branch: None,
+                        parent_task_id: None,
+                        depth: 0,
+                        workflow_run_id: Some("workflow_detail".to_string()),
+                        workflow_phase_id: Some("scan".to_string()),
+                        workflow_task_label: None,
+                        workflow_child_index: Some(0),
+                        fleet_receipt: None,
+                    },
+                )),
+            );
+            let completed: WorkflowUiEvent = serde_json::from_value(serde_json::json!({
+                "at_ms": 3,
+                "owner_session_id": "session-journal",
+                "type": "task_completed",
+                "task_id": "child-1",
+                "status": "failed"
+            }))
+            .expect("task_completed event");
+            let replay = WorkflowWorkspaceState::open(tmp.path());
+            replay.record_event("workflow_detail", &phase);
+            replay.record_event("workflow_detail", &started);
+            replay.record_event("workflow_detail", &completed);
+            drop(replay);
+
+            let details =
+                super::super::host_workflow_run_details(tmp.path(), Some("session-journal"));
+            assert_eq!(details.len(), 1, "one journaled run");
+            let detail = &details[0];
+            assert_eq!(detail.line.run_id, "workflow_detail");
+            // Journal-only `running` rows hydrate through restart-orphan
+            // recovery (the same rewrite `WorkflowWorkspaceState::open`
+            // applies), so the host projection reports the run as failed —
+            // live in-process runs keep `running` via the shared state.
+            assert_eq!(detail.line.status, "failed");
+            assert_eq!(detail.line.label, "audit provider errors");
+            assert_eq!(detail.phases, vec!["scan".to_string()]);
+            assert_eq!(detail.children.len(), 1);
+            let child = &detail.children[0];
+            assert_eq!(child.task_id, "child-1");
+            assert_eq!(child.label.as_deref(), Some("slow-1"));
+            assert_eq!(child.role.as_deref(), Some("explore"));
+            assert_eq!(child.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(child.phase.as_deref(), Some("scan"));
+            assert_eq!(
+                child.state, "failed",
+                "terminal event must win over running"
+            );
+            assert_eq!(detail.progress_tail.len(), 3);
+            assert!(!detail.has_result);
+
+            // Session ownership fences the projection: a foreign session
+            // sees nothing, exactly like every other host control.
+            assert!(
+                super::super::host_workflow_run_details(tmp.path(), Some("session-other"))
+                    .is_empty()
+            );
+        }
     }
 }
 
@@ -5406,6 +5511,129 @@ pub(crate) fn host_workflow_runs(
         .collect();
     lines.sort_by_key(|line| line.started_at_ms);
     lines
+}
+
+/// One child-agent row of a workflow run as the host reads it: the typed
+/// spawn label, the resolved role/model, the phase it was admitted under,
+/// and a terminal state derived from the task-completed event (`running`
+/// until one exists). Same bounded projection rules as
+/// [`HostWorkflowRunLine`]: no raw event payloads, no filesystem paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostWorkflowChildRow {
+    pub task_id: String,
+    pub label: Option<String>,
+    pub role: Option<String>,
+    pub model: Option<String>,
+    pub phase: Option<String>,
+    pub state: &'static str,
+}
+
+/// Expanded host projection for the `/workflows` run manager: the run line
+/// plus the phase order, the child-agent roster, and the retained progress
+/// tail, all derived from the same run record the journal persists. Derived
+/// from the bounded event tail, so a long run shows the newest phases and
+/// children, not the whole history. Read-only: never creates the journal or
+/// workspace state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostWorkflowRunDetail {
+    pub line: HostWorkflowRunLine,
+    pub phases: Vec<String>,
+    pub children: Vec<HostWorkflowChildRow>,
+    pub progress_tail: Vec<String>,
+    pub has_result: bool,
+}
+
+fn host_task_state(status: IrWorkflowRunStatus) -> &'static str {
+    match status {
+        IrWorkflowRunStatus::Pending => "pending",
+        IrWorkflowRunStatus::Running => "running",
+        IrWorkflowRunStatus::Succeeded => "succeeded",
+        IrWorkflowRunStatus::Failed => "failed",
+        IrWorkflowRunStatus::Cancelled => "cancelled",
+        IrWorkflowRunStatus::BudgetExceeded => "budget_exceeded",
+        IrWorkflowRunStatus::ReplayDiverged => "replay_diverged",
+    }
+}
+
+fn host_run_detail(record: &WorkflowRunRecord) -> HostWorkflowRunDetail {
+    let line = host_run_line(record);
+    let mut phases: Vec<String> = Vec::new();
+    let mut children: Vec<HostWorkflowChildRow> = Vec::new();
+    for event in &record.events {
+        match &event.kind {
+            WorkflowUiEventKind::PhaseStarted { title } => {
+                if phases.last().map(String::as_str) != Some(title.as_str()) {
+                    phases.push(title.clone());
+                }
+            }
+            WorkflowUiEventKind::TaskStarted(started) => children.push(HostWorkflowChildRow {
+                task_id: started.task_id.clone(),
+                label: started
+                    .workflow_task_label
+                    .clone()
+                    .or_else(|| started.label.clone()),
+                role: started
+                    .resolved_role
+                    .clone()
+                    .or_else(|| started.role.clone()),
+                model: if started.resolved_model.is_empty() {
+                    None
+                } else {
+                    Some(started.resolved_model.clone())
+                },
+                phase: started.workflow_phase_id.clone(),
+                state: "running",
+            }),
+            WorkflowUiEventKind::TaskCompleted {
+                task_id, status, ..
+            } => {
+                if let Some(row) = children.iter_mut().find(|row| row.task_id == *task_id) {
+                    row.state = host_task_state(*status);
+                }
+            }
+            _ => {}
+        }
+    }
+    HostWorkflowRunDetail {
+        line,
+        phases,
+        children,
+        progress_tail: record
+            .progress
+            .iter()
+            .rev()
+            .take(HOST_RUN_PROGRESS_TAIL)
+            .rev()
+            .cloned()
+            .collect(),
+        has_result: record.result.is_some(),
+    }
+}
+
+/// Every workflow run this workspace knows about (live and journaled) with
+/// the detail the `/workflows` manager renders, oldest first. Read-only:
+/// never creates the journal or workspace state.
+pub(crate) fn host_workflow_run_details(
+    workspace: &Path,
+    owner_session_id: Option<&str>,
+) -> Vec<HostWorkflowRunDetail> {
+    let Some(owner_session_id) = owner_session_id else {
+        return Vec::new();
+    };
+    let Some(state) = host_workflow_state(workspace) else {
+        return Vec::new();
+    };
+    let runs = state
+        .runs
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut details: Vec<HostWorkflowRunDetail> = runs
+        .values()
+        .filter(|record| record.owner_session_id.as_deref() == Some(owner_session_id))
+        .map(host_run_detail)
+        .collect();
+    details.sort_by_key(|detail| detail.line.started_at_ms);
+    details
 }
 
 /// Cancel a running workflow directly from the host (the `/workflow cancel`

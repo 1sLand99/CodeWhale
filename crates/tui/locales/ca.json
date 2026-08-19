@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "Les metadades del rebut de còpia estructural superen el límit de sortida de {bytes} bytes; no s'emetran",
   "CmdFleetDescription": "Inspecciona i configura els treballadors de Fleet i l'estat d'orquestració",
   "CmdWorkflowDescription": "Executar un script multiagent quan importen l'ordre o el fan-out",
+  "CmdWorkflowsDescription": "Mostra les execucions de flux de treball d'aquest espai de treball (llistar, cancel·lar)",
   "CmdHotbarDescription": "Obre la configuració de Hotbar",
   "CmdSetupDescription": "Obre el Setup amb la constitució primer",
   "CmdSubagentsDescription": "Drecera de compatibilitat per a l'estat de Fleet",

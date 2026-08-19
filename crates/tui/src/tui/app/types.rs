@@ -919,6 +919,8 @@ pub enum AppAction {
     OpenThemePicker,
     /// Open the `/skills` manager — audit inventory + owned mutations.
     OpenSkillsManager,
+    /// Open the `/workflows` run dashboard — live and retained workflow runs.
+    OpenWorkflowsManager,
     /// Open the unified, read-only extensions inventory on a specific tab.
     OpenExtensions {
         tab: crate::tui::views::extensions::ExtensionsTab,

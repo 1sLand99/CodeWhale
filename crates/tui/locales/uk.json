@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "Метадані квитанції структурного копіювання перевищують ліміт виводу в {bytes} байтів; вивід відхилено",
   "CmdFleetDescription": "Переглянути й налаштувати воркерів Fleet та стан оркестрації",
   "CmdWorkflowDescription": "Запустити мультиагентний скрипт, коли важливі порядок або fan-out",
+  "CmdWorkflowsDescription": "Показати запуски робочого процесу в цьому робочому просторі (список, скасувати)",
   "CmdHotbarDescription": "Відкрити налаштування Hotbar",
   "CmdSetupDescription": "Відкрити налаштування, що починається з конституції",
   "CmdSubagentsDescription": "Сумісне скорочення для стану Fleet",

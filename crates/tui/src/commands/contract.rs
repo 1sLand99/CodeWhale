@@ -236,6 +236,7 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
         "cmd_voice_description" => MessageId::CmdVoiceDescription,
         "cmd_voice_send_description" => MessageId::CmdVoiceSendDescription,
         "cmd_workflow_description" => MessageId::CmdWorkflowDescription,
+        "cmd_workflows_description" => MessageId::CmdWorkflowsDescription,
         "cmd_workspace_description" => MessageId::CmdWorkspaceDescription,
         _ => return None,
     })

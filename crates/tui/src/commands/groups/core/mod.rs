@@ -118,6 +118,10 @@ impl CommandGroup for CoreCommands {
                 workflow::WorkflowCmd::execute,
             )),
             Box::new(FunctionCommand::new(
+                workflow::WorkflowsCmd::info(),
+                workflow::WorkflowsCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
                 workflow::AutoCmd::info(),
                 workflow::AutoCmd::execute,
             )),

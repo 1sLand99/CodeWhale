@@ -480,6 +480,7 @@
   "CmdFleetDescription": "Inspeccionar y configurar workers de Fleet y orquestación",
   "CmdLaneDescription": "Inspeccionar y controlar Lanes duraderos (Workflows en ejecución)",
   "CmdWorkflowDescription": "Ejecutar un script multiagente cuando importan el orden o el fan-out",
+  "CmdWorkflowsDescription": "Muestra las ejecuciones de flujo de trabajo de este workspace (listar, cancelar)",
   "CmdHotbarDescription": "Abrir configuración de Hotbar",
   "CmdSetupDescription": "Abrir configuración con constitución primero",
   "CmdSubagentsDescription": "Atajo de compatibilidad para el estado de Fleet",

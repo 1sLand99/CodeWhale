@@ -38,6 +38,7 @@ pub mod mode_picker;
 pub mod route_save_prompt;
 pub mod skills_manager;
 pub mod status_picker;
+pub mod workflows_manager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
@@ -74,6 +75,9 @@ pub enum ModalKind {
     Extensions,
     /// Native git worktree manager (list / create / switch / compare).
     WorktreeManager,
+    /// Live workflow **run** dashboard (`/workflows`): active and retained
+    /// runs from the journal, with host-side cancel.
+    WorkflowsManager,
 }
 
 /// Clear and paint a modal popup with an opaque surface.

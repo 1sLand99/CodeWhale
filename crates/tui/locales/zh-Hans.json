@@ -480,6 +480,7 @@
   "CmdFleetDescription": "查看与配置 Fleet 工作节点及编排状态",
   "CmdLaneDescription": "查看与控制持久化的 Lane（运行中的工作流）",
   "CmdWorkflowDescription": "当需要阶段、顺序或多路并行时运行多智能体脚本",
+  "CmdWorkflowsDescription": "显示此工作区的工作流运行（列表、取消）",
   "CmdHotbarDescription": "打开 Hotbar 设置",
   "CmdSetupDescription": "打开以宪章为核心的设置",
   "CmdSubagentsDescription": "Fleet 状态的兼容快捷方式",

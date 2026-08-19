@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "Les métadonnées du reçu de copie structurelle dépassent la limite de sortie de {bytes} octets ; émission refusée",
   "CmdFleetDescription": "Inspecter et configurer les workers Fleet et l'état d'orchestration",
   "CmdWorkflowDescription": "Lancer un script multi-agents quand l'ordre ou le fan-out compte",
+  "CmdWorkflowsDescription": "Afficher les exécutions de workflow de cet espace de travail (lister, annuler)",
   "CmdHotbarDescription": "Ouvrir la configuration Hotbar",
   "CmdSetupDescription": "Ouvrir la configuration axée constitution",
   "CmdSubagentsDescription": "Raccourci de compatibilité pour le statut Fleet",

@@ -480,6 +480,7 @@
   "CmdFleetDescription": "Fleet ワーカーとオーケストレーション状態を確認・設定",
   "CmdLaneDescription": "永続化された Lane（実行中の Workflow）を確認・制御",
   "CmdWorkflowDescription": "順序や並列が必要なときにマルチエージェント脚本を実行する",
+  "CmdWorkflowsDescription": "このワークスペースのワークフロー実行を表示（一覧・キャンセル）",
   "CmdHotbarDescription": "Hotbar設定を開く",
   "CmdSetupDescription": "憲法ファーストのセットアップを開く",
   "CmdSubagentsDescription": "Fleet ステータスへの互換ショートカット",

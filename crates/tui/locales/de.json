@@ -476,6 +476,7 @@
   "CmdStructcopyReceiptTooLarge": "Die Beleg-Metadaten der strukturellen Kopie überschreiten das Ausgabelimit von {bytes} Bytes; Ausgabe wird verweigert",
   "CmdFleetDescription": "Fleet-Worker und Orchestrierungsstatus ansehen und einrichten",
   "CmdWorkflowDescription": "Multi-Agent-Skript ausführen, wenn Reihenfolge oder Fan-out zählen",
+  "CmdWorkflowsDescription": "Workflow-Läufe in diesem Arbeitsbereich anzeigen (auflisten, abbrechen)",
   "CmdHotbarDescription": "Hotbar-Setup öffnen",
   "CmdSetupDescription": "Setup mit Verfassung zuerst öffnen",
   "CmdSubagentsDescription": "Kompatibilitäts-Kurzbefehl für Fleet-Status",
