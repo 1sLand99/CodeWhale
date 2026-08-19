@@ -14306,8 +14306,10 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
 
 /// R6 injection-size regression: the per-turn `<turn_meta>` block, built
 /// (never sent) from the same snapshot path production uses. Measured 254B
-/// on 2026-08-02; ceiling is measured +10% so growth is a reviewed act.
-const TURN_META_BYTE_CEILING: usize = 280;
+/// on 2026-08-02; the unavailable-backend qualifier adds 48B (Linux without
+/// bwrap, all Windows). Ceiling is that host's measured size +10%
+/// so growth is a reviewed act.
+const TURN_META_BYTE_CEILING: usize = 333;
 
 #[test]
 fn turn_meta_block_stays_within_measured_ceiling() {
@@ -14366,9 +14368,9 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let (engine, _handle) = Engine::new(config, &Config::default());
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
 
-    let meta_for_mode = |mode: AppMode| -> String {
+    let meta_for_mode = |engine: &Engine, mode: AppMode| -> String {
         let prompt_context = NextTurnPromptContext::for_planned_turn(
             ApiProvider::Deepseek,
             "deepseek-v4-flash".to_string(),
@@ -14402,7 +14404,7 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
         text.clone()
     };
 
-    let agent_meta = meta_for_mode(AppMode::Agent);
+    let agent_meta = meta_for_mode(&engine, AppMode::Agent);
     assert!(
         agent_meta.contains("Current sandbox posture: workspace-write"),
         "{agent_meta}"
@@ -14410,12 +14412,47 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
 
     // Plan mode must surface the read-only clamp without promising that this
     // non-interactive posture can open an escalation prompt.
-    let plan_meta = meta_for_mode(AppMode::Plan);
+    let plan_meta = meta_for_mode(&engine, AppMode::Plan);
     assert!(
         plan_meta.contains(
             "Current sandbox posture: read-only (shell writes are blocked; ordinary approval does not change this)"
         ),
         "{plan_meta}"
+    );
+
+    // Pin deterministic states instead of branching on the CI host. The
+    // production value is also captured once at engine construction.
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::LocalOs;
+    let local_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        local_meta.contains("local OS sandbox applied"),
+        "{local_meta}"
+    );
+
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::Unavailable;
+    let unavailable_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        unavailable_meta.contains("policy only; no execution sandbox available"),
+        "{unavailable_meta}"
+    );
+
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::ExternalBackend;
+    let external_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        external_meta.contains("workspace-write policy"),
+        "{external_meta}"
+    );
+    assert!(
+        external_meta.contains("external execution backend configured"),
+        "{external_meta}"
+    );
+    assert!(
+        external_meta.contains("isolation unverified by Codewhale"),
+        "{external_meta}"
+    );
+    assert!(
+        !external_meta.contains("writes inside the workspace"),
+        "{external_meta}"
     );
 }
 

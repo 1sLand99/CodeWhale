@@ -677,6 +677,9 @@ pub struct Engine {
     /// External sandbox backend (#516). When `Some`, exec_shell routes commands
     /// through this instead of spawning a local process.
     sandbox_backend: Option<std::sync::Arc<dyn crate::sandbox::backend::SandboxBackend>>,
+    /// Session-pinned execution boundary used by model-visible sandbox labels.
+    /// This must not be re-probed per turn or metadata bytes can drift.
+    sandbox_enforcement: crate::sandbox::policy::SandboxEnforcement,
     /// Diagnostics collected during the current step's tool calls. Drained
     /// and forwarded as a synthetic user message before the next API call.
     pending_lsp_blocks: Vec<crate::lsp::DiagnosticBlock>,
@@ -1327,6 +1330,15 @@ impl Engine {
                 None
             })
             .map(std::sync::Arc::from);
+        let sandbox_enforcement = if sandbox_backend.is_some() {
+            crate::sandbox::policy::SandboxEnforcement::ExternalBackend
+        } else if crate::sandbox::get_platform_sandbox_with_bwrap_preference(config.prefer_bwrap)
+            .is_some()
+        {
+            crate::sandbox::policy::SandboxEnforcement::LocalOs
+        } else {
+            crate::sandbox::policy::SandboxEnforcement::Unavailable
+        };
 
         let active_route_limits = config.active_route_limits;
         let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
@@ -1381,6 +1393,7 @@ impl Engine {
             pending_lsp_blocks: Vec::new(),
             workshop_vars,
             sandbox_backend,
+            sandbox_enforcement,
             current_mode: AppMode::Agent,
             last_policy_narrowing: None,
             last_turn_meta_git_snapshot: StdMutex::new(None),
@@ -2916,9 +2929,11 @@ impl Engine {
         // DGF-02 (dogfood 2026-08-02): the model was never told its own
         // sandbox posture, so an approved-then-sandbox-blocked write read as
         // a mystery failure it burned turns "debugging". Derive the posture
-        // from the same resolver tool execution uses so the line and the
-        // enforcement can never disagree. Stable per session (mode, config,
-        // workspace), so ordinary turns stay byte-identical.
+        // from the same resolver tool execution uses. The execution boundary
+        // is snapshotted at engine construction: local OS wrapper, configured
+        // external backend, or unavailable. External raw-command backends do
+        // not inherit local workspace/network enforcement claims. Stable per
+        // session, so ordinary turns stay byte-identical.
         let sandbox_posture = crate::core::authority::sandbox_policy_for_turn(
             prompt_context.mode,
             approval_mode,
@@ -2937,7 +2952,7 @@ impl Engine {
             ),
             format!(
                 "Current sandbox posture: {}",
-                sandbox_posture.posture_label()
+                sandbox_posture.posture_label_with_enforcement(self.sandbox_enforcement)
             ),
         ];
         if approval_mode == crate::tui::approval::ApprovalMode::Never {
