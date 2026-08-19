@@ -50,6 +50,28 @@ abort under load.
 - `test(tui): break the LazyLock/env-barrier deadlock in the test harness`.
 - `ci: give test threads the 8 MiB stack they need` — the lib suite aborted
   with SIGABRT under load on the default 2 MiB stack.
+- YOLO entry points honor a locked approval policy: `--yolo`, `/mode yolo`,
+  `/zidong`, and Alt+Y can no longer set Full Access + trust + shell when
+  config or managed requirements own the posture.
+- Terminal PTY tools fail closed without a sandbox backend under a narrowed
+  filesystem posture, and otherwise start `$SHELL -i` through
+  `SandboxManager::prepare` like `bash`.
+- Skill update refuses to replace a directory that has no `.installed-from`
+  marker — same ownership gate plugins already used.
+- `cp`/`mv` are workspace-safe only when every path operand stays inside
+  the workspace — Auto-Review no longer auto-allows `cp /etc/passwd .`.
+- Main CI no longer shares one concurrency group per branch: each SHA
+  gets a verdict instead of a cancelled pending run. A hermetic Safety
+  gate job runs authorization tests in under 15 minutes (test bankruptcy
+  restructuring — no tests deleted).
+- Short CLI no longer waits up to three seconds for a telemetry POST on
+  exit; `session_end` is recorded and the buffer ships on the next
+  interactive session.
+- `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
+  the empty palette and bare `/` menu instead of only under Advanced
+  (#5442, #5439).
+- The model picker no longer re-parses `~/.codewhale/config.toml` once per
+  provider when deciding who has a saved key.
 
 ### Added
 

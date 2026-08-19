@@ -207,13 +207,12 @@ fn pty_lacks_required_sandbox(
     policy.should_sandbox() && matches!(applied, crate::sandbox::SandboxType::None)
 }
 
+#[cfg(unix)]
 fn pty_sandbox_policy(context: &ToolContext) -> crate::sandbox::SandboxPolicy {
-    context
-        .elevated_sandbox_policy
-        .clone()
-        .unwrap_or_else(crate::sandbox::SandboxPolicy::default)
+    context.elevated_sandbox_policy.clone().unwrap_or_default()
 }
 
+#[cfg(unix)]
 fn prepare_pty_shell(
     shell: &str,
     workspace: &std::path::Path,
@@ -243,6 +242,7 @@ fn prepare_pty_shell(
     Ok((prepared, confined))
 }
 
+#[cfg(unix)]
 fn create_session(
     name: &str,
     workspace: &std::path::Path,

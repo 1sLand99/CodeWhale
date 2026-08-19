@@ -733,6 +733,7 @@ fn truncate_path(path: &str, max: usize) -> String {
 /// Single-pass walk that collects workspace-relative paths. `max_depth` of
 /// `None` walks the whole tree (still bounded by `MAX_CANDIDATES` and
 /// `.gitignore`); `Some(n)` caps the recursion at `n` levels.
+#[cfg(test)]
 fn collect_candidates(root: &Path, max_depth: Option<usize>) -> Vec<String> {
     collect_candidates_limited(root, max_depth, MAX_CANDIDATES).paths
 }
