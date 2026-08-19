@@ -8,6 +8,10 @@ use crate::commands::CommandResult;
 
 const GITHUB_MCP_URL: &str = "https://api.githubcopilot.com/mcp/";
 const CHROME_DEVTOOLS_MCP_PACKAGE: &str = "chrome-devtools-mcp@1.7.0";
+const PLAYWRIGHT_MCP_PACKAGE: &str = "@playwright/mcp@0.0.79";
+const PLAYWRIGHT_MCP_SOURCE: &str = "https://github.com/microsoft/playwright-mcp";
+const CUA_DRIVER_SOURCE: &str = "https://github.com/trycua/cua";
+const CONTAINER_USE_SOURCE: &str = "https://github.com/dagger/container-use";
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "mcp",
@@ -116,6 +120,10 @@ fn parse_name(name: Option<&str>, usage: &str) -> Result<String, String> {
 }
 
 fn parse_add(locale: Locale, parts: Vec<&str>) -> CommandResult {
+    parse_add_for_platform(locale, parts, cfg!(windows))
+}
+
+fn parse_add_for_platform(locale: Locale, parts: Vec<&str>, windows: bool) -> CommandResult {
     if parts
         .first()
         .is_some_and(|part| part.eq_ignore_ascii_case("recommended"))
@@ -141,8 +149,36 @@ fn parse_add(locale: Locale, parts: Vec<&str>) -> CommandResult {
             {
                 CommandResult::action(AppAction::Mcp(McpUiAction::AddStdio {
                     name: "chrome-devtools".to_string(),
-                    command: recommended_npx_command().to_string(),
+                    command: recommended_npx_command_for(windows).to_string(),
                     args: vec!["-y".to_string(), CHROME_DEVTOOLS_MCP_PACKAGE.to_string()],
+                }))
+            }
+            [_, id] if id.eq_ignore_ascii_case("playwright") => {
+                CommandResult::action(AppAction::Mcp(McpUiAction::AddStdio {
+                    name: "playwright".to_string(),
+                    command: recommended_npx_command_for(windows).to_string(),
+                    args: vec![
+                        "-y".to_string(),
+                        PLAYWRIGHT_MCP_PACKAGE.to_string(),
+                        "--isolated".to_string(),
+                    ],
+                }))
+            }
+            [_, id] if id.eq_ignore_ascii_case("cua") || id.eq_ignore_ascii_case("cua-driver") => {
+                CommandResult::action(AppAction::Mcp(McpUiAction::AddStdio {
+                    name: "cua-driver".to_string(),
+                    command: "cua-driver".to_string(),
+                    args: vec!["mcp".to_string()],
+                }))
+            }
+            [_, id]
+                if id.eq_ignore_ascii_case("container-use")
+                    || id.eq_ignore_ascii_case("container") =>
+            {
+                CommandResult::action(AppAction::Mcp(McpUiAction::AddStdio {
+                    name: "container-use".to_string(),
+                    command: "container-use".to_string(),
+                    args: vec!["stdio".to_string()],
                 }))
             }
             [_, _] => CommandResult::error(
@@ -180,6 +216,7 @@ fn parse_add(locale: Locale, parts: Vec<&str>) -> CommandResult {
 }
 
 fn recommended_mcp_text(locale: Locale) -> String {
+    let heading = tr(locale, MessageId::McpRecommendationsHeading);
     let safety = tr(locale, MessageId::McpRecommendationsSafety)
         .replace("{restart_command}", "/mcp restart");
     let github = tr(locale, MessageId::McpRecommendationGithub)
@@ -191,8 +228,22 @@ fn recommended_mcp_text(locale: Locale) -> String {
         .replace("{launcher}", "npx/npx.cmd")
         .replace("{restart_command}", "/mcp restart")
         .replace("{add_command}", "/mcp add recommended chrome-devtools");
+    let playwright = tr(locale, MessageId::McpRecommendationPlaywright)
+        .replace("{package}", PLAYWRIGHT_MCP_PACKAGE)
+        .replace("{source}", PLAYWRIGHT_MCP_SOURCE)
+        .replace("{launcher}", "npx/npx.cmd")
+        .replace("{restart_command}", "/mcp restart")
+        .replace("{add_command}", "/mcp add recommended playwright");
+    let cua = tr(locale, MessageId::McpRecommendationCua)
+        .replace("{source}", CUA_DRIVER_SOURCE)
+        .replace("{restart_command}", "/mcp restart")
+        .replace("{add_command}", "/mcp add recommended cua");
+    let container_use = tr(locale, MessageId::McpRecommendationContainerUse)
+        .replace("{source}", CONTAINER_USE_SOURCE)
+        .replace("{restart_command}", "/mcp restart")
+        .replace("{add_command}", "/mcp add recommended container-use");
     format!(
-        "Recommended MCP servers (suggestions only; nothing is installed automatically)\n\
+        "{heading}\n\
          {safety}\n\
          \n\
          • hugging-face — remote Hugging Face MCP endpoint\n\
@@ -204,16 +255,18 @@ fn recommended_mcp_text(locale: Locale) -> String {
          \n\
          {chrome}\n\
          \n\
+         {playwright}\n\
+         \n\
+         {cua}\n\
+         \n\
+         {container_use}\n\
+         \n\
          External sources (~/.claude.json, .mcp.json, marketplace manifests):\n\
            /mcp import — list candidates with provenance (keyboard/mouse status)\n\
            /mcp import approve <name> — create managed connector after consent\n\
            /mcp import decline <name> — durable decline until source content changes\n\
          enabled=false is a hard block and will never import. Nothing is auto-imported."
     )
-}
-
-fn recommended_npx_command() -> &'static str {
-    recommended_npx_command_for(cfg!(windows))
 }
 
 fn recommended_npx_command_for(windows: bool) -> &'static str {
@@ -308,6 +361,10 @@ mod tests {
         assert!(recommended.contains("provenance:"));
         assert!(recommended.contains("https://api.githubcopilot.com/mcp/"));
         assert!(recommended.contains("chrome-devtools-mcp@1.7.0"));
+        assert!(recommended.contains("@playwright/mcp@0.0.79"));
+        assert!(recommended.contains("https://github.com/microsoft/playwright-mcp"));
+        assert!(recommended.contains("https://github.com/dagger/container-use"));
+        assert!(recommended.contains("https://github.com/trycua/cua"));
         assert!(recommended.contains("least-privilege PAT outside command history"));
         assert!(recommended.contains("read authenticated pages"));
 
@@ -345,8 +402,39 @@ mod tests {
             add_chrome.action,
             Some(AppAction::Mcp(McpUiAction::AddStdio { name, command, args }))
                 if name == "chrome-devtools"
-                    && command == recommended_npx_command()
+                    && command == recommended_npx_command_for(cfg!(windows))
                     && args == vec!["-y".to_string(), CHROME_DEVTOOLS_MCP_PACKAGE.to_string()]
+        ));
+
+        let add_playwright = mcp(&mut app, Some("add recommended playwright"));
+        assert!(matches!(
+            add_playwright.action,
+            Some(AppAction::Mcp(McpUiAction::AddStdio { name, command, args }))
+                if name == "playwright"
+                    && command == recommended_npx_command_for(cfg!(windows))
+                    && args == vec![
+                        "-y".to_string(),
+                        PLAYWRIGHT_MCP_PACKAGE.to_string(),
+                        "--isolated".to_string(),
+                    ]
+        ));
+
+        let add_container = mcp(&mut app, Some("add recommended container-use"));
+        assert!(matches!(
+            add_container.action,
+            Some(AppAction::Mcp(McpUiAction::AddStdio { name, command, args }))
+                if name == "container-use"
+                    && command == "container-use"
+                    && args == vec!["stdio".to_string()]
+        ));
+
+        let add_cua = mcp(&mut app, Some("add recommended cua"));
+        assert!(matches!(
+            add_cua.action,
+            Some(AppAction::Mcp(McpUiAction::AddStdio { name, command, args }))
+                if name == "cua-driver"
+                    && command == "cua-driver"
+                    && args == vec!["mcp".to_string()]
         ));
 
         let import_list = mcp(&mut app, Some("import"));
@@ -389,5 +477,40 @@ mod tests {
     fn recommended_chrome_launcher_is_native_on_unix_and_windows() {
         assert_eq!(recommended_npx_command_for(false), "npx");
         assert_eq!(recommended_npx_command_for(true), "npx.cmd");
+
+        let windows = parse_add_for_platform(Locale::En, vec!["recommended", "playwright"], true);
+        assert!(matches!(
+            windows.action,
+            Some(AppAction::Mcp(McpUiAction::AddStdio { name, command, args }))
+                if name == "playwright"
+                    && command == "npx.cmd"
+                    && args == vec![
+                        "-y".to_string(),
+                        PLAYWRIGHT_MCP_PACKAGE.to_string(),
+                        "--isolated".to_string(),
+                    ]
+        ));
+    }
+
+    #[test]
+    fn recommendations_state_execution_and_install_boundaries() {
+        let text = recommended_mcp_text(Locale::En);
+        assert!(text.contains("nothing is installed automatically"));
+        assert!(text.contains("Suggested Codewhale plugins"));
+        assert!(text.contains("never downloads or"));
+        assert!(text.contains("installs this binary"));
+        assert!(text.contains("experimental"));
+        assert!(text.contains("--isolated"));
+        assert!(text.contains("operating-system permissions"));
+
+        let mut app = app();
+        let unknown = mcp(&mut app, Some("add recommended not-in-the-list"));
+        assert!(unknown.action.is_none());
+        assert!(
+            unknown
+                .message
+                .expect("unknown ID error")
+                .contains("Unknown recommended MCP ID")
+        );
     }
 }

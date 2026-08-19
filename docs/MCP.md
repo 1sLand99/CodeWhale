@@ -118,6 +118,42 @@ Supported in-TUI actions:
 /mcp reload
 ```
 
+### Suggested plugins and companion integrations
+
+`/mcp recommendations` is Codewhale's native, curated suggestions surface.
+The entries are described as product plugins, with their component type and
+provenance, but `/mcp add recommended <id>` still writes only the named MCP
+server component. Viewing recommendations never fetches, installs, trusts, or
+enables anything. Adding one writes configuration; the server is first started
+only after an explicit `/mcp restart`.
+
+The v0.9.10 product suggestions use these reviewed, pinned definitions. The
+Plugins view is the product/install surface; MCP, Skills, and sandbox adapters
+are transparent component kinds and their own tabs remain operational and
+diagnostic surfaces:
+
+| Plugin | Component | Pinned definition | Provenance and maturity | Installation boundary |
+| --- | --- | --- | --- | --- |
+| Chrome DevTools | MCP server (stdio) | `npx -y chrome-devtools-mcp@1.7.0` (`npx.cmd` on Windows) | [Official ChromeDevTools project](https://github.com/ChromeDevTools/chrome-devtools-mcp) | npm may download the pinned package when the user restarts MCP. |
+| Playwright | MCP server (stdio) | `npx -y @playwright/mcp@0.0.79 --isolated` (`npx.cmd` on Windows) | [Official Microsoft project](https://github.com/microsoft/playwright-mcp) | `--isolated` starts a fresh browser profile; npm may download the pinned package only after an explicit restart. |
+| Cua Computer Use | MCP server (stdio) | `cua-driver mcp`; Driver `0.20.0` reviewed for this release | [Official Cua project](https://github.com/trycua/cua); preview integration | The signed driver and OS permissions are separate, explicit installs. `/mcp add recommended cua` only writes config and never installs or grants either. |
+| Browser Use | Skill plus separately installed Python runtime | Skill/runtime release `0.13.8` | [Official browser-use project](https://github.com/browser-use/browser-use) | Optional companion: not an MCP server. Codewhale does not auto-run the upstream Skill installer or install its browser/runtime dependencies. |
+| Anthropic Sandbox Runtime | Sandbox adapter companion | `@anthropic-ai/sandbox-runtime@0.0.73` | [Official anthropic-experimental project](https://github.com/anthropic-experimental/sandbox-runtime); beta | Documentation-only adapter candidate in v0.9.10: not an MCP server and not an active Codewhale plugin adapter. It does not replace Codewhale's sandbox policy. |
+
+[Container Use](https://github.com/dagger/container-use) remains an additional
+experimental suggestion with an MCP server component (`container-use stdio`).
+The binary must be installed separately; `/mcp add recommended container-use`
+only writes config and Codewhale never downloads it.
+
+This presentation follows the same useful boundary found in the local
+Grokbuild extensions view (one product plugin may expose MCP or Skill
+components while component tabs stay inspectable), the Kimi marketplace's
+explicit display name/tier/source fields, and the Codex marketplace's explicit
+source and install-policy fields.
+Codewhale keeps its stricter rule: provenance and foreign policy are display
+metadata only, never inherited trust or automatic installation. For full
+bundle and marketplace semantics, see [Plugin bundles](PLUGIN_BUNDLES.md).
+
 `/mcp validate` (alias `/mcp doctor`) reconnects for UI discovery only: it
 refreshes the manager snapshot you see in the pager, not the catalog the model
 gets.

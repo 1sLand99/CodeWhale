@@ -8942,7 +8942,7 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         if server
             .args
             .iter()
-            .any(|arg| is_relative_stdio_path_arg(arg))
+            .any(|arg| is_relative_stdio_path_arg(arg) && !is_scoped_npm_package_arg(cmd, arg))
         {
             return McpServerDoctorStatus::Warning(
                 "stdio server uses a relative path argument without cwd; argument values omitted"
@@ -8956,6 +8956,53 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         server.args.len(),
         server.env.len()
     ))
+}
+
+/// `@scope/package@version` is an npm package spec, not a relative filesystem
+/// path, even though it contains `/`. Keep this exception tied to the npx
+/// launcher so similarly shaped arguments to other commands retain the
+/// relative-path warning.
+fn is_scoped_npm_package_arg(command: &str, argument: &str) -> bool {
+    let launcher = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+    if !launcher.eq_ignore_ascii_case("npx") && !launcher.eq_ignore_ascii_case("npx.cmd") {
+        return false;
+    }
+
+    let Some(scoped) = argument.strip_prefix('@') else {
+        return false;
+    };
+    let Some((scope, package_and_version)) = scoped.split_once('/') else {
+        return false;
+    };
+    if scope.is_empty()
+        || package_and_version.is_empty()
+        || package_and_version.contains('/')
+        || package_and_version.contains('\\')
+    {
+        return false;
+    }
+
+    let (package, version) = match package_and_version.split_once('@') {
+        Some((package, version)) => (package, Some(version)),
+        None => (package_and_version, None),
+    };
+    let valid_name = |value: &str| {
+        !value.is_empty()
+            && !value.starts_with(['.', '_'])
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    };
+    valid_name(scope)
+        && valid_name(package)
+        && version.is_none_or(|value| {
+            !value.is_empty()
+                && !value.contains(['@', '/', '\\'])
+                && !value.chars().any(char::is_whitespace)
+        })
 }
 
 fn save_mcp_config(path: &Path, cfg: &McpConfig) -> Result<()> {
@@ -17230,6 +17277,43 @@ mod doctor_mcp_tests {
                 assert!(detail.contains("cwd"));
             }
             other => panic!("Expected Warning for relative path argument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scoped_npm_package_spec_without_cwd_is_not_a_path_warning() {
+        for command in ["npx", "npx.cmd", "/opt/homebrew/bin/npx"] {
+            let server = make_server(
+                Some(command),
+                &["-y", "@playwright/mcp@0.0.79", "--isolated"],
+                None,
+            );
+            match doctor_check_mcp_server(&server) {
+                McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
+                other => panic!("Expected Ok for scoped npm package via {command}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_scoped_npm_exception_does_not_hide_relative_paths() {
+        for (command, argument) in [
+            ("npx", "scripts/server.js"),
+            ("npx", "@scope/package/extra"),
+            ("npx", "@scope/package@"),
+            ("npx", "@scope/package@@1.0.0"),
+            ("npx", "@.scope/package"),
+            ("npx.cmd", "@scope/_package"),
+            ("node", "@scope/package@1.0.0"),
+        ] {
+            let server = make_server(Some(command), &[argument], None);
+            assert!(
+                matches!(
+                    doctor_check_mcp_server(&server),
+                    McpServerDoctorStatus::Warning(_)
+                ),
+                "Expected a relative-path warning for {command} {argument}"
+            );
         }
     }
 
