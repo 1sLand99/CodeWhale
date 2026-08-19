@@ -1426,6 +1426,9 @@ pub struct App {
     pub show_thinking: bool,
     pub thinking_highlight: bool,
     pub thinking_default_expanded: bool,
+    pub thinking_preview_lines: usize,
+    pub help_expand_groups: bool,
+    pub pin_last_prompt: bool,
     pub verbose_transcript: bool,
     pub show_tool_details: bool,
     /// Inline presentation mode for successful structured File mutations.
@@ -4582,6 +4585,7 @@ impl App {
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
             thinking_default_expanded: self.thinking_default_expanded,
+            thinking_preview_lines: self.thinking_preview_lines,
             verbose: self.verbose_transcript,
             show_tool_details: self.show_tool_details,
             inline_diff_mode: self.inline_diff_mode,

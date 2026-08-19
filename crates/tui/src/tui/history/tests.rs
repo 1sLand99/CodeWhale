@@ -103,7 +103,7 @@ fn compact_live_row_does_not_leak_evidence_path() {
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
         .collect();
     assert!(
-        joined.contains("read done · cmd: cargo build --release"),
+        joined.contains("read 1 line · cmd: cargo build --release"),
         "expected compact live summary: {joined:?}"
     );
     assert!(
@@ -3660,4 +3660,26 @@ fn agent_spawn_suppresses_generic_card_in_favor_of_delegate_card() {
             "spawn generic tool card must yield to DelegateCard (#4133): {mode:?} {lines:?}"
         );
     }
+}
+
+#[test]
+fn finished_read_card_names_the_line_count() {
+    use crate::tui::widgets::tool_card::ToolFamily;
+    let one = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Success, Some("hello\n"));
+    assert_eq!(one, "1 line");
+    let many = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Success, Some("a\nb\nc\n"));
+    assert_eq!(many, "3 lines");
+    let running = super::tool_receipt_label(ToolFamily::Read, ToolStatus::Running, Some("a\nb"));
+    assert_eq!(running, "running");
+}
+
+#[test]
+fn finished_run_card_does_not_infer_stdio_streams_from_rendered_text() {
+    use crate::tui::widgets::tool_card::ToolFamily;
+    let mixed = super::tool_receipt_label(
+        ToolFamily::Run,
+        ToolStatus::Success,
+        Some("stdout:\nok\nmore\nstderr:\nbad\n"),
+    );
+    assert_eq!(mixed, "done");
 }

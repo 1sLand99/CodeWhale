@@ -3634,7 +3634,8 @@ pub(crate) async fn run_event_loop(
                         app.ui_locale,
                         &app.workspace,
                         &app.cached_skills,
-                    );
+                    )
+                    .with_groups_expanded(app.help_expand_groups);
                     app.view_stack.push(help);
                 }
                 continue;

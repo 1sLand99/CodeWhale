@@ -1004,6 +1004,18 @@ pub enum AppAction {
         api_timeout_secs: u64,
         heartbeat_timeout_secs: u64,
     },
+    /// Apply `/config search.provider` to the live Config and engine.
+    UpdateSearchProvider {
+        provider: crate::config::SearchProvider,
+    },
+    /// Apply `/config prompt_suggestion` to the live Config.
+    UpdatePromptSuggestion {
+        enabled: bool,
+    },
+    /// Apply one `/config notifications` scalar to the live Config.
+    UpdateNotification {
+        update: crate::config::NotificationConfigUpdate,
+    },
     /// Enable or disable the background advisor watcher for this session (#3982).
     SetAdvisorEnabled {
         enabled: bool,

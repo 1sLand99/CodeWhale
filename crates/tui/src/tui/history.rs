@@ -1,5 +1,6 @@
 //! TUI rendering helpers for chat history and tool output.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -185,6 +186,8 @@ pub struct TranscriptRenderOptions {
     pub locale: Locale,
     pub show_thinking: bool,
     pub thinking_default_expanded: bool,
+    /// Collapsed completed-thought preview rows (settings.toml).
+    pub thinking_preview_lines: usize,
     pub thinking_highlight: bool,
     pub verbose: bool,
     pub show_tool_details: bool,
@@ -221,6 +224,7 @@ impl Default for TranscriptRenderOptions {
             show_thinking: true,
             thinking_highlight: true,
             thinking_default_expanded: false,
+            thinking_preview_lines: 2,
             verbose: false,
             show_tool_details: true,
             inline_diff_mode: crate::settings::InlineDiffMode::Full,
@@ -409,6 +413,7 @@ impl HistoryCell {
                     options.low_motion,
                     options.thinking_highlight,
                     options.reasoning_preview_extra_lines,
+                    options.thinking_preview_lines,
                 );
                 reasoning_action = expandable.then_some(if collapsed {
                     ReasoningAction::Expand
@@ -935,12 +940,19 @@ impl ExecCell {
         let stale_status = self
             .stale_elapsed_since_output_ms
             .map(stale_shell_status_label);
+        let receipt = tool_receipt_label(
+            crate::tui::widgets::tool_card::ToolFamily::Run,
+            self.status,
+            self.output.as_deref(),
+        );
+        let status_text = stale_status
+            .as_deref()
+            .map(Cow::Borrowed)
+            .unwrap_or(receipt);
         lines.push(render_tool_header_with_summary(
             "Shell",
             header_summary,
-            stale_status
-                .as_deref()
-                .unwrap_or_else(|| tool_status_label(self.status)),
+            status_text.as_ref(),
             self.status,
             self.started_at,
             low_motion || stale_status.is_some(),
@@ -1661,7 +1673,7 @@ impl GenericToolCell {
                 let mut collapsed = vec![render_tool_header_with_family_and_summary(
                     family,
                     header_summary.as_deref(),
-                    tool_status_label(self.status),
+                    &tool_receipt_label(family, self.status, self.output.as_deref()),
                     self.status,
                     None,
                     low_motion,
@@ -1686,7 +1698,7 @@ impl GenericToolCell {
         lines.push(render_tool_header_with_family_and_summary(
             family,
             header_summary.as_deref(),
-            tool_status_label(self.status),
+            &tool_receipt_label(family, self.status, self.output.as_deref()),
             self.status,
             None,
             low_motion,
@@ -2568,6 +2580,43 @@ fn tool_status_label(status: ToolStatus) -> &'static str {
         ToolStatus::Success => "done",
         ToolStatus::Hydrated => "tool loaded - retry required",
         ToolStatus::Failed => "issue",
+    }
+}
+
+/// A finished read/find card can truthfully name how many rendered lines came
+/// back. Generic command output does not preserve typed stdout/stderr streams,
+/// so Run receipts stay at `done` instead of inventing per-stream counts from
+/// display text.
+fn tool_receipt_label(
+    family: crate::tui::widgets::tool_card::ToolFamily,
+    status: ToolStatus,
+    output: Option<&str>,
+) -> Cow<'static, str> {
+    if status != ToolStatus::Success {
+        return Cow::Borrowed(tool_status_label(status));
+    }
+    use crate::tui::widgets::tool_card::ToolFamily;
+    match family {
+        ToolFamily::Read | ToolFamily::Find => {
+            let lines = output.map(count_output_lines).unwrap_or(0);
+            if lines == 0 {
+                Cow::Borrowed("done")
+            } else if lines == 1 {
+                Cow::Borrowed("1 line")
+            } else {
+                Cow::Owned(format!("{lines} lines"))
+            }
+        }
+        ToolFamily::Run => Cow::Borrowed("done"),
+        _ => Cow::Borrowed("done"),
+    }
+}
+
+fn count_output_lines(output: &str) -> usize {
+    if output.is_empty() {
+        0
+    } else {
+        output.lines().count()
     }
 }
 

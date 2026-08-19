@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -100,10 +101,24 @@ struct HelpEntry {
     haystack: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HelpRenderRow {
-    Section(HelpSection),
-    Entry { slot: usize, entry_idx: usize },
+    Group {
+        key: String,
+        label: String,
+        count: usize,
+        collapsed: bool,
+    },
+    Entry {
+        slot: usize,
+        entry_idx: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelpHit {
+    Group(String),
+    Entry(usize),
 }
 
 pub struct HelpView {
@@ -113,8 +128,13 @@ pub struct HelpView {
     /// Indices into `entries`, in display order, after filtering.
     filtered: Vec<usize>,
     query: String,
+    /// Keyboard focus covers both group headers and entry rows. `selected`
+    /// remains the last focused entry slot so entry-oriented actions and
+    /// tests keep a stable target while a header owns focus.
+    focus: Option<HelpHit>,
     selected: usize,
-    row_hitboxes: RefCell<Vec<(Rect, usize)>>,
+    collapsed: HashSet<String>,
+    row_hitboxes: RefCell<Vec<(Rect, HelpHit)>>,
 }
 
 impl Default for HelpView {
@@ -174,11 +194,24 @@ impl HelpView {
             entries,
             filtered: Vec::new(),
             query: String::new(),
+            focus: None,
             selected: 0,
+            collapsed: default_collapsed(ordering),
             row_hitboxes: RefCell::new(Vec::new()),
         };
         view.refilter();
         view
+    }
+
+    /// Start with every Help/shortcuts group expanded. Default is the
+    /// Grok-like folded long tail; `/config help_expand_groups true` opts in.
+    #[must_use]
+    pub fn with_groups_expanded(mut self, expand: bool) -> Self {
+        if expand {
+            self.collapsed.clear();
+            self.clamp_focus_to_visible();
+        }
+        self
     }
 
     fn tr(&self, id: MessageId) -> Cow<'static, str> {
@@ -213,14 +246,66 @@ impl HelpView {
             )
         });
         self.filtered = filtered;
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
+        self.clamp_focus_to_visible();
+    }
+
+    fn clamp_focus_to_visible(&mut self) {
+        let visible = self.visible_entry_slots();
+        if !visible.is_empty() && !visible.contains(&self.selected) {
+            self.selected = visible[0];
         }
+        let focusable = self.focusable_rows();
+        if !self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| focusable.contains(focus))
+        {
+            self.focus = focusable.first().cloned();
+        }
+    }
+
+    fn visible_entry_slots(&self) -> Vec<usize> {
+        self.filtered
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(slot, entry_idx)| {
+                let key = group_key(&self.entries[entry_idx]);
+                if self.group_is_collapsed(&key) {
+                    None
+                } else {
+                    Some(slot)
+                }
+            })
+            .collect()
+    }
+
+    fn group_is_collapsed(&self, key: &str) -> bool {
+        self.query.trim().is_empty() && self.collapsed.contains(key)
+    }
+
+    fn toggle_group(&mut self, key: &str) {
+        if !self.collapsed.remove(key) {
+            self.collapsed.insert(key.to_string());
+        }
+        self.focus = Some(HelpHit::Group(key.to_string()));
+        self.clamp_focus_to_visible();
     }
 
     fn move_selection(&mut self, delta: isize) {
         // #4755: help list wraps at both ends (same as other modal lists).
-        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
+        // Group headers participate so a keyboard user can open the same
+        // default-collapsed rows as a mouse user.
+        let focusable = self.focusable_rows();
+        if focusable.is_empty() {
+            return;
+        }
+        let pos = focusable
+            .iter()
+            .position(|candidate| self.focus.as_ref() == Some(candidate))
+            .unwrap_or(0);
+        let next = crate::tui::list_nav::wrap_index(pos, focusable.len(), delta);
+        self.set_focus(focusable[next].clone());
     }
 
     fn move_selection_wrapping(&mut self, delta: isize) {
@@ -229,13 +314,28 @@ impl HelpView {
 
     fn render_rows(&self) -> Vec<HelpRenderRow> {
         let mut rows = Vec::new();
-        let mut active_section: Option<HelpSection> = None;
+        let mut active_group: Option<String> = None;
 
         for (slot, entry_idx) in self.filtered.iter().copied().enumerate() {
             let entry = &self.entries[entry_idx];
-            if active_section != Some(entry.section) {
-                rows.push(HelpRenderRow::Section(entry.section));
-                active_section = Some(entry.section);
+            let key = group_key(entry);
+            if active_group.as_deref() != Some(key.as_str()) {
+                let count = self
+                    .filtered
+                    .iter()
+                    .filter(|idx| group_key(&self.entries[**idx]) == key)
+                    .count();
+                let collapsed = self.group_is_collapsed(&key);
+                rows.push(HelpRenderRow::Group {
+                    key: key.clone(),
+                    label: group_label(entry, self.locale),
+                    count,
+                    collapsed,
+                });
+                active_group = Some(key.clone());
+            }
+            if self.group_is_collapsed(&key) {
+                continue;
             }
             rows.push(HelpRenderRow::Entry { slot, entry_idx });
         }
@@ -243,18 +343,57 @@ impl HelpView {
         rows
     }
 
-    fn selected_render_row(rows: &[HelpRenderRow], selected: usize) -> usize {
+    fn focusable_rows(&self) -> Vec<HelpHit> {
+        self.render_rows()
+            .into_iter()
+            .map(|row| match row {
+                HelpRenderRow::Group { key, .. } => HelpHit::Group(key),
+                HelpRenderRow::Entry { slot, .. } => HelpHit::Entry(slot),
+            })
+            .collect()
+    }
+
+    fn set_focus(&mut self, focus: HelpHit) {
+        if let HelpHit::Entry(slot) = focus {
+            self.selected = slot;
+            self.focus = Some(HelpHit::Entry(slot));
+        } else {
+            self.focus = Some(focus);
+        }
+    }
+
+    fn focused_group_key(&self) -> Option<String> {
+        match self.focus.as_ref()? {
+            HelpHit::Group(key) => Some(key.clone()),
+            HelpHit::Entry(slot) => self
+                .filtered
+                .get(*slot)
+                .map(|entry_idx| group_key(&self.entries[*entry_idx])),
+        }
+    }
+
+    fn selected_render_row(rows: &[HelpRenderRow], focus: Option<&HelpHit>) -> usize {
         rows.iter()
-            .position(|row| matches!(row, HelpRenderRow::Entry { slot, .. } if *slot == selected))
+            .position(|row| match (row, focus) {
+                (HelpRenderRow::Group { key, .. }, Some(HelpHit::Group(focused))) => key == focused,
+                (HelpRenderRow::Entry { slot, .. }, Some(HelpHit::Entry(focused))) => {
+                    slot == focused
+                }
+                _ => false,
+            })
             .unwrap_or(0)
     }
 
-    fn visible_row_start(rows: &[HelpRenderRow], selected: usize, visible_budget: usize) -> usize {
+    fn visible_row_start(
+        rows: &[HelpRenderRow],
+        focus: Option<&HelpHit>,
+        visible_budget: usize,
+    ) -> usize {
         if rows.len() <= visible_budget {
             return 0;
         }
 
-        let selected_row = Self::selected_render_row(rows, selected);
+        let selected_row = Self::selected_render_row(rows, focus);
         let half = visible_budget / 2;
         if selected_row <= half {
             0
@@ -371,11 +510,7 @@ fn build_entries(
         // macOS renders Alt chords with the Option glyph (`⌥V`), never
         // `Alt`/`Cmd` (TUI-DOG-002 acceptance).
         let label = crate::tui::shell_key_routing::display_chord(binding.chord).into_owned();
-        let description = format!(
-            "[{}] {}",
-            binding.section.label(locale),
-            tr(locale, binding.description_id)
-        );
+        let description = tr(locale, binding.description_id).into_owned();
         let haystack = format!(
             "{} {}",
             label.to_ascii_lowercase(),
@@ -391,6 +526,68 @@ fn build_entries(
     }
 
     entries
+}
+
+fn group_key(entry: &HelpEntry) -> String {
+    match entry.section {
+        HelpSection::Command => "cmd".into(),
+        HelpSection::UserCommand => "usercmd".into(),
+        HelpSection::Skill => "skill".into(),
+        HelpSection::Keybinding => format!("kb:{}", entry.sub_rank),
+    }
+}
+
+fn group_label(entry: &HelpEntry, locale: Locale) -> String {
+    match entry.section {
+        HelpSection::Keybinding => keybinding_section_for_rank(entry.sub_rank)
+            .map(|section| section.label(locale).into_owned())
+            .unwrap_or_else(|| entry.section.label(locale).into_owned()),
+        other => other.label(locale).into_owned(),
+    }
+}
+
+fn keybinding_section_for_rank(rank: u8) -> Option<crate::tui::keybindings::KeybindingSection> {
+    use crate::tui::keybindings::KeybindingSection;
+    [
+        KeybindingSection::Navigation,
+        KeybindingSection::Editing,
+        KeybindingSection::Submission,
+        KeybindingSection::Modes,
+        KeybindingSection::Sessions,
+        KeybindingSection::Clipboard,
+        KeybindingSection::Help,
+    ]
+    .into_iter()
+    .find(|section| section.rank() == rank)
+}
+
+fn default_collapsed(ordering: HelpOrdering) -> HashSet<String> {
+    use crate::tui::keybindings::KeybindingSection;
+    let kb_keys = [
+        KeybindingSection::Navigation,
+        KeybindingSection::Editing,
+        KeybindingSection::Submission,
+        KeybindingSection::Modes,
+        KeybindingSection::Sessions,
+        KeybindingSection::Clipboard,
+        KeybindingSection::Help,
+    ]
+    .into_iter()
+    .map(|section| format!("kb:{}", section.rank()));
+
+    match ordering {
+        HelpOrdering::KeybindingsFirst => {
+            // Show Navigation only — the rest is a long tail the user
+            // expands or searches. Slash/skill catalogs stay folded.
+            let mut set: HashSet<String> = ["cmd", "usercmd", "skill"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            set.extend(kb_keys.filter(|key| key != "kb:0"));
+            set
+        }
+        HelpOrdering::CommandsFirst => kb_keys.collect(),
+    }
 }
 
 fn truncate_to_width(text: &str, max_width: usize) -> String {
@@ -429,11 +626,15 @@ impl ModalView for HelpView {
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(slot) = self.row_hitboxes.borrow().iter().find_map(|(rect, slot)| {
+                let hit = self.row_hitboxes.borrow().iter().find_map(|(rect, hit)| {
                     rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                        .then_some(*slot)
-                }) {
-                    self.selected = slot;
+                        .then_some(hit.clone())
+                });
+                if let Some(hit) = hit {
+                    match hit {
+                        HelpHit::Group(key) => self.toggle_group(&key),
+                        HelpHit::Entry(slot) => self.set_focus(HelpHit::Entry(slot)),
+                    }
                 }
             }
             _ => {}
@@ -473,12 +674,42 @@ impl ModalView for HelpView {
                 ViewAction::None
             }
             KeyCode::Home => {
-                self.selected = 0;
+                if let Some(first) = self.focusable_rows().first().cloned() {
+                    self.set_focus(first);
+                }
                 ViewAction::None
             }
             KeyCode::End => {
-                if !self.filtered.is_empty() {
-                    self.selected = self.filtered.len() - 1;
+                if let Some(last) = self.focusable_rows().last().cloned() {
+                    self.set_focus(last);
+                }
+                ViewAction::None
+            }
+            KeyCode::Enter => {
+                if let Some(HelpHit::Group(key)) = self.focus.clone() {
+                    self.toggle_group(&key);
+                }
+                ViewAction::None
+            }
+            KeyCode::Right => {
+                if let Some(HelpHit::Group(key)) = self.focus.clone()
+                    && self.group_is_collapsed(&key)
+                {
+                    self.toggle_group(&key);
+                }
+                ViewAction::None
+            }
+            KeyCode::Left => {
+                if let Some(key) = self.focused_group_key() {
+                    match self.focus.as_ref() {
+                        Some(HelpHit::Entry(_)) => self.set_focus(HelpHit::Group(key)),
+                        Some(HelpHit::Group(_)) if !self.group_is_collapsed(&key) => {
+                            self.collapsed.insert(key.clone());
+                            self.set_focus(HelpHit::Group(key));
+                            self.clamp_focus_to_visible();
+                        }
+                        _ => {}
+                    }
                 }
                 ViewAction::None
             }
@@ -530,6 +761,9 @@ impl ModalView for HelpView {
                 ActionHint::new("", self.tr(MessageId::HelpFooterTypeFilter)),
                 ActionHint::new("", self.tr(MessageId::HelpFooterMove)),
                 ActionHint::new("", self.tr(MessageId::HelpFooterJump)),
+                // Directional tree controls are self-describing and avoid
+                // injecting an English-only phrase into localized Help.
+                ActionHint::new("←/→", ""),
                 ActionHint::new("", self.tr(MessageId::HelpFooterClose)),
             ],
         );
@@ -563,7 +797,7 @@ impl ModalView for HelpView {
 
         let rows = self.render_rows();
         let visible_rows = content.height.saturating_sub(lines.len() as u16) as usize;
-        let row_start = Self::visible_row_start(&rows, self.selected, visible_rows.max(1));
+        let row_start = Self::visible_row_start(&rows, self.focus.as_ref(), visible_rows.max(1));
         // Reserve the rail before calculating column widths. Otherwise the
         // description column writes beneath the rail on compact terminals.
         let content = render_panel_scroll_rail(
@@ -600,26 +834,40 @@ impl ModalView for HelpView {
 
             for row in rows.iter().skip(row_start).take(visible_budget) {
                 match *row {
-                    HelpRenderRow::Section(section) => {
-                        let count = self
-                            .filtered
-                            .iter()
-                            .filter(|idx| self.entries[**idx].section == section)
-                            .count();
-                        lines.push(Line::from(Span::styled(
-                            format!("  {} ({})", section.label(self.locale), count),
+                    HelpRenderRow::Group {
+                        ref key,
+                        ref label,
+                        count,
+                        collapsed,
+                    } => {
+                        let row_y = content.y.saturating_add(lines.len() as u16);
+                        self.row_hitboxes.borrow_mut().push((
+                            Rect::new(content.x, row_y, content.width, 1),
+                            HelpHit::Group(key.clone()),
+                        ));
+                        let marker = if collapsed { "▸" } else { "▾" };
+                        let is_focused = self.focus.as_ref() == Some(&HelpHit::Group(key.clone()));
+                        let cursor = crate::tui::glyphs::selection_marker(is_focused);
+                        let style = if is_focused {
+                            menu_style::selected_row_style()
+                        } else {
                             Style::default()
                                 .fg(palette::WHALE_ACTION)
-                                .add_modifier(Modifier::BOLD),
+                                .add_modifier(Modifier::BOLD)
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("{cursor} {marker} {label} ({count})"),
+                            style,
                         )));
                     }
                     HelpRenderRow::Entry { slot, entry_idx } => {
                         let row_y = content.y.saturating_add(lines.len() as u16);
-                        self.row_hitboxes
-                            .borrow_mut()
-                            .push((Rect::new(content.x, row_y, content.width, 1), slot));
+                        self.row_hitboxes.borrow_mut().push((
+                            Rect::new(content.x, row_y, content.width, 1),
+                            HelpHit::Entry(slot),
+                        ));
                         let entry = &self.entries[entry_idx];
-                        let is_selected = slot == self.selected;
+                        let is_selected = self.focus.as_ref() == Some(&HelpHit::Entry(slot));
                         let style = if is_selected {
                             menu_style::selected_row_style()
                         } else {
@@ -905,17 +1153,24 @@ mod tests {
     #[test]
     fn arrow_keys_move_selection_and_wrap_edges() {
         let mut view = HelpView::new();
-        // Down once → row 1; Up twice wraps from the first row to the last.
+        let focusable = view.focusable_rows();
+        assert!(
+            focusable.len() >= 3,
+            "need at least three visible help rows"
+        );
+        assert_eq!(view.focus.as_ref(), focusable.first());
+        // Down reaches the first child; Up returns to its group; another Up
+        // wraps to the final visible row.
         view.handle_key(key(KeyCode::Down));
-        assert_eq!(view.selected, 1);
+        assert_eq!(view.focus.as_ref(), Some(&focusable[1]));
         view.handle_key(key(KeyCode::Up));
         view.handle_key(key(KeyCode::Up));
-        assert_eq!(view.selected, view.filtered.len() - 1);
-        // Down from last wraps to first; End still jumps to the last row.
+        assert_eq!(view.focus.as_ref(), focusable.last());
+        // Down from last wraps to first; End still jumps to the last visible row.
         view.handle_key(key(KeyCode::Down));
-        assert_eq!(view.selected, 0);
+        assert_eq!(view.focus.as_ref(), focusable.first());
         view.handle_key(key(KeyCode::End));
-        assert_eq!(view.selected, view.filtered.len() - 1);
+        assert_eq!(view.focus.as_ref(), focusable.last());
     }
 
     #[test]
@@ -924,7 +1179,15 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
-        let (rect, slot) = view.row_hitboxes.borrow()[1];
+        let (rect, slot) = view
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                HelpHit::Entry(slot) => Some((*rect, *slot)),
+                HelpHit::Group(_) => None,
+            })
+            .expect("at least one entry hitbox");
 
         view.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -934,6 +1197,7 @@ mod tests {
         });
 
         assert_eq!(view.selected, slot);
+        assert_eq!(view.focus, Some(HelpHit::Entry(slot)));
     }
 
     #[test]
@@ -945,9 +1209,10 @@ mod tests {
             .position(|idx| view.entries[*idx].label == "/home")
             .expect("/home command should be present");
         view.selected = selected;
+        view.focus = Some(HelpHit::Entry(selected));
 
         let rows = view.render_rows();
-        let row_start = HelpView::visible_row_start(&rows, view.selected, 12);
+        let row_start = HelpView::visible_row_start(&rows, view.focus.as_ref(), 12);
         let visible = &rows[row_start..(row_start + 12).min(rows.len())];
 
         assert!(
@@ -967,8 +1232,13 @@ mod tests {
             .position(|idx| view.entries[*idx].label == "/help")
             .expect("/help command should be present");
         view.selected = help_slot;
+        view.focus = Some(HelpHit::Entry(help_slot));
         view.handle_key(key(KeyCode::Down));
-        let selected_idx = view.filtered[view.selected];
+        let selected_slot = match view.focus {
+            Some(HelpHit::Entry(slot)) => slot,
+            ref other => panic!("expected entry focus after /help, got {other:?}"),
+        };
+        let selected_idx = view.filtered[selected_slot];
         let selected_label = view.entries[selected_idx].label.clone();
 
         let area = Rect::new(0, 0, 96, 32);
@@ -1102,12 +1372,12 @@ mod tests {
         assert!(!kb_entries.is_empty(), "no keybinding entries found");
 
         for entry in &kb_entries {
+            let group = group_label(entry, Locale::ZhHans);
             assert!(
-                entry
-                    .description
+                group
                     .chars()
                     .any(|c| { ('\u{4e00}'..='\u{9fff}').contains(&c) }),
-                "keybinding description not localized: {}",
+                "keybinding group not localized: {group} ({})",
                 entry.description
             );
         }
@@ -1124,7 +1394,7 @@ mod tests {
     fn shortcut_help_leads_with_keys_at_responsive_sizes() {
         use crate::tui::views::ViewStack;
 
-        let keybindings_heading = tr(Locale::En, MessageId::HelpKeybindings);
+        let keybindings_heading = tr(Locale::En, MessageId::HelpSectionNavigation);
         let commands_heading = tr(Locale::En, MessageId::HelpSlashCommands);
 
         for (w, h) in SHORTCUT_HELP_SIZES {
@@ -1230,6 +1500,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn shortcuts_open_folds_the_long_tail() {
+        let view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst);
+        let rows = view.render_rows();
+        let groups: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                HelpRenderRow::Group {
+                    label, collapsed, ..
+                } => Some((*collapsed, label.as_str())),
+                _ => None,
+            })
+            .map(|(collapsed, label)| {
+                if collapsed {
+                    label
+                } else {
+                    // keep expanded groups in a second pass
+                    label
+                }
+            })
+            .collect();
+        assert!(
+            groups.iter().any(|label| *label == "Navigation"),
+            "shortcuts should surface Navigation: {groups:?}"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                HelpRenderRow::Group {
+                    collapsed: false,
+                    ..
+                }
+            )),
+            "at least one group stays open"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                HelpRenderRow::Group {
+                    collapsed: true,
+                    ..
+                }
+            )),
+            "the long tail should start collapsed"
+        );
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                HelpRenderRow::Entry { entry_idx, .. }
+                    if view.entries[*entry_idx].section == HelpSection::Command
+            )),
+            "slash commands stay folded until the user expands or searches"
+        );
+    }
+
+    #[test]
+    fn enter_toggles_the_selected_group() {
+        let mut view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst);
+        let before = view.visible_entry_slots().len();
+        view.handle_key(key(KeyCode::Enter));
+        let after = view.visible_entry_slots().len();
+        assert_ne!(
+            before, after,
+            "Enter should fold or unfold the selected group's members"
+        );
+        view.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            view.visible_entry_slots().len(),
+            before,
+            "a second Enter restores the previous fold"
+        );
+    }
+
+    #[test]
+    fn right_expands_and_left_collapses_a_focused_header() {
+        let mut view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst);
+        let group_key = "cmd".to_string();
+        assert!(view.group_is_collapsed(&group_key));
+        view.focus = Some(HelpHit::Group(group_key.clone()));
+
+        view.handle_key(key(KeyCode::Right));
+        assert!(!view.group_is_collapsed(&group_key));
+        assert_eq!(view.focus, Some(HelpHit::Group(group_key.clone())));
+
+        view.handle_key(key(KeyCode::Left));
+        assert!(view.group_is_collapsed(&group_key));
+        assert_eq!(view.focus, Some(HelpHit::Group(group_key)));
+    }
+
+    #[test]
+    fn mouse_click_on_group_header_matches_enter_toggle() {
+        let mut view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst);
+        let area = Rect::new(0, 0, 100, 120);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let (rect, group) = view
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                HelpHit::Group(key) if view.group_is_collapsed(key) => Some((*rect, key.clone())),
+                _ => None,
+            })
+            .expect("at least one collapsed group header is visible");
+
+        view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(!view.group_is_collapsed(&group));
+        assert_eq!(view.focus, Some(HelpHit::Group(group)));
+    }
+
+    #[test]
+    fn search_unfolds_collapsed_groups() {
+        let mut view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst);
+        assert!(
+            view.group_is_collapsed("cmd"),
+            "slash commands start collapsed on the shortcuts surface"
+        );
+        type_filter(&mut view, "/mode");
+        assert!(
+            !view.group_is_collapsed("cmd"),
+            "a search query must reveal matching groups"
+        );
+        assert!(
+            view.filtered
+                .iter()
+                .any(|idx| view.entries[*idx].label == "/mode")
+        );
+    }
+
+    #[test]
+    fn help_expand_groups_starts_unfolded() {
+        let view = HelpView::new_with_ordering(Locale::En, HelpOrdering::KeybindingsFirst)
+            .with_groups_expanded(true);
+        assert!(
+            !view.group_is_collapsed("cmd"),
+            "help_expand_groups must start with slash commands visible"
+        );
+        assert!(
+            view.render_rows().iter().any(|row| matches!(
+                row,
+                HelpRenderRow::Entry { entry_idx, .. }
+                    if view.entries[*entry_idx].section == HelpSection::Command
+            )),
+            "expanded shortcuts include slash command rows"
+        );
     }
 
     fn buffer_text(buf: &Buffer, area: Rect) -> String {

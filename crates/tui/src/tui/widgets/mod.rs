@@ -50,6 +50,10 @@ const JUMP_TO_LATEST_BUTTON_WIDTH: u16 = 3;
 const JUMP_TO_LATEST_BUTTON_HEIGHT: u16 = 3;
 pub struct ChatWidget {
     content_area: Rect,
+    /// Scrollable/selectable transcript geometry. When the last prompt is
+    /// pinned, this starts one row below `content_area`; the pinned header is
+    /// intentionally outside transcript hit-testing.
+    transcript_area: Rect,
     lines: Vec<Line<'static>>,
     line_links: Vec<Vec<crate::tui::osc8::LineLink>>,
     scrollbar: Option<TranscriptScrollbar>,
@@ -207,6 +211,7 @@ impl ChatWidget {
             app.viewport.jump_to_latest_button_area = None;
             return Self {
                 content_area,
+                transcript_area: content_area,
                 lines,
                 line_links: Vec::new(),
                 scrollbar: None,
@@ -440,8 +445,35 @@ impl ChatWidget {
             );
         }
 
-        let (total_lines, top, was_explicit_tail) =
+        let (mut total_lines, mut top, mut was_explicit_tail) =
             resolve_transcript_viewport_after_layout(&mut app.viewport, visible_lines);
+
+        // A sticky prompt is layout chrome, not a synthetic transcript row.
+        // First resolve against the full viewport, then reserve one real row
+        // only when the prompt has actually scrolled above it. Resolving once
+        // more with the smaller body keeps the newest tail line visible.
+        let mut transcript_area = content_area;
+        let pinned_prompt = (app.pin_last_prompt && content_area.height > 1)
+            .then(|| {
+                scrolled_user_prompt_pin(
+                    &app.history,
+                    app.viewport.transcript_cache.line_meta(),
+                    &app.collapsed_cell_map,
+                    top,
+                    content_area.width,
+                )
+            })
+            .flatten();
+        let visible_lines = if pinned_prompt.is_some() {
+            transcript_area.y = transcript_area.y.saturating_add(1);
+            transcript_area.height = transcript_area.height.saturating_sub(1);
+            let visible = usize::from(transcript_area.height);
+            (total_lines, top, was_explicit_tail) =
+                resolve_transcript_viewport_after_layout(&mut app.viewport, visible);
+            visible
+        } else {
+            visible_lines
+        };
         let owner = app.transcript_action_owner();
         let index_map = has_collapsed.then_some(app.collapsed_cell_map.as_slice());
         app.viewport.transcript_cache.retarget(owner, index_map);
@@ -472,7 +504,7 @@ impl ChatWidget {
             app.user_scrolled_during_stream = false;
         }
 
-        app.viewport.last_transcript_area = Some(content_area);
+        app.viewport.last_transcript_area = Some(transcript_area);
         app.viewport.last_transcript_padding_top = 0;
         let detail_target_cell = (!app.viewport.transcript_selection.is_active())
             .then(|| app.detail_cell_index_for_viewport(top, visible_lines, line_meta))
@@ -484,7 +516,7 @@ impl ChatWidget {
         } else {
             app.viewport.transcript_cache.lines()[top..end].to_vec()
         };
-        let line_links = if total_lines == 0 {
+        let mut line_links = if total_lines == 0 {
             vec![Vec::new()]
         } else {
             app.viewport.transcript_cache.line_links()[top..end].to_vec()
@@ -541,6 +573,11 @@ impl ChatWidget {
 
         apply_selection(&mut lines, top, app);
 
+        if let Some(pin) = pinned_prompt {
+            lines.insert(0, pin);
+            line_links.insert(0, Vec::new());
+        }
+
         // The HTML contract is a top-first ledger. Bottom-padding the short
         // transcript made every newly wrapped stream line shift all prior
         // rows upward, producing repeated thousand-cell repaints and the
@@ -549,7 +586,7 @@ impl ChatWidget {
         // place until scrolling is genuinely necessary.
         app.viewport.last_transcript_padding_top = 0;
 
-        let scrollbar = (total_lines > visible_lines && content_area.width > 1).then_some(
+        let scrollbar = (total_lines > visible_lines && transcript_area.width > 1).then_some(
             TranscriptScrollbar {
                 top,
                 visible: visible_lines,
@@ -558,7 +595,7 @@ impl ChatWidget {
         );
         let jump_to_latest_button =
             if app.use_mouse_capture && !app.viewport.transcript_scroll.is_at_tail() {
-                jump_to_latest_button_rect(content_area, scrollbar.is_some())
+                jump_to_latest_button_rect(transcript_area, scrollbar.is_some())
             } else {
                 None
             };
@@ -566,6 +603,7 @@ impl ChatWidget {
 
         Self {
             content_area,
+            transcript_area,
             lines,
             line_links,
             scrollbar,
@@ -714,6 +752,84 @@ pub(crate) fn active_entry_revision(active_rev: u64, salt: u64) -> u64 {
     revision_in_domain(mixed, true)
 }
 
+/// Build the last-user-prompt header when that message is above the resolved
+/// transcript viewport. The caller owns the one-row layout reservation so
+/// the header never masquerades as `top` or displaces the newest tail line.
+fn scrolled_user_prompt_pin(
+    history: &[HistoryCell],
+    line_meta: &[TranscriptLineMeta],
+    collapsed_cell_map: &[usize],
+    top: usize,
+    width: u16,
+) -> Option<Line<'static>> {
+    if width == 0 {
+        return None;
+    }
+    let Some((orig_idx, content)) =
+        history
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, cell)| match cell {
+                HistoryCell::User { content } if !content.trim().is_empty() => {
+                    Some((idx, content.as_str()))
+                }
+                _ => None,
+            })
+    else {
+        return None;
+    };
+    let first_line = line_meta.iter().position(|meta| match meta {
+        TranscriptLineMeta::CellLine {
+            cell_index,
+            line_in_cell,
+            ..
+        } => {
+            let original = collapsed_cell_map
+                .get(*cell_index)
+                .copied()
+                .unwrap_or(*cell_index);
+            original == orig_idx && *line_in_cell == 0
+        }
+        _ => false,
+    });
+    let Some(first_line) = first_line else {
+        return None;
+    };
+    if first_line >= top {
+        return None;
+    }
+
+    let first = content.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return None;
+    }
+    let budget = usize::from(width.saturating_sub(4)).max(1);
+    let mut shown = String::new();
+    let mut used = 0usize;
+    for ch in first.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        shown.push(ch);
+        used += w;
+    }
+    if used < UnicodeWidthStr::width(first) && !shown.is_empty() {
+        shown.push('…');
+    }
+
+    Some(Line::from(vec![
+        Span::styled(
+            format!("{} ", crate::tui::glyphs::USER),
+            Style::default()
+                .fg(palette::WHALE_HUMAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(shown, Style::default().fg(palette::TEXT_PRIMARY)),
+    ]))
+}
+
 impl Renderable for ChatWidget {
     fn render(&self, _area: Rect, buf: &mut Buffer) {
         // Use the passed render area, not self.content_area — those can
@@ -773,7 +889,7 @@ impl Renderable for ChatWidget {
                 .track_style(Style::default().fg(self.scroll_track))
                 .thumb_symbol("┃")
                 .thumb_style(Style::default().fg(self.scroll_thumb))
-                .render(area, buf, &mut state);
+                .render(self.transcript_area, buf, &mut state);
         }
 
         if let Some(button_area) = self.jump_to_latest_button {
@@ -4184,6 +4300,7 @@ mod tests {
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -6679,6 +6796,135 @@ mod tests {
         assert_ne!(first[(0, 0)].bg, first[(0, 19)].bg);
         assert_eq!(first[(0, 0)].bg, second[(0, 0)].bg);
         assert_eq!(first[(11, 14)].symbol(), second[(11, 14)].symbol());
+    }
+
+    #[test]
+    fn pin_helper_returns_header_when_user_line_is_above_viewport() {
+        let history = vec![
+            HistoryCell::User {
+                content: "remember this prompt".into(),
+            },
+            HistoryCell::Assistant {
+                content: "ok".into(),
+                streaming: false,
+            },
+        ];
+        let meta = vec![
+            TranscriptLineMeta::CellLine {
+                cell_index: 0,
+                line_in_cell: 0,
+                copy_prefix_width: 0,
+                copy_separator_after: crate::tui::ui_text::CopyLineSeparator::None,
+            },
+            TranscriptLineMeta::CellLine {
+                cell_index: 1,
+                line_in_cell: 0,
+                copy_prefix_width: 0,
+                copy_separator_after: crate::tui::ui_text::CopyLineSeparator::None,
+            },
+        ];
+        let map = vec![0, 1];
+        let pin = super::scrolled_user_prompt_pin(&history, &meta, &map, 1, 40)
+            .expect("scrolled user prompt should yield a pinned header");
+        let text: String = pin.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(
+            text.contains("remember this prompt"),
+            "expected pinned user text, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn pin_helper_is_idle_when_user_line_is_visible() {
+        let history = vec![HistoryCell::User {
+            content: "still on screen".into(),
+        }];
+        let meta = vec![TranscriptLineMeta::CellLine {
+            cell_index: 0,
+            line_in_cell: 0,
+            copy_prefix_width: 0,
+            copy_separator_after: crate::tui::ui_text::CopyLineSeparator::None,
+        }];
+        let map = vec![0];
+        assert!(super::scrolled_user_prompt_pin(&history, &meta, &map, 0, 40).is_none());
+    }
+
+    #[test]
+    fn pinned_prompt_reserves_header_without_hiding_tail_or_shifting_mouse_mapping() {
+        let mut app = create_test_app();
+        app.pin_last_prompt = true;
+        app.add_message(HistoryCell::User {
+            content: "keep this goal visible".into(),
+        });
+        for index in 0..8 {
+            app.add_message(HistoryCell::Assistant {
+                content: format!("answer {index}"),
+                streaming: false,
+            });
+        }
+
+        let area = Rect::new(2, 5, 48, 5);
+        let widget = ChatWidget::new_with_ocean_elapsed(&mut app, area, 0);
+        let transcript_area = app
+            .viewport
+            .last_transcript_area
+            .expect("transcript geometry recorded");
+        assert_eq!(transcript_area, Rect::new(2, 6, 48, 4));
+        assert_eq!(widget.transcript_area, transcript_area);
+        assert_eq!(app.viewport.last_transcript_visible, 4);
+        assert_eq!(
+            app.viewport.last_transcript_top + app.viewport.last_transcript_visible,
+            app.viewport.last_transcript_total,
+            "reserving the header must still resolve the real transcript to its newest tail"
+        );
+        let last_rendered: String = widget
+            .lines
+            .last()
+            .expect("tail line rendered")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let last_cached: String = app
+            .viewport
+            .transcript_cache
+            .lines()
+            .last()
+            .expect("tail line cached")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(last_rendered, last_cached);
+
+        let pinned_row = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(
+            crate::tui::mouse_ui::selection_point_from_mouse(&app, pinned_row).is_none(),
+            "the sticky header must not impersonate transcript line `top`"
+        );
+
+        let meta = app.viewport.transcript_cache.line_meta();
+        let (line_offset, expected_cell) = meta[app.viewport.last_transcript_top..]
+            .iter()
+            .take(app.viewport.last_transcript_visible)
+            .enumerate()
+            .find_map(|(offset, meta)| meta.cell_line().map(|(cell, _)| (offset, cell)))
+            .expect("visible transcript contains a cell row");
+        let body_row = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: transcript_area.x,
+            row: transcript_area.y + u16::try_from(line_offset).unwrap(),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            crate::tui::mouse_ui::transcript_cell_index_from_mouse(&app, body_row),
+            Some(expected_cell),
+            "click, drag, selection, and right-click must share the actual body geometry"
+        );
     }
 
     #[test]
