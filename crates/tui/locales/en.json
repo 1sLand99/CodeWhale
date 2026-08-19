@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "add",
   "ExtensionsActionEnable": "enable",
+  "ExtensionsActionReload": "reload",
   "ExtensionsActionFocus": "focus",
   "ExtensionsActionFold": "fold",
   "ExtensionsActionTabs": "tabs",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "publisher: {publisher} · tier: {tier} · installable: {installable}",
   "ExtensionsMarketplaceUnavailable": "Plugin marketplace storage is unavailable",
   "ExtensionsMcpDetail": "tools: {tools} · resources: {resources} · prompts: {prompts}",
+  "ExtensionsMcpNotInspected": "Not inspected in this snapshot · Reload required to connect configured servers",
   "ExtensionsMcpRefresh": "{count} MCP servers configured; open /mcp to refresh this snapshot",
   "ExtensionsMcpSummary": "{transport} · tools: {tools} · resources: {resources}",
   "ExtensionsNoItems": "No items on this tab",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "inactive",
   "ExtensionsStateInapplicable": "not applicable",
   "ExtensionsStateInvalid": "invalid",
+  "ExtensionsStateNotInspected": "not inspected",
   "ExtensionsStateRejected": "rejected",
   "ExtensionsStateReviewedCandidate": "reviewed candidate",
   "ExtensionsStateUnderEvaluation": "under evaluation",

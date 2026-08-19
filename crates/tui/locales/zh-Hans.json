@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "添加",
   "ExtensionsActionEnable": "启用",
+  "ExtensionsActionReload": "重新加载",
   "ExtensionsActionFocus": "焦点",
   "ExtensionsActionFold": "折叠",
   "ExtensionsActionTabs": "标签页",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "发布者：{publisher} · 级别：{tier} · 可安装：{installable}",
   "ExtensionsMarketplaceUnavailable": "插件市场存储不可用",
   "ExtensionsMcpDetail": "工具：{tools} · 资源：{resources} · 提示词：{prompts}",
+  "ExtensionsMcpNotInspected": "此快照中尚未检查 · 按 Enter 重新加载并连接已配置的服务器",
   "ExtensionsMcpRefresh": "已配置 {count} 个 MCP 服务器；打开 /mcp 刷新此快照",
   "ExtensionsMcpSummary": "{transport} · 工具：{tools} · 资源：{resources}",
   "ExtensionsNoItems": "此标签页没有项目",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "未激活",
   "ExtensionsStateInapplicable": "不适用",
   "ExtensionsStateInvalid": "无效",
+  "ExtensionsStateNotInspected": "尚未检查",
   "ExtensionsStateRejected": "已拒绝",
   "ExtensionsStateReviewedCandidate": "已审核候选",
   "ExtensionsStateUnderEvaluation": "评估中",

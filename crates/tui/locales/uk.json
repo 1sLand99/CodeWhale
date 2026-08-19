@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "додати",
   "ExtensionsActionEnable": "увімкнути",
+  "ExtensionsActionReload": "перезавантажити",
   "ExtensionsActionFocus": "фокус",
   "ExtensionsActionFold": "згорнути",
   "ExtensionsActionTabs": "вкладки",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "видавець: {publisher} · рівень: {tier} · можна встановити: {installable}",
   "ExtensionsMarketplaceUnavailable": "Сховище магазину плагінів недоступне",
   "ExtensionsMcpDetail": "інструменти: {tools} · ресурси: {resources} · промпти: {prompts}",
+  "ExtensionsMcpNotInspected": "Не перевірено в цьому знімку · Enter перезавантажить і підключить налаштовані сервери",
   "ExtensionsMcpRefresh": "Налаштовано серверів MCP: {count}; відкрийте /mcp, щоб оновити знімок",
   "ExtensionsMcpSummary": "{transport} · інструменти: {tools} · ресурси: {resources}",
   "ExtensionsNoItems": "На цій вкладці немає елементів",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "неактивний",
   "ExtensionsStateInapplicable": "не застосовується",
   "ExtensionsStateInvalid": "недійсний",
+  "ExtensionsStateNotInspected": "не перевірено",
   "ExtensionsStateRejected": "відхилено",
   "ExtensionsStateReviewedCandidate": "перевірений кандидат",
   "ExtensionsStateUnderEvaluation": "оцінюється",

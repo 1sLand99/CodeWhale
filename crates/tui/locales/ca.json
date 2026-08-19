@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "afegeix",
   "ExtensionsActionEnable": "activa",
+  "ExtensionsActionReload": "torna a carregar",
   "ExtensionsActionFocus": "focus",
   "ExtensionsActionFold": "plega",
   "ExtensionsActionTabs": "pestanyes",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "editor: {publisher} · nivell: {tier} · instal·lable: {installable}",
   "ExtensionsMarketplaceUnavailable": "L'emmagatzematge del mercat de connectors no està disponible",
   "ExtensionsMcpDetail": "eines: {tools} · recursos: {resources} · indicacions: {prompts}",
+  "ExtensionsMcpNotInspected": "No inspeccionat en aquesta instantània · prem Retorn per tornar a carregar i connectar els servidors configurats",
   "ExtensionsMcpRefresh": "Hi ha {count} servidors MCP configurats; obre /mcp per actualitzar aquesta instantània",
   "ExtensionsMcpSummary": "{transport} · eines: {tools} · recursos: {resources}",
   "ExtensionsNoItems": "No hi ha elements en aquesta pestanya",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "inactiu",
   "ExtensionsStateInapplicable": "no aplicable",
   "ExtensionsStateInvalid": "no vàlid",
+  "ExtensionsStateNotInspected": "no inspeccionat",
   "ExtensionsStateRejected": "rebutjat",
   "ExtensionsStateReviewedCandidate": "candidat revisat",
   "ExtensionsStateUnderEvaluation": "en avaluació",

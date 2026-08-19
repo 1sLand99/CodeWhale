@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "добавить",
   "ExtensionsActionEnable": "включить",
+  "ExtensionsActionReload": "перезагрузить",
   "ExtensionsActionFocus": "фокус",
   "ExtensionsActionFold": "свернуть",
   "ExtensionsActionTabs": "вкладки",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "издатель: {publisher} · уровень: {tier} · можно установить: {installable}",
   "ExtensionsMarketplaceUnavailable": "Хранилище магазина плагинов недоступно",
   "ExtensionsMcpDetail": "инструменты: {tools} · ресурсы: {resources} · промпты: {prompts}",
+  "ExtensionsMcpNotInspected": "Не проверено в этом снимке · Enter перезагрузит и подключит настроенные серверы",
   "ExtensionsMcpRefresh": "Настроено серверов MCP: {count}; откройте /mcp, чтобы обновить снимок",
   "ExtensionsMcpSummary": "{transport} · инструменты: {tools} · ресурсы: {resources}",
   "ExtensionsNoItems": "На этой вкладке нет элементов",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "неактивен",
   "ExtensionsStateInapplicable": "не применим",
   "ExtensionsStateInvalid": "недействителен",
+  "ExtensionsStateNotInspected": "не проверено",
   "ExtensionsStateRejected": "отклонён",
   "ExtensionsStateReviewedCandidate": "проверенный кандидат",
   "ExtensionsStateUnderEvaluation": "оценивается",

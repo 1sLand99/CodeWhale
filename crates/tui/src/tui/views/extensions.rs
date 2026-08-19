@@ -894,6 +894,18 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 .map(|server| server.enabled)
                 .or_else(|| config.map(crate::mcp::McpServerConfig::is_enabled))
                 .unwrap_or(true);
+            let state = if !enabled {
+                tr(locale, MessageId::HotbarSetupStatusDisabled)
+            } else if observed.is_some_and(|server| server.connected) {
+                tr(locale, MessageId::ExtensionsStateConnected)
+            } else if observed.is_some_and(|server| server.error.is_some()) {
+                tr(locale, MessageId::ExtensionsStateError)
+            } else if observed.is_none() {
+                tr(locale, MessageId::ExtensionsStateNotInspected)
+            } else {
+                tr(locale, MessageId::PickerActionConfigured)
+            }
+            .into_owned();
             let action = if !enabled
                 && name
                     .chars()
@@ -903,9 +915,14 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
                     command: format!("/mcp enable {name}"),
                 }
+            } else if enabled && observed.is_none() {
+                ExtensionAction::Command {
+                    label: tr(locale, MessageId::ExtensionsActionReload).into_owned(),
+                    command: "/mcp reload".into(),
+                }
             } else {
                 ExtensionAction::Status {
-                    label: tr(locale, MessageId::PickerActionConfigured).into_owned(),
+                    label: state.clone(),
                 }
             };
             ExtensionItem {
@@ -922,26 +939,11 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                         ],
                     )
                 }),
-                state: if !enabled {
-                    tr(locale, MessageId::HotbarSetupStatusDisabled)
-                } else if observed.is_some_and(|server| server.connected) {
-                    tr(locale, MessageId::ExtensionsStateConnected)
-                } else if observed.is_some_and(|server| server.error.is_some()) {
-                    tr(locale, MessageId::ExtensionsStateError)
-                } else {
-                    tr(locale, MessageId::PickerActionConfigured)
-                }
-                .into_owned(),
+                state,
                 // The passive snapshot can carry a command line or URL. Do
                 // not mirror either into this broad inventory surface.
                 detail: observed.map_or_else(
-                    || {
-                        localize(
-                            locale,
-                            MessageId::ExtensionsMcpRefresh,
-                            &[("count", &total.to_string())],
-                        )
-                    },
+                    || tr(locale, MessageId::ExtensionsMcpNotInspected).into_owned(),
                     |server| {
                         server.error.clone().unwrap_or_else(|| {
                             localize(
@@ -1768,7 +1770,33 @@ mod tests {
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].items.len(), 6);
-        assert!(groups[0].items.iter().any(|item| item.id == "zeta"));
+        let zeta = groups[0]
+            .items
+            .iter()
+            .find(|item| item.id == "zeta")
+            .unwrap();
+        assert_eq!(zeta.state, "not inspected");
+        assert!(zeta.detail.contains("Not inspected"));
+        assert!(matches!(
+            zeta.action.as_ref(),
+            Some(ExtensionAction::Command { command, .. }) if command == "/mcp reload"
+        ));
+
+        let mut view = ExtensionsView::from_snapshot(snapshot, ExtensionsTab::Mcp);
+        view.selected[ExtensionsTab::Mcp.index()] = view
+            .visible_entries()
+            .iter()
+            .position(|entry| matches!(entry, VisibleEntry::Item(_, item) if item.id == "zeta"))
+            .unwrap();
+
+        let action = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command }
+            }) if command == "/mcp reload"
+        ));
     }
 
     #[test]

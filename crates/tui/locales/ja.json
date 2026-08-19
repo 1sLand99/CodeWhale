@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "追加",
   "ExtensionsActionEnable": "有効化",
+  "ExtensionsActionReload": "再読み込み",
   "ExtensionsActionFocus": "フォーカス",
   "ExtensionsActionFold": "折りたたむ",
   "ExtensionsActionTabs": "タブ",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "発行元: {publisher} · 区分: {tier} · インストール可: {installable}",
   "ExtensionsMarketplaceUnavailable": "プラグインマーケットプレイスの保存領域を利用できません",
   "ExtensionsMcpDetail": "ツール: {tools} · リソース: {resources} · プロンプト: {prompts}",
+  "ExtensionsMcpNotInspected": "このスナップショットでは未確認 · Enter で再読み込みし、設定済みサーバーへ接続",
   "ExtensionsMcpRefresh": "MCP サーバーが {count} 件設定されています。/mcp を開いてスナップショットを更新してください",
   "ExtensionsMcpSummary": "{transport} · ツール: {tools} · リソース: {resources}",
   "ExtensionsNoItems": "このタブに項目はありません",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "非アクティブ",
   "ExtensionsStateInapplicable": "適用不可",
   "ExtensionsStateInvalid": "無効",
+  "ExtensionsStateNotInspected": "未確認",
   "ExtensionsStateRejected": "拒否済み",
   "ExtensionsStateReviewedCandidate": "レビュー済み候補",
   "ExtensionsStateUnderEvaluation": "評価中",

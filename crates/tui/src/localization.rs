@@ -424,6 +424,7 @@ pub enum MessageId {
     CmdPluginDescription,
     ExtensionsActionAdd,
     ExtensionsActionEnable,
+    ExtensionsActionReload,
     ExtensionsActionFocus,
     ExtensionsActionFold,
     ExtensionsActionTabs,
@@ -452,6 +453,7 @@ pub enum MessageId {
     ExtensionsMarketplaceDetail,
     ExtensionsMarketplaceUnavailable,
     ExtensionsMcpDetail,
+    ExtensionsMcpNotInspected,
     ExtensionsMcpRefresh,
     ExtensionsMcpSummary,
     ExtensionsNoItems,
@@ -480,6 +482,7 @@ pub enum MessageId {
     ExtensionsStateInactive,
     ExtensionsStateInapplicable,
     ExtensionsStateInvalid,
+    ExtensionsStateNotInspected,
     ExtensionsStateRejected,
     ExtensionsStateReviewedCandidate,
     ExtensionsStateUnderEvaluation,
@@ -2153,6 +2156,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdPluginDescription,
     MessageId::ExtensionsActionAdd,
     MessageId::ExtensionsActionEnable,
+    MessageId::ExtensionsActionReload,
     MessageId::ExtensionsActionFocus,
     MessageId::ExtensionsActionFold,
     MessageId::ExtensionsActionTabs,
@@ -2181,6 +2185,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsMarketplaceDetail,
     MessageId::ExtensionsMarketplaceUnavailable,
     MessageId::ExtensionsMcpDetail,
+    MessageId::ExtensionsMcpNotInspected,
     MessageId::ExtensionsMcpRefresh,
     MessageId::ExtensionsMcpSummary,
     MessageId::ExtensionsNoItems,
@@ -2209,6 +2214,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsStateInactive,
     MessageId::ExtensionsStateInapplicable,
     MessageId::ExtensionsStateInvalid,
+    MessageId::ExtensionsStateNotInspected,
     MessageId::ExtensionsStateRejected,
     MessageId::ExtensionsStateReviewedCandidate,
     MessageId::ExtensionsStateUnderEvaluation,
@@ -4740,10 +4746,11 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 79, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 82, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",
+            "ExtensionsMcpNotInspected",
             "ExtensionsMcpRefresh",
             "ExtensionsNoItems",
             "ExtensionsNoMatches",

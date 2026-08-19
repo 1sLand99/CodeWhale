@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "hinzufügen",
   "ExtensionsActionEnable": "aktivieren",
+  "ExtensionsActionReload": "neu laden",
   "ExtensionsActionFocus": "Fokus",
   "ExtensionsActionFold": "einklappen",
   "ExtensionsActionTabs": "Tabs",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "Herausgeber: {publisher} · Stufe: {tier} · installierbar: {installable}",
   "ExtensionsMarketplaceUnavailable": "Der Plugin-Marktplatzspeicher ist nicht verfügbar",
   "ExtensionsMcpDetail": "Werkzeuge: {tools} · Ressourcen: {resources} · Prompts: {prompts}",
+  "ExtensionsMcpNotInspected": "In diesem Snapshot nicht geprüft · Eingabetaste lädt neu und verbindet konfigurierte Server",
   "ExtensionsMcpRefresh": "{count} MCP-Server sind konfiguriert; /mcp öffnen, um diesen Stand zu aktualisieren",
   "ExtensionsMcpSummary": "{transport} · Werkzeuge: {tools} · Ressourcen: {resources}",
   "ExtensionsNoItems": "Keine Einträge in diesem Tab",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "inaktiv",
   "ExtensionsStateInapplicable": "nicht anwendbar",
   "ExtensionsStateInvalid": "ungültig",
+  "ExtensionsStateNotInspected": "nicht geprüft",
   "ExtensionsStateRejected": "abgelehnt",
   "ExtensionsStateReviewedCandidate": "geprüfter Kandidat",
   "ExtensionsStateUnderEvaluation": "wird geprüft",

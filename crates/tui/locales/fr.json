@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "ajouter",
   "ExtensionsActionEnable": "activer",
+  "ExtensionsActionReload": "recharger",
   "ExtensionsActionFocus": "focus",
   "ExtensionsActionFold": "replier",
   "ExtensionsActionTabs": "onglets",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "éditeur : {publisher} · niveau : {tier} · installable : {installable}",
   "ExtensionsMarketplaceUnavailable": "Le stockage du marché des plugins n'est pas disponible",
   "ExtensionsMcpDetail": "outils : {tools} · ressources : {resources} · prompts : {prompts}",
+  "ExtensionsMcpNotInspected": "Non inspecté dans cet instantané · Entrée recharge et connecte les serveurs configurés",
   "ExtensionsMcpRefresh": "{count} serveurs MCP sont configurés ; ouvrez /mcp pour actualiser cet instantané",
   "ExtensionsMcpSummary": "{transport} · outils : {tools} · ressources : {resources}",
   "ExtensionsNoItems": "Aucun élément dans cet onglet",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "inactif",
   "ExtensionsStateInapplicable": "non applicable",
   "ExtensionsStateInvalid": "invalide",
+  "ExtensionsStateNotInspected": "non inspecté",
   "ExtensionsStateRejected": "rejeté",
   "ExtensionsStateReviewedCandidate": "candidat examiné",
   "ExtensionsStateUnderEvaluation": "en cours d'évaluation",

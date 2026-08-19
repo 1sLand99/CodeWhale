@@ -1,6 +1,7 @@
 {
   "ExtensionsActionAdd": "tambahkan",
   "ExtensionsActionEnable": "aktifkan",
+  "ExtensionsActionReload": "muat ulang",
   "ExtensionsActionFocus": "fokus",
   "ExtensionsActionFold": "lipat",
   "ExtensionsActionTabs": "tab",
@@ -29,6 +30,7 @@
   "ExtensionsMarketplaceDetail": "penerbit: {publisher} · tingkat: {tier} · dapat dipasang: {installable}",
   "ExtensionsMarketplaceUnavailable": "Penyimpanan marketplace plugin tidak tersedia",
   "ExtensionsMcpDetail": "alat: {tools} · sumber daya: {resources} · prompt: {prompts}",
+  "ExtensionsMcpNotInspected": "Belum diperiksa dalam snapshot ini · Enter memuat ulang dan menghubungkan server terkonfigurasi",
   "ExtensionsMcpRefresh": "{count} server MCP dikonfigurasi; buka /mcp untuk menyegarkan cuplikan ini",
   "ExtensionsMcpSummary": "{transport} · alat: {tools} · sumber daya: {resources}",
   "ExtensionsNoItems": "Tidak ada item di tab ini",
@@ -57,6 +59,7 @@
   "ExtensionsStateInactive": "tidak aktif",
   "ExtensionsStateInapplicable": "tidak berlaku",
   "ExtensionsStateInvalid": "tidak valid",
+  "ExtensionsStateNotInspected": "belum diperiksa",
   "ExtensionsStateRejected": "ditolak",
   "ExtensionsStateReviewedCandidate": "kandidat tertinjau",
   "ExtensionsStateUnderEvaluation": "sedang dievaluasi",
