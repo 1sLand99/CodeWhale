@@ -11,6 +11,7 @@
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction, AppMode};
+#[cfg(test)]
 use crate::tui::approval::ApprovalMode;
 
 use super::CommandResult;
