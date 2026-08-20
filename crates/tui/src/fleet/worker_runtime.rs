@@ -1261,6 +1261,7 @@ pub(crate) fn network_posture_warning_for_task(
 fn profile_origin_label(origin: crate::fleet::roster::ProfileOrigin) -> &'static str {
     match origin {
         crate::fleet::roster::ProfileOrigin::BuiltIn => "built_in",
+        crate::fleet::roster::ProfileOrigin::Plugin => "plugin",
         crate::fleet::roster::ProfileOrigin::Config => "config",
         crate::fleet::roster::ProfileOrigin::Personal => "personal",
         crate::fleet::roster::ProfileOrigin::Workspace => "workspace",
@@ -1571,6 +1572,7 @@ mod tests {
             },
             source: std::path::PathBuf::from(format!("{id}.toml")),
             origin: crate::fleet::roster::ProfileOrigin::Workspace,
+            plugin_authority: None,
         }
     }
 

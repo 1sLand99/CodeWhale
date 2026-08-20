@@ -67,7 +67,7 @@ pub(super) fn render_bundle_detail(
         .collect::<Vec<_>>();
     let _ = write!(
         output,
-        "\nCompatibility: {}\nActive components: [{active_components}]\nInactive components: [{unsupported}]\nQualified skills: [{}]\nActivation boundary: trust stages the exact reviewed content but does not activate it; enable rebuilds this workspace's Skill/MCP catalog immediately; disable or revoke cancels in-flight plugin MCP operations and denies queued Skills. Commands, agents, hooks, LSP, native, filesystem-roots, and lifecycle-mutation stay inventoried and inactive.",
+        "\nCompatibility: {}\nActive components: [{active_components}]\nInactive components: [{unsupported}]\nQualified skills: [{}]\nActivation boundary: trust stages the exact reviewed content but does not activate it; enable rebuilds this workspace's Skills, MCP, Commands, Agents, and Hooks immediately. Every plugin command dispatch, Agent spawn, Hook process start, Skill use, and MCP call rechecks current authority. LSP, native, filesystem-roots, and lifecycle-mutation stay inventoried and inactive.",
         plugin.compatibility().as_str(),
         if skills.is_empty() {
             "none".to_string()

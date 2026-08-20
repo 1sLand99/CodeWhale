@@ -1395,6 +1395,7 @@ struct BackgroundHookJob {
     stdin_bytes: Option<Vec<u8>>,
     label: String,
     timeout: Duration,
+    plugin_authority: Option<crate::plugins::types::PluginAuthority>,
 }
 
 impl BackgroundHookJob {
@@ -1406,7 +1407,22 @@ impl BackgroundHookJob {
             stdin_bytes,
             label,
             timeout,
+            plugin_authority,
         } = self;
+        if let Some(authority) = plugin_authority.as_ref()
+            && let Err(error) = crate::plugins::registry::verify_plugin_component_authority(
+                authority,
+                crate::plugins::activation::PluginActivationCapability::Hooks,
+            )
+        {
+            tracing::warn!(
+                target: "hooks",
+                hook = %label,
+                error = %error,
+                "denied queued plugin hook after authority changed"
+            );
+            return;
+        }
         let timeout_secs = timeout.as_secs();
         let mut command = HookExecutor::build_shell_command(&command_text);
         command
@@ -2121,6 +2137,24 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
+        if let Some(authority) = hook.plugin_authority.as_ref()
+            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
+                authority,
+                crate::plugins::activation::PluginActivationCapability::Hooks,
+            )
+        {
+            return HookResult {
+                name: hook.name.clone(),
+                background: false,
+                strict: !hook.continue_on_error,
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: started.elapsed(),
+                error: Some(format!("Plugin hook authority was denied: {reason}")),
+            };
+        }
         let working_dir = self
             .config
             .working_dir
@@ -2360,6 +2394,24 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
+        if let Some(authority) = hook.plugin_authority.as_ref()
+            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
+                authority,
+                crate::plugins::activation::PluginActivationCapability::Hooks,
+            )
+        {
+            return HookResult {
+                name: hook.name.clone(),
+                background: true,
+                strict: false,
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: started.elapsed(),
+                error: Some(format!("Plugin hook authority was denied: {reason}")),
+            };
+        }
         let working_dir = self
             .config
             .working_dir
@@ -2389,6 +2441,7 @@ impl HookExecutor {
             stdin_bytes,
             label: sanitize_hook_label(hook.name.as_deref()),
             timeout: Duration::from_secs(self.effective_timeout_secs(hook)),
+            plugin_authority: hook.plugin_authority.clone(),
         });
 
         // The result describes the bounded submission, not the run: no caller
@@ -2991,6 +3044,100 @@ mod tests {
         let hooks = config.hooks_for_event(crate::hooks::config::HookEvent::SessionStart);
 
         assert_eq!(hooks.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_hook_runs_after_restart_and_process_spawn_rechecks_revocation() {
+        let _lock = lock_test_env();
+        let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
+        let config = HooksConfig::load_with_project_and_plugins(
+            HooksConfig {
+                enabled: true,
+                ..HooksConfig::default()
+            },
+            &fixture.workspace,
+            Some(&fixture.registry),
+        );
+        assert!(config.problems.is_empty(), "{:?}", config.problems);
+        assert_eq!(config.hooks.len(), 1);
+        assert!(config.hooks[0].plugin_authority.is_some());
+        let executor = HookExecutor::new(config, fixture.workspace.clone());
+        let context = HookContext::new().with_workspace(fixture.workspace.clone());
+
+        let ran = executor.execute(HookEvent::SessionStart, &context);
+        assert_eq!(ran.len(), 1);
+        assert!(ran[0].success, "{:?}", ran[0].error);
+        assert_eq!(
+            std::fs::read_to_string(&fixture.marker).expect("plugin hook marker"),
+            "plugin-hook-ran"
+        );
+        std::fs::remove_file(&fixture.marker).expect("clear marker");
+
+        let inactive = fixture.revoke_from_fresh_registry();
+        let denied = executor.execute(HookEvent::SessionStart, &context);
+        assert_eq!(denied.len(), 1);
+        assert!(!denied[0].success);
+        assert!(
+            denied[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("authority was denied")),
+            "{:?}",
+            denied[0].error
+        );
+        assert!(
+            !fixture.marker.exists(),
+            "revoked hook must be denied before process spawn"
+        );
+
+        let reloaded = HooksConfig::load_with_project_and_plugins(
+            HooksConfig {
+                enabled: true,
+                ..HooksConfig::default()
+            },
+            &fixture.workspace,
+            Some(&inactive),
+        );
+        assert!(
+            reloaded.hooks.is_empty(),
+            "reload removes the revoked plugin Hook"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_plugin_hook_rechecks_revocation_at_dequeue() {
+        let _lock = lock_test_env();
+        let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
+        let blocker_one = Hook::new(HookEvent::SessionStart, "sleep 1").background();
+        let blocker_two = Hook::new(HookEvent::SessionStart, "sleep 1").background();
+        let mut config = HooksConfig::load_with_project_and_plugins(
+            HooksConfig {
+                enabled: true,
+                hooks: vec![blocker_one, blocker_two],
+                ..HooksConfig::default()
+            },
+            &fixture.workspace,
+            Some(&fixture.registry),
+        );
+        assert_eq!(config.hooks.len(), 3);
+        config.hooks[2].background = true;
+        let executor = HookExecutor::new(config, fixture.workspace.clone());
+
+        let submitted = executor.execute(
+            HookEvent::SessionStart,
+            &HookContext::new().with_workspace(fixture.workspace.clone()),
+        );
+        assert_eq!(submitted.len(), 3);
+        assert!(submitted.iter().all(|result| result.background));
+        fixture.revoke_from_fresh_registry();
+
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert!(
+            !fixture.marker.exists(),
+            "queued hook must recheck authority after the preceding job finishes"
+        );
     }
 
     #[test]

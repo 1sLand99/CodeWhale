@@ -1698,6 +1698,7 @@ fn exact_member_profile(
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("<exact fleet>")),
         origin: ProfileOrigin::Config,
+        plugin_authority: None,
     }
 }
 

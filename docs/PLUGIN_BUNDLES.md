@@ -1,11 +1,11 @@
 # Plugin bundles
 
 Codewhale supports a deliberately small plugin-bundle boundary. The boundary
-was drawn in v0.9.1 and still holds as of v0.9.9: a bundle may contribute
-declarative Skills and MCP server configuration through Codewhale's existing
-engines, and nothing else activates. Unsupported declarations stay inventoried
-instead of disabling a mixed bundle. Discovery alone never executes, enables,
-trusts, downloads, updates, or installs anything.
+was drawn in v0.9.1 and is extended deliberately in v0.9.10: a bundle may
+contribute declarative Skills, MCP configuration, Commands, Agent profiles,
+and Hooks through Codewhale's existing engines. Unsupported declarations stay
+inventoried instead of disabling a mixed bundle. Discovery alone never
+executes, enables, trusts, downloads, updates, or installs anything.
 
 This document owns the bundle format (both manifest encodings), discovery,
 validation, and the trust/enable/runtime contract. [PLUGINS.md](PLUGINS.md)
@@ -39,7 +39,7 @@ never scanned.
 
 Pre-v0.9.1 `overrides.json` enablement was intentionally not imported as
 trust; every bundle activates only through the content-hash and
-`codewhale-plugin-capabilities-v2` activation-policy review below.
+`codewhale-plugin-capabilities-v3` activation-policy review below.
 
 ## Manifest
 
@@ -87,6 +87,15 @@ author = "Example Author"
 
 [skills]
 path = "skills"
+
+[commands]
+path = "commands"
+
+[agents]
+path = "agents"
+
+[hooks]
+path = "hooks"
 
 [mcp_servers.local]
 command = "node"
@@ -150,21 +159,19 @@ a manifest declaring OAuth fields on a plugin MCP server fails validation.
 
 ### Active and inactive component surfaces
 
-`[skills]` and `[mcp_servers.*]` are the only active component adapters as of
-v0.9.9. The manifest can additionally inventory the following future
-surfaces. Those declarations stay hashed, reviewed, and displayed, but they
-do not activate and they no longer disable the whole bundle:
+Codewhale 0.9.10 activates declarative `[skills]`, `[mcp_servers.*]`,
+`[commands]`, `[agents]`, and `[hooks]` components from its content-addressed
+runtime snapshot. Commands use markdown command files, Agents use Fleet TOML
+profiles, and Hooks use `HooksConfig` TOML files. A component may name one file
+or a directory of the corresponding files. Ordinary user/workspace commands
+and Agent profiles keep precedence over plugin contributions; trusted project
+hooks run after plugin hooks.
+
+The manifest can additionally inventory the following inactive surfaces.
+Those declarations stay hashed, reviewed, and displayed, but do not activate
+and no longer disable the whole bundle:
 
 ```toml
-[commands]
-path = "commands"
-
-[agents]        # TOML alias: [profiles]
-path = "agents"
-
-[hooks]
-path = "hooks"
-
 [lsp]           # TOML alias: [lsp_servers]
 path = "lsp"
 
@@ -183,22 +190,22 @@ lifecycle_mutation = true
 The accept/reject behavior is deliberately loud, never silent:
 
 - Compatibility is per-component: `full` when every declared surface has an
-  adapter (or the bundle is empty), `partial` when Skills and/or MCP can
+  adapter (or the bundle is empty), `partial` when supported components can
   activate beside named inactive surfaces, and `unsupported` when the bundle
   only declares surfaces Codewhale cannot activate yet. The same versioned
-  activation policy (v2) drives those labels, the runtime adapters, and the
-  capability hash. A future Codewhale that starts executing commands, agents,
-  hooks, LSP, or native code must change that policy, which changes the
-  capability hash and forces re-review. Pre-policy (v1) trust receipts fail
-  closed as `capabilities-changed`.
-- A **recognized-but-inactive** declaration (`commands`, `agents`, `hooks`,
-  `lsp`, `native`, a non-empty `capabilities.filesystem_roots`, or
+  activation policy (v3) drives those labels, the runtime adapters, and the
+  capability hash. A future Codewhale that starts executing LSP or native code
+  must change that policy, which changes the capability hash and forces
+  re-review. v1 and v2 trust receipts fail closed as
+  `capabilities-changed`.
+- A **recognized-but-inactive** declaration (`lsp`, `native`, a non-empty
+  `capabilities.filesystem_roots`, or
   `capabilities.lifecycle_mutation = true`) parses and is validated like any
   component (contained, present, link-free). It is counted in the inventory,
   hashed into the capability receipt, shown in review and `/plugin show` as
   inactive, and never executed. A reviewed, trusted, applicable mixed bundle
-  can still be enabled: Skills and MCP become active, and the inactive
-  surfaces stay named as inactive.
+  can still be enabled: supported declarative components become active, and
+  the inactive surfaces stay named as inactive.
 - An **all-unsupported** bundle can be reviewed and trusted, but `/plugin
   enable` fails closed and names the inactive surfaces. There is nothing
   Codewhale can honestly activate.
@@ -235,7 +242,7 @@ hashes, and inactive declarations. It also prints an exact confirmation:
 
 Run that exact command only after reviewing the bundle. The confirmation token
 uses both complete SHA-256 receipts rather than display prefixes. The
-capability receipt is the v2 digest: it still hashes the complete inventory
+capability receipt is the v3 digest: it still hashes the complete inventory
 and also binds this build's activation policy (which adapters are executable
 versus inventoried-only). Trust first
 copies the complete reviewed tree into a Codewhale-owned, content-addressed
@@ -255,11 +262,11 @@ bits themselves and always drop into this same review — see
 installed.)
 
 Trust, enable, disable, revoke, and reload rebuild the current workspace's
-Skill catalogue and MCP pool immediately. Each persisted transition advances a
-per-bundle generation under a stable cross-process lock. A generation change
-cancels in-flight MCP work, removes cached catalog entries, terminates an idle
-plugin stdio child, and denies persisted queued Skills carrying the older
-authority receipt.
+Skills, MCP, Commands, Agent profiles, and Hooks immediately. Each persisted
+transition advances a per-bundle generation under a stable cross-process lock.
+A generation change cancels in-flight MCP work, removes cached catalog
+entries, terminates an idle plugin stdio child, and denies persisted queued
+Skills carrying the older authority receipt.
 
 The review distinguishes remote MCP endpoints from local stdio MCP servers.
 A local stdio server is a child process running with the Codewhale user's host
@@ -291,7 +298,7 @@ on: replaced bytes stop matching the receipt, forcing re-review.
 
 An active bundle must be enabled, trusted for its current hashes, applicable to
 the host, and free of validation errors. A reviewed mixed bundle may be
-active, but only supported components in the reviewed v2 activation mask are
+active, but only supported components in the reviewed v3 activation mask are
 consumable. Unsupported components remain listed, hashed, reviewed, and
 inactive.
 
@@ -317,8 +324,22 @@ inactive.
   boundary and drops the stale connection/catalogue entry, but is not claimed
   to interrupt a call already executing. Every failure includes instructions
   to reload, review, trust, and enable the bundle again.
+- Commands load after ordinary user/workspace commands and saved workflows, so
+  existing definitions keep precedence and collisions are visible. The
+  palette hides a revoked command immediately; dispatch rechecks the full
+  receipt before expanding its body and reports a visible denial on stale
+  input.
+- Agent profiles join the Fleet roster below explicit config, personal, and
+  workspace profiles but above built-ins. Roster collisions retain the
+  existing visible shadow record. Every Agent spawn rebuilds from the current
+  registry and rechecks the selected plugin profile's authority before its
+  prompt or route can be used.
+- Hooks merge after global hooks and before trusted project hooks. Foreground
+  Hooks recheck authority immediately before process spawn; background Hooks
+  check before enqueue and again at dequeue so a queued, revoked Hook cannot
+  start later.
 - Plain launch, resume, fork, exec, and serve each construct an immutable
-  workspace-scoped registry before constructing their Skill or MCP catalogue.
+  workspace-scoped registry before constructing their plugin-backed catalogues.
 - Constitution, repository instructions, permission rules, sandbox policy,
   and MCP tool approval continue to outrank plugin instructions.
 
@@ -330,15 +351,15 @@ plugin-originated errors suppress URL query, authentication, argv, and
 environment material. Legacy executable tools under `[tools].plugin_dir`
 remain a distinct system and are listed under `/plugin tools`.
 
-## Explicit non-goals as of v0.9.6
+## Explicit non-goals as of v0.9.10
 
 Federated marketplace catalogs (`/plugin marketplace add|list|show|remove|install`)
 parse local Kimi-, Claude-, Codex-, and Codewhale-format catalog documents; see
 the marketplace section below (`/plugin install` fetches
 one reviewed source, and `/plugin suggest` ranks only what is already
 installed), no ambient compatibility discovery, no automatic trust, no
-plugin-contributed MCP OAuth, no hook adapter, command adapter, agent adapter,
-LSP adapter, native extension runtime, or MCP subscription adapter, no
+plugin-contributed MCP OAuth, no LSP adapter, native extension runtime, or MCP
+subscription adapter, no
 migration of another application's bundle, and no on-disk auto-migration of a
 legacy `plugin.toml` to `plugin.json`. These remain later work rather than
 implied capabilities.

@@ -234,9 +234,10 @@ fn write_mixed_bundle(root: &Path) {
     fs::create_dir_all(bundle.join("skills/hello")).unwrap();
     fs::create_dir_all(bundle.join("commands")).unwrap();
     fs::create_dir_all(bundle.join("hooks")).unwrap();
+    fs::create_dir_all(bundle.join("lsp")).unwrap();
     fs::write(
         bundle.join("plugin.toml"),
-        "schema_version = 1\n[plugin]\nname = \"mixed\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n",
+        "schema_version = 1\n[plugin]\nname = \"mixed\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n[lsp]\npath = \"lsp\"\n",
     )
     .unwrap();
     fs::write(
@@ -261,10 +262,7 @@ fn mixed_bundle_review_and_enable_keep_supported_components_active() {
 
     let show = plugins(&mut app, Some("show mixed")).message.unwrap();
     assert!(show.contains("Compatibility: partial"), "{show}");
-    assert!(
-        show.contains("Inactive components: [commands, hooks]"),
-        "{show}"
-    );
+    assert!(show.contains("Inactive components: [lsp]"), "{show}");
     assert!(show.contains("Active components: [none]"), "{show}");
 
     let review = plugins(&mut app, Some("trust mixed")).message.unwrap();
@@ -278,7 +276,7 @@ fn mixed_bundle_review_and_enable_keep_supported_components_active() {
     assert!(!enabled.is_error, "{:?}", enabled.message);
     let message = enabled.message.unwrap();
     assert!(message.contains("Compatibility: partial"), "{message}");
-    assert!(message.contains("inactive: commands, hooks"), "{message}");
+    assert!(message.contains("inactive: lsp"), "{message}");
     assert!(app.plugin_registry.is_active("mixed"));
     assert_eq!(
         app.plugin_registry
@@ -291,9 +289,9 @@ fn mixed_bundle_review_and_enable_keep_supported_components_active() {
 
     let show = plugins(&mut app, Some("show mixed")).message.unwrap();
     assert!(show.contains("State: active"), "{show}");
-    assert!(show.contains("Active components: [skills]"), "{show}");
+    assert!(show.contains("Inactive components: [lsp]"), "{show}");
     assert!(
-        show.contains("Inactive components: [commands, hooks]"),
+        show.contains("Active components: [skills, commands, hooks]"),
         "{show}"
     );
     assert!(show.contains("Qualified skills: [mixed:hello]"), "{show}");

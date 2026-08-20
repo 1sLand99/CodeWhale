@@ -129,7 +129,11 @@ impl FleetRosterView {
             });
         let mut view = Self::from_parts(
             OperatorInfo::from_app(app),
-            FleetRoster::load(&config.fleet_config(), &app.workspace),
+            FleetRoster::load_with_plugins(
+                &config.fleet_config(),
+                &app.workspace,
+                app.plugin_registry.as_ref(),
+            ),
             selected_fleet,
         );
         view.locale = app.ui_locale;
@@ -664,7 +668,7 @@ fn member_shadow_badge(
             ProfileOrigin::Workspace => MessageId::FleetRosterShadowBadgeProjectOverride,
             ProfileOrigin::Personal => MessageId::FleetRosterShadowBadgePersonalOverride,
             ProfileOrigin::Config => MessageId::FleetRosterShadowBadgeConfigOverride,
-            ProfileOrigin::BuiltIn => return None,
+            ProfileOrigin::Plugin | ProfileOrigin::BuiltIn => return None,
         }
     };
     Some(format!("  {}", tr(locale, id)))

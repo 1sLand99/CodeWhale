@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::activation::PluginActivationCapability;
 use super::discovery::{DiscoveryConfig, discover_with_config};
-use super::manifest::{PluginCompatibility, capability_hash_v1};
+use super::manifest::{PluginCompatibility, capability_hash_v1, capability_hash_v2};
 use super::types::{PluginDiagnosticLevel, PluginTrustStatus};
 
 fn config(root: &Path) -> DiscoveryConfig {
@@ -108,6 +108,28 @@ fn trust_and_enablement_are_separate_atomic_state_transitions() {
         entries.iter().all(|name| !name.contains(".tmp")),
         "atomic persistence must not strand temp files: {entries:?}"
     );
+}
+
+#[test]
+fn declarative_runtime_sources_survive_restart_only_from_the_staged_snapshot() {
+    let fixture = super::test_fixture::DeclarativePluginFixture::new();
+    let plugin = fixture.registry.get("runtime-demo").expect("plugin");
+    let staged_root = plugin.staged_root.as_deref().expect("staged root");
+    for capability in [
+        PluginActivationCapability::Commands,
+        PluginActivationCapability::Agents,
+        PluginActivationCapability::Hooks,
+    ] {
+        let (sources, errors) =
+            super::runtime::active_component_sources(&fixture.registry, capability);
+        assert!(errors.is_empty(), "{capability:?}: {errors:?}");
+        assert_eq!(sources.len(), 1, "{capability:?}");
+        assert!(sources[0].path.starts_with(staged_root), "{capability:?}");
+        assert!(
+            !sources[0].path.starts_with(&plugin.canonical_root),
+            "{capability:?} must never execute from mutable source"
+        );
+    }
 }
 
 #[test]
@@ -291,7 +313,7 @@ fn revoking_trust_does_not_rewrite_enablement() {
 fn write_mixed_bundle(config: &DiscoveryConfig) -> PathBuf {
     let plugin = write_plugin(
         config,
-        "\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n",
+        "\n[skills]\npath = \"skills\"\n[commands]\npath = \"commands\"\n[hooks]\npath = \"hooks\"\n[lsp]\npath = \"lsp\"\n",
     );
     fs::create_dir_all(plugin.join("skills/demo")).unwrap();
     fs::write(
@@ -301,6 +323,7 @@ fn write_mixed_bundle(config: &DiscoveryConfig) -> PathBuf {
     .unwrap();
     fs::create_dir_all(plugin.join("commands")).unwrap();
     fs::create_dir_all(plugin.join("hooks")).unwrap();
+    fs::create_dir_all(plugin.join("lsp")).unwrap();
     plugin
 }
 
@@ -313,17 +336,16 @@ fn mixed_supported_and_unsupported_components_activate_only_supported_surfaces()
     let mut registry = discover_with_config(&config);
     let plugin = registry.get("demo").unwrap();
     assert_eq!(plugin.compatibility(), PluginCompatibility::Partial);
-    assert_eq!(plugin.inventory.supported_labels(), vec!["skills"]);
     assert_eq!(
-        plugin.inventory.unsupported_labels(),
-        vec!["commands", "hooks"]
+        plugin.inventory.supported_labels(),
+        vec!["skills", "commands", "hooks"]
     );
+    assert_eq!(plugin.inventory.unsupported_labels(), vec!["lsp"]);
     assert!(
         plugin.diagnostics.iter().any(|diagnostic| {
             diagnostic.level == PluginDiagnosticLevel::Warning
                 && diagnostic.code == "component-inactive"
-                && diagnostic.message.contains("commands")
-                && diagnostic.message.contains("hooks")
+                && diagnostic.message.contains("lsp")
         }),
         "inactive components must stay visible in diagnostics: {:?}",
         plugin.diagnostics
@@ -340,8 +362,9 @@ fn mixed_supported_and_unsupported_components_activate_only_supported_surfaces()
     assert_eq!(plugin.skill_snapshots.len(), 1);
     assert_eq!(plugin.skill_snapshots[0].name, "demo");
     assert!(plugin.component_active(PluginActivationCapability::Skills));
-    assert!(!plugin.component_active(PluginActivationCapability::Commands));
-    assert!(!plugin.component_active(PluginActivationCapability::Hooks));
+    assert!(plugin.component_active(PluginActivationCapability::Commands));
+    assert!(plugin.component_active(PluginActivationCapability::Hooks));
+    assert!(!plugin.component_active(PluginActivationCapability::Lsp));
 
     let skills = crate::skills::discover_from_directories_with_plugins(
         Vec::<PathBuf>::new(),
@@ -354,8 +377,8 @@ fn mixed_supported_and_unsupported_components_activate_only_supported_surfaces()
 fn all_unsupported_bundles_can_be_reviewed_but_not_enabled() {
     let tmp = tempfile::tempdir().unwrap();
     let config = config(tmp.path());
-    let plugin = write_plugin(&config, "\n[commands]\npath = \"commands\"\n");
-    fs::create_dir_all(plugin.join("commands")).unwrap();
+    let plugin = write_plugin(&config, "\n[lsp]\npath = \"lsp\"\n");
+    fs::create_dir_all(plugin.join("lsp")).unwrap();
 
     let mut registry = discover_with_config(&config);
     let plugin = registry.get("demo").unwrap();
@@ -364,10 +387,10 @@ fn all_unsupported_bundles_can_be_reviewed_but_not_enabled() {
     registry.trust("demo").unwrap();
     let error = registry.enable("demo").unwrap_err();
     assert!(
-        error.contains("no supported Skills or MCP"),
+        error.contains("no supported declarative components"),
         "all-unsupported enable must name the missing supported surfaces: {error}"
     );
-    assert!(error.contains("commands"), "{error}");
+    assert!(error.contains("lsp"), "{error}");
     assert!(!registry.is_active("demo"));
     let plugin = registry.get("demo").unwrap();
     assert!(plugin.trusted());
@@ -459,7 +482,7 @@ fn mixed_bundle_revocation_and_trust_changes_deactivate_supported_surfaces() {
 }
 
 #[test]
-fn v1_trust_receipts_fail_closed_as_needs_review_under_v2() {
+fn legacy_trust_receipts_fail_closed_as_needs_review_under_v3() {
     let tmp = tempfile::tempdir().unwrap();
     let config = config(tmp.path());
     let plugin = write_plugin(&config, "\n[skills]\npath = \"skills\"\n");
@@ -475,38 +498,45 @@ fn v1_trust_receipts_fail_closed_as_needs_review_under_v2() {
     first.enable("demo").unwrap();
     assert!(first.is_active("demo"));
     let plugin = first.get("demo").unwrap();
-    let v1_hash = capability_hash_v1(&plugin.inventory);
-    let v2_hash = plugin.capability_hash.clone();
-    assert_ne!(
-        v1_hash, v2_hash,
-        "v2 receipts must not collide with the pre-policy v1 domain"
+    let legacy_hashes = [
+        ("v1", capability_hash_v1(&plugin.inventory)),
+        ("v2", capability_hash_v2(&plugin.inventory)),
+    ];
+    let v3_hash = plugin.capability_hash.clone();
+    assert!(
+        legacy_hashes.iter().all(|(_, hash)| hash != &v3_hash),
+        "v3 receipts must not collide with either historical domain"
     );
     let content_hash = plugin.content_hash.clone();
 
     let raw = fs::read_to_string(&config.state_path).unwrap();
-    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    replace_capability_hashes(&mut parsed, &v2_hash, &v1_hash);
-    fs::write(
-        &config.state_path,
-        serde_json::to_string_pretty(&parsed).unwrap(),
-    )
-    .unwrap();
+    for (version, legacy_hash) in legacy_hashes {
+        let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        replace_capability_hashes(&mut parsed, &v3_hash, &legacy_hash);
+        fs::write(
+            &config.state_path,
+            serde_json::to_string_pretty(&parsed).unwrap(),
+        )
+        .unwrap();
 
-    let second = discover_with_config(&config);
-    let plugin = second.get("demo").unwrap();
-    assert_eq!(plugin.content_hash, content_hash);
-    assert_eq!(plugin.capability_hash, v2_hash);
-    assert_eq!(plugin.trust_status, PluginTrustStatus::CapabilitiesChanged);
-    assert!(plugin.enabled);
-    assert!(!plugin.trusted());
-    assert!(!plugin.active());
-    assert!(second.authority_for("demo").is_some());
-    let skills =
-        crate::skills::discover_from_directories_with_plugins(Vec::<PathBuf>::new(), Some(&second));
-    assert!(
-        skills.get("demo:demo").is_none(),
-        "a v1 receipt must not activate Skills after the v2 policy binding"
-    );
+        let restarted = discover_with_config(&config);
+        let plugin = restarted.get("demo").unwrap();
+        assert_eq!(plugin.content_hash, content_hash);
+        assert_eq!(plugin.capability_hash, v3_hash);
+        assert_eq!(plugin.trust_status, PluginTrustStatus::CapabilitiesChanged);
+        assert!(plugin.enabled);
+        assert!(!plugin.trusted());
+        assert!(!plugin.active());
+        assert!(restarted.authority_for("demo").is_some());
+        let skills = crate::skills::discover_from_directories_with_plugins(
+            Vec::<PathBuf>::new(),
+            Some(&restarted),
+        );
+        assert!(
+            skills.get("demo:demo").is_none(),
+            "a {version} receipt must not activate Skills after the v3 policy binding"
+        );
+    }
 }
 
 fn replace_capability_hashes(value: &mut serde_json::Value, from: &str, to: &str) {

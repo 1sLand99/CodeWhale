@@ -11,8 +11,11 @@ pub mod marketplace;
 pub mod mutation;
 mod path_identity;
 pub mod registry;
+pub mod runtime;
 pub mod types;
 
+#[cfg(test)]
+pub(crate) mod test_fixture;
 #[cfg(test)]
 mod tests;
 

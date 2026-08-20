@@ -1298,8 +1298,11 @@ pub(crate) async fn handle_view_events(
                 app.status_message = Some(message);
                 // Refresh the dispatch roster from the fleet-aware source so
                 // selection changes take effect for the next spawn.
-                let roster =
-                    crate::fleet::roster::FleetRoster::load(&config.fleet_config(), &app.workspace);
+                let roster = crate::fleet::roster::FleetRoster::load_with_plugins(
+                    &config.fleet_config(),
+                    &app.workspace,
+                    app.plugin_registry.as_ref(),
+                );
                 let _ = engine_handle.try_send(Op::SetFleetRoster {
                     roster: std::sync::Arc::new(roster),
                 });
@@ -1484,10 +1487,13 @@ pub(crate) async fn handle_view_events(
                 txn.stage(target.clone(), draft.render_toml().into_bytes());
                 match txn.commit() {
                     Ok(()) => {
-                        let roster = std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
-                            &config.fleet_config(),
-                            &app.workspace,
-                        ));
+                        let roster = std::sync::Arc::new(
+                            crate::fleet::roster::FleetRoster::load_with_plugins(
+                                &config.fleet_config(),
+                                &app.workspace,
+                                app.plugin_registry.as_ref(),
+                            ),
+                        );
                         let roster_refresh_failed = engine_handle
                             .try_send(Op::SetFleetRoster { roster })
                             .is_err();

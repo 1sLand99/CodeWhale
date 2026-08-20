@@ -3575,6 +3575,7 @@ fn isolated_fleet_roster_with(
         profile,
         source: std::path::PathBuf::from("test"),
         origin: crate::fleet::roster::ProfileOrigin::Config,
+        plugin_authority: None,
     }])
 }
 
@@ -4753,6 +4754,54 @@ fn test_invalid_role_error_lists_real_aliases() {
     assert!(
         err.contains("legacy aliases remain accepted"),
         "hint should explain compatibility aliases: {err}"
+    );
+}
+
+#[test]
+fn plugin_agent_profile_survives_restart_and_spawn_rechecks_disable() {
+    let _lock = crate::test_support::lock_test_env();
+    let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
+    let config = codewhale_config::FleetConfigToml::default();
+    let roster = FleetRoster::load_with_plugins(&config, &fixture.workspace, &fixture.registry);
+    let member = roster.get("plugin-scout").expect("plugin Agent is loaded");
+    assert_eq!(member.origin, crate::fleet::roster::ProfileOrigin::Plugin);
+    assert!(member.plugin_authority.is_some());
+    assert!(
+        member.source.starts_with(
+            fixture
+                .registry
+                .get("runtime-demo")
+                .and_then(|plugin| plugin.staged_root.as_deref())
+                .expect("staged root")
+        ),
+        "Agent profile must execute from the immutable staged snapshot"
+    );
+
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "inspect the plugin boundary",
+        "profile": "plugin-scout"
+    }))
+    .expect("spawn request parses");
+    let applied = apply_spawn_profile(&mut request, &roster)
+        .expect("active plugin Agent passes the spawn boundary")
+        .expect("profile resolves");
+    assert_eq!(applied.id, "plugin-scout");
+
+    let inactive = fixture.disable_from_fresh_registry();
+    let mut stale_request = parse_spawn_request(&json!({
+        "prompt": "must fail closed",
+        "profile": "plugin-scout"
+    }))
+    .expect("spawn request parses");
+    let denied = apply_spawn_profile(&mut stale_request, &roster)
+        .expect_err("a stale roster cannot spawn a disabled plugin Agent")
+        .to_string();
+    assert!(denied.contains("was denied"), "{denied}");
+
+    let reloaded = FleetRoster::load_with_plugins(&config, &fixture.workspace, &inactive);
+    assert!(
+        reloaded.get("plugin-scout").is_none(),
+        "reload removes the disabled plugin Agent"
     );
 }
 
@@ -12416,6 +12465,7 @@ fn member_pinning_provider(provider: &str, model: &str) -> crate::fleet::profile
         profile,
         source: std::path::PathBuf::from(format!("{provider}-worker.toml")),
         origin: crate::fleet::roster::ProfileOrigin::Workspace,
+        plugin_authority: None,
     }
 }
 

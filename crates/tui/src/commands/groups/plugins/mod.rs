@@ -802,7 +802,7 @@ fn mutate_bundle(app: &mut App, selector: &str, mutation: Mutation<'_>) -> Comma
                 if !inactive.is_empty() {
                     message.push(' ');
                     message.push_str(&format!(
-                        "Compatibility: {}. Supported Skills/MCP are active; inactive: {}.",
+                        "Compatibility: {}. Supported declarative components are active; inactive: {}.",
                         plugin.compatibility().as_str(),
                         inactive.join(", ")
                     ));

@@ -402,7 +402,7 @@ impl PluginRegistry {
         if !plugin.inventory.can_activate_supported_components() {
             let unsupported = plugin.inventory.unsupported_labels();
             return Err(format!(
-                "Plugin bundle `{}` has no supported Skills or MCP components to activate; inactive: {}",
+                "Plugin bundle `{}` has no supported declarative components to activate; inactive: {}",
                 plugin.name(),
                 unsupported.join(", ")
             ));
@@ -1918,9 +1918,9 @@ fn preserve_owner_only_file_mode(path: &Path, _source: &fs::Metadata) -> Result<
 
 /// Recheck a persisted plugin receipt, the mutable reviewed source, and the
 /// Codewhale-owned immutable runtime copy, then require the named adapter to
-/// be in this build's activation policy. Skills and MCP must call this with
-/// their specific capability rather than treating bundle-wide activity as
-/// authority to run every inventoried surface.
+/// be in this build's activation policy. Every adapter must call this with its
+/// specific capability rather than treating bundle-wide activity as authority
+/// to run every inventoried surface.
 pub fn verify_plugin_component_authority(
     authority: &PluginAuthority,
     capability: PluginActivationCapability,

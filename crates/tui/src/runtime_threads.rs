@@ -6604,15 +6604,16 @@ impl RuntimeThreadManager {
             let max_subagents = cfg
                 .max_subagents_for_provider(provider)
                 .clamp(1, MAX_SUBAGENTS);
+            let thread_plugin_registry = self
+                .plugin_registry
+                .as_ref()
+                .map(|registry| registry.rediscover_for_workspace(&thread.workspace));
             let engine_cfg = EngineConfig {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
                 subagent_state_root: None,
-                plugin_registry: self
-                    .plugin_registry
-                    .as_ref()
-                    .map(|registry| registry.rediscover_for_workspace(&thread.workspace)),
+                plugin_registry: thread_plugin_registry.clone(),
                 allow_shell: thread.allow_shell,
                 trust_mode: thread.trust_mode,
                 notes_path: cfg.notes_path(),
@@ -6663,9 +6664,20 @@ impl RuntimeThreadManager {
                     rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
                 },
                 subagent_model_overrides: cfg.subagent_model_overrides(),
-                fleet_roster: Arc::new(crate::fleet::roster::FleetRoster::load(
-                    &cfg.fleet_config(),
-                    &thread.workspace,
+                fleet_roster: Arc::new(thread_plugin_registry.as_deref().map_or_else(
+                    || {
+                        crate::fleet::roster::FleetRoster::load(
+                            &cfg.fleet_config(),
+                            &thread.workspace,
+                        )
+                    },
+                    |plugins| {
+                        crate::fleet::roster::FleetRoster::load_with_plugins(
+                            &cfg.fleet_config(),
+                            &thread.workspace,
+                            plugins,
+                        )
+                    },
                 )),
                 subagent_api_timeout: std::time::Duration::from_secs(
                     cfg.subagent_api_timeout_secs_for_provider(provider),

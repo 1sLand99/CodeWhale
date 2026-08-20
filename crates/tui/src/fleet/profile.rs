@@ -74,6 +74,9 @@ pub struct AgentProfile {
     /// File-based loading in this module always yields `Workspace`; the
     /// roster stamps `BuiltIn` / `Config` for the other layers.
     pub origin: ProfileOrigin,
+    /// Runtime authority for a profile loaded from an immutable plugin
+    /// snapshot. Rechecked at Agent spawn so another process can revoke it.
+    pub plugin_authority: Option<crate::plugins::types::PluginAuthority>,
 }
 
 /// The minimum profile information needed to prevent a save from clobbering
@@ -228,6 +231,32 @@ pub fn load_agent_profiles_from_dir_tolerant(
     Ok((profiles, issues))
 }
 
+pub(crate) fn load_plugin_agent_profiles_from_component(
+    component: &Path,
+    authority: &crate::plugins::types::PluginAuthority,
+) -> Result<(Vec<AgentProfile>, Vec<String>)> {
+    let (mut profiles, issues) = if component.is_dir() {
+        load_agent_profiles_from_dir_tolerant(component, ProfileOrigin::Plugin)?
+    } else if component.is_file() {
+        match load_agent_profile_file(component) {
+            Ok(mut profile) => {
+                profile.origin = ProfileOrigin::Plugin;
+                (vec![profile], Vec::new())
+            }
+            Err(error) => (Vec::new(), vec![format!("{error:#}")]),
+        }
+    } else {
+        return Err(anyhow!(
+            "plugin Agent component is unavailable: {}",
+            component.display()
+        ));
+    };
+    for profile in &mut profiles {
+        profile.plugin_authority = Some(authority.clone());
+    }
+    Ok((profiles, issues))
+}
+
 /// Read only the identity-bearing fields from workspace profiles for the
 /// authoring collision gate.  Unknown legacy fields are harmless here because
 /// no profile behavior is loaded or executed from this representation.
@@ -374,6 +403,7 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         profile,
         source: path.to_path_buf(),
         origin: ProfileOrigin::Workspace,
+        plugin_authority: None,
     })
 }
 

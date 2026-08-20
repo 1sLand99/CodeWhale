@@ -278,6 +278,7 @@ async fn issue_5305_unbuildable_provider_refuses_before_admission() {
             profile,
             source: std::path::PathBuf::from("private/profile.toml"),
             origin: crate::fleet::roster::ProfileOrigin::Personal,
+            plugin_authority: None,
         },
     ]));
     let context = runtime.context.clone();

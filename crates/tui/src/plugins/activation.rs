@@ -9,13 +9,17 @@
 use sha2::Digest;
 
 /// Capability-hash domain for the current activation-policy binding.
+pub const CAPABILITY_HASH_DOMAIN_V3: &[u8] = b"codewhale-plugin-capabilities-v3\0";
+
+/// Historical policy domain kept so persisted v2 receipts are intentionally
+/// invalidated when the declarative Commands, Agents, and Hooks adapters ship.
 pub const CAPABILITY_HASH_DOMAIN_V2: &[u8] = b"codewhale-plugin-capabilities-v2\0";
 
 /// Historical domain used before the activation policy was bound into the
 /// receipt. Kept so discovery can prove a v1 receipt no longer matches.
 pub const CAPABILITY_HASH_DOMAIN_V1: &[u8] = b"codewhale-plugin-capabilities-v1\0";
 
-pub const ACTIVATION_POLICY_VERSION: u32 = 2;
+pub const ACTIVATION_POLICY_VERSION: u32 = 3;
 
 /// A runtime adapter or inventoried capability that a bundle may declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -82,11 +86,11 @@ impl PluginActivationPolicy {
                 PluginActivationCapability::Skills,
                 PluginActivationCapability::McpStdio,
                 PluginActivationCapability::McpRemote,
-            ],
-            inactive: &[
                 PluginActivationCapability::Commands,
                 PluginActivationCapability::Agents,
                 PluginActivationCapability::Hooks,
+            ],
+            inactive: &[
                 PluginActivationCapability::Lsp,
                 PluginActivationCapability::Native,
                 PluginActivationCapability::FilesystemRoots,
@@ -101,7 +105,7 @@ impl PluginActivationPolicy {
     }
 
     pub fn write_hash_material(self, hasher: &mut impl Digest) {
-        hasher.update(CAPABILITY_HASH_DOMAIN_V2);
+        hasher.update(CAPABILITY_HASH_DOMAIN_V3);
         hasher.update(b"policy-version\0");
         hasher.update(self.version.to_string().as_bytes());
         hasher.update(b"\0");

@@ -587,10 +587,20 @@ impl App {
         };
         let shell_manager = new_shared_shell_manager(workspace.clone());
 
-        // Initialize hooks executor from config, merged with project-local
-        // `.codewhale/hooks.toml` (#3026).
-        let hooks_config =
-            crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace);
+        for error in crate::commands::user_registry::install_plugin_registry(
+            &workspace,
+            plugin_registry.as_ref(),
+        ) {
+            tracing::warn!(target: "plugins", "{error}");
+        }
+
+        // Initialize hooks executor from config, reviewed plugin snapshots,
+        // then project-local `.codewhale/hooks.toml` (#3026).
+        let hooks_config = crate::hooks::HooksConfig::load_with_project_and_plugins(
+            config.hooks_config(),
+            &workspace,
+            Some(plugin_registry.as_ref()),
+        );
         let hooks = HookExecutor::new(hooks_config, workspace.clone());
 
         // Initialize plan state

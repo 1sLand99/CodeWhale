@@ -997,6 +997,29 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::PluginRegistryChanged => {
+                let command_errors = crate::commands::user_registry::install_plugin_registry(
+                    &app.workspace,
+                    app.plugin_registry.as_ref(),
+                );
+                app.hooks = app.hooks.rebind(
+                    crate::hooks::HooksConfig::load_with_project_and_plugins(
+                        config.hooks_config(),
+                        &app.workspace,
+                        Some(app.plugin_registry.as_ref()),
+                    ),
+                    app.workspace.clone(),
+                );
+                app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));
+                if !command_errors.is_empty() {
+                    app.set_sticky_status(
+                        format!(
+                            "Plugin runtime activation failed: {}",
+                            command_errors.join("; ")
+                        ),
+                        StatusToastLevel::Error,
+                        None,
+                    );
+                }
                 let _ = engine_handle.send(Op::Shutdown).await;
                 *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
                 if !app.api_messages.is_empty() {
@@ -1889,12 +1912,22 @@ pub(crate) fn apply_workspace_runtime_state(app: &mut App, config: &Config, work
     app.workspace = workspace.clone();
     app.coordination_detail = None;
     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
+    for error in crate::commands::user_registry::install_plugin_registry(
+        &workspace,
+        app.plugin_registry.as_ref(),
+    ) {
+        tracing::warn!(target: "plugins", "{error}");
+    }
     app.active_skill = None;
     app.active_skill_provenance = None;
     // Switching workspace reloads the hook set (project hooks are per-repo)
     // but stays inside the same TUI session, so the session id is preserved.
     app.hooks = app.hooks.rebind(
-        crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace),
+        crate::hooks::HooksConfig::load_with_project_and_plugins(
+            config.hooks_config(),
+            &workspace,
+            Some(app.plugin_registry.as_ref()),
+        ),
         workspace.clone(),
     );
     app.skills_dir = crate::tui::app::resolve_skills_dir(&workspace, &config.skills_dir(), config);

@@ -837,6 +837,7 @@ mod tests {
             },
             source: std::path::PathBuf::from(format!("{id}.toml")),
             origin: crate::fleet::roster::ProfileOrigin::Workspace,
+            plugin_authority: None,
         }
     }
 

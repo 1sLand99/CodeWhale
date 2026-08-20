@@ -17,7 +17,11 @@ pub(crate) fn complete_trust_directory_onboarding(
     // reported a `DEEPSEEK_SESSION_ID`, and it has to keep meaning the same
     // session afterwards.
     app.hooks = app.hooks.rebind(
-        crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &app.workspace),
+        crate::hooks::HooksConfig::load_with_project_and_plugins(
+            config.hooks_config(),
+            &app.workspace,
+            Some(app.plugin_registry.as_ref()),
+        ),
         app.workspace.clone(),
     );
     app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));

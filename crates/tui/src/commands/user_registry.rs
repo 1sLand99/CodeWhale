@@ -22,6 +22,9 @@ struct UserCommandRegistryState {
     initialized: bool,
     workspace: Option<PathBuf>,
     command_dirs_snapshot: Vec<CommandDirSnapshot>,
+    plugin_workspace: Option<PathBuf>,
+    plugin_sources: Vec<crate::plugins::runtime::PluginComponentSource>,
+    plugin_errors: Vec<String>,
     registry: UserCommandRegistry,
 }
 
@@ -51,6 +54,7 @@ pub struct UserCommandMetadata {
     pub pausable: bool,
     pub aliases: Vec<String>,
     pub hidden: bool,
+    pub plugin_authority: Option<crate::plugins::types::PluginAuthority>,
 }
 
 impl UserCommandMetadata {
@@ -102,6 +106,7 @@ impl UserCommandRegistry {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn load(workspace: Option<&Path>) -> Self {
         // The user_commands module is the permanent lower-level file scanning
         // and parsing boundary; this registry owns metadata, shadowing, and
@@ -109,28 +114,52 @@ impl UserCommandRegistry {
         Self::load_with_sources(
             &user_commands::commands_dirs(workspace),
             &user_commands::workflow_dirs(workspace),
+            &[],
+            &[],
         )
     }
 
-    pub(crate) fn load_with_sources(md_dirs: &[PathBuf], workflow_dirs: &[PathBuf]) -> Self {
+    pub(crate) fn load_with_sources(
+        md_dirs: &[PathBuf],
+        workflow_dirs: &[PathBuf],
+        plugin_sources: &[crate::plugins::runtime::PluginComponentSource],
+        plugin_errors: &[String],
+    ) -> Self {
         let mut registry = Self::load_from_paths(md_dirs);
 
         // Saved workflows become slash commands after explicit .md commands,
         // so a hand-written command with the same name always wins without a
         // noisy duplicate-definition warning.
-        let mut workflow_entries: Vec<(String, String, PathBuf)> = Vec::new();
+        let mut workflow_entries: Vec<CommandSourceEntry> = Vec::new();
         for dir in workflow_dirs {
             for (name, content, path) in user_commands::load_workflow_commands_from_dir(dir) {
                 if registry.get(&name).is_none()
                     && !workflow_entries
                         .iter()
-                        .any(|(existing, _, _)| *existing == name)
+                        .any(|existing| existing.name == name)
                 {
-                    workflow_entries.push((name, content, path));
+                    workflow_entries.push(CommandSourceEntry::plain(name, content, path));
                 }
             }
         }
         registry.load_from_entries(workflow_entries);
+        for error in plugin_errors {
+            registry.record_load_error(PathBuf::from("plugin-runtime"), error.clone());
+        }
+        let mut plugin_entries = Vec::new();
+        for source in plugin_sources {
+            for (name, content, path) in
+                user_commands::load_command_entries_from_component(&source.path)
+            {
+                plugin_entries.push(CommandSourceEntry {
+                    name,
+                    content,
+                    path,
+                    plugin_authority: Some(source.authority.clone()),
+                });
+            }
+        }
+        registry.load_from_entries(plugin_entries);
         registry
     }
 
@@ -145,7 +174,11 @@ impl UserCommandRegistry {
             for (name, content) in directory_commands {
                 let canonical = normalize_name(&name);
                 if seen.insert(canonical.clone()) {
-                    loaded.push((name, content, dir.join(format!("{canonical}.md"))));
+                    loaded.push(CommandSourceEntry::plain(
+                        name,
+                        content,
+                        dir.join(format!("{canonical}.md")),
+                    ));
                 } else {
                     registry.record_load_error(
                         dir.join(format!("{canonical}.md")),
@@ -167,18 +200,21 @@ impl UserCommandRegistry {
             .into_iter()
             .map(|(name, content)| {
                 let path = PathBuf::from(format!("{}.md", normalize_name(&name)));
-                (name, content, path)
+                CommandSourceEntry::plain(name, content, path)
             })
             .collect();
         registry.load_from_entries(loaded);
         registry
     }
 
-    fn load_from_entries(&mut self, commands: Vec<(String, String, PathBuf)>) {
+    fn load_from_entries(&mut self, commands: Vec<CommandSourceEntry>) {
         let parsed_commands = commands
             .into_iter()
-            .map(|(name, content, path)| {
-                let (metadata, errors) = parse_metadata(name, &content, &path);
+            .map(|entry| {
+                let (mut metadata, errors) =
+                    parse_metadata(entry.name, &entry.content, &entry.path);
+                metadata.plugin_authority = entry.plugin_authority;
+                let path = entry.path;
                 (metadata, errors, path)
             })
             .collect::<Vec<_>>();
@@ -252,6 +288,11 @@ impl UserCommandRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&UserCommandMetadata> {
+        self.get_unchecked(name)
+            .filter(|command| plugin_command_is_current(command))
+    }
+
+    fn get_unchecked(&self, name: &str) -> Option<&UserCommandMetadata> {
         let key = normalize_name(name);
         self.commands.get(&key).or_else(|| {
             self.aliases
@@ -266,17 +307,25 @@ impl UserCommandRegistry {
         self.aliases
             .get(&key)
             .and_then(|canonical| self.commands.get(canonical))
+            .filter(|command| plugin_command_is_current(command))
     }
 
     #[cfg(test)]
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.commands.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .commands
+            .values()
+            .filter(|command| plugin_command_is_current(command))
+            .map(|command| command.name.clone())
+            .collect();
         names.sort();
         names
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &UserCommandMetadata> {
-        self.commands.values()
+        self.commands
+            .values()
+            .filter(|command| plugin_command_is_current(command))
     }
 
     #[cfg(test)]
@@ -318,6 +367,7 @@ fn parse_metadata(
         pausable: false,
         aliases: Vec::new(),
         hidden: false,
+        plugin_authority: None,
     };
     let mut configured_name = None;
 
@@ -360,6 +410,31 @@ fn parse_metadata(
     errors.extend(validate_command_content(&command.name, content, path));
 
     (command, errors)
+}
+
+#[derive(Debug, Clone)]
+struct CommandSourceEntry {
+    name: String,
+    content: String,
+    path: PathBuf,
+    plugin_authority: Option<crate::plugins::types::PluginAuthority>,
+}
+
+impl CommandSourceEntry {
+    fn plain(name: String, content: String, path: PathBuf) -> Self {
+        Self {
+            name,
+            content,
+            path,
+            plugin_authority: None,
+        }
+    }
+}
+
+fn plugin_command_is_current(command: &UserCommandMetadata) -> bool {
+    command.plugin_authority.as_ref().is_none_or(|authority| {
+        crate::plugins::registry::verify_plugin_state_authority(authority).is_ok()
+    })
 }
 
 fn validate_command_content(canonical: &str, content: &str, path: &Path) -> Vec<LoadError> {
@@ -450,7 +525,15 @@ fn normalize_workspace(workspace: Option<&Path>) -> Option<PathBuf> {
     workspace.map(Path::to_path_buf)
 }
 
+#[cfg(test)]
 fn command_dirs_snapshot(workspace: Option<&Path>) -> Vec<CommandDirSnapshot> {
+    command_dirs_snapshot_with_plugins(workspace, &[])
+}
+
+fn command_dirs_snapshot_with_plugins(
+    workspace: Option<&Path>,
+    plugin_sources: &[crate::plugins::runtime::PluginComponentSource],
+) -> Vec<CommandDirSnapshot> {
     user_commands::commands_dirs(workspace)
         .into_iter()
         .map(|path| snapshot_dir(path, |name| name.ends_with(".md")))
@@ -462,6 +545,11 @@ fn command_dirs_snapshot(workspace: Option<&Path>) -> Vec<CommandDirSnapshot> {
                         name.ends_with(user_commands::WORKFLOW_SOURCE_SUFFIX)
                     })
                 }),
+        )
+        .chain(
+            plugin_sources
+                .iter()
+                .map(|source| snapshot_dir(source.path.clone(), |name| name.ends_with(".md"))),
         )
         .collect()
 }
@@ -548,8 +636,16 @@ pub fn with_registry_for_workspace<R>(
     f: impl FnOnce(&UserCommandRegistry) -> R,
 ) -> R {
     let workspace = normalize_workspace(workspace);
-    let snapshot = command_dirs_snapshot(workspace.as_deref());
     let lock = registry_lock();
+    let (plugin_sources, plugin_errors) = {
+        let guard = lock.read().expect("user command registry lock poisoned");
+        if guard.plugin_workspace == workspace {
+            (guard.plugin_sources.clone(), guard.plugin_errors.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    };
+    let snapshot = command_dirs_snapshot_with_plugins(workspace.as_deref(), &plugin_sources);
     {
         let guard = lock.read().expect("user command registry lock poisoned");
         if !registry_needs_reload(&guard, &workspace, &snapshot) {
@@ -557,7 +653,12 @@ pub fn with_registry_for_workspace<R>(
         }
     }
 
-    let replacement = UserCommandRegistry::load(workspace.as_deref());
+    let replacement = UserCommandRegistry::load_with_sources(
+        &user_commands::commands_dirs(workspace.as_deref()),
+        &user_commands::workflow_dirs(workspace.as_deref()),
+        &plugin_sources,
+        &plugin_errors,
+    );
     let mut guard = lock.write().expect("user command registry lock poisoned");
     if registry_needs_reload(&guard, &workspace, &snapshot) {
         guard.initialized = true;
@@ -568,6 +669,28 @@ pub fn with_registry_for_workspace<R>(
     f(&guard.registry)
 }
 
+/// Install the current workspace's reviewed plugin command snapshot into the
+/// existing process-global command registry. The next read rebuilds the
+/// catalogue atomically; dispatch still revalidates authority immediately
+/// before expanding the command body.
+pub fn install_plugin_registry(
+    workspace: &Path,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Vec<String> {
+    let (sources, errors) = crate::plugins::runtime::active_component_sources(
+        plugins,
+        crate::plugins::activation::PluginActivationCapability::Commands,
+    );
+    let mut guard = registry_lock()
+        .write()
+        .expect("user command registry lock poisoned");
+    guard.initialized = false;
+    guard.plugin_workspace = Some(workspace.to_path_buf());
+    guard.plugin_sources = sources;
+    guard.plugin_errors = errors.clone();
+    errors
+}
+
 pub fn try_dispatch(app: &mut App, input: &str) -> Option<CommandResult> {
     let parts: Vec<&str> = input.trim().splitn(2, ' ').collect();
     let command = normalize_name(parts.first().copied().unwrap_or_default());
@@ -575,16 +698,31 @@ pub fn try_dispatch(app: &mut App, input: &str) -> Option<CommandResult> {
 
     let (dispatch_error, metadata) =
         with_registry_for_workspace(Some(&app.workspace), |registry| {
-            (
-                registry.dispatch_error(&command),
-                registry.get(&command).cloned(),
-            )
+            // Dispatch must see a just-revoked plugin command long enough to
+            // return a visible authority error. Discovery and palettes use
+            // `get`/`iter`, which hide it immediately.
+            let metadata = registry.get_unchecked(&command).cloned();
+            let dispatch_error = metadata
+                .as_ref()
+                .and_then(|_| registry.dispatch_error(&command));
+            (dispatch_error, metadata)
         });
     if let Some(error) = dispatch_error {
         return Some(CommandResult::error(error));
     }
 
     let metadata = metadata?;
+    if let Some(authority) = metadata.plugin_authority.as_ref()
+        && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
+            authority,
+            crate::plugins::activation::PluginActivationCapability::Commands,
+        )
+    {
+        return Some(CommandResult::error(format!(
+            "Plugin command '/{}' was denied: {reason}. Reload, review, trust, and enable the bundle before retrying.",
+            metadata.name
+        )));
+    }
 
     app.goal.objective = None;
     app.goal.started_at = None;
@@ -652,8 +790,12 @@ mod tests {
         )
         .expect("write workflow");
 
-        let registry =
-            UserCommandRegistry::load_with_sources(&[], std::slice::from_ref(&workflow_dir));
+        let registry = UserCommandRegistry::load_with_sources(
+            &[],
+            std::slice::from_ref(&workflow_dir),
+            &[],
+            &[],
+        );
         let command = registry.get("pr-review").expect("workflow command");
         assert_eq!(
             command.description.as_deref(),
@@ -690,7 +832,7 @@ mod tests {
         std::fs::write(workflow_dir.join("triage.workflow.js"), "phase('x');\n")
             .expect("write workflow");
 
-        let registry = UserCommandRegistry::load_with_sources(&[md_dir], &[workflow_dir]);
+        let registry = UserCommandRegistry::load_with_sources(&[md_dir], &[workflow_dir], &[], &[]);
         let command = registry.get("triage").expect("command");
         assert_eq!(command.body, "hand-written triage $ARGUMENTS");
         assert!(
@@ -839,6 +981,39 @@ mod tests {
             Some(AppAction::SendMessage(message)) => message,
             other => panic!("expected SendMessage action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plugin_command_dispatch_survives_restart_and_revocation_is_visible() {
+        let _lock = crate::test_support::lock_test_env();
+        let fixture = crate::plugins::test_fixture::DeclarativePluginFixture::new();
+        let mut app = test_app(fixture.workspace.clone());
+        install_plugin_registry(&fixture.workspace, &fixture.registry);
+
+        let result = try_dispatch(&mut app, "/plugin-hello ocean")
+            .expect("active plugin command dispatches");
+        assert!(!result.is_error);
+        assert_eq!(sent_message(result), "hello from plugin ocean");
+
+        let inactive = fixture.revoke_from_fresh_registry();
+        let denied = try_dispatch(&mut app, "/plugin-hello ocean")
+            .expect("stale command returns a visible denial");
+        assert!(denied.is_error);
+        assert!(
+            denied
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("was denied")),
+            "{denied:?}"
+        );
+
+        install_plugin_registry(&fixture.workspace, &inactive);
+        assert!(
+            with_registry_for_workspace(Some(&fixture.workspace), |registry| {
+                registry.get("plugin-hello").is_none()
+            }),
+            "a reload removes revoked plugin commands"
+        );
     }
 
     #[test]

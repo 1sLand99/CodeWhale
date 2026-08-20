@@ -247,6 +247,12 @@ pub struct Hook {
     /// Optional name for logging/debugging
     #[serde(default)]
     pub name: Option<String>,
+
+    /// Content- and generation-bound authority for a plugin-contributed hook.
+    /// Never accepted from TOML; only the reviewed staged adapter may attach
+    /// it after parsing immutable bytes.
+    #[serde(skip)]
+    pub plugin_authority: Option<crate::plugins::types::PluginAuthority>,
 }
 
 fn default_timeout() -> u64 {
@@ -269,6 +275,7 @@ impl Hook {
             background: false,
             continue_on_error: true,
             name: None,
+            plugin_authority: None,
         }
     }
 
@@ -382,7 +389,49 @@ impl HooksConfig {
     /// Trusted project hooks are appended after global hooks.  A malformed
     /// trusted project file logs a warning and falls back to global-only.
     pub fn load_with_project(global: HooksConfig, workspace: &Path) -> HooksConfig {
+        Self::load_with_project_and_plugins(global, workspace, None)
+    }
+
+    /// Merge global, reviewed plugin, then trusted project hooks.
+    ///
+    /// Project hooks intentionally remain last because that is the existing
+    /// tie-breaking contract for mutable `message_submit` transformations.
+    /// Plugin files are read only from Codewhale's immutable staged snapshot;
+    /// their attached authority is rechecked at every process-spawn boundary.
+    pub fn load_with_project_and_plugins(
+        global: HooksConfig,
+        workspace: &Path,
+        plugins: Option<&crate::plugins::PluginRegistry>,
+    ) -> HooksConfig {
         let mut merged = global;
+        if let Some(plugins) = plugins {
+            let (sources, adapter_errors) = crate::plugins::runtime::active_component_sources(
+                plugins,
+                crate::plugins::activation::PluginActivationCapability::Hooks,
+            );
+            for error in adapter_errors {
+                merged.problems.push(HookConfigProblem {
+                    name: None,
+                    event: None,
+                    detail: error,
+                    rejected: true,
+                });
+            }
+            for source in sources {
+                match load_plugin_hook_component(&source.path, &source.authority) {
+                    Ok(mut plugin) => {
+                        merged.problems.append(&mut plugin.problems);
+                        merged.hooks.append(&mut plugin.hooks);
+                    }
+                    Err(error) => merged.problems.push(HookConfigProblem {
+                        name: Some(source.plugin_name),
+                        event: None,
+                        detail: error,
+                        rejected: true,
+                    }),
+                }
+            }
+        }
         let project_path = workspace.join(".codewhale").join("hooks.toml");
         if project_path.exists() && workspace_allows_project_hooks(workspace) {
             match read_project_hooks_file(&project_path) {
@@ -519,6 +568,7 @@ impl HooksConfig {
     /// Rejection is by position, so a broken entry never takes an innocent one
     /// with it just because the two share a name (or share the absence of one).
     fn apply_validation(&mut self) {
+        let inherited_problems = std::mem::take(&mut self.problems);
         let setting_problems = self.validate_settings();
         // Reject the value, not just report it: the executor reads
         // `default_timeout_secs` directly, so leaving `Some(0)` in place would
@@ -546,8 +596,9 @@ impl HooksConfig {
                 keep
             });
         }
-        self.problems = setting_problems
+        self.problems = inherited_problems
             .into_iter()
+            .chain(setting_problems)
             .chain(problems.into_iter().map(|(_, problem)| problem))
             .collect();
     }
@@ -590,6 +641,58 @@ impl HooksConfig {
         // credit a number to a setting the runtime refused to apply.
         self.default_timeout_secs.is_some_and(|secs| secs > 0)
     }
+}
+
+fn load_plugin_hook_component(
+    component: &Path,
+    authority: &crate::plugins::types::PluginAuthority,
+) -> Result<HooksConfig, String> {
+    let mut paths = if component.is_file() {
+        vec![component.to_path_buf()]
+    } else if component.is_dir() {
+        let mut paths = std::fs::read_dir(component)
+            .map_err(|error| format!("failed to read plugin Hooks component: {error}"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    } else {
+        return Err("plugin Hooks component is unavailable".to_string());
+    };
+    if paths.is_empty() {
+        return Err("plugin Hooks component contains no TOML configuration".to_string());
+    }
+
+    let mut merged = HooksConfig::default();
+    for path in paths.drain(..) {
+        let contents = read_project_hooks_file(&path)
+            .map_err(|error| format!("failed to read plugin Hooks file: {error}"))?;
+        let mut parsed: HooksConfig = toml::from_str(&contents)
+            .map_err(|error| format!("failed to parse plugin Hooks file: {error}"))?;
+        if parsed.working_dir.is_some() {
+            return Err(
+                "plugin Hooks may not set working_dir; hooks run in the active workspace"
+                    .to_string(),
+            );
+        }
+        parsed.apply_validation();
+        if !parsed.enabled {
+            continue;
+        }
+        if let Some(timeout) = parsed.default_timeout_secs.filter(|value| *value > 0) {
+            for hook in &mut parsed.hooks {
+                hook.timeout_secs = timeout;
+            }
+        }
+        for hook in &mut parsed.hooks {
+            hook.plugin_authority = Some(authority.clone());
+        }
+        merged.problems.append(&mut parsed.problems);
+        merged.hooks.append(&mut parsed.hooks);
+    }
+    Ok(merged)
 }
 
 fn workspace_allows_project_hooks(workspace: &Path) -> bool {

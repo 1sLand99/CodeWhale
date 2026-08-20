@@ -1975,9 +1975,9 @@ async fn run_async_main_dispatch(
 
     // Plugins own one read-only discovery snapshot per process. Initialize it
     // before the subcommand match so plain launch, resume, fork, exec, serve,
-    // and every other runtime surface feed Skills and MCP from the same trust
-    // decision (#3916, #4399). Discovery never enables, trusts, executes, or
-    // persists a bundle.
+    // and every other runtime surface use the same plugin trust decision
+    // (#3916, #4399). Discovery never enables, trusts, executes, or persists a
+    // bundle.
 
     // Handle subcommands first
     if let Some(command) = command {
@@ -3353,12 +3353,13 @@ fn plugins_readme_template() -> &'static str {
      content-addressed runtime snapshot, then enable the bundle. Remote MCP\n\
      authentication must name environment sources; never store secret values\n\
      in `plugin.toml`.\n\n\
-     Codewhale activates only declarative Skills and MCP servers through their\n\
-     existing engines. Commands, agents, hooks, LSP, native extensions,\n\
-     filesystem grants, and lifecycle mutation stay inventoried and inactive;\n\
-     a mixed bundle can still activate its supported Skills and MCP.\n\
-     There is no marketplace, install, update, ambient compatibility scan, or\n\
-     automatic trust surface in this release.\n"
+     Codewhale activates declarative Skills, MCP servers, Commands, Agent\n\
+     profiles, and Hooks through their existing engines. LSP, native\n\
+     extensions, filesystem grants, and lifecycle mutation stay inventoried\n\
+     and inactive; a mixed bundle can still activate supported components.\n\
+     Marketplace catalogs, install, update, and uninstall all feed this same\n\
+     disabled-and-untrusted review path; none grants automatic trust. Codewhale\n\
+     does not scan other applications for ambient plugins.\n"
 }
 
 fn plugin_example_manifest_template() -> &'static str {
@@ -6085,19 +6086,21 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let max_spawn_depth = config.subagent_max_spawn_depth_for_provider(provider);
     let roster = crate::fleet::roster::FleetRoster::load(&config.fleet_config(), workspace);
     let mut built_in_members = 0usize;
+    let mut plugin_members = 0usize;
     let mut config_members = 0usize;
     let mut personal_members = 0usize;
     let mut workspace_members = 0usize;
     for member in roster.members() {
         match member.origin {
             crate::fleet::roster::ProfileOrigin::BuiltIn => built_in_members += 1,
+            crate::fleet::roster::ProfileOrigin::Plugin => plugin_members += 1,
             crate::fleet::roster::ProfileOrigin::Config => config_members += 1,
             crate::fleet::roster::ProfileOrigin::Personal => personal_members += 1,
             crate::fleet::roster::ProfileOrigin::Workspace => workspace_members += 1,
         }
     }
     let roster_members = roster.members().len();
-    let custom_members = config_members + personal_members + workspace_members;
+    let custom_members = plugin_members + config_members + personal_members + workspace_members;
     let roster_ready = roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
@@ -11515,7 +11518,7 @@ async fn run_exec_agent(
         active_route_limits,
         workspace: workspace.clone(),
         subagent_state_root: None,
-        plugin_registry: Some(engine_plugin_registry),
+        plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),
         allow_shell: exec_allow_shell,
         trust_mode,
         notes_path: execution_config.notes_path(),
@@ -11568,9 +11571,10 @@ async fn run_exec_agent(
         lsp_config,
         runtime_services,
         subagent_model_overrides: execution_config.subagent_model_overrides(),
-        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
+        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load_with_plugins(
             &execution_config.fleet_config(),
             &workspace,
+            engine_plugin_registry.as_ref(),
         )),
         subagent_api_timeout: std::time::Duration::from_secs(
             execution_config.subagent_api_timeout_secs_for_provider(effective_provider),

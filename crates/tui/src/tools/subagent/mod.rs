@@ -12644,8 +12644,21 @@ fn refresh_spawn_route_sources(runtime: &mut SubAgentRuntime) {
     let Some(config) = runtime.api_config.as_deref() else {
         return;
     };
-    let roster =
-        crate::fleet::roster::FleetRoster::load(&config.fleet_config(), &runtime.context.workspace);
+    let roster = runtime.context.plugin_registry.as_deref().map_or_else(
+        || {
+            crate::fleet::roster::FleetRoster::load(
+                &config.fleet_config(),
+                &runtime.context.workspace,
+            )
+        },
+        |plugins| {
+            crate::fleet::roster::FleetRoster::load_with_plugins(
+                &config.fleet_config(),
+                &runtime.context.workspace,
+                plugins,
+            )
+        },
+    );
     let mut role_models = roster.model_overrides();
     role_models.extend(config.subagent_model_overrides());
     runtime.role_models = role_models;
@@ -12692,6 +12705,17 @@ fn apply_spawn_profile(
              Type aliases: {VALID_ROLE_ALIASES}. See /fleet."
         )));
     };
+    if let Some(authority) = member.plugin_authority.as_ref()
+        && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
+            authority,
+            crate::plugins::activation::PluginActivationCapability::Agents,
+        )
+    {
+        return Err(ToolError::execution_failed(format!(
+            "Plugin Agent profile '{}' was denied: {reason}. Reload, review, trust, and enable the bundle before retrying.",
+            member.id
+        )));
+    }
 
     let member_type = crate::fleet::worker_runtime::roster_member_agent_type(member);
     if request.agent_type_explicit && request.agent_type != member_type {

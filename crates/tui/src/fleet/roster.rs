@@ -11,7 +11,7 @@
 //! - personal `$CODEWHALE_HOME/agents/*.toml` profile files,
 //! - workspace `.codewhale/agents/*.toml` profile files.
 //!
-//! Precedence is Workspace > Personal > Config > BuiltIn, merged by id. Loading never
+//! Precedence is Workspace > Personal > Config > Plugin > BuiltIn, merged by id. Loading never
 //! fails the session: an unreadable workspace profile dir degrades to the
 //! built-in + config layers with a log line.
 //!
@@ -38,16 +38,17 @@ use codewhale_config::{
 };
 
 use super::profile::{
-    AgentProfile, load_agent_profiles_from_dir_tolerant, load_workspace_agent_profiles_tolerant,
-    personal_agent_profile_dir,
+    AgentProfile, load_agent_profiles_from_dir_tolerant, load_plugin_agent_profiles_from_component,
+    load_workspace_agent_profiles_tolerant, personal_agent_profile_dir,
 };
 
 /// Which layer a roster member came from. Higher layers override lower ones
-/// by id (Workspace > Personal > Config > BuiltIn).
+/// by id (Workspace > Personal > Config > Plugin > BuiltIn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileOrigin {
     BuiltIn,
+    Plugin,
     Config,
     Personal,
     Workspace,
@@ -57,6 +58,7 @@ impl std::fmt::Display for ProfileOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::BuiltIn => "built-in",
+            Self::Plugin => "plugin",
             Self::Config => "config",
             Self::Personal => "personal",
             Self::Workspace => "project",
@@ -109,9 +111,10 @@ pub struct MultiLayerProfile {
 
 fn origin_precedence(origin: ProfileOrigin) -> u8 {
     match origin {
-        ProfileOrigin::Workspace => 3,
-        ProfileOrigin::Personal => 2,
-        ProfileOrigin::Config => 1,
+        ProfileOrigin::Workspace => 4,
+        ProfileOrigin::Personal => 3,
+        ProfileOrigin::Config => 2,
+        ProfileOrigin::Plugin => 1,
         ProfileOrigin::BuiltIn => 0,
     }
 }
@@ -169,11 +172,29 @@ impl FleetRoster {
     #[must_use]
     pub fn load(fleet_config: &FleetConfigToml, workspace: &Path) -> Self {
         let personal_dir = personal_agent_profile_dir().ok();
-        Self::load_with_personal_dir(
+        Self::load_with_personal_dir_and_plugins(
             fleet_config,
             workspace,
             personal_dir.as_deref(),
             project_agent_profiles_enabled(),
+            None,
+        )
+    }
+
+    /// Load the ordinary roster plus trusted, enabled plugin Agent profiles.
+    #[must_use]
+    pub fn load_with_plugins(
+        fleet_config: &FleetConfigToml,
+        workspace: &Path,
+        plugins: &crate::plugins::PluginRegistry,
+    ) -> Self {
+        let personal_dir = personal_agent_profile_dir().ok();
+        Self::load_with_personal_dir_and_plugins(
+            fleet_config,
+            workspace,
+            personal_dir.as_deref(),
+            project_agent_profiles_enabled(),
+            Some(plugins),
         )
     }
 
@@ -183,9 +204,57 @@ impl FleetRoster {
         personal_dir: Option<&Path>,
         include_workspace_profiles: bool,
     ) -> Self {
+        Self::load_with_personal_dir_and_plugins(
+            fleet_config,
+            workspace,
+            personal_dir,
+            include_workspace_profiles,
+            None,
+        )
+    }
+
+    fn load_with_personal_dir_and_plugins(
+        fleet_config: &FleetConfigToml,
+        workspace: &Path,
+        personal_dir: Option<&Path>,
+        include_workspace_profiles: bool,
+        plugins: Option<&crate::plugins::PluginRegistry>,
+    ) -> Self {
         let mut built_ins = Self::built_in_members();
         let mut extras: Vec<AgentProfile> = Vec::new();
         let mut shadowed: Vec<ShadowedProfile> = Vec::new();
+
+        if let Some(plugins) = plugins {
+            let (sources, errors) = crate::plugins::runtime::active_component_sources(
+                plugins,
+                crate::plugins::activation::PluginActivationCapability::Agents,
+            );
+            for error in errors {
+                tracing::warn!("fleet roster: {error}");
+            }
+            for source in sources {
+                match load_plugin_agent_profiles_from_component(&source.path, &source.authority) {
+                    Ok((profiles, issues)) => {
+                        for issue in issues {
+                            tracing::warn!(
+                                plugin = %source.plugin_name,
+                                "fleet roster: skipping invalid plugin Agent profile: {issue}"
+                            );
+                        }
+                        for member in profiles {
+                            record_shadow(
+                                merge_member(&mut built_ins, &mut extras, member),
+                                &mut shadowed,
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        plugin = %source.plugin_name,
+                        "fleet roster: failed to load plugin Agent profiles: {error:#}"
+                    ),
+                }
+            }
+        }
 
         for (id, profile) in &fleet_config.profiles {
             let mut profile = profile.clone();
@@ -198,6 +267,7 @@ impl FleetRoster {
                 profile,
                 source: PathBuf::from("config.toml"),
                 origin: ProfileOrigin::Config,
+                plugin_authority: None,
             };
             record_shadow(
                 merge_member(&mut built_ins, &mut extras, member),
@@ -416,6 +486,7 @@ impl FleetRoster {
             },
             source: PathBuf::from("built-in"),
             origin: ProfileOrigin::BuiltIn,
+            plugin_authority: None,
         })
         .collect()
     }

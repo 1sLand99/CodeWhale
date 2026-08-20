@@ -137,15 +137,40 @@ fn synthesize_workflow_command(name: &str, description: &str, path: &Path) -> St
 /// Scan a single commands directory for `.md` files and return
 /// `(name, content)` pairs. Errors are silently skipped.
 pub(crate) fn load_commands_from_dir(dir: &Path) -> Vec<(String, String)> {
-    let mut commands: Vec<(String, String)> = Vec::new();
+    load_command_entries_from_component(dir)
+        .into_iter()
+        .map(|(name, content, _)| (name, content))
+        .collect()
+}
 
-    if !dir.is_dir() {
-        return commands;
+/// Load one reviewed command component from an immutable plugin snapshot.
+/// Components may name either one markdown file or a directory of markdown
+/// files; every returned entry retains the exact staged path for diagnostics.
+pub(crate) fn load_command_entries_from_component(
+    component: &Path,
+) -> Vec<(String, String, PathBuf)> {
+    if component.is_file() {
+        if component.extension().and_then(|value| value.to_str()) != Some("md") {
+            return Vec::new();
+        }
+        let Some(stem) = component.file_stem().and_then(|value| value.to_str()) else {
+            return Vec::new();
+        };
+        return std::fs::read_to_string(component)
+            .ok()
+            .map(|content| vec![(stem.to_lowercase(), content, component.to_path_buf())])
+            .unwrap_or_default();
     }
 
-    let entries = match std::fs::read_dir(dir) {
+    let mut commands: Vec<(String, String, PathBuf)> = Vec::new();
+
+    if !component.is_dir() {
+        return Vec::new();
+    }
+
+    let entries = match std::fs::read_dir(component) {
         Ok(entries) => entries,
-        Err(_) => return commands,
+        Err(_) => return Vec::new(),
     };
 
     for entry in entries.flatten() {
@@ -161,9 +186,9 @@ pub(crate) fn load_commands_from_dir(dir: &Path) -> Vec<(String, String)> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        commands.push((stem, content));
+        commands.push((stem, content, path));
     }
-
+    commands.sort_by(|left, right| left.0.cmp(&right.0));
     commands
 }
 
