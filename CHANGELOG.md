@@ -8,14 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - `codewhale completions <shell>` generated a script for the wrong program.
-  The subcommand forwarded to the internal `codewhale-tui` executable, which
+  The subcommand forwarded to the in-tree `codewhale-tui` binary, which
   rendered completions from *its own* clap tree under *its own* name, so the
   output ended in `complete -F _codewhale__tui ... codewhale-tui` (bash),
   `#compdef codewhale-tui` (zsh), and
   `Register-ArgumentCompleter -Native -CommandName 'codewhale-tui'`
   (PowerShell). Sourcing it registered nothing for `codewhale` or `codew` —
-  the two names releases actually publish — so tab completion appeared to do
-  nothing. The forwarded tree was also stale against the real CLI: it offered
+  the two commands current installers expose — so tab completion appeared to
+  do nothing. The forwarded tree was also stale against the real CLI: it offered
   `pr`, `scorecard`, and `session-diagnostics`, which `codewhale` does not
   have, and omitted `run`, `rc`, `config`, `model`, `thread`, `lane`,
   `workflow`, `web`, `account`, `app-server`, `mcp-server`, `metrics`,

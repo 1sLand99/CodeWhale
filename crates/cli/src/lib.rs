@@ -466,8 +466,13 @@ The command prints the completion script to stdout; redirect it to a path your s
 }
 
 /// The name of this crate's `[[bin]]` target, and the command users actually
-/// type. Completion scripts must register *this*, not the internal
-/// `codewhale-tui` executable that used to render them (#5526).
+/// type. Completion scripts must register *this*, not the in-tree
+/// `codewhale-tui` binary that used to render them (#5526).
+///
+/// GitHub releases do not ship a separately compiled TUI: `release-artifacts.yml`
+/// builds `-p codewhale-cli` and publishes `codewhale` plus a byte-identical
+/// `codew` copy. The `codewhale-tui-*` filenames still attached to the release
+/// are that same binary (a v0.9.4 updater bridge), not a third runtime.
 const COMPLETION_BIN_NAME: &str = "codewhale";
 
 /// Releases publish `codew` as a byte-identical copy of `codewhale`
@@ -5509,9 +5514,9 @@ mod tests {
     }
 
     /// Issue #5526: `codewhale completions <shell>` used to forward to the
-    /// `codewhale-tui` executable, so every generated script registered
-    /// `codewhale-tui` — a name no user types — and exposed the TUI's smaller
-    /// subcommand tree. Pin the registered names per shell.
+    /// in-tree `codewhale-tui` binary, so every generated script registered
+    /// `codewhale-tui` — not a GitHub-release command — and exposed the TUI's
+    /// smaller subcommand tree. Pin the registered names per shell.
     #[test]
     fn generated_completion_scripts_register_the_published_command_names() {
         let bin = declared_bin_name();
@@ -5599,7 +5604,7 @@ mod tests {
         ] {
             assert!(
                 !script.contains("codewhale-tui"),
-                "{shell} completions leaked the internal codewhale-tui name (#5526)"
+                "{shell} completions leaked the in-tree codewhale-tui name (#5526)"
             );
         }
     }
