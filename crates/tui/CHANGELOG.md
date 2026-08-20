@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
+  auditors not to delete — prompt zones, context budget, the route seam —
+  and on the next-largest holders (palette tokens, hotbar actions, core
+  events) are now `#[expect(dead_code)]`, or gone where the lint was already
+  stale. A suppression that stops matching the lint fails the `-Dwarnings`
+  gate instead of sitting quiet. The same gate is recorded in
+  `[workspace.lints]` so member crates inherit it from the manifest rather
+  than only from CI `RUSTFLAGS`.
+
 - The first screen of first run no longer cuts its own headline. The welcome
   and ready titles, and the provider-step heading, were emitted as single
   unwrapped lines while the sentence beneath them wrapped, so at 40 columns
