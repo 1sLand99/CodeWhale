@@ -45,7 +45,7 @@ use codewhale_config::AppMode;
 use codewhale_core::request::{Message, SystemPrompt};
 use codewhale_execpolicy::ApprovalMode;
 
-use crate::localization::{Locale, MessageId, tr};
+use crate::localization::{MessageId, tr};
 use crate::pricing::CostCurrency;
 use crate::tui::app::{App, ReasoningEffort};
 
@@ -681,6 +681,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::localization::Locale;
 
     fn test_app() -> App {
         crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
