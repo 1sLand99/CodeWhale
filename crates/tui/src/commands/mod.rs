@@ -1567,8 +1567,13 @@ mod tests {
         let mut app = create_test_app();
         let result = execute("/goal ship layer 2 | budget: 100", &mut app);
         assert!(!result.is_error);
-        assert_eq!(app.goal.objective.as_deref(), Some("ship layer 2"));
-        assert_eq!(app.goal.token_budget, Some(100));
+        assert!(matches!(
+            result.action,
+            Some(AppAction::SetGoalObjective {
+                ref objective,
+                token_budget: Some(100)
+            }) if objective == "ship layer 2"
+        ));
         // The hunt-era alias is gone: `/hunt` must not resolve anymore.
         assert!(execute("/hunt ship layer 2", &mut app).is_error);
 

@@ -1824,7 +1824,10 @@ mod tests {
         );
         // `source_path` keeps pointing at the more-specific file so the
         // user knows where to edit the workspace-level override.
-        assert_eq!(ctx.source_path, Some(workspace.path().join("AGENTS.md")));
+        assert_eq!(
+            ctx.source_path,
+            Some(canonicalize_workspace_or_keep(workspace.path()).join("AGENTS.md"))
+        );
     }
 
     #[test]

@@ -769,13 +769,18 @@ mod tests {
         // The strip must not push the right-hand key hints off the row.
         assert!(text.contains("keys"), "{text}");
 
-        // A 150-column idle row shares the line with the full key hints, so
-        // every group keeps its headline fact and sheds its second cell.
+        // A 150-column idle row now owns the quiet route identity requested
+        // for the footer. It keeps the highest-value session facts and sheds
+        // lower-priority cells before it crowds out the key hints.
         let text = strip_text(&mut app, 150);
         assert!(
-            text.contains("4 turns │ LLM 3.5s │ TTFT avg 400ms │ Cache hit 99% │ Input 9.3M"),
+            text.contains("DeepSeek · deepseek-v4-flash · max"),
             "{text}"
         );
+        assert!(text.contains("4 turns"), "{text}");
+        assert!(text.contains("LLM 3.5s"), "{text}");
+        assert!(text.contains("Cache hit 99%"), "{text}");
+        assert!(text.contains("Input 9.3M"), "{text}");
         assert!(text.contains("keys"), "{text}");
     }
 

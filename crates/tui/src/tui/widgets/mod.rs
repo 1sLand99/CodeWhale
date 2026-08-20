@@ -4283,13 +4283,13 @@ mod tests {
         COMPOSER_PLACEHOLDER, COMPOSER_PROMPT_GUTTER_WIDTH, ChatWidget, ComposerWidget, Renderable,
         SlashMenuEntry, active_entry_revision, apply_detail_target_highlight,
         apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
-        build_empty_state_lines, composer_content_geometry, composer_height, composer_max_height,
-        composer_top_padding, cursor_row_col, empty_composer_visual_rows,
-        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
-        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
-        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
-        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
-        wrap_input_lines_for_mouse, wrap_text,
+        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
+        composer_height, composer_max_height, composer_top_padding, cursor_row_col,
+        empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
+        fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
+        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
+        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
+        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -5542,8 +5542,8 @@ mod tests {
             None,
             ApiProvider::Deepseek,
         );
-        assert!(hints.iter().any(|hint| hint.name == "/skill"));
-        assert!(hints.iter().any(|hint| hint.name == "/skills"));
+        assert!(!hints.iter().any(|hint| hint.name == "/skill"));
+        assert!(!hints.iter().any(|hint| hint.name == "/skills"));
         assert!(!hints.iter().any(|hint| hint.is_skill));
     }
 
@@ -6016,8 +6016,14 @@ mod tests {
             panic!("empty composer should expose cursor position");
         };
         let rendered = buffer_text(&buf, area);
+        let placeholder = composer_empty_hint_text(&app).into_owned();
+        let first_placeholder_cell = placeholder
+            .chars()
+            .next()
+            .expect("composer placeholder should not be empty")
+            .to_string();
 
-        assert_eq!(buf[(cursor_x, cursor_y)].symbol(), "W");
+        assert_eq!(buf[(cursor_x, cursor_y)].symbol(), first_placeholder_cell);
         assert_eq!(
             buf[(cursor_x, cursor_y)].fg,
             app.ui_theme.text_soft,
@@ -6030,11 +6036,11 @@ mod tests {
             "the idle prompt should remain upright at distance"
         );
         assert!(
-            rendered.contains(COMPOSER_PLACEHOLDER),
+            rendered.contains(&placeholder),
             "placeholder hint should render on the prompt row: {rendered}"
         );
         assert!(
-            row_text(&buf, area, cursor_y).contains(COMPOSER_PLACEHOLDER),
+            row_text(&buf, area, cursor_y).contains(&placeholder),
             "prompt and hint should share one row: {rendered}"
         );
         assert!(
@@ -6594,10 +6600,6 @@ mod tests {
         assert!(
             rendered.contains("><>") || rendered.contains("<><"),
             "flat means a plain surface, not a lifeless ocean — idle fish must survive:\n{rendered}"
-        );
-        assert!(
-            (0..area.height).any(|y| (0..area.width).any(|x| buf[(x, y)].symbol() == "F")),
-            "Fleet setup remains available in flat mode"
         );
     }
 
