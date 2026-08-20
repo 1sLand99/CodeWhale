@@ -385,8 +385,6 @@ New integrations should prefer `codewhale app-server`.")]
         after_help = "The browser receives a one-time loopback bootstrap capability, never the Runtime token.\nThe capability is exchanged for a bounded, process-local HttpOnly, SameSite=Strict web session and then invalidated."
     )]
     Web(WebArgs),
-    /// Generate shell completions.
-    Completions(TuiPassthroughArgs),
     /// Configure provider credentials.
     Login(LoginArgs),
     /// Remove saved authentication state.
@@ -421,7 +419,11 @@ is read from --auth-token, CODEWHALE_RUNTIME_TOKEN, or DEEPSEEK_RUNTIME_TOKEN.
 See docs/RUNTIME_API.md.")]
     AppServer(AppServerArgs),
     /// Generate shell completions.
-    #[command(after_help = r#"Examples:
+    #[command(
+        visible_alias = "completions",
+        after_help = r#"Every script completes both `codewhale` and the `codew` shorthand.
+
+Examples:
   Bash (current shell only):
     source <(codewhale completion bash)
 
@@ -444,7 +446,12 @@ See docs/RUNTIME_API.md.")]
   PowerShell (current shell only):
     codewhale completion powershell | Out-String | Invoke-Expression
 
-The command prints the completion script to stdout; redirect it to a path your shell loads automatically."#)]
+  PowerShell (persistent):
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PROFILE)
+    codewhale completion powershell >> $PROFILE
+
+The command prints the completion script to stdout; redirect it to a path your shell loads automatically."#
+    )]
     Completion {
         #[arg(value_enum)]
         shell: Shell,
@@ -453,6 +460,72 @@ The command prints the completion script to stdout; redirect it to a path your s
     Metrics(MetricsArgs),
     /// Check for and apply updates to the `codewhale` binary.
     Update(UpdateArgs),
+}
+
+/// The name of this crate's `[[bin]]` target, and the command users actually
+/// type. Completion scripts must register *this*, not the internal
+/// `codewhale-tui` executable that used to render them (#5526).
+const COMPLETION_BIN_NAME: &str = "codewhale";
+
+/// Releases publish `codew` as a byte-identical copy of `codewhale`
+/// (`release-artifacts.yml` copies the binary and `cmp`s it), so a completion
+/// script that fires only for `codewhale` is half-installed for anyone who
+/// types the short name.
+const COMPLETION_ALIAS_NAME: &str = "codew";
+
+/// Render the completion script for `shell` from this binary's own clap tree,
+/// registered for both published command names.
+fn render_completion_script(shell: Shell) -> String {
+    let mut cmd = Cli::command();
+    let mut buf = Vec::new();
+    generate(shell, &mut cmd, COMPLETION_BIN_NAME, &mut buf);
+    let script = String::from_utf8_lossy(&buf).into_owned();
+    register_completion_alias(shell, script)
+}
+
+/// Extend a clap_complete script so the `codew` shorthand completes too.
+///
+/// Each shell gets its own idiomatic hook rather than a second copy of the
+/// script: bash re-binds the generated function, zsh widens the `#compdef`
+/// tag line, fish wraps the primary command, and PowerShell registers an
+/// array of command names. Elvish (and any future shell) falls through
+/// unchanged — a script that completes one name is still correct.
+fn register_completion_alias(shell: Shell, script: String) -> String {
+    let bin = COMPLETION_BIN_NAME;
+    let alias = COMPLETION_ALIAS_NAME;
+    match shell {
+        Shell::Bash => format!(
+            "{script}\n\
+             if [[ \"${{BASH_VERSINFO[0]}}\" -eq 4 && \"${{BASH_VERSINFO[1]}}\" -ge 4 || \"${{BASH_VERSINFO[0]}}\" -gt 4 ]]; then\n    \
+             complete -F _{bin} -o nosort -o bashdefault -o default {alias}\n\
+             else\n    \
+             complete -F _{bin} -o bashdefault -o default {alias}\n\
+             fi\n"
+        ),
+        // Two install paths, two hooks. Autoloaded from `fpath` the tag line
+        // on the first line is what binds the names; sourced directly, the
+        // `compdef` call clap emits at the bottom is. Cover both, and reuse
+        // clap's own `funcstack` guard so the appended call is skipped when
+        // the body runs as the completion function itself.
+        Shell::Zsh => {
+            let tagged = match script.strip_prefix(&format!("#compdef {bin}\n")) {
+                Some(rest) => format!("#compdef {bin} {alias}\n{rest}"),
+                None => script,
+            };
+            format!(
+                "{tagged}\nif [ \"$funcstack[1]\" != \"_{bin}\" ]; then\n    \
+                 compdef _{bin} {alias}\n\
+                 fi\n"
+            )
+        }
+        Shell::Fish => format!("{script}\ncomplete -c {alias} -w {bin}\n"),
+        Shell::PowerShell => script.replacen(
+            &format!("-CommandName '{bin}'"),
+            &format!("-CommandName '{bin}','{alias}'"),
+            1,
+        ),
+        _ => script,
+    }
 }
 
 fn command_accepts_raw_provider(command: Option<&Commands>) -> bool {
@@ -1878,10 +1951,6 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_server_in_process(&cli, &resolved_runtime, web_serve_passthrough(&args))
         }
-        Some(Commands::Completions(args)) => {
-            let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
-            run_tui_in_process(&cli, &resolved_runtime, tui_args("completions", args))
-        }
         Some(Commands::Login(args)) => run_login_command(&mut store, args),
         Some(Commands::Logout) => run_logout_command(&mut store),
         Some(Commands::Auth(args)) => match args.command {
@@ -1980,8 +2049,9 @@ fn run() -> Result<()> {
             run_app_server_command(&cli, &resolved_runtime, args)
         }
         Some(Commands::Completion { shell }) => {
-            let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "codewhale", &mut io::stdout());
+            let mut stdout = io::stdout();
+            stdout.write_all(render_completion_script(shell).as_bytes())?;
+            stdout.flush()?;
             Ok(())
         }
         Some(Commands::Metrics(args)) => run_metrics_command(args),
@@ -5398,6 +5468,143 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Completion { shell: Shell::Bash })
+        ));
+    }
+
+    /// The `[[bin]] name` declared in this crate's manifest is the only thing a
+    /// user ever types. Read it from disk rather than restating it, so renaming
+    /// the binary without re-pointing the completion generator fails here
+    /// instead of silently shipping a script nobody's shell loads (#5526).
+    fn declared_bin_name() -> String {
+        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("read crates/cli/Cargo.toml");
+        let bin_section = manifest
+            .split("[[bin]]")
+            .nth(1)
+            .expect("crates/cli/Cargo.toml declares a [[bin]] target");
+        for line in bin_section.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("name") {
+                let value = rest.trim_start().trim_start_matches('=').trim();
+                return value.trim_matches('"').to_string();
+            }
+        }
+        panic!("[[bin]] section has no name key");
+    }
+
+    #[test]
+    fn completion_bin_name_matches_the_declared_bin_target() {
+        assert_eq!(
+            COMPLETION_BIN_NAME,
+            declared_bin_name(),
+            "completion scripts must register the binary this crate actually builds"
+        );
+    }
+
+    /// Issue #5526: `codewhale completions <shell>` used to forward to the
+    /// `codewhale-tui` executable, so every generated script registered
+    /// `codewhale-tui` — a name no user types — and exposed the TUI's smaller
+    /// subcommand tree. Pin the registered names per shell.
+    #[test]
+    fn generated_completion_scripts_register_the_published_command_names() {
+        let bin = declared_bin_name();
+        let alias = COMPLETION_ALIAS_NAME;
+
+        // Match whole lines throughout: `codew` is a prefix of `codewhale`,
+        // so a substring check for the alias is satisfied by the primary
+        // binding and would pass on an unfixed build.
+        let has_line =
+            |script: &str, wanted: &str| script.lines().any(|line| line.trim() == wanted);
+
+        let bash = render_completion_script(Shell::Bash);
+        assert!(
+            has_line(
+                &bash,
+                &format!("complete -F _{bin} -o bashdefault -o default {bin}")
+            ),
+            "bash script must bind the real binary name:\n{bash}"
+        );
+        assert!(
+            has_line(
+                &bash,
+                &format!("complete -F _{bin} -o bashdefault -o default {alias}")
+            ),
+            "bash script must bind the {alias} shorthand too"
+        );
+
+        let zsh = render_completion_script(Shell::Zsh);
+        assert_eq!(
+            zsh.lines().next(),
+            Some(format!("#compdef {bin} {alias}").as_str()),
+            "zsh compdef tag line must list both published command names"
+        );
+        assert!(
+            has_line(&zsh, &format!("compdef _{bin} {bin}")),
+            "zsh script must bind {bin} on the sourced path"
+        );
+        assert!(
+            has_line(&zsh, &format!("compdef _{bin} {alias}")),
+            "zsh script must bind {alias} on the sourced path too"
+        );
+
+        let fish = render_completion_script(Shell::Fish);
+        assert!(
+            fish.contains(&format!("complete -c {bin} ")),
+            "fish script must complete the real binary name"
+        );
+        assert!(
+            has_line(&fish, &format!("complete -c {alias} -w {bin}")),
+            "fish script must wrap the {alias} shorthand onto {bin}"
+        );
+
+        let powershell = render_completion_script(Shell::PowerShell);
+        assert!(
+            powershell.contains(&format!(
+                "Register-ArgumentCompleter -Native -CommandName '{bin}','{alias}'"
+            )),
+            "PowerShell script must register both published command names"
+        );
+
+        for (shell, script) in [
+            ("bash", &bash),
+            ("zsh", &zsh),
+            ("fish", &fish),
+            ("powershell", &powershell),
+        ] {
+            assert!(
+                !script.contains("codewhale-tui"),
+                "{shell} completions leaked the internal codewhale-tui name (#5526)"
+            );
+        }
+    }
+
+    /// The other half of #5526: the script has to describe *this* CLI's
+    /// commands. Rendering from a different clap tree would drop or invent
+    /// subcommands, which is exactly how the forwarded script went stale.
+    #[test]
+    fn generated_completion_scripts_cover_the_real_subcommand_surface() {
+        let bash = render_completion_script(Shell::Bash);
+        for sub in Cli::command().get_subcommands() {
+            if sub.is_hide_set() {
+                continue;
+            }
+            let name = sub.get_name();
+            assert!(
+                bash.contains(name),
+                "bash completions omit the `{name}` subcommand"
+            );
+        }
+    }
+
+    /// `completions` is what the issue reporter typed and what the TUI called
+    /// it; keep it working, now as an alias that renders in-process.
+    #[test]
+    fn completions_is_an_alias_for_completion() {
+        assert!(matches!(
+            parse_ok(&["codewhale", "completions", "powershell"]).command,
+            Some(Commands::Completion {
+                shell: Shell::PowerShell
+            })
         ));
     }
 
