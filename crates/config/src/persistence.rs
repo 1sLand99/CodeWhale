@@ -297,7 +297,14 @@ fn sensitive_json_key(key: &str) -> bool {
 /// 1. **Keyed assignments.** Lines or whitespace-delimited inline tokens shaped
 ///    like `key = value`, `key: value`, or `key=value` whose key
 ///    (case-insensitively, ignoring quotes) contains a `SENSITIVE_KEY_HINTS`
-///    substring have their value replaced with [`REDACTED`].
+///    substring have their value replaced with [`REDACTED`]. The spaced form
+///    (`key = value`) is matched anywhere on the line, not only when the
+///    sensitive key owns the line's first separator — an `anyhow` chain
+///    rendered with `{:#}` puts prose and its own `: ` separators in front of
+///    the assignment, and that must not be a hole. Because such a value can
+///    span several words (`authorization = Bearer <token>`), everything from
+///    the value to the end of the line is dropped, exactly as the whole-line
+///    form already does.
 /// 2. **Bare tokens.** Whitespace-delimited words beginning with a known
 ///    `SECRET_TOKEN_PREFIXES` are replaced wholesale.
 ///
@@ -332,29 +339,101 @@ fn redact_line(line: &str) -> String {
     }
 
     // Inline-assignment / bare-token pass: mask any whitespace-delimited word
-    // carrying a sensitive keyed value or a known bare secret prefix.
+    // carrying a sensitive keyed value or a known bare secret prefix, plus the
+    // spaced `key = value` form that `redact_keyed_assignment` above only sees
+    // when the sensitive key owns the line's first separator.
     let mut changed = false;
-    let masked: Vec<String> = body
-        .split(' ')
-        .map(|word| {
-            let trimmed = word.trim_matches(|c| matches!(c, '"' | '\'' | ',' | ';'));
-            if let Some(redacted) = redact_inline_keyed_assignment(trimmed) {
-                changed = true;
-                word.replace(trimmed, &redacted)
-            } else if !trimmed.is_empty() && looks_like_secret_token(trimmed) {
-                changed = true;
-                word.replace(trimmed, REDACTED)
-            } else {
-                word.to_string()
-            }
-        })
-        .collect();
+    let mut spaced = SpacedAssignment::None;
+    let mut masked: Vec<String> = Vec::new();
+    for word in body.split(' ') {
+        let trimmed = trim_word_punctuation(word);
+        if spaced == SpacedAssignment::AwaitingValue && !trimmed.is_empty() {
+            // The value may run to the end of the line, so drop the remainder
+            // rather than masking one word and leaking the rest.
+            masked.push(REDACTED.to_string());
+            changed = true;
+            break;
+        }
+        if let Some(redacted) = redact_inline_keyed_assignment(trimmed) {
+            changed = true;
+            masked.push(word.replace(trimmed, &redacted));
+            spaced = SpacedAssignment::None;
+        } else if !trimmed.is_empty() && looks_like_secret_token(trimmed) {
+            changed = true;
+            masked.push(word.replace(trimmed, REDACTED));
+            spaced = SpacedAssignment::None;
+        } else {
+            masked.push(word.to_string());
+            spaced = spaced.advance(trimmed);
+        }
+    }
 
     if changed {
         format!("{}{newline}", masked.join(" "))
     } else {
         format!("{body}{newline}")
     }
+}
+
+/// Progress through a `key <space> <sep> <space> value` assignment as the
+/// word-level pass walks a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpacedAssignment {
+    None,
+    /// The previous word was a bare sensitive key awaiting its separator.
+    SensitiveKey,
+    /// A sensitive key and its separator are both behind us.
+    AwaitingValue,
+}
+
+impl SpacedAssignment {
+    fn advance(self, trimmed: &str) -> Self {
+        // Runs of spaces produce empty words; they neither start nor cancel an
+        // assignment.
+        if trimmed.is_empty() {
+            return self;
+        }
+        if matches!(trimmed, "=" | ":") {
+            return if self == Self::SensitiveKey {
+                Self::AwaitingValue
+            } else {
+                Self::None
+            };
+        }
+        // `api_key=` / `api_key:` with the value in the next word. A word whose
+        // separator is *not* final was already offered to
+        // `redact_inline_keyed_assignment`, so it is not an assignment we own.
+        if let Some(key) = trimmed
+            .strip_suffix('=')
+            .or_else(|| trimmed.strip_suffix(':'))
+        {
+            return if key_is_sensitive(key) {
+                Self::AwaitingValue
+            } else {
+                Self::None
+            };
+        }
+        if key_is_sensitive(trimmed) {
+            return Self::SensitiveKey;
+        }
+        Self::None
+    }
+}
+
+fn trim_word_punctuation(word: &str) -> &str {
+    word.trim_matches(|c| matches!(c, '"' | '\'' | ',' | ';'))
+}
+
+/// Whether `raw`, normalized the way a config/env/JSON key is, carries a
+/// [`SENSITIVE_KEY_HINTS`] substring.
+fn key_is_sensitive(raw: &str) -> bool {
+    let key_norm = raw
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+        .to_ascii_lowercase();
+    !key_norm.is_empty()
+        && SENSITIVE_KEY_HINTS
+            .iter()
+            .any(|hint| key_norm.contains(hint))
 }
 
 fn redact_inline_keyed_assignment(word: &str) -> Option<String> {
@@ -364,14 +443,7 @@ fn redact_inline_keyed_assignment(word: &str) -> Option<String> {
     if raw_value.is_empty() {
         return None;
     }
-    let key_norm = raw_key
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-        .to_ascii_lowercase();
-    if key_norm.is_empty()
-        || !SENSITIVE_KEY_HINTS
-            .iter()
-            .any(|hint| key_norm.contains(hint))
-    {
+    if !key_is_sensitive(raw_key) {
         return None;
     }
     Some(format!("{}{}{}", raw_key, &rest[..1], REDACTED))
@@ -579,6 +651,42 @@ PASSWORD=hunter2hunter2";
         assert!(!out.contains("another-secret-value"), "{out}");
         assert_eq!(out.matches(REDACTED).count(), 2, "{out}");
         assert!(out.starts_with("Decision: use "), "{out}");
+    }
+
+    #[test]
+    fn redact_masks_spaced_assignment_that_is_not_the_first_separator() {
+        // The shape `redact_secrets(&format!("{error:#}"))` produces: an
+        // anyhow chain puts prose and its own `: ` separators in front of the
+        // assignment, so the sensitive key never owns the line's first
+        // separator and the whole-line pass declines the line.
+        let out = redact_secrets("request failed: api_key = AIzaSyDeadBeefLeak");
+        assert!(!out.contains("AIzaSyDeadBeefLeak"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+
+        let out = redact_secrets("note: the token = abc123def456ghi");
+        assert!(!out.contains("abc123def456ghi"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+    }
+
+    #[test]
+    fn redact_masks_whole_multi_word_value_of_a_spaced_assignment() {
+        let out = redact_secrets("mcp call failed: authorization = Bearer abc123def456ghi");
+        assert!(!out.contains("abc123def456ghi"), "{out}");
+        assert!(!out.contains("Bearer"), "{out}");
+        assert!(
+            out.starts_with("mcp call failed: authorization = "),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn redact_spaced_pass_leaves_ordinary_prose_alone() {
+        // No sensitive key, so the spaced-assignment state machine must not
+        // start swallowing the rest of the line.
+        let input = "the quick brown fox = jumps over the lazy dog";
+        assert_eq!(redact_secrets(input), input);
+        let input = "note: the model = deepseek-v4-pro and the seed = 7";
+        assert_eq!(redact_secrets(input), input);
     }
 
     #[test]
