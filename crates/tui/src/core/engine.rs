@@ -8,7 +8,7 @@
 //! - Tool execution orchestration
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -585,6 +585,79 @@ pub struct EngineHandle {
     /// change publishes here before its mailbox op is queued, so gates never
     /// consult a stale per-turn copy.
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
+    /// Out-of-band authority for one exact compaction request. The engine can
+    /// be awaiting a provider while its bounded op mailbox is unable to drain,
+    /// so cancellation cannot depend on processing a later mailbox entry.
+    compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
+}
+
+const MAX_PENDING_COMPACTION_CANCELLATIONS: usize = 64;
+
+#[derive(Debug, Default)]
+struct CompactionCancellationState {
+    active: Option<(String, CancellationToken)>,
+    pending: VecDeque<String>,
+}
+
+impl CompactionCancellationState {
+    fn request(&mut self, id: &str) {
+        if let Some((active_id, token)) = self.active.as_ref()
+            && active_id == id
+        {
+            token.cancel();
+            return;
+        }
+        if self.pending.iter().any(|pending| pending == id) {
+            return;
+        }
+        if self.pending.len() >= MAX_PENDING_COMPACTION_CANCELLATIONS {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(id.to_string());
+    }
+
+    fn claim(&mut self, id: &str) -> Option<CancellationToken> {
+        if let Some(index) = self.pending.iter().position(|pending| pending == id) {
+            self.pending.remove(index);
+            return None;
+        }
+        let token = CancellationToken::new();
+        self.active = Some((id.to_string(), token.clone()));
+        Some(token)
+    }
+
+    fn finish(&mut self, id: &str) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|(active_id, _)| active_id == id)
+        {
+            self.active = None;
+        }
+        if let Some(index) = self.pending.iter().position(|pending| pending == id) {
+            self.pending.remove(index);
+        }
+    }
+}
+
+impl EngineHandle {
+    /// Publish typed compaction cancellation immediately, then enqueue the
+    /// matching operation when capacity permits. The shared authority is what
+    /// stops a running provider future; the operation keeps the mailbox
+    /// protocol explicit and clears a late, already-settled request safely.
+    pub fn cancel_compaction(&self, id: impl Into<String>) -> Result<()> {
+        let id = id.into();
+        self.compaction_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request(&id);
+        match self.tx_op.try_send(Op::CancelCompaction { id }) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("engine operation channel closed"))
+            }
+        }
+    }
 }
 
 // `impl EngineHandle { ... }` moved to `engine/handle.rs` so the
@@ -638,6 +711,7 @@ pub struct Engine {
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
+    compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
     /// Clone of the op-channel sender, so the engine can self-dispatch ops
     /// (e.g. a goal-continuation `SendMessage` after a turn completes).
     tx_op: mpsc::Sender<Op>,
@@ -989,6 +1063,18 @@ impl Engine {
             .await;
     }
 
+    pub(super) async fn emit_compaction_cancelled(
+        &mut self,
+        id: String,
+        auto: bool,
+        message: String,
+    ) {
+        let _ = self
+            .tx_event
+            .send(Event::CompactionCancelled { id, auto, message })
+            .await;
+    }
+
     /// Render the accumulated compaction summary prompt to plain text so it
     /// can travel in events and be persisted by host layers. All emit sites
     /// run after `commit_compaction_checkpoint`, so this reflects the checkpoint
@@ -1013,6 +1099,20 @@ impl Engine {
             .tx_event
             .send(Event::CompactionFailed { id, auto, message })
             .await;
+    }
+
+    fn claim_compaction(&self, id: &str) -> Option<CancellationToken> {
+        self.compaction_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .claim(id)
+    }
+
+    fn finish_compaction(&self, id: &str) {
+        self.compaction_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish(id);
     }
 
     fn reset_cancel_token(&mut self) {
@@ -1211,6 +1311,8 @@ impl Engine {
                 api_config.sandbox_mode.clone(),
             ),
         )));
+        let compaction_cancellation =
+            Arc::new(StdMutex::new(CompactionCancellationState::default()));
         let tool_exec_lock = Arc::new(RwLock::new(()));
         let plugin_registry = config
             .plugin_registry
@@ -1412,6 +1514,7 @@ impl Engine {
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
             rx_op,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
+            compaction_cancellation: Arc::clone(&compaction_cancellation),
             tx_op: tx_op.clone(),
             scheduled_goal_continuation: None,
             goal_continuation_schedule_seq: 0,
@@ -1451,6 +1554,7 @@ impl Engine {
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
+            compaction_cancellation,
         };
 
         (engine, handle)
@@ -2731,8 +2835,19 @@ impl Engine {
                             .send(Event::status("Session context synced".to_string()))
                             .await;
                     }
-                    Op::CompactContext { route, compaction } => {
-                        self.handle_manual_compaction_op(*route, *compaction).await;
+                    Op::CompactContext {
+                        id,
+                        route,
+                        compaction,
+                    } => {
+                        self.handle_manual_compaction_op(id, *route, *compaction)
+                            .await;
+                    }
+                    Op::CancelCompaction { id } => {
+                        // Cancellation is published out-of-band by the handle
+                        // so a provider await cannot block it. Draining the
+                        // typed op only clears a late, already-settled marker.
+                        self.finish_compaction(&id);
                     }
                     Op::GetSessionSnapshot { tx } => {
                         let total_tokens = self.session.total_usage.input_tokens
@@ -4751,19 +4866,35 @@ impl Engine {
 
     async fn handle_manual_compaction_op(
         &mut self,
+        id: String,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
     ) {
-        let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
         self.emit_compaction_started(
             id.clone(),
             false,
             "Manual context compaction started".to_string(),
         )
         .await;
+        let Some(cancel_token) = self.claim_compaction(&id) else {
+            let message = "Context compaction canceled before it started".to_string();
+            self.emit_compaction_cancelled(id, false, message).await;
+            let _ = self
+                .tx_event
+                .send(Event::TurnComplete {
+                    usage: Usage::default(),
+                    status: TurnOutcomeStatus::Interrupted,
+                    error: None,
+                    tool_catalog: None,
+                    base_url: None,
+                })
+                .await;
+            return;
+        };
         if let Err(err) = self.install_resolved_runtime_route(route) {
             let message =
                 format!("Cannot compact context because its provider route is not ready: {err}");
+            self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
             let _ = self
@@ -4773,10 +4904,10 @@ impl Engine {
             return;
         }
         self.config.compaction = compaction;
-        self.handle_manual_compaction(id).await;
+        self.handle_manual_compaction(id, cancel_token).await;
     }
 
-    async fn handle_manual_compaction(&mut self, id: String) {
+    async fn handle_manual_compaction(&mut self, id: String, cancel_token: CancellationToken) {
         let zero_usage = Usage {
             input_tokens: 0,
             output_tokens: 0,
@@ -4784,6 +4915,7 @@ impl Engine {
         };
         let Some(client) = self.deepseek_client.clone() else {
             let message = "Manual compaction unavailable: API client not configured".to_string();
+            self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
             let _ = self
@@ -4813,18 +4945,64 @@ impl Engine {
 
         let prepared = self.prepare_compaction_envelope(self.config.compaction.clone());
 
-        match compact_messages_safe(
-            &client,
-            &self.session.messages,
-            self.session.system_prompt.as_ref(),
-            &prepared,
-        )
-        .await
-        {
+        let compaction_result = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => None,
+            result = compact_messages_safe(
+                &client,
+                &self.session.messages,
+                self.session.system_prompt.as_ref(),
+                &prepared,
+            ) => Some(result),
+        };
+
+        let Some(compaction_result) = compaction_result else {
+            self.finish_compaction(&id);
+            self.emit_compaction_cancelled(
+                id,
+                false,
+                "Context compaction canceled; conversation context was not changed".to_string(),
+            )
+            .await;
+            let _ = self
+                .tx_event
+                .send(Event::TurnComplete {
+                    usage: zero_usage,
+                    status: TurnOutcomeStatus::Interrupted,
+                    error: None,
+                    tool_catalog: None,
+                    base_url: None,
+                })
+                .await;
+            return;
+        };
+
+        match compaction_result {
             Ok(mut result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
                     self.append_compaction_agent_topology(&mut result.messages)
                         .await;
+                    if cancel_token.is_cancelled() {
+                        self.finish_compaction(&id);
+                        self.emit_compaction_cancelled(
+                            id,
+                            false,
+                            "Context compaction canceled; conversation context was not changed"
+                                .to_string(),
+                        )
+                        .await;
+                        let _ = self
+                            .tx_event
+                            .send(Event::TurnComplete {
+                                usage: zero_usage,
+                                status: TurnOutcomeStatus::Interrupted,
+                                error: None,
+                                tool_catalog: None,
+                                base_url: None,
+                            })
+                            .await;
+                        return;
+                    }
                     let messages_after = result.messages.len();
                     let retries_used = result.retries_used;
                     self.session.replace_messages(result.messages);
@@ -4845,7 +5023,7 @@ impl Engine {
                         )
                     };
                     self.emit_compaction_completed(
-                        id,
+                        id.clone(),
                         false,
                         message,
                         Some(messages_before),
@@ -4854,7 +5032,7 @@ impl Engine {
                     .await;
                 } else {
                     let message = "Compaction skipped: produced empty result".to_string();
-                    self.emit_compaction_failed(id, false, message.clone())
+                    self.emit_compaction_failed(id.clone(), false, message.clone())
                         .await;
                     turn_status = TurnOutcomeStatus::Failed;
                     turn_error = Some(message);
@@ -4867,13 +5045,15 @@ impl Engine {
                     false,
                     &err,
                 );
-                self.emit_compaction_failed(id, false, message.clone())
+                self.emit_compaction_failed(id.clone(), false, message.clone())
                     .await;
                 let _ = self.tx_event.send(Event::status(message.clone())).await;
                 turn_status = TurnOutcomeStatus::Failed;
                 turn_error = Some(message);
             }
         }
+
+        self.finish_compaction(&id);
 
         let _ = self
             .tx_event
@@ -5052,6 +5232,17 @@ impl Engine {
         let start_message = format!("Emergency context compaction started ({reason})");
         self.emit_compaction_started(id.clone(), true, start_message)
             .await;
+        let Some(compaction_cancel) = self.claim_compaction(&id) else {
+            self.emit_compaction_cancelled(
+                id,
+                true,
+                "Emergency context compaction canceled before it started; conversation context was not changed"
+                    .to_string(),
+            )
+            .await;
+            return false;
+        };
+        let turn_cancel = self.cancel_token.clone();
 
         let before_tokens = self.estimated_input_tokens();
         let before_count = self.session.messages.len();
@@ -5068,14 +5259,30 @@ impl Engine {
             .max(1);
         let prepared = self.prepare_compaction_envelope(forced_config);
 
-        match compact_messages_safe(
-            client,
-            &self.session.messages,
-            self.session.system_prompt.as_ref(),
-            &prepared,
-        )
-        .await
-        {
+        let (compaction_result, turn_was_canceled) = tokio::select! {
+            biased;
+            _ = turn_cancel.cancelled() => (None, true),
+            _ = compaction_cancel.cancelled() => (None, false),
+            result = compact_messages_safe(
+                client,
+                &self.session.messages,
+                self.session.system_prompt.as_ref(),
+                &prepared,
+            ) => (Some(result), false),
+        };
+        let Some(compaction_result) = compaction_result else {
+            self.finish_compaction(&id);
+            let message = if turn_was_canceled {
+                "Emergency context compaction canceled with the active turn; conversation context was not changed"
+            } else {
+                "Emergency context compaction canceled; conversation context was not changed"
+            }
+            .to_string();
+            self.emit_compaction_cancelled(id, true, message).await;
+            return false;
+        };
+
+        match compaction_result {
             Ok(result) => {
                 retries_used = result.retries_used;
                 compacted_messages = result.messages;
@@ -5091,9 +5298,34 @@ impl Engine {
             }
         }
 
+        let turn_was_canceled = turn_cancel.is_cancelled();
+        if turn_was_canceled || compaction_cancel.is_cancelled() {
+            self.finish_compaction(&id);
+            let message = if turn_was_canceled {
+                "Emergency context compaction canceled with the active turn; conversation context was not changed"
+            } else {
+                "Emergency context compaction canceled; conversation context was not changed"
+            }
+            .to_string();
+            self.emit_compaction_cancelled(id, true, message).await;
+            return false;
+        }
+
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
             self.append_compaction_agent_topology(&mut compacted_messages)
                 .await;
+            let turn_was_canceled = turn_cancel.is_cancelled();
+            if turn_was_canceled || compaction_cancel.is_cancelled() {
+                self.finish_compaction(&id);
+                let message = if turn_was_canceled {
+                    "Emergency context compaction canceled with the active turn; conversation context was not changed"
+                } else {
+                    "Emergency context compaction canceled; conversation context was not changed"
+                }
+                .to_string();
+                self.emit_compaction_cancelled(id, true, message).await;
+                return false;
+            }
             self.session.replace_messages(compacted_messages);
         }
         self.commit_compaction_checkpoint(summary_prompt);
@@ -5117,7 +5349,7 @@ impl Engine {
                 details.push_str(&format!(", trimmed {trimmed} oldest"));
             }
             self.emit_compaction_completed(
-                id,
+                id.clone(),
                 true,
                 details.clone(),
                 Some(before_count),
@@ -5125,6 +5357,7 @@ impl Engine {
             )
             .await;
             let _ = self.tx_event.send(Event::status(details)).await;
+            self.finish_compaction(&id);
             return true;
         }
 
@@ -5132,8 +5365,10 @@ impl Engine {
             "Emergency context compaction failed to reduce request below model limit \
              (estimate ~{after_tokens} tokens, budget ~{target_budget})."
         );
-        self.emit_compaction_failed(id, true, message.clone()).await;
+        self.emit_compaction_failed(id.clone(), true, message.clone())
+            .await;
         let _ = self.tx_event.send(Event::status(message)).await;
+        self.finish_compaction(&id);
         false
     }
 
@@ -6241,6 +6476,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
             None,
         ),
     )));
+    let compaction_cancellation = Arc::new(StdMutex::new(CompactionCancellationState::default()));
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
@@ -6252,6 +6488,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
+        compaction_cancellation,
     };
 
     MockEngineHandle {

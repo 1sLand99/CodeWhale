@@ -1917,6 +1917,9 @@ pub struct App {
     /// A manual compaction op accepted by the UI but waiting for the engine to
     /// finish the active turn and emit CompactionStarted.
     pub(crate) manual_compaction_queued: bool,
+    /// Stable identity allocated before the manual request enters the engine
+    /// mailbox, retained so Ctrl+C/Esc can cancel that exact queued pass.
+    pub(crate) manual_compaction_id: Option<String>,
     /// A manual compaction request that found the bounded engine mailbox full.
     /// The event loop retries the send once a slot frees; any compaction that
     /// starts or settles in the meantime supersedes it. Inner value is the

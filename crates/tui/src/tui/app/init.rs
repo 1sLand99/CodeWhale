@@ -1004,6 +1004,7 @@ impl App {
             is_compacting: false,
             active_compaction: None,
             manual_compaction_queued: false,
+            manual_compaction_id: None,
             deferred_manual_compaction: None,
             is_purging: false,
             user_scrolled_during_stream: false,

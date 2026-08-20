@@ -1674,7 +1674,9 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
     );
     assert_eq!(compact_turn.effective_model.as_deref(), Some("local-model"));
     match harness.rx_op.recv().await {
-        Some(Op::CompactContext { route, compaction }) => {
+        Some(Op::CompactContext {
+            route, compaction, ..
+        }) => {
             assert_eq!(route.identity.key, "lm-studio");
             assert_eq!(
                 route.config.deepseek_base_url(),
@@ -3650,6 +3652,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
             active_turn: Some(ActiveTurnState {
                 turn_id: "turn_a".to_string(),
                 interrupt_requested: false,
+                compaction_id: None,
             }),
             route_identity: crate::config::ProviderIdentity {
                 provider: ApiProvider::Deepseek,
@@ -3668,6 +3671,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
             active_turn: Some(ActiveTurnState {
                 turn_id: "turn_b".to_string(),
                 interrupt_requested: false,
+                compaction_id: None,
             }),
             route_identity: crate::config::ProviderIdentity {
                 provider: ApiProvider::Deepseek,
@@ -4440,6 +4444,7 @@ async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
         state.active_turn = Some(ActiveTurnState {
             turn_id: "turn_live".to_string(),
             interrupt_requested: false,
+            compaction_id: None,
         });
     }
 
@@ -4758,6 +4763,75 @@ async fn compact_thread_preserves_thread_auto_approve_policy() -> Result<()> {
         Some((false, false))
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+
+    let turn = manager
+        .compact_thread(&thread.id, CompactThreadRequest::default())
+        .await?;
+    let compaction_id = match harness.rx_op.recv().await {
+        Some(Op::CompactContext { id, .. }) => id,
+        other => panic!("expected CompactContext op, got {other:?}"),
+    };
+
+    manager.interrupt_turn(&thread.id, &turn.id).await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::CancelCompaction { id }) if id == compaction_id
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::CompactionStarted {
+            id: compaction_id.clone(),
+            auto: false,
+            message: "compaction started".to_string(),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::CompactionCancelled {
+            id: compaction_id,
+            auto: false,
+            message: "compaction canceled".to_string(),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Interrupted,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+
+    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    assert_eq!(terminal.status, RuntimeTurnStatus::Interrupted);
+    let items = manager.store.list_items_for_turn(&turn.id)?;
+    assert!(items.iter().any(|item| {
+        item.kind == TurnItemKind::ContextCompaction
+            && item.status == TurnItemLifecycleStatus::Canceled
+    }));
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(events.iter().any(|event| {
+        event.event == "item.canceled"
+            && event
+                .payload
+                .get("item")
+                .and_then(|item| item.get("status"))
+                .and_then(Value::as_str)
+                == Some("canceled")
+    }));
     Ok(())
 }
 

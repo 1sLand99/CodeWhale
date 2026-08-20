@@ -318,6 +318,16 @@ pub enum Event {
         summary_prompt: Option<String>,
     },
 
+    /// Context compaction was canceled before it could commit a checkpoint.
+    ///
+    /// The stable id makes cancellation idempotent and lets host layers settle
+    /// the exact durable item without inferring lifecycle from status prose.
+    CompactionCancelled {
+        id: String,
+        auto: bool,
+        message: String,
+    },
+
     /// Context purge started.
     PurgeStarted {
         /// Status message for display.

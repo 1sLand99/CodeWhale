@@ -23,10 +23,14 @@ pub(crate) fn next_escape_action(app: &App, slash_menu_open: bool) -> EscapeActi
         EscapeAction::CancelRequest
     } else if app.pausable
         && !app.paused
+        && !app.is_compacting
+        && !app.manual_compaction_queued
         && (app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")))
     {
         EscapeAction::PauseCommand
     } else if app.is_loading
+        || app.is_compacting
+        || app.manual_compaction_queued
         || app.goal_continuation_waiting
         || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
     {

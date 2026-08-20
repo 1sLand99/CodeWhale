@@ -2322,7 +2322,9 @@ pub(crate) fn try_queue_manual_compaction(
     };
     let mut compaction = compaction_for_validated_route(app, &route);
     compaction.focus = focus.clone();
+    let request_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let op = Op::CompactContext {
+        id: request_id.clone(),
         route: Box::new(route.into_resolved()),
         compaction: Box::new(compaction),
     };
@@ -2330,6 +2332,7 @@ pub(crate) fn try_queue_manual_compaction(
     match engine_handle.try_send(op) {
         Ok(()) => {
             app.manual_compaction_queued = true;
+            app.manual_compaction_id = Some(request_id);
             let id = if app.is_loading {
                 MessageId::ContextCompactionQueued
             } else {
@@ -2355,6 +2358,7 @@ pub(crate) fn try_queue_manual_compaction(
                 // retry once the engine drains a slot; the user sees the same
                 // queued receipt as the ordinary behind-a-turn path.
                 app.manual_compaction_queued = true;
+                app.manual_compaction_id = Some(request_id);
                 app.deferred_manual_compaction = Some(focus);
                 let text = app.tr(MessageId::ContextCompactionQueued).into_owned();
                 add_compaction_receipt(app, &text);
@@ -2388,6 +2392,7 @@ pub(crate) fn flush_deferred_manual_compaction(
         Err(error) => {
             app.deferred_manual_compaction = None;
             app.manual_compaction_queued = false;
+            app.manual_compaction_id = None;
             let text = app
                 .tr(MessageId::ContextCompactionRouteInvalid)
                 .replace("{error}", &error.to_string());
@@ -2397,9 +2402,15 @@ pub(crate) fn flush_deferred_manual_compaction(
         }
     };
     let focus = app.deferred_manual_compaction.clone().unwrap_or_default();
+    let Some(request_id) = app.manual_compaction_id.clone() else {
+        app.deferred_manual_compaction = None;
+        app.manual_compaction_queued = false;
+        return;
+    };
     let mut compaction = compaction_for_validated_route(app, &route);
     compaction.focus = focus;
     let op = Op::CompactContext {
+        id: request_id,
         route: Box::new(route.into_resolved()),
         compaction: Box::new(compaction),
     };
@@ -2416,6 +2427,7 @@ pub(crate) fn flush_deferred_manual_compaction(
             if !full {
                 app.deferred_manual_compaction = None;
                 app.manual_compaction_queued = false;
+                app.manual_compaction_id = None;
                 let text = app.tr(MessageId::ContextCompactionQueueClosed).into_owned();
                 add_compaction_receipt(app, &text);
                 set_explicit_compaction_status(app, text, StatusToastLevel::Error, true);
@@ -2427,12 +2439,16 @@ pub(crate) fn flush_deferred_manual_compaction(
 pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     if !auto {
         app.manual_compaction_queued = false;
+        if app.manual_compaction_id.as_deref() == Some(id.as_str()) {
+            app.manual_compaction_id = None;
+        }
     }
     // A compaction is running; a deferred manual request is now redundant.
     // Dropping it must also release the queued flag when the running pass is
     // automatic, or `/compact` would report "already in progress" forever.
     if app.deferred_manual_compaction.take().is_some() && auto {
         app.manual_compaction_queued = false;
+        app.manual_compaction_id = None;
     }
     app.active_compaction = Some(ActiveCompaction { id, auto });
     app.is_compacting = true;
@@ -2466,12 +2482,14 @@ fn settle_compaction(app: &mut App, id: &str, auto: bool) -> bool {
     app.is_compacting = false;
     if !auto {
         app.manual_compaction_queued = false;
+        app.manual_compaction_id = None;
     }
     // A settled pass makes a still-deferred manual request redundant (the
     // context was just compacted). Dropping it releases the queued flag so a
     // later `/compact` is not rejected as "already in progress".
     if app.deferred_manual_compaction.take().is_some() {
         app.manual_compaction_queued = false;
+        app.manual_compaction_id = None;
     }
     true
 }
@@ -2501,6 +2519,58 @@ pub(crate) fn apply_compaction_failed(app: &mut App, id: &str, auto: bool, messa
         add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
     }
+}
+
+pub(crate) fn apply_compaction_cancelled(app: &mut App, id: &str, auto: bool, message: String) {
+    if settle_compaction(app, id, auto) {
+        add_compaction_receipt(app, &message);
+        set_explicit_compaction_status(app, message, StatusToastLevel::Info, false);
+    }
+}
+
+/// Cancel the exact queued or running pass without cancelling an unrelated
+/// model turn. A locally deferred request has never entered the engine, so it
+/// can settle synchronously with no provider call; all dispatched requests
+/// wait for the authoritative typed terminal event.
+pub(crate) fn try_cancel_compaction(app: &mut App, engine_handle: &EngineHandle) -> bool {
+    if !app.is_compacting && !app.manual_compaction_queued {
+        return false;
+    }
+
+    if !app.is_compacting && app.deferred_manual_compaction.take().is_some() {
+        app.manual_compaction_queued = false;
+        app.manual_compaction_id = None;
+        let message = "Context compaction canceled before it started".to_string();
+        add_compaction_receipt(app, &message);
+        set_explicit_compaction_status(app, message, StatusToastLevel::Info, false);
+        return true;
+    }
+
+    let id = app
+        .active_compaction
+        .as_ref()
+        .map(|active| active.id.clone())
+        .or_else(|| app.manual_compaction_id.clone());
+    let Some(id) = id else {
+        return false;
+    };
+
+    match engine_handle.cancel_compaction(id) {
+        Ok(()) => {
+            set_explicit_compaction_status(
+                app,
+                "Canceling context compaction…".to_string(),
+                StatusToastLevel::Info,
+                false,
+            );
+        }
+        Err(error) => {
+            let message = format!("Could not cancel context compaction: {error}");
+            add_compaction_receipt(app, &message);
+            set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
+        }
+    }
+    true
 }
 
 #[cfg(test)]

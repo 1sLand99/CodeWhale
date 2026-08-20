@@ -2130,6 +2130,9 @@ pub(crate) async fn run_event_loop(
                     } => {
                         apply_compaction_completed(app, &id, auto, message);
                     }
+                    EngineEvent::CompactionCancelled { id, auto, message } => {
+                        apply_compaction_cancelled(app, &id, auto, message);
+                    }
                     EngineEvent::CompactionFailed { id, auto, message } => {
                         apply_compaction_failed(app, &id, auto, message);
                     }
@@ -4589,6 +4592,10 @@ pub(crate) async fn run_event_loop(
                             clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
+                            if try_cancel_compaction(app, &engine_handle) {
+                                app.disarm_quit();
+                                continue;
+                            }
                             let was_waiting = app.goal_continuation_waiting;
                             engine_handle.cancel();
                             if was_waiting {
@@ -4668,6 +4675,9 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
+                            if try_cancel_compaction(app, &engine_handle) {
+                                continue;
+                            }
                             if app.paused || app.paused_goal_objective.is_some() {
                                 clear_paused_command_state(app, &engine_handle);
                                 if app.is_loading

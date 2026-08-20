@@ -719,6 +719,9 @@ impl Engine {
                 )
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                let compaction_cancel = self
+                    .claim_compaction(&compaction_id)
+                    .expect("a fresh automatic compaction id cannot be pre-canceled");
                 self.emit_compaction_started(
                     compaction_id.clone(),
                     true,
@@ -727,19 +730,56 @@ impl Engine {
                 .await;
                 let auto_messages_before = self.session.messages.len();
                 let auto_tokens_before = self.estimated_input_tokens();
-                match compact_messages_safe(
-                    client.as_ref(),
-                    &self.session.messages,
-                    self.session.system_prompt.as_ref(),
-                    &prepared,
-                )
-                .await
-                {
+                let turn_cancel = self.cancel_token.clone();
+                let (compaction_result, turn_was_canceled) = tokio::select! {
+                    biased;
+                    _ = turn_cancel.cancelled() => (None, true),
+                    _ = compaction_cancel.cancelled() => (None, false),
+                    result = compact_messages_safe(
+                        client.as_ref(),
+                        &self.session.messages,
+                        self.session.system_prompt.as_ref(),
+                        &prepared,
+                    ) => (Some(result), false),
+                };
+                let Some(compaction_result) = compaction_result else {
+                    self.finish_compaction(&compaction_id);
+                    let message = if turn_was_canceled {
+                        "Auto-compaction canceled with the active turn; conversation context was not changed"
+                    } else {
+                        "Auto-compaction canceled; conversation context was not changed"
+                    }
+                    .to_string();
+                    self.emit_compaction_cancelled(compaction_id, true, message)
+                        .await;
+                    if turn_was_canceled {
+                        return (TurnOutcomeStatus::Interrupted, None);
+                    }
+                    continue;
+                };
+
+                match compaction_result {
                     Ok(mut result) => {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
                             self.append_compaction_agent_topology(&mut result.messages)
                                 .await;
+                            let turn_was_canceled = turn_cancel.is_cancelled();
+                            if turn_was_canceled || compaction_cancel.is_cancelled() {
+                                self.finish_compaction(&compaction_id);
+                                let message = if turn_was_canceled {
+                                    "Auto-compaction canceled with the active turn; conversation context was not changed"
+                                } else {
+                                    "Auto-compaction canceled; conversation context was not changed"
+                                }
+                                .to_string();
+                                self.emit_compaction_cancelled(compaction_id, true, message)
+                                    .await;
+                                if turn_was_canceled {
+                                    return (TurnOutcomeStatus::Interrupted, None);
+                                }
+                                continue;
+                            }
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             self.session.replace_messages(result.messages);
@@ -787,11 +827,12 @@ impl Engine {
                             true,
                             &err,
                         );
-                        self.emit_compaction_failed(compaction_id, true, message.clone())
+                        self.emit_compaction_failed(compaction_id.clone(), true, message.clone())
                             .await;
                         let _ = self.tx_event.send(Event::status(message)).await;
                     }
                 }
+                self.finish_compaction(&compaction_id);
             }
 
             let estimated_input = self.estimated_input_tokens();

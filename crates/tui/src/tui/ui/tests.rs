@@ -8707,11 +8707,14 @@ fn auto_routed_turn_compaction_uses_selected_route_not_stale_app_route() {
     assert_ne!(compaction, app.compaction_config());
 
     let pre_send_compact = crate::core::ops::Op::CompactContext {
+        id: "compact-test".into(),
         route: Box::new(route.into_resolved()),
         compaction: Box::new(compaction.clone()),
     };
     match pre_send_compact {
-        crate::core::ops::Op::CompactContext { route, compaction } => {
+        crate::core::ops::Op::CompactContext {
+            route, compaction, ..
+        } => {
             assert_eq!(route.identity.provider, ApiProvider::Openrouter);
             assert_eq!(route.model, "vendor/model-b");
             assert_eq!(compaction.model, "vendor/model-b");

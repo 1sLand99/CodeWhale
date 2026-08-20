@@ -2402,6 +2402,7 @@ fn runtime_compaction_config(
 struct ActiveTurnState {
     turn_id: String,
     interrupt_requested: bool,
+    compaction_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6122,6 +6123,7 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 turn_id: turn_id.clone(),
                 interrupt_requested: false,
+                compaction_id: None,
             });
             state.route_identity = provider_identity;
             state.route_model.clone_from(&model);
@@ -6192,7 +6194,11 @@ impl RuntimeThreadManager {
                 bail!("Turn {turn_id} is not active on thread {thread_id}");
             }
             active_turn.interrupt_requested = true;
-            active_thread.engine.cancel();
+            if let Some(compaction_id) = active_turn.compaction_id.as_deref() {
+                active_thread.engine.cancel_compaction(compaction_id)?;
+            } else {
+                active_thread.engine.cancel();
+            }
             touch_lru(&mut active.lru, thread_id);
         }
 
@@ -6356,6 +6362,7 @@ impl RuntimeThreadManager {
 
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+        let compaction_id = format!("compact_{}", &Uuid::new_v4().to_string()[..8]);
         compaction.runtime_cost_owner = Some(turn_id.clone());
         let turn = TurnRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -6402,6 +6409,7 @@ impl RuntimeThreadManager {
             agent_mail_message_id: None,
         };
         let op = Op::CompactContext {
+            id: compaction_id.clone(),
             route: Box::new(route),
             compaction: Box::new(compaction),
         };
@@ -6426,6 +6434,7 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 turn_id: turn_id.clone(),
                 interrupt_requested: false,
+                compaction_id: Some(compaction_id),
             });
             state.route_identity = route_identity;
             state.route_model = route_model;
@@ -7095,6 +7104,7 @@ impl RuntimeThreadManager {
                     | EngineEvent::ToolCallComplete { .. }
                     | EngineEvent::CompactionStarted { .. }
                     | EngineEvent::CompactionCompleted { .. }
+                    | EngineEvent::CompactionCancelled { .. }
                     | EngineEvent::CompactionFailed { .. }
                     | EngineEvent::AgentSpawned { .. }
                     | EngineEvent::AgentProgress { .. }
@@ -7499,6 +7509,24 @@ impl RuntimeThreadManager {
                                 "messages_before": messages_before,
                                 "messages_after": messages_after,
                             }),
+                        )
+                        .await?;
+                    }
+                }
+                EngineEvent::CompactionCancelled { id, auto, message } => {
+                    if let Some(item_id) = compaction_items.remove(&id) {
+                        let mut item = self.store.load_item(&item_id)?;
+                        item.status = TurnItemLifecycleStatus::Canceled;
+                        item.summary = summarize_text(&message, SUMMARY_LIMIT);
+                        item.detail = Some(message);
+                        item.ended_at = Some(Utc::now());
+                        self.store.save_item(&item)?;
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            Some(&item_id),
+                            "item.canceled",
+                            json!({ "item": item, "auto": auto }),
                         )
                         .await?;
                     }

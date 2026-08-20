@@ -269,9 +269,16 @@ pub enum Op {
     /// Run context compaction on one exact, structurally resolved provider
     /// route with policy derived from that same descriptor.
     CompactContext {
+        /// Stable request identity allocated before the operation enters the
+        /// bounded mailbox. Cancellation uses this id even when the provider
+        /// future has not started yet.
+        id: String,
         route: Box<ResolvedRuntimeRoute>,
         compaction: Box<CompactionConfig>,
     },
+
+    /// Cancel one exact queued or running context-compaction request.
+    CancelCompaction { id: String },
 
     /// Get a snapshot of the current session state (messages, tokens, etc.)
     /// for saving to disk. Returns the result via the oneshot sender so

@@ -145,7 +145,11 @@ async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
 
     engine
-        .handle_manual_compaction_op(route, CompactionConfig::default())
+        .handle_manual_compaction_op(
+            "compact-route-invalid".to_string(),
+            route,
+            CompactionConfig::default(),
+        )
         .await;
 
     let mut started_id = None;
@@ -171,6 +175,185 @@ async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
     }
     assert_eq!(order, ["started", "failed", "error"]);
     assert_eq!(started_id, failed_id);
+}
+
+#[tokio::test]
+async fn queued_manual_compaction_cancellation_is_idempotent_and_skips_route_activation() {
+    let _env_lock = lock_test_env();
+    let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let route_config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some(String::new()),
+        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
+    };
+    let route = resolve_runtime_route(
+        &route_config,
+        ApiProvider::Deepseek,
+        Some(crate::config::DEFAULT_TEXT_MODEL),
+    )
+    .expect("structurally resolve route without credential");
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
+    let id = "compact-cancel-before-start";
+
+    handle.cancel_compaction(id).expect("first cancel accepted");
+    handle
+        .cancel_compaction(id)
+        .expect("replayed cancel remains idempotent");
+    engine
+        .handle_manual_compaction_op(id.to_string(), route, CompactionConfig::default())
+        .await;
+
+    let mut events = handle.rx_event.write().await;
+    let drained = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(matches!(
+        drained.as_slice(),
+        [
+            Event::CompactionStarted { id: started, auto: false, .. },
+            Event::CompactionCancelled { id: cancelled, auto: false, .. },
+            Event::TurnComplete { status: TurnOutcomeStatus::Interrupted, .. }
+        ] if started == id && cancelled == id
+    ));
+    assert!(
+        !drained
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "pre-start cancellation must not activate or validate the provider route"
+    );
+
+    let retry = engine
+        .claim_compaction(id)
+        .expect("the same stable id can be retried after terminal settlement");
+    assert!(!retry.is_cancelled());
+    handle
+        .cancel_compaction(id)
+        .expect("running cancel accepted");
+    assert!(
+        retry.is_cancelled(),
+        "running cancellation reaches its token"
+    );
+    engine.finish_compaction(id);
+}
+
+struct BlockingEmergencyCompactionModelClient {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    request_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for BlockingEmergencyCompactionModelClient {
+    fn provider_name(&self) -> &str {
+        "deepseek"
+    }
+
+    fn model(&self) -> &str {
+        crate::config::DEFAULT_TEXT_MODEL
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        anyhow::bail!("emergency compaction uses the non-streaming model boundary")
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_context() {
+    let route_config = Config {
+        provider: Some("deepseek".to_string()),
+        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
+    };
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
+    engine.session.messages = (0..8)
+        .map(|index| Message {
+            role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+            content: vec![ContentBlock::Text {
+                text: format!("preserve emergency context item {index}"),
+                cache_control: None,
+            }],
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let messages_before = engine.session.messages.clone();
+    let checkpoint_before = engine.session.compaction_summary_prompt.clone();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client = std::sync::Arc::new(BlockingEmergencyCompactionModelClient {
+        entered: std::sync::Arc::clone(&entered),
+        request_dropped: std::sync::Arc::clone(&request_dropped),
+    });
+
+    let recovery = tokio::spawn(async move {
+        let recovered = engine
+            .recover_context_overflow(client.as_ref(), "cancellation regression")
+            .await;
+        (engine, recovered)
+    });
+
+    let started_id = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let event = handle
+                .rx_event
+                .write()
+                .await
+                .recv()
+                .await
+                .expect("emergency compaction start event");
+            if let Event::CompactionStarted { id, auto: true, .. } = event {
+                break id;
+            }
+        }
+    })
+    .await
+    .expect("emergency compaction publishes its stable id");
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("emergency provider request starts");
+
+    handle
+        .cancel_compaction(started_id.clone())
+        .expect("exact emergency cancellation accepted");
+    let (engine, recovered) = tokio::time::timeout(Duration::from_secs(1), recovery)
+        .await
+        .expect("emergency cancellation settles promptly")
+        .expect("recovery task");
+
+    assert!(!recovered);
+    assert_eq!(&*engine.session.messages, &*messages_before);
+    assert_eq!(engine.session.compaction_summary_prompt, checkpoint_before);
+    assert!(
+        request_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "cancellation must drop the in-flight provider future"
+    );
+
+    let mut events = handle.rx_event.write().await;
+    let drained = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(matches!(
+        drained.as_slice(),
+        [Event::CompactionCancelled { id, auto: true, .. }] if id == &started_id
+    ));
+    assert!(
+        !drained.iter().any(|event| matches!(
+            event,
+            Event::CompactionCompleted { .. } | Event::CompactionFailed { .. }
+        )),
+        "a canceled emergency pass must have one canceled terminal event"
+    );
 }
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
@@ -18336,6 +18519,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 None,
             ),
         ))),
+        compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
     };
 
     // Fill the op channel with one message (capacity = 1).
@@ -18362,6 +18546,19 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         crate::tui::approval::ApprovalMode::Auto
     );
     assert!(!authority.auto_approve);
+
+    handle
+        .cancel_compaction("compact-full-mailbox")
+        .expect("full mailbox must not block compaction cancellation");
+    assert!(
+        handle
+            .compaction_cancellation
+            .lock()
+            .expect("cancellation state")
+            .claim("compact-full-mailbox")
+            .is_none(),
+        "cancellation authority remains visible even when its wake-up op cannot fit"
+    );
 }
 
 #[tokio::test]
