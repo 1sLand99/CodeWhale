@@ -1860,10 +1860,16 @@ mod tests {
 
     #[test]
     fn feat015_all_production_entries_remain_legacy() {
-        // Every non-fixture registered command must still use the legacy
-        // concrete-App path (no production group is migrated in FEAT-015).
+        // FEAT-015 shipped no production contextual command, so the assertion
+        // below used to exclude nothing. FEAT-018 migrates the utility group;
+        // the remaining non-fixture commands must still use the legacy
+        // concrete-App path. The seven utility entries are asserted separately
+        // by the FEAT-018 public-dispatch and inventory tests (Phase 6).
+        const FEAT_018_UTILITY: &[&str] = &[
+            "attach", "automation", "jobs", "mcp", "network", "task", "update",
+        ];
         for info in command_infos() {
-            if info.name == "feat015ctx" {
+            if info.name == "feat015ctx" || FEAT_018_UTILITY.contains(&info.name) {
                 continue;
             }
             assert!(
