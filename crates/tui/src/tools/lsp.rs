@@ -85,9 +85,7 @@ impl ToolSpec for LspTool {
                 .filter(|path| !path.is_empty())
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>();
-            return ReadLintsTool
-                .execute(json!({"paths": paths}), context)
-                .await;
+            return execute_read_lints(json!({"paths": paths}), context).await;
         }
 
         let manager = context.lsp_manager.as_ref().ok_or_else(|| {
@@ -113,138 +111,94 @@ const MAX_LINT_DIAGNOSTICS: usize = 100;
 const MAX_LINT_MESSAGE_CHARS: usize = 512;
 const MAX_LINT_OUTPUT_CHARS: usize = 12_000;
 
-/// Model-callable on-demand diagnostics surface. Unlike the post-edit hook,
-/// this can inspect several existing files without requiring a preceding edit.
-pub struct ReadLintsTool;
-
-#[async_trait]
-impl ToolSpec for ReadLintsTool {
-    fn name(&self) -> &'static str {
-        "read_lints"
+/// Read bounded diagnostics for several existing files without requiring a
+/// preceding edit. The model-facing entry point is the `lsp` operation above;
+/// keeping this as a helper avoids adding a second catalog tool name.
+async fn execute_read_lints(input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+    let raw_paths = input
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolError::invalid_input("paths must be a non-empty array"))?;
+    if raw_paths.is_empty() || raw_paths.len() > MAX_LINT_PATHS {
+        return Err(ToolError::invalid_input(format!(
+            "paths must contain between 1 and {MAX_LINT_PATHS} files"
+        )));
     }
 
-    fn description(&self) -> &'static str {
-        "Read bounded structured LSP diagnostics for one or more existing workspace-relative files. Requires [lsp] enabled and a configured language server."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "paths": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": MAX_LINT_PATHS,
-                    "items": {
-                        "type": "string",
-                        "description": "Existing workspace-relative source file."
-                    },
-                    "description": "One or more existing workspace-relative files to diagnose. Results are capped at 12,000 characters."
-                }
-            },
-            "required": ["paths"],
-            "additionalProperties": false
+    let paths = raw_paths
+        .iter()
+        .map(|value| {
+            let raw = value
+                .as_str()
+                .ok_or_else(|| ToolError::invalid_input("each paths entry must be a string"))?;
+            resolve_lint_path(&context.workspace, raw)
         })
-    }
+        .collect::<Result<Vec<_>, _>>()?;
 
-    fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ReadOnly]
-    }
+    let manager = context.lsp_manager.as_ref().ok_or_else(|| {
+        ToolError::execution_failed(
+            "LSP manager is not attached to this tool context; enable LSP for this session",
+        )
+    })?;
+    let blocks = manager
+        .diagnostics_for_paths(&paths)
+        .await
+        .map_err(ToolError::execution_failed)?;
 
-    fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
-    }
-
-    fn supports_parallel(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let raw_paths = input
-            .get("paths")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ToolError::invalid_input("paths must be a non-empty array"))?;
-        if raw_paths.is_empty() || raw_paths.len() > MAX_LINT_PATHS {
-            return Err(ToolError::invalid_input(format!(
-                "paths must contain between 1 and {MAX_LINT_PATHS} files"
-            )));
-        }
-
-        let paths = raw_paths
-            .iter()
-            .map(|value| {
-                let raw = value
-                    .as_str()
-                    .ok_or_else(|| ToolError::invalid_input("each paths entry must be a string"))?;
-                resolve_lint_path(&context.workspace, raw)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let manager = context.lsp_manager.as_ref().ok_or_else(|| {
-            ToolError::execution_failed(
-                "LSP manager is not attached to this tool context; enable LSP for this session",
-            )
-        })?;
-        let blocks = manager
-            .diagnostics_for_paths(&paths)
-            .await
-            .map_err(ToolError::execution_failed)?;
-
-        let mut files = Vec::with_capacity(blocks.len());
-        let mut diagnostic_count = 0usize;
-        let mut truncated = false;
-        for block in blocks {
-            let mut items = Vec::new();
-            for diagnostic in block.items {
-                if diagnostic_count >= MAX_LINT_DIAGNOSTICS {
-                    truncated = true;
-                    break;
-                }
-                diagnostic_count += 1;
-                items.push(json!({
-                    "line": diagnostic.line,
-                    "column": diagnostic.column,
-                    "severity": format!("{:?}", diagnostic.severity).to_ascii_lowercase(),
-                    "message": diagnostic
-                        .message
-                        .chars()
-                        .take(MAX_LINT_MESSAGE_CHARS)
-                        .collect::<String>(),
-                }));
+    let mut files = Vec::with_capacity(blocks.len());
+    let mut diagnostic_count = 0usize;
+    let mut truncated = false;
+    for block in blocks {
+        let mut items = Vec::new();
+        for diagnostic in block.items {
+            if diagnostic_count >= MAX_LINT_DIAGNOSTICS {
+                truncated = true;
+                break;
             }
-            files.push(json!({
-                "file": block.file.display().to_string(),
-                "diagnostics": items,
+            diagnostic_count += 1;
+            items.push(json!({
+                "line": diagnostic.line,
+                "column": diagnostic.column,
+                "severity": format!("{:?}", diagnostic.severity).to_ascii_lowercase(),
+                "message": diagnostic
+                    .message
+                    .chars()
+                    .take(MAX_LINT_MESSAGE_CHARS)
+                    .collect::<String>(),
             }));
         }
-
-        let mut output = json!({
-            "files": files,
-            "diagnostic_count": diagnostic_count,
-            "truncated": truncated,
-        });
-        while serde_json::to_string(&output)
-            .map(|value| value.len() > MAX_LINT_OUTPUT_CHARS)
-            .unwrap_or(false)
-        {
-            let Some(files) = output.get_mut("files").and_then(Value::as_array_mut) else {
-                break;
-            };
-            let Some(last) = files.last_mut() else {
-                break;
-            };
-            if let Some(items) = last.get_mut("diagnostics").and_then(Value::as_array_mut)
-                && items.pop().is_some()
-            {
-                output["truncated"] = Value::Bool(true);
-            } else {
-                files.pop();
-                output["truncated"] = Value::Bool(true);
-            }
-        }
-
-        ToolResult::json(&output).map_err(|error| ToolError::execution_failed(error.to_string()))
+        files.push(json!({
+            "file": block.file.display().to_string(),
+            "diagnostics": items,
+        }));
     }
+
+    let mut output = json!({
+        "files": files,
+        "diagnostic_count": diagnostic_count,
+        "truncated": truncated,
+    });
+    while serde_json::to_string(&output)
+        .map(|value| value.len() > MAX_LINT_OUTPUT_CHARS)
+        .unwrap_or(false)
+    {
+        let Some(files) = output.get_mut("files").and_then(Value::as_array_mut) else {
+            break;
+        };
+        let Some(last) = files.last_mut() else {
+            break;
+        };
+        if let Some(items) = last.get_mut("diagnostics").and_then(Value::as_array_mut)
+            && items.pop().is_some()
+        {
+            output["truncated"] = Value::Bool(true);
+        } else {
+            files.pop();
+            output["truncated"] = Value::Bool(true);
+        }
+    }
+
+    ToolResult::json(&output).map_err(|error| ToolError::execution_failed(error.to_string()))
 }
 
 fn resolve_lint_path(workspace: &Path, raw: &str) -> Result<PathBuf, ToolError> {
