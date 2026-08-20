@@ -5465,6 +5465,91 @@ async fn mobile_insecure_mode_allows_page_and_v1_routes_without_token() -> Resul
     Ok(())
 }
 
+/// `GET /v1/threads/summary?search=` bounded the *store read* by `limit`
+/// before matching, so a thread older than the newest `limit` rows could not
+/// be found by searching for it — the embedded dashboard's search box asks
+/// for `limit=100`, which silently made every older thread unsearchable.
+/// `limit` bounds the returned rows, not how far the search looks.
+#[tokio::test]
+async fn thread_summary_search_finds_a_match_older_than_the_row_limit() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // `POST /v1/threads` has no title field; the title is a PATCH. Patching
+    // also re-stamps `updated_at`, so ordering is not left to two creates
+    // landing inside the same clock tick.
+    let create = |title: &str| {
+        let client = client.clone();
+        let title = title.to_string();
+        async move {
+            let thread: serde_json::Value = client
+                .post(format!("http://{addr}/v1/threads"))
+                .json(&json!({}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let id = thread["id"]
+                .as_str()
+                .context("missing thread id")?
+                .to_string();
+            client
+                .patch(format!("http://{addr}/v1/threads/{id}"))
+                .json(&json!({ "title": title }))
+                .send()
+                .await?
+                .error_for_status()?;
+            anyhow::Ok(id)
+        }
+    };
+
+    // Oldest thread carries the needle; three newer threads crowd it out of
+    // any `limit`-sized window.
+    let needle_id = create("zebracrossing handoff").await?;
+    for title in ["decoy one", "decoy two", "decoy three"] {
+        create(title).await?;
+    }
+
+    let summaries: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/threads/summary?limit=2&search=zebracrossing"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rows = summaries.as_array().context("summary should be an array")?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "search must reach past the row limit; got {summaries}"
+    );
+    assert_eq!(rows[0]["id"], needle_id);
+
+    // `limit` still bounds the returned rows.
+    let bounded: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/summary?limit=2"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        bounded
+            .as_array()
+            .context("summary should be an array")?
+            .len(),
+        2
+    );
+
+    handle.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn decide_approval_404s_when_nothing_pending() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {

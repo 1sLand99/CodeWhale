@@ -1346,14 +1346,23 @@ async fn list_threads_summary(
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let search = query.search.as_deref().map(str::to_ascii_lowercase);
     let filter = resolve_thread_filter(query.include_archived, query.archived_only);
+    // `limit` bounds the rows this route returns, not how far a search looks.
+    // Passing it to the store read as well matched only inside the newest
+    // `limit` threads, so any older match — the row the caller typed the query
+    // to find — was invisible. Unsearched listings keep the cheap bounded read;
+    // a search scans in newest-first order and stops at `limit` matches.
+    let scan_limit = if search.is_some() { None } else { Some(limit) };
     let threads = state
         .runtime_threads
-        .list_threads(filter, Some(limit))
+        .list_threads(filter, scan_limit)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut summaries = Vec::new();
     for thread in threads {
+        if summaries.len() >= limit {
+            break;
+        }
         let detail = state
             .runtime_threads
             .get_thread_detail(&thread.id)
@@ -1427,10 +1436,6 @@ async fn list_threads_summary(
             latest_turn_id: thread.latest_turn_id,
             latest_turn_status: latest_status,
         });
-    }
-
-    if summaries.len() > limit {
-        summaries.truncate(limit);
     }
 
     Ok(Json(summaries))
