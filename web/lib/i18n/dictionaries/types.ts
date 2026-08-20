@@ -463,3 +463,35 @@ export interface DocsRuntimeApiDict {
   securityLead: string;
   sourceNote: string;
 }
+
+export interface DocsSandboxDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  /** Four `[name, detail]` rows; the name is also the row's key. */
+  platforms: [string, string][];
+  policiesTitle: string;
+  policiesLead: string;
+  diagnosticsTitle: string;
+  diagnosticsLead: string;
+  diagnosticsLimits: string;
+  sourceNote: string;
+}
+
+export interface DocsWebDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  overviewBody: string;
+  authTitle: string;
+  authLead: string;
+  localTitle: string;
+  localLead: string;
+  troubleshootingTitle: string;
+  troubleshootingLead: string;
+  sourceNote: string;
+}

@@ -247,6 +247,10 @@ abort under load.
 - `feat(web): move docs/hooks and docs/troubleshooting onto the dictionary
   spine` (Lstarsky0) — both pages now read copy from the locale dictionaries
   instead of inline bilingual literals (#5337).
+- `feat(web): move docs/constitution and docs/runtime-api onto the dictionary
+  spine` (Lstarsky0) — both pages now read copy from the locale dictionaries
+  instead of inline bilingual literals; another incremental phase of #5337,
+  not completion of the full epic (#5517).
 - `docs(i18n): complete Tier 1 of Chinese docs localization` (SparkofSpike) —
   Chinese and Indonesian docs move to `docs/zh_hans/` and `docs/id/`, with
   redirect stubs at the old paths for one release cycle (#5482).
