@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping, not the turn engine, and returns an error naming
   `POST /v1/threads/{id}/turns` rather than a canned acceptance.
 
+- **Breaking (app-server):** `AppRequest::SubmitUserInput` now refuses
+  explicitly (`ok: false`, `error: "user_input_reply_unsupported"`) instead of
+  returning `resolved: true` and filing the answers in a map that had no
+  reader anywhere in the crate — every answer submitted was silently
+  discarded. It cannot be made to work on this transport: while a turn
+  streams, the stdio loop executes only `thread/interrupt` and queues
+  everything else, so an answer sent there would wait on the very turn
+  waiting for it. The refusal names the surface that does accept it,
+  `POST /v1/user-input/{thread_id}/{request_id}` on the runtime API. The
+  `/tool` path that mints the `UserInputRequest` is unchanged and still
+  genuine.
+
 - Removed the placeholder engine tree in `crates/core/src/engine/`. Its
   `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
   `TurnComplete { status: "completed" }` without ever contacting a model, and

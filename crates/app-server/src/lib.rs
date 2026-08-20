@@ -20,7 +20,6 @@ use codewhale_mcp::McpManager;
 use codewhale_protocol::{
     AppRequest, AppResponse, EventFrame, PromptRequest, PromptResponse, ResponseChannel,
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadRequest, ThreadResponse,
-    UserInputAnswerEvent,
 };
 use codewhale_state::StateStore;
 use codewhale_tools::{ToolCall, ToolRegistry};
@@ -31,16 +30,6 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 use tokio::sync::{Mutex, RwLock};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-
-/// Answers submitted for a pending `request_user_input` clarification.
-///
-/// The headless runtime emits [`codewhale_protocol::EventFrame::UserInputRequest`]
-/// fire-and-return (it has no resume channel, mirroring headless approval).
-/// Clients POST answers back via [`AppRequest::SubmitUserInput`]; we record
-/// them here keyed by `request_id` so a driver can retrieve and feed them into
-/// the next turn as structured context. True in-flight resume would require an
-/// awaiter in `invoke_tool` and is left as a follow-up.
-type PendingUserInputAnswers = Vec<UserInputAnswerEvent>;
 
 mod chat_completions;
 
@@ -126,10 +115,6 @@ struct AppState {
     /// both `/prompt` transports — because there is exactly one turn engine.
     runtime_bridge: Arc<Mutex<Option<SharedRuntimeBridge>>>,
     stdio_thread_hints: Arc<Mutex<HashMap<String, RuntimeThreadHint>>>,
-    /// Answers submitted via `AppRequest::SubmitUserInput`, keyed by
-    /// `request_id`. A driver polls this to resolve clarification questions
-    /// raised by the model during a headless run.
-    pending_user_input: Arc<Mutex<std::collections::HashMap<String, PendingUserInputAnswers>>>,
     /// Turns currently streaming over stdio, keyed by stdio thread id.
     ///
     /// Deliberately kept *outside* the bridge mutex: a streaming turn holds
@@ -726,7 +711,6 @@ fn build_state_with_transport(
         auth_token,
         runtime_bridge: Arc::new(Mutex::new(None)),
         stdio_thread_hints: Arc::new(Mutex::new(HashMap::new())),
-        pending_user_input: Arc::new(Mutex::new(std::collections::HashMap::new())),
         in_flight_turns: Arc::new(Mutex::new(HashMap::new())),
     })
 }
@@ -2198,30 +2182,26 @@ async fn process_app_request(
                 },
             }
         }
-        AppRequest::SubmitUserInput {
-            request_id,
-            answers,
-        } => {
-            // Record the user's answers against the pending clarification
-            // request so a driver can retrieve them. The headless runtime does
-            // not block on `request_user_input` (fire-and-return, like
-            // approval), so there is no in-flight turn to resume here — the
-            // caller is expected to feed these answers into the next turn.
-            let mut pending = state.pending_user_input.lock().await;
-            if pending.contains_key(&request_id) {
-                return AppResponse {
-                    ok: false,
-                    data: json!({
-                        "error": "request_id already resolved",
-                        "request_id": request_id,
-                    }),
-                    events: Vec::new(),
-                };
-            }
-            pending.insert(request_id.clone(), answers);
+        AppRequest::SubmitUserInput { request_id, .. } => {
+            // This transport cannot deliver a clarification answer, and
+            // saying otherwise was the bug: the previous implementation
+            // reported `resolved: true` and filed the answers in a map with
+            // no reader anywhere in this crate.
+            //
+            // It cannot be made to work here. `handle_line_during_turn`
+            // executes exactly one method while a turn is streaming —
+            // `thread/interrupt`. Everything else, `app/request` included,
+            // queues until the turn ends, so an answer sent over this
+            // transport would wait on the very turn that is waiting for it.
+            // The runtime API owns the pending request and can resume the
+            // turn, so that is where the reply belongs.
             AppResponse {
-                ok: true,
-                data: json!({ "request_id": request_id, "resolved": true }),
+                ok: false,
+                data: json!({
+                    "error": "user_input_reply_unsupported",
+                    "request_id": request_id,
+                    "message": "the app-server control transport cannot deliver                                 clarification answers: only `thread/interrupt` runs                                 while a turn is streaming, so an answer sent here would                                 queue behind the turn waiting for it. Reply on the                                 runtime API instead: POST /v1/user-input/{thread_id}/{request_id}.",
+                }),
                 events: Vec::new(),
             }
         }
@@ -3586,6 +3566,35 @@ mod tests {
             .await
             .expect_err("no runtime means no turn");
         assert_eq!(err.code, RUNTIME_UNAVAILABLE_CODE);
+    }
+
+    #[tokio::test]
+    async fn submit_user_input_refuses_instead_of_claiming_resolution() {
+        let (state, _tmp) = capability_test_state();
+        let response = process_app_request(
+            &state,
+            AppRequest::SubmitUserInput {
+                request_id: "user-input-1".to_string(),
+                answers: Vec::new(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+
+        assert!(!response.ok, "this transport cannot deliver the answer");
+        assert_eq!(response.data["error"], "user_input_reply_unsupported");
+        assert!(
+            response.data.get("resolved").is_none(),
+            "nothing was resolved: {}",
+            response.data
+        );
+        assert!(
+            response.data["message"]
+                .as_str()
+                .expect("message")
+                .contains("/v1/user-input/"),
+            "the refusal must name the transport that can accept the answer"
+        );
     }
 
     // ── capability drift guard ─────────────────────────────────────────

@@ -1423,10 +1423,17 @@ impl Runtime {
         // branch (issue #3102). The TUI intercepts this tool by name before
         // dispatch and blocks on a reply channel; the headless runtime instead
         // emits a typed `UserInputRequest` frame and returns a
-        // `user_input_required` status so the client can render the question
-        // and POST answers back via `AppRequest::SubmitUserInput`. It does NOT
-        // block — consistent with the headless approval model, which has no
-        // resume channel either.
+        // `user_input_required` status so the client can render the question.
+        // It does NOT block — consistent with the headless approval model,
+        // which has no resume channel either.
+        //
+        // The reply goes to the runtime API
+        // (`POST /v1/user-input/{thread_id}/{request_id}`), which owns the
+        // pending request and can resume the turn. The app-server control
+        // transport cannot: it executes only `thread/interrupt` mid-turn, so
+        // an answer sent over it would queue behind the very turn that is
+        // waiting for it. `AppRequest::SubmitUserInput` therefore refuses
+        // explicitly instead of pretending to have delivered the answer.
         if call.name == REQUEST_USER_INPUT_TOOL_NAME {
             let request_id = format!("user-input-{}", Uuid::new_v4());
             let arguments = match &call.payload {

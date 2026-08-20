@@ -167,6 +167,22 @@ in the app-server can produce model output, so a prompt either runs or fails.
 and replies `status: "completed"` with the streamed frames in `events` — where
 it previously replied `accepted` without doing anything.
 
+### Answering a clarification question
+
+When a headless turn calls `request_user_input`, the runtime emits a
+`user_input.required` event carrying a `request_id`. Reply on the runtime API:
+
+```
+POST /v1/user-input/{thread_id}/{request_id}
+```
+
+The app-server control transport cannot accept that reply.
+`app/request` with `SubmitUserInput` returns `ok: false` and
+`error: "user_input_reply_unsupported"`. This is a property of the transport,
+not an omission: while a turn is streaming, the stdio loop executes only
+`thread/interrupt` and queues everything else, so an answer sent there would
+wait on the very turn that is waiting for it.
+
 ## SDK contract
 
 The app-server exists so an external SDK can answer — without scraping TUI
