@@ -68,7 +68,12 @@ pub fn build_generate_content_body(request: &MessageRequest) -> Result<Value> {
         let role = match role_placement(&message.role, WireDialect::GoogleCloudCode) {
             RolePlacement::User => "user",
             RolePlacement::Assistant => "model",
-            _ => bail!(
+            // Listed rather than caught by `_` so a new placement forces a
+            // decision here instead of silently becoming a hard error.
+            RolePlacement::InterruptedAssistant
+            | RolePlacement::System
+            | RolePlacement::Omitted
+            | RolePlacement::Rejected => bail!(
                 "Antigravity cloud-code does not accept role {:?}",
                 message.role.as_str()
             ),
