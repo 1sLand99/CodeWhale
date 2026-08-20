@@ -42,6 +42,8 @@ pub const XAI_OIDC_ISSUER: &str = "https://auth.x.ai";
 pub const DEFAULT_SCOPES: &str = "openid profile email offline_access api:access grok-cli:access";
 const REFRESH_SKEW_SECS: i64 = 60;
 const DEVICE_POLL_MAX_SECS: u64 = 900;
+/// Every xAI OAuth request shares one timeout; none of them are long-poll.
+const OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
 const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
@@ -1006,10 +1008,7 @@ fn discover_device_oauth_endpoints(issuer: &str) -> Result<DeviceOauthEndpoints>
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     );
-    let client = crate::tls::reqwest_blocking_client_builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("Failed to build xAI OIDC discovery client")?;
+    let client = oauth_client("OIDC discovery")?;
     #[cfg(test)]
     crate::external_credentials::record_oauth_network();
     let response = client
@@ -1076,6 +1075,16 @@ fn validate_discovered_oauth_endpoint(
         bail!("xAI OIDC discovery returned {field} on a different origin than the issuer");
     }
     Ok(endpoint.to_string())
+}
+
+/// One blocking HTTP client for every xAI OAuth request. Four call sites built
+/// an identical client with the same timeout; `purpose` is the only thing that
+/// ever differed, and it only appears in the build-failure message.
+fn oauth_client(purpose: &str) -> Result<reqwest::blocking::Client> {
+    crate::tls::reqwest_blocking_client_builder()
+        .timeout(OAUTH_REQUEST_TIMEOUT)
+        .build()
+        .with_context(|| format!("Failed to build xAI {purpose} client"))
 }
 
 fn parse_oauth_json_response<T: DeserializeOwned>(
@@ -1163,10 +1172,7 @@ fn refresh_access_token(
     #[cfg(test)]
     crate::external_credentials::record_oauth_refresh();
     let token_endpoint = resolve_device_oauth_endpoints(issuer).token_endpoint;
-    let client = crate::tls::reqwest_blocking_client_builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("Failed to build xAI OAuth refresh client")?;
+    let client = oauth_client("OAuth refresh")?;
     let params = [
         ("client_id", client_id),
         ("grant_type", "refresh_token"),
@@ -1198,10 +1204,7 @@ fn request_device_code(
     client_id: &str,
     scopes: &str,
 ) -> Result<DeviceCodeGrant> {
-    let client = crate::tls::reqwest_blocking_client_builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("Failed to build xAI device-code client")?;
+    let client = oauth_client("device-code")?;
     let params = [("client_id", client_id), ("scope", scopes)];
     #[cfg(test)]
     crate::external_credentials::record_oauth_network();
@@ -1247,10 +1250,7 @@ fn poll_device_token(
     client_id: &str,
     device_code: &str,
 ) -> Result<DevicePollOutcome<TokenResponse>> {
-    let client = crate::tls::reqwest_blocking_client_builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .context("Failed to build xAI device-code poll client")?;
+    let client = oauth_client("device-code poll")?;
     let params = [
         ("client_id", client_id),
         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
