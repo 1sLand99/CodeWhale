@@ -10,7 +10,6 @@
 //! shim note at `crates/tui/src/tui/ocean.rs:35` — so there is no
 //! footer-below-composer fallback path left.
 
-use crate::localization::truncate_to_width;
 use std::borrow::Cow;
 
 use ratatui::{
@@ -23,7 +22,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::localization::{MessageId, tr};
-use crate::palette::ChromeInk;
+use crate::palette::{ChromeInk, UiTheme};
 use crate::tui::{
     app::App,
     underwater::{LiveActivity, ShellPhase, ShellTier, phase_marker_with_activity},
@@ -100,24 +99,151 @@ fn session_cache_hit_percentage(app: &App) -> Option<u8> {
     Some(((hit * 100 + total / 2) / total) as u8)
 }
 
-/// Quiet route identity for the phase rail. The header owns posture and
-/// workspace truth; this secondary line keeps the active provider, model, and
-/// reasoning choice available without making them the first thing a user sees.
-fn route_identity_label(app: &App, tier: ShellTier) -> String {
+/// Route identity for the rail, shed field by field until it fits `budget`.
+///
+/// The old version composed the full `provider · model · effort` label and
+/// then `truncate_to_width`'d it to a fixed 24/44/64 columns, which happily
+/// rendered `deepseek-v4-flash-prev…`. A clipped model name is worse than no
+/// model name: routes share prefixes, so the ellipsis is the rail admitting
+/// it will not tell you which model is answering. Shed the qualifiers
+/// instead — provider first, then effort — and if the bare model name still
+/// does not fit, shed the whole group. `/model` and `/status` own the full
+/// route either way.
+fn route_identity_fields(app: &App, tier: ShellTier, budget: usize) -> Option<Vec<String>> {
     let (provider, model) = app.effective_route_identity_display();
     let effort = app.reasoning_effort_display_label();
-    let label = match tier {
-        // On the smallest shell, model + effort are more useful than repeating
-        // the provider. The full route remains available in /model and /status.
-        ShellTier::Compact => format!("{model} · {effort}"),
-        ShellTier::Normal | ShellTier::Wide => format!("{provider} · {model} · {effort}"),
-    };
-    let budget = match tier {
-        ShellTier::Compact => 24,
-        ShellTier::Normal => 44,
-        ShellTier::Wide => 64,
-    };
-    truncate_to_width(&label, budget)
+    if model.is_empty() {
+        return None;
+    }
+    let mut candidates: Vec<Vec<String>> = Vec::new();
+    if tier != ShellTier::Compact && !provider.is_empty() && !effort.is_empty() {
+        // The smallest shell never repeats the provider: model and effort are
+        // the two facts that change what comes back.
+        candidates.push(vec![provider, model.clone(), effort.clone()]);
+    }
+    if !effort.is_empty() {
+        candidates.push(vec![model.clone(), effort]);
+    }
+    candidates.push(vec![model]);
+    candidates.into_iter().find(|fields| {
+        let width = fields.iter().map(|field| field.width()).sum::<usize>()
+            + fields.len().saturating_sub(1) * ITEM_SEPARATOR_WIDTH;
+        width <= budget
+    })
+}
+
+/// Paint an identity group: the model name one step brighter than the
+/// qualifiers that narrow it, so the field a mid-session glance is looking
+/// for is the field the eye lands on. Two weights, no new colour.
+fn identity_spans(fields: &[String], model_index: usize, theme: &UiTheme) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(fields.len() * 2);
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                ITEM_SEPARATOR,
+                Style::default().fg(ChromeInk::MetadataDim.color(theme)),
+            ));
+        }
+        let ink = if index == model_index {
+            ChromeInk::MetadataValue
+        } else {
+            ChromeInk::Metadata
+        };
+        spans.push(Span::styled(
+            field.clone(),
+            Style::default().fg(ink.color(theme)),
+        ));
+    }
+    spans
+}
+
+/// Split a notice at its joints, coarsest first.
+///
+/// A rail notice is prose, and prose has joints. Cutting at a joint keeps
+/// every word that survives true; cutting mid-phrase and hanging an ellipsis
+/// off the end only advertises that the row lost the argument. Sentence stops
+/// are the joint we want; the inner marks are the fallback for a one-sentence
+/// notice that is still too long for a narrow rail — losing the second half
+/// of `Auto-denied exec_shell: denied earlier` beats losing the warning.
+fn notice_clauses<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
+    let mut clauses = Vec::new();
+    let mut start = 0usize;
+    let mut chars = text.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if !marks.contains(&ch) {
+            continue;
+        }
+        // Full-width marks carry no trailing space, so they break on sight.
+        // ASCII marks only break before whitespace, which keeps `0.9.11`,
+        // `docs/TELEMETRY.md`, and `https://…` in one piece.
+        let breaks = !ch.is_ascii() || chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if !breaks {
+            continue;
+        }
+        let end = idx + ch.len_utf8();
+        let clause = text[start..end].trim();
+        if !clause.is_empty() {
+            clauses.push(clause);
+        }
+        start = end;
+    }
+    let rest = text[start..].trim();
+    if !rest.is_empty() {
+        clauses.push(rest);
+    }
+    clauses
+}
+
+/// Sentence stops — the joint a notice prefers to be cut at.
+const SENTENCE_MARKS: [char; 7] = ['.', '!', '?', '…', '。', '！', '？'];
+/// Inner joints, used only when one sentence still will not fit the rail.
+const CLAUSE_MARKS: [char; 8] = [';', ':', ',', '—', '；', '：', '，', '、'];
+
+fn join_while_fitting(clauses: &[&str], budget: usize) -> Option<String> {
+    let mut fitted = String::new();
+    for clause in clauses {
+        // A full-width stop already carries its own breathing room; putting
+        // a Latin space after `。` is a typographic accent in the wrong
+        // language.
+        let space = usize::from(!fitted.is_empty() && fitted.ends_with(|ch: char| ch.is_ascii()));
+        let candidate = fitted.width() + space + clause.width();
+        if candidate > budget {
+            break;
+        }
+        if space == 1 {
+            fitted.push(' ');
+        }
+        fitted.push_str(clause);
+    }
+    // A phrase that ends on `:` or `;` is still telling you more is coming —
+    // the same lie an ellipsis tells. Cut the mark and let the phrase stand.
+    let fitted = fitted
+        .trim_end_matches(|ch| CLAUSE_MARKS.contains(&ch) || ch == ' ')
+        .to_string();
+    (!fitted.is_empty()).then_some(fitted)
+}
+
+/// Fit a notice into `budget` by dropping whole trailing clauses.
+///
+/// Returns `None` only when not even the first inner phrase fits, and the
+/// rail then says nothing rather than dangling a stump. Notices get first
+/// call on the row: identity and the ledger chips have already stood down by
+/// the time this is asked, and the key hints stand down after it if that is
+/// what the notice needs.
+fn fit_notice(text: &str, budget: usize) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || budget == 0 {
+        return None;
+    }
+    if text.width() <= budget {
+        return Some(text.to_string());
+    }
+    let sentences = notice_clauses(text, &SENTENCE_MARKS);
+    if let Some(fitted) = join_while_fitting(&sentences, budget) {
+        return Some(fitted);
+    }
+    let first = sentences.first().copied().unwrap_or(text);
+    join_while_fitting(&notice_clauses(first, &CLAUSE_MARKS), budget)
 }
 
 /// Toasts share the footer rail, so their typed level must resolve through
@@ -131,9 +257,21 @@ fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
     }
 }
 
-/// Paint the one-line phase rail. Compact left marker (icon + verb + duration)
-/// instead of a full-width routine phase band. Amber only for approval/waiting;
-/// cyan/teal for routine work.
+/// Paint the one-line phase rail.
+///
+/// The rail speaks four kinds of fact and they are not peers:
+///
+/// * **live state** — the phase marker, in the phase accent. Always present.
+/// * **a notice** — a transient thing the session is telling you. When one is
+///   live it takes the identity slot and the standing facts stand down; they
+///   are back in a few seconds and the notice is not.
+/// * **route identity** — provider, model, effort. Standing background truth.
+/// * **key hints** — right-aligned, dimmest, the only group that is optional
+///   twice over.
+///
+/// Groups are divided by a blank gutter and by ink family; peers *inside* a
+/// group keep the ` · `. Nothing on the rail is ever truncated: every group
+/// either fits whole or sheds a whole field.
 pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -167,7 +305,7 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if tier != ShellTier::Compact && matches!(phase, ShellPhase::Working | ShellPhase::Verifying) {
         if let Some(detail) = working_detail(app, activity) {
             left.push(Span::styled(
-                " · ",
+                ITEM_SEPARATOR,
                 Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
             ));
             left.push(Span::styled(
@@ -176,67 +314,15 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
             ));
         }
         left.push(Span::styled(
-            format!(
-                " · {}",
-                tr(app.ui_locale, MessageId::FooterHintEscInterrupt)
-            ),
+            ITEM_SEPARATOR,
             Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
         ));
-    }
-
-    let route_label = route_identity_label(app, tier);
-    if !route_label.is_empty() {
+        // `Esc to interrupt` is a key hint that happens to sit next to the
+        // thing it interrupts. It reads in the hint weight the right-hand
+        // chords use, not in the separator weight it used to share.
         left.push(Span::styled(
-            " · ",
-            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
-        ));
-        left.push(Span::styled(
-            route_label,
-            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
-        ));
-    }
-
-    // The ledger chips are built before the toast so the toast can be given
-    // whatever width is genuinely left over. They are appended after it, so
-    // the visual order is unchanged.
-    let mut tail: Vec<Span<'static>> = Vec::new();
-    let chip = app.cumulative_usage_chip();
-    if tier != ShellTier::Compact
-        && let Some(amount) = match &chip {
-            crate::route_billing::UsageChip::Money(amount) => Some(amount.clone()),
-            crate::route_billing::UsageChip::PricedSubtotal { .. } => {
-                crate::route_billing::format_usage_chip(&chip)
-            }
-            _ => None,
-        }
-    {
-        tail.push(Span::styled(
-            " · ",
-            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
-        ));
-        tail.push(Span::styled(
-            amount,
-            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
-        ));
-    }
-
-    // The session metrics strip owns the cache cell when it is on; the
-    // standalone `cache N%` chip stays for users who turned the strip off.
-    let metrics_enabled = app
-        .status_items
-        .contains(&crate::config::StatusItem::SessionMetrics);
-    if !metrics_enabled
-        && tier != ShellTier::Compact
-        && app.status_items.contains(&crate::config::StatusItem::Cache)
-        && let Some(pct) = session_cache_hit_percentage(app)
-    {
-        tail.push(Span::styled(
-            " · ",
-            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
-        ));
-        tail.push(Span::styled(
-            format!("cache {pct}%"),
-            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
+            tr(app.ui_locale, MessageId::FooterHintEscInterrupt).into_owned(),
+            Style::default().fg(ChromeInk::MetadataHint.color(&app.ui_theme)),
         ));
     }
 
@@ -244,27 +330,28 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     // the ledger. Idle/typing may advertise keys on the quiet footer.
     // Hints come from shell_key_routing so advertised chords match handlers;
     // bare letters are never advertised — the composer owns printable keys.
-    let right_text: Cow<'static, str> = if PhaseStripPlacement::for_phase(phase).is_above_composer()
-    {
-        Cow::Borrowed("")
-    } else {
-        use crate::tui::shell_key_routing::{ShellBindingId, binding, footer_action_hints};
-        let hint_keys = tr(app.ui_locale, MessageId::FooterHintKeys);
-        let hint_output = tr(app.ui_locale, MessageId::FooterHintOutput);
-        let hint_context = tr(app.ui_locale, MessageId::FooterHintContext);
-        Cow::Owned(match tier {
-            ShellTier::Compact => {
-                format!("{}:{hint_keys}", binding(ShellBindingId::Help).footer_chord)
-            }
-            ShellTier::Normal => footer_action_hints(false)
-                .replace("{output}", hint_output.as_ref())
-                .replace("{keys}", hint_keys.as_ref()),
-            ShellTier::Wide => footer_action_hints(true)
-                .replace("{output}", hint_output.as_ref())
-                .replace("{context}", hint_context.as_ref())
-                .replace("{keys}", hint_keys.as_ref()),
-        })
-    };
+    let mut right_text: Cow<'static, str> =
+        if PhaseStripPlacement::for_phase(phase).is_above_composer() {
+            Cow::Borrowed("")
+        } else {
+            use crate::tui::shell_key_routing::{ShellBindingId, binding, footer_action_hints};
+            let hint_keys = tr(app.ui_locale, MessageId::FooterHintKeys);
+            let hint_output = tr(app.ui_locale, MessageId::FooterHintOutput);
+            Cow::Owned(match tier {
+                ShellTier::Compact => {
+                    format!("{}:{hint_keys}", binding(ShellBindingId::Help).footer_chord)
+                }
+                // Wide used to add `/context:context`. The rail advertises
+                // chords you cannot discover any other way; a slash command
+                // announces itself the moment you type `/`, so it was paying
+                // eighteen columns of a 24-row screen to tell you something
+                // the composer already tells you. The rail now reads the same
+                // at 80 columns as at 200.
+                ShellTier::Normal | ShellTier::Wide => footer_action_hints(false)
+                    .replace("{output}", hint_output.as_ref())
+                    .replace("{keys}", hint_keys.as_ref()),
+            })
+        };
 
     // `← for agents · ↓ to manage`: advertise only while the empty
     // composer owns those keys and a worker exists. Focused surfaces, modals,
@@ -275,56 +362,29 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         // post-completion menu ownership into the same predicate.
         && crate::tui::agent_focus::shell_shortcuts_available(app, false))
     .then(|| crate::tui::agent_focus::footer_agent_hints(app));
-    let right_text: Cow<'static, str> = match agent_hints {
-        Some(hints) if !right_text.is_empty() => Cow::Owned(format!("{hints} · {right_text}")),
+    right_text = match agent_hints {
+        Some(hints) if !right_text.is_empty() => {
+            Cow::Owned(format!("{hints}{ITEM_SEPARATOR}{right_text}"))
+        }
         // A settled turn keeps the strip above the composer without the key
         // chorus; the two agent keys still apply there, so they stay visible.
         Some(hints) if phase == ShellPhase::Done => Cow::Owned(hints),
         _ => right_text,
     };
 
-    let right_width = right_text.width();
     let available = usize::from(area.width);
+    let phase_width = span_width(&left);
+    let hint_width = right_text.width();
+    let hint_cost = if hint_width == 0 {
+        0
+    } else {
+        hint_width + HINT_GAP
+    };
 
-    // Session metrics strip (`4 turns · 108 steps │ LLM 11m46s · tools 1m52s
-    // │ TTFT 1.5s · 120 tok/s │ cache 99% │ in 9.3M`). It takes whatever
-    // columns are genuinely free after the phase marker, the ledger chips, a
-    // floor for any live toast, and the key hints, and sheds its
-    // lowest-value groups to fit rather than truncating a number.
-    if metrics_enabled && tier != ShellTier::Compact {
-        let snapshot = crate::tui::session_metrics::snapshot_from_app(app);
-        if !snapshot.is_empty() {
-            let toast_reserve = status_toast
-                .as_ref()
-                .filter(|toast| !toast.text.trim().is_empty())
-                .map(|toast| toast.text.trim().width().min(TOAST_MIN_WIDTH) + TOAST_SEPARATOR_WIDTH)
-                .unwrap_or(0);
-            let budget = available.saturating_sub(
-                span_width(&left)
-                    + span_width(&tail)
-                    + toast_reserve
-                    + right_width
-                    + TOAST_RIGHT_GAP
-                    + METRICS_SEPARATOR_WIDTH,
-            );
-            let ascii = crate::tui::color_compat::ascii_safe_enabled();
-            let strip = crate::tui::session_metrics::fit_to_width(
-                crate::tui::session_metrics::build_groups(snapshot, app.ui_locale),
-                budget,
-                crate::tui::session_metrics::Separators::for_ascii(ascii),
-            );
-            if !strip.is_empty() {
-                tail.push(Span::styled(
-                    if ascii { " | " } else { " │ " },
-                    Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
-                ));
-                tail.extend(crate::tui::session_metrics::spans(&strip, &app.ui_theme));
-            }
-        }
-    }
-
-    if tier != ShellTier::Compact
-        && let Some(toast) = status_toast.filter(|toast| {
+    let notice = (tier != ShellTier::Compact)
+        .then_some(status_toast)
+        .flatten()
+        .filter(|toast| {
             // Completion may land in the same event drain as an approval
             // denial. Keep unresolved attention/error receipts visible after
             // `done`; only routine informational completion copy yields to the
@@ -338,35 +398,157 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 && !toast.text.trim().is_empty()
                 && toast.text.trim() != phase_label.as_ref()
         })
-    {
-        // The budget used to be a flat 40 columns no matter how wide the
-        // terminal was, which cut a warning whose entire job is to explain an
-        // unexpected state down to `Delegated coordination unavailable — an…`.
-        // Spend the row that actually exists: everything left after the phase
-        // marker, the ledger chips, the key hints, and a gap between them.
-        let toast_budget = available
-            .saturating_sub(
-                span_width(&left)
-                    + TOAST_SEPARATOR_WIDTH
-                    + span_width(&tail)
-                    + right_width
-                    + TOAST_RIGHT_GAP,
-            )
-            .max(TOAST_MIN_WIDTH);
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
-        ));
-        left.push(Span::styled(
-            truncate_to_width(toast.text.trim(), toast_budget),
-            Style::default().fg(status_toast_ink(toast.level).color(&app.ui_theme)),
-        ));
+        .map(|toast| {
+            let urgent = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (toast.text.clone(), status_toast_ink(toast.level), urgent)
+        });
+
+    // Identity is standing information: which model is answering does not stop
+    // being true because a notice appeared. A notice is also not necessarily
+    // transient — `sticky_status` carries `ttl_ms: None` for Warning and Error
+    // — so letting any notice erase the route would let one denied tool call
+    // hide it for the rest of the session.
+    //
+    // When both cannot fit, severity decides. A Warning or an Error is
+    // actionable and wins the columns; routine informational copy (the
+    // telemetry receipt is the common case) yields to the standing facts.
+    let mut used = phase_width + hint_cost;
+    let identity =
+        route_identity_fields(app, tier, available.saturating_sub(used + GROUP_GAP_WIDTH));
+    let identity_painted = identity.as_ref().map(|fields| {
+        let model_index = usize::from(fields.len() == 3);
+        identity_spans(fields, model_index, &app.ui_theme)
+    });
+    let identity_cost = identity_painted
+        .as_ref()
+        .map_or(0, |spans| GROUP_GAP_WIDTH + span_width(spans));
+
+    let mut show_identity = identity_painted.is_some();
+    let notice = notice.and_then(|(text, ink, urgent)| {
+        let beside = available.saturating_sub(used + identity_cost + GROUP_GAP_WIDTH);
+        if let Some(fitted) = fit_notice(&text, beside) {
+            return Some((fitted, ink));
+        }
+        if !urgent {
+            // Routine copy does not get to evict the route.
+            return None;
+        }
+        // Urgent: take identity's columns and refit against the whole row.
+        let alone = available.saturating_sub(used + GROUP_GAP_WIDTH);
+        let fitted = fit_notice(&text, alone)?;
+        show_identity = false;
+        Some((fitted, ink))
+    });
+
+    let keep_hints = true;
+    if show_identity && let Some(spans) = identity_painted {
+        used += identity_cost;
+        left.push(Span::raw(GROUP_GAP));
+        left.extend(spans);
     }
-    left.extend(tail);
+    if let Some((text, ink)) = notice {
+        left.push(Span::raw(GROUP_GAP));
+        left.push(Span::styled(
+            text,
+            Style::default().fg(ink.color(&app.ui_theme)),
+        ));
+    } else {
+        // No notice: the ledger and the session metrics strip may spend what
+        // identity did not. Each group fits whole or is not painted.
+
+        let mut ledger: Vec<Span<'static>> = Vec::new();
+        let chip = app.cumulative_usage_chip();
+        if tier != ShellTier::Compact
+            && let Some(amount) = match &chip {
+                crate::route_billing::UsageChip::Money(amount) => Some(amount.clone()),
+                crate::route_billing::UsageChip::PricedSubtotal { .. } => {
+                    crate::route_billing::format_usage_chip(&chip)
+                }
+                _ => None,
+            }
+            && amount.width() + GROUP_GAP_WIDTH <= available.saturating_sub(used)
+        {
+            used += GROUP_GAP_WIDTH + amount.width();
+            ledger.push(Span::raw(GROUP_GAP));
+            ledger.push(Span::styled(
+                amount,
+                Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
+            ));
+        }
+
+        // The session metrics strip owns the cache cell when it is on; the
+        // standalone `cache N%` chip stays for users who turned the strip off.
+        let metrics_enabled = app
+            .status_items
+            .contains(&crate::config::StatusItem::SessionMetrics);
+        if !metrics_enabled
+            && tier != ShellTier::Compact
+            && app.status_items.contains(&crate::config::StatusItem::Cache)
+            && let Some(pct) = session_cache_hit_percentage(app)
+        {
+            let chip = format!("cache {pct}%");
+            let separator_width = if ledger.is_empty() {
+                GROUP_GAP_WIDTH
+            } else {
+                ITEM_SEPARATOR_WIDTH
+            };
+            if chip.width() + separator_width <= available.saturating_sub(used) {
+                used += separator_width + chip.width();
+                ledger.push(if ledger.is_empty() {
+                    Span::raw(GROUP_GAP)
+                } else {
+                    Span::styled(
+                        ITEM_SEPARATOR,
+                        Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
+                    )
+                });
+                ledger.push(Span::styled(
+                    chip,
+                    Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
+                ));
+            }
+        }
+
+        // Session metrics strip (`4 turns · 108 steps │ LLM 11m46s · tools
+        // 1m52s │ TTFT 1.5s · 120 tok/s │ cache 99% │ in 9.3M`). It takes
+        // whatever columns are genuinely free and sheds its lowest-value
+        // groups to fit rather than truncating a number.
+        if metrics_enabled && tier != ShellTier::Compact {
+            let snapshot = crate::tui::session_metrics::snapshot_from_app(app);
+            if !snapshot.is_empty() {
+                let budget = available.saturating_sub(used + LEDGER_OPENER_WIDTH);
+                let ascii = crate::tui::color_compat::ascii_safe_enabled();
+                let strip = crate::tui::session_metrics::fit_to_width(
+                    crate::tui::session_metrics::build_groups(snapshot, app.ui_locale),
+                    budget,
+                    crate::tui::session_metrics::Separators::for_ascii(ascii),
+                );
+                if !strip.is_empty() {
+                    // The gutter opens the ledger group; the bar is the
+                    // metrics strip's own internal divider, so it only shows
+                    // up once the group is already open.
+                    ledger.push(if ledger.is_empty() {
+                        Span::raw(GROUP_GAP)
+                    } else {
+                        Span::styled(
+                            if ascii { " | " } else { " │ " },
+                            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
+                        )
+                    });
+                    ledger.extend(crate::tui::session_metrics::spans(&strip, &app.ui_theme));
+                }
+            }
+        }
+        left.extend(ledger);
+    }
 
     let left_width = span_width(&left);
-    if right_width > 0 && left_width + right_width < available {
-        left.push(Span::raw(" ".repeat(available - left_width - right_width)));
+    if keep_hints && hint_width > 0 && left_width + hint_width < available {
+        left.push(Span::raw(" ".repeat(available - left_width - hint_width)));
         left.push(Span::styled(
             right_text.into_owned(),
             Style::default().fg(ChromeInk::MetadataHint.color(&app.ui_theme)),
@@ -375,17 +557,25 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     Paragraph::new(Line::from(left)).render(area, buf);
 }
 
-/// Width of the ` · ` separator painted before the toast.
-const TOAST_SEPARATOR_WIDTH: usize = 3;
-/// Width of the ` │ ` separator painted before the session metrics strip.
-const METRICS_SEPARATOR_WIDTH: usize = 3;
-/// Blank columns kept between the toast and the right-aligned key hints, so
-/// the two never read as one run-on sentence.
-const TOAST_RIGHT_GAP: usize = 2;
-/// Floor for the toast budget. Below this the strip is too narrow to say
-/// anything useful either way, and clamping keeps the arithmetic from
-/// collapsing the toast to nothing on a cramped terminal.
-const TOAST_MIN_WIDTH: usize = 24;
+/// Peers inside one group — provider and model, a count and its verb — keep
+/// the middle dot.
+const ITEM_SEPARATOR: &str = " · ";
+const ITEM_SEPARATOR_WIDTH: usize = 3;
+/// Blank gutter between the rail's semantic groups.
+///
+/// The rail used to join every group with that same ` · ` in that same ink,
+/// so live state, route identity, a privacy notice, and keyboard hints all
+/// read as one run-on list of peers. A dot separates peers inside a group; a
+/// gutter separates groups. Same three columns, no extra ink, and the eye
+/// finally has something to skim by.
+const GROUP_GAP: &str = "   ";
+const GROUP_GAP_WIDTH: usize = 3;
+/// Blank columns kept between the left run and the right-aligned key hints.
+const HINT_GAP: usize = 2;
+/// Width of whichever mark opens the session metrics strip — the group
+/// gutter when the ledger starts with it, the ` │ ` bar when chips came
+/// first. Both are three columns.
+const LEDGER_OPENER_WIDTH: usize = 3;
 
 #[cfg(test)]
 mod tests {
@@ -837,6 +1027,253 @@ mod tests {
         let text = strip_text(&mut fresh, 120);
         assert!(!text.contains("turns"), "{text}");
         assert!(!text.contains("│"), "{text}");
+    }
+
+    /// The whole point of the gutter: four kinds of fact used to be strung
+    /// together with one separator at one weight, so nothing was grouped and
+    /// the eye had nothing to skim by.
+    #[test]
+    fn live_state_and_route_identity_are_divided_by_a_gutter_not_a_dot() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        let text = strip_text(&mut app, 120);
+        let label = text.find("idle").expect(&text);
+        assert!(
+            text[label..].starts_with("idle   DeepSeek"),
+            "phase and identity must be divided by the group gutter: {text}"
+        );
+        // Peers inside the identity group keep the middle dot.
+        assert!(
+            text.contains("DeepSeek · deepseek-v4-flash · max"),
+            "{text}"
+        );
+    }
+
+    /// `/context:context` cost eighteen columns to advertise something the
+    /// composer announces the moment you type `/`. The rail now reads the
+    /// same at 80 columns as at 200.
+    #[test]
+    fn the_rail_advertises_chords_not_slash_commands() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        for width in [80, 120, 200] {
+            let text = strip_text(&mut app, width);
+            assert!(text.contains("keys"), "{width}: {text}");
+            assert!(
+                !text.contains("/context"),
+                "{width} advertised a slash command: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn notice_clauses_split_on_sentences_and_keep_versions_and_paths_whole() {
+        assert_eq!(
+            notice_clauses(
+                "Counts are on. Code is never collected. See docs/T.md",
+                &SENTENCE_MARKS
+            ),
+            vec![
+                "Counts are on.",
+                "Code is never collected.",
+                "See docs/T.md"
+            ]
+        );
+        assert_eq!(
+            notice_clauses("Updated to 0.9.11 from 0.9.10", &SENTENCE_MARKS),
+            vec!["Updated to 0.9.11 from 0.9.10"]
+        );
+        // Full-width stops carry no trailing space, so they break on sight.
+        assert_eq!(
+            notice_clauses(
+                "匿名の利用回数は有効です。会話とコードは収集されません。",
+                &SENTENCE_MARKS
+            ),
+            vec![
+                "匿名の利用回数は有効です。",
+                "会話とコードは収集されません。"
+            ]
+        );
+        // A colon inside a URL is not a joint.
+        assert_eq!(
+            notice_clauses("Docs: https://example.test/x", &CLAUSE_MARKS),
+            vec!["Docs:", "https://example.test/x"]
+        );
+    }
+
+    /// `。` already carries its own breathing room; a Latin space after it is
+    /// a typographic accent in the wrong language.
+    #[test]
+    fn shed_clauses_rejoin_without_a_latin_space_after_a_full_width_stop() {
+        const JA: &str = "匿名の利用状況集計はオンです。会話やコードは一切収集しません。/settings で変更できます。スキーマ: docs/TELEMETRY.md";
+        assert_eq!(
+            fit_notice(JA, 62).as_deref(),
+            Some("匿名の利用状況集計はオンです。会話やコードは一切収集しません。")
+        );
+        assert_eq!(
+            fit_notice(JA, 40).as_deref(),
+            Some("匿名の利用状況集計はオンです。")
+        );
+    }
+
+    #[test]
+    fn a_notice_sheds_whole_clauses_and_never_dangles() {
+        const NOTICE: &str = "Anonymous usage counts are on. Conversations and code are never collected. Change this in /settings; schema: docs/TELEMETRY.md";
+        assert_eq!(fit_notice(NOTICE, 200).as_deref(), Some(NOTICE));
+        assert_eq!(
+            fit_notice(NOTICE, 80).as_deref(),
+            Some("Anonymous usage counts are on. Conversations and code are never collected.")
+        );
+        assert_eq!(
+            fit_notice(NOTICE, 40).as_deref(),
+            Some("Anonymous usage counts are on.")
+        );
+        assert_eq!(fit_notice("   ", 40), None);
+    }
+
+    /// The failure this caught: a one-sentence warning longer than the row
+    /// used to have no sentence joint to shed at, so the rail dropped the
+    /// whole warning. Inner joints are the fallback, and the phrase that
+    /// survives never ends on a `:` or `;` — that mark says "more is coming"
+    /// as loudly as an ellipsis does.
+    #[test]
+    fn a_clause_less_warning_sheds_at_inner_joints_rather_than_vanishing() {
+        const WARNING: &str =
+            "Auto-denied exec_shell: denied earlier; restart Codewhale to re-enable it.";
+        assert_eq!(fit_notice(WARNING, 120).as_deref(), Some(WARNING));
+        assert_eq!(
+            fit_notice(WARNING, 60).as_deref(),
+            Some("Auto-denied exec_shell: denied earlier")
+        );
+        assert_eq!(
+            fit_notice(WARNING, 30).as_deref(),
+            Some("Auto-denied exec_shell")
+        );
+
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.push_status_toast(WARNING, crate::tui::app::StatusToastLevel::Warning, None);
+        for width in [60u16, 72, 80, 100, 120] {
+            let text = strip_text(&mut app, width);
+            assert!(
+                text.contains("Auto-denied exec_shell"),
+                "{width} dropped the warning: {text}"
+            );
+            assert!(!text.contains('…'), "{width} dangled: {text}");
+        }
+    }
+
+    /// Identity is standing information; a notice is something the session is
+    /// telling you. When both cannot fit, severity decides — and severity, not
+    /// mere presence, is the right axis: `sticky_status` carries
+    /// `ttl_ms: None` for Warning and Error, so "any notice evicts identity"
+    /// would let one denied tool call hide which model is answering for the
+    /// rest of the session.
+    #[test]
+    fn routine_notices_yield_to_the_route_but_urgent_ones_do_not() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.status_items = vec![crate::config::StatusItem::SessionMetrics];
+        app.turn_counter = 4;
+        app.push_status_toast(
+            "Anonymous usage counts are on. Conversations and code are never collected. Change this in /settings; schema: docs/TELEMETRY.md",
+            crate::tui::app::StatusToastLevel::Info,
+            Some(12_000),
+        );
+
+        // Wide: the receipt and the route coexist. The route is never the
+        // thing that gets dropped to make room for routine copy.
+        let text = strip_text(&mut app, 120);
+        assert!(text.contains("Anonymous usage counts are on."), "{text}");
+        assert!(
+            text.contains("deepseek-v4-flash"),
+            "a routine notice must not evict the route: {text}"
+        );
+
+        // Narrow: the receipt sheds clauses; the route still stands.
+        let text = strip_text(&mut app, 80);
+        assert!(
+            text.contains("deepseek-v4-flash"),
+            "the route survives at 80: {text}"
+        );
+        assert!(!text.contains('…'), "no dangling ellipsis: {text}");
+
+        // An urgent notice is actionable and does get the columns when the row
+        // cannot hold both.
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.push_status_toast(
+            "Auto-denied exec_shell: denied earlier; restart Codewhale to re-enable it.",
+            crate::tui::app::StatusToastLevel::Warning,
+            None,
+        );
+        for width in [60u16, 80, 120] {
+            let text = strip_text(&mut app, width);
+            assert!(
+                text.contains("Auto-denied exec_shell"),
+                "{width} dropped an actionable warning: {text}"
+            );
+            assert!(!text.contains('…'), "{width} dangled: {text}");
+        }
+    }
+
+    #[test]
+    fn nothing_on_the_rail_advertises_truncation() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.status_items = vec![crate::config::StatusItem::SessionMetrics];
+        app.turn_counter = 4;
+        for width in [40u16, 50, 59, 60, 72, 80, 100, 120, 160] {
+            let clean = strip_text(&mut app, width);
+            assert!(!clean.contains('…'), "{width} dangled: {clean}");
+        }
+        app.push_status_toast(
+            "Anonymous usage counts are on. Conversations and code are never collected. Change this in /settings; schema: docs/TELEMETRY.md",
+            crate::tui::app::StatusToastLevel::Info,
+            Some(12_000),
+        );
+        for width in [40u16, 50, 59, 60, 72, 80, 100, 120, 160] {
+            let noticed = strip_text(&mut app, width);
+            assert!(!noticed.contains('…'), "{width} dangled: {noticed}");
+        }
+    }
+
+    /// `deepseek-v4-flash-prev…` could be any of several routes. A clipped
+    /// model name is worse than no model name, so the qualifiers go first.
+    #[test]
+    fn identity_sheds_qualifiers_before_it_would_clip_a_model_name() {
+        let mut app = App::new(
+            TuiOptions {
+                model: "deepseek-v4-flash-preview-2026-05-01".to_string(),
+                ..crate::test_support::test_tui_options(PathBuf::from("."))
+            },
+            &Config::default(),
+        );
+        app.ui_locale = crate::localization::Locale::En;
+
+        let wide = strip_text(&mut app, 140);
+        assert!(
+            wide.contains("DeepSeek · deepseek-v4-flash-preview-2026-05-01 · max"),
+            "{wide}"
+        );
+
+        let mid = strip_text(&mut app, 80);
+        assert!(
+            mid.contains("deepseek-v4-flash-preview-2026-05-01"),
+            "{mid}"
+        );
+        assert!(!mid.contains("DeepSeek ·"), "provider sheds first: {mid}");
+
+        // Narrow enough that only the bare model name survives; it survives
+        // whole or not at all.
+        for width in [50u16, 60, 70] {
+            let narrow = strip_text(&mut app, width);
+            assert!(
+                !narrow.contains("deepseek-v4-flash-p")
+                    || narrow.contains("deepseek-v4-flash-preview-2026-05-01"),
+                "{width} clipped the model name: {narrow}"
+            );
+        }
     }
 
     #[test]
