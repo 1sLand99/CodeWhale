@@ -138,6 +138,14 @@ fn record_skill_md_read_attempt() {
 
 #[must_use]
 pub fn default_skills_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if !crate::test_support::guarded_environment_provides_state_paths() {
+            return crate::test_support::unsealed_test_state_root()
+                .join(".codewhale")
+                .join("skills");
+        }
+    }
     crate::config::effective_home_dir().map_or_else(
         || PathBuf::from("/tmp/codewhale/skills"),
         |p| p.join(".codewhale").join("skills"),
@@ -147,6 +155,16 @@ pub fn default_skills_dir() -> PathBuf {
 /// Global agentskills.io-compatible skills directory (`~/.agents/skills`).
 #[must_use]
 pub fn agents_global_skills_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if !crate::test_support::guarded_environment_provides_state_paths() {
+            return Some(
+                crate::test_support::unsealed_test_state_root()
+                    .join(".agents")
+                    .join("skills"),
+            );
+        }
+    }
     crate::config::effective_home_dir().map(|p| p.join(".agents").join("skills"))
 }
 

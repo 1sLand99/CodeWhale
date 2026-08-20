@@ -1664,7 +1664,7 @@ fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
     let revisions = [1, 1];
     let mut cache = TranscriptViewCache::new();
     let constrained = TranscriptRenderOptions {
-        reasoning_preview_viewport_lines: Some(26),
+        reasoning_preview_viewport_lines: Some(18),
         ..TranscriptRenderOptions::default()
     };
     cache.ensure_split(
@@ -1692,7 +1692,7 @@ fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
     assert!(!first.contains("reasoning line 20"), "{first}");
     assert!(newest.contains("reasoning line 12"), "{newest}");
     assert!(!newest.contains("reasoning line 13"), "{newest}");
-    assert_eq!(cache.total_lines(), 26);
+    assert_eq!(cache.total_lines(), 18);
     assert!(cache.per_cell[0].reasoning_action.is_some());
     assert!(cache.per_cell[1].reasoning_action.is_some());
 

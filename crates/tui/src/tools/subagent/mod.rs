@@ -10,7 +10,7 @@
 //! the retired lifecycle theater. Older manager helpers remain executable for
 //! persisted records and internal recovery.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -915,6 +915,11 @@ pub struct AgentWorkerEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentWorkerRecord {
     pub spec: AgentWorkerSpec,
+    /// Root conversation that admitted this worker. Persisted independently
+    /// of the optional paired `SubAgent` row so headless workers remain
+    /// session-addressable without being guessed into a later conversation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_session_id: String,
     #[serde(default = "default_subagent_actor_kind")]
     pub actor_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -957,7 +962,15 @@ pub(crate) struct CoordinationRegistrationSnapshot {
 }
 
 impl AgentWorkerRecord {
-    fn new(spec: AgentWorkerSpec, now_ms: u64) -> Self {
+    /// Build a record exactly as the manager does. `pub(crate)` so the agents
+    /// roster projection (#5479) can be tested against real records instead of
+    /// a hand-rolled struct literal that would drift from this one.
+    #[cfg(test)]
+    pub(crate) fn new(spec: AgentWorkerSpec, now_ms: u64) -> Self {
+        Self::new_for_session(spec, now_ms, String::new())
+    }
+
+    fn new_for_session(spec: AgentWorkerSpec, now_ms: u64, owner_session_id: String) -> Self {
         let run_id = agent_worker_run_id(&spec);
         let artifacts = default_subagent_artifacts(&run_id);
         let follow_up = follow_up_target_for_spec(&spec);
@@ -967,6 +980,7 @@ impl AgentWorkerRecord {
         Self {
             parent_run_id: spec.parent_run_id.clone(),
             spec,
+            owner_session_id,
             actor_kind: default_subagent_actor_kind(),
             follow_up,
             takeover,
@@ -1954,6 +1968,11 @@ struct PersistedSubAgent {
     /// "from_prior_session" because it can't match any current id.
     #[serde(default)]
     session_boot_id: String,
+    /// Root conversation that launched this child. Records written before
+    /// this field existed deserialize to empty and are never eligible for
+    /// completion synthesis (fail closed).
+    #[serde(default)]
+    owner_session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2014,6 +2033,11 @@ fn clamp_child_max_spawn_depth(child_spawn_depth: u32, requested_max_depth: u32)
 /// transcript per the constitution (`prompts/text.rs`, `BASE_PROMPT`).
 #[derive(Debug, Clone)]
 pub struct SubAgentCompletion {
+    /// Root session that owned the child when it was launched. Completion
+    /// channels outlive individual conversations, so consumers must compare
+    /// this immutable owner with the active session before deduplicating or
+    /// injecting the payload.
+    pub owner_session_id: String,
     /// The completing child's agent id. Held for routing/logging — the
     /// engine's turn loop does not currently key on it (it just injects
     /// the payload), but downstream tooling and tests need the field.
@@ -2069,7 +2093,11 @@ impl SubAgentTerminalDeliveryContext {
     /// Running until all three sends have been attempted.
     fn deliver(&self, result: &SubAgentResult) {
         let report_ref = spill_subagent_final_report(&self.session_id, result);
-        let completion = subagent_completion_from_result_with_ref(result, report_ref.as_deref());
+        let completion = subagent_completion_from_result_with_ref_for_session(
+            &self.session_id,
+            result,
+            report_ref.as_deref(),
+        );
 
         if self.spawn_depth > 0
             && let Some(tx) = self.parent_completion_tx.as_ref()
@@ -2083,6 +2111,7 @@ impl SubAgentTerminalDeliveryContext {
 
         if let Some(event_tx) = self.event_tx.as_ref() {
             let _ = event_tx.try_send(Event::AgentComplete {
+                owner_session_id: self.session_id.clone(),
                 id: result.agent_id.clone(),
                 result: completion.payload,
             });
@@ -2963,6 +2992,9 @@ pub struct SubAgent {
     /// against the manager's `current_session_boot_id` to classify the
     /// agent as in-session vs prior-session at list time.
     pub session_boot_id: String,
+    /// Immutable root conversation owner. Empty is a legacy/unattached value
+    /// and must never match an active session.
+    owner_session_id: String,
     pub workspace: PathBuf,
     /// Internal completion/cancellation arbitration bit. While set, the task
     /// has won the right to publish its terminal notifications, but the public
@@ -3016,6 +3048,7 @@ impl SubAgent {
             last_activity_at: started_at,
             allowed_tools,
             session_boot_id,
+            owner_session_id: String::new(),
             workspace,
             completion_claimed: false,
             terminal_delivery: None,
@@ -3239,7 +3272,7 @@ pub struct SubAgentManager {
     /// Agent ids whose handle-store entries should be evicted on the next async
     /// drain. Populated by `cleanup()` when an agent record is retired; drained
     /// by async callers that hold the `HandleStore` lock (#3885).
-    pending_handle_evictions: Vec<String>,
+    pending_handle_evictions: Vec<(String, String)>,
     /// Checkpoint-resume idempotency map: interrupted agent id -> the agent
     /// id of the session resumed from its checkpoint. A second followup on
     /// the same interrupted id returns the existing resumed target instead of
@@ -3408,6 +3441,49 @@ impl SubAgentManager {
     ) -> Result<DecisionRecord, String> {
         self.ensure_coordination_process_lock()?;
         self.coordination.record_decision(decision)
+    }
+
+    pub(crate) fn stamp_coordination_sequence_for_session(
+        &mut self,
+        sequence: u64,
+        active_session_id: &str,
+    ) -> Result<(), String> {
+        if active_session_id.is_empty() {
+            return Err("active session id is empty".to_string());
+        }
+        self.coordination
+            .record_sessions
+            .insert(sequence, active_session_id.to_string());
+        Ok(())
+    }
+
+    fn coordination_record_is_owned_by_session(
+        &self,
+        active_session_id: &str,
+        sequence: u64,
+        owner: Option<&str>,
+    ) -> bool {
+        self.coordination
+            .record_sessions
+            .get(&sequence)
+            .is_some_and(|session_id| session_id == active_session_id)
+            || owner
+                .is_some_and(|owner| self.agent_id_is_owned_by_session(owner, active_session_id))
+    }
+
+    pub(crate) fn coordination_decision_is_owned_by_session(
+        &self,
+        active_session_id: &str,
+        decision_id: &str,
+    ) -> bool {
+        self.coordination.decisions.iter().any(|record| {
+            record.decision_id == decision_id
+                && self.coordination_record_is_owned_by_session(
+                    active_session_id,
+                    record.sequence,
+                    Some(&record.owner),
+                )
+        })
     }
 
     pub fn update_coordination_decision(
@@ -3724,9 +3800,113 @@ impl SubAgentManager {
     }
 
     #[must_use]
+    pub(crate) fn coordination_detail_projection_for_session(
+        &self,
+        active_session_id: &str,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> CoordinationDetailProjection {
+        let mut projection = self.coordination_detail_projection(subject, limit);
+        let record_matches = |sequence: u64, owner: Option<&str>| {
+            self.coordination_record_is_owned_by_session(active_session_id, sequence, owner)
+        };
+
+        projection
+            .decisions
+            .retain(|record| record_matches(record.sequence, Some(&record.owner)));
+        let visible_decision_ids = projection
+            .decisions
+            .iter()
+            .map(|record| record.decision_id.clone())
+            .collect::<HashSet<_>>();
+        projection
+            .write_claims
+            .retain(|record| record_matches(record.sequence, Some(record.claim.owner.as_str())));
+        projection.reconciliations.retain(|record| {
+            record_matches(record.sequence, Some(&record.owner))
+                && record
+                    .input_decisions
+                    .iter()
+                    .all(|decision_id| visible_decision_ids.contains(decision_id))
+        });
+        projection.context_projections.retain_mut(|record| {
+            if !record_matches(record.sequence, Some(&record.child_id)) {
+                return false;
+            }
+            record
+                .decision_ids
+                .retain(|decision_id| visible_decision_ids.contains(decision_id));
+            true
+        });
+        projection.contentions.retain(|record| {
+            record_matches(record.sequence, Some(&record.claimant))
+                && self.agent_id_is_owned_by_session(&record.conflicting_owner, active_session_id)
+        });
+
+        let mut hot_path_counts = std::collections::BTreeMap::<String, usize>::new();
+        for record in &projection.write_claims {
+            for root in &record.claim.roots {
+                *hot_path_counts.entry(root.clone()).or_default() += 1;
+            }
+            for file in &record.claim.exact_files {
+                *hot_path_counts.entry(file.clone()).or_default() += 1;
+            }
+        }
+        let mut hottest_paths = hot_path_counts.into_iter().collect::<Vec<_>>();
+        hottest_paths.sort_by(|(path_a, count_a), (path_b, count_b)| {
+            count_b.cmp(count_a).then_with(|| path_a.cmp(path_b))
+        });
+        hottest_paths.truncate(projection.limit.min(8));
+        projection.metrics.hottest_paths = hottest_paths
+            .into_iter()
+            .map(|(path, active_claims)| CoordinationHotPath {
+                path,
+                active_claims,
+            })
+            .collect();
+        projection.sequence = projection
+            .decisions
+            .iter()
+            .map(|record| record.sequence)
+            .chain(projection.write_claims.iter().map(|record| record.sequence))
+            .chain(
+                projection
+                    .reconciliations
+                    .iter()
+                    .map(|record| record.sequence),
+            )
+            .chain(
+                projection
+                    .context_projections
+                    .iter()
+                    .map(|record| record.sequence),
+            )
+            .chain(projection.contentions.iter().map(|record| record.sequence))
+            .max()
+            .unwrap_or_default();
+        projection
+    }
+
+    #[must_use]
+    #[cfg(test)]
     pub fn inspect_coordination(&self, subject: Option<&str>, limit: usize) -> Value {
         serde_json::to_value(self.coordination_detail_projection(subject, limit))
             .expect("typed coordination projection is serializable")
+    }
+
+    #[must_use]
+    pub(crate) fn inspect_coordination_for_session(
+        &self,
+        active_session_id: &str,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> Value {
+        serde_json::to_value(self.coordination_detail_projection_for_session(
+            active_session_id,
+            subject,
+            limit,
+        ))
+        .expect("typed coordination projection is serializable")
     }
 
     pub fn expand_write_claim(
@@ -3995,6 +4175,7 @@ impl SubAgentManager {
                 allowed_tools: agent.allowed_tools.clone().unwrap_or_default(),
                 updated_at_ms: now_ms,
                 session_boot_id: agent.session_boot_id.clone(),
+                owner_session_id: agent.owner_session_id.clone(),
             });
         }
         agents.sort_by(|a, b| a.id.cmp(&b.id));
@@ -4220,6 +4401,7 @@ impl SubAgentManager {
                 // manager treats that the same as a non-matching id —
                 // i.e. agent classified as prior-session.
                 session_boot_id: persisted.session_boot_id,
+                owner_session_id: persisted.owner_session_id,
                 completion_claimed: false,
                 terminal_delivery: None,
                 work_lifecycle: None,
@@ -4292,12 +4474,25 @@ impl SubAgentManager {
     /// currently-live fleet is finalized here. Write claims owned by absent
     /// or prior-session owners stay put — a sibling session's live claim must
     /// never be released by this process.
+    #[cfg(test)]
     pub fn finalize_session_close(&mut self) -> usize {
+        self.finalize_session_close_inner(None)
+    }
+
+    pub(crate) fn finalize_session_close_for_session(&mut self, active_session_id: &str) -> usize {
+        self.finalize_session_close_inner(Some(active_session_id))
+    }
+
+    fn finalize_session_close_inner(&mut self, active_session_id: Option<&str>) -> usize {
         let reason = SUBAGENT_SESSION_CLOSED_REASON;
         let running_agent_ids = self
             .agents
             .values()
             .filter(|agent| agent.status == SubAgentStatus::Running)
+            .filter(|agent| {
+                active_session_id
+                    .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+            })
             .map(|agent| agent.id.clone())
             .collect::<std::collections::HashSet<_>>();
         let mut finalized = 0usize;
@@ -4320,6 +4515,11 @@ impl SubAgentManager {
             .worker_records
             .values()
             .filter(|record| !record.status.is_terminal())
+            .filter(|record| {
+                active_session_id.is_none_or(|session_id| {
+                    !session_id.is_empty() && record.owner_session_id == session_id
+                })
+            })
             .map(|record| (record.spec.worker_id.clone(), record.steps_taken))
             .collect::<Vec<_>>();
         for (worker_id, steps_taken) in &live_worker_ids {
@@ -4393,9 +4593,17 @@ impl SubAgentManager {
     }
 
     pub fn register_worker(&mut self, spec: AgentWorkerSpec) {
+        self.register_worker_for_session(spec, "");
+    }
+
+    fn register_worker_for_session(&mut self, spec: AgentWorkerSpec, owner_session_id: &str) {
         let worker_id = spec.worker_id.clone();
         let now_ms = epoch_millis_now();
-        let mut record = AgentWorkerRecord::new(normalize_worker_spec(spec), now_ms);
+        let mut record = AgentWorkerRecord::new_for_session(
+            normalize_worker_spec(spec),
+            now_ms,
+            owner_session_id.to_string(),
+        );
         self.push_worker_event(
             &mut record,
             AgentWorkerStatus::Starting,
@@ -4629,6 +4837,21 @@ impl SubAgentManager {
         self.sorted_worker_records()
     }
 
+    /// Empty-owner legacy records fail closed. Headless records keep their own
+    /// immutable owner so they can remain visible without requiring a paired
+    /// `SubAgent` row.
+    pub(crate) fn list_worker_records_for_session(
+        &self,
+        active_session_id: &str,
+    ) -> Vec<AgentWorkerRecord> {
+        self.sorted_worker_records()
+            .into_iter()
+            .filter(|record| {
+                !active_session_id.is_empty() && record.owner_session_id == active_session_id
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn coordination_snapshot(&self) -> CoordinationLedger {
         self.coordination.clone()
@@ -4636,6 +4859,17 @@ impl SubAgentManager {
 
     pub fn get_worker_record(&self, worker_id: &str) -> Option<AgentWorkerRecord> {
         self.worker_records.get(worker_id).cloned()
+    }
+
+    pub(crate) fn get_worker_record_for_session(
+        &self,
+        active_session_id: &str,
+        worker_id: &str,
+    ) -> Option<AgentWorkerRecord> {
+        self.worker_records.get(worker_id).and_then(|record| {
+            (!active_session_id.is_empty() && record.owner_session_id == active_session_id)
+                .then(|| record.clone())
+        })
     }
 
     #[cfg(test)]
@@ -5057,6 +5291,17 @@ impl SubAgentManager {
         self.get_result(&agent_id)
     }
 
+    pub(crate) fn cancel_agent_for_session(
+        &mut self,
+        active_session_id: &str,
+        agent_ref: &str,
+    ) -> Result<SubAgentResult> {
+        // Resolution and mutation share this manager write borrow, so an alias
+        // cannot be rebound between the owner check and the exact-id action.
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.cancel_agent(&agent_id)
+    }
+
     /// Queue parent mail without waking the child (`agents/message`).
     pub fn queue_parent_message(
         &mut self,
@@ -5110,6 +5355,16 @@ impl SubAgentManager {
             ));
         }
         self.queue_parent_message(&agent_id, text, false)
+    }
+
+    pub(crate) fn queue_running_parent_message_for_session(
+        &mut self,
+        active_session_id: &str,
+        agent_ref: &str,
+        text: String,
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.queue_running_parent_message(&agent_id, text)
     }
 
     /// Queue mail and attempt a live wake (`agents/followup`).
@@ -5256,6 +5511,16 @@ impl SubAgentManager {
         Ok(receipt)
     }
 
+    pub(crate) fn followup_child_for_session(
+        &mut self,
+        active_session_id: &str,
+        agent_ref: &str,
+        text: String,
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.followup_child(&agent_id, text)
+    }
+
     /// Resume an `interrupted_continuable` child by re-dispatching a fresh
     /// agent loop seeded with the checkpoint message tail and the follow-up
     /// text (checkpoint-based continuation).
@@ -5283,6 +5548,18 @@ impl SubAgentManager {
             followup_text,
             ResumePolicy::InterruptedOnly,
         )
+    }
+
+    pub(crate) fn resume_from_checkpoint_for_session(
+        &mut self,
+        active_session_id: &str,
+        manager_handle: SharedSubAgentManager,
+        runtime: SubAgentRuntime,
+        agent_ref: &str,
+        followup_text: &str,
+    ) -> Result<SubAgentResult> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.resume_from_checkpoint(manager_handle, runtime, &agent_id, followup_text)
     }
 
     /// Continue a child on its own fork from the user's side of the shell.
@@ -5344,6 +5621,18 @@ impl SubAgentManager {
                 subagent_status_name(&other)
             )),
         }
+    }
+
+    pub(crate) fn continue_child_from_user_for_session(
+        &mut self,
+        active_session_id: &str,
+        manager_handle: SharedSubAgentManager,
+        runtime: Option<SubAgentRuntime>,
+        agent_ref: &str,
+        text: &str,
+    ) -> Result<UserFollowUpOutcome> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.continue_child_from_user(manager_handle, runtime, &agent_id, text)
     }
 
     fn resume_from_checkpoint_with_policy(
@@ -5543,29 +5832,64 @@ impl SubAgentManager {
         Ok((prior, snapshot))
     }
 
+    pub(crate) fn interrupt_child_for_session(
+        &mut self,
+        active_session_id: &str,
+        agent_ref: &str,
+        caller_agent_id: Option<&str>,
+        reason: String,
+    ) -> Result<(SubAgentResult, SubAgentResult)> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.interrupt_child(&agent_id, caller_agent_id, reason)
+    }
+
     /// Follow-ups per running child that were handed to its live input
     /// channel but not yet taken at a round boundary. Only non-zero entries.
+    #[cfg(test)]
     pub fn queued_follow_up_counts(&self) -> HashMap<String, usize> {
+        self.queued_follow_up_counts_inner(None)
+    }
+
+    pub(crate) fn queued_follow_up_counts_for_session(
+        &self,
+        active_session_id: &str,
+    ) -> HashMap<String, usize> {
+        self.queued_follow_up_counts_inner(Some(active_session_id))
+    }
+
+    fn queued_follow_up_counts_inner(
+        &self,
+        active_session_id: Option<&str>,
+    ) -> HashMap<String, usize> {
         self.pending_follow_ups
             .iter()
             .filter_map(|(agent_id, counter)| {
+                if active_session_id.is_some_and(|session_id| {
+                    !self.agent_id_is_owned_by_session(agent_id, session_id)
+                }) {
+                    return None;
+                }
                 let count = counter.load(std::sync::atomic::Ordering::Acquire);
                 (count > 0).then(|| (agent_id.clone(), count))
             })
             .collect()
     }
 
-    /// Bounded coordination summaries for `agents/list`.
-    pub fn list_coordination_summaries(
+    pub(crate) fn list_coordination_summaries_for_session(
         &self,
+        active_session_id: &str,
         include_archived: bool,
         recent_limit: usize,
     ) -> Vec<AgentCoordSummary> {
-        self.list_filtered(include_archived)
+        self.list_filtered_for_session(active_session_id, include_archived)
             .into_iter()
             .filter_map(|snap| {
-                self.coordination_summary_for(&snap.agent_id, recent_limit)
-                    .ok()
+                self.coordination_summary_for_session(
+                    active_session_id,
+                    &snap.agent_id,
+                    recent_limit,
+                )
+                .ok()
             })
             .collect()
     }
@@ -5633,6 +5957,16 @@ impl SubAgentManager {
         })
     }
 
+    pub(crate) fn coordination_summary_for_session(
+        &self,
+        active_session_id: &str,
+        agent_ref: &str,
+        recent_limit: usize,
+    ) -> Result<AgentCoordSummary> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.coordination_summary_for(&agent_id, recent_limit)
+    }
+
     #[allow(dead_code)] // coord list/wait surfaces; wired when agents/list hosts go live
     pub fn queued_mail_depth(&self, agent_id: &str) -> Option<usize> {
         self.queued_mail.get(agent_id).map(VecDeque::len)
@@ -5672,6 +6006,17 @@ impl SubAgentManager {
         self.insert_test_running_agent_with_input(name, workspace).0
     }
 
+    #[cfg(test)]
+    pub fn assign_test_session_owner(&mut self, agent_id: &str, owner_session_id: &str) {
+        self.agents
+            .get_mut(agent_id)
+            .expect("test agent")
+            .owner_session_id = owner_session_id.to_string();
+        if let Some(record) = self.worker_records.get_mut(agent_id) {
+            record.owner_session_id = owner_session_id.to_string();
+        }
+    }
+
     /// Test helper exposing the receiving side so delivery and provenance can
     /// be verified rather than inferred from a still-present sender handle.
     #[cfg(test)]
@@ -5696,6 +6041,10 @@ impl SubAgentManager {
         );
         agent.session_name = name.to_string();
         agent.status = SubAgentStatus::Running;
+        // `ToolContext::new` uses this deterministic namespace in unit tests.
+        // Tests exercising real conversation boundaries override it through
+        // `assign_test_session_owner`.
+        agent.owner_session_id = "workspace".to_string();
         // Make the test agent live for 4a liveness (handle required, otherwise
         // list_filtered hides it as phantom). Use try_current + leaked runtime
         // fallback so sync tests also work.
@@ -5737,7 +6086,7 @@ impl SubAgentManager {
             child_route: None,
             launch_manifest: None,
         };
-        self.register_worker(spec);
+        self.register_worker_for_session(spec, "workspace");
         (agent_id, input_rx)
     }
 
@@ -5791,6 +6140,18 @@ impl SubAgentManager {
     /// Count running agents.
     pub fn running_count(&self) -> usize {
         self.admitted_count()
+    }
+
+    pub(crate) fn running_count_for_session(&self, active_session_id: &str) -> usize {
+        self.agents
+            .values()
+            .filter(|agent| self.agent_is_owned_by_session(agent, active_session_id))
+            .filter(|agent| {
+                agent.status == SubAgentStatus::Running
+                    && agent.task_handle.is_some()
+                    && !self.running_heartbeat_timed_out(agent)
+            })
+            .count()
     }
 
     /// Count live sub-agents that have been admitted, including queued
@@ -5865,6 +6226,13 @@ impl SubAgentManager {
         }
         agent.last_activity_at = Instant::now();
         true
+    }
+
+    pub(crate) fn touch_for_session(&mut self, active_session_id: &str, agent_id: &str) -> bool {
+        if !self.agent_id_is_owned_by_session(agent_id, active_session_id) {
+            return false;
+        }
+        self.touch(agent_id)
     }
 
     /// Spawn a new background sub-agent with explicit assignment and display
@@ -6129,8 +6497,9 @@ impl SubAgentManager {
                     return Err(error);
                 }
             };
+        agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
-        self.register_worker(worker_spec);
+        self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
         if let Some(scope) = budget_scope {
             self.attach_budget_scope(&agent_id, scope);
         }
@@ -6167,6 +6536,7 @@ impl SubAgentManager {
 
         if let Some(event_tx) = runtime.event_tx.clone() {
             let _ = event_tx.try_send(Event::AgentSpawned {
+                owner_session_id: runtime.context.state_namespace.clone(),
                 id: agent_id.clone(),
                 prompt: prompt.clone(),
                 parent_run_id: runtime.parent_agent_id.clone(),
@@ -6239,8 +6609,45 @@ impl SubAgentManager {
         self.get_result(&agent_id)
     }
 
+    /// Get an agent snapshot only when it belongs to the active root session.
+    ///
+    /// The error deliberately does not distinguish a foreign agent from a
+    /// missing one. User- and model-facing callers must not gain an existence
+    /// oracle for another conversation by guessing a durable id or name.
+    pub(crate) fn get_result_by_ref_for_session(
+        &self,
+        active_session_id: &str,
+        agent_ref: &str,
+    ) -> Result<SubAgentResult> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        self.get_result(&agent_id)
+    }
+
+    #[cfg(test)]
     pub fn terminal_results_excluding(
         &self,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> Vec<SubAgentResult> {
+        self.terminal_results_excluding_inner(None, delivered_ids)
+    }
+
+    /// Return terminal direct-child results owned by the active root session.
+    ///
+    /// The manager and its persisted roster can survive `SyncSession`; exact
+    /// owner matching prevents a completed child from the previous
+    /// conversation being synthesized into the new turn. Empty legacy owners
+    /// do not match and therefore fail closed.
+    pub(crate) fn terminal_results_excluding_for_session(
+        &self,
+        active_session_id: &str,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> Vec<SubAgentResult> {
+        self.terminal_results_excluding_inner(Some(active_session_id), delivered_ids)
+    }
+
+    fn terminal_results_excluding_inner(
+        &self,
+        active_session_id: Option<&str>,
         delivered_ids: &std::collections::HashSet<String>,
     ) -> Vec<SubAgentResult> {
         let mut results = self
@@ -6248,6 +6655,9 @@ impl SubAgentManager {
             .values()
             .filter(|agent| agent.status != SubAgentStatus::Running)
             .filter(|agent| agent.session_boot_id == self.current_session_boot_id)
+            .filter(|agent| {
+                active_session_id.is_none_or(|session_id| agent.owner_session_id == session_id)
+            })
             .filter(|agent| {
                 self.worker_records
                     .get(&agent.id)
@@ -6269,12 +6679,23 @@ impl SubAgentManager {
     /// Preview uses this predicate instead of draining either completion
     /// channel, so inspecting the request cannot consume or claim the state it
     /// is reporting.
-    pub fn may_transform_next_parent_request(
+    pub(crate) fn may_transform_next_parent_request_for_session(
         &self,
+        active_session_id: &str,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.may_transform_next_parent_request_inner(Some(active_session_id), delivered_ids)
+    }
+
+    fn may_transform_next_parent_request_inner(
+        &self,
+        active_session_id: Option<&str>,
         delivered_ids: &std::collections::HashSet<String>,
     ) -> bool {
         self.agents.values().any(|agent| {
             agent.session_boot_id == self.current_session_boot_id
+                && active_session_id
+                    .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
                 && self
                     .worker_records
                     .get(&agent.id)
@@ -6285,15 +6706,39 @@ impl SubAgentManager {
 
     /// Resolve either a durable agent id or a model-facing session name.
     fn resolve_agent_ref(&self, agent_ref: &str) -> Result<String> {
+        self.resolve_agent_ref_inner(agent_ref, None)
+    }
+
+    fn resolve_agent_ref_for_session(
+        &self,
+        active_session_id: &str,
+        agent_ref: &str,
+    ) -> Result<String> {
+        self.resolve_agent_ref_inner(agent_ref, Some(active_session_id))
+            .map_err(|_| anyhow!("Agent not found in the active session"))
+    }
+
+    fn resolve_agent_ref_inner(
+        &self,
+        agent_ref: &str,
+        active_session_id: Option<&str>,
+    ) -> Result<String> {
         let agent_ref = agent_ref.trim();
-        if self.agents.contains_key(agent_ref) {
-            return Ok(agent_ref.to_string());
+        if let Some(agent) = self.agents.get(agent_ref)
+            && active_session_id
+                .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+        {
+            return Ok(agent.id.clone());
         }
 
         let matches = self
             .agents
             .values()
             .filter(|agent| agent.session_name == agent_ref)
+            .filter(|agent| {
+                active_session_id
+                    .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+            })
             .map(|agent| agent.id.clone())
             .collect::<Vec<_>>();
 
@@ -6304,6 +6749,16 @@ impl SubAgentManager {
                 "Agent session name '{agent_ref}' is ambiguous; use an agent_id"
             )),
         }
+    }
+
+    fn agent_is_owned_by_session(&self, agent: &SubAgent, active_session_id: &str) -> bool {
+        !active_session_id.is_empty() && agent.owner_session_id == active_session_id
+    }
+
+    fn agent_id_is_owned_by_session(&self, agent_id: &str, active_session_id: &str) -> bool {
+        self.agents
+            .get(agent_id)
+            .is_some_and(|agent| self.agent_is_owned_by_session(agent, active_session_id))
     }
 
     /// Resolve a hierarchy mutation target and prove that it is a strict
@@ -6360,6 +6815,23 @@ impl SubAgentManager {
         ))
     }
 
+    pub(super) fn ensure_caller_controls_descendant_for_session(
+        &self,
+        active_session_id: &str,
+        agent_ref: &str,
+        caller_agent_id: Option<&str>,
+        action: &str,
+    ) -> Result<String> {
+        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        if let Some(caller) = caller_agent_id
+            .map(str::trim)
+            .filter(|caller| !caller.is_empty() && *caller != "root")
+        {
+            self.resolve_agent_ref_for_session(active_session_id, caller)?;
+        }
+        self.ensure_caller_controls_descendant(&agent_id, caller_agent_id, action)
+    }
+
     /// List all agents and their status.
     #[must_use]
     /// Snapshot a single agent and tag it with the manager's
@@ -6391,6 +6863,7 @@ impl SubAgentManager {
     /// List all agents currently held by the manager, regardless of
     /// session origin. Use [`Self::list_filtered`] in user-facing tool
     /// paths so prior-session agents stay hidden by default (#405).
+    #[cfg(test)]
     pub fn list(&self) -> Vec<SubAgentResult> {
         self.agents
             .values()
@@ -6398,24 +6871,51 @@ impl SubAgentManager {
             .collect()
     }
 
-    /// List agents respecting the session-boundary filter (#405).
-    ///
-    /// `include_archived = false` drops
-    /// any prior-session agent that is no longer running. Prior-session
-    /// agents that are still `Running` (e.g. interrupted by a process
-    /// restart) stay visible — they may matter for ongoing recovery.
-    ///
-    /// `include_archived = true` returns everything, with the
-    /// `from_prior_session` flag on each `SubAgentResult` so the model
-    /// can tell active and archived apart at a glance.
-    pub fn list_filtered(&self, include_archived: bool) -> Vec<SubAgentResult> {
+    pub(crate) fn list_for_session(&self, active_session_id: &str) -> Vec<SubAgentResult> {
         self.agents
             .values()
+            .filter(|agent| self.agent_is_owned_by_session(agent, active_session_id))
+            .map(|agent| self.snapshot_for_listing(agent))
+            .collect()
+    }
+
+    /// Legacy test-global projection for boot-origin filtering (#405).
+    /// Production user/model surfaces call `list_filtered_for_session`, which
+    /// first requires exact non-empty root-conversation ownership. Its
+    /// `include_archived` option includes only that conversation's archived
+    /// rows and never makes a foreign or ownerless record visible.
+    #[cfg(test)]
+    pub fn list_filtered(&self, include_archived: bool) -> Vec<SubAgentResult> {
+        self.list_filtered_inner(None, include_archived)
+    }
+
+    pub(crate) fn list_filtered_for_session(
+        &self,
+        active_session_id: &str,
+        include_archived: bool,
+    ) -> Vec<SubAgentResult> {
+        self.list_filtered_inner(Some(active_session_id), include_archived)
+    }
+
+    fn list_filtered_inner(
+        &self,
+        active_session_id: Option<&str>,
+        include_archived: bool,
+    ) -> Vec<SubAgentResult> {
+        self.agents
+            .values()
+            .filter(|agent| {
+                active_session_id
+                    .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+            })
             .filter(|agent| {
                 if include_archived {
                     return true;
                 }
-                // Live roster: only actually running children (4a). This
+                // Live roster: only actually running children (4a). In the
+                // legacy unscoped projection, prior-boot Running stays visible
+                // for recovery; the scoped production projection has already
+                // excluded every foreign conversation above. This
                 // excludes completed/failed/cancelled and children that
                 // never started (no task_handle) or timed out — same root
                 // as the phantom watch entry. Prior-session Running stays
@@ -6438,14 +6938,46 @@ impl SubAgentManager {
     /// given duration. Returns the number of running agents auto-cancelled
     /// during this pass.
     pub fn cleanup(&mut self, max_age: Duration) -> usize {
+        self.cleanup_inner(None, max_age)
+    }
+
+    pub(crate) fn cleanup_for_session(
+        &mut self,
+        active_session_id: &str,
+        max_age: Duration,
+    ) -> usize {
+        self.cleanup_inner(Some(active_session_id), max_age)
+    }
+
+    fn cleanup_inner(&mut self, active_session_id: Option<&str>, max_age: Duration) -> usize {
         let before = self.agents.len();
         let before_workers = self.worker_records.len();
-        let mut transcript_candidates: Vec<String> = self
+        let scoped_agent_owners = self
             .agents
-            .keys()
-            .chain(self.worker_records.keys())
+            .iter()
+            .filter(|(_, agent)| {
+                active_session_id
+                    .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
+            })
+            .map(|(agent_id, agent)| (agent_id.clone(), agent.owner_session_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let scoped_agent_ids = scoped_agent_owners.keys().cloned().collect::<HashSet<_>>();
+        let scoped_worker_owners = self
+            .worker_records
+            .iter()
+            .filter(|(_, record)| {
+                active_session_id.is_none_or(|session_id| {
+                    !session_id.is_empty() && record.owner_session_id == session_id
+                })
+            })
+            .map(|(worker_id, record)| (worker_id.clone(), record.owner_session_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let scoped_worker_ids = scoped_worker_owners.keys().cloned().collect::<HashSet<_>>();
+        let mut transcript_candidates = scoped_agent_ids
+            .iter()
+            .chain(scoped_worker_ids.iter())
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
         transcript_candidates.sort();
         transcript_candidates.dedup();
         let mut auto_cancelled = 0;
@@ -6453,6 +6985,7 @@ impl SubAgentManager {
         let stale_agent_ids = self
             .agents
             .values()
+            .filter(|agent| scoped_agent_ids.contains(&agent.id))
             .filter(|agent| {
                 agent.status == SubAgentStatus::Running
                     && !agent.completion_claimed
@@ -6514,7 +7047,10 @@ impl SubAgentManager {
         // the flock (owner report, 2026-08-04). See `docs/architecture/
         // delegated-coordination.md` for what lock loss legitimately costs.
 
-        self.agents.retain(|_, agent| {
+        self.agents.retain(|agent_id, agent| {
+            if active_session_id.is_some() && !scoped_agent_ids.contains(agent_id) {
+                return true;
+            }
             if agent.status == SubAgentStatus::Running {
                 true
             } else {
@@ -6527,7 +7063,10 @@ impl SubAgentManager {
         // Running / starting / waiting records are always preserved.
         let now_ms = epoch_millis_now();
         let max_age_ms = max_age.as_millis() as u64;
-        self.worker_records.retain(|_, record| {
+        self.worker_records.retain(|worker_id, record| {
+            if active_session_id.is_some() && !scoped_worker_ids.contains(worker_id) {
+                return true;
+            }
             if !record.status.is_terminal() {
                 return true;
             }
@@ -6553,7 +7092,13 @@ impl SubAgentManager {
                     "failed to remove expired sub-agent transcript artifact"
                 );
             }
-            self.pending_handle_evictions.push(agent_id);
+            let owner_session_id = scoped_agent_owners
+                .get(&agent_id)
+                .cloned()
+                .or_else(|| scoped_worker_owners.get(&agent_id).cloned())
+                .unwrap_or_default();
+            self.pending_handle_evictions
+                .push((agent_id, owner_session_id));
         }
         if self.agents.len() != before
             || auto_cancelled > 0
@@ -6575,13 +7120,17 @@ impl SubAgentManager {
             .is_none_or(|last| last.elapsed() >= min_interval)
     }
 
-    /// Drain and return the agent ids queued for handle-store eviction by
-    /// the last `cleanup()` pass (#3885). Callers that hold the
-    /// `SharedHandleStore` lock should call this after `cleanup()` and evict
-    /// each returned id with `store.evict_session("agent:{id}")`.
     #[must_use]
-    pub fn drain_pending_handle_evictions(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pending_handle_evictions)
+    pub(crate) fn drain_pending_handle_evictions_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> Vec<String> {
+        let pending = std::mem::take(&mut self.pending_handle_evictions);
+        let (owned, foreign): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(_, owner_session_id)| owner_session_id == active_session_id);
+        self.pending_handle_evictions = foreign;
+        owned.into_iter().map(|(agent_id, _)| agent_id).collect()
     }
 
     /// Claim terminal delivery if this task is still the running owner.
@@ -7308,7 +7857,7 @@ fn open_private_subagent_transcript(path: &Path, append: bool) -> Result<fs::Fil
         .map_err(Into::into)
 }
 
-fn epoch_millis_now() -> u64 {
+pub(crate) fn epoch_millis_now() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         Err(_) => 0,
@@ -7847,10 +8396,21 @@ impl ToolSpec for AgentTool {
                 return coord::dispatch_wait(&input, self.manager.clone(), context).await;
             }
             AgentToolAction::Cancel => {
-                return cancel_agent_from_input(&input, self.manager.clone(), context).await;
+                return cancel_agent_from_input(
+                    &input,
+                    self.manager.clone(),
+                    context,
+                    self.runtime.parent_agent_id.as_deref(),
+                )
+                .await;
             }
         }
-        touch_running_shell_owners(&self.manager, &context.execution.shell_manager).await;
+        touch_running_shell_owners(
+            &self.manager,
+            &context.execution.shell_manager,
+            &context.state_namespace,
+        )
+        .await;
         let verbose = input
             .get("verbose")
             .and_then(Value::as_bool)
@@ -7859,7 +8419,7 @@ impl ToolSpec for AgentTool {
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
             let manager = self.manager.read().await;
-            manager.get_worker_record(&snapshot.agent_id)
+            manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
         };
         let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let mut value = serde_json::to_value(&projection)
@@ -7937,14 +8497,21 @@ async fn inspect_agent_from_input(
 
     if let Some(agent_ref) = parse_agent_ref(input)? {
         let (snapshot, worker_record, evicted_ids) = {
-            touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
+            touch_running_shell_owners(
+                &manager,
+                &context.execution.shell_manager,
+                &context.state_namespace,
+            )
+            .await;
             let mut manager = manager.write().await;
-            manager.cleanup(COMPLETED_AGENT_RETENTION);
-            let evicted_ids = manager.drain_pending_handle_evictions();
+            manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
+            let evicted_ids =
+                manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
             let snapshot = manager
-                .get_result_by_ref(&agent_ref)
+                .get_result_by_ref_for_session(&context.state_namespace, &agent_ref)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
-            let worker_record = manager.get_worker_record(&snapshot.agent_id);
+            let worker_record =
+                manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
             (snapshot, worker_record, evicted_ids)
         };
         // Evict retired handles outside the manager lock (#3885).
@@ -8021,15 +8588,22 @@ async fn inspect_agent_from_input(
     }
 
     let (snapshots, evicted_ids) = {
-        touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
+        touch_running_shell_owners(
+            &manager,
+            &context.execution.shell_manager,
+            &context.state_namespace,
+        )
+        .await;
         let mut manager = manager.write().await;
-        manager.cleanup(COMPLETED_AGENT_RETENTION);
-        let evicted_ids = manager.drain_pending_handle_evictions();
+        manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
+        let evicted_ids =
+            manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
         let snapshots = manager
-            .list_filtered(include_archived)
+            .list_filtered_for_session(&context.state_namespace, include_archived)
             .into_iter()
             .map(|snapshot| {
-                let worker_record = manager.get_worker_record(&snapshot.agent_id);
+                let worker_record = manager
+                    .get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
                 (snapshot, worker_record)
             })
             .collect::<Vec<_>>();
@@ -8099,19 +8673,20 @@ async fn inspect_agent_from_input(
 async fn touch_running_shell_owners(
     manager: &SharedSubAgentManager,
     shell_manager: &SharedShellManager,
+    active_session_id: &str,
 ) {
     let owner_ids = {
         let Ok(mut shell_manager) = shell_manager.lock() else {
             return;
         };
-        shell_manager.running_owner_agent_ids()
+        shell_manager.running_owner_agent_ids_for_session(active_session_id)
     };
     if owner_ids.is_empty() {
         return;
     }
     let mut manager = manager.write().await;
     for owner_id in owner_ids {
-        manager.touch(&owner_id);
+        manager.touch_for_session(active_session_id, &owner_id);
     }
 }
 
@@ -8119,14 +8694,24 @@ async fn cancel_agent_from_input(
     input: &Value,
     manager: SharedSubAgentManager,
     context: &ToolContext,
+    caller_agent_id: Option<&str>,
 ) -> Result<ToolResult, ToolError> {
     let agent_ref = parse_agent_ref(input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
     let (snapshot, worker_record) = {
         let mut manager = manager.write().await;
-        let snapshot = manager
-            .cancel_agent(&agent_ref)
+        manager
+            .ensure_caller_controls_descendant_for_session(
+                &context.state_namespace,
+                &agent_ref,
+                caller_agent_id,
+                "agent/cancel",
+            )
             .map_err(|err| ToolError::invalid_input(err.to_string()))?;
-        let worker_record = manager.get_worker_record(&snapshot.agent_id);
+        let snapshot = manager
+            .cancel_agent_for_session(&context.state_namespace, &agent_ref)
+            .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+        let worker_record =
+            manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
         (snapshot, worker_record)
     };
     let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
@@ -8194,17 +8779,17 @@ async fn wait_for_subagents_from_input(
         let manager = manager.read().await;
         if let Some(agent_ref) = &agent_ref {
             let snapshot = manager
-                .get_result_by_ref(agent_ref)
+                .get_result_by_ref_for_session(&context.state_namespace, agent_ref)
                 .map_err(|err| ToolError::invalid_input(err.to_string()))?;
             if snapshot.status != SubAgentStatus::Running {
-                let running = manager.running_count();
+                let running = manager.running_count_for_session(&context.state_namespace);
                 drop(manager);
                 return wait_result_payload(&[snapshot], running, 0, false).await;
             }
             vec![snapshot.agent_id]
         } else {
             manager
-                .list_filtered(false)
+                .list_filtered_for_session(&context.state_namespace, false)
                 .into_iter()
                 .filter(|snapshot| snapshot.status == SubAgentStatus::Running)
                 .map(|snapshot| snapshot.agent_id)
@@ -8239,13 +8824,17 @@ async fn wait_for_subagents_from_input(
             let manager = manager.read().await;
             let mut settled = Vec::new();
             for agent_id in &watched {
-                if let Ok(snapshot) = manager.get_result_by_ref(agent_id)
+                if let Ok(snapshot) =
+                    manager.get_result_by_ref_for_session(&context.state_namespace, agent_id)
                     && snapshot.status != SubAgentStatus::Running
                 {
                     settled.push(snapshot);
                 }
             }
-            (settled, manager.running_count())
+            (
+                settled,
+                manager.running_count_for_session(&context.state_namespace),
+            )
         };
 
         if !settled.is_empty() || running == 0 {
@@ -8608,12 +9197,14 @@ async fn spawn_subagent_from_input(
             }
             let (source_agent_id, source_workspace, source_state_root, checkpoint_messages) = {
                 let manager_read = manager.read().await;
-                let source_id = manager_read.resolve_agent_ref(source_ref).map_err(|_| {
-                    ToolError::invalid_input(format!(
-                        "resume_from: agent or session '{source_ref}' not found. \
+                let source_id = manager_read
+                    .resolve_agent_ref_for_session(&runtime.context.state_namespace, source_ref)
+                    .map_err(|_| {
+                        ToolError::invalid_input(format!(
+                            "resume_from: agent or session '{source_ref}' not found. \
                      Use agent action=status to list available agents."
-                    ))
-                })?;
+                        ))
+                    })?;
                 let source = manager_read.agents.get(&source_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("resume_from: agent '{source_id}' not found"))
                 })?;
@@ -9308,6 +9899,7 @@ async fn run_subagent_task(task: SubAgentTask) {
             && !agent.completion_claimed
             && agent.terminal_delivery.is_none()
         {
+            agent.owner_session_id = delivery.session_id.clone();
             agent.terminal_delivery = Some(delivery);
         }
     }
@@ -9461,6 +10053,7 @@ async fn record_queued_launch_progress(task: &SubAgentTask) {
     }
     emit_agent_progress(
         task.runtime.event_tx.as_ref(),
+        &task.runtime.context.state_namespace,
         &task.agent_id,
         SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
         AgentProgressEventMeta::new(AgentWorkerStatus::Queued),
@@ -9495,6 +10088,7 @@ pub(crate) fn emit_parent_completion(
         return false;
     };
     let _ = tx.send(SubAgentCompletion {
+        owner_session_id: runtime.context.state_namespace.clone(),
         agent_id: agent_id.to_string(),
         payload: payload.to_string(),
     });
@@ -9508,7 +10102,19 @@ pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAge
 
 /// Completion builder that names the persisted full report in the truncation
 /// footer when `report_ref` is available; see `spill_subagent_final_report`.
+#[cfg(test)]
 pub(crate) fn subagent_completion_from_result_with_ref(
+    result: &SubAgentResult,
+    report_ref: Option<&str>,
+) -> SubAgentCompletion {
+    subagent_completion_from_result_with_ref_for_session("", result, report_ref)
+}
+
+/// Session-owned completion builder used by live delivery and turn synthesis.
+/// An empty owner is reserved for legacy test helpers and is rejected by the
+/// session-aware engine claim path.
+pub(crate) fn subagent_completion_from_result_with_ref_for_session(
+    owner_session_id: &str,
     result: &SubAgentResult,
     report_ref: Option<&str>,
 ) -> SubAgentCompletion {
@@ -9548,6 +10154,7 @@ pub(crate) fn subagent_completion_from_result_with_ref(
         None => format!("{summary}\n{sentinel}"),
     };
     SubAgentCompletion {
+        owner_session_id: owner_session_id.to_string(),
         agent_id: result.agent_id.clone(),
         payload,
     }
@@ -10244,6 +10851,7 @@ fn record_agent_progress(
     }
     emit_agent_progress(
         runtime.event_tx.as_ref(),
+        &runtime.context.state_namespace,
         agent_id,
         message,
         activity,
@@ -10592,11 +11200,9 @@ async fn run_subagent(
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                request_route.provider,
-                &request_route.model,
-                None,
-            ),
+            max_tokens: runtime
+                .client
+                .effective_max_output_tokens(&request_route.model),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: has_tools.then(|| json!({ "type": "auto" })),
@@ -13028,6 +13634,7 @@ pub(crate) fn subagent_progress_tool_display_name(name: &str) -> &str {
 
 fn emit_agent_progress(
     event_tx: Option<&mpsc::Sender<Event>>,
+    owner_session_id: &str,
     agent_id: &str,
     status: String,
     activity: AgentProgressEventMeta,
@@ -13042,6 +13649,7 @@ fn emit_agent_progress(
             return;
         }
         let _ = event_tx.try_send(Event::AgentProgress {
+            owner_session_id: owner_session_id.to_string(),
             id: agent_id.to_string(),
             status,
             activity,

@@ -72,7 +72,11 @@ pub struct SettingsSection {
     pub paste_burst_detection: bool,
     pub show_thinking: bool,
     pub thinking_default_expanded: bool,
+    #[schemars(range(min = 0, max = 40))]
+    pub thinking_preview_lines: usize,
     pub thinking_highlight: bool,
+    pub help_expand_groups: bool,
+    pub pin_last_prompt: bool,
     pub show_tool_details: bool,
     pub inline_diffs: InlineDiffValue,
     #[schemars(
@@ -439,7 +443,10 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             paste_burst_detection: settings.paste_burst_detection,
             show_thinking: settings.show_thinking,
             thinking_default_expanded: settings.thinking_default_expanded,
+            thinking_preview_lines: settings.thinking_preview_lines,
             thinking_highlight: settings.thinking_highlight,
+            help_expand_groups: settings.help_expand_groups,
+            pin_last_prompt: settings.pin_last_prompt,
             show_tool_details: settings.show_tool_details,
             inline_diffs: settings.inline_diffs.as_str().into(),
             locale: UiLocale::from_setting(&settings.locale)?,
@@ -645,9 +652,18 @@ pub fn apply_document(
             bool_str(doc.settings.thinking_default_expanded),
         ),
         (
+            "thinking_preview_lines",
+            &doc.settings.thinking_preview_lines.to_string(),
+        ),
+        (
             "thinking_highlight",
             bool_str(doc.settings.thinking_highlight),
         ),
+        (
+            "help_expand_groups",
+            bool_str(doc.settings.help_expand_groups),
+        ),
+        ("pin_last_prompt", bool_str(doc.settings.pin_last_prompt)),
         (
             "show_tool_details",
             bool_str(doc.settings.show_tool_details),

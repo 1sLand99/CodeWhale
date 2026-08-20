@@ -44,7 +44,7 @@ export default async function SubagentsPage({ params }: { params: Promise<{ loca
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "子 Agent" : "Sub-Agents"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "子 Agent" : "Sub-Agents"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "父会话通过 agent 工具启动一个有明确职责的子 Agent，并立即拿回 agent_id、compact 收据和 transcript 句柄；子 Agent 在后台运行。子 Agent 默认继承父级的工具注册表，但它们是叶子 worker：不会再拿到 agent 或嵌套生命周期工具。agent 启动的是分离的后台工作——取消父回合会停止父级的等待路径，但不会杀死已经启动的子运行。"

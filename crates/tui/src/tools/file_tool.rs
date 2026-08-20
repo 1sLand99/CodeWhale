@@ -202,7 +202,7 @@ impl ToolSpec for EditTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        EditFileTool::execute_pi_edits(input, context).await
+        EditFileTool::execute_contract_edits(input, context).await
     }
 }
 

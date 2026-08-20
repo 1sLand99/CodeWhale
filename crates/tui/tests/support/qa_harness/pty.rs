@@ -228,16 +228,66 @@ impl PtySession {
     }
 
     fn kill_and_join_reader(&mut self, grace: Duration) -> Option<i32> {
+        // Name the teardown for the watchdog: a wedge here used to be the whole
+        // bug, so "teardown: kill child" is the message worth seeing.
+        super::watchdog::progress("teardown: kill child + reap group");
         let _ = self.child.kill();
+        // Killing only the direct child is not enough: the TUI spawns shells,
+        // and a descendant that escaped into its own session keeps the PTY
+        // slave open, so the reader never sees EOF. Reap the whole group.
+        self.kill_process_group();
         let exit = self.wait_until(Instant::now() + grace);
-        if exit.is_some()
-            && let Some(handle) = self.reader_handle.take()
-        {
-            // Don't block on the reader thread forever — it exits on EOF.
-            let _ = handle.join();
+        if let Some(handle) = self.reader_handle.take() {
+            join_reader_bounded(handle);
         }
         exit
     }
+
+    /// SIGKILL the child's process group, best effort.
+    ///
+    /// `portable_pty`'s `Child::kill` signals one pid. A grandchild in its own
+    /// session survives it and holds the inherited slave fd, which is the state
+    /// that made the reader join below unbounded.
+    #[cfg(unix)]
+    fn kill_process_group(&mut self) {
+        let Some(pid) = self.child.process_id() else {
+            return;
+        };
+        let Ok(pid) = i32::try_from(pid) else {
+            return;
+        };
+        // SAFETY: `killpg` on a pid we spawned; a stale pid returns ESRCH
+        // rather than signalling an unrelated group, because the child has not
+        // been reaped yet at this point.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn kill_process_group(&mut self) {}
+}
+
+/// Bounded join for the PTY reader thread.
+///
+/// The previous code said "don't block forever" but called `handle.join()`,
+/// which does exactly that when a descendant still holds the PTY slave open —
+/// `read()` never returns EOF. Because libtest has no per-test timeout, that
+/// turned any *failing* PTY test into an infinite hang: the assertion returns
+/// `Err`, `?` drops the harness, and the drop blocks forever. Hand the join to
+/// a helper thread and move on; the reader exits on its own once the pipe
+/// finally closes, and the process exits at the end of the test binary anyway.
+/// Same shape as `READER_JOIN_GRACE` in `tools/shell.rs` (#52).
+fn join_reader_bounded(handle: JoinHandle<()>) {
+    const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let _ = thread::Builder::new()
+        .name("qa-pty-reader-join".into())
+        .spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+    let _ = done_rx.recv_timeout(READER_JOIN_GRACE);
 }
 
 impl Drop for PtySession {

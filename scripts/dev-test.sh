@@ -14,7 +14,6 @@
 #   scripts/dev-test.sh config
 #   scripts/dev-test.sh tui elapsed::
 #   scripts/dev-test.sh crates/tui/src/elapsed.rs
-#   scripts/dev-test.sh tui-pty qa_pty
 #
 # Environment:
 #   CODEWHALE_DEV_NEXTEST  auto|1|0  (default auto: use cargo-nextest when
@@ -58,7 +57,6 @@ telemetry         cargo test -p codewhale-telemetry --lib --locked
 tools             cargo test -p codewhale-tools --lib --locked
 tui               cargo test -p codewhale-tui --lib --locked
 tui-integration   cargo test -p codewhale-tui --test integration --locked
-tui-pty           cargo test -p codewhale-tui --test pty --locked
 tui-cucumber      cargo test -p codewhale-tui --test cucumber --locked
 workflow          cargo test -p codewhale-workflow --lib --locked
 workflow-js       cargo test -p codewhale-workflow-js --lib --locked
@@ -72,7 +70,6 @@ crates/tui/src/core/                tui  core::
 crates/tui/src/commands/            tui  commands::
 crates/tui/src/<file>.rs            tui  <file>::
 crates/tui/tests/integration/       tui-integration  <stem>
-crates/tui/tests/pty/               tui-pty  <stem>
 crates/tui/tests/cucumber/          tui-cucumber  <stem>
 crates/tui/tests/                  tui-integration
 
@@ -108,10 +105,6 @@ if [ -e "$area" ] || printf '%s' "$area" | grep -q /; then
   case $rel in
     crates/tui/tests/integration/*)
       area=tui-integration
-      extra=$(basename "$rel" .rs)
-      ;;
-    crates/tui/tests/pty/*)
-      area=tui-pty
       extra=$(basename "$rel" .rs)
       ;;
     crates/tui/tests/cucumber/*)
@@ -190,11 +183,6 @@ case $area in
     pkg=codewhale-tui
     target=--test
     harness=integration
-    ;;
-  tui-pty)
-    pkg=codewhale-tui
-    target=--test
-    harness=pty
     ;;
   tui-cucumber)
     pkg=codewhale-tui

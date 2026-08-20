@@ -426,7 +426,7 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// secret-store directories. Other dotfiles remain readable. Model-bound
 /// redaction is still required because shell tools can read these files and
 /// arbitrary commands can print credentials without reading a file at all.
-fn is_codewhale_credential_path(path: &Path) -> bool {
+pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
     let candidate = canonical_path_for_credential_guard(path);
 
     if let Ok(active_config) = codewhale_config::resolve_config_path(None)
@@ -1575,7 +1575,7 @@ fn text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn pi_edit_not_found(path: &str, index: usize, total: usize) -> ToolError {
+fn contract_edit_not_found(path: &str, index: usize, total: usize) -> ToolError {
     if total == 1 {
         ToolError::execution_failed(format!(
             "Could not find the exact text in {path}. The old text must match exactly including all whitespace and newlines."
@@ -1587,7 +1587,7 @@ fn pi_edit_not_found(path: &str, index: usize, total: usize) -> ToolError {
     }
 }
 
-fn pi_edit_duplicate(path: &str, index: usize, total: usize, matches: usize) -> ToolError {
+fn contract_edit_duplicate(path: &str, index: usize, total: usize, matches: usize) -> ToolError {
     if total == 1 {
         ToolError::execution_failed(format!(
             "Found {matches} occurrences of the text in {path}. The text must be unique. Please provide more context to make it unique."
@@ -1599,7 +1599,7 @@ fn pi_edit_duplicate(path: &str, index: usize, total: usize, matches: usize) -> 
     }
 }
 
-fn prepare_pi_edit_input(mut input: Value) -> Result<Value, ToolError> {
+fn prepare_contract_edit_input(mut input: Value) -> Result<Value, ToolError> {
     let object = input
         .as_object_mut()
         .ok_or_else(|| ToolError::invalid_input("edit input must be an object"))?;
@@ -1633,7 +1633,7 @@ fn prepare_pi_edit_input(mut input: Value) -> Result<Value, ToolError> {
     Ok(input)
 }
 
-fn parse_pi_edits(input: &Value) -> Result<Vec<ContractEdit>, ToolError> {
+fn parse_contract_edits(input: &Value) -> Result<Vec<ContractEdit>, ToolError> {
     let raw = input
         .get("edits")
         .and_then(Value::as_array)
@@ -1772,7 +1772,11 @@ fn apply_fuzzy_edits_preserving_other_lines(
     Ok(result)
 }
 
-fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<String, ToolError> {
+fn apply_contract_edits(
+    base: &str,
+    edits: &[ContractEdit],
+    path: &str,
+) -> Result<String, ToolError> {
     let fuzzy_base = normalize_contract_fuzzy(base);
     let initial = edits
         .iter()
@@ -1782,7 +1786,7 @@ fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<Stri
             } else if fuzzy_base.contains(&normalize_contract_fuzzy(&edit.old_text)) {
                 Ok(true)
             } else {
-                Err(pi_edit_not_found(path, edit.index, edits.len()))
+                Err(contract_edit_not_found(path, edit.index, edits.len()))
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1795,7 +1799,7 @@ fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<Stri
         let fuzzy_old = normalize_contract_fuzzy(&edit.old_text);
         let fuzzy_occurrences = text_matches(&fuzzy_base, &fuzzy_old).len();
         if fuzzy_occurrences > 1 {
-            return Err(pi_edit_duplicate(
+            return Err(contract_edit_duplicate(
                 path,
                 edit.index,
                 edits.len(),
@@ -1808,10 +1812,10 @@ fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<Stri
             exact
         };
         let Some(&(start, end)) = matches.first() else {
-            return Err(pi_edit_not_found(path, edit.index, edits.len()));
+            return Err(contract_edit_not_found(path, edit.index, edits.len()));
         };
         if matches.len() > 1 {
-            return Err(pi_edit_duplicate(
+            return Err(contract_edit_duplicate(
                 path,
                 edit.index,
                 edits.len(),
@@ -1850,14 +1854,14 @@ fn apply_pi_edits(base: &str, edits: &[ContractEdit], path: &str) -> Result<Stri
 }
 
 impl EditFileTool {
-    pub(super) async fn execute_pi_edits(
+    pub(super) async fn execute_contract_edits(
         input: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let input = prepare_pi_edit_input(input)?;
+        let input = prepare_contract_edit_input(input)?;
         reject_primitive_unknown(&input, "edit", &["path", "edits"])?;
         let path_str = required_str(&input, "path")?;
-        let edits = parse_pi_edits(&input)?;
+        let edits = parse_contract_edits(&input)?;
         let file_path = context.resolve_path(path_str)?;
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
@@ -1882,7 +1886,7 @@ impl EditFileTool {
             .map_or(("", raw.as_str()), |text| ("\u{FEFF}", text));
         let ending = contract_line_ending(without_bom);
         let normalized = normalize_contract_line_endings(without_bom);
-        let updated = apply_pi_edits(&normalized, &edits, path_str)?;
+        let updated = apply_contract_edits(&normalized, &edits, path_str)?;
         check_file_operation_cancelled(context)?;
         let final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
 

@@ -126,7 +126,7 @@ use crate::tui::subagent_routing::{handle_subagent_mailbox, reconcile_subagent_a
 #[cfg(test)]
 use crate::tui::tool_routing::exploring_label;
 use crate::tui::tool_routing::{
-    apply_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
+    apply_owned_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
 };
 use crate::tui::ui_text::history_cell_to_text;
 use crate::tui::user_input::UserInputView;
@@ -139,10 +139,10 @@ use super::key_actions;
 use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
     AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
-    HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
-    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
-    ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
-    looks_like_slash_command_input, shell_command_from_bang_input,
+    OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort, StatusToast,
+    StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence,
+    TuiOptions, bound_agent_activity_text, is_stop_word, looks_like_slash_command_input,
+    shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -1328,7 +1328,7 @@ fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSo
 fn preview_effective_base_prompt(app: &mut App, config: &Config) {
     use crate::prompts::base_preview;
 
-    let prompt = build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref());
+    let prompt = build_app_system_prompt_with_goal(app, config, app.goal.objective.as_deref());
     let home = codewhale_config::codewhale_home().ok();
     let constitution_path = codewhale_config::UserConstitution::path().ok();
     let sources = base_preview::PreviewSources {
@@ -1353,7 +1353,14 @@ fn preview_effective_base_prompt(app: &mut App, config: &Config) {
 }
 
 async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManager) -> bool {
-    let tasks = task_manager.list_tasks(None).await;
+    let tasks = match app.current_session_id.as_deref() {
+        Some(session_id) => {
+            task_manager
+                .list_tasks_for_owner(None, None, session_id)
+                .await
+        }
+        None => Vec::new(),
+    };
     let previously_active_durable_ids = app
         .task_panel
         .iter()
@@ -1423,46 +1430,51 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
         .iter()
         .map(|entry| entry.id.clone())
         .collect::<HashSet<_>>();
-    let (shell_entries, shell_background_completed): (Vec<TaskPanelEntry>, bool) =
-        match app.runtime_services.shell_manager.as_ref() {
-            Some(shell_mgr) => match shell_mgr.try_lock() {
-                Ok(mut mgr) => {
-                    let jobs = mgr.list_jobs();
-                    let completed = newly_completed_id(
-                        prev_shell_ids.iter().map(String::as_str).collect(),
-                        jobs.iter()
-                            .filter(|job| {
-                                matches!(job.status, crate::tools::shell::ShellStatus::Completed)
-                            })
-                            .map(|job| job.id.as_str()),
-                    );
-                    let entries = jobs
-                        .into_iter()
+    let (shell_entries, shell_background_completed): (Vec<TaskPanelEntry>, bool) = match app
+        .runtime_services
+        .shell_manager
+        .as_ref()
+    {
+        Some(shell_mgr) => match shell_mgr.try_lock() {
+            Ok(mut mgr) => {
+                let jobs = mgr
+                    .list_jobs_for_session(app.current_session_id.as_deref().unwrap_or_default());
+                let completed = newly_completed_id(
+                    prev_shell_ids.iter().map(String::as_str).collect(),
+                    jobs.iter()
                         .filter(|job| {
-                            matches!(job.status, crate::tools::shell::ShellStatus::Running)
+                            matches!(job.status, crate::tools::shell::ShellStatus::Completed)
                         })
-                        .map(|job| TaskPanelEntry {
-                            id: job.id,
-                            status: "running".to_string(),
-                            prompt_summary: format!("shell: {}", job.command),
-                            duration_ms: Some(job.elapsed_ms),
-                            kind: TaskPanelEntryKind::Background,
-                            stale: job.stale,
-                            elapsed_since_output_ms: job.elapsed_since_output_ms,
-                            owner_agent_id: job.owner_agent_id,
-                            owner_agent_name: job.owner_agent_name,
-                            current_tool: None,
-                            role: None,
-                            files_touched: 0,
-                        })
-                        .collect();
-                    (entries, completed)
-                }
-                // Contended: keep the last known snapshot rather than blocking.
-                Err(_) => (prev_shell_entries, false),
-            },
-            None => (Vec::new(), false),
-        };
+                        .map(|job| job.id.as_str()),
+                );
+                let entries = jobs
+                    .into_iter()
+                    .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
+                    .map(|job| TaskPanelEntry {
+                        id: job.id,
+                        status: "running".to_string(),
+                        prompt_summary: format!("shell: {}", job.command),
+                        duration_ms: Some(job.elapsed_ms),
+                        kind: TaskPanelEntryKind::Background,
+                        stale: job.stale,
+                        elapsed_since_output_ms: job.elapsed_since_output_ms,
+                        owner_agent_id: job.owner_agent_id,
+                        owner_agent_name: job.owner_agent_name,
+                        current_tool: None,
+                        role: None,
+                        files_touched: 0,
+                    })
+                    .collect();
+                (entries, completed)
+            }
+            // Contended: keep the last known snapshot rather than blocking.
+            // A retained frame could belong to the session that was just
+            // replaced. Fail closed on contention instead of showing it
+            // in the new conversation.
+            Err(_) => (Vec::new(), false),
+        },
+        None => (Vec::new(), false),
+    };
     entries.extend(shell_entries);
 
     // Report whether anything visible changed so the idle tick can skip the
@@ -1497,7 +1509,7 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
         let Ok(mut mgr) = shell_mgr.try_lock() else {
             return false;
         };
-        mgr.list_jobs()
+        mgr.list_jobs_for_session(app.current_session_id.as_deref().unwrap_or_default())
             .into_iter()
             .map(|job| (job.id.clone(), job))
             .collect::<std::collections::HashMap<_, _>>()
@@ -1893,8 +1905,8 @@ async fn tool_result_content_for_api_message(
 
 const INITIAL_PROMPT_DEFERRED_STATUS: &str = "Initial prompt ready; complete setup to send it";
 
-fn paused_quarry_title(quarry: &str) -> &str {
-    quarry
+fn paused_goal_objective_title(objective: &str) -> &str {
+    objective
         .split(['\n', '\r'])
         .next()
         .map(str::trim)
@@ -1987,7 +1999,7 @@ Paused command: {title}\n\
 enum PausedCommandDispatch {
     None,
     ClearWithoutQuarry,
-    Resume { quarry: String, note: String },
+    Resume { objective: String, note: String },
     Detach { note: String },
 }
 
@@ -2001,9 +2013,9 @@ impl PausedCommandDispatch {
 
     fn goal_objective(&self, app: &App) -> Option<String> {
         match self {
-            Self::Resume { quarry, .. } => Some(quarry.clone()),
+            Self::Resume { objective, .. } => Some(objective.clone()),
             Self::Detach { .. } | Self::ClearWithoutQuarry => None,
-            Self::None => app.hunt.quarry.clone(),
+            Self::None => app.goal.objective.clone(),
         }
     }
 
@@ -2015,39 +2027,39 @@ impl PausedCommandDispatch {
                 app.paused = false;
                 app.pausable = false;
             }
-            Self::Resume { quarry, .. } => {
+            Self::Resume { objective, .. } => {
                 app.paused = false;
-                app.paused_quarry = None;
-                app.hunt.quarry = Some(quarry);
+                app.paused_goal_objective = None;
+                app.goal.objective = Some(objective);
                 app.pausable = true;
             }
             Self::Detach { .. } => {
                 app.paused = false;
-                app.hunt.quarry = None;
-                app.hunt.tokens_used = 0;
-                app.hunt.time_used_seconds = 0;
-                app.hunt.continuation_count = 0;
+                app.goal.objective = None;
+                app.goal.tokens_used = 0;
+                app.goal.time_used_seconds = 0;
+                app.goal.continuation_count = 0;
             }
         }
     }
 }
 
 fn plan_paused_command_message(app: &App, user_message: &str) -> PausedCommandDispatch {
-    if !app.paused && app.paused_quarry.is_none() {
+    if !app.paused && app.paused_goal_objective.is_none() {
         return PausedCommandDispatch::None;
     }
 
-    let Some(quarry) = app
-        .paused_quarry
+    let Some(objective) = app
+        .paused_goal_objective
         .clone()
-        .or_else(|| app.hunt.quarry.clone())
+        .or_else(|| app.goal.objective.clone())
     else {
         return PausedCommandDispatch::ClearWithoutQuarry;
     };
-    let title = paused_quarry_title(&quarry).to_string();
+    let title = paused_goal_objective_title(&objective).to_string();
     if is_resume_message(user_message) {
         PausedCommandDispatch::Resume {
-            quarry,
+            objective,
             note: paused_command_note(&title, true),
         }
     } else {
@@ -2058,14 +2070,14 @@ fn plan_paused_command_message(app: &App, user_message: &str) -> PausedCommandDi
 }
 
 fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
-    app.paused_quarry = app
-        .paused_quarry
+    app.paused_goal_objective = app
+        .paused_goal_objective
         .clone()
-        .or_else(|| app.hunt.quarry.clone());
-    app.hunt.quarry = None;
-    app.hunt.tokens_used = 0;
-    app.hunt.time_used_seconds = 0;
-    app.hunt.continuation_count = 0;
+        .or_else(|| app.goal.objective.clone());
+    app.goal.objective = None;
+    app.goal.tokens_used = 0;
+    app.goal.time_used_seconds = 0;
+    app.goal.continuation_count = 0;
     app.paused = true;
     app.pausable = true;
     engine_handle.set_paused(true);
@@ -2077,7 +2089,7 @@ fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
 fn clear_paused_command_state(app: &mut App, engine_handle: &EngineHandle) {
     app.pausable = false;
     app.paused = false;
-    app.paused_quarry = None;
+    app.paused_goal_objective = None;
     engine_handle.set_paused(false);
 }
 
@@ -2693,8 +2705,8 @@ async fn execute_command_input(
 pub(crate) struct SteerPausedSnapshot {
     paused: bool,
     pausable: bool,
-    paused_quarry: Option<String>,
-    quarry: Option<String>,
+    paused_goal_objective: Option<String>,
+    objective: Option<String>,
     tokens_used: u64,
     time_used_seconds: u64,
     continuation_count: u32,
@@ -3185,12 +3197,12 @@ mod provider_key_validation_tests {
     use super::*;
     use crate::core::engine::mock_engine_handle;
     use ratatui::{buffer::Buffer, layout::Rect};
-    use std::ffi::OsString;
     use tempfile::TempDir;
 
     struct ConfigPathEnvGuard {
         _tmp: TempDir,
-        previous: Option<OsString>,
+        _codewhale_config_path: crate::test_support::EnvVarGuard,
+        _deepseek_config_path: crate::test_support::EnvVarGuard,
         _lock: crate::test_support::TestEnvLock,
     }
 
@@ -3201,35 +3213,24 @@ mod provider_key_validation_tests {
             let config_path = tmp.path().join(".codewhale").join("config.toml");
             std::fs::create_dir_all(config_path.parent().expect("config parent"))
                 .expect("config dir");
-            let previous = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-            }
             Self {
                 _tmp: tmp,
-                previous,
+                _codewhale_config_path: crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_CONFIG_PATH",
+                    &config_path,
+                ),
+                _deepseek_config_path: crate::test_support::EnvVarGuard::set(
+                    "DEEPSEEK_CONFIG_PATH",
+                    &config_path,
+                ),
                 _lock: lock,
             }
         }
 
         fn config_path(&self) -> PathBuf {
-            std::env::var_os("DEEPSEEK_CONFIG_PATH")
+            std::env::var_os("CODEWHALE_CONFIG_PATH")
                 .map(PathBuf::from)
                 .expect("config path set")
-        }
-    }
-
-    impl Drop for ConfigPathEnvGuard {
-        fn drop(&mut self) {
-            // Safety: test-only environment mutation guarded by a global mutex.
-            unsafe {
-                if let Some(previous) = self.previous.take() {
-                    std::env::set_var("DEEPSEEK_CONFIG_PATH", previous);
-                } else {
-                    std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-                }
-            }
         }
     }
 
@@ -3474,6 +3475,182 @@ mod provider_key_validation_tests {
                 && rendered.contains("Pick a default model"),
             "expected model-pick stage UI, got:\n{rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_connection_records_models_probe_not_ready() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        config.provider = Some("openrouter".to_string());
+        if let Some(providers) = config.providers.as_mut() {
+            providers.openrouter.api_key = Some("sk-saved".to_string());
+        }
+        let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            false,
+            &verifier,
+        )
+        .await;
+
+        assert_eq!(
+            verifier.calls(),
+            vec![(
+                ApiProvider::Openrouter,
+                "sk-saved".to_string(),
+                "https://mock.openrouter.test/v1".to_string()
+            )]
+        );
+        let _ = config_env;
+        assert_eq!(config.provider.as_deref(), Some("openrouter"));
+        assert!(
+            app.status_toasts.iter().any(|toast| {
+                toast
+                    .text
+                    .contains("Connection checked (/models returned 2xx)")
+                    && !toast.text.contains("Pick a default model")
+            }),
+            "test connection names reachability only: {:?}",
+            app.status_toasts
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert_eq!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::ConnectionCheckedModelUnchecked,
+        );
+        assert_ne!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::Ready,
+        );
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
+    }
+
+    #[tokio::test]
+    async fn test_connection_without_key_does_not_mark_ready() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            false,
+            &verifier,
+        )
+        .await;
+
+        assert!(verifier.calls().is_empty());
+        let _ = config_env;
+        assert!(
+            app.status_toasts
+                .iter()
+                .any(|toast| toast.text.contains("No API key saved")),
+            "{:?}",
+            app.status_toasts
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert_eq!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::MissingKey,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::MissingKey,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_failure_redacts_the_api_key() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        config.provider = Some("openrouter".to_string());
+        if let Some(providers) = config.providers.as_mut() {
+            providers.openrouter.api_key = Some("sk-saved".to_string());
+        }
+        let verifier = MockProviderKeyVerifier::new(Err(
+            "HTTP 401: upstream echoed sk-saved in a long diagnostic body that must not stay visible"
+                .repeat(4),
+        ));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
+
+        apply_provider_picker_test_connection_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            true,
+            &verifier,
+        )
+        .await;
+
+        let _ = config_env;
+        let status = app
+            .status_toasts
+            .iter()
+            .map(|toast| toast.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !status.contains("sk-saved"),
+            "probe toast leaked the API key: {status}"
+        );
+        assert!(status.contains("***"), "{status}");
+        assert!(
+            app.provider_picker_memory
+                .as_ref()
+                .is_some_and(|memory| memory.catalog_view),
+            "catalog browsing context must survive the probe"
+        );
+        let verified_route = crate::provider_readiness::route_identity_for_model(
+            &config,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_MODEL,
+        );
+        assert!(matches!(
+            crate::provider_readiness::resolve_with_identity(
+                &verified_route,
+                crate::provider_readiness::CredentialState::Saved,
+                true,
+                &app.provider_health,
+            ),
+            crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed { .. }
+        ));
     }
 
     /// #4526: the wizard's StepFun billing-route choice must be the endpoint

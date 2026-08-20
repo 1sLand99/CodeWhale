@@ -25,14 +25,9 @@ pub(crate) fn default_config_path() -> anyhow::Result<PathBuf> {
 pub(crate) fn try_default_config_path() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     {
-        let honor_guarded_environment = crate::test_support::current_thread_holds_test_env_lock();
-        crate::test_support::with_test_env_lock(|| {
-            if honor_guarded_environment {
-                try_default_config_path_from_environment()
-            } else {
-                Ok(crate::test_support::isolated_test_state_root()
-                    .join(codewhale_config::CONFIG_FILE_NAME))
-            }
+        with_test_state_path(try_default_config_path_from_environment, || {
+            Ok(crate::test_support::unsealed_test_state_root()
+                .join(codewhale_config::CONFIG_FILE_NAME))
         })
     }
 
@@ -42,6 +37,26 @@ pub(crate) fn try_default_config_path() -> anyhow::Result<PathBuf> {
 
 fn try_default_config_path_from_environment() -> anyhow::Result<PathBuf> {
     codewhale_config::resolve_config_path(None)
+}
+
+/// Holding [`lock_test_env`] is not enough to read the process environment:
+/// many tests take that lock only to serialize unrelated variables, and
+/// trusting it routed them at a populated `~/.codewhale/config.toml` (#5355,
+/// #5359). Settings already requires a sealed `EnvVarGuard`; config paths
+/// must use the same gate.
+#[cfg(test)]
+fn with_test_state_path<T>(
+    from_environment: impl FnOnce() -> T,
+    isolated: impl FnOnce() -> T,
+) -> T {
+    let honor_guarded_environment = crate::test_support::guarded_environment_provides_state_paths();
+    crate::test_support::with_test_env_lock(|| {
+        if honor_guarded_environment {
+            from_environment()
+        } else {
+            isolated()
+        }
+    })
 }
 
 pub(crate) fn codewhale_home_dir() -> Result<Option<PathBuf>, codewhale_paths::PathOverrideError> {
@@ -56,6 +71,21 @@ pub(crate) fn codewhale_home_dir() -> Result<Option<PathBuf>, codewhale_paths::P
 /// to a workspace-scoped document (#5045, #5193); non-credential settings keep
 /// the ambient scoping.
 pub(crate) fn home_config_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        with_test_state_path(home_config_path_from_environment, || {
+            Some(
+                crate::test_support::unsealed_test_state_root()
+                    .join(codewhale_config::CONFIG_FILE_NAME),
+            )
+        })
+    }
+
+    #[cfg(not(test))]
+    home_config_path_from_environment()
+}
+
+fn home_config_path_from_environment() -> Option<PathBuf> {
     match codewhale_home_dir() {
         Ok(Some(home)) => return Some(home.join(codewhale_config::CONFIG_FILE_NAME)),
         Ok(None) => {}
@@ -94,7 +124,7 @@ pub(crate) fn canonicalize_or_keep(path: &Path) -> PathBuf {
 pub(crate) fn env_config_path() -> Result<Option<PathBuf>, codewhale_paths::PathOverrideError> {
     #[cfg(test)]
     {
-        crate::test_support::with_test_env_lock(env_config_path_unlocked)
+        with_test_state_path(env_config_path_unlocked, || Ok(None))
     }
     #[cfg(not(test))]
     {
@@ -180,6 +210,19 @@ pub(crate) fn default_memory_path() -> Option<PathBuf> {
 }
 
 fn default_user_state_path(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        with_test_state_path(
+            || default_user_state_path_from_environment(name),
+            || Some(crate::test_support::unsealed_test_state_root().join(name)),
+        )
+    }
+
+    #[cfg(not(test))]
+    default_user_state_path_from_environment(name)
+}
+
+fn default_user_state_path_from_environment(name: &str) -> Option<PathBuf> {
     match codewhale_home_dir() {
         Ok(Some(home)) => return Some(home.join(name)),
         Ok(None) => {}

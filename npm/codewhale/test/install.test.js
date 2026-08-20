@@ -30,13 +30,20 @@ async function exists(file) {
 }
 
 async function withoutForcedDownload(callback) {
+  const previousCodewhale = process.env.CODEWHALE_FORCE_DOWNLOAD;
   const previousTui = process.env.DEEPSEEK_TUI_FORCE_DOWNLOAD;
   const previousLegacy = process.env.DEEPSEEK_FORCE_DOWNLOAD;
+  delete process.env.CODEWHALE_FORCE_DOWNLOAD;
   delete process.env.DEEPSEEK_TUI_FORCE_DOWNLOAD;
   delete process.env.DEEPSEEK_FORCE_DOWNLOAD;
   try {
     return await callback();
   } finally {
+    if (previousCodewhale === undefined) {
+      delete process.env.CODEWHALE_FORCE_DOWNLOAD;
+    } else {
+      process.env.CODEWHALE_FORCE_DOWNLOAD = previousCodewhale;
+    }
     if (previousTui === undefined) {
       delete process.env.DEEPSEEK_TUI_FORCE_DOWNLOAD;
     } else {
@@ -84,7 +91,7 @@ test("install failure hint explains release base override for blocked GitHub dow
 
     const hint = installFailureHint(error);
 
-    assert.match(hint, /DEEPSEEK_TUI_RELEASE_BASE_URL/);
+    assert.match(hint, /CODEWHALE_RELEASE_BASE_URL/);
     assert.match(hint, /codewhale-artifacts-sha256\.txt/);
     assert.match(hint, /platform binaries/);
     assert.match(hint, /#npm-binary-download-times-out/);
@@ -107,7 +114,7 @@ test("install failure hint checks configured release base when override is alrea
 
     const hint = installFailureHint(error);
 
-    assert.match(hint, /is set to https:\/\/mirror\.example\/deepseek\//);
+    assert.match(hint, /resolves to https:\/\/mirror\.example\/deepseek\//);
     assert.match(hint, /codewhale-artifacts-sha256\.txt/);
     assert.doesNotMatch(hint, /If GitHub is unavailable/);
   } finally {
@@ -256,6 +263,18 @@ test("resolvePackageVersion honors codewhaleBinaryVersion precedence (#3769)", (
   );
   assert.equal(resolvePackageVersion({ version: "9.9.9" }, {}), "9.9.9");
 
+  assert.equal(
+    resolvePackageVersion(
+      { codewhaleBinaryVersion: "1.2.3" },
+      {
+        CODEWHALE_VERSION: "6.6.6",
+        DEEPSEEK_TUI_VERSION: "7.7.7",
+        DEEPSEEK_VERSION: "8.8.8",
+      },
+    ),
+    "6.6.6",
+  );
+
   // Legacy env vars still take precedence over package fields, unchanged.
   assert.equal(
     resolvePackageVersion(
@@ -270,6 +289,49 @@ test("resolvePackageVersion honors codewhaleBinaryVersion precedence (#3769)", (
       { DEEPSEEK_VERSION: "8.8.8" },
     ),
     "8.8.8",
+  );
+});
+
+test("canonical Codewhale installer variables outrank legacy aliases", () => {
+  assert.equal(
+    _internal.resolveRepo({
+      CODEWHALE_GITHUB_REPO: "example/codewhale",
+      DEEPSEEK_TUI_GITHUB_REPO: "legacy/tui",
+      DEEPSEEK_GITHUB_REPO: "legacy/root",
+    }),
+    "example/codewhale",
+  );
+  assert.equal(
+    _internal.isOptionalInstall([], {
+      CODEWHALE_OPTIONAL_INSTALL: "1",
+    }),
+    true,
+  );
+  assert.equal(
+    _internal.isQuietInstall({ CODEWHALE_QUIET_INSTALL: "1" }),
+    true,
+  );
+  assert.equal(
+    _internal.shouldForceDownload({ CODEWHALE_FORCE_DOWNLOAD: "1" }),
+    true,
+  );
+  assert.equal(
+    _internal.shouldDisableInstall({ CODEWHALE_DISABLE_INSTALL: "1" }),
+    true,
+  );
+  assert.equal(
+    _internal.downloadTimeoutMs("runtime", {
+      CODEWHALE_DOWNLOAD_TIMEOUT_MS: "1234",
+      DEEPSEEK_TUI_DOWNLOAD_TIMEOUT_MS: "9999",
+    }),
+    1234,
+  );
+  assert.equal(
+    _internal.downloadStallMs("runtime", {
+      CODEWHALE_DOWNLOAD_STALL_MS: "5678",
+      DEEPSEEK_TUI_DOWNLOAD_STALL_MS: "9999",
+    }),
+    5678,
   );
 });
 

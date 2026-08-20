@@ -1199,11 +1199,17 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+/// MCP server capabilities advertised in the initialize response.
+///
+/// Each flag records presence of the corresponding MCP capability object. The
+/// surrounding [`McpServerCapabilityMetadata`] preserves the important
+/// distinction between an advertised empty set and a legacy server that did
+/// not send capability metadata at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct McpServerCapabilities {
-    tools: bool,
-    resources: bool,
-    prompts: bool,
+pub struct McpServerCapabilities {
+    pub tools: bool,
+    pub resources: bool,
+    pub prompts: bool,
 }
 
 impl McpServerCapabilities {
@@ -1215,6 +1221,20 @@ impl McpServerCapabilities {
             prompts: capabilities.contains_key("prompts"),
         })
     }
+}
+
+/// Provenance-aware capability metadata for a manager snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpServerCapabilityMetadata {
+    /// The server supplied a spec-shaped `capabilities` object at initialize.
+    Advertised(McpServerCapabilities),
+    /// A connected legacy server omitted metadata, so bounded discovery probes
+    /// remain enabled for backward compatibility.
+    LegacyFallback,
+    /// The server has not completed initialization, so no truthful capability
+    /// claim can be made yet.
+    #[default]
+    NotObserved,
 }
 
 fn response_result<'a>(
@@ -3531,6 +3551,7 @@ pub struct McpServerSnapshot {
     pub read_timeout: u64,
     pub connected: bool,
     pub error: Option<String>,
+    pub capability_metadata: McpServerCapabilityMetadata,
     pub tools: Vec<McpDiscoveredItem>,
     pub resources: Vec<McpDiscoveredItem>,
     pub prompts: Vec<McpDiscoveredItem>,
@@ -4242,6 +4263,7 @@ fn snapshot_from_config(
                 } else {
                     Some("disabled".to_string())
                 },
+                capability_metadata: McpServerCapabilityMetadata::NotObserved,
                 tools: Vec::new(),
                 resources: Vec::new(),
                 prompts: Vec::new(),
@@ -4253,6 +4275,10 @@ fn snapshot_from_config(
                 }
                 if let Some(conn) = pool.connections.get(name) {
                     snapshot.connected = conn.is_ready();
+                    snapshot.capability_metadata = conn.server_capabilities.map_or(
+                        McpServerCapabilityMetadata::LegacyFallback,
+                        McpServerCapabilityMetadata::Advertised,
+                    );
                     if snapshot.connected {
                         // A count of connected servers and nothing else. The
                         // name, the command or URL, and the error string are

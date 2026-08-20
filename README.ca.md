@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Un agent de programació de codi obert per al teu terminal — porta el teu propi model.
@@ -15,11 +15,17 @@ o et necessita. Canvia de model a mig camí amb `/model`. Treballa de forma
 interactiva a la TUI, o executa `codewhale exec` en scripts i CI. Està escrit en
 Rust, amb llicència MIT, i corre a la teva màquina.
 
-El que no s'assembla als altres harnessos: **tu tries el model de cada rol, i no
-cal que coincideixin.** Una fleet fixa un proveïdor, un model i un nivell de
-raonament per rol — així un model barat i ràpid pot dirigir-ne un de raonament car,
-o un builder GLM pot treballar en la mateixa tasca que un reviewer Kimi. Escriu els
-teus propis rols i la teva pròpia constitution, i el harness és teu en lloc de nostre.
+El que no tenen altres harnessos: **tu tries el model de cada rol — i no han
+de coincidir** — i **els agents de Codewhale es parlen entre ells, a través
+de models.** Una fleet fixa proveïdor, model i nivell de raonament per rol,
+així un model barat i ràpid pot dirigir-ne un de car i raonador, o un
+builder GLM pot treballar la mateixa tasca que un reviewer Kimi. Mentre
+funcionen, envia'ls una nota en ple vol, mira el seu transcript o
+interromp-ne un — i no és només de pare a fill: tasques Codewhale separades
+al mateix workspace intercanvien Agent Mail durador, que sobreviu reinicis,
+es lliura exactament un cop en una frontera segura i emmascara credencials.
+Un `/goal` manté un objectiu llarg al llarg dels torns fins que de veritat
+acaba. Els rols són fitxers que edites, i tot el harness segueix sent teu.
 
 Sempre busquem persones que hi contribueixin i maneres de millorar. Si falta un
 model o un proveïdor que uses, o alguna cosa es trenca, dir-nos-ho és una de les
@@ -32,7 +38,7 @@ coses més útils que pots fer — mira [Contribuir](#contribuir).
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale en execució en un terminal](assets/screenshot.png)
+![Codewhale en execució en un terminal](assets/screenshot.webp)
 
 ## Instal·lació
 
@@ -76,18 +82,29 @@ Full Access. `!` executa una ordre de l'intèrpret pel camí d'aprovació habitu
   mai de quin proveïdor passa a estar actiu. Els límits de context i els preus
   venen de la ruta real; un preu desconegut es mostra com a desconegut, no com
   0 $.
+- **Agents que es parlen — a través de models.** Cada agent de Codewhale
+  és abastable mentre treballa: `message` posa una nota a la cua d'un
+  subagent en marxa, `followup` el desperta amb la teva nota a la seva
+  pròxima frontera segura, `peek` llegeix el seu transcript, i una
+  interrupció atura només el seu torn. Va més enllà de l'arbre pare-fill:
+  tasques separades al mateix workspace intercanvien **Agent Mail** durador
+  — un resum de relleu en cua que sobreviu al reinici, es lliura exactament
+  un cop a la frontera segura del destinatari i emmascara credencials i
+  camins — així una sessió GLM i una sessió Kimi es coordinen en dos
+  terminals sense que tu facis de pont. Cada banda pot ser un model
+  diferent; Codewhale porta la conversa.
 - **Un harness que escrius tu.** Els rols són fitxers que pots llegir i editar
   — un model, una postura d'eines i instruccions permanents per rol — guardats
   al projecte perquè l'equip els comparteixi, o al costat dels altres ajustos
   personals perquè et segueixin entre repositoris. Una constitution registra com
   vols que l'agent es comporti a cada sessió, de manera que el harness segueixi
   la teva pràctica en lloc de la nostra.
-- **Només lectura fins que permetis més.** El mode Plan no pot canviar fitxers,
-  i les aprovacions tanquen les ordres arriscades. Quan un sandbox del sistema
-  operatiu envolta de debò una ordre, el Codewhale ho diu: Seatbelt a macOS
-  quan està disponible, bubblewrap opcional a Linux. El `constitution.json` d'un
-  repositori es compila en bloquejos d'escriptura que ni tan sols Full Access
-  pot saltar-se.
+- **Feina que pots reprendre.** Una fleet registra cada pas en un registre
+  append-only, i `fleet resume` continua on el vas deixar. `/goal` manté un
+  objectiu persistent que l'agent persegueix torn rere torn — pausable,
+  reprenible i restaurat amb la sessió després d'un reinici — i `/workflows`
+  obre un tauler en directe de totes les execucions que conserva el journal
+  d'aquest workspace.
 - **Feina que pots reprendre.** Una fleet registra cada pas en un llibre major
   de només afegir, així que `fleet resume` continua on et vas aturar.
 
@@ -156,3 +173,5 @@ l'experiència d'agent al terminal.
 models.
 
 ![Codewhale desplegant tres subagents scout de només lectura en un terminal](assets/fanout.gif)
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

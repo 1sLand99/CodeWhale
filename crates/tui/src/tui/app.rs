@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use codewhale_config::{ProviderChain, route::RouteLimits};
@@ -737,56 +736,25 @@ impl Default for ViewportState {
     }
 }
 
-/// Verdict for a hunt (#2092).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HuntVerdict {
-    #[default]
-    Hunting,
-    Hunted,
-    Wounded,
-    Escaped,
-}
-
-impl HuntVerdict {
-    #[must_use]
-    pub fn goal_status(self) -> crate::tools::goal::GoalStatus {
-        match self {
-            Self::Hunting => crate::tools::goal::GoalStatus::Active,
-            Self::Hunted => crate::tools::goal::GoalStatus::Complete,
-            Self::Wounded => crate::tools::goal::GoalStatus::Paused,
-            Self::Escaped => crate::tools::goal::GoalStatus::Blocked,
-        }
-    }
-
-    #[must_use]
-    pub fn from_goal_status(status: crate::tools::goal::GoalStatus) -> Self {
-        match status {
-            crate::tools::goal::GoalStatus::Active => Self::Hunting,
-            crate::tools::goal::GoalStatus::Paused => Self::Wounded,
-            crate::tools::goal::GoalStatus::Complete => Self::Hunted,
-            crate::tools::goal::GoalStatus::Blocked => Self::Escaped,
-        }
-    }
-}
-
-/// Hunt tracking state (#2092 — was GoalState).
+/// Host-side tracking state for the active thread goal. Mirrors the
+/// engine's authoritative `SharedGoalState` snapshot (`GoalUpdated`) so the
+/// sidebar, top bar, and system prompt all read one truth.
 #[derive(Debug, Clone, Default)]
-pub struct HuntState {
-    pub quarry: Option<String>,
+pub struct HostGoalState {
+    pub objective: Option<String>,
     pub token_budget: Option<u32>,
     pub tokens_used: u64,
     pub time_used_seconds: u64,
     pub continuation_count: u32,
     /// Why an unfinished goal is paused. Kept separate from the four-state
-    /// hunt verdict so usage, budget, and run-limit stops stay distinguishable.
+    /// status so usage, budget, and run-limit stops stay distinguishable.
     pub pause_reason: Option<crate::tools::goal::GoalPauseReason>,
     pub started_at: Option<Instant>,
-    /// When the goal reached a terminal verdict (Hunted/Wounded/Escaped).
+    /// When the goal reached a terminal status (Complete/Blocked).
     /// While `None`, elapsed time keeps growing; once set, the sidebar freezes
     /// the timer at `finished_at - started_at` so completed goals stop ticking.
     pub finished_at: Option<Instant>,
-    pub verdict: HuntVerdict,
+    pub status: crate::tools::goal::GoalStatus,
 }
 
 /// Session cost and token telemetry state.
@@ -1087,7 +1055,17 @@ pub struct PendingRouteSave {
 /// those providers, matching how startup reads it back.
 fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
     let route = format!("{provider_identity}/{model}");
-    match crate::settings::Settings::transact(|settings| {
+    match try_persist_route_as_startup_default(provider_identity, model) {
+        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+        Err(err) => format!("Save failed: {err}"),
+    }
+}
+
+fn try_persist_route_as_startup_default(
+    provider_identity: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    crate::settings::Settings::transact(|settings| {
         settings.default_provider = Some(provider_identity.to_string());
         settings.set_model_for_provider(provider_identity, model);
         if matches!(
@@ -1098,10 +1076,7 @@ fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> Str
             settings.set("default_model", model)?;
         }
         Ok(())
-    }) {
-        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
-        Err(err) => format!("Save failed: {err}"),
-    }
+    })
 }
 
 pub struct App {
@@ -1117,7 +1092,7 @@ pub struct App {
     /// so the replacement shell can be removed or promoted as one unit.
     pub work_surface: crate::tui::work_surface::WorkSurfaceState,
     /// Goal sub-state.
-    pub hunt: HuntState,
+    pub goal: HostGoalState,
     /// Session sub-state (cost, tokens, telemetry).
     pub session: SessionState,
     /// Active tool restriction from custom slash command frontmatter.
@@ -1132,7 +1107,7 @@ pub struct App {
     /// True after Esc paused a pausable command and before it is resumed or cancelled.
     pub paused: bool,
     /// Saved custom-command objective while the command is paused.
-    pub paused_quarry: Option<String>,
+    pub paused_goal_objective: Option<String>,
     pub history: Vec<HistoryCell>,
     pub history_version: u64,
     /// Bumped when destructive reindexing could make a cached Space owner name
@@ -1291,6 +1266,8 @@ pub struct App {
     pub workflow_config: codewhale_config::WorkflowConfigToml,
     /// Effective `[goal] max_continuations` backstop; `0` means unlimited.
     pub goal_max_continuations: u32,
+    /// Typed engine lifecycle state for the cancellable between-turn wait.
+    pub goal_continuation_waiting: bool,
     /// Effective explicit/managed filesystem scope captured at startup. The
     /// named permission posture supplies the default when this is `None`.
     pub configured_sandbox_mode: Option<String>,
@@ -1426,6 +1403,9 @@ pub struct App {
     pub show_thinking: bool,
     pub thinking_highlight: bool,
     pub thinking_default_expanded: bool,
+    pub thinking_preview_lines: usize,
+    pub help_expand_groups: bool,
+    pub pin_last_prompt: bool,
     pub verbose_transcript: bool,
     pub show_tool_details: bool,
     /// Inline presentation mode for successful structured File mutations.
@@ -1531,6 +1511,13 @@ pub struct App {
     /// Follow-ups a running child has not yet taken at its next round
     /// boundary (`agent_id` → count), from the latest `AgentList` refresh.
     pub agent_queued_follow_ups: HashMap<String, usize>,
+    /// Receipts-only roster of every agent that ran this session (#5479).
+    /// Refreshed wholesale on each `AgentList` event; rendered by `/agents`
+    /// and, in a later slice, by the agents rail.
+    pub agent_roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+    /// `/agents list` asked for a one-shot transcript listing. Cleared by the
+    /// `AgentList` handler that prints it.
+    pub agent_roster_print_requested: bool,
     /// Per-role sequence counters for unnamed children (#3030). Two concurrent
     /// builders render as `builder · 1` and `builder · 2` instead of sharing a
     /// bare, indistinguishable role label.
@@ -1604,6 +1591,10 @@ pub struct App {
     /// True only when an organization requirements file owns approval policy.
     /// Unlike a user-owned config key, this source cannot be edited in-app.
     approval_policy_requirements_managed: bool,
+    /// True when the interactive shell switch is user-owned (unset or root
+    /// config.toml). Profile / env / managed / project owners stay in charge
+    /// even when a YOLO entry point asks for Full Access.
+    shell_access_editable: bool,
     // Clipboard handler
     pub clipboard: ClipboardHandler,
     // Tool approval session allowlist
@@ -1628,6 +1619,10 @@ pub struct App {
     /// Last non-contended Work snapshot captured in this App. The outer
     /// option distinguishes "never captured" from a captured empty state.
     pub(crate) last_known_work_state: Option<Option<SessionWorkState>>,
+    /// Latest bounded runtime goal projection. Persistence stores this beside
+    /// the owning saved session so a resumed process rebuilds the same goal
+    /// control state instead of inferring it from transcript prose.
+    pub(crate) last_known_goal_state: Option<crate::session_manager::SessionGoalState>,
     /// Metadata for the active session, cached in memory so automatic
     /// checkpoints never synchronously reload and parse a growing JSON file on
     /// the UI thread.
@@ -2177,15 +2172,28 @@ impl App {
     /// next launch reopened the old route. An explicit request now always
     /// reports what it did.
     pub fn save_live_route_as_startup_default(&mut self) -> String {
+        match self.try_save_live_route_as_startup_default() {
+            Ok(receipt) => receipt,
+            Err(err) => format!("Save failed: {err}"),
+        }
+    }
+
+    /// Persist the live route with a typed failure for onboarding, whose next
+    /// transition depends on knowing that the restart route actually landed.
+    pub(crate) fn try_save_live_route_as_startup_default(&mut self) -> anyhow::Result<String> {
         let provider_identity = self.provider_identity_for_persistence().to_string();
         let model = if self.auto_model {
             "auto".to_string()
         } else {
             self.model.clone()
         };
-        // This explicit decision resolves the pending prompt.
+        try_persist_route_as_startup_default(&provider_identity, &model)?;
+        // Resolve the prompt only after the write lands. If persistence fails,
+        // keep the retry available instead of discarding the operator's route.
         self.pending_route_save = None;
-        persist_route_as_startup_default(&provider_identity, &model)
+        Ok(format!(
+            "Remembered {provider_identity}/{model} as the startup default (settings.toml)."
+        ))
     }
 
     /// Record that the live session route changed to `provider_identity` /
@@ -2451,7 +2459,10 @@ impl App {
             AppMode::Yolo => AppMode::Agent,
             other => other,
         };
-        let yolo_compat = requested_mode == AppMode::Yolo;
+        // YOLO is a permission change (Full Access + trust + shell), not a
+        // mode change. A locked approval policy owns that surface — every
+        // other posture route already honors the lock.
+        let yolo_compat = requested_mode == AppMode::Yolo && !self.approval_policy_locked();
         let previous_mode = self.mode;
         if previous_mode == mode && !yolo_compat && !self.yolo {
             return false;
@@ -2479,7 +2490,9 @@ impl App {
         if yolo_compat {
             // Transient full-access mirrors for legacy YOLO entry points; do not
             // persist trust/shell elevation into the durable Agent baseline.
-            self.allow_shell = true;
+            if self.shell_access_editable {
+                self.allow_shell = true;
+            }
             self.trust_mode = true;
             self.approval_mode = ApprovalMode::Bypass;
             self.yolo = true;
@@ -2551,6 +2564,15 @@ impl App {
     /// [`StartupDefaultsWriter`]: crate::tui::startup_defaults::StartupDefaultsWriter
     pub fn select_mode(&mut self, mode: AppMode) -> SettingSelection {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
+            return SettingSelection::Refused;
+        }
+        if matches!(mode, AppMode::Yolo) && self.approval_policy_locked() {
+            self.push_status_toast(
+                "Permissions are controlled by config or managed requirements".to_string(),
+                StatusToastLevel::Warning,
+                Some(6_000),
+            );
+            self.needs_redraw = true;
             return SettingSelection::Refused;
         }
         let changed = self.set_mode(mode);
@@ -3026,6 +3048,24 @@ impl App {
         );
     }
 
+    /// Host path for `/auto`: persist Auto-Review as the TUI permission
+    /// posture without inventing a second runtime. Same write as Shift+Tab
+    /// landing on Auto-Review; Plan stays read-only and only the Act baseline
+    /// moves.
+    pub fn apply_auto_review_posture(&mut self) -> Result<(), String> {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
+            return Err(self.setting_locked_message(MessageId::SettingSubjectPermissions));
+        }
+        if self.approval_policy_locked() {
+            return Err("Permissions are controlled by config or managed requirements".to_string());
+        }
+        Self::persist_permission_posture(ApprovalMode::Auto)
+            .map_err(|err| format!("could not save TUI posture ({err})"))?;
+        self.set_agent_approval_posture(ApprovalMode::Auto);
+        self.needs_redraw = true;
+        Ok(())
+    }
+
     /// Update the durable Act approval choice. Entering Full Access enables
     /// trust mode; leaving it removes that implicit elevation while preserving
     /// an independently enabled trust baseline in other posture transitions.
@@ -3136,6 +3176,13 @@ impl App {
     const HISTORY_FOLD_BATCH: usize = 1_000;
 
     pub fn add_message(&mut self, msg: HistoryCell) {
+        // An in-flight tool is bound to a *virtual* index, `history.len() +
+        // entry_index`, resolved against `history.len()` at completion time.
+        // Growing history here without re-basing those bindings makes each of
+        // them silently mean a different cell, so the completion lands on the
+        // wrong one and the real row spins forever (#5478 — reproduced by
+        // `/rename` mid-turn, but every command that reports a message hits it).
+        self.rebase_active_cell_bindings(1);
         let rev = self.fresh_history_revision();
         self.history.push(msg);
         self.history_revisions.push(rev);
@@ -4190,6 +4237,41 @@ impl App {
     /// Mutable variant of [`Self::cell_at_virtual_index`]. Bumps the
     /// appropriate revision counter (active-cell revision when targeting an
     /// in-flight entry, history version otherwise).
+    /// Shift every binding that points *into the active cell* up by `added`,
+    /// to keep it pointing at the same entry after `added` cells are appended
+    /// to history.
+    ///
+    /// Bindings below `history.len()` address finalized cells and must not
+    /// move. Only called when an active cell exists: with no active cell there
+    /// are no virtual indices to re-base, and shifting would corrupt real ones.
+    fn rebase_active_cell_bindings(&mut self, added: usize) {
+        if added == 0 || self.active_cell.is_none() {
+            return;
+        }
+        let boundary = self.history.len();
+        for index in self.tool_cells.values_mut() {
+            if *index >= boundary {
+                *index = index.saturating_add(added);
+            }
+        }
+        for (cell_index, _) in self.exploring_entries.values_mut() {
+            if *cell_index >= boundary {
+                *cell_index = cell_index.saturating_add(added);
+            }
+        }
+        self.active_tool_entry_completed_at =
+            std::mem::take(&mut self.active_tool_entry_completed_at)
+                .into_iter()
+                .map(|(index, at)| {
+                    if index >= boundary {
+                        (index.saturating_add(added), at)
+                    } else {
+                        (index, at)
+                    }
+                })
+                .collect();
+    }
+
     pub fn cell_at_virtual_index_mut(&mut self, index: usize) -> Option<&mut HistoryCell> {
         if index < self.history.len() {
             // Bump only the targeted cell's revision; leave every other
@@ -4528,6 +4610,7 @@ impl App {
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
             thinking_default_expanded: self.thinking_default_expanded,
+            thinking_preview_lines: self.thinking_preview_lines,
             verbose: self.verbose_transcript,
             show_tool_details: self.show_tool_details,
             inline_diff_mode: self.inline_diff_mode,

@@ -32,7 +32,7 @@ export default async function VocabularyPage({ params }: { params: Promise<{ loc
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "产品名词" : "Vocabulary"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "产品名词" : "Vocabulary"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "这些名词在全站、TUI 和收据里含义完全一致。名词本身不翻译；每条定义都与仓库中的公共事实矩阵逐字对应。"

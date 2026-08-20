@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::HeaderItem;
 use crate::localization::{Locale, MessageId, tr};
+use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::{
     app::{App, AppMode, OnboardingState},
     approval::ApprovalMode,
@@ -36,10 +37,11 @@ pub enum ShellTier {
     Wide,
 }
 
-const LAUNCH_ROWS: [(MessageId, &str); 5] = [
-    (MessageId::LaunchMenuNewSession, "Enter"),
-    (MessageId::LaunchMenuNewWorktree, "Ctrl+N"),
+const LAUNCH_ROWS: [(MessageId, &str); 6] = [
+    (MessageId::LaunchMenuWork, "Enter"),
+    (MessageId::LaunchMenuChat, "C"),
     (MessageId::LaunchMenuResumeSession, "Ctrl+R"),
+    (MessageId::LaunchMenuNewWorktree, "Ctrl+N"),
     (MessageId::LaunchMenuChangelog, "Ctrl+L"),
     (MessageId::LaunchMenuQuit, "Ctrl+Q"),
 ];
@@ -48,10 +50,24 @@ const LAUNCH_ROWS: [(MessageId, &str); 5] = [
 pub enum LaunchAction {
     None,
     NewSession,
+    NewChat,
     CreateWorktree(String),
     Resume,
     Changelog,
     Quit,
+}
+
+impl LaunchAction {
+    /// Session-only mode selected by a launch choice. The event loop applies
+    /// this with `App::set_mode`, never the startup-default-writing selector.
+    #[must_use]
+    pub const fn session_mode(&self) -> Option<AppMode> {
+        match self {
+            Self::NewSession => Some(AppMode::Agent),
+            Self::NewChat => Some(AppMode::Plan),
+            _ => None,
+        }
+    }
 }
 
 /// Translate launch-menu input into one product action. Direct reliable keys
@@ -96,10 +112,17 @@ pub fn handle_launch_key(
     }
 
     let direct = match key.code {
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(1),
+        KeyCode::Char('c') | KeyCode::Char('C')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Some(1)
+        }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(2),
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(4),
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(3),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(4),
+        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(5),
         _ => None,
     };
     if let Some(selected) = direct {
@@ -121,18 +144,19 @@ pub fn handle_launch_key(
 
     match launch.selected {
         0 => LaunchAction::NewSession,
-        1 if launch.worktree_available => {
+        1 => LaunchAction::NewChat,
+        2 => LaunchAction::Resume,
+        3 if launch.worktree_available => {
             launch.worktree_input = Some(String::new());
             launch.status = Some(tr(locale, MessageId::LaunchWorktreePrompt).into_owned());
             LaunchAction::None
         }
-        1 => {
+        3 => {
             launch.status = Some(tr(locale, MessageId::LaunchWorktreeNeedsGit).into_owned());
             LaunchAction::None
         }
-        2 => LaunchAction::Resume,
-        3 => LaunchAction::Changelog,
-        4 => LaunchAction::Quit,
+        4 => LaunchAction::Changelog,
+        5 => LaunchAction::Quit,
         _ => LaunchAction::None,
     }
 }
@@ -312,20 +336,11 @@ const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
 const IDLE_SHIMMER_BAND_HALF_WIDTH: f32 = 0.38;
 const IDLE_SHIMMER_STRENGTH: f32 = 0.33;
 
-/// The build-version string the header renders. Since #5245 an unstamped
-/// local build reports `0.9.4 (dev)` while CI/release carries a sha, so the
-/// header's width choreography (which lengths of version stamp fit at which
-/// terminal width) is environment-dependent. Tests that assert on those
-/// width breakpoints override this to a fixed value so they measure the
-/// layout, not the ambient build's sha length.
+/// The build-version string the header renders. An unstamped local build uses
+/// the build script's development marker while CI/release carries its source
+/// stamp; the header always reports that real build provenance.
 fn shell_build_version() -> Cow<'static, str> {
-    #[cfg(test)]
-    {
-        if let Some(version) = tests::build_version_override() {
-            return Cow::Owned(version);
-        }
-    }
-    Cow::Borrowed(env!("DEEPSEEK_BUILD_VERSION"))
+    Cow::Borrowed(env!("CODEWHALE_BUILD_VERSION"))
 }
 
 impl ShellPhase {
@@ -397,17 +412,49 @@ impl ShellPhase {
 
     #[must_use]
     pub fn color(self, app: &App) -> Color {
-        match self {
-            Self::Idle => app.ui_theme.text_muted,
-            Self::Done => app.ui_theme.success,
-            Self::Typing => app.ui_theme.accent_primary,
-            // Verifying shares the live seafoam hue; the tick-vs-bubble
-            // marker carries the checking/searching distinction.
-            Self::Working | Self::Verifying => app.ui_theme.status_working,
-            Self::Waiting | Self::Approval => app.ui_theme.accent_action,
-            Self::Failed => app.ui_theme.error_fg,
-        }
+        phase_ink(self).color(&app.ui_theme)
     }
+}
+
+/// Status-bar phase ink. Failure red is only `Failed`.
+#[must_use]
+pub(crate) fn phase_ink(phase: ShellPhase) -> ChromeInk {
+    match phase {
+        ShellPhase::Idle => ChromeInk::Metadata,
+        ShellPhase::Done => ChromeInk::Outcome,
+        ShellPhase::Typing => ChromeInk::Identity,
+        // Verifying shares the live seafoam hue; the tick-vs-bubble
+        // marker carries the checking/searching distinction.
+        ShellPhase::Working | ShellPhase::Verifying => ChromeInk::Active,
+        ShellPhase::Waiting | ShellPhase::Approval => ChromeInk::Waiting,
+        ShellPhase::Failed => ChromeInk::Failure,
+    }
+}
+
+/// Exhaustive on purpose: a new [`AppMode`] must be handed a Policy ink
+/// deliberately rather than inheriting act's by falling through a wildcard.
+fn header_mode_ink(mode: AppMode) -> ChromeInk {
+    match mode {
+        AppMode::Plan => ChromeInk::PolicyPlan,
+        AppMode::Operate => ChromeInk::PolicyOperate,
+        // YOLO stays Policy, not Failure — the header must not spend red
+        // on a selected mode. It wears the act badge because `mode_label`
+        // resolves it to act; the posture it implies is the permission
+        // chip's Cognition ink, not this one.
+        AppMode::Agent | AppMode::Auto | AppMode::Yolo => ChromeInk::PolicyAct,
+    }
+}
+
+fn header_permission_ink(mode: ApprovalMode) -> ChromeInk {
+    match mode {
+        ApprovalMode::Suggest | ApprovalMode::Never => ChromeInk::PermissionAsk,
+        ApprovalMode::Auto => ChromeInk::PermissionAutoReview,
+        ApprovalMode::Bypass => ChromeInk::PermissionFullAccess,
+    }
+}
+
+fn header_fg(app: &App, ink: ChromeInk) -> Style {
+    chrome_style(&app.ui_theme, ink)
 }
 
 /// Summarize only tools whose lifecycle is actually `Running`. A read label
@@ -480,11 +527,6 @@ fn completion_elapsed_ms(app: &App) -> Option<u128> {
     app.ocean_completion_started_at
         .map(|started| started.elapsed().as_millis())
         .filter(|elapsed| *elapsed < COMPLETION_BREATH_MS)
-}
-
-#[cfg(test)]
-pub(crate) fn phase_marker(app: &App, phase: ShellPhase) -> (&'static str, Cow<'static, str>) {
-    phase_marker_with_activity(app, phase, LiveActivity::from_app(app))
 }
 
 /// Truthful window-title activity verb for the OSC-0 whale animation.
@@ -704,6 +746,60 @@ fn render_launch_line(area: Rect, buf: &mut Buffer, y: u16, spans: Vec<Span<'sta
     );
 }
 
+fn render_launch_content_line(
+    area: Rect,
+    buf: &mut Buffer,
+    y: u16,
+    inset: u16,
+    spans: Vec<Span<'static>>,
+) {
+    if y >= area.height {
+        return;
+    }
+    let inset = inset.min(area.width / 2);
+    Paragraph::new(Line::from(spans)).render(
+        Rect {
+            x: area.x.saturating_add(inset),
+            y: area.y.saturating_add(y),
+            width: area.width.saturating_sub(inset.saturating_mul(2)),
+            height: 1,
+        },
+        buf,
+    );
+}
+
+fn launch_has_detail(area: Rect) -> bool {
+    area.width >= 60 && area.height >= 22
+}
+
+fn launch_content_start(_area: Rect) -> u16 {
+    // Keep the decision block anchored just below the shell header at every
+    // detailed size. Vertically centering it made a wide terminal look like
+    // an old fixed-height menu floating in decorative emptiness.
+    3
+}
+
+fn launch_row_y(area: Rect, index: usize) -> u16 {
+    const DETAIL_ROW_OFFSETS: [u16; 6] = [4, 7, 11, 12, 15, 16];
+    let start = launch_content_start(area);
+    if launch_has_detail(area) {
+        start.saturating_add(DETAIL_ROW_OFFSETS[index])
+    } else {
+        start.saturating_add(u16::try_from(index).unwrap_or(0))
+    }
+}
+
+fn launch_workspace_name(app: &App) -> String {
+    app.workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || crate::utils::display_path(&app.workspace),
+            str::to_string,
+        )
+}
+
 /// Render the distinct pre-session choice state. This screen contains no
 /// transcript, composer, dashboard, or post-launch whale: each row dispatches
 /// to real session/worktree machinery before the idle ocean is entered.
@@ -750,15 +846,96 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         );
     }
 
-    let rows_start = if area.height >= 16 { 4 } else { 3 };
+    if launch_has_detail(area) {
+        let content_start = launch_content_start(area);
+        render_launch_content_line(
+            area,
+            buf,
+            content_start,
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, MessageId::LaunchStartTitle).into_owned(),
+                Style::default()
+                    .fg(app.ui_theme.text_body)
+                    .add_modifier(Modifier::BOLD),
+            )],
+        );
+        let workspace_id = if app.launch.worktree_available {
+            MessageId::LaunchWorkspaceGitReady
+        } else {
+            MessageId::LaunchWorkspaceFolderReady
+        };
+        render_launch_content_line(
+            area,
+            buf,
+            content_start.saturating_add(1),
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, workspace_id).replace("{name}", &launch_workspace_name(app)),
+                Style::default().fg(app.ui_theme.text_soft),
+            )],
+        );
+        let provider_id = if app.onboarding_needs_api_key {
+            MessageId::LaunchProviderSetupNeeded
+        } else {
+            MessageId::LaunchProviderConfigured
+        };
+        render_launch_content_line(
+            area,
+            buf,
+            content_start.saturating_add(2),
+            2,
+            vec![Span::styled(
+                tr(app.ui_locale, provider_id).into_owned(),
+                Style::default().fg(if app.onboarding_needs_api_key {
+                    app.ui_theme.warning
+                } else {
+                    app.ui_theme.success
+                }),
+            )],
+        );
+        for (row, description_id) in [
+            (launch_row_y(area, 0), MessageId::LaunchWorkDescription),
+            (launch_row_y(area, 1), MessageId::LaunchChatDescription),
+        ] {
+            render_launch_content_line(
+                area,
+                buf,
+                row.saturating_add(1),
+                4,
+                vec![Span::styled(
+                    tr(app.ui_locale, description_id).into_owned(),
+                    Style::default().fg(app.ui_theme.text_muted),
+                )],
+            );
+        }
+        for (row, heading_id) in [
+            (launch_row_y(area, 2), MessageId::LaunchGroupContinue),
+            (launch_row_y(area, 4), MessageId::LaunchGroupMore),
+        ] {
+            render_launch_content_line(
+                area,
+                buf,
+                row.saturating_sub(1),
+                2,
+                vec![Span::styled(
+                    tr(app.ui_locale, heading_id).into_owned(),
+                    Style::default()
+                        .fg(app.ui_theme.text_hint)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+    }
+
     for (index, (label_id, key)) in LAUNCH_ROWS.iter().enumerate() {
-        let y = rows_start + u16::try_from(index).unwrap_or(0);
+        let y = launch_row_y(area, index);
         if y >= area.height.saturating_sub(3) {
             break;
         }
         let selected = app.launch.selected == index;
         let mut label = tr(app.ui_locale, *label_id).into_owned();
-        if index == 1 && !app.launch.worktree_available {
+        if index == 3 && !app.launch.worktree_available {
             label.push_str(&format!(
                 " · {}",
                 tr(app.ui_locale, MessageId::LaunchMenuUnavailable)
@@ -771,29 +948,34 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
                     .replace("{count}", &app.launch.workspace_session_count.to_string())
             ));
         }
-        let prefix = if selected { "  ▸ " } else { "    " };
+        let prefix = if selected { "▸ " } else { "  " };
         let key_width = key.width();
-        let label_budget = width.saturating_sub(prefix.width() + key_width + 2);
+        let content_width = width.saturating_sub(4);
+        let label_budget = content_width.saturating_sub(prefix.width() + key_width + 2);
         let label = truncate_to_width(&label, label_budget);
-        let fill = width.saturating_sub(prefix.width() + label.width() + key_width);
+        let fill = content_width.saturating_sub(prefix.width() + label.width() + key_width);
         let row_style = if selected {
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD)
-        } else if index == 1 && !app.launch.worktree_available {
+            crate::tui::menu_style::theme_selected_row_style(&app.ui_theme)
+        } else if index == 3 && !app.launch.worktree_available {
             Style::default().fg(app.ui_theme.text_dim)
         } else {
             Style::default().fg(app.ui_theme.text_body)
         };
-        render_launch_line(
+        let key_style = if selected {
+            row_style
+        } else {
+            Style::default().fg(app.ui_theme.text_hint)
+        };
+        render_launch_content_line(
             area,
             buf,
             y,
+            2,
             vec![
                 Span::styled(prefix, row_style),
                 Span::styled(label, row_style),
-                Span::raw(" ".repeat(fill)),
-                Span::styled(*key, Style::default().fg(app.ui_theme.text_hint)),
+                Span::styled(" ".repeat(fill), row_style),
+                Span::styled(*key, key_style),
             ],
         );
     }
@@ -843,17 +1025,25 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         )],
     );
 
-    let saved_sessions = if app.launch.workspace_session_count == 1 {
-        tr(app.ui_locale, MessageId::LaunchSavedSessionSingular).into_owned()
-    } else {
-        tr(app.ui_locale, MessageId::LaunchSavedSessionsPlural)
-            .replace("{count}", &app.launch.workspace_session_count.to_string())
-    };
+    let workspace_kind = tr(
+        app.ui_locale,
+        if app.launch.worktree_available {
+            MessageId::LaunchWorkspaceGitShort
+        } else {
+            MessageId::LaunchWorkspaceFolderShort
+        },
+    );
+    let provider = tr(
+        app.ui_locale,
+        if app.onboarding_needs_api_key {
+            MessageId::LaunchProviderSetupShort
+        } else {
+            MessageId::LaunchProviderConfiguredShort
+        },
+    );
     let status = format!(
-        "{} · {} · {}",
-        app.model_display_label(),
-        mode_label(app.ui_locale, app.mode),
-        saved_sessions
+        "{} · {workspace_kind} · {provider}",
+        launch_workspace_name(app)
     );
     render_launch_line(
         area,
@@ -870,16 +1060,15 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
 /// The coordinates mirror the renderer's responsive row placement exactly.
 pub fn record_launch_row_areas(area: Rect, launch: &mut crate::tui::app::LaunchState) {
     launch.row_areas.clear();
-    let rows_start = if area.height >= 16 { 4 } else { 3 };
     for index in 0..LAUNCH_ROWS.len() {
-        let y = rows_start + u16::try_from(index).unwrap_or(0);
+        let y = launch_row_y(area, index);
         if y >= area.height.saturating_sub(3) {
             break;
         }
         launch.row_areas.push(Rect {
-            x: area.x,
+            x: area.x.saturating_add(2),
             y: area.y.saturating_add(y),
-            width: area.width,
+            width: area.width.saturating_sub(4),
             height: 1,
         });
     }
@@ -924,7 +1113,7 @@ fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
                 format_token_count_compact(u64::from(app.session.total_cache_hit_tokens)),
                 format_token_count_compact(u64::from(app.session.total_output_tokens)),
             ),
-            Style::default().fg(app.ui_theme.info),
+            header_fg(app, ChromeInk::Info),
         )
     })
 }
@@ -962,64 +1151,46 @@ fn render_header_with_git_status(
     let (effective_provider, effective_model) = app.effective_route_identity_display();
     let route_label = format!("{effective_provider} · {effective_model}");
     let effort_label = app.reasoning_effort_display_label();
-    let mode_color = match app.mode {
-        AppMode::Plan => app.ui_theme.mode_plan,
-        AppMode::Operate => app.ui_theme.mode_operate,
-        _ => app.ui_theme.mode_agent,
-    };
+    let mode_color = header_mode_ink(app.mode).color(&app.ui_theme);
     // Match the composer's warm top edge exactly: Ask amber, Auto-Review
     // Signal Gold, and Full Access coral.
-    let permission_color = match app.approval_mode {
-        ApprovalMode::Suggest | ApprovalMode::Never => app.ui_theme.permission_ask,
-        ApprovalMode::Auto => app.ui_theme.permission_auto_review,
-        ApprovalMode::Bypass => app.ui_theme.permission_full_access,
-    };
+    let permission_color = header_permission_ink(app.approval_mode).color(&app.ui_theme);
+    let dim = header_fg(app, ChromeInk::MetadataDim);
+    // `status_indicator` owns the single header mark. It used to be filtered
+    // against the literal "cw" because the header also hardcoded a leading
+    // "cw" span, and `header_status_indicator_frame` collapses `cw`, the
+    // legacy `whale` opt-in, and unknown values onto that same mark — so the
+    // filter silently discarded three of the setting's four documented values
+    // and left `off` with nothing to turn off (#5512). There is one mark now,
+    // and this setting decides what occupies it.
     let status_indicator = crate::tui::widgets::header_status_indicator_frame(
         (!app.low_motion && app.fancy_animations)
             .then_some(app.turn_started_at)
             .flatten(),
         &app.status_indicator,
-    )
-    .filter(|indicator| *indicator != "cw");
-    let mut left = vec![
-        Span::styled(
-            "cw",
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            route_label.clone(),
-            Style::default().fg(app.ui_theme.text_muted),
-        ),
-        Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+    );
+    let mut left = Vec::new();
+    if let Some(indicator) = status_indicator {
+        left.push(Span::styled(
+            indicator,
+            header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::raw("  "));
+    }
+    left.extend([
+        Span::styled(route_label.clone(), header_fg(app, ChromeInk::Metadata)),
+        Span::styled(" · ", dim),
         Span::styled(
             mode_label(app.ui_locale, app.mode),
             Style::default().fg(mode_color),
         ),
-        Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
-        Span::styled(effort_label.clone(), Style::default().fg(app.ui_theme.info)),
-    ];
-    // The selected brand/status mark is part of the user's chosen header,
-    // not expendable wide-screen decoration. Keep it in compact layouts too;
-    // route text truncates before the permission posture or selected mark.
-    if let Some(indicator) = status_indicator {
-        left.push(Span::raw(" "));
-        left.push(Span::styled(
-            indicator,
-            Style::default()
-                .fg(app.ui_theme.info)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+        Span::styled(" · ", dim),
+        Span::styled(effort_label.clone(), header_fg(app, ChromeInk::Info)),
+    ]);
     // Permission is safety state, not optional chrome. Compact terminals shed
     // route detail and the context meter, but keep mode, effective effort, and
     // the effective posture.
-    left.push(Span::styled(
-        " · ",
-        Style::default().fg(app.ui_theme.text_dim),
-    ));
+    left.push(Span::styled(" · ", dim));
     left.push(Span::styled(
         permission_label(app),
         Style::default().fg(permission_color),
@@ -1038,17 +1209,14 @@ fn render_header_with_git_status(
                 format!("goal {}", truncate_to_width(&flat, budget))
             };
             let color = if paused {
-                app.ui_theme.warning
+                ChromeInk::Attention.color(&app.ui_theme)
             } else {
-                app.ui_theme.status_working
+                ChromeInk::Active.color(&app.ui_theme)
             };
             (text, color)
         });
     if let Some((text, color)) = &goal_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1061,12 +1229,9 @@ fn render_header_with_git_status(
     let workflow_chip = app
         .workflow_panel
         .as_ref()
-        .map(|panel| (panel.top_bar_chip(), app.ui_theme.info));
+        .map(|panel| (panel.top_bar_chip(), ChromeInk::Info.color(&app.ui_theme)));
     if let Some((text, color)) = &workflow_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1080,12 +1245,9 @@ fn render_header_with_git_status(
     let update_chip = app
         .update_available
         .as_ref()
-        .map(|label| (label.clone(), app.ui_theme.warning));
+        .map(|label| (label.clone(), ChromeInk::Attention.color(&app.ui_theme)));
     if let Some((text, color)) = &update_chip {
-        left.push(Span::styled(
-            " · ",
-            Style::default().fg(app.ui_theme.text_dim),
-        ));
+        left.push(Span::styled(" · ", dim));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1106,7 +1268,7 @@ fn render_header_with_git_status(
                     "▱".repeat(5usize.saturating_sub(filled)),
                     percent
                 ),
-                Style::default().fg(app.ui_theme.info),
+                header_fg(app, ChromeInk::Info),
             )
         });
     let token_breakdown = (tier != ShellTier::Compact)
@@ -1116,7 +1278,7 @@ fn render_header_with_git_status(
     let version = (tier == ShellTier::Wide).then(|| {
         Span::styled(
             format!("v{}", shell_build_version()),
-            Style::default().fg(app.ui_theme.text_hint),
+            header_fg(app, ChromeInk::MetadataHint),
         )
     });
     // Cached repository/worktree status only — never probe from the render path.
@@ -1129,7 +1291,7 @@ fn render_header_with_git_status(
         };
         Span::styled(
             truncate_to_width(&label, max_width),
-            Style::default().fg(app.ui_theme.text_muted),
+            header_fg(app, crate::tui::git_status::chrome_ink()),
         )
     });
 
@@ -1151,9 +1313,10 @@ fn render_header_with_git_status(
     } else {
         effort_label.clone()
     };
-    let indicator_width = status_indicator.map_or(0, |indicator| 1 + indicator.width());
-    let minimum_left_width = 4usize
-        .saturating_add(indicator_width)
+    // The mark leads the header and carries its own two-space gutter, so it
+    // costs `width + 2` when present and nothing at all when `off` (#5512).
+    let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
+    let minimum_left_width = indicator_width
         .saturating_add(3 + mode_label(app.ui_locale, app.mode).width())
         .saturating_add(3 + minimum_effort.width())
         .saturating_add(3 + permission_label(app).width());
@@ -1237,11 +1400,11 @@ fn render_header_with_git_status(
             effort_label.clone()
         };
         let mut suffix = vec![
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+            Span::styled(" · ", dim),
             Span::styled(mode, Style::default().fg(mode_color)),
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
-            Span::styled(effort, Style::default().fg(app.ui_theme.info)),
-            Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
+            Span::styled(" · ", dim),
+            Span::styled(effort, header_fg(app, ChromeInk::Info)),
+            Span::styled(" · ", dim),
             Span::styled(permission, Style::default().fg(permission_color)),
         ];
         // The goal chip survives cramped layouts too — it is operator state,
@@ -1249,17 +1412,14 @@ fn render_header_with_git_status(
         // nothing, as it always has); below that the goal itself truncates,
         // and when even a minimal chip cannot fit it drops rather than
         // clipping mid-word (#39).
-        let indicator_width = status_indicator.map_or(0, |indicator| 1 + indicator.width());
-        let base_fixed = 4usize
-            .saturating_add(indicator_width)
-            .saturating_add(span_width(&suffix));
+        // Same accounting as the baseline pass: the mark leads and owns its
+        // gutter, so it is `width + 2` present and 0 when `off` (#5512).
+        let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
+        let base_fixed = indicator_width.saturating_add(span_width(&suffix));
         if let Some((text, color)) = &goal_chip {
             let goal_room = left_budget.saturating_sub(base_fixed).saturating_sub(3);
             if goal_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, goal_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1272,17 +1432,10 @@ fn render_header_with_git_status(
         // cannot fit. The route label still yields its budget first.
         if let Some((text, color)) = &workflow_chip {
             let workflow_room = left_budget
-                .saturating_sub(
-                    4usize
-                        .saturating_add(indicator_width)
-                        .saturating_add(span_width(&suffix)),
-                )
+                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if workflow_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, workflow_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1293,46 +1446,29 @@ fn render_header_with_git_status(
         // useful, but it yields to every piece of operator state ahead of it.
         if let Some((text, color)) = &update_chip {
             let update_room = left_budget
-                .saturating_sub(
-                    4usize
-                        .saturating_add(indicator_width)
-                        .saturating_add(span_width(&suffix)),
-                )
+                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
                 .saturating_sub(3);
             if update_room >= 8 {
-                suffix.push(Span::styled(
-                    " · ",
-                    Style::default().fg(app.ui_theme.text_dim),
-                ));
+                suffix.push(Span::styled(" · ", dim));
                 suffix.push(Span::styled(
                     truncate_to_width(text, update_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
                 ));
             }
         }
-        let fixed_width = 4usize
-            .saturating_add(indicator_width)
-            .saturating_add(span_width(&suffix));
+        let fixed_width = indicator_width.saturating_add(span_width(&suffix));
         let route_budget = left_budget.saturating_sub(fixed_width);
-        left = vec![Span::styled(
-            "cw",
-            Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .add_modifier(Modifier::BOLD),
-        )];
+        left = Vec::new();
         if let Some(indicator) = status_indicator {
-            left.push(Span::raw(" "));
             left.push(Span::styled(
                 indicator,
-                Style::default()
-                    .fg(app.ui_theme.info)
-                    .add_modifier(Modifier::BOLD),
+                header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
             ));
+            left.push(Span::raw("  "));
         }
-        left.push(Span::raw("  "));
         left.push(Span::styled(
             truncate_to_width(&route_label, route_budget),
-            Style::default().fg(app.ui_theme.text_muted),
+            header_fg(app, ChromeInk::Metadata),
         ));
         left.extend(suffix);
     }
@@ -1376,8 +1512,8 @@ pub(crate) const AMBIENT_MIN_CHAT_HEIGHT: u16 = 16;
 /// Companion column floor, same reasoning as [`AMBIENT_MIN_CHAT_HEIGHT`].
 pub(crate) const AMBIENT_MIN_CHAT_WIDTH: u16 = 60;
 
-/// Build the post-launch idle composition. It is deliberately not a command
-/// dashboard: one brand mark, one context line, and one quiet Fleet setup path.
+/// Build the post-launch idle composition: brand, workspace context, Fleet,
+/// help, and the orchestration trio (`/workflow /goal /auto`).
 ///
 /// Expressed in terms of the ambient floor constants so the layout rule that
 /// reserves the rows and the gate that spends them cannot disagree. (The old
@@ -1660,1292 +1796,26 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
                 ),
             ]));
         }
+        if area.height >= 8 {
+            let orch_label = tr(app.ui_locale, MessageId::EmptyStateOrchestrationLabel);
+            let orch_commands = crate::commands::traits::orchestration_slash_hint();
+            let orch = format!("{orch_label}  {orch_commands}");
+            let inset = " ".repeat(width.saturating_sub(orch.width()) / 2);
+            lines.push(Line::from(vec![
+                Span::raw(inset),
+                Span::styled(
+                    orch_label.into_owned(),
+                    Style::default().fg(app.ui_theme.text_soft),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    orch_commands,
+                    Style::default()
+                        .fg(app.ui_theme.accent_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     }
     lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        config::Config,
-        tui::app::{LaunchState, TuiOptions},
-    };
-    use std::{
-        cell::RefCell,
-        path::PathBuf,
-        time::{Duration, Instant},
-    };
-
-    thread_local! {
-        static BUILD_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
-    /// Read the header's version-string override (see [`shell_build_version`]).
-    pub(super) fn build_version_override() -> Option<String> {
-        BUILD_VERSION_OVERRIDE.with(|cell| cell.borrow().clone())
-    }
-
-    /// Pin the header's version stamp for the current test thread so width
-    /// choreography is measured against a fixed length, not the ambient
-    /// build's sha (which is `(dev)` locally and a sha on CI since #5245).
-    /// The default fixture mirrors a sha-stamped build's width.
-    struct BuildVersionGuard;
-
-    impl BuildVersionGuard {
-        fn set(version: &str) -> Self {
-            BUILD_VERSION_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(version.to_string()));
-            Self
-        }
-    }
-
-    impl Drop for BuildVersionGuard {
-        fn drop(&mut self) {
-            BUILD_VERSION_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
-        }
-    }
-
-    /// An enforced-sandbox marker for this platform, or `None` where the
-    /// enum has no enforced variant. Only identity matters here: the header
-    /// reads `sandbox_backend.is_some()`, never which backend it is.
-    fn enforced_backend() -> Option<crate::sandbox::SandboxType> {
-        #[cfg(target_os = "macos")]
-        {
-            Some(crate::sandbox::SandboxType::MacosSeatbelt)
-        }
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        {
-            Some(crate::sandbox::SandboxType::LinuxBubblewrap)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Some(crate::sandbox::SandboxType::Windows)
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        )))]
-        {
-            None
-        }
-    }
-
-    fn test_app() -> App {
-        let mut app = App::new(
-            TuiOptions {
-                model: "deepseek-v4-flash".to_string(),
-                start_in_agent_mode: true,
-                ..crate::test_support::test_tui_options(PathBuf::from("."))
-            },
-            &Config::default(),
-        );
-        // `filesystem_scope_label` is deliberately honest about enforcement:
-        // with no OS sandbox backend it appends " (unenforced)" (all Windows,
-        // and Linux where bubblewrap is absent — it is opt-in). That is 12
-        // extra columns in the permission chip, which both changes the exact
-        // chip text and eats the width budget the cramped-layout assertions
-        // below are calibrated against. Header rendering is not a probe of
-        // the host's sandbox availability, so pin the backend and keep these
-        // tests platform-stable; `permission_chip_says_unenforced_without_a_
-        // backend` covers the `None` rendering explicitly.
-        app.sandbox_backend = enforced_backend();
-        app
-    }
-
-    fn launch() -> LaunchState {
-        LaunchState {
-            visible: true,
-            selected: 0,
-            worktree_input: None,
-            status: None,
-            workspace_session_count: 2,
-            worktree_available: true,
-            row_areas: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn window_title_prefix_prefers_session_over_config_default() {
-        let mut app = test_app();
-        // Nothing configured: no prefix at all.
-        assert_eq!(app.window_title_prefix(), None);
-
-        // Config default alone.
-        app.title_default = Some("workspace-x".to_string());
-        assert_eq!(app.window_title_prefix(), Some("workspace-x"));
-
-        // Session-level `/title` wins over the config default.
-        app.window_title = Some("task-7".to_string());
-        assert_eq!(app.window_title_prefix(), Some("task-7"));
-
-        // Clearing the session title falls back to the default.
-        app.window_title = None;
-        assert_eq!(app.window_title_prefix(), Some("workspace-x"));
-
-        // Whitespace-only titles count as unset.
-        app.window_title = Some("   ".to_string());
-        assert_eq!(app.window_title_prefix(), None);
-        app.window_title = None;
-    }
-
-    #[test]
-    fn sync_title_activity_pushes_the_resolved_prefix() {
-        // The render-loop sync must reach the notifications layer so the
-        // terminal title actually carries the prefix.
-        let _guard = crate::tui::notifications::title_prefix_test_lock();
-        crate::tui::notifications::set_title_prefix(None);
-        let mut app = test_app();
-        app.window_title = Some("sync-check".to_string());
-        sync_title_activity(&app);
-        assert_eq!(
-            crate::tui::notifications::title_prefix_slot()
-                .lock()
-                .unwrap()
-                .as_str(),
-            "sync-check"
-        );
-        app.window_title = None;
-        sync_title_activity(&app);
-        assert_eq!(
-            crate::tui::notifications::title_prefix_slot()
-                .lock()
-                .unwrap()
-                .as_str(),
-            ""
-        );
-    }
-
-    #[test]
-    fn launch_row_hitboxes_follow_responsive_render_rows() {
-        let mut launch = launch();
-        record_launch_row_areas(Rect::new(3, 2, 80, 24), &mut launch);
-        assert_eq!(launch.row_areas.len(), 5);
-        assert_eq!(launch.row_areas[0], Rect::new(3, 6, 80, 1));
-        assert_eq!(launch.row_areas[4], Rect::new(3, 10, 80, 1));
-
-        record_launch_row_areas(Rect::new(3, 2, 40, 10), &mut launch);
-        assert_eq!(launch.row_areas.len(), 4);
-        assert_eq!(launch.row_areas[0], Rect::new(3, 5, 40, 1));
-    }
-
-    fn footer_text(app: &mut App) -> String {
-        let area = Rect::new(0, 0, 100, 1);
-        let mut buf = Buffer::empty(area);
-        render_footer(area, &mut buf, app);
-        (0..area.width).map(|x| buf[(x, 0)].symbol()).collect()
-    }
-
-    fn header_text(app: &App, width: u16) -> String {
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        render_header(area, &mut buf, app);
-        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
-    }
-
-    fn header_text_with_git_status(
-        app: &App,
-        width: u16,
-        git_status: &crate::tui::git_status::GitStatusSnapshot,
-    ) -> String {
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        render_header_with_git_status(area, &mut buf, app, git_status);
-        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
-    }
-
-    #[test]
-    fn header_surfaces_repository_and_worktree_without_wrapping() {
-        let app = test_app();
-        let git_status = crate::tui::git_status::GitStatusSnapshot {
-            root: Some("/repo/.cw-worktrees/feature".into()),
-            repository_name: Some("repo".into()),
-            branch: Some("feature".into()),
-            dirty: true,
-            ..Default::default()
-        };
-
-        let wide = header_text_with_git_status(&app, 130, &git_status);
-        assert!(
-            wide.contains("repo/feature · feature*"),
-            "wide header: {wide:?}"
-        );
-
-        let narrow = header_text_with_git_status(&app, 60, &git_status);
-        assert!(!narrow.contains('\n'), "narrow header must stay one line");
-        assert!(
-            narrow.to_ascii_lowercase().contains("work"),
-            "mode: {narrow:?}"
-        );
-        assert!(
-            narrow.to_ascii_lowercase().contains("ask"),
-            "permission: {narrow:?}"
-        );
-    }
-
-    #[test]
-    fn configured_session_tokens_follow_underwater_header_width_priority() {
-        // Pin the version stamp: the Wide-tier breakpoints below are
-        // calibrated to a sha-length stamp, which #5245 no longer guarantees
-        // on a local build.
-        let _version = BuildVersionGuard::set("0.9.4 (000000000000)");
-        let mut app = test_app();
-        app.header_items = vec![HeaderItem::Tokens];
-        app.session.total_input_tokens = 18_000;
-        app.session.total_cache_hit_tokens = 12_000;
-        app.session.total_output_tokens = 6_000;
-        app.session.last_prompt_tokens = Some(48_000);
-
-        // The optional chip is the only elidable element. It appears once the
-        // terminal can hold it alongside the whole baseline right-hand chrome
-        // plus the guaranteed-left minimum (brand, mode, effort, permission +
-        // filesystem scope). Route detail — already the first thing this header
-        // truncates under pressure — is what yields the space.
-        //
-        // The Wide tier re-adds the version stamp to the baseline, but the
-        // route detail yields before the complete optional chip.
-        for (width, should_show_tokens, should_show_context) in [
-            (40, false, false),
-            (60, false, true),
-            (80, false, true),
-            (93, false, true),
-            (94, true, true),
-            (100, true, true),
-            (110, false, true),
-            (130, true, true),
-        ] {
-            let header = header_text(&app, width);
-            assert_eq!(
-                header.contains("18.0k in · 12.0k cch · 6.0k out"),
-                should_show_tokens,
-                "unexpected token visibility at width {width}: {header:?}",
-            );
-            assert_eq!(
-                header.contains('%'),
-                should_show_context,
-                "unexpected context visibility at width {width}: {header:?}",
-            );
-            assert!(
-                header.to_ascii_lowercase().contains("work"),
-                "mode must survive at width {width}: {header:?}",
-            );
-            assert!(
-                header.to_ascii_lowercase().contains("ask"),
-                "permission must survive at width {width}: {header:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn underwater_header_shows_update_chip_only_when_update_available() {
-        // The startup version check sets the label once; the chip then rides
-        // the right-hand chrome until the session ends (#14).
-        let mut app = test_app();
-        app.update_available = Some("↑ v0.9.5".to_string());
-        for width in [96, 130] {
-            let header = header_text(&app, width);
-            assert!(
-                header.contains("↑ v0.9.5"),
-                "update chip missing at width {width}: {header:?}"
-            );
-        }
-        // Under width pressure the chip yields cleanly — never clipped
-        // mid-chip, never evicting the mode/permission posture.
-        let narrow = header_text(&app, 60);
-        assert!(
-            !narrow.contains('↑'),
-            "update chip must drop when the line has no room: {narrow:?}"
-        );
-        assert!(
-            narrow.to_ascii_lowercase().contains("ask"),
-            "permission must survive at width 60: {narrow:?}"
-        );
-
-        // Up to date (or the check never ran): silent.
-        let app = test_app();
-        let header = header_text(&app, 130);
-        assert!(
-            !header.contains('↑'),
-            "no update chip without an available update: {header:?}"
-        );
-    }
-
-    #[test]
-    fn underwater_header_keeps_session_tokens_opt_in() {
-        let mut app = test_app();
-        app.header_items.clear();
-        app.session.total_input_tokens = 18_000;
-        app.session.total_cache_hit_tokens = 12_000;
-        app.session.total_output_tokens = 6_000;
-        app.session.last_prompt_tokens = Some(48_000);
-
-        let normal_header = header_text(&app, 60);
-        let wide_header = header_text(&app, 110);
-
-        assert!(
-            !normal_header.contains("18.0k in"),
-            "header: {normal_header:?}"
-        );
-        assert!(
-            normal_header.contains('%'),
-            "context meter missing: {normal_header:?}"
-        );
-        assert!(
-            wide_header.contains('%'),
-            "context meter missing: {wide_header:?}"
-        );
-        assert!(
-            wide_header.contains(&format!("v{}", shell_build_version())),
-            "version missing: {wide_header:?}"
-        );
-    }
-
-    #[test]
-    fn compact_header_keeps_mode_and_effective_permission() {
-        let mut app = test_app();
-        app.mode = AppMode::Operate;
-        app.approval_mode = ApprovalMode::Bypass;
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::Low;
-        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
-
-        let header = header_text(&app, 40);
-
-        assert!(header.starts_with("cw"), "brand missing: {header:?}");
-        assert!(
-            header.to_ascii_lowercase().contains("operate"),
-            "mode missing: {header:?}"
-        );
-        assert!(
-            header.contains("Full Access"),
-            "permission posture missing: {header:?}"
-        );
-        assert!(
-            header.contains(" · l · Full Access"),
-            "effective effort missing: {header:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_renders_active_goal_and_hides_it_when_unset_or_terminal() {
-        // #39: the ocean shell has no sidebar, so the topbar is the surface
-        // that must show a goal the moment `create_goal` sets it.
-        let mut app = test_app();
-        let idle = header_text(&app, 120);
-        assert!(
-            !idle.contains("goal"),
-            "no goal chip without an active goal: {idle:?}"
-        );
-
-        app.hunt.quarry = Some("Ship the v0.9.4 release train".to_string());
-        let hunting = header_text(&app, 120);
-        assert!(
-            hunting.contains("goal Ship the v0.9.4"),
-            "active goal missing from ocean topbar: {hunting:?}"
-        );
-
-        app.hunt.verdict = crate::tui::app::HuntVerdict::Hunted;
-        let done = header_text(&app, 120);
-        assert!(
-            !done.contains("goal"),
-            "terminal goal must not linger in the topbar: {done:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_names_a_paused_goal() {
-        let mut app = test_app();
-        app.paused_quarry = Some("Audit the fleet roster".to_string());
-        let header = header_text(&app, 120);
-        assert!(
-            header.contains("goal paused Audit the"),
-            "paused goal must say so: {header:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_keeps_goal_chip_in_cramped_layouts() {
-        let mut app = test_app();
-        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
-        app.hunt.quarry = Some("Ship it".to_string());
-        // Width pressure forces the cramped rebuild: the route yields first
-        // and the goal chip survives whole.
-        let header = header_text(&app, 80);
-        assert!(
-            header.contains("goal Ship it"),
-            "goal chip must survive width pressure: {header:?}"
-        );
-        // When even a minimal chip cannot fit alongside mode, effort, and
-        // permission, it drops cleanly instead of clipping mid-word.
-        let narrow = header_text(&app, 48);
-        assert!(
-            !narrow.contains("goal"),
-            "unsupportable goal chip must drop, not clip: {narrow:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_renders_running_workflow_chip_and_hides_it_when_idle() {
-        // #5040: a collapsed workflow run must stay visible in the ocean
-        // topbar — the same chip the classic header shows.
-        let mut app = test_app();
-        let idle = header_text(&app, 120);
-        assert!(
-            !idle.contains("wf "),
-            "no workflow chip without a run: {idle:?}"
-        );
-
-        app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
-            "wf_1", "ship it", 0,
-        ));
-        let running = header_text(&app, 120);
-        assert!(
-            running.contains("wf running"),
-            "running workflow chip missing from ocean topbar: {running:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_keeps_completed_workflow_status_visible() {
-        let mut app = test_app();
-        let mut panel =
-            crate::tui::widgets::workflow_panel::WorkflowPanel::new("wf_2", "ship it", 1_000);
-        panel.lifecycle = crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Succeeded;
-        panel.completed_at_ms = Some(61_000);
-        app.workflow_panel = Some(panel);
-        let header = header_text(&app, 120);
-        assert!(
-            header.contains("wf success"),
-            "completed workflow status missing: {header:?}"
-        );
-    }
-
-    #[test]
-    fn ocean_header_keeps_workflow_chip_in_cramped_layouts() {
-        let mut app = test_app();
-        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
-        app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
-            "wf_3", "ship it", 0,
-        ));
-        // Width pressure forces the cramped rebuild: the route yields first
-        // and the workflow chip survives whole.
-        let header = header_text(&app, 80);
-        assert!(
-            header.contains("wf running"),
-            "workflow chip must survive width pressure: {header:?}"
-        );
-        // When even a minimal chip cannot fit alongside mode, effort, and
-        // permission, it drops cleanly instead of clipping mid-word.
-        let narrow = header_text(&app, 48);
-        assert!(
-            !narrow.contains("wf "),
-            "unsupportable workflow chip must drop, not clip: {narrow:?}"
-        );
-    }
-
-    #[test]
-    fn header_labels_follow_the_ask_amber_auto_gold_full_access_coral_ramp() {
-        for width in [40, 100] {
-            for (approval_mode, expected_label) in [
-                (ApprovalMode::Suggest, "ask"),
-                (ApprovalMode::Auto, "auto"),
-                (ApprovalMode::Bypass, "Full Access"),
-            ] {
-                let mut app = test_app();
-                app.approval_mode = approval_mode;
-                let expected_color = match approval_mode {
-                    ApprovalMode::Suggest | ApprovalMode::Never => app.ui_theme.permission_ask,
-                    ApprovalMode::Auto => app.ui_theme.permission_auto_review,
-                    ApprovalMode::Bypass => app.ui_theme.permission_full_access,
-                };
-                let label = permission_label(&app).into_owned();
-                assert!(
-                    label.starts_with(expected_label) && label.contains("files:"),
-                    "{approval_mode:?}: {label}"
-                );
-                let area = Rect::new(0, 0, width, 1);
-                let mut buf = Buffer::empty(area);
-
-                render_header(area, &mut buf, &app);
-
-                let rendered = (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>();
-                // `auto` can also appear earlier as a route/mode label. The
-                // permission posture owns the rightmost occurrence.
-                let label_byte = rendered
-                    .rfind(expected_label)
-                    .expect("permission label should render");
-                let label_x = rendered[..label_byte].width() as u16;
-                assert_eq!(buf[(label_x, 0)].fg, expected_color, "{approval_mode:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn permission_chip_reports_the_same_effective_scope_as_execution() {
-        let mut app = test_app();
-        app.approval_mode = ApprovalMode::Bypass;
-        assert_eq!(
-            permission_label(&app),
-            Cow::Borrowed("Full Access · files: full disk")
-        );
-
-        app.configured_sandbox_mode = Some("workspace-write".to_string());
-        assert_eq!(
-            permission_label(&app),
-            Cow::Borrowed("Full Access · files: workspace")
-        );
-
-        app.mode = AppMode::Plan;
-        app.configured_sandbox_mode = Some("danger-full-access".to_string());
-        assert_eq!(permission_label(&app), Cow::Borrowed("read only"));
-    }
-
-    /// The other half of the chip contract: a policy is an intent, and
-    /// without a backend nothing applies it. On those platforms the chip must
-    /// say so rather than name a boundary that is not enforced (2026-08-04
-    /// audit). `DangerFullAccess` is already honest and stays unqualified.
-    #[test]
-    fn permission_chip_says_unenforced_without_a_backend() {
-        let mut app = test_app();
-        app.sandbox_backend = None;
-
-        app.approval_mode = ApprovalMode::Bypass;
-        app.configured_sandbox_mode = Some("workspace-write".to_string());
-        assert_eq!(
-            permission_label(&app),
-            Cow::Borrowed("Full Access · files: workspace (unenforced)")
-        );
-
-        app.configured_sandbox_mode = Some("danger-full-access".to_string());
-        assert_eq!(
-            permission_label(&app),
-            Cow::Borrowed("Full Access · files: full disk")
-        );
-    }
-
-    #[test]
-    fn normal_header_keeps_requested_effective_effort_before_route_detail() {
-        let mut app = test_app();
-        app.mode = AppMode::Operate;
-        app.approval_mode = ApprovalMode::Bypass;
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::Low;
-        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
-
-        let header = header_text(&app, 80);
-
-        // First-party DeepSeek maps low -> low (8c5370a56: the wire documents
-        // [low, high, max] and has no medium), so requested and effective agree
-        // and the header renders the tier alone. Assert the absence of the
-        // arrow too: bare `contains("low")` would also pass on the old
-        // `low→high` rendering, which is the regression this pins against.
-        assert!(header.contains("low"), "effort missing: {header:?}");
-        assert!(
-            !header.contains("low→"),
-            "requested and effective agree on first-party DeepSeek; no arrow expected: {header:?}"
-        );
-        assert!(
-            header.to_ascii_lowercase().contains("operate"),
-            "mode missing: {header:?}"
-        );
-        assert!(
-            header.contains("Full Access"),
-            "permission posture missing: {header:?}"
-        );
-    }
-
-    #[test]
-    fn compact_header_never_shows_a_whale_emoji_even_for_legacy_settings() {
-        // The whale emoji header chip is retired (2026-07-23): a persisted
-        // "whale" opt-in renders the typographic mark, and no header width
-        // squeeze may reintroduce the emoji beside the model/mode chips.
-        let mut app = test_app();
-        app.status_indicator = "whale".to_string();
-        app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
-
-        let header = header_text(&app, 40);
-
-        assert!(
-            !header.contains('🐳') && !header.contains('🐋'),
-            "whale emoji must stay out of the header: {header:?}"
-        );
-        assert!(header.contains("cw"), "cw mark missing: {header:?}");
-    }
-
-    #[test]
-    fn header_shows_exact_named_custom_provider() {
-        let mut app = test_app();
-        app.set_provider_identity(crate::config::ApiProvider::Custom, "lm-studio");
-        app.model = "local-code-model".to_string();
-
-        let header = header_text(&app, 100);
-
-        assert!(
-            header.contains("lm-studio · local-code-model"),
-            "{header:?}"
-        );
-        assert!(!header.contains("Custom ·"), "{header:?}");
-    }
-
-    /// The footer consumes the toast system, not the legacy status sink: an
-    /// informational acknowledgement must leave on its own instead of
-    /// becoming permanent idle chrome.
-    #[test]
-    fn footer_notices_expire_instead_of_becoming_permanent_chrome() {
-        let mut app = test_app();
-        app.status_message = Some("Auto-compaction enabled".to_string());
-
-        let fresh = footer_text(&mut app);
-        assert!(
-            fresh.contains("Auto-compaction enabled"),
-            "a fresh notice should surface once: {fresh}"
-        );
-
-        for toast in &mut app.status_toasts {
-            toast.created_at = Instant::now() - Duration::from_secs(60);
-        }
-        let later = footer_text(&mut app);
-        assert!(
-            !later.contains("Auto-compaction"),
-            "an informational acknowledgement must expire without user action: {later}"
-        );
-        assert!(
-            later.contains("idle"),
-            "the stable phase fact survives the expiry: {later}"
-        );
-    }
-
-    /// Errors are sticky: they outlive the informational TTL window and stay
-    /// until their own resolution window passes, then expire on their own.
-    #[test]
-    fn footer_errors_outlive_informational_acknowledgements() {
-        let mut app = test_app();
-        app.status_message = Some("Provider request failed: timeout".to_string());
-
-        let fresh = footer_text(&mut app);
-        assert!(fresh.contains("failed"), "error notice missing: {fresh}");
-
-        if let Some(sticky) = app.sticky_status.as_mut() {
-            assert_eq!(
-                sticky.ttl_ms,
-                Some(crate::tui::app::App::STICKY_ERROR_TTL_MS)
-            );
-            sticky.created_at = Instant::now() - Duration::from_secs(6);
-        } else {
-            panic!("an error must be promoted to the sticky slot");
-        }
-        let held = footer_text(&mut app);
-        assert!(
-            held.contains("failed"),
-            "errors must hold past the informational window: {held}"
-        );
-
-        if let Some(sticky) = app.sticky_status.as_mut() {
-            sticky.created_at = Instant::now()
-                - Duration::from_millis(crate::tui::app::App::STICKY_ERROR_TTL_MS + 1);
-        }
-        let expired = footer_text(&mut app);
-        assert!(
-            !expired.contains("failed"),
-            "sticky errors must expire after their TTL: {expired}"
-        );
-    }
-
-    #[test]
-    fn sticky_error_clears_when_composer_gets_input() {
-        let mut app = test_app();
-        app.set_sticky_status(
-            "workflow failed: script error",
-            crate::tui::app::StatusToastLevel::Error,
-            None,
-        );
-        assert!(app.sticky_status.is_some());
-        app.insert_char('x');
-        assert!(
-            app.sticky_status.is_none(),
-            "composer activity must dismiss sticky error chrome"
-        );
-    }
-
-    #[test]
-    fn launch_rows_and_direct_keys_share_actions() {
-        let mut state = launch();
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                Locale::En,
-            ),
-            LaunchAction::NewSession
-        );
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                Locale::En,
-            ),
-            LaunchAction::Resume
-        );
-        assert_eq!(state.selected, 2);
-
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
-                Locale::En,
-            ),
-            LaunchAction::Changelog
-        );
-        assert_eq!(state.selected, 3);
-    }
-
-    #[test]
-    fn worktree_action_collects_a_name_before_creation() {
-        let mut state = launch();
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-                Locale::En,
-            ),
-            LaunchAction::None
-        );
-        for ch in "repair-pty".chars() {
-            assert_eq!(
-                handle_launch_key(
-                    &mut state,
-                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-                    Locale::En,
-                ),
-                LaunchAction::None
-            );
-        }
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                Locale::En,
-            ),
-            LaunchAction::CreateWorktree("repair-pty".to_string())
-        );
-    }
-
-    #[test]
-    fn unavailable_worktree_is_truthful_and_non_destructive() {
-        let mut state = launch();
-        state.worktree_available = false;
-        assert_eq!(
-            handle_launch_key(
-                &mut state,
-                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
-                Locale::En,
-            ),
-            LaunchAction::None
-        );
-        assert!(state.worktree_input.is_none());
-        assert_eq!(
-            state.status.as_deref(),
-            Some("New worktree requires a Git repository.")
-        );
-    }
-
-    #[test]
-    fn phase_markers_make_motion_and_attention_explicit() {
-        let mut app = test_app();
-
-        app.runtime_turn_status = Some("in_progress".to_string());
-        app.turn_started_at = Some(Instant::now() - Duration::from_millis(1_300));
-        let (working, label) = phase_marker(&app, ShellPhase::from_app(&app));
-        assert!(crate::tui::spinner::BRAILLE_SPINNER_FRAMES.contains(&working));
-        assert_eq!(label, "working");
-
-        app.low_motion = true;
-        app.turn_started_at = Some(Instant::now() - Duration::from_secs(9));
-        assert_eq!(
-            phase_marker(&app, ShellPhase::Working).0,
-            WORKING_BUBBLE_FRAMES[4]
-        );
-
-        app.runtime_turn_status = None;
-        app.runtime_turn_status = Some("failed".to_string());
-        let (marker, label) = phase_marker(&app, ShellPhase::from_app(&app));
-        assert_eq!(marker, "✕");
-        assert_eq!(label, "failed");
-    }
-
-    #[test]
-    fn compaction_activity_owns_phase_label_for_its_full_lifecycle() {
-        let mut app = test_app();
-        app.is_loading = true;
-        app.is_compacting = true;
-        app.turn_error_posted = true;
-        app.runtime_turn_status = Some("failed".to_string());
-        app.active_compaction = Some(crate::tui::app::ActiveCompaction {
-            id: "compact-auto".to_string(),
-            auto: true,
-        });
-
-        assert_eq!(
-            LiveActivity::from_app(&app).kind(),
-            LiveActivityKind::AutoCompacting
-        );
-        let phase = ShellPhase::from_app(&app);
-        assert_eq!(phase, ShellPhase::Working);
-        assert_eq!(
-            phase_marker(&app, phase).1,
-            "Context automatically compacting…"
-        );
-        let auto_label = "Context automatically compacting…".to_string();
-        app.status_message = Some(auto_label.clone());
-        app.last_status_message_seen = Some(auto_label.clone());
-        app.push_status_toast(
-            auto_label,
-            crate::tui::app::StatusToastLevel::Info,
-            Some(4_000),
-        );
-        for toast in &mut app.status_toasts {
-            toast.created_at = Instant::now() - Duration::from_secs(5);
-        }
-        let footer = footer_text(&mut app);
-        assert!(
-            footer.contains("Context automatically compacting…"),
-            "the lifecycle phase must outlive the start toast: {footer}"
-        );
-
-        app.active_compaction = Some(crate::tui::app::ActiveCompaction {
-            id: "compact-manual".to_string(),
-            auto: false,
-        });
-        assert_eq!(
-            LiveActivity::from_app(&app).kind(),
-            LiveActivityKind::Compacting
-        );
-        assert_eq!(phase_marker(&app, phase).1, "Compacting context…");
-    }
-
-    #[test]
-    fn live_activity_is_truthful_prioritized_and_ignores_stale_tools() {
-        use crate::tui::active_cell::ActiveCell;
-        use crate::tui::history::{
-            ExploringCell, ExploringEntry, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
-        };
-
-        let generic = |name: &str, status: ToolStatus| {
-            HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-                name: name.to_string(),
-                status,
-                input_summary: None,
-                output: None,
-                prompts: None,
-                spillover_path: None,
-                output_summary: None,
-                is_diff: false,
-            }))
-        };
-        let reading = || {
-            HistoryCell::Tool(ToolCell::Exploring(ExploringCell {
-                entries: vec![ExploringEntry {
-                    label: "Reading src/lib.rs".to_string(),
-                    status: ToolStatus::Running,
-                }],
-            }))
-        };
-
-        let mut app = test_app();
-
-        // A completed tool may remain in the active group until TurnComplete,
-        // but it cannot manufacture liveness on its own.
-        let mut stale = ActiveCell::new();
-        stale.push_tool("done", generic("write_file", ToolStatus::Success));
-        app.active_cell = Some(stale);
-        assert_eq!(
-            LiveActivity::from_app(&app).kind(),
-            LiveActivityKind::Working
-        );
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Idle);
-
-        // Only the explicit streaming pointer earns the reasoning label. No
-        // configured effort, elapsed clock, or generic loading inference is
-        // involved.
-        let mut active = ActiveCell::new();
-        let thinking = active.push_thinking(HistoryCell::Thinking {
-            content: "private reasoning must not reach the strip".to_string(),
-            streaming: true,
-            duration_secs: None,
-        });
-        app.active_cell = Some(active);
-        app.streaming_thinking_active_entry = Some(thinking);
-        assert_eq!(
-            LiveActivity::from_app(&app).kind(),
-            LiveActivityKind::Reasoning
-        );
-        let (_, label) = phase_marker(&app, ShellPhase::from_app(&app));
-        assert_eq!(label, "reasoning");
-        assert!(!label.contains("private"));
-
-        // A running read wins over a stale thinking pointer.
-        app.active_cell
-            .as_mut()
-            .expect("active cell")
-            .push_tool("read", reading());
-        let activity = LiveActivity::from_app(&app);
-        assert_eq!(activity.kind(), LiveActivityKind::Reading);
-        assert_eq!(activity.running_tool_count(), 1);
-        assert_eq!(phase_marker(&app, ShellPhase::Working).1, "reading");
-
-        // Mixed tool work is not mislabeled as a pure read pass.
-        app.active_cell
-            .as_mut()
-            .expect("active cell")
-            .push_tool("write", generic("write_file", ToolStatus::Running));
-        let activity = LiveActivity::from_app(&app);
-        assert_eq!(activity.kind(), LiveActivityKind::UsingTool);
-        assert_eq!(activity.running_tool_count(), 2);
-        assert_eq!(phase_marker(&app, ShellPhase::Working).1, "using tool");
-
-        // Verification remains the strongest live promise.
-        app.active_cell
-            .as_mut()
-            .expect("active cell")
-            .push_tool("verify", generic("run_verifiers", ToolStatus::Running));
-        assert_eq!(
-            LiveActivity::from_app(&app).kind(),
-            LiveActivityKind::Verifying
-        );
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Verifying);
-    }
-
-    #[test]
-    fn live_activity_marker_freezes_for_reduced_or_still_and_has_ascii_fallback() {
-        let mut app = test_app();
-        app.runtime_turn_status = Some("in_progress".to_string());
-        app.turn_started_at = Some(Instant::now() - Duration::from_secs(5));
-
-        app.low_motion = true;
-        let reduced = phase_marker(&app, ShellPhase::Working).0;
-        assert_eq!(reduced, crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME);
-
-        app.low_motion = false;
-        app.fancy_animations = false;
-        let fancy_off = phase_marker(&app, ShellPhase::Working).0;
-        assert_eq!(fancy_off, crate::tui::spinner::LIVE_STATIC_MARKER);
-
-        let mut cell = ratatui::buffer::Cell::default();
-        cell.set_symbol(fancy_off);
-        crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
-        assert_eq!(cell.symbol(), ">");
-        assert!(cell.symbol().is_ascii());
-    }
-
-    #[test]
-    fn idle_whale_caustic_sweeps_then_parks_offscreen() {
-        assert_eq!(idle_mark_shine_opacity(0.5, 0), 0.0);
-        assert!(
-            idle_mark_shine_opacity(0.5, 640) > 0.32,
-            "the raised-cosine band should reach its peak near mid-sweep"
-        );
-        assert_eq!(
-            idle_mark_shine_opacity(0.5, 2_000),
-            0.0,
-            "the caustic must rest offscreen between sweeps"
-        );
-    }
-
-    #[test]
-    fn idle_whale_caustic_preserves_text_width_and_has_a_static_fallback() {
-        let base = Color::Rgb(246, 196, 83);
-        let highlight = Color::Rgb(246, 242, 232);
-        let text = IDLE_WHALE_ROWS[0];
-        let moving = idle_whale_row_spans(text, 0, 640, true, base, highlight, highlight);
-        let parked = idle_whale_row_spans(text, 0, 2_000, true, base, highlight, highlight);
-        let frozen_a = idle_whale_row_spans(text, 0, 640, false, base, highlight, highlight);
-        let frozen_b = idle_whale_row_spans(text, 0, 2_000, false, base, highlight, highlight);
-
-        let content = |spans: &[Span<'_>]| {
-            spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        };
-        let colors =
-            |spans: &[Span<'_>]| spans.iter().map(|span| span.style.fg).collect::<Vec<_>>();
-
-        for spans in [&moving, &parked, &frozen_a, &frozen_b] {
-            assert_eq!(content(spans), text);
-            assert_eq!(span_width(spans), text.width());
-        }
-        assert_ne!(colors(&moving), colors(&parked));
-        assert_eq!(colors(&frozen_a), colors(&frozen_b));
-    }
-
-    #[test]
-    fn idle_whale_rows_share_one_centered_block_without_losing_authored_offsets() {
-        let mut app = test_app();
-        app.ui_theme = crate::palette::ThemeId::Whale.ui_theme();
-        app.low_motion = true;
-        let width = 60usize;
-        let rendered = empty_state_lines(&app, Rect::new(0, 0, width as u16, 16))
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-        let block_width = idle_whale_block_width(IDLE_WHALE_SPOUT_ROW, &IDLE_WHALE_ROWS);
-        let block_inset = (width - block_width) / 2;
-
-        assert_eq!(
-            block_width, 17,
-            "the crown-fluke mark should stay quiet at 60 cols"
-        );
-        for row in std::iter::once(IDLE_WHALE_SPOUT_ROW).chain(IDLE_WHALE_ROWS) {
-            let line = rendered
-                .iter()
-                .find(|line| line.trim_start() == row.trim_start())
-                .unwrap_or_else(|| panic!("missing authored whale row {row:?}"));
-            let rendered_inset = line.chars().take_while(|ch| *ch == ' ').count();
-            let authored_inset = row.chars().take_while(|ch| *ch == ' ').count();
-
-            assert_eq!(
-                rendered_inset - authored_inset,
-                block_inset,
-                "row drifted out of the shared silhouette: {line:?}"
-            );
-            assert!(
-                line.width() <= block_inset + block_width,
-                "row escaped the centered mark block: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn uwu_idle_whale_uses_its_own_centered_block_width() {
-        let mut app = test_app();
-        app.ui_theme = crate::palette::ThemeId::Uwu.ui_theme();
-        app.low_motion = true;
-        let width = 60usize;
-        let rendered = empty_state_lines(&app, Rect::new(0, 0, width as u16, 16))
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-        let block_width = idle_whale_block_width(UWU_IDLE_WHALE_SPOUT_ROW, &UWU_IDLE_WHALE_ROWS);
-        let block_inset = (width - block_width) / 2;
-
-        assert_eq!(block_width, 16);
-        for row in std::iter::once(UWU_IDLE_WHALE_SPOUT_ROW).chain(UWU_IDLE_WHALE_ROWS) {
-            let line = rendered
-                .iter()
-                .find(|line| line.trim_start() == row.trim_start())
-                .unwrap_or_else(|| panic!("missing authored uwu whale row {row:?}"));
-            let rendered_inset = line.chars().take_while(|ch| *ch == ' ').count();
-            let authored_inset = row.chars().take_while(|ch| *ch == ' ').count();
-
-            assert_eq!(
-                rendered_inset - authored_inset,
-                block_inset,
-                "uwu row drifted out of its own centered silhouette: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn idle_whale_has_a_recognizable_ascii_safe_silhouette() {
-        let ascii_row = |row: &str| {
-            let mut rendered = String::new();
-            for ch in row.chars() {
-                let mut cell = ratatui::buffer::Cell::default();
-                cell.set_symbol(&ch.to_string());
-                crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
-                rendered.push_str(cell.symbol());
-            }
-            rendered
-        };
-        let rows = std::iter::once(IDLE_WHALE_SPOUT_ROW)
-            .chain(IDLE_WHALE_ROWS)
-            .map(ascii_row)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            rows,
-            [
-                "    o",
-                r"  .########.  \^/",
-                " |#.###########/",
-                "  .########.",
-            ]
-        );
-        assert!(rows.iter().all(|row| row.is_ascii()));
-    }
-
-    #[test]
-    fn reduced_motion_keeps_the_whole_idle_mark_still_and_cursorless() {
-        let mut app = test_app();
-        app.low_motion = true;
-        app.fancy_animations = true;
-        app.cursor_position = 7;
-        app.ocean_started_at = Instant::now() - Duration::from_secs(2);
-        let first = empty_state_lines(&app, Rect::new(0, 0, 100, 30));
-
-        app.ocean_started_at = Instant::now() - Duration::from_secs(11);
-        let second = empty_state_lines(&app, Rect::new(0, 0, 100, 30));
-
-        assert_eq!(first, second, "reduced motion must freeze mark and shine");
-        assert_eq!(
-            app.cursor_position, 7,
-            "the empty-state decoration must leave cursor ownership to the composer"
-        );
-    }
-
-    #[test]
-    fn idle_whale_uses_the_human_brand_role_not_focus_blue() {
-        let mut app = test_app();
-        app.low_motion = true;
-        let lines = empty_state_lines(&app, Rect::new(0, 0, 100, 30));
-        let colors = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .filter_map(|span| span.style.fg)
-            .collect::<Vec<_>>();
-
-        assert!(colors.contains(&app.ui_theme.accent_action));
-        assert_ne!(app.ui_theme.accent_action, app.ui_theme.accent_primary);
-    }
-
-    #[test]
-    fn idle_whale_caustic_obeys_motion_policy_and_attention_stillness() {
-        let mut app = test_app();
-        app.launch.visible = false;
-        app.low_motion = false;
-        app.fancy_animations = true;
-        assert!(idle_mark_animation_enabled(&app));
-
-        app.low_motion = true;
-        assert!(!idle_mark_animation_enabled(&app));
-
-        app.low_motion = false;
-        app.fancy_animations = false;
-        assert!(!idle_mark_animation_enabled(&app));
-
-        app.fancy_animations = true;
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Flat;
-        assert!(idle_mark_animation_enabled(&app));
-
-        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
-        app.launch.visible = true;
-        assert!(!idle_mark_animation_enabled(&app));
-
-        app.launch.visible = false;
-        app.view_stack
-            .push(crate::tui::views::HelpView::new_for_locale(app.ui_locale));
-        assert!(!idle_mark_animation_enabled(&app));
-    }
-
-    #[test]
-    fn verifying_phase_meters_a_tick_for_test_runs_only() {
-        use crate::tui::active_cell::ActiveCell;
-        use crate::tui::history::{ExecCell, ExecSource, HistoryCell, ToolCell, ToolStatus};
-
-        let running_exec = |command: &str| {
-            HistoryCell::Tool(ToolCell::Exec(ExecCell {
-                command: command.to_string(),
-                status: ToolStatus::Running,
-                output: None,
-                live_output: None,
-                shell_task_id: None,
-                owner_agent_id: None,
-                owner_agent_name: None,
-                started_at: None,
-                duration_ms: None,
-                stale_elapsed_since_output_ms: None,
-                source: ExecSource::Assistant,
-                interaction: None,
-                output_summary: None,
-            }))
-        };
-
-        let mut app = test_app();
-        app.runtime_turn_status = Some("in_progress".to_string());
-        app.turn_started_at = Some(Instant::now() - Duration::from_secs(3));
-
-        // A live test run reads as `verifying`. Reduced motion keeps the
-        // semantic label while sharing the calm, static live-work marker.
-        let mut active = ActiveCell::new();
-        active.push_tool("exec-1", running_exec("cargo test -p codewhale-tui"));
-        app.active_cell = Some(active);
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Verifying);
-        app.low_motion = true;
-        let (marker, label) = phase_marker(&app, ShellPhase::Verifying);
-        assert_eq!(marker, crate::tui::spinner::BRAILLE_SPINNER_STILL_FRAME);
-        assert_eq!(label, "verifying");
-        app.low_motion = false;
-
-        // An ordinary build stays `working` — checking must not lie.
-        let mut active = ActiveCell::new();
-        active.push_tool("exec-2", running_exec("cargo build --release"));
-        app.active_cell = Some(active);
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Working);
-
-        // Verifying is a live phase: strip sits above the composer and
-        // shares the live seafoam hue.
-        assert!(
-            crate::tui::phase_strip::PhaseStripPlacement::for_phase(ShellPhase::Verifying)
-                .is_above_composer()
-        );
-        assert_eq!(
-            ShellPhase::Verifying.color(&app),
-            app.ui_theme.status_working
-        );
-    }
-
-    #[test]
-    fn attention_and_failure_keep_distinct_semantic_hues() {
-        let app = test_app();
-        assert_eq!(ShellPhase::Waiting.color(&app), app.ui_theme.accent_action);
-        assert_eq!(ShellPhase::Approval.color(&app), app.ui_theme.accent_action);
-        assert_eq!(ShellPhase::Failed.color(&app), app.ui_theme.error_fg);
-        assert_ne!(
-            ShellPhase::Waiting.color(&app),
-            ShellPhase::Failed.color(&app)
-        );
-    }
-
-    #[test]
-    fn completion_releases_once_then_settles_to_checkmark() {
-        let mut app = test_app();
-        app.runtime_turn_status = Some("completed".to_string());
-        app.low_motion = false;
-        app.fancy_animations = true;
-        app.ocean_completion_started_at = Some(Instant::now() - Duration::from_millis(120));
-
-        let (marker, label) = phase_marker(&app, ShellPhase::from_app(&app));
-        assert_ne!(marker, "✓");
-        assert_eq!(label, "finishing");
-
-        app.ocean_completion_started_at = Some(Instant::now() - Duration::from_millis(700));
-        let (marker, label) = phase_marker(&app, ShellPhase::Done);
-        assert_eq!(marker, "✓");
-        assert_eq!(label, "done");
-
-        app.low_motion = true;
-        app.ocean_completion_started_at = Some(Instant::now());
-        let (marker, label) = phase_marker(&app, ShellPhase::Done);
-        assert_eq!(marker, "✓");
-        assert_eq!(label, "done");
-    }
-
-    #[test]
-    fn draft_phase_beats_stale_completion_status() {
-        let mut app = test_app();
-        app.runtime_turn_status = Some("completed".to_string());
-
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Done);
-
-        app.input = "next task".to_string();
-        assert_eq!(ShellPhase::from_app(&app), ShellPhase::Typing);
-    }
 }

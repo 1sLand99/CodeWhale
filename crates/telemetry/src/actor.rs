@@ -29,6 +29,7 @@ pub const BATCH_MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) enum Message {
     Event(Box<Event>),
+    PersistLocal(SyncSender<FlushOutcome>),
     Shutdown(SyncSender<FlushOutcome>),
 }
 
@@ -37,6 +38,8 @@ pub(crate) enum Message {
 pub enum FlushOutcome {
     /// Nothing was buffered.
     Empty,
+    /// Events remain in the local buffer for a later network flush.
+    Buffered,
     /// A batch was written to the dry-run sink.
     DryRun,
     /// A batch was accepted by the endpoint.
@@ -89,6 +92,11 @@ impl Handle {
         self.round_trip(deadline, Message::Shutdown)
     }
 
+    /// Persist queued events locally and stop without making a network request.
+    pub(crate) fn persist_local(&self, deadline: Duration) -> FlushOutcome {
+        self.round_trip(deadline, Message::PersistLocal)
+    }
+
     fn round_trip(
         &self,
         deadline: Duration,
@@ -117,6 +125,10 @@ fn run(context: &Context, rx: &Receiver<Message>) {
                 append(context, &event);
                 None
             }
+            Message::PersistLocal(ack) => {
+                let _ = ack.send(persist_local(context));
+                Some(())
+            }
             Message::Shutdown(ack) => {
                 let _ = ack.send(flush(context));
                 Some(())
@@ -138,6 +150,33 @@ fn append(context: &Context, event: &Event) {
     };
     let path = buffer::buffer_path(&context.root);
     let _ = buffer::append(&context.root, &path, &line);
+}
+
+/// Seal every event queued before this message without reaching the network.
+///
+/// The channel is FIFO, so all prior event appends have settled before this
+/// runs. Re-deciding here preserves the same mid-session opt-out boundary as a
+/// full flush. An explicitly empty endpoint is the local dry-run sink and can
+/// therefore be finalized immediately; a configured endpoint leaves the
+/// events in `buffer.jsonl` for the next interactive flush.
+fn persist_local(context: &Context) -> FlushOutcome {
+    match decision::re_decide(context.config_path.as_deref(), context.surface) {
+        TelemetryDecision::Enabled(_) => {}
+        TelemetryDecision::OptedOut | TelemetryDecision::ForcedOff => {
+            return FlushOutcome::Suppressed;
+        }
+    }
+    if buffer::tombstone_present(&context.root) {
+        return FlushOutcome::Suppressed;
+    }
+    if context.endpoint.is_none() {
+        return flush(context);
+    }
+    if buffer::read_lines(&buffer::buffer_path(&context.root)).is_empty() {
+        FlushOutcome::Empty
+    } else {
+        FlushOutcome::Buffered
+    }
 }
 
 /// Drain, re-check consent, and deliver.

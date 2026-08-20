@@ -1307,6 +1307,7 @@ mod dialect_seam_tests {
         client
             .bind_request_to_protocol(client.prepare_model_bound_request(request))
             .expect("protocol binding succeeds")
+            .0
     }
 
     #[test]

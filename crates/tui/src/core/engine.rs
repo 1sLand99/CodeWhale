@@ -45,7 +45,8 @@ use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
 use crate::tools::goal::{
-    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
+    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, explicit_goal_directive,
+    new_shared_goal_state,
 };
 use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
@@ -100,16 +101,28 @@ fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
     }
 }
 
-fn agent_list_event(manager: &SubAgentManager) -> Event {
+fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event {
+    // One clock read shared by every row, so elapsed values in a single
+    // listing are consistent with each other (#5479).
+    let now_ms = crate::tools::subagent::epoch_millis_now();
     Event::AgentList {
-        agents: manager.list(),
-        coordination: manager.coordination_detail_projection(None, 24),
-        queued_follow_ups: manager.queued_follow_up_counts(),
+        owner_session_id: active_session_id.to_string(),
+        agents: manager.list_for_session(active_session_id),
+        coordination: manager.coordination_detail_projection_for_session(
+            active_session_id,
+            None,
+            24,
+        ),
+        queued_follow_ups: manager.queued_follow_up_counts_for_session(active_session_id),
+        roster: crate::tui::agent_roster::build_agent_roster(
+            &manager.list_worker_records_for_session(active_session_id),
+            now_ms,
+        ),
     }
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync {}` before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. Compare the user's complete task yourself against every returned server name and description; wording need not be exact. If any server plausibly covers the core capability, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, when every Registry entry is clearly irrelevant, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
 
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
@@ -136,14 +149,15 @@ impl StructuredState {
         cwd: Option<PathBuf>,
         working_set: &WorkingSet,
         subagents: Option<&SharedSubAgentManager>,
+        active_session_id: &str,
     ) -> Self {
         let working_set_summary = working_set.summary_block(&workspace);
 
         let subagent_snapshots = if let Some(handle) = subagents {
             let mut guard = handle.write().await;
-            guard.cleanup(Duration::from_secs(60 * 60));
+            guard.cleanup_for_session(active_session_id, Duration::from_secs(60 * 60));
             guard
-                .list()
+                .list_for_session(active_session_id)
                 .into_iter()
                 .filter(|s| matches!(s.status, SubAgentStatus::Running))
                 .collect()
@@ -345,6 +359,10 @@ pub struct EngineConfig {
     /// the backstop so only completion, blocked state, or the continuation
     /// limit stops an operate-mode goal run.
     pub goal_max_continuations: u32,
+    /// Delay between successful interactive goal turns. `0` continues
+    /// immediately; positive values opt coordinator goals into a cancellable
+    /// quiet period (#5508).
+    pub goal_continuation_delay_seconds: u64,
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
@@ -472,6 +490,7 @@ impl Default for EngineConfig {
             goal_token_budget: None,
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
+            goal_continuation_delay_seconds: 0,
             allowed_tools: None,
             disallowed_tools: None,
             max_tool_calls: None,
@@ -670,6 +689,9 @@ pub struct Engine {
     /// External sandbox backend (#516). When `Some`, exec_shell routes commands
     /// through this instead of spawning a local process.
     sandbox_backend: Option<std::sync::Arc<dyn crate::sandbox::backend::SandboxBackend>>,
+    /// Session-pinned execution boundary used by model-visible sandbox labels.
+    /// This must not be re-probed per turn or metadata bytes can drift.
+    sandbox_enforcement: crate::sandbox::policy::SandboxEnforcement,
     /// Diagnostics collected during the current step's tool calls. Drained
     /// and forwarded as a synthetic user message before the next API call.
     pending_lsp_blocks: Vec<crate::lsp::DiagnosticBlock>,
@@ -789,6 +811,24 @@ fn claim_subagent_completion(
         .then_some(completion)
 }
 
+fn claim_subagent_completion_for_session(
+    delivered_ids: &mut HashSet<String>,
+    active_session_id: &str,
+    completion: SubAgentCompletion,
+) -> Option<SubAgentCompletion> {
+    if completion.owner_session_id != active_session_id {
+        tracing::warn!(
+            target: "subagent",
+            agent_id = %completion.agent_id,
+            owner_session_id = %completion.owner_session_id,
+            active_session_id,
+            "discarding sub-agent completion for an inactive session"
+        );
+        return None;
+    }
+    claim_subagent_completion(delivered_ids, completion)
+}
+
 #[derive(Debug)]
 enum GoalContinuationAction {
     Inactive,
@@ -806,6 +846,13 @@ struct ScheduledGoalContinuation {
     id: u64,
     dynamic_tools: Vec<DynamicToolSpec>,
     enqueued: bool,
+    /// `Some` only while the configured between-turn quiet period is active.
+    /// Once it expires the same schedule record becomes the existing queued
+    /// `ContinueGoal` token; there is no second scheduler.
+    ready_at: Option<Instant>,
+    /// Retained after expiry so a cancellation racing the timer can still
+    /// publish an interrupted wait receipt before provider dispatch.
+    was_delayed: bool,
 }
 
 enum SendMessageOutcome {
@@ -877,12 +924,14 @@ fn subagent_mailbox_best_effort_send_permitted(
 /// event channel is closed and the drainer should stop.
 async fn forward_subagent_mailbox_message(
     tx: &mpsc::Sender<Event>,
+    owner_session_id: &str,
     turn_id: &str,
     seq: u64,
     message: MailboxMessage,
     best_effort_sent_at: &mut HashMap<String, Instant>,
 ) -> bool {
     let event = Event::SubAgentMailbox {
+        owner_session_id: owner_session_id.to_string(),
         turn_id: turn_id.to_string(),
         seq,
         message,
@@ -1320,6 +1369,15 @@ impl Engine {
                 None
             })
             .map(std::sync::Arc::from);
+        let sandbox_enforcement = if sandbox_backend.is_some() {
+            crate::sandbox::policy::SandboxEnforcement::ExternalBackend
+        } else if crate::sandbox::get_platform_sandbox_with_bwrap_preference(config.prefer_bwrap)
+            .is_some()
+        {
+            crate::sandbox::policy::SandboxEnforcement::LocalOs
+        } else {
+            crate::sandbox::policy::SandboxEnforcement::Unavailable
+        };
 
         let active_route_limits = config.active_route_limits;
         let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
@@ -1374,6 +1432,7 @@ impl Engine {
             pending_lsp_blocks: Vec::new(),
             workshop_vars,
             sandbox_backend,
+            sandbox_enforcement,
             current_mode: AppMode::Agent,
             last_policy_narrowing: None,
             last_turn_meta_git_snapshot: StdMutex::new(None),
@@ -1726,13 +1785,32 @@ impl Engine {
         self.record_applied_runtime_authority(authority);
     }
 
-    fn schedule_goal_continuation(&mut self, dynamic_tools: Vec<DynamicToolSpec>) {
-        if let Some(scheduled) = self.scheduled_goal_continuation.as_mut() {
-            // A normal user turn or idle child handoff can finish while the
-            // prior synthetic token is already queued. Refresh that one token
-            // instead of multiplying autonomous turns and provider spend.
-            scheduled.dynamic_tools = dynamic_tools;
+    async fn schedule_goal_continuation(&mut self, dynamic_tools: Vec<DynamicToolSpec>) {
+        let delay_seconds = self.config.goal_continuation_delay_seconds;
+        let ready_at =
+            (delay_seconds > 0).then(|| Instant::now() + Duration::from_secs(delay_seconds));
+        if self.scheduled_goal_continuation.is_some() {
+            let should_announce = {
+                let scheduled = self
+                    .scheduled_goal_continuation
+                    .as_mut()
+                    .expect("scheduled continuation checked above");
+                // A normal user turn or idle child handoff can finish while
+                // the prior synthetic token is already queued. Refresh that
+                // one token instead of multiplying autonomous turns and spend.
+                scheduled.dynamic_tools = dynamic_tools;
+                if !scheduled.enqueued {
+                    scheduled.ready_at = ready_at;
+                }
+                delay_seconds > 0 && !scheduled.enqueued
+            };
             self.try_flush_pending_goal_continuation();
+            if should_announce {
+                let _ = self
+                    .tx_event
+                    .send(Event::GoalContinuationWaiting { delay_seconds })
+                    .await;
+            }
             return;
         }
 
@@ -1742,15 +1820,29 @@ impl Engine {
             id: self.goal_continuation_schedule_seq,
             dynamic_tools,
             enqueued: false,
+            ready_at,
+            was_delayed: delay_seconds > 0,
         });
         self.try_flush_pending_goal_continuation();
+        if delay_seconds > 0 {
+            let _ = self
+                .tx_event
+                .send(Event::GoalContinuationWaiting { delay_seconds })
+                .await;
+        }
     }
 
-    fn cancel_scheduled_goal_continuation(&mut self) {
-        if self.scheduled_goal_continuation.take().is_some() {
+    async fn cancel_scheduled_goal_continuation(&mut self, interrupted: bool) {
+        if let Some(scheduled) = self.scheduled_goal_continuation.take() {
             tracing::debug!(
                 "cancelled an outstanding goal continuation after a non-completed turn"
             );
+            if scheduled.was_delayed {
+                let _ = self
+                    .tx_event
+                    .send(Event::GoalContinuationWaitEnded { interrupted })
+                    .await;
+            }
         }
     }
 
@@ -1787,6 +1879,26 @@ impl Engine {
 
     fn has_scheduled_goal_continuation(&self) -> bool {
         self.scheduled_goal_continuation.is_some()
+    }
+
+    /// Install the conversation identity portion of `SyncSession` and clear
+    /// process-local capabilities that must never cross that boundary. The
+    /// returned id is the conversation being closed; callers use it to scope
+    /// asynchronous fleet finalization before loading the new history.
+    fn install_synced_session_id(&mut self, next_session_id: String) -> Option<String> {
+        let previous_session_id = self.session.id.clone();
+        if next_session_id == previous_session_id {
+            return None;
+        }
+        // A synthetic token may already be queued in `rx_op`; dropping the
+        // authoritative schedule makes that token fail closed when drained.
+        self.scheduled_goal_continuation = None;
+        // Runtime-added MCP servers are conversation capabilities even when
+        // both conversations use the same workspace. Configured servers can
+        // reconnect lazily after the new session is installed.
+        self.mcp_pool = None;
+        self.session.id = next_session_id;
+        Some(previous_session_id)
     }
 
     fn bounded_redacted_goal_failure_detail(&self, detail: &str) -> Option<String> {
@@ -1843,6 +1955,9 @@ impl Engine {
         if scheduled.enqueued {
             return;
         }
+        if scheduled.ready_at.is_some() {
+            return;
+        }
         let schedule_id = scheduled.id;
 
         match self.tx_op.try_send(Op::ContinueGoal {
@@ -1873,22 +1988,65 @@ impl Engine {
     }
 
     async fn next_run_input(&mut self, host_managed_turns: bool) -> Option<EngineRunInput> {
-        // A full mailbox means queued controls must run first. Retrying at the
-        // top of each receive appends the continuation behind the remaining
-        // controls as soon as one slot becomes available.
-        self.try_flush_pending_goal_continuation();
-        if self.has_scheduled_goal_continuation() {
-            // The synthetic token sits behind every operation that was already
-            // queued when it was scheduled. Drain FIFO operations through that
-            // token before accepting an idle child completion, whether or not
-            // the mailbox happened to be full. Consuming or cancelling the
-            // schedule marker restores normal select fairness immediately.
-            self.rx_op
-                .recv()
-                .await
-                .map(|op| EngineRunInput::Operation(Box::new(op)))
-        } else {
-            loop {
+        loop {
+            // A full mailbox means queued controls must run first. Retrying at
+            // the top of each receive appends the continuation behind the
+            // remaining controls as soon as one slot becomes available.
+            self.try_flush_pending_goal_continuation();
+            if self.has_scheduled_goal_continuation() {
+                let (enqueued, ready_at) = self
+                    .scheduled_goal_continuation
+                    .as_ref()
+                    .map(|scheduled| (scheduled.enqueued, scheduled.ready_at))
+                    .expect("scheduled continuation checked above");
+                if enqueued {
+                    // The synthetic token sits behind every operation that was
+                    // already queued when it was scheduled. Drain FIFO through
+                    // that token before accepting an idle child completion.
+                    return self
+                        .rx_op
+                        .recv()
+                        .await
+                        .map(|op| EngineRunInput::Operation(Box::new(op)));
+                }
+
+                if let Some(ready_at) = ready_at {
+                    let cancel = self.cancel_token.clone();
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            self.cancel_scheduled_goal_continuation(true).await;
+                            continue;
+                        }
+                        // Goal status controls and ordinary user messages stay
+                        // responsive throughout the wait. A pause/clear action
+                        // cancels this exact record in its normal handler.
+                        op = self.rx_op.recv() => {
+                            return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                        }
+                        () = tokio::time::sleep(ready_at.saturating_duration_since(Instant::now())) => {
+                            if let Some(scheduled) = self.scheduled_goal_continuation.as_mut()
+                                && scheduled.ready_at == Some(ready_at)
+                            {
+                                scheduled.ready_at = None;
+                                let _ = self.tx_event.send(Event::GoalContinuationWaitEnded {
+                                    interrupted: false,
+                                }).await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // A record that is ready but could not enter the full mailbox
+                // waits for one queued control. The next loop pass retries the
+                // same coalesced token, so there is no spin or duplicate turn.
+                return self
+                    .rx_op
+                    .recv()
+                    .await
+                    .map(|op| EngineRunInput::Operation(Box::new(op)));
+            } else {
                 let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
                 tokio::select! {
                     op = self.rx_op.recv() => {
@@ -1953,7 +2111,7 @@ impl Engine {
     fn idle_shell_wake_armed(&self) -> bool {
         self.shell_manager
             .lock()
-            .map(|manager| manager.may_have_undelivered_completion())
+            .map(|manager| manager.may_have_undelivered_completion_for_session(&self.session.id))
             .unwrap_or(false)
     }
 
@@ -1961,7 +2119,7 @@ impl Engine {
     fn finished_background_shell_pending(&self) -> bool {
         self.shell_manager
             .lock()
-            .map(|mut manager| manager.has_finished_unreported_jobs())
+            .map(|mut manager| manager.has_finished_unreported_jobs_for_session(&self.session.id))
             .unwrap_or(false)
     }
 
@@ -1986,7 +2144,7 @@ impl Engine {
                     "Background shell work finished; continuing the active goal".to_string(),
                 ))
                 .await;
-            self.schedule_goal_continuation(Vec::new());
+            self.schedule_goal_continuation(Vec::new()).await;
             return;
         }
         let route = match self.current_runtime_route() {
@@ -1999,7 +2157,11 @@ impl Engine {
                 let finished = self
                     .shell_manager
                     .lock()
-                    .map(|mut manager| manager.drain_finished_jobs_with_evidence().len())
+                    .map(|mut manager| {
+                        manager
+                            .drain_finished_jobs_with_evidence_for_session(&self.session.id)
+                            .len()
+                    })
                     .unwrap_or(0);
                 let _ = self
                     .tx_event
@@ -2125,6 +2287,15 @@ impl Engine {
                         dynamic_tools,
                         engine_schedule_id,
                     } => {
+                        // Cancellation can race the delay expiry after the
+                        // coalesced token entered the mailbox. Re-check the
+                        // same turn token before consuming the schedule so an
+                        // interrupt at the boundary never starts a provider
+                        // request and is not erased by the next turn's reset.
+                        if engine_schedule_id.is_some() && self.cancel_token.is_cancelled() {
+                            self.cancel_scheduled_goal_continuation(true).await;
+                            continue;
+                        }
                         let Some(dynamic_tools) = self
                             .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
                         else {
@@ -2211,6 +2382,13 @@ impl Engine {
                     Op::SetGoalStatus { status, clear } => {
                         self.handle_set_goal_status(status, clear).await;
                     }
+                    Op::SetGoalObjective {
+                        objective,
+                        token_budget,
+                    } => {
+                        self.handle_set_goal_objective(objective, token_budget)
+                            .await;
+                    }
                     Op::PreviewOutboundRequest {
                         inputs,
                         json,
@@ -2243,6 +2421,7 @@ impl Engine {
                         // during a sub-agent fanout no longer contends for the
                         // write lock (against completions/persistence) on every
                         // request. Cleanup still auto-cancels stale agents.
+                        let active_session_id = self.session.id.clone();
                         self.touch_workers_with_running_shells().await;
                         let due = {
                             let manager = self.subagent_manager.read().await;
@@ -2252,11 +2431,14 @@ impl Engine {
                         };
                         let event = if due {
                             let mut manager = self.subagent_manager.write().await;
-                            manager.cleanup(Duration::from_secs(60 * 60));
-                            agent_list_event(&manager)
+                            manager.cleanup_for_session(
+                                &active_session_id,
+                                Duration::from_secs(60 * 60),
+                            );
+                            agent_list_event(&manager, &active_session_id)
                         } else {
                             let manager = self.subagent_manager.read().await;
-                            agent_list_event(&manager)
+                            agent_list_event(&manager, &active_session_id)
                         };
                         // #3802: use non-blocking send — this is a refresh event
                         // that can safely be dropped when the channel is full.
@@ -2268,10 +2450,11 @@ impl Engine {
                         }
                     }
                     Op::CancelSubAgent { agent_id } => {
+                        let active_session_id = self.session.id.clone();
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
-                            match manager.cancel_agent(&agent_id) {
-                                Ok(_) => Ok(agent_list_event(&manager)),
+                            match manager.cancel_agent_for_session(&active_session_id, &agent_id) {
+                                Ok(_) => Ok(agent_list_event(&manager, &active_session_id)),
                                 Err(err) => Err(err),
                             }
                         };
@@ -2293,18 +2476,29 @@ impl Engine {
                         }
                     }
                     Op::FollowUpSubAgent { agent_id, text } => {
+                        let active_session_id = self.session.id.clone();
                         let runtime = self.off_turn_subagent_runtime();
                         let manager_handle = Arc::clone(&self.subagent_manager);
                         let (outcome, refresh) = {
                             let mut manager = self.subagent_manager.write().await;
                             let outcome = manager
-                                .continue_child_from_user(manager_handle, runtime, &agent_id, &text)
+                                .continue_child_from_user_for_session(
+                                    &active_session_id,
+                                    manager_handle,
+                                    runtime,
+                                    &agent_id,
+                                    &text,
+                                )
                                 .map_err(|err| err.to_string());
-                            (outcome, agent_list_event(&manager))
+                            (outcome, agent_list_event(&manager, &active_session_id))
                         };
                         let _ = self
                             .tx_event
-                            .send(Event::SubAgentFollowUp { agent_id, outcome })
+                            .send(Event::SubAgentFollowUp {
+                                owner_session_id: active_session_id,
+                                agent_id,
+                                outcome,
+                            })
                             .await;
                         if let Err(_e) = self.tx_event.try_send(refresh) {
                             tracing::debug!(
@@ -2438,11 +2632,14 @@ impl Engine {
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         let previous_session_id = self.session.id.clone();
-                        if let Some(session_id) = session_id {
-                            self.session.id = session_id;
+                        let next_session_id = if let Some(session_id) = session_id {
+                            session_id
                         } else if messages.is_empty() && system_prompt.is_none() {
-                            self.session.id = uuid::Uuid::new_v4().to_string();
-                        }
+                            uuid::Uuid::new_v4().to_string()
+                        } else {
+                            previous_session_id.clone()
+                        };
+                        let closed_session_id = self.install_synced_session_id(next_session_id);
                         // SyncSession installs a conversation's identity; an id
                         // change IS a conversation boundary in this runtime —
                         // callers must pass their own conversation id for
@@ -2452,9 +2649,12 @@ impl Engine {
                         // must be finalized here or they keep gating writers in
                         // the new conversation (#5372). Same-session reloads
                         // keep their id and are deliberately left untouched.
-                        if self.session.id != previous_session_id {
-                            let finalized =
-                                self.subagent_manager.write().await.finalize_session_close();
+                        if let Some(closed_session_id) = closed_session_id {
+                            let finalized = self
+                                .subagent_manager
+                                .write()
+                                .await
+                                .finalize_session_close_for_session(&closed_session_id);
                             if finalized > 0 {
                                 tracing::info!(
                                     target: "subagent",
@@ -2659,6 +2859,9 @@ impl Engine {
                             )))
                             .await;
                         tracing::info!(target: "advisor", "advisor watcher {state}");
+                    }
+                    Op::SetSearchProvider { provider } => {
+                        self.config.search_provider = provider;
                     }
                     Op::Shutdown => {
                         break;
@@ -2909,9 +3112,11 @@ impl Engine {
         // DGF-02 (dogfood 2026-08-02): the model was never told its own
         // sandbox posture, so an approved-then-sandbox-blocked write read as
         // a mystery failure it burned turns "debugging". Derive the posture
-        // from the same resolver tool execution uses so the line and the
-        // enforcement can never disagree. Stable per session (mode, config,
-        // workspace), so ordinary turns stay byte-identical.
+        // from the same resolver tool execution uses. The execution boundary
+        // is snapshotted at engine construction: local OS wrapper, configured
+        // external backend, or unavailable. External raw-command backends do
+        // not inherit local workspace/network enforcement claims. Stable per
+        // session, so ordinary turns stay byte-identical.
         let sandbox_posture = crate::core::authority::sandbox_policy_for_turn(
             prompt_context.mode,
             approval_mode,
@@ -2930,7 +3135,7 @@ impl Engine {
             ),
             format!(
                 "Current sandbox posture: {}",
-                sandbox_posture.posture_label()
+                sandbox_posture.posture_label_with_enforcement(self.sandbox_enforcement)
             ),
         ];
         if approval_mode == crate::tui::approval::ApprovalMode::Never {
@@ -3133,15 +3338,19 @@ impl Engine {
 
     async fn handle_idle_subagent_completion(&mut self, first: SubAgentCompletion) {
         let mut completions = Vec::new();
-        if let Some(completion) =
-            claim_subagent_completion(&mut self.delivered_subagent_completion_ids, first)
-        {
+        if let Some(completion) = claim_subagent_completion_for_session(
+            &mut self.delivered_subagent_completion_ids,
+            &self.session.id,
+            first,
+        ) {
             completions.push(completion);
         }
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
-            if let Some(completion) =
-                claim_subagent_completion(&mut self.delivered_subagent_completion_ids, completion)
-            {
+            if let Some(completion) = claim_subagent_completion_for_session(
+                &mut self.delivered_subagent_completion_ids,
+                &self.session.id,
+                completion,
+            ) {
                 completions.push(completion);
             }
         }
@@ -3330,7 +3539,7 @@ impl Engine {
             return;
         }
 
-        self.cancel_scheduled_goal_continuation();
+        self.cancel_scheduled_goal_continuation(false).await;
         match outcome {
             SendMessageOutcome::NotStarted { error } => {
                 let message = self.goal_turn_not_started_message(error.as_deref());
@@ -3463,6 +3672,19 @@ impl Engine {
     /// status to `SharedGoalState` so the cross-turn continuation loop respects
     /// it. This does NOT dispatch a model turn — it's a control-plane update.
     async fn handle_set_goal_status(&mut self, status: GoalStatus, clear: bool) {
+        if clear || status != GoalStatus::Active {
+            self.cancel_scheduled_goal_continuation(true).await;
+        }
+        // A continuation is scheduled only on a real transition INTO Active
+        // from a non-active state (paused/blocked resume). Re-asserting
+        // Active on an already-active goal must not stack a second
+        // autonomous turn on top of the loop that is already running.
+        let was_active = self
+            .config
+            .goal_state
+            .lock()
+            .map(|state| state.is_active())
+            .unwrap_or(false);
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if clear {
@@ -3503,6 +3725,7 @@ impl Engine {
         // avoids an unrelated no-goal turn racing with a newly declared goal in
         // the UI while still letting the clear win over a preceding active
         // TurnComplete snapshot.
+        let snapshot_has_objective = snapshot.objective.is_some();
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
 
         let label = if clear {
@@ -3519,6 +3742,56 @@ impl Engine {
             .tx_event
             .send(Event::status(format!("Goal {label}.")))
             .await;
+
+        // Resuming an objective-bearing goal restarts the runtime's own
+        // steering loop — the kickoff is a continuation turn, never a raw
+        // user message echoing the objective (codex `/goal resume` parity).
+        let resumed_into_active = !clear && status == GoalStatus::Active && !was_active;
+        if resumed_into_active && snapshot_has_objective {
+            self.schedule_goal_continuation(Vec::new()).await;
+        }
+    }
+
+    /// `/goal <objective>` — control-plane goal set (codex `/goal` parity).
+    /// The engine is authoritative: the objective lands in
+    /// `SharedGoalState`, every host projection is refreshed, `GoalUpdated`
+    /// publishes the new snapshot, and the first goal turn is dispatched as
+    /// runtime steering (the continuation prompt built from the goal
+    /// snapshot). The objective is never echoed as a raw user message.
+    async fn handle_set_goal_objective(&mut self, objective: String, token_budget: Option<u32>) {
+        let Some(objective) = normalized_goal_objective(Some(&objective)) else {
+            let _ = self
+                .tx_event
+                .send(Event::status(
+                    "Goal not set: the objective is empty after trimming.".to_string(),
+                ))
+                .await;
+            return;
+        };
+        sync_goal_state_from_host(
+            &self.config.goal_state,
+            Some(&objective),
+            token_budget,
+            GoalStatus::Active,
+        );
+        self.config.goal_objective = Some(objective);
+        self.config.goal_token_budget = token_budget;
+        self.config.goal_status = GoalStatus::Active;
+        self.refresh_system_prompt_with_reason("goal");
+        self.emit_session_updated().await;
+        let snapshot = match self.config.goal_state.lock() {
+            Ok(state) => state.snapshot(),
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned during SetGoalObjective: {err}");
+                return;
+            }
+        };
+        let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        let _ = self
+            .tx_event
+            .send(Event::status("Goal set; starting goal work.".to_string()))
+            .await;
+        self.schedule_goal_continuation(Vec::new()).await;
     }
 
     /// Build the turn's tool registry and the model-facing tool catalog.
@@ -3588,6 +3861,7 @@ impl Engine {
                 std::env::current_dir().ok(),
                 &self.session.working_set,
                 Some(&self.subagent_manager),
+                &self.session.id,
             )
             .await;
             Some(SubAgentForkContext {
@@ -3611,6 +3885,7 @@ impl Engine {
             let foreground_children = Arc::new(ForegroundChildRegistry::new());
             let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
             let tx_event_clone = self.tx_event.clone();
+            let mailbox_owner_session_id = self.session.id.clone();
             let mailbox_turn_id = turn_id.to_string();
             let (flush_tx, mut flush_rx) = tokio::sync::oneshot::channel();
             let drain_handle = spawn_supervised(
@@ -3625,6 +3900,7 @@ impl Engine {
                                 for envelope in receiver.drain_available() {
                                     if !forward_subagent_mailbox_message(
                                         &tx_event_clone,
+                                        &mailbox_owner_session_id,
                                         &mailbox_turn_id,
                                         envelope.seq,
                                         envelope.message,
@@ -3639,6 +3915,7 @@ impl Engine {
                                 let Some(envelope) = envelope else { break };
                                 if !forward_subagent_mailbox_message(
                                     &tx_event_clone,
+                                    &mailbox_owner_session_id,
                                     &mailbox_turn_id,
                                     envelope.seq,
                                     envelope.message,
@@ -3877,6 +4154,58 @@ impl Engine {
         verbosity: Option<String>,
         provenance: UserInputProvenance,
     ) -> SendMessageOutcome {
+        let mut goal_objective = goal_objective;
+        let mut goal_token_budget = goal_token_budget;
+        let mut goal_status = goal_status;
+
+        // A literal natural-language `/goal` declaration is control-plane
+        // intent, not a suggestion that each provider may acknowledge or
+        // ignore. Activate it through the same GoalState::create path as the
+        // model-visible create_goal tool before constructing any provider
+        // request. Only structurally external user input can authorize this;
+        // runtime text, recalled memory, handoffs, and pasted multi-line
+        // transcripts cannot create a goal.
+        //
+        // KV-cache effect: this only selects the already-existing volatile
+        // <session_goal> contributor. It adds no new stable-prefix text.
+        let explicit_goal_result = if provenance.can_authorize_work() {
+            explicit_goal_directive(&content).map(|directive| {
+                self.config
+                    .goal_state
+                    .lock()
+                    .map_err(|_| "goal state lock poisoned".to_string())
+                    .and_then(|mut state| {
+                        state
+                            .create(directive.objective, None)
+                            .map_err(str::to_string)?;
+                        Ok(state.snapshot())
+                    })
+            })
+        } else {
+            None
+        };
+        if let Some(result) = explicit_goal_result {
+            match result {
+                Ok(snapshot) => {
+                    goal_objective.clone_from(&snapshot.objective);
+                    goal_token_budget = snapshot.token_budget;
+                    goal_status = GoalStatus::Active;
+                    // Publish before TurnStarted/provider dispatch so the TUI
+                    // and durable runtime host observe the real goal action,
+                    // even when this model would otherwise reply only in prose.
+                    let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+                }
+                Err(error) => {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Requested /goal was not created: {error}"
+                        )))
+                        .await;
+                }
+            }
+        }
+
         let effective_provider = route.identity.provider;
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();
@@ -4031,7 +4360,7 @@ impl Engine {
             )
             .into(),
             // Provisional. Replaced with the true wire-boundary instant
-            // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
+            // when `run_turn` emits `Event::RouteDispatched`.
             dispatched_at: turn_started_at,
         };
         turn.pending_route = Some(TurnRoute {
@@ -4259,13 +4588,10 @@ impl Engine {
         // killing the whole engine-event-loop task — which left the UI stuck
         // on "working" forever with the engine silently dead (#2583, #1269).
         use futures_util::FutureExt as _;
-        let turn_result = std::panic::AssertUnwindSafe(self.handle_deepseek_turn(
-            &mut turn,
-            surface,
-            Some(tool_surface),
-        ))
-        .catch_unwind()
-        .await;
+        let turn_result =
+            std::panic::AssertUnwindSafe(self.run_turn(&mut turn, surface, Some(tool_surface)))
+                .catch_unwind()
+                .await;
         let (status, error) = match turn_result {
             Ok(outcome) => outcome,
             Err(panic) => {
@@ -4404,7 +4730,7 @@ impl Engine {
             // Queue a typed continuation instead of freezing an Active goal
             // snapshot into a generic message. The operation re-reads the live
             // state when consumed, after any already-queued goal controls.
-            self.schedule_goal_continuation(dynamic_tools);
+            self.schedule_goal_continuation(dynamic_tools).await;
         } else {
             self.reconcile_non_completed_goal_turn(&outcome).await;
         }
@@ -4598,11 +4924,7 @@ impl Engine {
             &self.session.messages,
             &self.session.model,
             self.session.reasoning_effort.clone(),
-            effective_max_output_tokens_for_route(
-                self.api_provider,
-                &self.session.model,
-                self.active_route_limits,
-            ),
+            client.effective_max_output_tokens(&self.session.model),
         )
         .await
         {
@@ -4654,7 +4976,7 @@ impl Engine {
             return Vec::new();
         };
         manager
-            .list_jobs()
+            .list_jobs_for_session(&self.session.id)
             .into_iter()
             .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
             .map(|job| {
@@ -5053,7 +5375,10 @@ impl Engine {
 
         let mut seen_tasks = HashSet::new();
         if let Some(task_manager) = self.config.runtime_services.task_manager.as_ref() {
-            for task in task_manager.list_tasks(None).await {
+            for task in task_manager
+                .list_tasks_for_owner(None, None, session_id)
+                .await
+            {
                 let external = format!("task:{}", task.id);
                 if !candidates.contains(&external) {
                     continue;
@@ -6262,8 +6587,8 @@ use self::streaming::filter_tool_call_delta;
 use self::streaming::{
     ContentBlockKind, FAKE_WRAPPER_NOTICE, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
     MAX_TRANSPARENT_STREAM_RETRIES, STREAM_MAX_CONTENT_BYTES, STREAM_MAX_DURATION_SECS,
-    ToolCallDeltaFilterState, ToolUseState, contains_fake_tool_wrapper,
-    filter_tool_call_delta_with_state, flush_tool_call_delta_state,
+    StreamResume, StreamRetryBudget, ToolCallDeltaFilterState, ToolUseState,
+    contains_fake_tool_wrapper, filter_tool_call_delta_with_state, flush_tool_call_delta_state,
     should_resume_after_network_drop, should_resume_after_sleep,
     should_resume_interactive_after_network_drop, should_transparently_retry_stream,
     sleep_gap_detected, stream_read_error_user_message,

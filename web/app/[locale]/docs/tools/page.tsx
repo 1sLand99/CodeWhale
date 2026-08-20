@@ -21,12 +21,12 @@ export default async function ToolsPage({ params }: { params: Promise<{ locale: 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">
+        <h1 className="font-display text-3xl mb-1">
           {isZh ? "工具" : "Tools"}{" "}
           <span className="font-cjk text-indigo text-2xl ml-2">
             {isZh ? "Tools" : "工具"}
           </span>
-        </h2>
+        </h1>
         <p className={`text-ink-soft mt-3 ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
           {isZh
             ? "精选工具集——设计思路详见 "

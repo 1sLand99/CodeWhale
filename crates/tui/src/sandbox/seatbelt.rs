@@ -195,10 +195,14 @@ fn generate_policy(policy: &SandboxPolicy, cwd: &Path) -> String {
         full_policy.push_str(SEATBELT_TRUSTED_AUTOMATION_POLICY);
     }
 
-    // Add Darwin user cache directory access (needed by many macOS tools)
+    // Darwin user cache: read always; write only when the policy allows any
+    // write (same gate as cargo/npm). ReadOnly must not get a cache escape.
     full_policy.push_str("\n\n; Darwin user cache directory\n");
-    full_policy
-        .push_str(r#"(allow file-read* file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))"#);
+    full_policy.push_str(r#"(allow file-read* (subpath (param "DARWIN_USER_CACHE_DIR")))"#);
+    if !matches!(policy, SandboxPolicy::ReadOnly) {
+        full_policy.push('\n');
+        full_policy.push_str(r#"(allow file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))"#);
+    }
 
     // Add common macOS directories that tools often need
     full_policy.push_str("\n\n; Common macOS directories\n");
@@ -471,6 +475,41 @@ mod existing_tests {
 
         // Should have at least the cache dir param
         assert!(params.iter().any(|(k, _)| k == "DARWIN_USER_CACHE_DIR"));
+    }
+
+    #[test]
+    fn test_darwin_user_cache_write_skipped_for_read_only() {
+        let cwd = Path::new("/tmp/test");
+
+        let default_text = generate_policy(&SandboxPolicy::default(), cwd);
+        assert!(
+            default_text
+                .contains(r#"(allow file-read* (subpath (param "DARWIN_USER_CACHE_DIR")))"#),
+            "default policy should allow reading the Darwin user cache"
+        );
+        assert!(
+            default_text
+                .contains(r#"(allow file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))"#),
+            "default policy should allow writing the Darwin user cache"
+        );
+
+        let read_only_text = generate_policy(&SandboxPolicy::ReadOnly, cwd);
+        assert!(
+            read_only_text
+                .contains(r#"(allow file-read* (subpath (param "DARWIN_USER_CACHE_DIR")))"#),
+            "read-only mode should still allow reading the Darwin user cache"
+        );
+        assert!(
+            !read_only_text
+                .contains(r#"(allow file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))"#),
+            "read-only mode must NOT grant write access to the Darwin user cache"
+        );
+        assert!(
+            !read_only_text.contains(
+                r#"(allow file-read* file-write* (subpath (param "DARWIN_USER_CACHE_DIR")))"#
+            ),
+            "read-only mode must not combine Darwin cache write into the read rule"
+        );
     }
 
     /// #558: cargo publish reaches into ~/.cargo/registry; the seatbelt has

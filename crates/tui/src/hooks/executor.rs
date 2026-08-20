@@ -195,6 +195,7 @@ impl HookContext {
             env.insert("DEEPSEEK_TOOL_NAME".to_string(), name.clone());
         }
         if let Some(ref id) = self.tool_call_id {
+            env.insert("CODEWHALE_TOOL_CALL_ID".to_string(), id.clone());
             env.insert("DEEPSEEK_TOOL_CALL_ID".to_string(), id.clone());
         }
         if let Some(ref args) = self.tool_args {
@@ -227,6 +228,7 @@ impl HookContext {
             env.insert("DEEPSEEK_PREVIOUS_MODE".to_string(), prev.clone());
         }
         if let Some(ref session_id) = self.session_id {
+            env.insert("CODEWHALE_SESSION_ID".to_string(), session_id.clone());
             env.insert("DEEPSEEK_SESSION_ID".to_string(), session_id.clone());
         }
         if let Some(ref message) = self.message {
@@ -1541,7 +1543,8 @@ impl HookExecutor {
     /// **once per launch**; every later reload (workspace switch, trust
     /// onboarding) must go through [`Self::rebind`] so the id every hook has
     /// already seen stays valid. Regenerating it mid-session would break
-    /// correlation for anything that grouped records by `DEEPSEEK_SESSION_ID`.
+    /// correlation for anything that grouped records by `CODEWHALE_SESSION_ID`
+    /// or its `DEEPSEEK_SESSION_ID` compatibility alias.
     pub fn new(config: HooksConfig, default_working_dir: PathBuf) -> Self {
         // Generate a session ID
         let session_id = format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -4548,8 +4551,9 @@ command = "echo project"
 
     #[test]
     fn session_id_is_stable_across_every_event_and_survives_a_rebind() {
-        // One TUI session, one `DEEPSEEK_SESSION_ID`. This is what makes hook
-        // records correlatable, so it is asserted over every event name.
+        // One TUI session, one `CODEWHALE_SESSION_ID`. The legacy
+        // `DEEPSEEK_SESSION_ID` alias carries the same value so existing hook
+        // records stay correlatable; assert both names over every event.
         let executor = HookExecutor::new(HooksConfig::default(), PathBuf::from("."));
         let session_id = executor.session_id().to_string();
         assert!(
@@ -4563,9 +4567,15 @@ command = "echo project"
                 .with_tool_name(event.as_str());
             let env = context.to_env_vars();
             assert_eq!(
+                env.get("CODEWHALE_SESSION_ID"),
+                Some(&session_id),
+                "event `{}` reported a different Codewhale session id",
+                event.as_str()
+            );
+            assert_eq!(
                 env.get("DEEPSEEK_SESSION_ID"),
                 Some(&session_id),
-                "event `{}` reported a different session id",
+                "event `{}` reported a different legacy session id",
                 event.as_str()
             );
         }
@@ -4631,6 +4641,10 @@ command = "echo project"
             .with_tool_call_id("call_abc123")
             .to_env_vars();
         assert_eq!(
+            env.get("CODEWHALE_TOOL_CALL_ID"),
+            Some(&"call_abc123".to_string())
+        );
+        assert_eq!(
             env.get("DEEPSEEK_TOOL_CALL_ID"),
             Some(&"call_abc123".to_string())
         );
@@ -4639,6 +4653,7 @@ command = "echo project"
         let without = HookContext::new()
             .with_tool_name("exec_shell")
             .to_env_vars();
+        assert!(!without.contains_key("CODEWHALE_TOOL_CALL_ID"));
         assert!(!without.contains_key("DEEPSEEK_TOOL_CALL_ID"));
     }
 

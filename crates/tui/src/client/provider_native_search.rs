@@ -103,7 +103,14 @@ impl ProviderNativeSearchClient {
                 ResponsesSearchDialect::Xai,
             ),
             ApiProvider::Anthropic => {
-                build_anthropic_search_body(&self.inner.default_model, request)
+                let route_cap = self
+                    .inner
+                    .effective_max_output_tokens(&self.inner.default_model);
+                build_anthropic_search_body(
+                    &self.inner.default_model,
+                    request,
+                    2_048_u32.min(route_cap),
+                )
             }
             _ => bail!("active provider has no native web-search adapter"),
         };
@@ -182,7 +189,11 @@ fn build_responses_search_body(
     body
 }
 
-fn build_anthropic_search_body(model: &str, request: &ProviderNativeSearchRequest) -> Value {
+fn build_anthropic_search_body(
+    model: &str,
+    request: &ProviderNativeSearchRequest,
+    max_tokens: u32,
+) -> Value {
     let mut tool = json!({
         "type": "web_search_20250305",
         "name": "web_search",
@@ -193,7 +204,7 @@ fn build_anthropic_search_body(model: &str, request: &ProviderNativeSearchReques
     }
     json!({
         "model": model,
-        "max_tokens": 2048,
+        "max_tokens": max_tokens,
         "messages": [{ "role": "user", "content": search_prompt(request) }],
         "tools": [tool],
     })
@@ -422,10 +433,14 @@ mod tests {
 
     #[test]
     fn anthropic_payload_uses_basic_direct_search_contract() {
-        let body = build_anthropic_search_body("claude-opus-4-8", &request());
+        let body = build_anthropic_search_body("claude-opus-4-8", &request(), 2_048);
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
         assert_eq!(body["tools"][0]["max_uses"], 1);
         assert_eq!(body["tools"][0]["allowed_domains"][0], "example.com");
+        assert_eq!(body["max_tokens"], 2_048);
+
+        let tiny_route = build_anthropic_search_body("claude-opus-4-8", &request(), 128);
+        assert_eq!(tiny_route["max_tokens"], 128);
     }
 
     #[test]

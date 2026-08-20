@@ -85,6 +85,15 @@ card, child limits); `/workflow settings` prints the effective values with
 what each one does. Reloading `config.toml` refreshes that table for both
 settings and the workflow tool.
 
+`/workflows` opens the run dashboard: every run this workspace's journal
+keeps for the session — running and finished — newest first. Each row shows
+the status token, the run's label, elapsed time, child count, and latest
+progress; `Enter` opens the detail pane (run id, phases, the child roster
+with per-child state, recent progress, and the error/result summary). `x`
+cancels the selected running run through the same host path as `/workflow
+cancel`, `r` re-reads the journal, and `Esc` closes. The dashboard never
+launches anything — orchestration authority stays with `/workflow`.
+
 ## What you see while it runs
 
 - **Workflow panel** — phases, children, status, budget

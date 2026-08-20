@@ -282,6 +282,16 @@ pub enum Event {
     /// `create_goal` or `update_goal` tool calls.
     GoalUpdated { snapshot: GoalSnapshot },
 
+    /// The interactive engine is in the configured quiet period before one
+    /// already-authorized goal continuation. This is lifecycle state, not a
+    /// status string: Esc/Ctrl+C can cancel it without pretending a provider
+    /// turn is still in flight.
+    GoalContinuationWaiting { delay_seconds: u64 },
+
+    /// The between-turn quiet period ended. `interrupted` distinguishes a
+    /// user/external cancel from normal expiry or a goal status control.
+    GoalContinuationWaitEnded { interrupted: bool },
+
     /// Context compaction started.
     CompactionStarted {
         id: String,
@@ -341,6 +351,7 @@ pub enum Event {
     // === Sub-Agent Events ===
     /// A sub-agent has been spawned
     AgentSpawned {
+        owner_session_id: String,
         id: String,
         prompt: String,
         parent_run_id: Option<String>,
@@ -357,6 +368,7 @@ pub enum Event {
 
     /// Sub-agent progress update
     AgentProgress {
+        owner_session_id: String,
         id: String,
         status: String,
         activity: AgentProgressEventMeta,
@@ -365,13 +377,18 @@ pub enum Event {
     },
 
     /// Sub-agent completed
-    AgentComplete { id: String, result: String },
+    AgentComplete {
+        owner_session_id: String,
+        id: String,
+        result: String,
+    },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
     /// `Ok` carries the delivery outcome (the target id may differ from the
     /// addressed id when a fork was continued from a checkpoint); `Err` is the
     /// exact reason nothing was delivered.
     SubAgentFollowUp {
+        owner_session_id: String,
         agent_id: String,
         outcome: Result<crate::tools::subagent::UserFollowUpOutcome, String>,
     },
@@ -379,17 +396,24 @@ pub enum Event {
     /// Sub-agent listing plus the same bounded typed coordination projection
     /// used by machine-readable `agents/coordinate inspect`.
     AgentList {
+        owner_session_id: String,
         agents: Vec<SubAgentResult>,
         coordination: CoordinationDetailProjection,
         /// Follow-ups handed to a running child that it has not yet taken at
         /// its next round boundary (`agent_id` → count). Only non-zero entries.
         queued_follow_ups: std::collections::HashMap<String, usize>,
+        /// Receipts-only roster of every agent that ran this session (#5479):
+        /// status, current step, elapsed and token usage per row, built from
+        /// the retained worker records rather than from live agent state, so a
+        /// finished agent keeps the numbers it finished with.
+        roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
     },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the
     /// monotonic seq + the typed `MailboxMessage` so the UI can route each
     /// envelope to the correct in-transcript card.
     SubAgentMailbox {
+        owner_session_id: String,
         /// Engine turn identity. Sequence numbers restart for every mailbox,
         /// so consumers must deduplicate on `(turn_id, seq)`, never `seq`
         /// alone.
@@ -402,6 +426,9 @@ pub enum Event {
     /// object so the TUI can advance the WorkflowPanel and the compact history
     /// card while a run is still in flight (not only on tool complete).
     WorkflowUi {
+        /// Immutable conversation owner. Consumers must compare this before
+        /// revealing or applying any workflow state.
+        owner_session_id: String,
         run_id: String,
         /// Flattened event JSON: `{"type":"task_started", "at_ms":…, …}`.
         /// Callers inject `run_id` on the object when available.

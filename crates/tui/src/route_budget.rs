@@ -4,17 +4,8 @@ use crate::config::{ApiProvider, provider_capability};
 use crate::context_budget::ContextBudget;
 use crate::models::{DEFAULT_COMPACTION_TOKEN_THRESHOLD, context_window_for_model};
 
-/// Output room reserved by the internal budget for large-context reasoning
-/// models. This is deliberately larger than the ordinary API request cap so
-/// interleaved thinking cannot exhaust the turn budget.
-pub(crate) const TURN_MAX_OUTPUT_TOKENS: u32 = 262_144;
-
 /// Safe ordinary API request cap across provider routes.
 const API_MAX_OUTPUT_TOKENS: u32 = 65_536;
-
-/// Large windows reserve the full internal reasoning allowance. Smaller
-/// windows reserve their route-effective request cap instead.
-const INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD: u32 = 500_000;
 
 /// Preserve only route limits that came from a concrete offering.
 #[must_use]
@@ -49,24 +40,56 @@ pub(crate) fn route_output_limit_tokens(route_limits: Option<RouteLimits>) -> Op
         .filter(|tokens| *tokens > 0)
 }
 
+/// Provider/offering input cap, when the resolved route reports one.
+#[must_use]
+pub(crate) fn route_input_limit_tokens(route_limits: Option<RouteLimits>) -> Option<u32> {
+    route_limits
+        .and_then(|limits| limits.input_tokens)
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .filter(|tokens| *tokens > 0)
+}
+
+/// Explicit operator request cap, when configured.
+///
+/// Keep this separate from catalogue/default resolution: a published maximum
+/// is a ceiling, while these environment variables are an actual request from
+/// the operator. Route/window validation still clamps the value before it is
+/// sent.
+#[must_use]
+fn explicit_max_output_tokens_override() -> Option<u32> {
+    match std::env::var("CODEWHALE_MAX_OUTPUT_TOKENS") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            // A non-blank canonical value is authoritative. Invalid/zero
+            // values deliberately fall back to the safe automatic default;
+            // they must not silently activate a stale legacy setting.
+            return raw.trim().parse::<u32>().ok().filter(|tokens| *tokens > 0);
+        }
+        Ok(_) | Err(_) => {}
+    }
+    std::env::var("DEEPSEEK_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|tokens| *tokens > 0)
+}
+
 /// Effective `max_tokens` for a model before provider/route caps are applied.
 #[must_use]
 pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
-    if let Ok(raw) = std::env::var("CODEWHALE_MAX_OUTPUT_TOKENS")
-        .or_else(|_| std::env::var("DEEPSEEK_MAX_OUTPUT_TOKENS"))
-        && let Ok(tokens) = raw.trim().parse::<u32>()
-        && tokens > 0
-    {
+    if let Some(tokens) = explicit_max_output_tokens_override() {
         return tokens;
     }
 
-    // The documented catalogue ceiling is authoritative when it speaks: it
-    // can *raise* the request above the generic floor, not merely narrow it
-    // in `effective_max_output_tokens_for_route`. `API_MAX_OUTPUT_TOKENS`
-    // remains strictly the fallback for models the catalogue does not
-    // describe, and any concrete route/offering maximum still intersects.
+    // A documented catalogue value is a capability ceiling, not necessarily a
+    // sensible default request size. In particular, DeepSeek V4 advertises a
+    // 384K maximum. Treating that maximum as the default made Codewhale ask a
+    // 262K/327K self-hosted route for almost its whole context as output before
+    // it had counted a single input token (#5516/#5518). Keep documented
+    // ceilings through the normal compatibility intersection, but automatic
+    // requests start at the ordinary 64K cap unless the operator explicitly
+    // overrides it. A maximum describes what a provider may allow, not what
+    // every response should reserve by default.
     //
-    // Provenance for the raise (deepseek-v4-flash/pro: 384_000 output):
+    // Provenance for the ceiling (deepseek-v4-flash/pro: 384_000 output):
     // - models_dev.bundled.json documents limit.output = 384000.
     // - The DS4 provider contract corroborates 384K
     //   (crates/config/src/model_reference.rs pins max_output 384_000 / "384K").
@@ -76,15 +99,11 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
     //   catalogue-sourced value to re-verify against official docs when they
     //   publish one (#5373).
     if let Some(documented) = crate::models::max_output_tokens_for_model(model) {
-        return documented;
+        return documented.min(API_MAX_OUTPUT_TOKENS);
     }
 
     let window = context_window_for_model(model).unwrap_or(128_000);
-    if window >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
-        API_MAX_OUTPUT_TOKENS
-    } else {
-        (window / 2).min(API_MAX_OUTPUT_TOKENS)
-    }
+    (window / 2).min(API_MAX_OUTPUT_TOKENS)
 }
 
 /// Conservative request ceiling for a model the static catalogue does not
@@ -236,13 +255,11 @@ pub(crate) fn effective_max_output_tokens_for_route(
             route_cap.map_or(cap, |route_cap| cap.min(route_cap))
         }
     };
-    let Some(window) = route_limits
-        .and_then(|limits| limits.context_tokens)
-        .and_then(|tokens| u32::try_from(tokens).ok())
-        .filter(|tokens| *tokens > 0)
-    else {
-        return cap;
-    };
+    // Clamp against the effective route window even when it came from the
+    // capability fallback rather than an explicit offering. This keeps a
+    // suffix/config/catalog-derived small window from ever receiving a request
+    // cap larger than the window itself.
+    let window = route_context_window_tokens(provider, model, route_limits);
 
     u32::try_from(ContextBudget::new(u64::from(window), 0, u64::from(cap)).output_cap_tokens)
         .unwrap_or(cap)
@@ -251,24 +268,18 @@ pub(crate) fn effective_max_output_tokens_for_route(
 
 /// Output reservation used by the internal input budget for a route.
 #[must_use]
-pub(crate) fn route_output_reservation_for_window(
+pub(crate) fn route_output_reservation(
     provider: ApiProvider,
     model: &str,
-    window_tokens: u32,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
-    if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
-        route_output_limit_tokens(route_limits).map_or(TURN_MAX_OUTPUT_TOKENS, |route_cap| {
-            route_cap.min(TURN_MAX_OUTPUT_TOKENS)
-        })
-    } else {
-        // The request cap may honor a documented catalogue ceiling above
-        // 65K (#5373). Internal reservation must not: a 256K window with a
-        // matching output ceiling would otherwise reserve the whole window
-        // and collapse compaction to the 1K headroom floor.
-        effective_max_output_tokens_for_route(provider, model, route_limits)
-            .min(API_MAX_OUTPUT_TOKENS)
-    }
+    // Use exactly the value that can reach the wire on every window size.
+    // The previous split reserved 65K for a possible 325K wire request below
+    // 500K, then jumped to an unrequested 262K reservation at 500K. Both
+    // directions made preflight disagree with the actual request. Reasoning
+    // effort is a request control, not separately metered non-wire output, so
+    // it does not justify a second hidden context reservation.
+    effective_max_output_tokens_for_route(provider, model, route_limits)
 }
 
 #[must_use]
@@ -279,11 +290,12 @@ pub(crate) fn route_context_budget(
     input_tokens: usize,
 ) -> Option<ContextBudget> {
     let window = route_context_window_tokens(provider, model, route_limits);
-    let output_cap = route_output_reservation_for_window(provider, model, window, route_limits);
-    Some(ContextBudget::new(
+    let output_cap = route_output_reservation(provider, model, route_limits);
+    Some(ContextBudget::new_with_input_limit(
         u64::from(window),
         u64::try_from(input_tokens).ok()?,
         u64::from(output_cap),
+        route_input_limit_tokens(route_limits).map(u64::from),
     ))
 }
 
@@ -506,15 +518,14 @@ mod tests {
     }
 
     #[test]
-    fn v4_trigger_is_window_percent_clamped_to_spendable_input() {
+    fn v4_trigger_uses_window_percent_when_it_fits_spendable_input() {
         let budget = route_context_budget(ApiProvider::Deepseek, "deepseek-v4-pro", None, 0)
             .expect("V4 route budget");
 
         assert_eq!(budget.window_tokens, 1_000_000);
-        assert_eq!(budget.output_cap_tokens, u64::from(TURN_MAX_OUTPUT_TOKENS));
-        assert_eq!(budget.input_budget_ceiling, 736_832);
-        // 80% of the 1M window (800_000) exceeds the spendable input, so the
-        // overflow clamp holds the trigger at the ceiling.
+        assert_eq!(budget.output_cap_tokens, u64::from(API_MAX_OUTPUT_TOKENS));
+        assert_eq!(budget.input_budget_ceiling, 933_440);
+        // 80% of the 1M window fits below the spendable input ceiling.
         assert_eq!(
             compaction_threshold_for_route_at_percent(
                 ApiProvider::Deepseek,
@@ -522,7 +533,7 @@ mod tests {
                 None,
                 80.0,
             ),
-            736_832
+            800_000
         );
     }
 
@@ -540,9 +551,9 @@ mod tests {
         let _lock = crate::test_support::lock_test_env();
         let _max_output = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
         // #4368/#4378: Models.dev may report Kimi's full 262K context as both
-        // context and output ceilings. On a sub-500K window, reserve the
-        // route-effective 32K request cap rather than treating that catalog
-        // maximum as the amount every turn will emit.
+        // context and output ceilings. Reserve the route-effective 32K request
+        // cap rather than treating that catalog maximum as the amount every
+        // turn will emit.
         let limits = RouteLimits {
             context_tokens: Some(262_144),
             output_tokens: Some(262_144),
@@ -669,9 +680,8 @@ mod tests {
         let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
 
-        // GLM 5.2: 1M window, documented 131K output. The requested cap is the
-        // 65,536 API ceiling, so the known cap is above it and does not bind —
-        // what matters is that the capability is *known*.
+        // GLM 5.2: 1M window, documented 131K output. The capability remains
+        // known even though the safe automatic request starts at 64K.
         let glm = provider_capability(ApiProvider::Zai, "glm-5.2");
         assert_eq!(glm.max_output, Some(131_072));
 
@@ -685,53 +695,233 @@ mod tests {
         );
     }
 
-    /// A documented catalogue ceiling must escape the generic floor, not just
-    /// narrow it. Before the fix, every model with a context window >= 500K
-    /// was clamped to [`API_MAX_OUTPUT_TOKENS`] even when the catalogue
-    /// documented a larger `max_output`. This test fails if any such ceiling
-    /// is ever clamped again (or if the bundled catalogue stops carrying any
-    /// above-floor ceiling at all).
+    /// A documented capability maximum is not itself a sane default request
+    /// size. The capability remains documented and available as an explicit
+    /// override; only the automatic request is bounded.
     #[test]
-    fn documented_ceiling_escapes_generic_floor() {
+    fn documented_ceiling_is_a_bound_not_an_unbounded_default_request() {
         let _lock = crate::test_support::lock_test_env();
         let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
 
-        let bundled = crate::model_catalog::bundled_catalog();
-        let mut escaped = 0usize;
-        for id in bundled.entries.keys() {
-            let Some(documented) = crate::model_catalog::resolved_max_output(id) else {
-                continue;
-            };
-            let window = context_window_for_model(id).unwrap_or(128_000);
-            let pre_fix_floor = if window >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
-                API_MAX_OUTPUT_TOKENS
-            } else {
-                (window / 2).min(API_MAX_OUTPUT_TOKENS)
-            };
-            if documented > pre_fix_floor {
-                assert_eq!(
-                    effective_max_output_tokens(id),
-                    documented,
-                    "{id}: documented ceiling {documented} must escape the pre-fix floor {pre_fix_floor}"
-                );
-                escaped += 1;
-            }
-        }
-        assert!(
-            escaped >= 2,
-            "expected at least two bundled ceilings above the generic floor, found {escaped}"
+        assert_eq!(
+            output_ceiling_source(ApiProvider::Deepseek, "deepseek-v4-flash"),
+            OutputCeilingSource::Documented(384_000)
+        );
+        assert_eq!(
+            effective_max_output_tokens("deepseek-v4-flash"),
+            API_MAX_OUTPUT_TOKENS,
+            "a 384K capability maximum must not become the no-config request size"
+        );
+        assert_eq!(
+            effective_max_output_tokens("glm-5.2"),
+            API_MAX_OUTPUT_TOKENS,
+            "a 131K capability maximum must also remain a ceiling, not a default"
         );
     }
 
     #[test]
-    fn mid_window_internal_reservation_stays_on_the_ordinary_request_floor() {
-        let reservation = route_output_reservation_for_window(
-            ApiProvider::Arcee,
-            "trinity-large-thinking",
-            262_144,
-            None,
+    fn deepseek_v4_explicit_mid_windows_share_one_safe_no_config_budget() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        for window in [262_144, 327_680, 393_216] {
+            let limits = RouteLimits {
+                context_tokens: Some(window),
+                ..RouteLimits::default()
+            };
+            let cap = effective_max_output_tokens_for_route(
+                ApiProvider::Vllm,
+                "DeepSeek-V4-Flash",
+                Some(limits),
+            );
+            let reservation =
+                route_output_reservation(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits));
+            let budget = route_context_budget(
+                ApiProvider::Vllm,
+                "DeepSeek-V4-Flash",
+                Some(limits),
+                105_000,
+            )
+            .expect("explicit vLLM route budget");
+
+            assert_eq!(cap, API_MAX_OUTPUT_TOKENS, "window={window}");
+            assert_eq!(reservation, cap, "window={window}");
+            assert_eq!(
+                budget.input_budget_ceiling,
+                window - u64::from(API_MAX_OUTPUT_TOKENS) - 1_024,
+                "window={window}"
+            );
+            assert!(
+                105_000 < budget.input_budget_ceiling,
+                "ordinary 85K-105K inputs must not trigger emergency compaction: {budget:?}"
+            );
+            assert!(budget.available_input_tokens > 0, "window={window}");
+        }
+    }
+
+    #[test]
+    fn explicit_output_override_is_preserved_and_reserved_on_mid_windows() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "100000");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let limits = RouteLimits {
+            context_tokens: Some(327_680),
+            ..RouteLimits::default()
+        };
+
+        let cap = effective_max_output_tokens_for_route(
+            ApiProvider::Vllm,
+            "DeepSeek-V4-Flash",
+            Some(limits),
         );
+        assert_eq!(cap, 100_000);
+        assert_eq!(
+            route_output_reservation(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits),),
+            cap
+        );
+        let budget = route_context_budget(
+            ApiProvider::Vllm,
+            "DeepSeek-V4-Flash",
+            Some(limits),
+            105_000,
+        )
+        .expect("override route budget");
+        assert_eq!(budget.input_budget_ceiling, 226_656);
+        assert!(budget.available_input_tokens > 0);
+    }
+
+    #[test]
+    fn oversized_explicit_override_is_clamped_and_reserved_to_the_route_window() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let limits = RouteLimits {
+            context_tokens: Some(327_680),
+            ..RouteLimits::default()
+        };
+
+        let cap = effective_max_output_tokens_for_route(
+            ApiProvider::Vllm,
+            "DeepSeek-V4-Flash",
+            Some(limits),
+        );
+        assert_eq!(cap, 325_632);
+        assert_eq!(
+            route_output_reservation(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits),),
+            cap,
+            "preflight must reserve every token the explicit override can put on the wire"
+        );
+        let budget = route_context_budget(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits), 0)
+            .expect("oversized override route budget");
+        assert_eq!(budget.input_budget_ceiling, 1_024);
+    }
+
+    #[test]
+    fn explicit_override_on_large_window_stays_unified() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let limits = RouteLimits {
+            context_tokens: Some(1_000_000),
+            ..RouteLimits::default()
+        };
+
+        let cap = effective_max_output_tokens_for_route(
+            ApiProvider::Vllm,
+            "DeepSeek-V4-Flash",
+            Some(limits),
+        );
+        let reservation =
+            route_output_reservation(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits));
+        let budget = route_context_budget(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits), 0)
+            .expect("large explicit route budget");
+
+        assert_eq!(cap, 384_000);
+        assert_eq!(reservation, cap);
+        assert_eq!(budget.output_cap_tokens, u64::from(cap));
+        assert_eq!(budget.input_budget_ceiling, 614_976);
+    }
+
+    #[test]
+    fn automatic_wire_cap_and_reservation_have_no_large_window_cliff() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        for window in [499_999, 500_000, 1_000_000] {
+            let limits = RouteLimits {
+                context_tokens: Some(window),
+                ..RouteLimits::default()
+            };
+            let wire = effective_max_output_tokens_for_route(
+                ApiProvider::Vllm,
+                "DeepSeek-V4-Flash",
+                Some(limits),
+            );
+            let reservation =
+                route_output_reservation(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits));
+            assert_eq!(wire, API_MAX_OUTPUT_TOKENS, "window={window}");
+            assert_eq!(reservation, wire, "window={window}");
+        }
+    }
+
+    #[test]
+    fn concrete_route_input_limit_clamps_preflight_and_compaction() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let limits = RouteLimits {
+            context_tokens: Some(1_000_000),
+            input_tokens: Some(128_000),
+            output_tokens: Some(64_000),
+        };
+
+        let budget = route_context_budget(
+            ApiProvider::Vllm,
+            "DeepSeek-V4-Flash",
+            Some(limits),
+            200_000,
+        )
+        .expect("route budget");
+        assert_eq!(route_input_limit_tokens(Some(limits)), Some(128_000));
+        assert_eq!(budget.input_budget_ceiling, 128_000);
+        assert_eq!(budget.available_input_tokens, 0);
+        assert_eq!(budget.compaction_trigger_for_percent(80.0), 128_000);
+    }
+
+    #[test]
+    fn canonical_output_override_blank_falls_through_but_invalid_is_authoritative() {
+        let _lock = crate::test_support::lock_test_env();
+        let _legacy = crate::test_support::EnvVarGuard::set("DEEPSEEK_MAX_OUTPUT_TOKENS", "100000");
+
+        {
+            let _canonical =
+                crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "   ");
+            assert_eq!(explicit_max_output_tokens_override(), Some(100_000));
+        }
+        for invalid in ["not-a-number", "0"] {
+            let _canonical =
+                crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", invalid);
+            assert_eq!(explicit_max_output_tokens_override(), None, "{invalid}");
+            assert_eq!(
+                effective_max_output_tokens("deepseek-v4-pro"),
+                API_MAX_OUTPUT_TOKENS
+            );
+        }
+    }
+
+    #[test]
+    fn mid_window_internal_reservation_stays_on_the_ordinary_request_floor() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let reservation =
+            route_output_reservation(ApiProvider::Arcee, "trinity-large-thinking", None);
         assert_eq!(reservation, API_MAX_OUTPUT_TOKENS);
         let budget = route_context_budget(ApiProvider::Arcee, "trinity-large-thinking", None, 0)
             .expect("trinity route budget");

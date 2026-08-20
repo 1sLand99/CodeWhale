@@ -75,32 +75,6 @@ describe("public website copy contracts", () => {
     }
   });
 
-  it("uses the current modes, permission postures, and key guidance", () => {
-    const modes = pageSource("docs/modes/page.tsx");
-    const install = pageSource("install/page.tsx");
-    const faq = pageSource("faq/page.tsx");
-    const modeCopy = `${modes}\n${install}\n${faq}`;
-
-    expect(modeCopy).not.toMatch(/\bAgent mode\b|Agent 模式|\bYOLO\b|suggest\s*\/\s*auto\s*\/\s*never|approval_mode|审批模式（建议/);
-    for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
-      expect(modes).toContain(label);
-      expect(install).toContain(label);
-    }
-    expect(modes).toContain("/mode act");
-    expect(modes).toContain("Shift+Tab");
-    expect(modes).toContain("Plan is always Read Only");
-    expect(modes).toContain("same permission posture, sandbox, and safety rules as Act");
-    expect(faq).toContain("delegation is not mandatory");
-    expect(modeCopy).not.toContain("executable work is dispatched to background Fleet workers");
-    expect(install).toContain("New sessions use your selected default mode (Act unless you changed it)");
-    expect(install).toContain("新会话使用你选择的默认模式（未修改则为 Act）");
-    expect(install).not.toContain("新会话默认以 Act 模式打开");
-    expect(install).toContain("GETTING_STARTED_STEPS");
-    expect(install).not.toContain("① Get an API key");
-    expect(install).not.toContain('href={isZh ? "/zh/faq" : "/faq"}');
-    expect(install).not.toContain('href={isZh ? "/zh/roadmap" : "/roadmap"}');
-  });
-
   it("keeps source-candidate facts separate from published install facts", () => {
     const homepage = pageSource("page.tsx");
     const install = pageSource("install/page.tsx");

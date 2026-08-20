@@ -16,6 +16,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { fill } from "@/lib/i18n/dictionaries";
+import { isDocsPath } from "@/lib/i18n/path";
 
 type Mode = "auto" | "light" | "dark";
 const ORDER: Mode[] = ["auto", "light", "dark"];
@@ -51,8 +52,7 @@ export function ThemeToggle({
     if (stored && ORDER.includes(stored)) setMode(stored);
   }, []);
 
-  const onDocs = /^\/[a-z]{2}\/docs(\/|$)/.test(pathname) || pathname.includes("/docs");
-  if (!onDocs) return null;
+  if (!isDocsPath(pathname)) return null;
 
   const cycle = () => {
     const next = ORDER[(ORDER.indexOf(mode) + 1) % ORDER.length];
@@ -82,7 +82,7 @@ export function ThemeToggle({
       suppressHydrationWarning
     >
       <span aria-hidden>{mounted ? glyph[mode] : glyph.auto}</span>
-      <span className="hidden sm:inline" suppressHydrationWarning>
+      <span className="hidden 2xl:inline" suppressHydrationWarning>
         {mounted ? labels[mode] : labels.auto}
       </span>
     </button>

@@ -192,7 +192,7 @@ fn install_rustls_crypto_provider() {
     name = "codewhale-tui",
     bin_name = "codewhale-tui",
     author,
-    version = env!("DEEPSEEK_BUILD_VERSION"),
+    version = env!("CODEWHALE_BUILD_VERSION"),
     about = "Codewhale terminal coding agent",
     long_about = "Terminal-native TUI and CLI for open-source and open-weight coding models.\n\nRun 'codewhale' to start.\n\nProvider routes include DeepSeek, Arcee, Hugging Face, OpenRouter, Xiaomi MiMo, local vLLM/SGLang/Ollama, and more."
 )]
@@ -1027,6 +1027,13 @@ struct DoctorArgs {
         conflicts_with_all = ["json", "context_json"]
     )]
     probe_mcp: bool,
+    /// Opt in to a credential-free transport probe of the selected search provider
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    probe_search: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1854,7 +1861,14 @@ pub(crate) fn apply_tui_telemetry_decision(
 }
 
 /// Close the armed session and flush, bounded.
-async fn finish_telemetry(outcome: &Result<()>) {
+///
+/// Short CLI (`config`, `doctor`, `auth`, …) records `session_end`, seals the
+/// local queue within a much smaller deadline, and returns. The 3s network
+/// flush is a TUI/exec concern: a hung TLS handshake must not hold
+/// `codewhale config list`. A configured endpoint remains buffered for the
+/// next interactive session; an explicitly empty endpoint writes its local
+/// dry-run batch immediately.
+async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Surface) {
     if !codewhale_telemetry::is_armed() {
         return;
     }
@@ -1866,6 +1880,11 @@ async fn finish_telemetry(outcome: &Result<()>) {
         codewhale_telemetry::set_exit_class(codewhale_telemetry::ExitClass::Error);
     }
     codewhale_telemetry::record(telemetry_session_end());
+    if surface == codewhale_telemetry::Surface::Cli {
+        let _ =
+            codewhale_telemetry::persist_local_blocking(codewhale_telemetry::CLI_PERSIST_TIMEOUT);
+        return;
+    }
     // `shutdown_blocking` parks a thread waiting on the writer, so it goes to
     // the blocking pool, and it is bounded there. The persistence actor's
     // unbounded `let _ = task.await` next door is not a pattern to copy here: a
@@ -1935,7 +1954,7 @@ async fn run_async_main_inner(
         pending_telemetry_notice,
     )
     .await;
-    finish_telemetry(&outcome).await;
+    finish_telemetry(&outcome, surface).await;
     outcome
 }
 
@@ -1989,6 +2008,7 @@ async fn run_async_main_dispatch(
                         probe_api: args.probe_api,
                         probe_local: args.probe_local,
                         probe_mcp: args.probe_mcp,
+                        probe_search: args.probe_search,
                     };
                     run_doctor(
                         &config,
@@ -4146,7 +4166,7 @@ async fn run_doctor(
 
     // Version info
     println!("{}", "Version Information:".bold());
-    println!("  codewhale-tui: {}", env!("DEEPSEEK_BUILD_VERSION"));
+    println!("  codewhale-tui: {}", env!("CODEWHALE_BUILD_VERSION"));
     println!("  rust: {}", rustc_version());
     println!();
 
@@ -4482,6 +4502,13 @@ async fn run_doctor(
             );
             println!("    Run `codewhale doctor --probe-api` to opt in.");
         }
+    }
+
+    println!();
+    println!("{}", "Search Provider Reachability:".bold());
+    let search_probe = crate::doctor::doctor_search_probe(config, probes).await;
+    for line in crate::doctor::doctor_search_probe_lines(&search_probe) {
+        println!("  {line}");
     }
 
     // MCP configuration
@@ -7056,6 +7083,8 @@ fn doctor_search_provider_json(config: &Config) -> serde_json::Value {
     json!({
         "provider": search_provider.provider.as_str(),
         "source": search_provider.source.as_str(),
+        "reachability": "not_checked",
+        "reachability_reason": "offline_json",
     })
 }
 
@@ -7932,11 +7961,7 @@ Provide findings ordered by severity with file references, then open questions, 
                 cache_control: None,
             }],
         }],
-        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-            request_route.provider,
-            &request_route.model,
-            None,
-        ),
+        max_tokens: client.effective_max_output_tokens(&request_route.model),
         system: Some(system),
         tools: None,
         tool_choice: None,
@@ -8934,7 +8959,7 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         if server
             .args
             .iter()
-            .any(|arg| is_relative_stdio_path_arg(arg))
+            .any(|arg| is_relative_stdio_path_arg(arg) && !is_scoped_npm_package_arg(cmd, arg))
         {
             return McpServerDoctorStatus::Warning(
                 "stdio server uses a relative path argument without cwd; argument values omitted"
@@ -8948,6 +8973,53 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         server.args.len(),
         server.env.len()
     ))
+}
+
+/// `@scope/package@version` is an npm package spec, not a relative filesystem
+/// path, even though it contains `/`. Keep this exception tied to the npx
+/// launcher so similarly shaped arguments to other commands retain the
+/// relative-path warning.
+fn is_scoped_npm_package_arg(command: &str, argument: &str) -> bool {
+    let launcher = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+    if !launcher.eq_ignore_ascii_case("npx") && !launcher.eq_ignore_ascii_case("npx.cmd") {
+        return false;
+    }
+
+    let Some(scoped) = argument.strip_prefix('@') else {
+        return false;
+    };
+    let Some((scope, package_and_version)) = scoped.split_once('/') else {
+        return false;
+    };
+    if scope.is_empty()
+        || package_and_version.is_empty()
+        || package_and_version.contains('/')
+        || package_and_version.contains('\\')
+    {
+        return false;
+    }
+
+    let (package, version) = match package_and_version.split_once('@') {
+        Some((package, version)) => (package, Some(version)),
+        None => (package_and_version, None),
+    };
+    let valid_name = |value: &str| {
+        !value.is_empty()
+            && !value.starts_with(['.', '_'])
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    };
+    valid_name(scope)
+        && valid_name(package)
+        && version.is_none_or(|value| {
+            !value.is_empty()
+                && !value.contains(['@', '/', '\\'])
+                && !value.chars().any(char::is_whitespace)
+        })
 }
 
 fn save_mcp_config(path: &Path, cfg: &McpConfig) -> Result<()> {
@@ -9587,8 +9659,9 @@ fn merge_user_workspace_config(
             return;
         }
     };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
+    let raw = match read_user_config_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
         Err(error) => {
             eprintln!(
                 "warning: could not read user config at {}: {error}. \
@@ -9616,6 +9689,20 @@ fn merge_user_workspace_config(
     merge_user_workspace_config_from_doc(config, &doc, workspace);
     if allow_shell_from_env {
         config.allow_shell = allow_shell_before;
+    }
+}
+
+fn read_user_config_file(path: &Path) -> io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(metadata_error) => Err(metadata_error),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -10071,11 +10158,7 @@ async fn run_one_shot(
                 cache_control: None,
             }],
         }],
-        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-            request_route.provider,
-            &request_route.model,
-            None,
-        ),
+        max_tokens: client.effective_max_output_tokens(&request_route.model),
         system: None,
         tools: None,
         tool_choice: None,
@@ -10136,11 +10219,7 @@ async fn run_one_shot_json(
                 cache_control: None,
             }],
         }],
-        max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-            request_route.provider,
-            &request_route.model,
-            None,
-        ),
+        max_tokens: client.effective_max_output_tokens(&request_route.model),
         system: Some(SystemPrompt::Text(
             "You are a coding assistant. Give concise, actionable responses.".to_string(),
         )),
@@ -10952,7 +11031,7 @@ async fn forward_direct_workflow_events(
 }
 
 fn emit_direct_workflow_event(event: crate::core::events::Event) -> Result<()> {
-    if let crate::core::events::Event::WorkflowUi { run_id, event } = event {
+    if let crate::core::events::Event::WorkflowUi { run_id, event, .. } = event {
         emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
     }
     Ok(())
@@ -11516,6 +11595,7 @@ async fn run_exec_agent(
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
         goal_max_continuations: execution_config.goal_max_continuations(),
+        goal_continuation_delay_seconds: execution_config.goal_continuation_delay_seconds(),
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls: None,
@@ -11817,7 +11897,7 @@ async fn run_exec_agent(
             {
                 eprintln!("sub-agent {id}: {status}");
             }
-            Event::AgentComplete { id, result }
+            Event::AgentComplete { id, result, .. }
                 if output_format == ExecOutputFormat::Text && !json_output =>
             {
                 eprintln!(
@@ -11844,7 +11924,7 @@ async fn run_exec_agent(
             Event::AgentSpawned { .. }
             | Event::AgentProgress { .. }
             | Event::AgentComplete { .. } => {}
-            Event::WorkflowUi { run_id, event }
+            Event::WorkflowUi { run_id, event, .. }
                 if output_format == ExecOutputFormat::StreamJson =>
             {
                 emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
@@ -13889,6 +13969,8 @@ mod doctor_endpoint_tests {
         }
         assert_eq!(report["provider"], "duckduckgo");
         assert_eq!(report["source"], "config");
+        assert_eq!(report["reachability"], "not_checked");
+        assert_eq!(report["reachability_reason"], "offline_json");
     }
 
     #[test]
@@ -13905,6 +13987,7 @@ mod doctor_endpoint_tests {
         }
         assert_eq!(report["provider"], "tavily");
         assert_eq!(report["source"], "env override");
+        assert_eq!(report["reachability"], "not_checked");
     }
 
     #[test]
@@ -16842,6 +16925,45 @@ allow_shell = true
     }
 
     #[test]
+    fn missing_user_config_is_absent_not_an_error() {
+        let tmp = tempdir().expect("tempdir");
+        let missing = tmp.path().join("config.toml");
+
+        assert_eq!(
+            read_user_config_file(&missing).expect("missing config is a normal first-run state"),
+            None
+        );
+    }
+
+    #[test]
+    fn existing_unreadable_user_config_remains_an_error() {
+        let tmp = tempdir().expect("tempdir");
+        let unreadable = tmp.path().join("config.toml");
+        fs::create_dir(&unreadable).expect("create directory at config path");
+
+        assert!(
+            read_user_config_file(&unreadable).is_err(),
+            "an existing path that cannot be read as a config must still warn"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_user_config_symlink_remains_an_error() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let missing_target = tmp.path().join("missing-target.toml");
+        let config_path = tmp.path().join("config.toml");
+        symlink(&missing_target, &config_path).expect("create dangling config symlink");
+
+        assert!(
+            read_user_config_file(&config_path).is_err(),
+            "a dangling symlink is an existing but unreadable config and must still warn"
+        );
+    }
+
+    #[test]
     fn user_workspace_overlay_can_enable_shell_for_matching_workspace() {
         let tmp = tempdir().expect("tempdir");
         let workspace = tmp.path().join("project");
@@ -17222,6 +17344,48 @@ mod doctor_mcp_tests {
                 assert!(detail.contains("cwd"));
             }
             other => panic!("Expected Warning for relative path argument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scoped_npm_package_spec_without_cwd_is_not_a_path_warning() {
+        let absolute_npx = if cfg!(windows) {
+            r"C:\Program Files\nodejs\npx.cmd"
+        } else {
+            "/opt/homebrew/bin/npx"
+        };
+        for command in ["npx", "npx.cmd", absolute_npx] {
+            let server = make_server(
+                Some(command),
+                &["-y", "@playwright/mcp@0.0.79", "--isolated"],
+                None,
+            );
+            match doctor_check_mcp_server(&server) {
+                McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
+                other => panic!("Expected Ok for scoped npm package via {command}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_scoped_npm_exception_does_not_hide_relative_paths() {
+        for (command, argument) in [
+            ("npx", "scripts/server.js"),
+            ("npx", "@scope/package/extra"),
+            ("npx", "@scope/package@"),
+            ("npx", "@scope/package@@1.0.0"),
+            ("npx", "@.scope/package"),
+            ("npx.cmd", "@scope/_package"),
+            ("node", "@scope/package@1.0.0"),
+        ] {
+            let server = make_server(Some(command), &[argument], None);
+            assert!(
+                matches!(
+                    doctor_check_mcp_server(&server),
+                    McpServerDoctorStatus::Warning(_)
+                ),
+                "Expected a relative-path warning for {command} {argument}"
+            );
         }
     }
 

@@ -91,6 +91,24 @@ network_hosts = ["example.invalid"]
 }
 
 #[test]
+fn bare_plugin_command_opens_unified_extensions_modal() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = TempDir::new().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+    let (mut app, _temp) = create_test_app(root.path());
+
+    let result = plugins(&mut app, None);
+
+    assert!(matches!(
+        result.action,
+        Some(AppAction::OpenExtensions {
+            tab: crate::tui::views::extensions::ExtensionsTab::Plugins
+        })
+    ));
+    assert!(result.message.is_none());
+}
+
+#[test]
 fn list_show_validate_are_read_only_and_label_legacy_tools() {
     let _lock = crate::test_support::lock_test_env();
     let root = TempDir::new().unwrap();

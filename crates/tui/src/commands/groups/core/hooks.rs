@@ -10,6 +10,7 @@ use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::hooks::HookEvent;
 use crate::localization::MessageId;
 use crate::tui::app::App;
+use crate::tui::app::AppAction;
 
 use super::CommandResult;
 
@@ -43,6 +44,11 @@ impl RegisterCommand for HooksCmd {
 ///   discovery — without this, the only way to learn the event
 ///   names is to read source.
 pub fn hooks(app: &App, arg: Option<&str>) -> CommandResult {
+    if arg.is_none_or(|value| value.trim().is_empty()) {
+        return CommandResult::action(AppAction::OpenExtensions {
+            tab: crate::tui::views::extensions::ExtensionsTab::Hooks,
+        });
+    }
     let sub = arg.map(str::trim).unwrap_or("list").to_ascii_lowercase();
     match sub.as_str() {
         "" | "list" | "ls" | "show" => list(app),
@@ -294,7 +300,37 @@ fn condition_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::hooks::{Hook, HookCondition};
+    use crate::tui::app::{App, TuiOptions};
+    use tempfile::TempDir;
+
+    fn create_test_app(tmpdir: &TempDir) -> App {
+        let options = TuiOptions {
+            skills_dir: tmpdir.path().join("skills"),
+            memory_path: tmpdir.path().join("memory.md"),
+            notes_path: tmpdir.path().join("notes.txt"),
+            mcp_config_path: tmpdir.path().join("mcp.json"),
+            ..crate::test_support::test_tui_options(tmpdir.path())
+        };
+        App::new(options, &Config::default())
+    }
+
+    #[test]
+    fn bare_hooks_command_opens_unified_extensions_modal() {
+        let tmpdir = TempDir::new().unwrap();
+        let app = create_test_app(&tmpdir);
+
+        let result = hooks(&app, None);
+
+        assert!(matches!(
+            result.action,
+            Some(AppAction::OpenExtensions {
+                tab: crate::tui::views::extensions::ExtensionsTab::Hooks
+            })
+        ));
+        assert!(result.message.is_none());
+    }
 
     #[test]
     fn preview_command_truncates_to_cap() {

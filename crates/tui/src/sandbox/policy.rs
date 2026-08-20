@@ -74,6 +74,23 @@ pub enum SandboxPolicy {
     },
 }
 
+/// Execution boundary available to apply a sandbox policy for this session.
+///
+/// The engine snapshots this once at construction so model-visible turn
+/// metadata stays byte-stable even if a local wrapper is installed or removed
+/// while the session is running. An external backend accepts a raw command and
+/// delegates isolation to its service, so it must not inherit local
+/// workspace/network enforcement claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxEnforcement {
+    /// A local OS wrapper (Seatbelt or opt-in bubblewrap) is configured.
+    LocalOs,
+    /// Shell execution is routed to a configured external service.
+    ExternalBackend,
+    /// No local wrapper or external execution backend is available.
+    Unavailable,
+}
+
 impl Default for SandboxPolicy {
     /// Returns the default policy: workspace-write with no extra roots and no network.
     fn default() -> Self {
@@ -175,6 +192,40 @@ impl SandboxPolicy {
                     "blocked"
                 }
             ),
+        }
+    }
+
+    /// Render the policy together with the session-pinned execution boundary.
+    ///
+    /// Local wrappers may truthfully retain the policy's concrete filesystem
+    /// and network claims. External backends receive a raw command and delegate
+    /// isolation to their service, so their label names only the requested
+    /// policy and explicitly leaves the actual boundary unverified. When no
+    /// backend exists, restrictive policies are identified as policy-only.
+    #[must_use]
+    pub fn posture_label_with_enforcement(&self, enforcement: SandboxEnforcement) -> String {
+        if enforcement == SandboxEnforcement::ExternalBackend {
+            let requested_policy = match self {
+                SandboxPolicy::DangerFullAccess => "full-access",
+                SandboxPolicy::ReadOnly => "read-only",
+                SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+                SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+            };
+            return format!(
+                "{requested_policy} policy (external execution backend configured; filesystem/network isolation unverified by Codewhale)"
+            );
+        }
+
+        let label = self.posture_label();
+        match enforcement {
+            SandboxEnforcement::LocalOs if self.should_sandbox() => {
+                format!("{label} (local OS sandbox applied)")
+            }
+            SandboxEnforcement::Unavailable if self.should_sandbox() => {
+                format!("{label} (policy only; no execution sandbox available)")
+            }
+            SandboxEnforcement::LocalOs | SandboxEnforcement::Unavailable => label,
+            SandboxEnforcement::ExternalBackend => unreachable!("handled above"),
         }
     }
 
@@ -501,6 +552,56 @@ mod tests {
             }
             .posture_label()
             .contains("network blocked"),
+        );
+    }
+
+    #[test]
+    fn enforcement_labels_distinguish_local_external_and_unavailable() {
+        let local =
+            SandboxPolicy::default().posture_label_with_enforcement(SandboxEnforcement::LocalOs);
+        assert!(local.starts_with("workspace-write"), "{local}");
+        assert!(local.contains("local OS sandbox applied"), "{local}");
+
+        let unavailable =
+            SandboxPolicy::ReadOnly.posture_label_with_enforcement(SandboxEnforcement::Unavailable);
+        assert!(
+            unavailable.contains("policy only; no execution sandbox available"),
+            "{unavailable}"
+        );
+
+        let external = SandboxPolicy::default()
+            .posture_label_with_enforcement(SandboxEnforcement::ExternalBackend);
+        assert!(external.starts_with("workspace-write policy"), "{external}");
+        assert!(
+            external.contains("external execution backend configured"),
+            "{external}"
+        );
+        assert!(
+            external.contains("isolation unverified by Codewhale"),
+            "{external}"
+        );
+        assert!(
+            !external.contains("writes inside the workspace"),
+            "{external}"
+        );
+        assert!(!external.contains("network allowed"), "{external}");
+
+        let full_external = SandboxPolicy::DangerFullAccess
+            .posture_label_with_enforcement(SandboxEnforcement::ExternalBackend);
+        assert!(
+            full_external.starts_with("full-access policy"),
+            "{full_external}"
+        );
+        assert!(
+            !full_external.contains("sandbox disabled"),
+            "{full_external}"
+        );
+
+        let full_unavailable = SandboxPolicy::DangerFullAccess
+            .posture_label_with_enforcement(SandboxEnforcement::Unavailable);
+        assert_eq!(
+            full_unavailable,
+            SandboxPolicy::DangerFullAccess.posture_label()
         );
     }
 

@@ -20,9 +20,9 @@
     ]
   },
   "sourceCandidate": {
-    "version": "0.9.9",
+    "version": "0.9.10",
     "providerCount": 45,
-    "toolCount": 74,
+    "toolCount": 75,
     "sandboxBackends": [
       "seatbelt (macOS, when available)",
       "bubblewrap (Linux, opt-in when installed)"
@@ -221,16 +221,17 @@
       "web/lib/release-credits.ts"
     ],
     "requiredCandidateCredits": [
-      "@h3c-hexin",
-      "@Gabriel-Degret",
-      "@hardy922",
-      "@all-lopezg",
-      "@alitvak69"
+      "@cyq1017",
+      "@aboimpinto",
+      "@wuisabel-gif",
+      "@SparkofSpike",
+      "@Lstarsky0",
+      "@thejayjetson"
     ]
   },
   "screenshot": {
-    "readme": "assets/screenshot.png",
-    "website": "web/public/codewhale-tui.png",
+    "readme": "assets/screenshot.webp",
+    "website": "web/public/codewhale-tui.webp",
     "sourceVersion": null,
     "sourceCommit": null,
     "terminal": "unrecorded",

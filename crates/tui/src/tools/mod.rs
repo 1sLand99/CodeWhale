@@ -45,6 +45,7 @@ mod pdf;
 pub mod plan;
 pub mod plugin;
 pub mod project;
+pub mod read_media;
 pub mod registry;
 pub mod remember;
 mod resource_admission;

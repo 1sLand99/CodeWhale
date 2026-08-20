@@ -113,14 +113,13 @@ async fn responses_stream_retries_rate_limited_request() {
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
         DeepSeekClient::new(&test_codex_config(&server)).unwrap()
     };
-    let mut stream = client
-        .handle_responses_stream(
-            &client
-                .prepare_outbound_request(minimal_responses_request(), true)
-                .expect("responses request prepares"),
-        )
-        .await
-        .unwrap();
+    let mut request = minimal_responses_request();
+    request.max_tokens = 384_000;
+    let prepared = client
+        .prepare_outbound_request(request, true)
+        .expect("responses request prepares");
+    assert_eq!(prepared.body["max_output_tokens"], json!(4_096));
+    let mut stream = client.handle_responses_stream(&prepared).await.unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(event) = stream.next().await {
@@ -131,6 +130,15 @@ async fn responses_stream_retries_rate_limited_request() {
     .expect("Responses retry stream should finish after [DONE]");
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recorded retry requests");
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body: Value = serde_json::from_slice(&request.body).expect("Responses JSON");
+        assert_eq!(body["max_output_tokens"], json!(4_096));
+    }
 }
 
 #[tokio::test]

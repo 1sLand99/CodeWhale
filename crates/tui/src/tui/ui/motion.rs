@@ -141,15 +141,6 @@ pub(crate) fn rail_min_chat_width(idle_empty: bool) -> u16 {
     }
 }
 
-pub(crate) fn status_color(level: StatusToastLevel) -> ratatui::style::Color {
-    match level {
-        StatusToastLevel::Info => palette::WHALE_INFO,
-        StatusToastLevel::Success => palette::STATUS_SUCCESS,
-        StatusToastLevel::Warning => palette::STATUS_WARNING,
-        StatusToastLevel::Error => palette::STATUS_ERROR,
-    }
-}
-
 pub(crate) fn status_animation_interval_ms(app: &App) -> u64 {
     if app.effective_low_motion_for_status() {
         crate::tui::display_refresh::adaptive_animation_interval_ms(true)

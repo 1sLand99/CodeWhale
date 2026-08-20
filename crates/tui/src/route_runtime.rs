@@ -1109,8 +1109,8 @@ mod tests {
                 "kimi-k3",
                 Some(candidate.limits()),
             ),
-            131_072,
-            "the documented catalogue output ceiling is the request cap; the 1M route window must not raise it further"
+            65_536,
+            "the documented catalogue output ceiling remains a ceiling; the safe default request must not reserve it in full"
         );
     }
 

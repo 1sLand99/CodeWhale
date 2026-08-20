@@ -29,6 +29,7 @@ use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::menu_style;
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
+pub mod extensions;
 pub mod fleet_detail;
 pub mod fleet_list;
 pub mod fleet_roster;
@@ -37,6 +38,7 @@ pub mod mode_picker;
 pub mod route_save_prompt;
 pub mod skills_manager;
 pub mod status_picker;
+pub mod workflows_manager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
@@ -68,8 +70,14 @@ pub enum ModalKind {
     ContextMenu,
     ContextInspector,
     SkillsManager,
+    /// Unified, read-only extensions inventory. Mutations delegate to the
+    /// existing Hooks / Plugins / Skills / MCP command controllers.
+    Extensions,
     /// Native git worktree manager (list / create / switch / compare).
     WorktreeManager,
+    /// Live workflow **run** dashboard (`/workflows`): active and retained
+    /// runs from the journal, with host-side cancel.
+    WorkflowsManager,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -845,6 +853,15 @@ pub enum ViewEvent {
         provider: crate::config::ApiProvider,
         provider_id: Option<String>,
     },
+    /// Emitted by `/provider` `T`: probe `/models` and refresh readiness
+    /// without treating a 2xx as model-ready (#5350).
+    ProviderPickerTestConnection {
+        provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
+        /// Restore Catalog vs Configured after the probe. Must not force
+        /// the all-providers catalog if the user was on configured-only.
+        catalog_view: bool,
+    },
     /// Emitted by the `/mode` picker when the user chooses a mode.
     ModeSelected {
         mode: crate::tui::app::AppMode,
@@ -1351,7 +1368,10 @@ impl SettingsRegistry {
         };
         let kind = if !row.editable {
             SettingKind::ReadOnly
-        } else if matches!(row.key.as_str(), "provider" | "model") {
+        } else if matches!(
+            row.key.as_str(),
+            "provider" | "model" | "provider_templates"
+        ) {
             SettingKind::Action
         } else if config_boolean_key(&row.key) {
             SettingKind::Boolean
@@ -1645,6 +1665,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Provider,
+                key: "provider_templates".to_string(),
+                value: codewhale_config::ProviderSetupTemplate::settings_value(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Provider,
                 key: config_base_url_row_key(app.api_provider).to_string(),
                 value: config_base_url_row_value(app),
                 editable: true,
@@ -1818,8 +1845,29 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "thinking_preview_lines".to_string(),
+                value: settings.thinking_preview_lines.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "thinking_highlight".to_string(),
                 value: settings.thinking_highlight.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "help_expand_groups".to_string(),
+                value: settings.help_expand_groups.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "pin_last_prompt".to_string(),
+                value: settings.pin_last_prompt.to_string(),
                 editable: true,
                 scope: ConfigScope::Saved,
             },
@@ -2266,6 +2314,9 @@ impl ConfigView {
     fn setting_description(key: &str) -> &'static str {
         match key {
             "provider" => "Active model provider for this session. Scope: saved route.",
+            "provider_templates" => {
+                "Beginner templates for OpenCode Zen/Go, SenseNova, and unpublished Agnes. Enter opens the list."
+            }
             "model" => "Model id for the active provider. Scope: saved / session route.",
             "approval_mode" => {
                 "Session approval posture (ask / auto). Separate from filesystem sandbox."
@@ -2418,6 +2469,7 @@ impl ConfigView {
         let row = self.rows.get(self.selected_row_index()?)?;
         let command = match row.key.as_str() {
             "provider" if row.editable => "/provider",
+            "provider_templates" if row.editable => "/provider templates",
             "model" if row.editable => "/model",
             _ => return None,
         };
@@ -2753,6 +2805,8 @@ impl ConfigView {
         let hint = config_hint_for_key(self.locale, &row.key);
         let action_id = if row.key == "provider" {
             MessageId::ConfigActionOpenProvider
+        } else if row.key == "provider_templates" {
+            MessageId::ConfigActionOpenProviderTemplates
         } else if row.key == "model" {
             MessageId::ConfigActionOpenModel
         } else if meta.kind == SettingKind::Boolean {
@@ -2884,6 +2938,7 @@ fn experimental_feature_value(effective: bool, default_enabled: bool, configured
 fn config_label_message(key: &str) -> Option<MessageId> {
     Some(match key {
         "provider" => MessageId::ConfigLabelProvider,
+        "provider_templates" => MessageId::ConfigLabelProviderTemplates,
         "base_url" => MessageId::ConfigLabelBaseUrlDeepseek,
         "provider_url" => MessageId::ConfigLabelProviderUrl,
         "model" => MessageId::ConfigLabelModel,
@@ -2979,6 +3034,9 @@ fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
     if key == "provider_url" {
         return tr(locale, MessageId::ConfigHintProviderUrl);
     }
+    if key == "provider_templates" {
+        return tr(locale, MessageId::ConfigHintProviderTemplates);
+    }
     Cow::Borrowed(config_literal_hint_for_key(key))
 }
 
@@ -3055,6 +3113,15 @@ fn config_literal_hint_for_key(key: &str) -> &'static str {
         "thinking_default_expanded" => {
             "expand model reasoning by default; Space still toggles each block"
         }
+        "thinking_preview_lines" => {
+            "collapsed completed-thought preview rows (default 2; 0=header-only; 10=older dump)"
+        }
+        "help_expand_groups" => {
+            "start Help/shortcuts with every group expanded; default folds the long tail"
+        }
+        "pin_last_prompt" => {
+            "pin the last user prompt at the top of the transcript when it scrolls off"
+        }
         "thinking_highlight" => {
             "fill the model reasoning background; the dashed rail remains visible when off"
         }
@@ -3107,6 +3174,8 @@ fn config_boolean_key(key: &str) -> bool {
             | "show_thinking"
             | "thinking_default_expanded"
             | "thinking_highlight"
+            | "help_expand_groups"
+            | "pin_last_prompt"
             | "show_tool_details"
             | "composer_border"
             | "composer_multiline_mode"
@@ -3128,6 +3197,7 @@ fn config_integer_key(key: &str) -> bool {
             | "work_surface_side_width"
             | "mention_menu_limit"
             | "mention_walk_depth"
+            | "thinking_preview_lines"
             | "auto_compact_threshold_percent"
             | "max_history"
             | "fleet.exec.max_spawn_depth"
@@ -5556,6 +5626,7 @@ mod tests {
             .map(|row| row.key.as_str())
             .collect::<Vec<_>>();
         assert!(keys.contains(&"provider"));
+        assert!(keys.contains(&"provider_templates"));
         assert!(keys.contains(&"model"));
         assert!(keys.contains(&"reasoning_effort"));
         assert!(keys.contains(&"base_url"));
@@ -6425,6 +6496,7 @@ context_window = 262144
                 "reasoning_effort",
                 "show_thinking",
                 "thinking_default_expanded",
+                "thinking_preview_lines",
                 "thinking_highlight"
             ]
         );
@@ -6894,6 +6966,7 @@ context_window = 262144
         };
 
         assert_eq!(kind_for("provider"), SettingKind::Action);
+        assert_eq!(kind_for("provider_templates"), SettingKind::Action);
         assert_eq!(kind_for("model"), SettingKind::Action);
         assert_eq!(kind_for("low_motion"), SettingKind::Boolean);
         assert_eq!(kind_for("default_mode"), SettingKind::Choice);

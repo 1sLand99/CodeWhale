@@ -831,6 +831,10 @@ fn test_mcp_config_parse_mcp_servers_alias_and_snapshot() {
     assert_eq!(snapshot.servers[0].name, "disabled");
     assert!(!snapshot.servers[0].enabled);
     assert_eq!(snapshot.servers[0].error.as_deref(), Some("disabled"));
+    assert_eq!(
+        snapshot.servers[0].capability_metadata,
+        McpServerCapabilityMetadata::NotObserved
+    );
 }
 
 #[test]
@@ -1939,7 +1943,15 @@ fn active_plugin_fixture(
     crate::plugins::types::PluginAuthority,
 ) {
     let plugins_root = plugin_base.parent().expect("plugin parent").to_path_buf();
-    let root = plugins_root.parent().unwrap_or(&plugins_root).to_path_buf();
+    // Callers use both `<temp>/plugins/<name>` and `<temp>/<name>` layouts.
+    // Only peel the conventional `plugins` directory; otherwise using the
+    // parent would place multiple parallel fixtures in the shared system temp
+    // root and make their durable state files collide on Windows.
+    let root = if plugins_root.file_name().and_then(|name| name.to_str()) == Some("plugins") {
+        plugins_root.parent().unwrap_or(&plugins_root).to_path_buf()
+    } else {
+        plugins_root.clone()
+    };
     let discovery = crate::plugins::discovery::DiscoveryConfig {
         workspace: root.join("project"),
         user_plugins_dir: plugins_root,
@@ -3097,6 +3109,14 @@ async fn discover_all_honors_tools_only_server_capabilities() {
     conn.initialize().await.expect("initialize");
     conn.discover_all().await.expect("discover tools");
 
+    assert_eq!(
+        conn.server_capabilities,
+        Some(McpServerCapabilities {
+            tools: true,
+            resources: false,
+            prompts: false,
+        })
+    );
     assert_eq!(conn.tools.len(), 1);
     assert!(conn.resources.is_empty());
     assert!(conn.resource_templates.is_empty());
@@ -3158,6 +3178,14 @@ async fn discover_all_populates_every_advertised_capability() {
     conn.initialize().await.expect("initialize");
     conn.discover_all().await.expect("discover all");
 
+    assert_eq!(
+        conn.server_capabilities,
+        Some(McpServerCapabilities {
+            tools: true,
+            resources: true,
+            prompts: true,
+        })
+    );
     assert_eq!(conn.tools.len(), 1);
     assert_eq!(conn.resources.len(), 1);
     assert_eq!(conn.resource_templates.len(), 1);
@@ -3201,6 +3229,7 @@ async fn legacy_optional_discovery_hangs_are_bounded_and_fail_soft() {
         .await
         .expect("hung optional methods must not fail discovery");
 
+    assert_eq!(conn.server_capabilities, None);
     assert_eq!(conn.tools.len(), 1);
     assert!(
         started.elapsed() < Duration::from_secs(1),
@@ -3222,6 +3251,61 @@ async fn legacy_optional_discovery_hangs_are_bounded_and_fail_soft() {
             "resources/templates/list",
             "prompts/list",
         ]
+    );
+}
+
+#[test]
+fn manager_snapshot_preserves_advertised_and_legacy_capability_provenance() {
+    let advertised_config = test_server_config();
+    let legacy_config = test_server_config();
+    let config = McpConfig {
+        servers: HashMap::from([
+            ("advertised".to_string(), advertised_config.clone()),
+            ("legacy".to_string(), legacy_config.clone()),
+        ]),
+        ..McpConfig::default()
+    };
+    let mut pool = McpPool::new(config.clone());
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut advertised = test_connection(Box::new(DropCountingTransport {
+        drops: Arc::clone(&drops),
+    }));
+    advertised.name = "advertised".to_string();
+    advertised.config = advertised_config;
+    advertised.server_capabilities = Some(McpServerCapabilities {
+        tools: true,
+        resources: false,
+        prompts: true,
+    });
+    pool.connections
+        .insert("advertised".to_string(), advertised);
+
+    let mut legacy = test_connection(Box::new(DropCountingTransport { drops }));
+    legacy.name = "legacy".to_string();
+    legacy.config = legacy_config;
+    pool.connections.insert("legacy".to_string(), legacy);
+
+    let errors = HashMap::new();
+    let snapshot = snapshot_from_config(
+        Path::new("mcp.json"),
+        true,
+        false,
+        &config,
+        Some((&pool, &errors)),
+    );
+
+    assert_eq!(
+        snapshot.servers[0].capability_metadata,
+        McpServerCapabilityMetadata::Advertised(McpServerCapabilities {
+            tools: true,
+            resources: false,
+            prompts: true,
+        })
+    );
+    assert_eq!(
+        snapshot.servers[1].capability_metadata,
+        McpServerCapabilityMetadata::LegacyFallback
     );
 }
 

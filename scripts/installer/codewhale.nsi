@@ -5,9 +5,11 @@
 ;   - Default to %LOCALAPPDATA%\Programs\CodeWhale\bin
 ;   - Add install dir to current-user PATH
 ;   - Uninstaller removes the PATH entry
+;   - Install codewhale.bat and a current-user Start Menu shortcut (#1854)
+;   - Uninstaller removes the launcher and shortcut
 ;
 ; Usage:
-;   1. Place all .exe files next to this script:
+;   1. Place the binaries next to this script (codewhale.bat is already here):
 ;        codewhale.exe
 ;        codew.exe
 ;   2. Build:
@@ -71,12 +73,16 @@ Section "Install" SecInstall
 
   SetOutPath "$INSTDIR\bin"
 
-  ; Copy binaries (single binary)
+  ; Copy binaries (single binary) and the Windows Terminal launcher (#1854)
   File "codewhale.exe"
   File "codew.exe"
+  File "codewhale.bat"
 
   ; Write uninstaller
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+  CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\bin\codewhale.bat" "" "$INSTDIR\bin\codewhale.exe" 0
 
   ; NSIS strings default to 1024 characters. ReadRegStr returns an empty string
   ; when a registry value exceeds that limit, which used to make a long user
@@ -122,9 +128,12 @@ Section "Uninstall"
   ; handles PATH values longer than NSIS_MAX_STRLEN without truncation.
   Call un.RemoveFromUserPath
 
-  ; Remove binaries (single binary)
+  ; Remove binaries, launcher, and Start Menu shortcut (single binary)
   Delete "$INSTDIR\bin\codewhale.exe"
   Delete "$INSTDIR\bin\codew.exe"
+  Delete "$INSTDIR\bin\codewhale.bat"
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
+  RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
   Delete "$INSTDIR\update-user-path.ps1"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR\bin"

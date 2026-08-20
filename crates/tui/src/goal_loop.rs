@@ -27,6 +27,11 @@
 /// with `[goal] max_continuations`; `0` keeps the default unlimited behavior.
 pub const DEFAULT_MAX_GOAL_CONTINUATIONS: u32 = 0;
 
+/// Upper bound for one between-turn quiet period. A day is long enough for
+/// coordinator cadences while preventing an accidental giant integer from
+/// becoming a practically uninterruptible-looking schedule receipt.
+pub const MAX_GOAL_CONTINUATION_DELAY_SECONDS: u64 = 24 * 60 * 60;
+
 /// Terminal or active state of a persistent goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalRunStatus {

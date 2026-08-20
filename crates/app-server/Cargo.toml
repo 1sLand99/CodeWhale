@@ -12,16 +12,16 @@ autobins = false
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-codewhale-agent = { path = "../agent", version = "0.9.9" }
-codewhale-config = { path = "../config", version = "0.9.9" }
-codewhale-core = { path = "../core", version = "0.9.9" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.9" }
-codewhale-hooks = { path = "../hooks", version = "0.9.9" }
-codewhale-mcp = { path = "../mcp", version = "0.9.9" }
-codewhale-protocol = { path = "../protocol", version = "0.9.9" }
-codewhale-release = { path = "../release", version = "0.9.9" }
-codewhale-state = { path = "../state", version = "0.9.9" }
-codewhale-tools = { path = "../tools", version = "0.9.9" }
+codewhale-agent = { path = "../agent", version = "0.9.10" }
+codewhale-config = { path = "../config", version = "0.9.10" }
+codewhale-core = { path = "../core", version = "0.9.10" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.10" }
+codewhale-hooks = { path = "../hooks", version = "0.9.10" }
+codewhale-mcp = { path = "../mcp", version = "0.9.10" }
+codewhale-protocol = { path = "../protocol", version = "0.9.10" }
+codewhale-release = { path = "../release", version = "0.9.10" }
+codewhale-state = { path = "../state", version = "0.9.10" }
+codewhale-tools = { path = "../tools", version = "0.9.10" }
 serde.workspace = true
 serde_json.workspace = true
 rustls.workspace = true

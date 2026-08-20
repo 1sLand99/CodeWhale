@@ -1089,10 +1089,14 @@ struct SlashHotbarAction {
 
 impl SlashHotbarAction {
     fn new(info: &'static CommandInfo) -> Self {
+        let short_label = match info.name {
+            "workflow" => "wf".to_string(),
+            other => other.chars().take(7).collect(),
+        };
         Self {
             info,
             id: format!("slash.{}", info.name),
-            short_label: info.name.chars().take(7).collect(),
+            short_label,
         }
     }
 
@@ -1115,11 +1119,18 @@ impl HotbarAction for SlashHotbarAction {
     }
 
     fn metadata(&self, locale: Locale) -> HotbarActionMetadata {
-        let recommendation = match self.info.discovery() {
-            crate::commands::traits::CommandDiscovery::Primary => HotbarRecommendation::Eligible,
-            crate::commands::traits::CommandDiscovery::Advanced
-            | crate::commands::traits::CommandDiscovery::Compatibility => {
-                HotbarRecommendation::Advanced
+        let recommendation = if codewhale_config::DEFAULT_HOTBAR_ACTIONS.contains(&self.id.as_str())
+        {
+            HotbarRecommendation::Default
+        } else {
+            match self.info.discovery() {
+                crate::commands::traits::CommandDiscovery::Primary => {
+                    HotbarRecommendation::Eligible
+                }
+                crate::commands::traits::CommandDiscovery::Advanced
+                | crate::commands::traits::CommandDiscovery::Compatibility => {
+                    HotbarRecommendation::Advanced
+                }
             }
         };
         HotbarActionMetadata {
@@ -1479,6 +1490,11 @@ mod tests {
             read_timeout: 5,
             connected: enabled,
             error: None,
+            capability_metadata: if enabled {
+                crate::mcp::McpServerCapabilityMetadata::LegacyFallback
+            } else {
+                crate::mcp::McpServerCapabilityMetadata::NotObserved
+            },
             tools,
             resources: Vec::new(),
             prompts: Vec::new(),
@@ -1812,8 +1828,12 @@ mod tests {
                 .get(id)
                 .unwrap_or_else(|| panic!("missing default hotbar action {id}"));
             let metadata = action.metadata(Locale::En);
-            assert_eq!(metadata.category, HotbarActionCategory::App);
-            assert_eq!(metadata.args, HotbarArgsBehavior::None);
+            if id.starts_with("slash.") {
+                assert_eq!(metadata.category, HotbarActionCategory::Slash);
+            } else {
+                assert_eq!(metadata.category, HotbarActionCategory::App);
+                assert_eq!(metadata.args, HotbarArgsBehavior::None);
+            }
             assert_eq!(metadata.recommendation, HotbarRecommendation::Default);
             assert!(
                 metadata.recommendation.is_recommendable(),
@@ -1943,7 +1963,16 @@ mod tests {
             .iter()
             .filter(|entry| entry.metadata.category == HotbarActionCategory::Slash)
             .collect::<Vec<_>>();
-        assert_eq!(slash_recommendations.len(), 1);
+        let default_slash = slash_recommendations
+            .iter()
+            .filter(|entry| entry.metadata.recommendation == HotbarRecommendation::Default)
+            .count();
+        let eligible_slash = slash_recommendations
+            .iter()
+            .filter(|entry| entry.metadata.recommendation == HotbarRecommendation::Eligible)
+            .count();
+        assert_eq!(default_slash, 3);
+        assert_eq!(eligible_slash, 1);
     }
 
     #[test]
@@ -1965,14 +1994,14 @@ mod tests {
                 .map(|binding| (binding.slot, binding.label.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                (1, Some("voice")),
-                (2, Some("compact")),
-                (3, Some("plan")),
-                (4, Some("agent")),
-                (5, Some("operate")),
-                (6, Some("palette")),
-                (7, Some("side")),
-                (8, Some("trust")),
+                (1, Some("wf")),
+                (2, Some("goal")),
+                (3, Some("auto")),
+                (4, Some("plan")),
+                (5, Some("agent")),
+                (6, Some("operate")),
+                (7, Some("palette")),
+                (8, Some("side")),
             ]
         );
 

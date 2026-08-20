@@ -27,7 +27,7 @@ pub(super) fn handle_tool_call_started(
     input: &serde_json::Value,
 ) {
     // #2511: ToolCallBefore gate moved to turn-loop planning loop
-    // (Engine::handle_deepseek_turn). Removing observer-only firing
+    // (Engine::run_turn). Removing observer-only firing
     // here to avoid double-firing hooks for each tool call.
     // Hooks that need observation can configure ToolCallBefore on
     // the turn-loop gate — it processes the denial (exit code 2).
@@ -346,26 +346,94 @@ fn register_tool_cell(
     }
 }
 
+/// Per-record ceiling on a retained tool output (#5472 finding 3).
+///
+/// These strings are kept for the transcript's expand-tool-output view, which
+/// shows an excerpt — nothing reads the whole thing. `Bash` already arrives
+/// truncated at 30 KB, but tools with no such contract (`rlm`, large file
+/// reads, MCP responses) previously stored whatever they returned, for every
+/// call, until the 5,000-cell history fold.
+const TOOL_DETAIL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Ceiling on retained tool outputs across the whole transcript.
+///
+/// The history cap is counted in *cells*, so 5,000 cells each holding a large
+/// output was bounded only in principle. Past this budget the oldest cells'
+/// outputs are released — oldest first, because both other consumers of this
+/// map (`context_inspector`, `file_picker_relevance`) already read only the
+/// most recent records, and the expand view degrades to "not retained" rather
+/// than lying about the content.
+const TOOL_DETAIL_TOTAL_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// Truncate to a whole-character boundary, naming what was dropped.
+fn bounded_tool_detail_output(mut text: String) -> String {
+    if text.len() <= TOOL_DETAIL_OUTPUT_MAX_BYTES {
+        return text;
+    }
+    let original = text.len();
+    let mut end = TOOL_DETAIL_OUTPUT_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(&format!(
+        "\n\n[Tool output retained up to {TOOL_DETAIL_OUTPUT_MAX_BYTES} bytes of {original}; \
+         the transcript keeps an excerpt, not the whole result.]"
+    ));
+    text
+}
+
 fn store_tool_detail_output(
     app: &mut App,
     tool_id: &str,
     cell_index: usize,
     result: &Result<ToolResult, ToolError>,
 ) {
-    let payload = Some(match result {
+    let payload = bounded_tool_detail_output(match result {
         Ok(tool_result) => tool_result.content.clone(),
         Err(err) => err.to_string(),
     });
     if cell_index < app.history.len()
         && let Some(detail) = app.tool_details_by_cell.get_mut(&cell_index)
     {
-        detail.output = payload.clone();
+        detail.output = Some(payload.clone());
     }
     // Also write to the active table while the entry might still live there;
     // some callsites pre-rewrite cell_index but the active_tool_details map is
     // the canonical source for in-flight outputs.
     if let Some(detail) = app.active_tool_details.get_mut(tool_id) {
-        detail.output = payload;
+        detail.output = Some(payload);
+    }
+    release_oldest_tool_detail_outputs(app);
+}
+
+/// Hold the retained-output total under [`TOOL_DETAIL_TOTAL_BUDGET_BYTES`] by
+/// dropping the oldest cells' outputs. The records themselves stay, so the
+/// inspector still lists the call and its input.
+fn release_oldest_tool_detail_outputs(app: &mut App) {
+    let mut total = 0usize;
+    for detail in app.tool_details_by_cell.values() {
+        total = total.saturating_add(detail.output.as_ref().map_or(0, String::len));
+    }
+    if total <= TOOL_DETAIL_TOTAL_BUDGET_BYTES {
+        return;
+    }
+    let mut oldest_first: Vec<usize> = app
+        .tool_details_by_cell
+        .iter()
+        .filter(|(_, detail)| detail.output.is_some())
+        .map(|(index, _)| *index)
+        .collect();
+    oldest_first.sort_unstable();
+    for index in oldest_first {
+        if total <= TOOL_DETAIL_TOTAL_BUDGET_BYTES {
+            break;
+        }
+        if let Some(detail) = app.tool_details_by_cell.get_mut(&index) {
+            let freed = detail.output.as_ref().map_or(0, String::len);
+            detail.output = None;
+            total = total.saturating_sub(freed);
+        }
     }
 }
 
@@ -1174,6 +1242,22 @@ pub(super) fn apply_workflow_ui_event(app: &mut App, run_id: &str, event: &serde
     sync_workflow_history_card_from_panel(app);
 }
 
+/// Apply a live workflow event only when its immutable owner is the active
+/// conversation. This check deliberately sits in the mutation helper so every
+/// caller fails closed before touching the panel or transcript history.
+pub(super) fn apply_owned_workflow_ui_event(
+    app: &mut App,
+    owner_session_id: &str,
+    run_id: &str,
+    event: &serde_json::Value,
+) -> bool {
+    if app.current_session_id.as_deref() != Some(owner_session_id) {
+        return false;
+    }
+    apply_workflow_ui_event(app, run_id, event);
+    true
+}
+
 /// Mirror the live WorkflowPanel snapshot into the in-flight (or most recent)
 /// workflow history tool cell so compact/expanded cards stay current.
 fn sync_workflow_history_card_from_panel(app: &mut App) {
@@ -1326,8 +1410,6 @@ fn push_orphan_tool_completion(
         Ok(tool_result) => Some(summarize_tool_output(&tool_result.content)),
         Err(err) => Some(err.to_string()),
     };
-    let history_threshold_before_push = app.history.len();
-    let active_in_flight = app.active_cell.is_some();
     let spillover_path = result
         .as_ref()
         .ok()
@@ -1380,27 +1462,10 @@ fn push_orphan_tool_completion(
         },
     );
 
-    // Shift active-cell virtual indices forward by 1 to absorb the new
-    // history cell. Without this, the next completion would address the
-    // wrong entry.
-    if active_in_flight {
-        let threshold = history_threshold_before_push;
-        for idx in app.tool_cells.values_mut() {
-            if *idx >= threshold {
-                *idx = idx.wrapping_add(1);
-            }
-        }
-        for (cell_idx, _) in app.exploring_entries.values_mut() {
-            if *cell_idx >= threshold {
-                *cell_idx = cell_idx.wrapping_add(1);
-            }
-        }
-        if let Some(idx) = app.exploring_cell.as_mut()
-            && *idx >= threshold
-        {
-            *idx = idx.wrapping_add(1);
-        }
-    }
+    // The virtual-index rebase this path used to do inline now lives in
+    // `App::add_message`, so every mid-turn history insert gets it — not just
+    // orphan completions. That gap was #5478: `/rename`'s note shifted the
+    // indices with nothing to re-base them.
 }
 
 fn tool_status_from_result(result: &Result<ToolResult, ToolError>) -> ToolStatus {
@@ -2128,5 +2193,79 @@ mod tests {
         let errored: Result<ToolResult, ToolError> =
             Err(ToolError::execution_failed("no such tool"));
         assert_eq!(super::reported_tool_exit_code(&errored), None);
+    }
+
+    // === #5472 finding 3: retained tool outputs are bounded ===
+
+    #[test]
+    fn tool_detail_output_is_capped_and_says_what_it_dropped() {
+        let small = "short output".to_string();
+        assert_eq!(super::bounded_tool_detail_output(small.clone()), small);
+
+        let huge = "x".repeat(super::TOOL_DETAIL_OUTPUT_MAX_BYTES * 3);
+        let bounded = super::bounded_tool_detail_output(huge);
+        assert!(
+            bounded.len() < super::TOOL_DETAIL_OUTPUT_MAX_BYTES + 200,
+            "retained {} bytes",
+            bounded.len()
+        );
+        assert!(bounded.contains("the transcript keeps an excerpt"));
+    }
+
+    #[test]
+    fn tool_detail_cap_never_splits_a_character() {
+        // Every char is 3 bytes, so a byte-exact cut lands mid-character.
+        let wide = "宽".repeat(super::TOOL_DETAIL_OUTPUT_MAX_BYTES);
+        let bounded = super::bounded_tool_detail_output(wide);
+        assert!(bounded.starts_with('宽'));
+        assert!(bounded.contains("excerpt"));
+    }
+
+    #[test]
+    fn oldest_tool_outputs_are_released_once_the_budget_is_exceeded() {
+        let mut app = crate::tui::app::App::new(
+            crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
+            &crate::config::Config::default(),
+        );
+        // 200 records x 64 KiB = 12.8 MiB, well past the 8 MiB budget.
+        let record_count = 200usize;
+        for index in 0..record_count {
+            app.tool_details_by_cell.insert(
+                index,
+                ToolDetailRecord {
+                    tool_id: format!("tool-{index}"),
+                    tool_name: "Bash".to_string(),
+                    input: serde_json::Value::Null,
+                    output: Some("y".repeat(super::TOOL_DETAIL_OUTPUT_MAX_BYTES)),
+                },
+            );
+        }
+        super::release_oldest_tool_detail_outputs(&mut app);
+
+        let retained: usize = app
+            .tool_details_by_cell
+            .values()
+            .map(|detail| detail.output.as_ref().map_or(0, String::len))
+            .sum();
+        assert!(
+            retained <= super::TOOL_DETAIL_TOTAL_BUDGET_BYTES,
+            "retained {retained} bytes over the {} budget",
+            super::TOOL_DETAIL_TOTAL_BUDGET_BYTES
+        );
+        assert_eq!(
+            app.tool_details_by_cell.len(),
+            record_count,
+            "records stay listed; only their outputs are released"
+        );
+        assert!(
+            app.tool_details_by_cell[&(record_count - 1)]
+                .output
+                .is_some(),
+            "the newest output must survive — it is the one the user can still expand"
+        );
+        assert!(
+            app.tool_details_by_cell[&0].output.is_none(),
+            "the oldest output is the first to go"
+        );
     }
 }

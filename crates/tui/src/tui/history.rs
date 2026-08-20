@@ -1,5 +1,6 @@
 //! TUI rendering helpers for chat history and tool output.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -185,6 +186,8 @@ pub struct TranscriptRenderOptions {
     pub locale: Locale,
     pub show_thinking: bool,
     pub thinking_default_expanded: bool,
+    /// Collapsed completed-thought preview rows (settings.toml).
+    pub thinking_preview_lines: usize,
     pub thinking_highlight: bool,
     pub verbose: bool,
     pub show_tool_details: bool,
@@ -221,6 +224,7 @@ impl Default for TranscriptRenderOptions {
             show_thinking: true,
             thinking_highlight: true,
             thinking_default_expanded: false,
+            thinking_preview_lines: 2,
             verbose: false,
             show_tool_details: true,
             inline_diff_mode: crate::settings::InlineDiffMode::Full,
@@ -360,7 +364,7 @@ impl HistoryCell {
         }
     }
 
-    #[allow(dead_code)] // retained for focused/detail renderers and direct rendering tests
+    #[cfg(test)]
     pub fn lines_with_options(
         &self,
         width: u16,
@@ -409,6 +413,7 @@ impl HistoryCell {
                     options.low_motion,
                     options.thinking_highlight,
                     options.reasoning_preview_extra_lines,
+                    options.thinking_preview_lines,
                 );
                 reasoning_action = expandable.then_some(if collapsed {
                     ReasoningAction::Expand
@@ -424,7 +429,8 @@ impl HistoryCell {
                 options.inline_diff_mode,
             ),
             HistoryCell::Tool(cell) if !options.show_tool_details && !cell.is_failed() => {
-                let mut lines = cell.lines_with_motion(width, options.low_motion);
+                let mut lines =
+                    cell.lines_with_motion_and_locale(width, options.low_motion, options.locale);
                 if lines.len() > TOOL_SUMMARY_CARD_LINES {
                     lines.truncate(TOOL_SUMMARY_CARD_LINES);
                     lines.push(details_affordance_line(
@@ -435,7 +441,8 @@ impl HistoryCell {
                 lines
             }
             HistoryCell::Tool(cell) if options.calm_mode && !cell.is_failed() => {
-                let mut lines = cell.lines_with_motion(width, options.low_motion);
+                let mut lines =
+                    cell.lines_with_motion_and_locale(width, options.low_motion, options.locale);
                 if lines.len() > TOOL_CARD_SUMMARY_LINES {
                     lines.truncate(TOOL_CARD_SUMMARY_LINES);
                     lines.push(details_affordance_line(
@@ -445,7 +452,9 @@ impl HistoryCell {
                 }
                 lines
             }
-            HistoryCell::Tool(cell) => cell.lines_with_motion(width, options.low_motion),
+            HistoryCell::Tool(cell) => {
+                cell.lines_with_motion_and_locale(width, options.low_motion, options.locale)
+            }
             HistoryCell::User { content } => render_user_message(content, width),
             HistoryCell::Assistant { content, streaming } => {
                 let mut lines: Vec<Line<'static>> = render_message_with_copy_metadata_for_palette(
@@ -488,7 +497,6 @@ impl HistoryCell {
         (lines, reasoning_action)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn lines_with_copy_metadata(
         &self,
         width: u16,
@@ -844,20 +852,46 @@ impl ToolCell {
     }
 
     pub fn lines_with_motion(&self, width: u16, low_motion: bool) -> Vec<Line<'static>> {
-        self.render(width, low_motion, RenderMode::Live)
+        self.lines_with_motion_and_locale(width, low_motion, Locale::En)
+    }
+
+    pub fn lines_with_motion_and_locale(
+        &self,
+        width: u16,
+        low_motion: bool,
+        locale: Locale,
+    ) -> Vec<Line<'static>> {
+        self.render_with_locale(width, low_motion, RenderMode::Live, locale)
     }
 
     /// Full-content rendering for the pager / clipboard. Tool output that
     /// would be capped + suffixed with a details-pager hint in the live view
     /// is emitted in full here.
     pub fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.render(width, /*low_motion*/ false, RenderMode::Transcript)
+        self.transcript_lines_with_locale(width, Locale::En)
     }
 
-    fn render(&self, width: u16, low_motion: bool, mode: RenderMode) -> Vec<Line<'static>> {
+    pub fn transcript_lines_with_locale(&self, width: u16, locale: Locale) -> Vec<Line<'static>> {
+        self.render_with_locale(
+            width,
+            /*low_motion*/ false,
+            RenderMode::Transcript,
+            locale,
+        )
+    }
+
+    fn render_with_locale(
+        &self,
+        width: u16,
+        low_motion: bool,
+        mode: RenderMode,
+        locale: Locale,
+    ) -> Vec<Line<'static>> {
         match self {
-            ToolCell::Exec(cell) => cell.render(width, low_motion, mode),
-            ToolCell::Exploring(cell) => cell.lines_with_motion(width, low_motion),
+            ToolCell::Exec(cell) => cell.render_with_locale(width, low_motion, mode, locale),
+            ToolCell::Exploring(cell) => {
+                cell.lines_with_motion_and_locale(width, low_motion, locale)
+            }
             ToolCell::PlanUpdate(cell) => cell.lines_with_motion(width, low_motion),
             ToolCell::PatchSummary(cell) => cell.render(
                 width,
@@ -869,7 +903,9 @@ impl ToolCell {
             ToolCell::Mcp(cell) => cell.render(width, low_motion, mode),
             ToolCell::ViewImage(cell) => cell.lines_with_motion(width, low_motion),
             ToolCell::WebSearch(cell) => cell.lines_with_motion(width, low_motion),
-            ToolCell::Generic(cell) => cell.lines_with_mode(width, low_motion, mode),
+            ToolCell::Generic(cell) => {
+                cell.lines_with_mode_and_locale(width, low_motion, mode, locale)
+            }
         }
     }
 }
@@ -916,11 +952,22 @@ impl ExecCell {
             && self.interaction.is_none()
     }
 
+    #[cfg(test)]
     pub(super) fn render(
         &self,
         width: u16,
         low_motion: bool,
         mode: RenderMode,
+    ) -> Vec<Line<'static>> {
+        self.render_with_locale(width, low_motion, mode, Locale::En)
+    }
+
+    pub(super) fn render_with_locale(
+        &self,
+        width: u16,
+        low_motion: bool,
+        mode: RenderMode,
+        locale: Locale,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let command_summary = command_header_summary(&self.command);
@@ -935,12 +982,20 @@ impl ExecCell {
         let stale_status = self
             .stale_elapsed_since_output_ms
             .map(stale_shell_status_label);
+        let receipt = tool_receipt_label(
+            crate::tui::widgets::tool_card::ToolFamily::Run,
+            self.status,
+            self.output.as_deref(),
+            locale,
+        );
+        let status_text = stale_status
+            .as_deref()
+            .map(Cow::Borrowed)
+            .unwrap_or(receipt);
         lines.push(render_tool_header_with_summary(
             "Shell",
             header_summary,
-            stale_status
-                .as_deref()
-                .unwrap_or_else(|| tool_status_label(self.status)),
+            status_text.as_ref(),
             self.status,
             self.started_at,
             low_motion || stale_status.is_some(),
@@ -1084,7 +1139,17 @@ pub struct ExploringCell {
 
 impl ExploringCell {
     /// Render the exploring cell into lines.
+    #[allow(dead_code)]
     pub fn lines_with_motion(&self, width: u16, low_motion: bool) -> Vec<Line<'static>> {
+        self.lines_with_motion_and_locale(width, low_motion, Locale::En)
+    }
+
+    pub fn lines_with_motion_and_locale(
+        &self,
+        width: u16,
+        low_motion: bool,
+        locale: Locale,
+    ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let all_done = self
             .entries
@@ -1105,12 +1170,16 @@ impl ExploringCell {
         };
         let header_summary = exploring_header_summary(&self.entries);
         let multi_entry = self.entries.len() > 1;
-        let header_state = if multi_entry {
-            ""
+        let header_state: Cow<'static, str> = if multi_entry {
+            Cow::Borrowed("")
         } else if all_done {
-            tool_status_label(status)
+            if status == ToolStatus::Success {
+                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+            } else {
+                Cow::Borrowed(tool_status_label(status))
+            }
         } else {
-            "running"
+            Cow::Borrowed("running")
         };
         // Search-only exploration cards read with the `find` verb so a
         // completed grep renders `find done · Searching for …` instead of the
@@ -1120,7 +1189,7 @@ impl ExploringCell {
         lines.push(render_tool_header_with_family_and_summary(
             family,
             header_summary.as_deref(),
-            header_state,
+            header_state.as_ref(),
             status,
             None,
             low_motion,
@@ -1585,11 +1654,22 @@ impl GenericToolCell {
     /// `mode` controls multi-line output handling: `Live` caps at
     /// `TOOL_OUTPUT_LINE_LIMIT` rows with a "+N more" affordance;
     /// `Transcript` emits the full output.
+    #[allow(dead_code)]
     pub fn lines_with_mode(
         &self,
         width: u16,
         low_motion: bool,
         mode: RenderMode,
+    ) -> Vec<Line<'static>> {
+        self.lines_with_mode_and_locale(width, low_motion, mode, Locale::En)
+    }
+
+    pub fn lines_with_mode_and_locale(
+        &self,
+        width: u16,
+        low_motion: bool,
+        mode: RenderMode,
+        locale: Locale,
     ) -> Vec<Line<'static>> {
         if self.name == "activity_group" {
             return agent_activity::render_activity_group(self, width);
@@ -1661,7 +1741,7 @@ impl GenericToolCell {
                 let mut collapsed = vec![render_tool_header_with_family_and_summary(
                     family,
                     header_summary.as_deref(),
-                    tool_status_label(self.status),
+                    &tool_receipt_label(family, self.status, self.output.as_deref(), locale),
                     self.status,
                     None,
                     low_motion,
@@ -1686,7 +1766,7 @@ impl GenericToolCell {
         lines.push(render_tool_header_with_family_and_summary(
             family,
             header_summary.as_deref(),
-            tool_status_label(self.status),
+            &tool_receipt_label(family, self.status, self.output.as_deref(), locale),
             self.status,
             None,
             low_motion,
@@ -2568,6 +2648,55 @@ fn tool_status_label(status: ToolStatus) -> &'static str {
         ToolStatus::Success => "done",
         ToolStatus::Hydrated => "tool loaded - retry required",
         ToolStatus::Failed => "issue",
+    }
+}
+
+/// A finished read/find card can truthfully name how many rendered lines came
+/// back. Generic command output does not preserve typed stdout/stderr streams,
+/// so Run receipts stay at localized `done` instead of inventing per-stream
+/// counts from display text.
+pub(crate) fn tool_receipt_label(
+    family: crate::tui::widgets::tool_card::ToolFamily,
+    status: ToolStatus,
+    output: Option<&str>,
+    locale: Locale,
+) -> Cow<'static, str> {
+    if status != ToolStatus::Success {
+        return Cow::Borrowed(tool_status_label(status));
+    }
+    use crate::tui::widgets::tool_card::ToolFamily;
+    match family {
+        ToolFamily::Read | ToolFamily::Find => {
+            let lines = output.map(count_output_lines).unwrap_or(0);
+            if lines == 0 {
+                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+            } else if lines == 1 {
+                crate::localization::tr(
+                    locale,
+                    crate::localization::MessageId::ToolReceiptLinesSingular,
+                )
+            } else {
+                Cow::Owned(
+                    crate::localization::tr(
+                        locale,
+                        crate::localization::MessageId::ToolReceiptLinesPlural,
+                    )
+                    .replace("{count}", &lines.to_string()),
+                )
+            }
+        }
+        ToolFamily::Run => {
+            crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+        }
+        _ => crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone),
+    }
+}
+
+fn count_output_lines(output: &str) -> usize {
+    if output.is_empty() {
+        0
+    } else {
+        output.lines().count()
     }
 }
 

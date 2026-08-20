@@ -332,6 +332,14 @@ pub async fn install_with_registry(
             let _ = fs::remove_dir_all(&staged.staged_path);
             return Err(InstallError::AlreadyInstalled(staged.skill_name).into());
         }
+        // Same ownership gate as plugins/install/place.rs: an update may only
+        // replace a tree this installer created. The tarball's top-level name
+        // is not proof of ownership — without the marker we would delete a
+        // user-authored or system skill that happened to share the name.
+        if let Err(err) = reject_unmarked_update(&final_path, &staged.skill_name) {
+            let _ = fs::remove_dir_all(&staged.staged_path);
+            return Err(err.into());
+        }
         let backup = skills_dir.join(format!("{}.bak", staged.skill_name));
         if backup.exists() {
             fs::remove_dir_all(&backup).ok();
@@ -1619,6 +1627,14 @@ fn parse_frontmatter_name(bytes: &[u8]) -> Result<String> {
     Ok(name)
 }
 
+fn reject_unmarked_update(final_path: &Path, name: &str) -> std::result::Result<(), InstallError> {
+    if final_path.join(INSTALLED_FROM_MARKER).exists() {
+        Ok(())
+    } else {
+        Err(InstallError::NotInstalledHere(name.to_string()))
+    }
+}
+
 pub(crate) fn source_spec_string(source: &InstallSource) -> String {
     match source {
         InstallSource::GitHubRepo(repo) => format!("github:{repo}"),
@@ -1782,6 +1798,18 @@ mod tests {
     fn parse_frontmatter_requires_opening_fence() {
         let body = b"name: hello\ndescription: x\n";
         assert!(parse_frontmatter_name(body).is_err());
+    }
+
+    #[test]
+    fn update_refuses_to_replace_a_directory_without_an_install_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("hand-authored");
+        std::fs::create_dir_all(&dest).expect("dest");
+        std::fs::write(dest.join("SKILL.md"), "---\nname: hand-authored\n---\n").expect("skill md");
+        assert!(!dest.join(INSTALLED_FROM_MARKER).exists());
+        let err = reject_unmarked_update(&dest, "hand-authored").unwrap_err();
+        assert!(matches!(err, InstallError::NotInstalledHere(name) if name == "hand-authored"));
+        assert!(dest.join("SKILL.md").exists(), "unmarked tree must survive");
     }
 
     #[test]

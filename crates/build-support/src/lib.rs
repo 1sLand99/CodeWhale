@@ -1,12 +1,12 @@
 //! Shared build-script helpers for the `codewhale-cli`, `codewhale-tui`, and
 //! `codewhale-telemetry` build scripts: rerun-condition declarations, the
-//! embedded `DEEPSEEK_BUILD_VERSION` metadata, and the release-only build sha.
+//! embedded `CODEWHALE_BUILD_VERSION` metadata, and the release-only build sha.
 //! Only call these functions from a build script — they emit `cargo:`
 //! directives on stdout.
 //!
 //! Two different shas live here and they are not interchangeable.
-//! `DEEPSEEK_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *the build the
-//! environment asked for* (`DEEPSEEK_BUILD_SHA`/`GITHUB_SHA`); an unstamped
+//! `CODEWHALE_BUILD_VERSION`/`CODEWHALE_BUILD_COMMIT` describe *the build the
+//! environment asked for* (`CODEWHALE_BUILD_SHA`/`DEEPSEEK_BUILD_SHA`/`GITHUB_SHA`); an unstamped
 //! local build renders a `(dev)` marker instead.
 //! `CODEWHALE_RELEASE_BUILD_SHA` describes a *published* binary and has no
 //! fallback at all, because it leaves the machine.
@@ -21,7 +21,7 @@
 //! would report whatever the checkout's HEAD is *now*, which breaks the
 //! dogfood-receipt identity `scripts/release/install-dogfood.sh` verifies.
 //! So the contract is: a sha appears in the version string only when the
-//! build environment supplied one (`DEEPSEEK_BUILD_SHA` wins over
+//! build environment supplied one (`CODEWHALE_BUILD_SHA` wins over
 //! `GITHUB_SHA`), the build script reruns only when those variables change,
 //! and a build nobody stamped says `(dev)`. CI and release builds are
 //! byte-identical to the old behavior; dogfood builds pass the sha
@@ -37,13 +37,14 @@ use std::path::Path;
 /// `manifest_dir` is accepted (and ignored) so build scripts keep one call
 /// shape; it documents that the decision is per-crate, not global state.
 pub fn declare_rerun_conditions(_manifest_dir: &Path) {
+    println!("cargo:rerun-if-env-changed=CODEWHALE_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=DEEPSEEK_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
 }
 
-/// Emit `cargo:rustc-env=DEEPSEEK_BUILD_VERSION=...` — the package version,
+/// Emit `cargo:rustc-env=CODEWHALE_BUILD_VERSION=...` — the package version,
 /// suffixed with the short build SHA when the environment supplied one
-/// (`DEEPSEEK_BUILD_SHA`, then `GITHUB_SHA`), or with the literal `dev`
+/// (`CODEWHALE_BUILD_SHA`, then `DEEPSEEK_BUILD_SHA`, then `GITHUB_SHA`), or with the literal `dev`
 /// marker when it did not. `CODEWHALE_BUILD_COMMIT` is emitted only in the
 /// stamped case.
 ///
@@ -57,6 +58,9 @@ pub fn emit_build_version(_manifest_dir: &Path, package_version: &str) {
         .map(|sha| format!("{package_version} ({sha})"))
         .unwrap_or_else(|| format!("{package_version} (dev)"));
 
+    println!("cargo:rustc-env=CODEWHALE_BUILD_VERSION={build_version}");
+    // Keep the pre-rebrand compile-time name through the 0.9.x compatibility
+    // window for downstream crates that still use `env!` with it.
     println!("cargo:rustc-env=DEEPSEEK_BUILD_VERSION={build_version}");
     if let Some(commit) = commit {
         println!("cargo:rustc-env=CODEWHALE_BUILD_COMMIT={commit}");
@@ -70,6 +74,7 @@ pub fn emit_build_version(_manifest_dir: &Path, package_version: &str) {
 /// make the build script rerun on every local commit, for a value that is
 /// `None` on every local build by design.
 pub fn declare_release_sha_rerun() {
+    println!("cargo:rerun-if-env-changed=CODEWHALE_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=DEEPSEEK_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
 }
@@ -104,12 +109,14 @@ pub fn emit_release_build_sha() {
 /// The decision behind [`emit_release_build_sha`], with the environment
 /// injected so it can be tested without mutating the process.
 ///
-/// `DEEPSEEK_BUILD_SHA` wins over `GITHUB_SHA`; both must be a full 40-hex sha
+/// `CODEWHALE_BUILD_SHA` wins over the legacy `DEEPSEEK_BUILD_SHA`, which wins over
+/// `GITHUB_SHA`; each must be a full 40-hex sha
 /// to be believed, and the result is the first 12 characters.
 #[must_use]
 pub fn release_build_sha(read_env: impl Fn(&str) -> Option<String>) -> Option<String> {
-    read_env("DEEPSEEK_BUILD_SHA")
+    read_env("CODEWHALE_BUILD_SHA")
         .and_then(full_sha)
+        .or_else(|| read_env("DEEPSEEK_BUILD_SHA").and_then(full_sha))
         .or_else(|| read_env("GITHUB_SHA").and_then(full_sha))
         .and_then(short_sha)
 }
@@ -121,8 +128,9 @@ fn build_commit() -> Option<String> {
 /// The stamping decision with the environment injected, so the no-local-
 /// fallback contract is testable without mutating the process (#5245).
 fn build_commit_with(read_env: impl Fn(&str) -> Option<String>) -> Option<String> {
-    read_env("DEEPSEEK_BUILD_SHA")
+    read_env("CODEWHALE_BUILD_SHA")
         .and_then(full_sha)
+        .or_else(|| read_env("DEEPSEEK_BUILD_SHA").and_then(full_sha))
         .or_else(|| read_env("GITHUB_SHA").and_then(full_sha))
 }
 
@@ -179,7 +187,19 @@ mod tests {
             release_build_sha(|name| (name == "GITHUB_SHA").then(|| ci.to_string())),
             Some("abcdef012345".to_string())
         );
-        // The Codewhale variable wins over the GitHub one.
+        // The canonical Codewhale variable wins over the legacy
+        // DeepSeek-era one, which wins over the GitHub one.
+        assert_eq!(
+            release_build_sha(|name| match name {
+                "CODEWHALE_BUILD_SHA" => Some("e".repeat(40)),
+                "DEEPSEEK_BUILD_SHA" => Some("f".repeat(40)),
+                "GITHUB_SHA" => Some(ci.to_string()),
+                _ => None,
+            }),
+            Some("e".repeat(12))
+        );
+        // The legacy name still stamps during the 0.9.x compatibility
+        // window, so existing release tooling keeps working.
         assert_eq!(
             release_build_sha(|name| match name {
                 "DEEPSEEK_BUILD_SHA" => Some("f".repeat(40)),
@@ -225,6 +245,14 @@ mod tests {
                 _ => None,
             }),
             Some("f".repeat(40))
+        );
+        assert_eq!(
+            super::build_commit_with(|name| match name {
+                "CODEWHALE_BUILD_SHA" => Some("e".repeat(40)),
+                "DEEPSEEK_BUILD_SHA" => Some("f".repeat(40)),
+                _ => None,
+            }),
+            Some("e".repeat(40))
         );
     }
 }

@@ -18,7 +18,7 @@
  * "Plan · Work · Operate", "Ask · Auto-Review · Full Access",
  * "TUI · exec · web · API", "Codewhale", "GitHub", "Issues",
  * `npm install -g codewhale`, `cargo test --locked`, `codewhale exec`,
- * package-manager proper nouns, mirror names, and `/codewhale-tui.png`.
+ * package-manager proper nouns, mirror names, and `/codewhale-tui.webp`.
  */
 
 export interface ChromeDict {
@@ -214,7 +214,7 @@ export interface HomeDict {
 
   /** Screenshot toolbar label, e.g. "Current session". */
   shotSession: string;
-  /** Screenshot alt text for /codewhale-tui.png. */
+  /** Screenshot alt text for /codewhale-tui.webp. */
   screenshotAlt: string;
   /** Screenshot figcaption. */
   figcaption: string;
@@ -361,6 +361,24 @@ export interface DocsTroubleshootingDict {
   sourceNote: string;
 }
 
+/** `app/[locale]/docs/configuration/page.tsx`. */
+export interface DocsConfigurationDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  auditLead: string;
+  overlayTitle: string;
+  overlayLead: string;
+  overlayLimits: string;
+  credentialsTitle: string;
+  credentialsLead: string;
+  legacyTitle: string;
+  legacyLead: string;
+  sourceNote: string;
+}
+
 /**
  * `app/[locale]/docs/constitution/page.tsx`.
  *
@@ -384,6 +402,41 @@ export interface DocsConstitutionDict {
   authorityNote: string;
   /** Link text inside `authorityNote`'s `{configDocs}` slot. */
   configDocsLabel: string;
+  sourceNote: string;
+}
+
+/** `app/[locale]/docs/fleet/page.tsx`. */
+export interface DocsFleetDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  runTitle: string;
+  runLead: string;
+  statusLead: string;
+  profilesTitle: string;
+  profilesLead: string;
+  workflowTitle: string;
+  workflowLead: string;
+  workflowLimits: string;
+  sourceNote: string;
+}
+
+/** `app/[locale]/docs/modes/page.tsx`. */
+export interface DocsModesDict {
+  metaTitle: string;
+  metaDescription: string;
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  modes: [string, string][];
+  switchingTitle: string;
+  switchingLead: string;
+  switchingCommandLead: string;
+  permissionsTitle: string;
+  permissionsLead: string;
+  postures: [string, string][];
   sourceNote: string;
 }
 

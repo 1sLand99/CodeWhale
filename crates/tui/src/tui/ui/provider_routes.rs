@@ -93,11 +93,49 @@ pub(crate) fn back_from_provider_onboarding(app: &mut App) {
 }
 
 pub(crate) fn complete_provider_picker_onboarding(app: &mut App, provider: ApiProvider) {
+    // Ordinary `/provider` changes stay session-local until the operator
+    // answers the route-save prompt. Onboarding is different: choosing a
+    // provider is the explicit decision that establishes the startup route.
+    // Persist the exact live identity/model before advancing, otherwise a
+    // clean first run can finish on Ollama (or another non-DeepSeek route)
+    // while the next launch silently reconstructs the old DeepSeek default.
+    // `settings.toml`, rather than a workspace `config.toml`, is the durable
+    // user-global owner for this choice.
+    let provider_action_receipt = app.status_message.take();
+    let startup_default_receipt = match app.try_save_live_route_as_startup_default() {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            // Persistence is part of completing first-run provider setup. Keep
+            // the provider step active on failure so the current session may
+            // use the selected route, but onboarding cannot claim that the
+            // next launch will restore it. The exact selected provider remains
+            // focused for an immediate retry.
+            app.onboarding_provider = provider;
+            app.onboarding_needs_api_key = true;
+            app.status_message = Some(match provider_action_receipt {
+                Some(receipt) if !receipt.trim().is_empty() => {
+                    format!("{receipt} · Save failed: {err}")
+                }
+                _ => format!("Save failed: {err}"),
+            });
+            app.needs_redraw = true;
+            return;
+        }
+    };
     app.onboarding_provider = provider;
     app.onboarding_needs_api_key = false;
     app.api_key_env_only = false;
     app.offline_mode = false;
     onboarding::advance_onboarding_after_provider(app);
+    // `advance_onboarding_after_provider` clears the previous switch status.
+    // Restore the persistence receipt last so an I/O failure remains visible
+    // instead of allowing onboarding to imply that the restart route landed.
+    app.status_message = Some(match provider_action_receipt {
+        Some(receipt) if !receipt.trim().is_empty() => {
+            format!("{receipt} · {startup_default_receipt}")
+        }
+        _ => startup_default_receipt,
+    });
 }
 
 pub(crate) fn complete_provider_picker_onboarding_if_switched(
@@ -831,7 +869,6 @@ pub(crate) fn picker_provider_identity(
     Ok(identity)
 }
 
-#[cfg(test)]
 pub(crate) fn provider_verification_error_category(
     reason: &str,
 ) -> crate::error_taxonomy::ErrorCategory {

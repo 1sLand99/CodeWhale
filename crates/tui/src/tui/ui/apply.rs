@@ -266,19 +266,27 @@ pub(crate) fn apply_message_submit_outcome(
 }
 
 pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot) -> bool {
+    let durable_goal = match crate::session_manager::SessionGoalState::from_runtime(snapshot) {
+        Ok(goal) => goal,
+        Err(error) => {
+            tracing::warn!("ignoring invalid runtime goal snapshot: {error}");
+            return false;
+        }
+    };
     // An explicit engine-side clear is represented by the one canonical empty
     // state emitted by GoalState::snapshot. Require both fields so a malformed
     // objective-less Active/Blocked update cannot erase valid visible state.
     if snapshot.objective.is_none() && snapshot.status.trim() == "none" {
-        let changed = app.hunt.quarry.is_some()
-            || app.hunt.token_budget.is_some()
-            || app.hunt.tokens_used != 0
-            || app.hunt.time_used_seconds != 0
-            || app.hunt.continuation_count != 0
-            || app.hunt.started_at.is_some()
-            || app.hunt.finished_at.is_some()
-            || app.hunt.verdict != HuntVerdict::default();
-        app.hunt = crate::tui::app::HuntState::default();
+        let changed = app.goal.objective.is_some()
+            || app.goal.token_budget.is_some()
+            || app.goal.tokens_used != 0
+            || app.goal.time_used_seconds != 0
+            || app.goal.continuation_count != 0
+            || app.goal.started_at.is_some()
+            || app.goal.finished_at.is_some()
+            || app.goal.status != GoalStatus::default();
+        app.goal = crate::tui::app::HostGoalState::default();
+        app.last_known_goal_state = None;
         return changed;
     }
 
@@ -298,39 +306,42 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         tracing::warn!("ignoring unknown runtime goal status: {}", snapshot.status);
         return false;
     };
-    let verdict = HuntVerdict::from_goal_status(status);
-    let objective_changed = app.hunt.quarry.as_deref() != Some(objective);
+    let verdict = status;
+    let objective_changed = app.goal.objective.as_deref() != Some(objective);
     let changed = objective_changed
-        || app.hunt.token_budget != snapshot.token_budget
-        || app.hunt.tokens_used != snapshot.tokens_used
-        || app.hunt.time_used_seconds != snapshot.time_used_seconds
-        || app.hunt.continuation_count != snapshot.continuation_count
-        || app.hunt.pause_reason != snapshot.pause_reason
-        || app.hunt.verdict != verdict;
+        || app.goal.token_budget != snapshot.token_budget
+        || app.goal.tokens_used != snapshot.tokens_used
+        || app.goal.time_used_seconds != snapshot.time_used_seconds
+        || app.goal.continuation_count != snapshot.continuation_count
+        || app.goal.pause_reason != snapshot.pause_reason
+        || app.goal.status != verdict;
     if !changed {
+        app.last_known_goal_state = durable_goal;
         return false;
     }
 
     // The runtime introduced a new active objective (the model called
     // `create_goal`, or a restored session carried one): say so once, in one
     // line, so the user knows a persistent goal is now driving turns and how
-    // to stop it. `/goal <objective>` sets `quarry` before this snapshot lands,
+    // to stop it. `/goal <objective>` sets the objective before this snapshot lands,
     // so a user-declared goal does not repeat its own receipt.
-    if objective_changed && verdict == HuntVerdict::Hunting {
+    if objective_changed && verdict == GoalStatus::Active {
         let content = app
             .tr(crate::localization::MessageId::GoalReceiptSet)
             .replace("{objective}", objective);
         app.add_message(crate::tui::history::HistoryCell::System { content });
     }
-    app.hunt.quarry = Some(objective.to_string());
-    app.hunt.token_budget = snapshot.token_budget;
-    app.hunt.tokens_used = snapshot.tokens_used;
-    app.hunt.time_used_seconds = snapshot.time_used_seconds;
-    app.hunt.continuation_count = snapshot.continuation_count;
-    app.hunt.pause_reason = snapshot.pause_reason;
-    app.hunt.verdict = verdict;
-    if objective_changed || app.hunt.started_at.is_none() {
-        app.hunt.started_at = Some(Instant::now());
+    app.goal.objective = Some(objective.to_string());
+    app.goal.token_budget = snapshot.token_budget;
+    app.goal.tokens_used = snapshot.tokens_used;
+    app.goal.time_used_seconds = snapshot.time_used_seconds;
+    app.goal.continuation_count = snapshot.continuation_count;
+    app.goal.pause_reason = snapshot.pause_reason;
+    app.goal.status = verdict;
+    if objective_changed || app.goal.started_at.is_none() {
+        let now = Instant::now();
+        let elapsed = std::time::Duration::from_secs(snapshot.elapsed_seconds.unwrap_or_default());
+        app.goal.started_at = now.checked_sub(elapsed).or(Some(now));
     }
     // Freeze the elapsed timer the first time a goal leaves the active state.
     // Paused (Wounded) goals freeze too — usage snapshots keep arriving while
@@ -338,13 +349,14 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     // paused (matching close_hunt, which records the pause instant). Only an
     // explicit resume back to Hunting re-arms the timer.
     match verdict {
-        HuntVerdict::Hunted | HuntVerdict::Escaped | HuntVerdict::Wounded => {
-            if app.hunt.finished_at.is_none() {
-                app.hunt.finished_at = Some(Instant::now());
+        GoalStatus::Complete | GoalStatus::Blocked | GoalStatus::Paused => {
+            if app.goal.finished_at.is_none() {
+                app.goal.finished_at = Some(Instant::now());
             }
         }
-        HuntVerdict::Hunting => app.hunt.finished_at = None,
+        GoalStatus::Active => app.goal.finished_at = None,
     }
+    app.last_known_goal_state = durable_goal;
     true
 }
 
@@ -1018,6 +1030,17 @@ pub(crate) async fn apply_command_result(
                     .send(Op::SetGoalStatus { status, clear })
                     .await;
             }
+            AppAction::SetGoalObjective {
+                objective,
+                token_budget,
+            } => {
+                let _ = engine_handle
+                    .send(Op::SetGoalObjective {
+                        objective,
+                        token_budget,
+                    })
+                    .await;
+            }
             AppAction::OpenTextPager { title, content } => {
                 open_text_pager(app, title, content);
             }
@@ -1283,6 +1306,24 @@ pub(crate) async fn apply_command_result(
                     })
                     .await;
             }
+            AppAction::UpdateSearchProvider { provider } => {
+                let effective_provider = config.set_search_provider(provider);
+                let _ = engine_handle
+                    .send(Op::SetSearchProvider {
+                        provider: effective_provider,
+                    })
+                    .await;
+            }
+            AppAction::UpdatePromptSuggestion { enabled } => {
+                config.prompt_suggestion = Some(enabled);
+            }
+            AppAction::UpdateNotification { update } => {
+                config
+                    .notifications
+                    .get_or_insert_with(crate::config::NotificationsConfig::default)
+                    .apply_update(update);
+                let _ = crate::tui::notifications::settings(config);
+            }
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
             }
@@ -1421,6 +1462,64 @@ pub(crate) async fn apply_command_result(
                     );
                 }
             }
+            AppAction::OpenProviderTemplateList => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    app.view_stack.push(
+                        crate::tui::provider_picker::ProviderPickerView::new_for_template_list(
+                            app.api_provider,
+                            config,
+                            runtime_status,
+                        )
+                        .with_locale(app.ui_locale)
+                        .with_provider_health(&app.provider_health),
+                    );
+                }
+            }
+            AppAction::OpenTemplateSetup { template_id } => {
+                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                    let runtime_status = query_provider_runtime_status(engine_handle).await;
+                    if let Some(picker) =
+                        crate::tui::provider_picker::ProviderPickerView::new_for_template_setup(
+                            app.api_provider,
+                            &template_id,
+                            config,
+                            runtime_status,
+                        )
+                    {
+                        app.view_stack.push(
+                            picker
+                                .with_locale(app.ui_locale)
+                                .with_provider_health(&app.provider_health),
+                        );
+                        let template = codewhale_config::provider_setup_template(&template_id);
+                        let message = match template {
+                            Some(template) if template.is_unpublished() => {
+                                app.tr(MessageId::ProviderTemplateUnpublished).into_owned()
+                            }
+                            Some(template) if template.is_compatible() => app
+                                .tr(MessageId::ProviderTemplateOpenedEnvOnly)
+                                .replace("{id}", &template_id),
+                            _ => app
+                                .tr(MessageId::ProviderTemplateOpened)
+                                .replace("{id}", &template_id),
+                        };
+                        let level = if template.is_some_and(|item| item.is_unpublished()) {
+                            StatusToastLevel::Warning
+                        } else {
+                            StatusToastLevel::Info
+                        };
+                        app.push_status_toast(message, level, Some(8_000));
+                    } else {
+                        app.push_status_toast(
+                            app.tr(MessageId::ProviderTemplateUnknown)
+                                .replace("{id}", &template_id),
+                            StatusToastLevel::Error,
+                            Some(8_000),
+                        );
+                    }
+                }
+            }
             AppAction::StartXaiDeviceLogin => {
                 let _switched =
                     run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
@@ -1473,6 +1572,18 @@ pub(crate) async fn apply_command_result(
                         .push(crate::tui::views::skills_manager::SkillsManagerView::new(
                             app,
                         ));
+                }
+            }
+            AppAction::OpenWorkflowsManager => {
+                if app.view_stack.top_kind() != Some(ModalKind::WorkflowsManager) {
+                    app.view_stack
+                        .push(crate::tui::views::workflows_manager::WorkflowsManagerView::new(app));
+                }
+            }
+            AppAction::OpenExtensions { tab } => {
+                if app.view_stack.top_kind() != Some(ModalKind::Extensions) {
+                    app.view_stack
+                        .push(crate::tui::views::extensions::ExtensionsView::new(app, tab));
                 }
             }
             AppAction::OpenFleetList => {
@@ -1555,6 +1666,11 @@ pub(crate) async fn apply_command_result(
                 let _ = engine_handle.send(Op::PurgeContext).await;
             }
             AppAction::TaskAdd { prompt } => {
+                let owner_session_id = app
+                    .current_session_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                app.current_session_id = Some(owner_session_id.clone());
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
                     model: Some(app.model.clone()),
@@ -1563,7 +1679,7 @@ pub(crate) async fn apply_command_result(
                     allow_shell: Some(app.allow_shell),
                     trust_mode: Some(app.trust_mode),
                     auto_approve: Some(app_auto_approve_enabled(app)),
-                    owner_session_id: app.current_session_id.clone(),
+                    owner_session_id: Some(owner_session_id),
                 };
                 match task_manager.add_task(request).await {
                     Ok(task) => {
@@ -1585,7 +1701,14 @@ pub(crate) async fn apply_command_result(
                 refresh_active_task_panel(app, task_manager).await;
             }
             AppAction::TaskList => {
-                let tasks = task_manager.list_tasks(Some(30)).await;
+                let tasks = match app.current_session_id.as_deref() {
+                    Some(session_id) => {
+                        task_manager
+                            .list_tasks_for_owner(Some(30), None, session_id)
+                            .await
+                    }
+                    None => Vec::new(),
+                };
                 refresh_active_task_panel(app, task_manager).await;
                 app.add_message(HistoryCell::System {
                     content: format_task_list(&tasks),
@@ -1610,16 +1733,26 @@ pub(crate) async fn apply_command_result(
                     app.status_message = Some(status);
                 }
             },
-            AppAction::TaskShow { id } => match task_manager.get_task(&id).await {
-                Ok(task) => open_task_pager(app, &task),
-                Err(err) => {
-                    app.add_message(HistoryCell::System {
-                        content: format!("Task lookup failed: {err}"),
-                    });
+            AppAction::TaskShow { id } => {
+                let task = match app.current_session_id.as_deref() {
+                    Some(session_id) => task_manager.get_task_for_owner(&id, session_id).await,
+                    None => Err(anyhow::anyhow!("Task not found: {id}")),
+                };
+                match task {
+                    Ok(task) => open_task_pager(app, &task),
+                    Err(err) => {
+                        app.add_message(HistoryCell::System {
+                            content: format!("Task lookup failed: {err}"),
+                        });
+                    }
                 }
-            },
+            }
             AppAction::TaskCancel { id } => {
-                match task_manager.cancel_task(&id).await {
+                let cancellation = match app.current_session_id.as_deref() {
+                    Some(session_id) => task_manager.cancel_task_for_owner(&id, session_id).await,
+                    None => Err(anyhow::anyhow!("Task not found: {id}")),
+                };
+                match cancellation {
                     Ok(cancellation) => {
                         app.add_message(HistoryCell::System {
                             content: format!(
@@ -2078,6 +2211,137 @@ pub(crate) async fn apply_provider_picker_custom_provider(
     switch_provider(app, engine_handle, config, ApiProvider::Custom, model).await
 }
 
+async fn reopen_provider_picker_list(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &Config,
+    selected_provider_id: Option<String>,
+    catalog_view: bool,
+) {
+    let runtime_status = query_provider_runtime_status(engine_handle).await;
+    app.provider_picker_memory = Some(crate::tui::app::ProviderPickerMemory {
+        catalog_view,
+        selected_provider_id,
+    });
+    app.view_stack.push(
+        crate::tui::provider_picker::ProviderPickerView::new_with_runtime_status_and_memory(
+            app.api_provider,
+            config,
+            runtime_status,
+            app.provider_picker_memory.as_ref(),
+        )
+        .with_locale(app.ui_locale)
+        .with_provider_health(&app.provider_health),
+    );
+    app.needs_redraw = true;
+}
+
+pub(crate) async fn apply_provider_picker_test_connection(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    identity: crate::config::ProviderIdentity,
+    catalog_view: bool,
+) {
+    apply_provider_picker_test_connection_with_verifier(
+        app,
+        engine_handle,
+        config,
+        identity,
+        catalog_view,
+        &LiveProviderKeyVerifier,
+    )
+    .await;
+}
+
+fn sanitize_probe_status(reason: &str, api_key: &str) -> String {
+    let mut text = reason.to_string();
+    if let Some(rest) = reason.strip_prefix("HTTP ")
+        && let Some((code, body)) = rest.split_once(':')
+        && let Ok(status) = code.trim().parse::<u16>()
+    {
+        text = crate::llm_client::sanitize_http_error_body(None, status, body.trim());
+    }
+    let secret = api_key.trim();
+    if !secret.is_empty() {
+        text = text.replace(secret, "***");
+    }
+    crate::utils::truncate_with_ellipsis(text.trim(), 120, "…")
+}
+
+pub(crate) async fn apply_provider_picker_test_connection_with_verifier(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    identity: crate::config::ProviderIdentity,
+    catalog_view: bool,
+    verifier: &dyn ProviderKeyVerifier,
+) {
+    let provider = identity.provider;
+    let mut scoped_config = config.clone();
+    scoped_config.provider = Some(identity.key.clone());
+    let selected_id = if provider == ApiProvider::Custom {
+        Some(identity.key.clone())
+    } else {
+        Some(provider.as_str().to_string())
+    };
+    if !crate::client::provider_api_key_verification_is_observed(provider) {
+        app.push_status_toast(
+            app.tr(MessageId::ProviderTestConnectionNoEndpoint)
+                .replace("{provider}", &identity.key),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
+        reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view).await;
+        return;
+    }
+    let api_key = match scoped_config.deepseek_api_key_read_only() {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            app.push_status_toast(
+                app.tr(MessageId::ProviderTestConnectionNeedKey)
+                    .replace("{provider}", &identity.key),
+                StatusToastLevel::Warning,
+                Some(8_000),
+            );
+            reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view)
+                .await;
+            return;
+        }
+    };
+    let base_url = scoped_config.deepseek_base_url();
+    let model = scoped_config.default_model();
+    match verifier.verify(provider, &api_key, &base_url).await {
+        Ok(()) => {
+            app.provider_health
+                .record_models_probe_success(&scoped_config, provider, &model);
+            app.push_status_toast(
+                app.tr(MessageId::ProviderConnectionChecked).into_owned(),
+                StatusToastLevel::Success,
+                Some(8_000),
+            );
+        }
+        Err(reason) => {
+            let safe = sanitize_probe_status(&reason, &api_key);
+            app.provider_health.record_models_probe_failure(
+                &scoped_config,
+                provider,
+                &model,
+                provider_verification_error_category(&reason),
+                &safe,
+            );
+            app.push_status_toast(
+                app.tr(MessageId::ProviderTestConnectionFailed)
+                    .replace("{provider}", &identity.key)
+                    .replace("{error}", &safe),
+                StatusToastLevel::Error,
+                Some(8_000),
+            );
+        }
+    }
+    reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view).await;
+}
+
 pub(crate) async fn apply_provider_picker_api_key(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -2159,8 +2423,8 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
             {
                 app.view_stack.push(picker);
                 app.status_message = Some(
-                    "Connection checked (/models returned 2xx). Pick a default model; model availability is not checked."
-                        .to_string(),
+                    app.tr(MessageId::ProviderConnectionCheckedPickModel)
+                        .into_owned(),
                 );
             } else {
                 app.status_message = Some(format!(
@@ -2354,15 +2618,29 @@ pub(crate) async fn apply_codewhale_owned_xai_login(
     switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await
 }
 
+#[cfg(test)]
 pub(crate) fn apply_loaded_session(
     app: &mut App,
     config: &mut Config,
     session: &SavedSession,
 ) -> Result<(), String> {
+    apply_loaded_session_with_goal(app, config, session, None)
+}
+
+pub(crate) fn apply_loaded_session_with_goal(
+    app: &mut App,
+    config: &mut Config,
+    session: &SavedSession,
+    goal: Option<&crate::session_manager::SessionGoalState>,
+) -> Result<(), String> {
     if app.session_transition_blocked() {
         return Err(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
+    }
+    if let Some(goal) = goal {
+        goal.validate()
+            .map_err(|error| format!("saved session goal is invalid: {error}"))?;
     }
     let provider_identity = config.resolve_persisted_provider_identity(
         Some(&session.metadata.model_provider),
@@ -2434,6 +2712,15 @@ pub(crate) fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
+    // Goal state is session-owned just like Work state. A legacy/no-goal
+    // session clears the previous session's objective; a durable sidecar
+    // rebuilds both the visible hunt and the EngineConfig seeded below.
+    app.goal = crate::tui::app::HostGoalState::default();
+    app.last_known_goal_state = None;
+    if let Some(goal) = goal {
+        let snapshot = goal.to_runtime_snapshot();
+        let _ = apply_goal_snapshot_to_app(app, &snapshot);
+    }
     restore_loaded_session_provider(app, config, provider_identity);
     // Session records do not own a reasoning preference. `set_model_selection`
     // restores the raw explicit global preference for Auto (or releases an
@@ -2571,7 +2858,10 @@ pub(crate) fn apply_loaded_session_config_snapshot(
     let previous_provider = app.api_provider;
     let previous_provider_identity = app.provider_identity_for_persistence().to_string();
     let previous_workspace = app.workspace.clone();
-    apply_loaded_session(app, &mut next_config, session)?;
+    let goal = SessionManager::default_location()
+        .and_then(|manager| manager.load_session_goal(&session.metadata.id))
+        .map_err(|error| format!("saved session goal could not be loaded: {error}"))?;
+    apply_loaded_session_with_goal(app, &mut next_config, session, goal.as_ref())?;
     // A file load reads a fresh disk snapshot. Even when the route's enum and
     // exact identity are unchanged, endpoint, key, headers, TLS, or retry
     // settings may have changed. Rebuild from that same validated snapshot so

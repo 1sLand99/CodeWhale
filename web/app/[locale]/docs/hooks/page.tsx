@@ -31,7 +31,7 @@ export default async function HooksPage({ params }: { params: Promise<{ locale: 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{t.overviewTitle}</h2>
+        <h1 className="font-display text-3xl mb-1">{t.overviewTitle}</h1>
         <p className={`${t.bodyClassName} mt-3`}>{t.overviewLead}</p>
         <p className={`${t.bodyClassName} mt-3`}>
           {splitTokens(t.configIntro).map((part, i) =>

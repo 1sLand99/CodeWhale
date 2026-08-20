@@ -85,6 +85,14 @@ The fast `deepseek-v4-flash` / thinking-off path is called Fin in the product
 language. Fin is a seam for routing, summaries, cheap child calls, and
 coordination work; it does not change approval behavior.
 
+The orchestration trio is the first selection from a blank prompt (press `/`,
+then Enter):
+`/auto` turns on Auto-Review so the agent just works, `/goal` keeps one
+objective across turns, and `/workflow` runs a repeatable ordered or fan-out
+workflow. They also
+sit on the idle welcome, the idle footer, and the first three Hotbar slots
+when the bar is enabled.
+
 `/goal <objective>` sets a session objective with an optional token budget and
 keeps active objectives visible as Work context. The agent may also create the
 goal itself when a direct request describes a verifiable end state that will
@@ -234,9 +242,10 @@ that path. Codewhale's autonomous posture adds only the single stateless
 guardian request described above; deterministic hard blocks remain
 non-bypassable.
 - `bypass` (**Full Access**): ordinary tool calls do not show approval prompts,
-  while deliberate user questions remain available. Non-bypassable safety,
-  repository-law, and managed-policy holds fail closed as hard blocks instead
-  of contradicting Full Access with an approval modal.
+  while deliberate user questions remain available. Non-bypassable registered
+  holds auto-approve instead of opening a contradictory modal. Repository-law
+  and managed-policy holds fail closed as hard blocks instead of contradicting
+  Full Access with an approval modal.
 - `never`: blocks any tool that is not considered safe/read-only; deliberate
   user questions remain available.
 

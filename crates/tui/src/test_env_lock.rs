@@ -178,6 +178,36 @@ pub(crate) fn with_test_env_lock<T>(read: impl FnOnce() -> T) -> T {
     read()
 }
 
+/// [`with_test_env_lock`] for readers that run inside a `LazyLock`/`OnceLock`
+/// initializer: takes the barrier when it is free, and reads *without* it
+/// rather than waiting when another thread holds it.
+///
+/// Blocking is not an option there. The initializer's own lock is held for the
+/// duration, so a second thread that already owns the env barrier and then
+/// touches the same lazy value deadlocks against this one: A waits for the
+/// initializer, B (this thread) waits for A's barrier. Both threads wedge, and
+/// libtest has no per-test timeout, so the whole test binary hangs instead of
+/// failing — which is how a single wedged run burns an entire CI job.
+///
+/// The trade is deliberate and small: an uncontended read is still fully
+/// serialized, and a contended one reads a variable mid-mutation at worst.
+/// Callers must therefore only use this for values whose staleness is
+/// tolerable, never to gate a disk write.
+pub(crate) fn with_test_env_lock_if_uncontended<T>(read: impl FnOnce() -> T) -> T {
+    if current_thread_owns_contended_env_lock() {
+        return read();
+    }
+
+    match env_lock().try_lock() {
+        Ok(_guard) => read(),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            let _guard = poisoned.into_inner();
+            read()
+        }
+        Err(TryLockError::WouldBlock) => read(),
+    }
+}
+
 pub(crate) fn current_thread_holds_test_env_lock() -> bool {
     match env_lock().try_lock() {
         Ok(guard) => {
@@ -189,5 +219,47 @@ pub(crate) fn current_thread_holds_test_env_lock() -> bool {
             false
         }
         Err(TryLockError::WouldBlock) => current_thread_owns_contended_env_lock(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lock_test_env, with_test_env_lock_if_uncontended};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// The lock-order inversion this helper exists to break.
+    ///
+    /// A reader running inside a `LazyLock`/`OnceLock` initializer must not wait
+    /// for the env barrier: the thread holding the barrier may itself be waiting
+    /// on that initializer. Both threads then wedge, and libtest has no per-test
+    /// timeout, so the entire test binary hangs — reproduced locally as
+    /// `cargo test -p codewhale-tui --lib -- shell` never returning.
+    #[test]
+    fn uncontended_read_returns_while_another_thread_holds_the_barrier() {
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = lock_test_env();
+            held_tx.send(()).expect("announce that the barrier is held");
+            // Outlive the assertion below without depending on timing.
+            let _ = release_rx.recv_timeout(Duration::from_secs(30));
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("holder thread must take the barrier");
+
+        let start = Instant::now();
+        let value = with_test_env_lock_if_uncontended(|| 7);
+        let elapsed = start.elapsed();
+
+        release_tx.send(()).ok();
+        holder.join().expect("holder thread");
+
+        assert_eq!(value, 7, "the read still runs, just unsynchronized");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "a contended read must not block; waited {elapsed:?}"
+        );
     }
 }

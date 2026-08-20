@@ -668,8 +668,8 @@ mod tests {
     #[test]
     fn relay_slash_command_routes_to_session_relay_instruction() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("Unify the work surface".to_string());
-        app.hunt.token_budget = Some(12_000);
+        app.goal.objective = Some("Unify the work surface".to_string());
+        app.goal.token_budget = Some(12_000);
         {
             let mut todos = app.todos.try_lock().expect("todo lock");
             todos.add("inspect workspace".to_string(), TodoStatus::Completed);
@@ -952,7 +952,7 @@ mod tests {
         // Consistency: group-iterated command count must match registry.
         // FEAT-015 registers one test-only contextual command (`/feat015ctx`)
         // under `#[cfg(test)]` to prove the dual-path seam (D6); the nine
-        // production groups remain exactly 95 commands.
+        // production groups remain exactly 96 commands.
         let test_only_count = command_infos()
             .iter()
             .filter(|info| info.name == "feat015ctx")
@@ -1077,6 +1077,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn flagship_orchestration_and_workspace_commands_are_visible_at_the_palette_root() {
+        for name in [
+            "auto",
+            "goal",
+            "hooks",
+            "tokens",
+            "translate",
+            "workflow",
+            "workspace",
+        ] {
+            let info = registry()
+                .get_info(name)
+                .unwrap_or_else(|| panic!("/{name} must be registered"));
+            assert!(
+                info.show_in_empty_discovery(),
+                "/{name} must appear at the palette root (#5442 / #5439)"
+            );
+            assert!(
+                !traits::ADVANCED_DISCOVERY_COMMANDS.contains(&name),
+                "/{name} must not stay on the Advanced discovery list"
+            );
+        }
+        assert_eq!(
+            traits::ORCHESTRATION_DISCOVERY_COMMANDS,
+            ["workflow", "goal", "auto"]
+        );
     }
 
     #[test]
@@ -1540,10 +1569,12 @@ mod tests {
         assert!(note_help.contains("Usage: /note"));
 
         let mut app = create_test_app();
-        let result = execute("/hunt ship layer 2 | budget: 100", &mut app);
+        let result = execute("/goal ship layer 2 | budget: 100", &mut app);
         assert!(!result.is_error);
-        assert_eq!(app.hunt.quarry.as_deref(), Some("ship layer 2"));
-        assert_eq!(app.hunt.token_budget, Some(100));
+        assert_eq!(app.goal.objective.as_deref(), Some("ship layer 2"));
+        assert_eq!(app.goal.token_budget, Some(100));
+        // The hunt-era alias is gone: `/hunt` must not resolve anymore.
+        assert!(execute("/hunt ship layer 2", &mut app).is_error);
 
         let (mut app, _tmpdir, _guard) = create_isolated_test_app();
         let result = execute("/skills", &mut app);

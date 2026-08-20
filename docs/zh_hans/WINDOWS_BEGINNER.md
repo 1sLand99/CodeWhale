@@ -188,20 +188,20 @@ https://github.com/Hmbown/CodeWhale/releases
 在最新版本的文件列表中，普通 Windows 电脑（Intel/AMD 处理器）**推荐下载 `codewhale-windows-x64-portable.zip`（Windows 便携版）**。
 
 - **便携版 = 解压即用，不需要安装脚本**：不用装 npm、Scoop、Cargo，也不用双击安装程序
-- 下载后解压到一个文件夹，里面就是可直接运行的 3 个程序（本说明实测验证过 zip 内容）：
+- 下载后解压到一个文件夹，里面就是可直接运行的程序（本说明按当前 zip 内容列出）：
   - `codewhale.exe` — 主程序
-  - `codewhale-tui.exe` — 界面程序
-  - `codew.exe` — 辅助命令
+  - `codew.exe` — 同一二进制的短命令名
+  - `codewhale.bat` — 启动器：已安装 Windows Terminal 时用它打开，否则回退到直接运行 exe
 
-文件名带 **arm64** 的是给 ARM 架构设备用的，普通电脑不要选。如果你更习惯传统安装方式，也可以下载 **`CodeWhaleSetup.exe`**（Windows 安装器）：它会安装到 `%LOCALAPPDATA%\Programs\CodeWhale\bin` 并自动加入用户 PATH，无需手动配置环境变量；因为安装包未签名，双击会弹 Windows SmartScreen 提示，点"更多信息 → 仍要运行"即可。注意：发布页里的 `codewhale-windows-x64.exe` 是**纯命令行程序，不是安装器**，双击只会闪一下命令行窗口，不要把它当成安装包。
+文件名带 **arm64** 的是给 ARM 架构设备用的，普通电脑不要选。如果你更习惯传统安装方式，也可以下载 **`CodeWhaleSetup.exe`**（Windows 安装器）：它会安装到 `%LOCALAPPDATA%\Programs\CodeWhale\bin` 并自动加入用户 PATH，开始菜单快捷方式指向 `codewhale.bat`，无需手动配置环境变量；因为安装包未签名，双击会弹 Windows SmartScreen 提示，点"更多信息 → 仍要运行"即可。注意：发布页里的 `codewhale-windows-x64.exe` 是**纯命令行程序，不是安装器**，双击只会打开默认 cmd 窗口，请改用 zip 里的 `codewhale.bat` 或安装器的开始菜单项。
 
 ![GitHub 发布页，选择 windows-x64 版本](images/github-release-page.png)
 
 ### 2.2 第二步：放到固定目录【codewhale-windows-x64-portable.zip】
 
-把便携版 zip 解压后的文件夹放到一个固定位置，比如 `D:\codewhale`（解压后里面就是 `codewhale.exe`、`codewhale-tui.exe`、`codew.exe` 三个文件，完整路径为 `D:\codewhale\codewhale.exe`）。放好后**不要再移动它**，否则下面的环境变量会失效。
+把便携版 zip 解压后的文件夹放到一个固定位置，比如 `D:\codewhale`（解压后里面就是 `codewhale.exe`、`codew.exe`、`codewhale.bat`，完整路径为 `D:\codewhale\codewhale.exe`）。放好后**不要再移动它**，否则下面的环境变量会失效。从资源管理器启动时请双击 `codewhale.bat`，不要双击 `codewhale.exe`。
 
-> 升级方法：以后出新版本，在终端运行 `codewhale update` 即可（想先看有没有新版：`codewhale update --check`），它会自动下载、校验并替换程序文件，完成后重启 Codewhale。配置和对话记录都保留。网络受限时也可以下载新版 portable zip 解压覆盖这 3 个文件。
+> 升级方法：以后出新版本，在终端运行 `codewhale update` 即可（想先看有没有新版：`codewhale update --check`），它会自动下载、校验并替换程序文件，完成后重启 Codewhale。配置和对话记录都保留。网络受限时也可以下载新版 portable zip 解压覆盖同目录下的程序文件。
 
 ### 2.3 第三步：加入环境变量【codewhale-windows-x64-portable.zip】
 

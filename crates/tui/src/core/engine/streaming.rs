@@ -76,6 +76,74 @@ pub(super) fn should_transparently_retry_stream(
 /// (#2990).
 pub(super) const MAX_STREAM_RETRIES: u32 = 3;
 
+/// Typed, engine-internal state for one mid-stream drop recovery.
+///
+/// This enum **is** the retry mechanism. A resumed turn used to append a
+/// synthetic `[runtime]` *user* message to the persisted conversation, which
+/// polluted the transcript and — when only hidden reasoning had streamed —
+/// promised a preserved partial answer that never existed (0.9.10
+/// regression). The retry is now modeled as this value, carried out of the
+/// stream decoder in [`StreamOutcome`] and consumed exactly once per drop:
+///
+/// * it is never persisted to the user transcript, and
+/// * nothing it triggers is serialized into the provider request history as
+///   a user role — the retried request is simply the persisted conversation
+///   re-issued, ending (when a visible fragment was preserved) with that
+///   assistant fragment so the provider continues from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StreamResume {
+    /// The stream died before anything actionable was streamed (#103
+    /// Phase 3): discard the fragment and re-issue the identical request.
+    NoContentStreamDeath,
+    /// The host slept mid-stream (#2990): the partial output predates the
+    /// sleep and no operator watched it — discard and re-issue.
+    AfterSleep,
+    /// Mid-stream network drop on a headless host (v0.9.4 Terminal-Bench
+    /// P0): the fragment was never committed and no tool from it ran, so
+    /// discard and re-issue the identical request.
+    HeadlessNetworkDrop,
+    /// Mid-stream network drop in the interactive TUI. A fragment with
+    /// sendable content is preserved as the trailing assistant message and
+    /// the request is re-issued; a thinking-only fragment has nothing
+    /// visible to preserve, so it is discarded exactly like the headless
+    /// resume and the copy must never claim otherwise.
+    InteractiveNetworkDrop,
+}
+
+/// Bounded authorization for drop-resume retries.
+///
+/// Mechanism, not comment: [`StreamRetryBudget::authorize`] is the only way
+/// to spend a resume and it returns `None` once [`MAX_STREAM_RETRIES`]
+/// resumes have been issued, so no call site can loop past the budget even
+/// if a guard predicate is relaxed. A healthy stream round resets it.
+#[derive(Debug, Default)]
+pub(super) struct StreamRetryBudget {
+    spent: u32,
+}
+
+impl StreamRetryBudget {
+    /// Drop-resumes already issued without a healthy round in between.
+    pub(super) fn spent(&self) -> u32 {
+        self.spent
+    }
+
+    /// Spend one resume and return its 1-based attempt number, or `None`
+    /// when the budget is exhausted.
+    pub(super) fn authorize(&mut self) -> Option<u32> {
+        if self.spent >= MAX_STREAM_RETRIES {
+            return None;
+        }
+        self.spent = self.spent.saturating_add(1);
+        Some(self.spent)
+    }
+
+    /// A healthy round clears the chain: the next drop starts a fresh,
+    /// still-bounded budget.
+    pub(super) fn reset(&mut self) {
+        self.spent = 0;
+    }
+}
+
 /// Wall-clock vs monotonic divergence above which we conclude the host slept
 /// mid-stream (#2990). `Instant` pauses during system sleep (CLOCK_UPTIME_RAW
 /// on macOS, CLOCK_MONOTONIC on Linux) while `SystemTime` keeps advancing, so
@@ -132,15 +200,19 @@ pub(super) fn should_resume_after_network_drop(
 }
 
 /// Decide whether an interactive TUI stream should be re-issued after a
-/// mid-stream network drop, preserving the partial reply and appending a
-/// runtime continuation message.
+/// mid-stream network drop, preserving a visible partial reply.
 ///
-/// Unlike the headless resume, this keeps the partial fragment: the user has
-/// already seen the deltas, so the assistant message is committed and the next
-/// request is asked to continue where it left off. Tool calls are never resumed
-/// because an incomplete tool call could be re-issued and duplicate side
-/// effects. Bounded by `MAX_STREAM_RETRIES` and gated on a network/timeout-class
-/// error so model/parse/auth failures still surface normally.
+/// Unlike the headless resume, this keeps a sendable fragment: the user has
+/// already seen the deltas, so the assistant message is committed and the
+/// re-issued request ends with that fragment, which is the provider-neutral
+/// continuation contract. No synthetic user turn is appended — the retry is
+/// typed state ([`StreamResume::InteractiveNetworkDrop`]), invisible to the
+/// transcript and to the provider request history as a user role. A
+/// thinking-only fragment preserves nothing and must not be described as a
+/// preserved reply. Tool calls are never resumed because an incomplete tool
+/// call could be re-issued and duplicate side effects. Bounded by
+/// `MAX_STREAM_RETRIES` and gated on a network/timeout-class error so
+/// model/parse/auth failures still surface normally.
 pub(super) fn should_resume_interactive_after_network_drop(
     terminal_chrome_enabled: bool,
     network_class_error: bool,

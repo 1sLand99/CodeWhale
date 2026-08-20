@@ -167,6 +167,7 @@ pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine2).to_string())),
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine3).to_string())),
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine4).to_string())),
+        Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine5).to_string())),
         Line::from(vec![
             Span::raw(app.tr(MessageId::OnboardTipsDoctorPrefix).to_string()),
             Span::styled(
@@ -420,16 +421,21 @@ mod tests {
     }
 
     #[test]
-    fn tips_copy_points_to_setup_and_constitution() {
+    fn tips_copy_names_workspace_restore_and_tokens() {
         let app = test_app_with_locale(Locale::En);
         let body = flattened(tips_lines(&app));
 
+        assert!(body.contains("/workspace"));
+        assert!(body.contains("/restore"));
+        assert!(body.contains("/tokens"));
         assert!(body.contains("/setup"));
         assert!(body.contains("/constitution"));
-        assert!(body.contains("/provider"));
-        assert!(body.contains("/model"));
+        assert!(body.contains("/auto"));
+        assert!(body.contains("/goal"));
+        assert!(body.contains("/workflow"));
         assert!(body.contains("codewhale doctor"));
         assert!(body.contains("open setup if it needs attention"));
+        assert!(!body.contains("Start With Setup"));
         assert!(!body.contains("open the workspace"));
     }
 

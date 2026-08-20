@@ -79,8 +79,8 @@ From `kimi --help` and `moonshotai.github.io/kimi-code` (llms-full):
   guardian (exact call + deterministic observations only; no transcript;
   90 s deadline; high/critical never auto-runs; any failure denies, fail
   closed). Repo-law holds that require a person block instead of opening a
-  hidden modal. Ask rules force prompts in every posture. Full Access turns
-  non-bypassable holds into hard blocks, never modals.
+  hidden modal. Ask rules force prompts in every posture. Full Access
+  auto-approves non-bypassable registered holds instead of opening a modal.
 - Every decision is written to `$CODEWHALE_HOME/audit.log`
   (`tool.auto_review` with `gate: deterministic|guardian`).
 - Children inherit the parent posture; an explicit Full Access handoff

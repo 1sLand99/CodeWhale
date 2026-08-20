@@ -1,8 +1,12 @@
 import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { FaqSearch } from "@/components/faq-search";
-import { buildPageMetadata } from "@/lib/page-meta";
+import { buildFaqPageJsonLd } from "@/lib/faq-schema";
 import { FACTS } from "@/lib/facts.generated";
+import { canonicalLocaleForPath } from "@/lib/i18n/content-locales";
+import { serializeJsonLd } from "@/lib/json-ld";
+import { buildPageMetadata } from "@/lib/page-meta";
+import { SITE_URL } from "@/lib/page-meta";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
@@ -743,9 +747,19 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
   const { locale } = await params;
   const isZh = locale === "zh";
   const items = isZh ? faqZh : faqEn;
+  const canonicalLocale = canonicalLocaleForPath("/faq", locale);
+  const jsonLd = buildFaqPageJsonLd({
+    items,
+    url: `${SITE_URL}/${canonicalLocale}/faq`,
+    inLanguage: canonicalLocale,
+  });
 
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }}
+      />
       <section className="site-container section">
         <div className="flex items-baseline gap-4 mb-3">
           <Seal char="问" />

@@ -143,6 +143,41 @@ codewhale_dev_cache_log() {
   printf 'dev-cache: %s\n' "$*" >&2
 }
 
+# Free space (in GiB, integer, truncated) on the filesystem holding $1, or
+# empty when it cannot be determined. `df -Pk` is the POSIX-portable form and
+# behaves the same on macOS and Linux.
+codewhale_dev_cache_free_gib() {
+  _cw_probe=$1
+  # Walk up to the nearest existing ancestor: the cache root usually does not
+  # exist yet on a first run, and df needs a real path.
+  while [ -n "$_cw_probe" ] && [ ! -d "$_cw_probe" ]; do
+    _cw_parent=$(dirname -- "$_cw_probe")
+    [ "$_cw_parent" = "$_cw_probe" ] && break
+    _cw_probe=$_cw_parent
+  done
+  [ -d "$_cw_probe" ] || return 0
+  df -Pk -- "$_cw_probe" 2>/dev/null | awk 'NR==2 { print int($4 / 1048576) }'
+}
+
+# A cold workspace build-dir is ~6 GB, and cargo writes it incrementally, so a
+# volume that runs out mid-build leaves a half-written cache and a failed run.
+# Worse, on the host where this was added the low volume was also $TMPDIR's:
+# the shell tool's spill `tempfile` fails on a full disk, which is the exact
+# wedge #5465 was filed for. Warn before the build starts rather than after it
+# dies, and name the override that fixes it.
+CODEWHALE_DEV_CACHE_MIN_FREE_GIB=${CODEWHALE_DEV_CACHE_MIN_FREE_GIB:-15}
+
+codewhale_dev_cache_warn_low_space() {
+  _cw_root=$1
+  _cw_free=$(codewhale_dev_cache_free_gib "$_cw_root")
+  [ -n "$_cw_free" ] || return 0
+  [ "$_cw_free" -lt "$CODEWHALE_DEV_CACHE_MIN_FREE_GIB" ] || return 0
+  codewhale_dev_cache_log \
+    "WARNING: only ${_cw_free}GiB free on the volume holding ${_cw_root}; a cold build-dir is ~6GB."
+  codewhale_dev_cache_log \
+    "         Set CODEWHALE_CACHE_ROOT=<dir on a roomier volume> (threshold: CODEWHALE_DEV_CACHE_MIN_FREE_GIB)."
+}
+
 # Apply the topology to the current shell. Idempotent. Never overrides an
 # already-set CARGO_TARGET_DIR, CARGO_BUILD_BUILD_DIR, RUSTC_WRAPPER, or
 # SCCACHE_DIR.
@@ -264,6 +299,10 @@ codewhale_dev_cache_apply() {
     _cw_line="${_cw_line} SCCACHE_DIR=${SCCACHE_DIR} rustc=${_cw_commit}"
   fi
   codewhale_dev_cache_log "$_cw_line"
+  case $CODEWHALE_DEV_CACHE_MODE in
+    disabled|existing-target) ;;
+    *) codewhale_dev_cache_warn_low_space "$(codewhale_dev_cache_root)" ;;
+  esac
 }
 
 codewhale_dev_cache_status() {

@@ -57,6 +57,10 @@ pub enum UserInputProvenance {
     Runtime,
     /// Completion/event text from a child worker or sub-agent handoff.
     SubAgentHandoff,
+    /// A bounded, typed Agent Mail envelope delivered by the durable runtime.
+    /// Provider protocols still receive a user-role projection, but this
+    /// provenance can never inherit external-user authority.
+    AgentMail,
     /// Text restored from a saved/imported transcript.
     ImportedTranscript,
     /// Text recalled from memory or another persisted source.
@@ -71,6 +75,7 @@ impl UserInputProvenance {
             Self::ExternalUser => "external_user",
             Self::Runtime => "runtime",
             Self::SubAgentHandoff => "subagent_handoff",
+            Self::AgentMail => "agent_mail",
             Self::ImportedTranscript => "imported_transcript",
             Self::MemoryRecall => "memory_recall",
             Self::AssistantGenerated => "assistant_generated",
@@ -162,6 +167,14 @@ pub enum Op {
         clear: bool,
     },
 
+    /// Set (or replace) the active goal objective and immediately start goal
+    /// work through the runtime's continuation steering. `/goal <objective>`
+    /// is the caller; the objective is never echoed as a raw user message.
+    SetGoalObjective {
+        objective: String,
+        token_budget: Option<u32>,
+    },
+
     /// Describe the exact request the next turn would send, without
     /// sending it (`/preview-request`, #1004).
     ///
@@ -228,6 +241,11 @@ pub enum Op {
         max_spawn_depth: u32,
         api_timeout_secs: u64,
         heartbeat_timeout_secs: u64,
+    },
+
+    /// Update the web-search backend for subsequent tool calls.
+    SetSearchProvider {
+        provider: crate::config::SearchProvider,
     },
 
     /// Replace the engine's merged Fleet roster after the setup wizard saves a

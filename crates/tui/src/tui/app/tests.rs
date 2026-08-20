@@ -1776,7 +1776,7 @@ fn app_new_defaults_auto_compact_on_for_v4_class_models_when_unset() {
     assert!(app.auto_compact);
     assert!(!app.auto_compact_user_configured);
     assert_eq!(app.auto_compact_threshold_percent, 80.0);
-    assert_eq!(app.compact_threshold, 736_832);
+    assert_eq!(app.compact_threshold, 800_000);
 }
 
 #[test]
@@ -1810,7 +1810,7 @@ fn app_new_respects_explicit_auto_compact_false_for_v4_class_models() {
 
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
-    assert_eq!(app.compact_threshold, 736_832);
+    assert_eq!(app.compact_threshold, 800_000);
 }
 
 #[test]
@@ -3703,6 +3703,48 @@ fn managed_requirements_ignore_saved_full_access_and_lock_changes() {
             .iter()
             .any(|toast| toast.text.contains("controlled"))
     );
+}
+
+#[test]
+fn yolo_entry_points_honor_a_locked_approval_policy() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let requirements_path = tmp.path().join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "allowed_approval_policies = [\"on-request\"]\n",
+    )
+    .expect("requirements");
+    let config = Config {
+        requirements_path: Some(requirements_path.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+
+    let mut options = test_options(false);
+    options.yolo = true;
+    options.allow_shell = false;
+    let mut app = App::new(options, &config);
+
+    assert!(app.approval_policy_locked());
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.trust_mode);
+    assert!(!app.yolo);
+
+    assert_eq!(app.select_mode(AppMode::Yolo), SettingSelection::Refused);
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.yolo);
+    assert!(
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("controlled"))
+    );
+
+    assert!(!app.set_mode(AppMode::Yolo));
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+    assert!(!app.allow_shell);
+    assert!(!app.yolo);
 }
 
 #[test]

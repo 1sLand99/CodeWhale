@@ -215,15 +215,18 @@ fn goal_max_continuations_loads_from_goal_table() -> Result<()> {
         crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS
     );
     assert_eq!(config.goal_max_continuations(), 0);
+    assert_eq!(config.goal_continuation_delay_seconds(), 0);
 
     // Explicit backstop override.
     let config: Config = toml::from_str(
         r#"
 [goal]
 max_continuations = 25
+continuation_delay_seconds = 300
 "#,
     )?;
     assert_eq!(config.goal_max_continuations(), 25);
+    assert_eq!(config.goal_continuation_delay_seconds(), 300);
 
     // 0 = unlimited; token/time budgets are telemetry only.
     let config: Config = toml::from_str(
@@ -233,6 +236,20 @@ max_continuations = 0
 "#,
     )?;
     assert_eq!(config.goal_max_continuations(), 0);
+    assert_eq!(config.goal_continuation_delay_seconds(), 0);
+
+    // Bound accidental giant cadences; this remains a turn loop, not a
+    // replacement for durable low-frequency automations.
+    let config: Config = toml::from_str(
+        r#"
+[goal]
+continuation_delay_seconds = 999999999
+"#,
+    )?;
+    assert_eq!(
+        config.goal_continuation_delay_seconds(),
+        crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS
+    );
 
     Ok(())
 }
@@ -1229,6 +1246,51 @@ fn search_provider_resolution_reports_env_override_source() {
 }
 
 #[test]
+fn live_search_provider_update_preserves_environment_precedence() {
+    let _guard = lock_test_env();
+    let previous_codewhale = env::var_os("CODEWHALE_SEARCH_PROVIDER");
+    let previous_deepseek = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
+    unsafe {
+        env::set_var("CODEWHALE_SEARCH_PROVIDER", "bocha");
+        env::remove_var("DEEPSEEK_SEARCH_PROVIDER");
+    }
+    let mut config = Config::default();
+
+    let effective = config.set_search_provider(SearchProvider::DuckDuckGo);
+
+    unsafe {
+        EnvGuard::restore_var("CODEWHALE_SEARCH_PROVIDER", previous_codewhale);
+        EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", previous_deepseek);
+    }
+    assert_eq!(effective, SearchProvider::Bocha);
+    assert_eq!(
+        config.search.and_then(|search| search.provider),
+        Some(SearchProvider::DuckDuckGo),
+        "the requested config value should still be retained beneath the override"
+    );
+}
+
+#[test]
+fn notification_defaults_and_live_updates_share_one_consistent_model() {
+    let mut notifications = NotificationsConfig::default();
+    assert_eq!(notifications.threshold_secs, 30);
+    assert_eq!(
+        Config::default().notifications_config().threshold_secs,
+        notifications.threshold_secs
+    );
+
+    notifications.apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9));
+    notifications.apply_update(NotificationConfigUpdate::Quiet(true));
+
+    assert_eq!(notifications.method, NotificationMethod::Osc9);
+    assert!(notifications.quiet);
+    assert_eq!(
+        notifications.threshold_secs, 30,
+        "field deltas must preserve both defaults and earlier live edits"
+    );
+}
+
+#[test]
 fn search_provider_env_override_accepts_baidu() {
     let _guard = lock_test_env();
     let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
@@ -1398,6 +1460,33 @@ fn codewhale_search_base_url_env_wins_over_legacy_alias() {
 }
 
 #[test]
+fn codewhale_prefer_bwrap_env_wins_over_legacy_alias() {
+    let _guard = lock_test_env();
+    let _primary = EnvVarGuard::set("CODEWHALE_PREFER_BWRAP", "false");
+    let _legacy = EnvVarGuard::set("DEEPSEEK_PREFER_BWRAP", "true");
+    let mut config = Config {
+        prefer_bwrap: Some(true),
+        ..Config::default()
+    };
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.prefer_bwrap, Some(false));
+}
+
+#[test]
+fn legacy_prefer_bwrap_env_remains_a_compatible_alias() {
+    let _guard = lock_test_env();
+    let _primary = EnvVarGuard::remove("CODEWHALE_PREFER_BWRAP");
+    let _legacy = EnvVarGuard::set("DEEPSEEK_PREFER_BWRAP", "true");
+    let mut config = Config::default();
+
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.prefer_bwrap, Some(true));
+}
+
+#[test]
 fn search_provider_resolution_ignores_invalid_env_override() {
     let _guard = lock_test_env();
     let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
@@ -1418,6 +1507,13 @@ fn search_provider_resolution_ignores_invalid_env_override() {
 }
 
 struct EnvGuard {
+    // Seal path overrides through EnvVarGuard so default_config_path honors
+    // this fixture instead of the isolated test root (#5355, #5359).
+    _sealed_home: EnvVarGuard,
+    _sealed_userprofile: EnvVarGuard,
+    _sealed_codewhale_home: EnvVarGuard,
+    _sealed_codewhale_config_path: EnvVarGuard,
+    _sealed_deepseek_config_path: EnvVarGuard,
     home: Option<OsString>,
     userprofile: Option<OsString>,
     codewhale_home: Option<OsString>,
@@ -1621,13 +1717,13 @@ impl EnvGuard {
         let hf_base_url_prev = env::var_os("HF_BASE_URL");
         let huggingface_model_prev = env::var_os("HUGGINGFACE_MODEL");
         let hf_model_prev = env::var_os("HF_MODEL");
+        let sealed_home = EnvVarGuard::set("HOME", &home_str);
+        let sealed_userprofile = EnvVarGuard::set("USERPROFILE", &home_str);
+        let sealed_codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let sealed_codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let sealed_deepseek_config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_str);
         // Safety: test-only environment mutation guarded by a global mutex.
         unsafe {
-            env::set_var("HOME", &home_str);
-            env::set_var("USERPROFILE", &home_str);
-            env::remove_var("CODEWHALE_HOME");
-            env::remove_var("CODEWHALE_CONFIG_PATH");
-            env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
             env::remove_var("CODEWHALE_SECRET_BACKEND");
             env::remove_var("DEEPSEEK_SECRET_BACKEND");
             env::remove_var("DEEPSEEK_PROVIDER");
@@ -1723,6 +1819,11 @@ impl EnvGuard {
             env::remove_var("HF_MODEL");
         }
         Self {
+            _sealed_home: sealed_home,
+            _sealed_userprofile: sealed_userprofile,
+            _sealed_codewhale_home: sealed_codewhale_home,
+            _sealed_codewhale_config_path: sealed_codewhale_config_path,
+            _sealed_deepseek_config_path: sealed_deepseek_config_path,
             home: home_prev,
             userprofile: userprofile_prev,
             codewhale_home: codewhale_home_prev,
@@ -5308,8 +5409,6 @@ fn non_unicode_codewhale_home_is_preserved_by_config_owned_user_paths() -> Resul
 #[test]
 fn codewhale_config_path_env_wins_over_legacy_env() -> Result<()> {
     let _lock = lock_test_env();
-    let prev_codewhale = env::var_os("CODEWHALE_CONFIG_PATH");
-    let prev_deepseek = env::var_os("DEEPSEEK_CONFIG_PATH");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -5321,18 +5420,10 @@ fn codewhale_config_path_env_wins_over_legacy_env() -> Result<()> {
     ));
     let preferred = temp_root.join("preferred.toml");
     let legacy = temp_root.join("legacy.toml");
-
-    unsafe {
-        env::set_var("CODEWHALE_CONFIG_PATH", &preferred);
-        env::set_var("DEEPSEEK_CONFIG_PATH", &legacy);
-    }
+    let _codewhale_config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &preferred);
+    let _legacy_config = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &legacy);
 
     assert_eq!(env_config_path().unwrap().unwrap(), preferred);
-
-    unsafe {
-        EnvGuard::restore_var("CODEWHALE_CONFIG_PATH", prev_codewhale);
-        EnvGuard::restore_var("DEEPSEEK_CONFIG_PATH", prev_deepseek);
-    }
 
     Ok(())
 }

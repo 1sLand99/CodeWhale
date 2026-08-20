@@ -20,6 +20,7 @@ concurrency:
 jobs:
   resolve:
     name: Resolve exact candidate source
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
@@ -76,6 +77,7 @@ jobs:
 
   web:
     name: Verify exact candidate web surface
+    timeout-minutes: 15
     needs: resolve
     if: ${{ !cancelled() && needs.resolve.result == 'success' }}
     runs-on: ubuntu-latest

@@ -187,7 +187,7 @@ fn parse_provider_identifier(value: &str) -> std::result::Result<String, String>
 #[derive(Debug, Parser)]
 #[command(
     name = "codewhale",
-    version = env!("DEEPSEEK_BUILD_VERSION"),
+    version = env!("CODEWHALE_BUILD_VERSION"),
     bin_name = "codewhale",
     override_usage = "codewhale [OPTIONS] [PROMPT]\n       codewhale [OPTIONS] <COMMAND> [ARGS]"
 )]
@@ -1479,6 +1479,11 @@ enum AuthCommand {
         /// Show status for a specific provider only.
         #[arg(long, value_enum)]
         provider: Option<ProviderArg>,
+        /// Report resolved home/config/settings/backend paths and structural
+        /// credential-source presence without printing credential values or
+        /// probing provider credential stores.
+        #[arg(long, default_value_t = false)]
+        diagnostic: bool,
     },
     /// Save an API key to the shared user config file. Reads from
     /// `--api-key`, `--api-key-stdin`, or prompts on stdin when
@@ -1887,6 +1892,15 @@ fn run() -> Result<()> {
                     &resolved_runtime,
                     vec!["auth".to_string(), "xai-device".to_string()],
                 )
+            }
+            command @ AuthCommand::Status {
+                diagnostic: true, ..
+            } => {
+                // Like `doctor`, this is a read-only diagnostic. Starting a
+                // telemetry session here would create
+                // `$CODEWHALE_HOME/telemetry` before the report could truthfully
+                // say the isolated home is missing.
+                run_auth_command_with_runtime(&mut store, command, &runtime_overrides)
             }
             command => {
                 let resolved_runtime =
@@ -3121,6 +3135,171 @@ fn auth_status_all_providers_with_runtime(
     lines
 }
 
+fn diagnostic_path_state(path: &Path, directory: bool) -> &'static str {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => "present (symlink; not followed)",
+        Ok(metadata) if directory && metadata.is_dir() => "present",
+        Ok(metadata) if !directory && metadata.is_file() => "present",
+        Ok(_) => "present (unexpected type)",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+        Err(_) => "unknown",
+    }
+}
+
+const fn secret_backend_kind_label(
+    kind: codewhale_secrets::SecretBackendDiagnosticKind,
+) -> &'static str {
+    match kind {
+        codewhale_secrets::SecretBackendDiagnosticKind::File => "file",
+        codewhale_secrets::SecretBackendDiagnosticKind::System => "system",
+        codewhale_secrets::SecretBackendDiagnosticKind::Unknown => "unknown",
+    }
+}
+
+const fn secret_backend_inspection_label(
+    inspection: codewhale_secrets::SecretBackendInspection,
+) -> &'static str {
+    match inspection {
+        codewhale_secrets::SecretBackendInspection::MetadataOnly => "metadata_only",
+        codewhale_secrets::SecretBackendInspection::NotProbed => "not_probed",
+    }
+}
+
+const fn secret_backend_presence_label(
+    presence: codewhale_secrets::SecretBackendPresence,
+) -> &'static str {
+    match presence {
+        codewhale_secrets::SecretBackendPresence::Present => "present",
+        codewhale_secrets::SecretBackendPresence::Absent => "missing",
+        codewhale_secrets::SecretBackendPresence::Unknown => "unknown",
+    }
+}
+
+/// Value-free home and credential-source report for `auth status --diagnostic`.
+///
+/// Unlike ordinary `auth status`, this path never constructs [`Secrets`] and
+/// never asks a provider keyring for a value. File presence comes from metadata
+/// only; provider environment variables are checked with the runtime's
+/// non-empty-string semantics and their contents are never formatted.
+fn auth_diagnostic_lines(store: &ConfigStore, provider: Option<ProviderKind>) -> Vec<String> {
+    let explicit_home = codewhale_paths::codewhale_home_is_explicit();
+    let resolved_home = codewhale_paths::codewhale_home();
+    let mut lines = vec![
+        "auth diagnostic (structural only; credential values are never printed and provider credential stores were not opened)".to_string(),
+        String::new(),
+    ];
+
+    let home = match resolved_home {
+        Ok(Some(path)) => {
+            lines.push(format!(
+                "codewhale home: {} (source: {}; state: {})",
+                codewhale_config::quote_os_path(&path),
+                if explicit_home {
+                    "CODEWHALE_HOME (isolated)"
+                } else {
+                    "platform home"
+                },
+                diagnostic_path_state(&path, true),
+            ));
+            Some(path)
+        }
+        Ok(None) => {
+            lines.push("codewhale home: unavailable (no user home resolved)".to_string());
+            None
+        }
+        Err(error) => {
+            lines.push(format!("codewhale home: unavailable ({error})"));
+            None
+        }
+    };
+
+    lines.push(format!(
+        "config: {} ({})",
+        codewhale_config::quote_os_path(store.path()),
+        diagnostic_path_state(store.path(), false),
+    ));
+    if let Some(home) = home.as_ref() {
+        let settings = home.join("settings.toml");
+        lines.push(format!(
+            "settings: {} ({})",
+            codewhale_config::quote_os_path(&settings),
+            diagnostic_path_state(&settings, false),
+        ));
+    } else {
+        lines.push("settings: unavailable (Codewhale home unresolved)".to_string());
+    }
+
+    let backend = codewhale_secrets::diagnose_secret_backend();
+    lines.push(format!(
+        "secret backend: {} (inspection: {})",
+        secret_backend_kind_label(backend.backend),
+        secret_backend_inspection_label(backend.inspection),
+    ));
+    if let Some(path) = backend.path.as_ref() {
+        lines.push(format!(
+            "secret store: {} ({})",
+            codewhale_config::quote_os_path(path),
+            secret_backend_presence_label(backend.presence),
+        ));
+    } else {
+        lines.push(format!(
+            "secret store: unavailable ({})",
+            secret_backend_presence_label(backend.presence),
+        ));
+    }
+    if let Some(path) = backend.legacy_path.as_ref() {
+        lines.push(format!(
+            "legacy secret store: {} ({})",
+            codewhale_config::quote_os_path(path),
+            secret_backend_presence_label(backend.legacy_presence),
+        ));
+    } else if explicit_home {
+        lines.push(
+            "legacy secret store: suppressed by explicit CODEWHALE_HOME isolation".to_string(),
+        );
+    } else {
+        lines.push("legacy secret store: unavailable (not probed)".to_string());
+    }
+
+    lines.push(String::new());
+    // Diagnostic mode answers "which sources will this shell use?" for one
+    // route. Ordinary `auth status` remains the all-provider inventory; a
+    // different provider can be inspected explicitly with `--provider`.
+    let providers = [provider.unwrap_or(store.config.provider)];
+    for provider in providers {
+        let config_present = provider_config_api_key(store, provider).is_some();
+        let environment_present = provider_env_vars(provider)
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        let environment_names = match provider_env_vars(provider) {
+            [] => "none configured".to_string(),
+            names => names.join("/"),
+        };
+        let external_configured = external_consent(store, provider).is_some();
+        lines.push(format!(
+            "provider {} sources: config_literal={}, secret_backend={} (provider entry unprobed), environment={} ({}), external_consent={}",
+            provider.as_str(),
+            if config_present { "present" } else { "missing" },
+            secret_backend_presence_label(backend.presence),
+            if environment_present { "present" } else { "missing" },
+            environment_names,
+            if external_configured {
+                "configured"
+            } else {
+                "missing"
+            },
+        ));
+    }
+    lines
+}
+
+fn run_auth_diagnostic(store: &ConfigStore, provider: Option<ProviderArg>) -> Result<()> {
+    for line in auth_diagnostic_lines(store, provider.map(ProviderKind::from)) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn auth_list_lines(store: &ConfigStore, secrets: &Secrets) -> Vec<String> {
     auth_list_lines_with_runtime(store, secrets, &CliRuntimeOverrides::default())
@@ -3491,6 +3670,19 @@ fn run_auth_command_with_runtime(
     command: AuthCommand,
     runtime_overrides: &CliRuntimeOverrides,
 ) -> Result<()> {
+    let command = match command {
+        AuthCommand::Status {
+            provider,
+            diagnostic: true,
+        } => {
+            // Keep the structural diagnostic structurally read-only: ordinary
+            // status constructs the configured credential facade so it can report
+            // runtime-effective sources, but diagnostic mode must not even create
+            // a system-keyring handle or inspect a file-backed store.
+            return run_auth_diagnostic(store, provider);
+        }
+        command => command,
+    };
     run_auth_command_with_secrets_and_runtime(
         store,
         command,
@@ -3626,7 +3818,13 @@ fn run_auth_command_with_secrets_and_runtime(
             );
             Ok(())
         }
-        AuthCommand::Status { provider } => {
+        AuthCommand::Status {
+            provider,
+            diagnostic,
+        } => {
+            if diagnostic {
+                return run_auth_diagnostic(store, provider);
+            }
             match provider {
                 Some(p) => {
                     let provider: ProviderKind = p.into();
@@ -6222,7 +6420,26 @@ mod tests {
             cli.command,
             Some(Commands::Auth(AuthArgs {
                 command: AuthCommand::Status {
-                    provider: Some(ProviderArg::OpenaiCodex)
+                    provider: Some(ProviderArg::OpenaiCodex),
+                    diagnostic: false,
+                }
+            }))
+        ));
+
+        let cli = parse_ok(&[
+            "deepseek",
+            "auth",
+            "status",
+            "--diagnostic",
+            "--provider",
+            "deepseek",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Auth(AuthArgs {
+                command: AuthCommand::Status {
+                    provider: Some(ProviderArg::Deepseek),
+                    diagnostic: true,
                 }
             }))
         ));
@@ -6547,6 +6764,7 @@ mod tests {
             &mut store,
             AuthCommand::Status {
                 provider: Some(ProviderArg::Deepseek),
+                diagnostic: false,
             },
             &secrets,
         )
@@ -6569,6 +6787,99 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn auth_diagnostic_reports_paths_and_presence_without_values() {
+        let _lock = env_lock();
+        let fixture = tempfile::TempDir::new().expect("fixture root");
+        // macOS spells /var through a /private symlink. Canonicalize the
+        // fixture root so the metadata-only backend diagnostic can prove every
+        // ancestor is a real directory instead of truthfully returning
+        // `unknown` for the symlinked spelling.
+        let home = fixture
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root")
+            .join("isolated-codewhale-home");
+        let config_path = home.join("config.toml");
+        let settings_path = home.join("settings.toml");
+        let secret_path = home.join("secrets").join("secrets.json");
+        std::fs::create_dir_all(secret_path.parent().expect("secret parent"))
+            .expect("create diagnostic fixture");
+        std::fs::write(
+            &config_path,
+            "api_key = \"diagnostic-config-secret-1234\"\n",
+        )
+        .expect("write config fixture");
+        std::fs::write(&settings_path, "default_mode = \"plan\"\n")
+            .expect("write settings fixture");
+        std::fs::write(
+            &secret_path,
+            r#"{"deepseek":"diagnostic-store-secret-5678"}"#,
+        )
+        .expect("write secret fixture");
+
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
+        let _backend = ScopedEnvVar::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _env = ScopedEnvVar::set("DEEPSEEK_API_KEY", "diagnostic-env-secret-9012");
+        let store = ConfigStore::load(Some(config_path.clone())).expect("load config fixture");
+
+        let output = auth_diagnostic_lines(&store, Some(ProviderKind::Deepseek)).join("\n");
+        assert!(
+            output.contains(&format!(
+                "codewhale home: {} (source: CODEWHALE_HOME (isolated); state: present)",
+                codewhale_config::quote_os_path(&home)
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "config: {} (present)",
+                codewhale_config::quote_os_path(&config_path)
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "settings: {} (present)",
+                codewhale_config::quote_os_path(&settings_path)
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains("secret backend: file (inspection: metadata_only)"),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "secret store: {} (present)",
+                codewhale_config::quote_os_path(&secret_path)
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains("provider deepseek sources: config_literal=present, secret_backend=present (provider entry unprobed), environment=present (DEEPSEEK_API_KEY)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("legacy secret store: suppressed by explicit CODEWHALE_HOME isolation"),
+            "{output}"
+        );
+        for secret_fragment in [
+            "diagnostic-config-secret",
+            "diagnostic-store-secret",
+            "diagnostic-env-secret",
+            "1234",
+            "5678",
+            "9012",
+            "last4",
+        ] {
+            assert!(
+                !output.contains(secret_fragment),
+                "diagnostic leaked {secret_fragment:?}: {output}"
+            );
+        }
     }
 
     #[test]

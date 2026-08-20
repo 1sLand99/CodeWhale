@@ -23,6 +23,17 @@ pub trait ModelClient: Send + Sync {
     fn billing_base_url(&self) -> Option<&str> {
         None
     }
+    fn route_limits(&self) -> Option<codewhale_config::route::RouteLimits> {
+        None
+    }
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        let route = self.effective_route_envelope(requested_model, chrono::Utc::now());
+        crate::route_budget::effective_max_output_tokens_for_route(
+            route.provider,
+            &route.model,
+            self.route_limits(),
+        )
+    }
     fn effective_route_envelope(
         &self,
         requested_model: &str,
@@ -64,6 +75,14 @@ where
 
     fn billing_base_url(&self) -> Option<&str> {
         LlmClient::billing_base_url(self)
+    }
+
+    fn route_limits(&self) -> Option<codewhale_config::route::RouteLimits> {
+        LlmClient::route_limits(self)
+    }
+
+    fn effective_max_output_tokens(&self, requested_model: &str) -> u32 {
+        LlmClient::effective_max_output_tokens(self, requested_model)
     }
 
     fn effective_route_envelope(

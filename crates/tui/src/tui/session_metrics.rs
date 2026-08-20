@@ -516,11 +516,14 @@ pub fn spans(
     strip: &RenderedStrip,
     theme: &crate::palette::UiTheme,
 ) -> Vec<ratatui::text::Span<'static>> {
+    use crate::palette::ChromeInk;
     use ratatui::style::Style;
     use ratatui::text::Span;
-    let dim = Style::default().fg(theme.text_dim);
-    let label = Style::default().fg(theme.text_muted);
-    let value = Style::default().fg(theme.text_soft);
+    // Footer-rail ink is status-bar ink: the whole strip is passive Metadata,
+    // separated only by weight. `docs/design/STATUS_BAR_COLOR_GRAMMAR.md`.
+    let dim = Style::default().fg(ChromeInk::MetadataDim.color(theme));
+    let label = Style::default().fg(ChromeInk::Metadata.color(theme));
+    let value = Style::default().fg(ChromeInk::MetadataValue.color(theme));
     let mut out = Vec::new();
     for (index, group) in strip.groups.iter().enumerate() {
         if index > 0 {
@@ -603,6 +606,33 @@ mod tests {
         let ascii = full_text(sample(), Locale::En, true);
         assert!(ascii.is_ascii(), "{ascii}");
         assert!(ascii.contains(" | LLM 11m46s . Tool call 1m52s | "));
+    }
+
+    #[test]
+    fn painted_metrics_use_metadata_inks_for_every_weight() {
+        let strip = fit_to_width(build_groups(sample(), Locale::En), 200, Separators::UNICODE);
+        let spans = spans(&strip, &crate::palette::UI_THEME);
+        let styled = |text: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.as_ref() == text)
+                .unwrap_or_else(|| panic!("missing metrics span {text:?}"))
+                .style
+                .fg
+        };
+
+        assert_eq!(
+            styled("4"),
+            Some(crate::palette::ChromeInk::MetadataValue.color(&crate::palette::UI_THEME))
+        );
+        assert_eq!(
+            styled("turns"),
+            Some(crate::palette::ChromeInk::Metadata.color(&crate::palette::UI_THEME))
+        );
+        assert_eq!(
+            styled(" │ "),
+            Some(crate::palette::ChromeInk::MetadataDim.color(&crate::palette::UI_THEME))
+        );
     }
 
     #[test]

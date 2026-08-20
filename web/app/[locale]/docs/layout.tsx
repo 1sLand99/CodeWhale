@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { DocsBreadcrumb } from "@/components/docs-breadcrumb";
 import { DocsSidebar } from "@/components/docs-sidebar";
 import { Whale } from "@/components/whale";
 import { getDocsShell } from "@/lib/i18n/dictionaries";
@@ -26,7 +27,10 @@ export default async function DocsLayout({
             <Whale size={28} />
             <span>{t.portalMark}</span>
           </div>
-          <h1>{t.heroTitle}</h1>
+          {/* Shell chrome, not the page heading: this line is identical on all
+              16 docs URLs, so each page owns its own <h1> (its topic) and this
+              keeps the hero's display size without claiming the heading rank. */}
+          <p className="docs-hero-title">{t.heroTitle}</p>
           <p>{t.heroLead}</p>
           <div className="portal-actions">
             <Link href={`/${locale}/install`} className="portal-button portal-button-primary">
@@ -45,7 +49,10 @@ export default async function DocsLayout({
       </section>
 
       <div className="portal-container docs-shell min-w-0">
-        <article className="docs-content min-w-0">{children}</article>
+        <article className="docs-content min-w-0">
+          <DocsBreadcrumb locale={locale} />
+          {children}
+        </article>
         <DocsSidebar locale={locale} />
       </div>
     </div>

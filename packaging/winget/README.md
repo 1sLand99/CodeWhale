@@ -46,8 +46,8 @@ The single-binary release (v0.9.5+) ships `codewhale` + `codew` per target — n
 
 Until v0.9.4 the release matrix was 7 targets × 3 binaries (`codewhale`, `codew`, `codewhale-tui`).
 v0.9.5 is 7×1 — each target publishes only `codewhale` + `codew` (Windows also ships `codewhale.bat`
-via the npm wrapper). The winget ZIP `NestedInstallerFiles` therefore lists only those two
-executables; `codewhale-tui.exe` is intentionally absent.
+as a GitHub/npm asset and inside the zip/NSIS layouts). The winget ZIP `NestedInstallerFiles`
+therefore lists only the two PATH commands; `codewhale-tui.exe` is intentionally absent.
 
 ## FreeBSD
 

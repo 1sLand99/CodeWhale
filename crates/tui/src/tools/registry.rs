@@ -22,7 +22,7 @@ use super::schema_canonicalize;
 use super::schema_sanitize;
 use super::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
-    ToolSpec,
+    ToolResultContentBlock, ToolSpec,
 };
 
 // === Types ===
@@ -902,6 +902,13 @@ impl ToolRegistryBuilder {
         }
     }
 
+    /// Include the `read_media` tool for safe multimodal media inspection.
+    #[must_use]
+    pub fn with_read_media_tool(self) -> Self {
+        use super::read_media::ReadMediaTool;
+        self.with_tool(Arc::new(ReadMediaTool))
+    }
+
     /// Include the `load_skill` tool (#434) so the model can pull a
     /// SKILL.md body + companion file list into context with one
     /// call instead of `read_file` + `list_dir` against the path
@@ -1020,9 +1027,16 @@ impl ToolRegistryBuilder {
     /// Register the `image_analyze` vision tool.
     /// Only registered when `[vision_model]` is configured in config.toml.
     #[must_use]
-    pub fn with_vision_tools(self, config: crate::config::VisionModelConfig) -> Self {
+    pub fn with_vision_tools(
+        self,
+        config: crate::config::VisionModelConfig,
+        route_client: Option<DeepSeekClient>,
+    ) -> Self {
         use crate::vision::tools::ImageAnalyzeTool;
-        self.with_tool(Arc::new(ImageAnalyzeTool::new(config)))
+        self.with_tool(Arc::new(ImageAnalyzeTool::new_with_route_client(
+            config,
+            route_client,
+        )))
     }
 
     /// Include request_user_input tool.
@@ -1248,6 +1262,7 @@ impl ToolRegistryBuilder {
             .with_revert_turn_tool()
             .with_pandoc_tools()
             .with_image_ocr_tools()
+            .with_read_media_tool()
             .with_finance_tool();
 
         match shell_policy {
@@ -1271,6 +1286,7 @@ impl ToolRegistryBuilder {
         plan_state: super::plan::SharedPlanState,
     ) -> Self {
         let speech_client = client.clone();
+        let vision_client = client.clone();
         let verify_client = client.clone();
         let verify_model = model.clone();
         let mut builder = self
@@ -1299,7 +1315,7 @@ impl ToolRegistryBuilder {
             builder = builder.with_remember_tool().with_native_memory_tools();
         }
         if let Some(vision_config) = options.vision_config {
-            builder = builder.with_vision_tools(vision_config);
+            builder = builder.with_vision_tools(vision_config, vision_client);
         }
 
         builder.with_notify_tool()
@@ -1484,43 +1500,101 @@ impl ToolSpec for McpToolAdapter {
         !is_mcp_read_helper(&self.name)
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        self.execute_rich(input, context)
+            .await
+            .map(RichToolResult::into_result)
+    }
+
+    async fn execute_rich(
+        &self,
+        input: Value,
+        _context: &ToolContext,
+    ) -> Result<RichToolResult, ToolError> {
         let mut pool = self.pool.lock().await;
         let result = pool
             .call_tool(&self.name, input)
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
-        Ok(mcp_result_to_tool_result(&result))
+        Ok(mcp_result_to_bounded_rich_tool_result(result))
     }
 }
 
-/// Map an MCP `tools/call` result to a `ToolResult`. MCP servers signal tool
-/// failure with `isError: true` on an otherwise successful JSON-RPC response;
-/// wrapping that in `ToolResult::success` tells the model a rejected call
-/// worked (#5123-class). Error results keep their text payload verbatim so
-/// the model still sees the server's message.
-fn mcp_result_to_tool_result(result: &Value) -> ToolResult {
-    let content = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
+const MCP_IMAGE_TEXT_PLACEHOLDER: &str = "[MCP image payload removed from text output]";
+
+/// Map an MCP `tools/call` result to the provider-neutral rich result used by
+/// native tools. Image payloads travel as typed blocks instead of being
+/// duplicated into the JSON text as multi-megabyte base64 strings.
+///
+/// MCP servers signal tool failure with `isError: true` on an otherwise
+/// successful JSON-RPC response. Error results keep their text payload
+/// verbatim so the model still sees the server's message (#5123-class).
+fn mcp_result_to_rich_tool_result(mut result: Value) -> RichToolResult {
+    let mut content_blocks = Vec::new();
+    if let Some(items) = result.get_mut("content").and_then(Value::as_array_mut) {
+        for item in items {
+            let Some(object) = item.as_object_mut() else {
+                continue;
+            };
+            if object.get("type").and_then(Value::as_str) != Some("image") {
+                continue;
+            }
+
+            let mime_type = object
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let data = object.remove("data");
+            if data.is_some() {
+                object.insert(
+                    "data".to_string(),
+                    Value::String(MCP_IMAGE_TEXT_PLACEHOLDER.to_string()),
+                );
+            }
+            // Keep malformed image entries in the typed stream with empty
+            // fields so the shared rich-result boundary rejects them and
+            // emits the same visible omission receipt as invalid base64,
+            // unsupported MIME types, oversized images, and extra images.
+            // Dropping them here would silently remove the payload before the
+            // boundary had anything to count.
+            let (mime_type, data) = match (mime_type, data) {
+                (Some(mime_type), Some(Value::String(data))) => (mime_type, data),
+                _ => (String::new(), String::new()),
+            };
+            content_blocks.push(ToolResultContentBlock::Image { mime_type, data });
+        }
+    }
+
+    let content = serde_json::to_string(&result).unwrap_or_else(|_| result.to_string());
     let is_error = result
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !is_error {
-        return ToolResult::success(content);
-    }
-    let text = result
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .filter(|text| !text.is_empty())
-        .unwrap_or(content);
-    ToolResult::error(text)
+    let result = if is_error {
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or(content);
+        ToolResult::error(text)
+    } else {
+        ToolResult::success(content)
+    };
+    RichToolResult::with_content_blocks(result, content_blocks)
+}
+
+/// Convert and bound an MCP result at the shared direct/parallel execution
+/// seam. The registry applies the same boundary to every rich tool; keeping it
+/// here too protects the engine's MCP fast path and text-only adapter callers.
+pub(crate) fn mcp_result_to_bounded_rich_tool_result(result: Value) -> RichToolResult {
+    crate::image_attach::bound_rich_tool_result(mcp_result_to_rich_tool_result(result))
 }
 
 #[cfg(test)]

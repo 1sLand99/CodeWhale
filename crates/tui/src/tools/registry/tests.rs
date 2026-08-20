@@ -13,7 +13,8 @@ use crate::tools::spec::{
 };
 
 use super::{
-    ToolRegistry, enforce_tool_authority, mcp_result_to_tool_result, mcp_tool_adapter_for_test,
+    MCP_IMAGE_TEXT_PLACEHOLDER, ToolRegistry, enforce_tool_authority,
+    mcp_result_to_bounded_rich_tool_result, mcp_tool_adapter_for_test,
 };
 
 #[test]
@@ -27,22 +28,154 @@ fn mcp_iserror_result_maps_to_tool_error_preserving_text() {
         ],
         "isError": true
     });
-    let result = mcp_result_to_tool_result(&error_payload);
+    let result = mcp_result_to_bounded_rich_tool_result(error_payload).result;
     assert!(!result.success, "isError must not be reported as success");
     assert_eq!(result.content, "delete failed: permission denied");
 
     let ok_payload = json!({
         "content": [{"type": "text", "text": "wrote 3 rows"}]
     });
-    let result = mcp_result_to_tool_result(&ok_payload);
+    let result = mcp_result_to_bounded_rich_tool_result(ok_payload).result;
     assert!(result.success);
     assert!(result.content.contains("wrote 3 rows"));
 
     // isError without text content falls back to the serialized payload.
     let bare_error = json!({"isError": true, "content": []});
-    let result = mcp_result_to_tool_result(&bare_error);
+    let result = mcp_result_to_bounded_rich_tool_result(bare_error).result;
     assert!(!result.success);
     assert!(result.content.contains("isError"));
+}
+
+#[test]
+fn mcp_image_result_uses_typed_block_without_base64_in_text() {
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let payload = json!({
+        "content": [
+            {"type": "text", "text": "screenshot captured"},
+            {"type": "image", "data": image_data, "mimeType": "image/png"}
+        ],
+        "structuredContent": {"page": "https://example.com"},
+        "isError": false
+    });
+
+    let rich = mcp_result_to_bounded_rich_tool_result(payload);
+
+    assert!(rich.result.success);
+    let sanitized: Value = serde_json::from_str(&rich.result.content).expect("sanitized MCP JSON");
+    assert_eq!(sanitized["content"][0]["text"], "screenshot captured");
+    assert_eq!(sanitized["content"][1]["data"], MCP_IMAGE_TEXT_PLACEHOLDER);
+    assert_eq!(
+        sanitized["structuredContent"],
+        json!({"page": "https://example.com"})
+    );
+    assert_eq!(sanitized["isError"], false);
+    assert!(!rich.result.content.contains(image_data));
+    assert_eq!(
+        rich.content_blocks,
+        vec![codewhale_tools::ToolResultContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data: image_data.to_string(),
+        }]
+    );
+}
+
+#[test]
+fn mcp_invalid_image_is_removed_with_a_visible_receipt() {
+    let payload = json!({
+        "content": [
+            {"type": "image", "data": "not base64", "mimeType": "image/png"}
+        ]
+    });
+
+    let rich = mcp_result_to_bounded_rich_tool_result(payload);
+
+    assert!(rich.content_blocks.is_empty());
+    assert!(rich.result.content.contains("MCP image payload removed"));
+    assert!(
+        rich.result
+            .content
+            .contains("1 tool-result image block(s) omitted")
+    );
+    assert!(!rich.result.content.contains("not base64"));
+}
+
+#[test]
+fn mcp_malformed_images_are_removed_with_a_visible_receipt() {
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let payload = json!({
+        "content": [
+            {"type": "image", "data": image_data},
+            {"type": "image", "data": {"nested": image_data}, "mimeType": "image/png"}
+        ]
+    });
+
+    let rich = mcp_result_to_bounded_rich_tool_result(payload);
+
+    assert!(rich.content_blocks.is_empty());
+    assert!(rich.result.content.contains("MCP image payload removed"));
+    assert!(
+        rich.result
+            .content
+            .contains("2 tool-result image block(s) omitted")
+    );
+    assert!(!rich.result.content.contains(image_data));
+}
+
+#[test]
+fn mcp_image_limits_keep_one_valid_block_and_report_the_rest() {
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let oversized = "A".repeat(crate::image_attach::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 4);
+    let payload = json!({
+        "content": [
+            {"type": "image", "data": oversized, "mimeType": "image/png"},
+            {"type": "image", "data": image_data, "mimeType": "image/png"},
+            {"type": "image", "data": image_data, "mimeType": "image/png"}
+        ]
+    });
+
+    let rich = mcp_result_to_bounded_rich_tool_result(payload);
+
+    assert_eq!(
+        rich.content_blocks,
+        vec![codewhale_tools::ToolResultContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data: image_data.to_string(),
+        }]
+    );
+    assert!(
+        rich.result
+            .content
+            .contains("2 tool-result image block(s) omitted")
+    );
+    assert!(!rich.result.content.contains(&oversized));
+}
+
+#[test]
+fn mcp_error_text_and_typed_image_are_both_preserved() {
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let payload = json!({
+        "content": [
+            {"type": "text", "text": "capture failed after partial screenshot"},
+            {"type": "image", "data": image_data, "mimeType": "image/png"}
+        ],
+        "structuredContent": {"retryable": true},
+        "isError": true
+    });
+
+    let rich = mcp_result_to_bounded_rich_tool_result(payload);
+
+    assert!(!rich.result.success);
+    assert_eq!(
+        rich.result.content,
+        "capture failed after partial screenshot"
+    );
+    assert_eq!(
+        rich.content_blocks,
+        vec![codewhale_tools::ToolResultContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data: image_data.to_string(),
+        }]
+    );
 }
 
 /// A simple test tool for unit testing
@@ -605,6 +738,7 @@ fn machine_verifier_catalog_and_dispatch_add_only_bounded_run() {
             "lsp",
             "project_map",
             "read",
+            "read_media",
             "request_user_input",
             "retrieve_tool_result",
             "todo_write",
@@ -1277,6 +1411,7 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
             "lsp",
             "project_map",
             "read",
+            "read_media",
             "request_user_input",
             "retrieve_tool_result",
             "todo_write",

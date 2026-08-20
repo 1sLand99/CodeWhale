@@ -53,6 +53,8 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
                 help.push_str(
                     "\n\n  Provider context window: set `context_window = 262144` under the active `[providers.<name>]` table to cap a 1M model to 256K. Use `/config context_window` to inspect the configured and effective values.",
                 );
+                help.push('\n');
+                help.push_str(&tr(app.ui_locale, MessageId::ConfigHelpDiscoverable));
             }
             return CommandResult::message(help);
         }
@@ -71,7 +73,8 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
 
     // Show help overlay
     if app.view_stack.top_kind() != Some(ModalKind::Help) {
-        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills);
+        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills)
+            .with_groups_expanded(app.help_expand_groups);
         app.view_stack.push(help);
     }
     CommandResult::ok()
@@ -384,6 +387,15 @@ pub fn models(_app: &mut App) -> CommandResult {
 }
 
 /// List Fleet worker status from the engine.
+/// Request a refresh and print the agent roster into the transcript once it
+/// lands. One-shot: the flag is cleared by the event handler, so ambient
+/// refreshes (sidebar polls, spawn/complete events) never spam the transcript.
+pub fn subagents_roster(app: &mut App) -> CommandResult {
+    app.agent_roster_print_requested = true;
+    app.status_message = Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
+    CommandResult::action(AppAction::ListSubAgents)
+}
+
 pub fn subagents(app: &mut App) -> CommandResult {
     if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
         let agents = subagent_view_agents(app, &app.subagent_cache);
@@ -645,6 +657,9 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
     // Quick actions section
     let _ = writeln!(stats, "\n{}", tr(locale, MessageId::HomeQuickActions));
     let _ = writeln!(stats, "--------------------------------------------");
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickWorkspace));
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickRestore));
+    let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickTokens));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickLinks));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickSkills));
     let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeQuickConfig));
@@ -835,6 +850,9 @@ mod tests {
         assert!(msg.contains("Usage: /config"));
         assert!(msg.contains("context_window = 262144"));
         assert!(msg.contains("/config context_window"));
+        assert!(msg.contains("/config search.provider"));
+        assert!(msg.contains("/config prompt_suggestion"));
+        assert!(msg.contains("/config notifications"));
     }
 
     #[test]
@@ -1237,6 +1255,31 @@ mod tests {
         assert_eq!(app.model, "GLM-5.2");
         let pending = app.pending_route_save.as_ref().expect("pending save");
         assert_eq!(pending.provider_identity, "zai");
+    }
+
+    #[test]
+    fn model_command_keeps_glm_53_as_its_own_wire_id() {
+        let _settings = SettingsPathGuard::new();
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        app.model_ids_passthrough = false;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.auto_model = false;
+
+        let result = model(&mut app, Some("glm-5.3"));
+
+        assert!(!result.is_error, "GLM-5.3 is valid on Z.ai: {result:?}");
+        assert_eq!(app.model, crate::config::ZAI_GLM_5_3_MODEL);
+        assert_eq!(
+            app.provider_models.get("zai").map(String::as_str),
+            Some(crate::config::ZAI_GLM_5_3_MODEL)
+        );
+        assert_eq!(
+            app.pending_route_save
+                .as_ref()
+                .map(|pending| pending.model.as_str()),
+            Some(crate::config::ZAI_GLM_5_3_MODEL)
+        );
     }
 
     #[test]
@@ -1675,7 +1718,10 @@ mod tests {
         let msg = result
             .message
             .expect("home dashboard should return message");
-        assert!(msg.contains("/links      - Codewhale, community & provider links"));
+        assert!(msg.contains("/workspace   - Switch folders or worktrees"));
+        assert!(msg.contains("/restore     - Roll files back to a turn snapshot"));
+        assert!(msg.contains("/tokens      - Show session spend and context"));
+        assert!(msg.contains("/links       - Codewhale, community & provider links"));
         assert!(msg.contains("/config      - Inspect and change settings"));
         assert!(
             !msg.lines()

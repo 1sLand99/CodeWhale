@@ -23,7 +23,7 @@ export default async function WebClientPage({ params }: { params: Promise<{ loca
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "浏览器客户端" : "Browser Client"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "浏览器客户端" : "Browser Client"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh ? (
             <>

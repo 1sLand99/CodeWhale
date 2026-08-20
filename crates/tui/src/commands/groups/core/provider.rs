@@ -14,7 +14,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "provider",
     aliases: &[],
-    usage: "/provider [setup [name]|name [model]]",
+    usage: "/provider [setup [name]|templates|name [model]]",
     description_id: MessageId::CmdProviderDescription,
 };
 
@@ -49,25 +49,22 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
     if name.eq_ignore_ascii_case("fallback") {
         return provider_fallback(app, model_arg);
     }
-    if name.eq_ignore_ascii_case("setup") {
-        if model_arg.is_some_and(|raw| {
-            raw.eq_ignore_ascii_case("ds4") || raw.eq_ignore_ascii_case("dwarfstar")
-        }) {
-            return CommandResult::action(AppAction::OpenDs4Setup);
+    if name.eq_ignore_ascii_case("templates") || name.eq_ignore_ascii_case("template") {
+        if model_arg.is_some() {
+            return CommandResult::error(
+                "Usage: /provider templates — open beginner setup templates.".to_string(),
+            );
         }
-        let provider = match model_arg {
-            None => None,
-            Some(raw) => match ApiProvider::parse(raw) {
-                Some(provider) => Some(provider),
-                None => {
-                    return CommandResult::error(format!(
-                        "Unknown provider '{raw}'. Expected: {}.",
-                        ApiProvider::names_hint()
-                    ));
-                }
+        return CommandResult::action(AppAction::OpenProviderTemplateList);
+    }
+    if name.eq_ignore_ascii_case("setup") {
+        return match model_arg {
+            None => CommandResult::action(AppAction::OpenProviderSetup { provider: None }),
+            Some(raw) => match provider_setup_action_for_name(raw) {
+                Ok(action) => CommandResult::action(action),
+                Err(message) => CommandResult::error(message),
             },
         };
-        return CommandResult::action(AppAction::OpenProviderSetup { provider });
     }
 
     let Some(target) = ApiProvider::parse(name) else {
@@ -116,6 +113,36 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
         provider: target,
         model,
     })
+}
+
+pub(in crate::commands) fn provider_setup_action_for_name(raw: &str) -> Result<AppAction, String> {
+    if raw.eq_ignore_ascii_case("ds4") || raw.eq_ignore_ascii_case("dwarfstar") {
+        return Ok(AppAction::OpenDs4Setup);
+    }
+    if let Some(template) = codewhale_config::provider_setup_template(raw) {
+        match template.apply {
+            codewhale_config::ProviderSetupApply::FirstClass(kind) => {
+                return Ok(AppAction::OpenProviderSetup {
+                    provider: Some(ApiProvider::from_kind(kind)),
+                });
+            }
+            codewhale_config::ProviderSetupApply::Compatible
+            | codewhale_config::ProviderSetupApply::Unpublished => {
+                return Ok(AppAction::OpenTemplateSetup {
+                    template_id: template.id.to_string(),
+                });
+            }
+        }
+    }
+    match ApiProvider::parse(raw) {
+        Some(provider) => Ok(AppAction::OpenProviderSetup {
+            provider: Some(provider),
+        }),
+        None => Err(format!(
+            "Unknown provider '{raw}'. Expected: {}, or a template (agnes, sensenova, opencode-zen, opencode-go).",
+            ApiProvider::names_hint()
+        )),
+    }
 }
 
 fn is_route_ambiguous_deepseek_alias(provider: ApiProvider, model: &str) -> bool {
@@ -264,6 +291,39 @@ mod tests {
         let mut app = create_test_app();
         let result = provider(&mut app, Some("setup ds4"));
         assert_eq!(result.action, Some(AppAction::OpenDs4Setup));
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn setup_subcommand_opens_agnes_unpublished_template() {
+        let mut app = create_test_app();
+        let result = provider(&mut app, Some("setup agnes"));
+        assert_eq!(
+            result.action,
+            Some(AppAction::OpenTemplateSetup {
+                template_id: "agnes".to_string(),
+            })
+        );
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn setup_subcommand_opens_first_class_zen_template() {
+        let mut app = create_test_app();
+        let result = provider(&mut app, Some("setup opencode-zen"));
+        assert_eq!(
+            result.action,
+            Some(AppAction::OpenProviderSetup {
+                provider: Some(ApiProvider::OpencodeZen),
+            })
+        );
+    }
+
+    #[test]
+    fn templates_subcommand_opens_template_list() {
+        let mut app = create_test_app();
+        let result = provider(&mut app, Some("templates"));
+        assert_eq!(result.action, Some(AppAction::OpenProviderTemplateList));
         assert!(result.message.is_none());
     }
 

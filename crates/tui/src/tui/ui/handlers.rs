@@ -564,7 +564,13 @@ pub(crate) async fn handle_mcp_ui_action(
         add_mcp_message(app, message);
     }
 
-    let snapshot_result = if is_reload {
+    // A successful MCP mutation is an explicit request to change the tools
+    // available to this running session. Apply it to the engine-owned pool in
+    // the same operation instead of leaving Extensions and `/mcp` users on a
+    // second, easy-to-miss reload step. The standalone reload action remains
+    // the retry/compatibility path for externally edited configuration.
+    let rebuild_live_pool = is_reload || changed;
+    let snapshot_result = if rebuild_live_pool {
         match engine_handle.reload_mcp(path.clone()).await {
             Ok(snapshot) => {
                 app.mcp_reload_required = false;
@@ -615,7 +621,7 @@ pub(crate) async fn handle_mcp_ui_action(
             app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
             open_mcp_manager_pager(app, &snapshot);
         }
-        Err(err) if is_reload => add_mcp_message(
+        Err(err) if rebuild_live_pool => add_mcp_message(
             app,
             format!("MCP reload failed; the live tool pool is unchanged: {err}"),
         ),
@@ -639,58 +645,72 @@ pub(crate) fn handle_shell_job_action(app: &mut App, action: crate::tui::app::Sh
             return;
         }
     };
+    let active_session_id = app.current_session_id.clone().unwrap_or_default();
 
     match action {
         crate::tui::app::ShellJobAction::List => {
-            let jobs = manager.list_jobs();
+            let jobs = manager.list_jobs_for_session(&active_session_id);
             add_shell_job_message(app, format_shell_job_list(&jobs));
         }
-        crate::tui::app::ShellJobAction::Show { id } => match manager.inspect_job(&id) {
-            Ok(detail) => open_shell_job_pager(app, &detail),
-            Err(err) => add_shell_job_message(app, format!("Command lookup failed: {err}")),
-        },
+        crate::tui::app::ShellJobAction::Show { id } => {
+            match manager.inspect_job_for_session(&active_session_id, &id) {
+                Ok(detail) => open_shell_job_pager(app, &detail),
+                Err(err) => add_shell_job_message(app, format!("Command lookup failed: {err}")),
+            }
+        }
         crate::tui::app::ShellJobAction::Poll { id, wait } => {
-            match manager.poll_delta(&id, wait, if wait { 5_000 } else { 1_000 }) {
+            match manager.poll_delta_for_session(
+                &active_session_id,
+                &id,
+                wait,
+                if wait { 5_000 } else { 1_000 },
+            ) {
                 Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
                 Err(err) => add_shell_job_message(app, format!("Command poll failed: {err}")),
             }
         }
         crate::tui::app::ShellJobAction::SendStdin { id, input, close } => {
-            match manager.write_stdin(&id, &input, close) {
-                Ok(()) => match manager.poll_delta(&id, false, 1_000) {
-                    Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
-                    Err(err) => {
-                        add_shell_job_message(
-                            app,
-                            format!("Command input sent; poll failed: {err}"),
-                        );
+            match manager.write_stdin_for_session(&active_session_id, &id, &input, close) {
+                Ok(()) => {
+                    match manager.poll_delta_for_session(&active_session_id, &id, false, 1_000) {
+                        Ok(delta) => add_shell_job_message(app, format_shell_poll(&delta.result)),
+                        Err(err) => {
+                            add_shell_job_message(
+                                app,
+                                format!("Command input sent; poll failed: {err}"),
+                            );
+                        }
                     }
-                },
+                }
                 Err(err) => add_shell_job_message(app, format!("Command input failed: {err}")),
             }
         }
-        crate::tui::app::ShellJobAction::Cancel { id } => match manager.kill(&id) {
-            Ok(result) => add_shell_job_message(app, format_shell_poll(&result)),
-            Err(err) => add_shell_job_message(app, format!("Command cancel failed: {err}")),
-        },
-        crate::tui::app::ShellJobAction::CancelAll => match manager.kill_running() {
-            Ok(results) => {
-                let count = results.len();
-                if count == 0 {
-                    add_shell_job_message(app, "No running commands to cancel.".to_string());
-                } else {
-                    let tasks: Vec<String> = results
-                        .iter()
-                        .filter_map(|result| result.task_id.clone())
-                        .collect();
-                    add_shell_job_message(
-                        app,
-                        format!("Canceled {count} command(s): {}", tasks.join(", ")),
-                    );
-                }
+        crate::tui::app::ShellJobAction::Cancel { id } => {
+            match manager.kill_for_session(&active_session_id, &id) {
+                Ok(result) => add_shell_job_message(app, format_shell_poll(&result)),
+                Err(err) => add_shell_job_message(app, format!("Command cancel failed: {err}")),
             }
-            Err(err) => add_shell_job_message(app, format!("Command cancel-all failed: {err}")),
-        },
+        }
+        crate::tui::app::ShellJobAction::CancelAll => {
+            match manager.kill_running_for_session(&active_session_id) {
+                Ok(results) => {
+                    let count = results.len();
+                    if count == 0 {
+                        add_shell_job_message(app, "No running commands to cancel.".to_string());
+                    } else {
+                        let tasks: Vec<String> = results
+                            .iter()
+                            .filter_map(|result| result.task_id.clone())
+                            .collect();
+                        add_shell_job_message(
+                            app,
+                            format!("Canceled {count} command(s): {}", tasks.join(", ")),
+                        );
+                    }
+                }
+                Err(err) => add_shell_job_message(app, format!("Command cancel-all failed: {err}")),
+            }
+        }
     }
 }
 
@@ -1963,6 +1983,28 @@ pub(crate) async fn handle_view_events(
                     set_active_custom_provider_in_memory(config, &provider_id);
                 }
                 open_model_picker_for_provider(app, config, provider);
+            }
+            ViewEvent::ProviderPickerTestConnection {
+                provider,
+                provider_id,
+                catalog_view,
+            } => {
+                match picker_provider_identity(config, provider, provider_id.as_deref()) {
+                    Ok(identity) => {
+                        apply_provider_picker_test_connection(
+                            app,
+                            engine_handle,
+                            config,
+                            identity,
+                            catalog_view,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        app.push_status_toast(error, StatusToastLevel::Error, Some(8_000));
+                    }
+                }
+                refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ModeSelected { mode } => {
                 let prior_mode = app.mode;

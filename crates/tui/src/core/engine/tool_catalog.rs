@@ -204,7 +204,7 @@ pub(super) fn build_model_tool_catalog_with_surface(
     native_tools
 }
 
-const REGISTRY_FIRST_SHELL_GUIDANCE: &str = "Before using this tool for a task whose core operation is a specialized capability (for example media or document conversion, data transformation, browser automation, database or service access, or a developer utility), call registry_sync first. If its complete catalog contains any plausible match, call start_registry_mcp_server and inspect the connected tools before using a shell alternative. Use the shell directly for ordinary repo-native work and simple file operations, or after every Registry entry is clearly irrelevant or the matching server fails to start.";
+const REGISTRY_FIRST_SHELL_GUIDANCE: &str = "Before using this tool for a task whose core operation is a specialized capability (for example media or document conversion, data transformation, browser automation, database or service access, or a developer utility), call registry_sync with a query describing that capability; it returns at most eight scored matches from the host-side Registry snapshot. If a returned match plausibly covers the operation, call start_registry_mcp_server and inspect the connected tools before using a shell alternative. Use the shell directly for ordinary repo-native work and simple file operations, or after no match (or one refined query) is plausible or the matching server fails to start.";
 
 /// Put the Registry-first decision at the point where the model considers its
 /// strongest fallback. The discovery skill body is lazy-loaded, so relying on

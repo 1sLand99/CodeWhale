@@ -2,27 +2,12 @@
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { faqSourceHref } from "@/lib/faq-source";
+import { extractText } from "@/lib/react-text";
 
 export interface FaqSearchItem {
   q: string;
   a: React.ReactNode;
   sources?: string[];
-}
-
-/* ------------------------------------------------------------------ */
-/*  Text extraction from React nodes for full-text matching            */
-/* ------------------------------------------------------------------ */
-
-function extractText(node: React.ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string") return node;
-  if (typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(extractText).join(" ");
-  if (typeof node === "object" && "props" in node) {
-    const props = (node as { props?: { children?: React.ReactNode } }).props;
-    return props ? extractText(props.children) : "";
-  }
-  return "";
 }
 
 /* ------------------------------------------------------------------ */

@@ -108,6 +108,46 @@ pub fn should_retry_with_h1(policy: StreamHttpPolicy, err_text: &str) -> bool {
         || lower.contains("frame size")
 }
 
+/// Whether an error raised before response headers should retry through the
+/// HTTP/1.1 twin. Prefer typed transport errors, then retain the narrow text
+/// classifier for lower-level H2 errors that reqwest exposes only as prose.
+#[must_use]
+fn should_retry_error_with_h1(policy: StreamHttpPolicy, err: &anyhow::Error) -> bool {
+    if policy != StreamHttpPolicy::DualWithH1Fallback {
+        return false;
+    }
+
+    if let Some(llm_error) = err.downcast_ref::<LlmError>() {
+        return matches!(llm_error, LlmError::NetworkError(_) | LlmError::Timeout(_));
+    }
+
+    if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>() {
+        return reqwest_error.is_connect()
+            || reqwest_error.is_timeout()
+            || reqwest_error.is_request();
+    }
+
+    should_retry_with_h1(policy, &format!("{err:#}"))
+}
+
+/// Preserve provider-semantic failures returned by the H1 attempt. Only a
+/// transport failure should be normalized into the shared retryable network
+/// error; otherwise an auth or invalid-request failure could be retried as if
+/// switching protocols had failed.
+fn h1_fallback_error(err: anyhow::Error) -> anyhow::Error {
+    if let Some(llm_error) = err.downcast_ref::<LlmError>()
+        && !matches!(llm_error, LlmError::NetworkError(_) | LlmError::Timeout(_))
+    {
+        return err;
+    }
+
+    anyhow::Error::new(LlmError::NetworkError(format!(
+        "SSE stream request failed after HTTP/1.1 fallback: {err}. \
+         `codewhale doctor` can still pass when non-streaming requests work; \
+         on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`."
+    )))
+}
+
 /// Open an SSE response through the shared transport policy.
 ///
 /// `attempt` builds and sends one wire-specific request on the client
@@ -115,9 +155,9 @@ pub fn should_retry_with_h1(policy: StreamHttpPolicy, err_text: &str) -> bool {
 /// transport-shared lives here:
 ///
 /// - the response-header wait is bounded by `open_req.open_timeout`;
-/// - a header stall on the dual client retries exactly once on the
-///   HTTP/1.1 twin ([`should_retry_with_h1`] classification);
-/// - a stall on an already H1-pinned request never retries;
+/// - a classified transport failure or header stall on the dual client
+///   retries exactly once on the HTTP/1.1 twin;
+/// - a failure on an already H1-pinned request never retries;
 /// - once response headers have been received the seam never retries —
 ///   body/stream errors belong to the adapter's decode loop.
 pub(crate) async fn open_sse_response<F, Fut>(
@@ -128,47 +168,52 @@ where
     F: Fn(StreamHttpPolicy) -> Fut,
     Fut: Future<Output = Result<reqwest::Response>>,
 {
-    match tokio::time::timeout(open_req.open_timeout, attempt(open_req.policy)).await {
-        Ok(result) => result,
-        Err(_elapsed) => {
-            // A header stall on the dual client is eligible for one explicit
-            // retry through the prebuilt HTTP/1.1 twin.
-            if should_retry_with_h1(open_req.policy, "http2 stream closed") {
-                let h1_req = open_req.clone().with_h1_only();
-                crate::logging::warn(
-                    "SSE stream headers timed out over HTTP/2; retrying once with HTTP/1.1",
-                );
-                match tokio::time::timeout(h1_req.open_timeout, attempt(h1_req.policy)).await {
-                    Ok(Ok(response)) => Ok(response),
-                    Ok(Err(err)) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
-                        "SSE stream request failed after HTTP/1.1 fallback: {err}. \
-                         `codewhale doctor` can still pass when non-streaming requests work; \
-                         on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`."
-                    )))),
-                    // Typed, not a bare string: a header stall is a transport
-                    // failure, and `LlmError::NetworkError` is what the shared
-                    // retry layer recognizes as retryable. As an untyped
-                    // anyhow error this killed the whole turn — sub-agents
-                    // survived it only because they text-match the message in
-                    // their own classifier, so a root turn lost all its work
-                    // while a child would have retried.
-                    Err(_elapsed) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
-                        "SSE stream request did not receive response headers after {}s \
-                         (HTTP/2 and HTTP/1.1). `codewhale doctor` can still pass when \
-                         non-streaming requests work; try `CODEWHALE_FORCE_HTTP1=1` and \
-                         rerun `codewhale`.",
-                        open_req.open_timeout.as_secs()
-                    )))),
-                }
-            } else {
-                Err(anyhow::Error::new(LlmError::NetworkError(format!(
-                    "SSE stream request did not receive response headers after {}s. \
-                     `codewhale doctor` can still pass when non-streaming requests work; \
-                     on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
-                    open_req.open_timeout.as_secs()
-                ))))
+    let fallback_reason = match tokio::time::timeout(
+        open_req.open_timeout,
+        attempt(open_req.policy),
+    )
+    .await
+    {
+        Ok(Ok(response)) => return Ok(response),
+        Ok(Err(err)) => {
+            if !should_retry_error_with_h1(open_req.policy, &err) {
+                return Err(err);
             }
+            "transport error before response headers"
         }
+        Err(_elapsed) => {
+            if open_req.policy == StreamHttpPolicy::Http1Only {
+                return Err(anyhow::Error::new(LlmError::NetworkError(format!(
+                    "SSE stream request did not receive response headers after {}s. \
+                         `codewhale doctor` can still pass when non-streaming requests work; \
+                         on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
+                    open_req.open_timeout.as_secs()
+                ))));
+            }
+            "response-header timeout"
+        }
+    };
+
+    // No response body exists yet, so switching protocols and replaying the
+    // request is safe. The policy guard above keeps this to exactly one retry.
+    let h1_req = open_req.clone().with_h1_only();
+    crate::logging::warn(format!(
+        "SSE stream {fallback_reason}; retrying once with HTTP/1.1"
+    ));
+    match tokio::time::timeout(h1_req.open_timeout, attempt(h1_req.policy)).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(err)) => Err(h1_fallback_error(err)),
+        // Typed, not a bare string: a header stall is a transport
+        // failure, and `LlmError::NetworkError` is what the shared
+        // retry layer recognizes as retryable. As an untyped anyhow
+        // error this killed the whole turn outright.
+        Err(_elapsed) => Err(anyhow::Error::new(LlmError::NetworkError(format!(
+            "SSE stream request did not receive response headers after {}s \
+             (HTTP/2 and HTTP/1.1). `codewhale doctor` can still pass when \
+             non-streaming requests work; try `CODEWHALE_FORCE_HTTP1=1` and \
+             rerun `codewhale`.",
+            open_req.open_timeout.as_secs()
+        )))),
     }
 }
 
@@ -280,6 +325,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_error_before_headers_retries_exactly_once_on_h1() {
+        let server = ok_server().await;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let response = open_sse_response(
+            &open_req(StreamHttpPolicy::DualWithH1Fallback, Duration::from_secs(5)),
+            |policy| {
+                let attempts = Arc::clone(&attempts);
+                let client = client.clone();
+                let url = server.uri();
+                async move {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        assert_eq!(policy, StreamHttpPolicy::DualWithH1Fallback);
+                        return Err(anyhow::Error::new(LlmError::NetworkError(
+                            "connection reset before response headers".to_string(),
+                        ))
+                        .context("Chat API request failed"));
+                    }
+                    assert_eq!(policy, StreamHttpPolicy::Http1Only);
+                    Ok(client.post(url).send().await?)
+                }
+            },
+        )
+        .await
+        .expect("H1 fallback retry succeeds after a transport error");
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "exactly one fallback retry"
+        );
+    }
+
+    #[tokio::test]
     async fn header_stall_when_h1_pinned_never_retries_and_reports_timeout_text() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let err = open_sse_response(
@@ -314,6 +395,62 @@ mod tests {
         assert!(
             !text.contains("HTTP/2 and HTTP/1.1"),
             "single-protocol stall must not claim a dual-protocol attempt: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_error_when_h1_pinned_never_retries() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let err = open_sse_response(
+            &open_req(StreamHttpPolicy::Http1Only, Duration::from_secs(5)),
+            |_| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err(anyhow::Error::new(LlmError::NetworkError(
+                        "connection reset before response headers".to_string(),
+                    )))
+                }
+            },
+        )
+        .await
+        .expect_err("an H1-pinned transport error must not retry");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry when pinned");
+        assert!(err.to_string().contains("connection reset"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn provider_error_from_h1_fallback_keeps_its_semantic_type() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let err = open_sse_response(
+            &open_req(StreamHttpPolicy::DualWithH1Fallback, Duration::from_secs(5)),
+            |policy| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        assert_eq!(policy, StreamHttpPolicy::DualWithH1Fallback);
+                        return Err(anyhow::Error::new(LlmError::NetworkError(
+                            "connection reset before response headers".to_string(),
+                        )));
+                    }
+                    assert_eq!(policy, StreamHttpPolicy::Http1Only);
+                    Err(anyhow::Error::new(LlmError::InvalidRequest {
+                        status: 400,
+                        message: "invalid request".to_string(),
+                    }))
+                }
+            },
+        )
+        .await
+        .expect_err("the H1 provider error must be returned");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "one fallback attempt");
+        assert!(
+            matches!(
+                err.downcast_ref::<LlmError>(),
+                Some(LlmError::InvalidRequest { status: 400, .. })
+            ),
+            "provider error was reclassified: {err:#}"
         );
     }
 

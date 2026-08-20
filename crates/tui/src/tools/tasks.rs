@@ -519,7 +519,9 @@ impl TasksTool {
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
         let limit = optional_u64(input, "limit", 20)?.clamp(1, 100) as usize;
-        let tasks = manager.list_tasks(Some(limit)).await;
+        let tasks = manager
+            .list_tasks_for_owner(Some(limit), None, &context.state_namespace)
+            .await;
         ToolResult::json(&json!({
             "summary": format!("{} durable task(s)", tasks.len()),
             "tasks": tasks,
@@ -532,15 +534,7 @@ impl TasksTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let manager = context
-            .runtime
-            .task_manager
-            .as_ref()
-            .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let task = manager
-            .get_task(required_str(input, "task_id")?)
-            .await
-            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        let task = read_task_for_input(input, context).await?;
         task_result("task_read", &task)
     }
 
@@ -554,10 +548,18 @@ impl TasksTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let cancellation = manager
-            .cancel_task(required_str(input, "task_id")?)
-            .await
-            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        let task_id = required_str(input, "task_id")?;
+        let cancellation = if context.runtime.active_task_id.as_deref() == Some(task_id) {
+            // `active_task_id` is stamped from the immutable runtime thread
+            // record, not model input. Preserve self-cancel for a running task,
+            // but fail closed for ownerless legacy records.
+            manager.cancel_task_for_active_runtime(task_id).await
+        } else {
+            manager
+                .cancel_task_for_owner(task_id, &context.state_namespace)
+                .await
+        }
+        .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         let task = cancellation.task;
         let cancel_outcome = match cancellation.disposition {
             TaskCancelDisposition::Forced => CancelOutcome::Forced,
@@ -707,7 +709,7 @@ impl TasksTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let task_id = task_id_from_input_or_context(input, context)?;
+        let task_id = read_task_for_input(input, context).await?.id;
         let base_sha = git_output(&context.workspace, &["rev-parse", "HEAD"])
             .await
             .ok();
@@ -1165,10 +1167,20 @@ async fn read_task_for_input(
         .as_ref()
         .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
     let task_id = task_id_from_input_or_context(input, context)?;
-    manager
-        .get_task(&task_id)
-        .await
-        .map_err(|e| ToolError::execution_failed(e.to_string()))
+    if context.runtime.active_task_id.as_deref() == Some(task_id.as_str()) {
+        // Runtime thread construction stamps `active_task_id` from its durable
+        // thread record. It is not a tool parameter, so an owned task may read
+        // itself even though its execution engine has a distinct namespace.
+        manager
+            .get_task_for_active_runtime(&task_id)
+            .await
+            .map_err(|e| ToolError::execution_failed(e.to_string()))
+    } else {
+        manager
+            .get_task_for_owner(&task_id, &context.state_namespace)
+            .await
+            .map_err(|e| ToolError::execution_failed(e.to_string()))
+    }
 }
 
 fn task_id_from_input_or_context(

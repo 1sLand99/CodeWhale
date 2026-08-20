@@ -37,6 +37,9 @@ $testRoot = Join-Path `
 $stageRoot = Join-Path $testRoot 'source'
 $stageInstallerDir = Join-Path $stageRoot 'scripts\installer'
 $installDir = Join-Path $testRoot 'installed'
+$programsDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+$shortcutDir = Join-Path $programsDir 'CodeWhale'
+$shortcut = Join-Path $shortcutDir 'CodeWhale.lnk'
 $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
 if ($null -eq $environmentKey) {
     throw 'Could not open or create the current-user Environment registry key.'
@@ -61,6 +64,9 @@ try {
     Copy-Item `
         -LiteralPath (Join-Path $PSScriptRoot 'update-user-path.ps1') `
         -Destination (Join-Path $stageInstallerDir 'update-user-path.ps1')
+    Copy-Item `
+        -LiteralPath (Join-Path $PSScriptRoot 'codewhale.bat') `
+        -Destination (Join-Path $stageInstallerDir 'codewhale.bat')
 
     foreach ($binary in @('codewhale.exe', 'codew.exe', 'codewhale-tui.exe')) {
         [System.IO.File]::WriteAllBytes(
@@ -130,6 +136,33 @@ try {
         throw 'The installer changed the user PATH registry value kind.'
     }
 
+    $launcher = Join-Path $expectedBin 'codewhale.bat'
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        throw 'The installer did not install codewhale.bat.'
+    }
+    $launcherText = [System.IO.File]::ReadAllText($launcher)
+    if ($launcherText -notmatch 'where wt') {
+        throw 'Installed codewhale.bat does not prefer Windows Terminal.'
+    }
+    if ($launcherText -notmatch 'codewhale\.exe') {
+        throw 'Installed codewhale.bat does not launch codewhale.exe.'
+    }
+    if (-not (Test-Path -LiteralPath $shortcut -PathType Leaf)) {
+        throw 'The installer did not create the Start Menu shortcut.'
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $lnk = $shell.CreateShortcut($shortcut)
+        $expectedTarget = [System.IO.Path]::GetFullPath($launcher)
+        $actualTarget = [System.IO.Path]::GetFullPath($lnk.TargetPath)
+        if ($actualTarget -cne $expectedTarget) {
+            throw "Start Menu shortcut target was '$($lnk.TargetPath)', expected '$launcher'."
+        }
+    }
+    finally {
+        [void] [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    }
+
     $uninstaller = Join-Path $installDir 'Uninstall.exe'
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
         throw 'Uninstall.exe was not produced.'
@@ -146,6 +179,15 @@ try {
     $afterUninstall = Get-RawUserPath -EnvironmentKey $environmentKey
     if (([string] $afterUninstall) -cne $seedPath) {
         throw 'Install followed by uninstall did not restore the seeded long PATH exactly.'
+    }
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        throw 'Uninstall did not remove codewhale.bat.'
+    }
+    if (Test-Path -LiteralPath $shortcut -PathType Leaf) {
+        throw 'Uninstall did not remove the Start Menu shortcut.'
+    }
+    if (Test-Path -LiteralPath $shortcutDir) {
+        throw 'Uninstall did not remove the Start Menu folder.'
     }
 
     Write-Host "Full NSIS installer PATH regression passed with $($seedPath.Length) characters."
@@ -168,6 +210,13 @@ finally {
         $environmentKey.DeleteValue('Path', $false)
     }
     $environmentKey.Close()
+
+    if (Test-Path -LiteralPath $shortcut -PathType Leaf) {
+        Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $shortcutDir) {
+        Remove-Item -LiteralPath $shortcutDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

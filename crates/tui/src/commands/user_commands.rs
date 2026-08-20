@@ -34,7 +34,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use crate::tui::app::{App, AppAction, HuntVerdict};
+use crate::tui::app::{App, AppAction};
 
 #[cfg(test)]
 use super::CommandResult;
@@ -285,17 +285,17 @@ pub fn try_dispatch_user_command(app: &mut App, input: &str) -> Option<CommandRe
     for (name, content) in &user_commands {
         if name == command {
             let (metadata, body) = parse_frontmatter(content);
-            app.hunt.quarry = None;
-            app.hunt.started_at = None;
-            app.hunt.verdict = HuntVerdict::Hunting;
-            app.hunt.token_budget = None;
-            app.hunt.tokens_used = 0;
-            app.hunt.time_used_seconds = 0;
-            app.hunt.continuation_count = 0;
+            app.goal.objective = None;
+            app.goal.started_at = None;
+            app.goal.status = crate::tools::goal::GoalStatus::Active;
+            app.goal.token_budget = None;
+            app.goal.tokens_used = 0;
+            app.goal.time_used_seconds = 0;
+            app.goal.continuation_count = 0;
             app.active_allowed_tools = None;
             app.pausable = false;
             app.paused = false;
-            app.paused_quarry = None;
+            app.paused_goal_objective = None;
             // Clear todos and plan state from the previous command so they
             // don't bleed into the next one. Both are behind the same locks
             // the sidebar reads; a contended/poisoned lock is logged and
@@ -313,8 +313,8 @@ pub fn try_dispatch_user_command(app: &mut App, input: &str) -> Option<CommandRe
             for (key, value) in &metadata {
                 match key.as_str() {
                     "description" => {
-                        app.hunt.quarry = Some(value.clone());
-                        app.hunt.started_at = Some(std::time::Instant::now());
+                        app.goal.objective = Some(value.clone());
+                        app.goal.started_at = Some(std::time::Instant::now());
                     }
                     "allowed-tools" => {
                         app.active_allowed_tools = Some(parse_allowed_tools(value));
@@ -610,7 +610,7 @@ mod tests {
 
         assert!(app.pausable);
         assert!(!app.paused);
-        assert!(app.paused_quarry.is_none());
+        assert!(app.paused_goal_objective.is_none());
         assert!(ws.join("user-work.txt").exists());
         let stash = std::process::Command::new("git")
             .args(["-C", ws.to_str().unwrap(), "stash", "list"])
@@ -644,13 +644,13 @@ mod tests {
         let mut app = App::new(test_options(ws), &Config::default());
         let _ = try_dispatch_user_command(&mut app, "/pause-scan").unwrap();
         app.paused = true;
-        app.paused_quarry = Some("Scan repos".to_string());
+        app.paused_goal_objective = Some("Scan repos".to_string());
 
         let _ = try_dispatch_user_command(&mut app, "/plain").unwrap();
 
         assert!(!app.pausable);
         assert!(!app.paused);
-        assert!(app.paused_quarry.is_none());
+        assert!(app.paused_goal_objective.is_none());
     }
 
     #[test]
@@ -762,25 +762,25 @@ mod tests {
 
         let mut app = App::new(test_options(ws), &Config::default());
         let _ = try_dispatch_user_command(&mut app, "/described").unwrap();
-        assert_eq!(app.hunt.quarry.as_deref(), Some("Scan repos"));
-        assert!(app.hunt.started_at.is_some());
-        assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
-        assert_eq!(app.hunt.token_budget, None);
+        assert_eq!(app.goal.objective.as_deref(), Some("Scan repos"));
+        assert!(app.goal.started_at.is_some());
+        assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
+        assert_eq!(app.goal.token_budget, None);
         assert_eq!(app.active_allowed_tools, Some(vec!["bash".to_string()]));
 
-        app.hunt.verdict = crate::tui::app::HuntVerdict::Escaped;
-        app.hunt.token_budget = Some(42);
-        app.hunt.tokens_used = 100;
-        app.hunt.time_used_seconds = 5;
-        app.hunt.continuation_count = 1;
+        app.goal.status = crate::tools::goal::GoalStatus::Blocked;
+        app.goal.token_budget = Some(42);
+        app.goal.tokens_used = 100;
+        app.goal.time_used_seconds = 5;
+        app.goal.continuation_count = 1;
         let _ = try_dispatch_user_command(&mut app, "/plain").unwrap();
-        assert_eq!(app.hunt.quarry, None);
-        assert_eq!(app.hunt.started_at, None);
-        assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunting);
-        assert_eq!(app.hunt.token_budget, None);
-        assert_eq!(app.hunt.tokens_used, 0);
-        assert_eq!(app.hunt.time_used_seconds, 0);
-        assert_eq!(app.hunt.continuation_count, 0);
+        assert_eq!(app.goal.objective, None);
+        assert_eq!(app.goal.started_at, None);
+        assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
+        assert_eq!(app.goal.token_budget, None);
+        assert_eq!(app.goal.tokens_used, 0);
+        assert_eq!(app.goal.time_used_seconds, 0);
+        assert_eq!(app.goal.continuation_count, 0);
         assert_eq!(app.active_allowed_tools, None);
     }
 
@@ -799,7 +799,7 @@ mod tests {
         let mut app = App::new(test_options(ws.clone()), &Config::default());
         let _ = try_dispatch_user_command(&mut app, "/git-scan").unwrap();
         assert_eq!(
-            app.hunt.quarry.as_deref(),
+            app.goal.objective.as_deref(),
             Some("Scan nested git repositories")
         );
         let commands = load_user_commands(Some(&ws));

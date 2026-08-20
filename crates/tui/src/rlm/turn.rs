@@ -273,11 +273,7 @@ async fn run_rlm_turn_impl(
                 &model,
                 &messages,
                 &system,
-                crate::route_budget::effective_max_output_tokens_for_route(
-                    request_route.provider,
-                    &request_route.model,
-                    None,
-                ),
+                client.effective_max_output_tokens(&request_route.model),
             );
 
             let response = match client.create_message_boxed(request).await {

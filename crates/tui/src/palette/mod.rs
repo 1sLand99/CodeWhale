@@ -12,6 +12,7 @@
 mod adapt;
 mod contrast;
 mod detect;
+pub mod grammar;
 mod osc11;
 mod themes;
 mod tokens;
@@ -26,6 +27,8 @@ pub use adapt::*;
 pub use contrast::*;
 #[allow(unused_imports)]
 pub use detect::*;
+#[allow(unused_imports)]
+pub use grammar::{ChromeInk, SemanticFamily, chrome_style};
 #[allow(unused_imports)]
 pub use osc11::*;
 #[allow(unused_imports)]

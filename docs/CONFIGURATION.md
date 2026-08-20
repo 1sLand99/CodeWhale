@@ -40,10 +40,10 @@ controls do not blur together.
 
 ### Managing the user-global constitution (`/setup` and `/constitution`)
 
-On first launch Codewhale runs a short **constitution-first** setup path:
-language → provider/model readiness → runtime posture → create or confirm your
-constitution. The bundled/default constitution is always valid, so you can
-defer; reopen the hub any time with `/setup`.
+On first launch Codewhale offers a recommended **working agreement**. Press
+Enter to accept the balanced bundled/default law, or press `C` to customize a
+full constitution. Provider/model readiness and runtime posture stay separate
+from this guidance, and you can reopen the setup hub any time with `/setup`.
 
 On the **Constitution** step:
 
@@ -808,9 +808,19 @@ window it cannot justify — it falls back to a conservative value, labels it
 - `auto_compact` (settings.toml, on/off): turns automatic compaction off
   entirely; `/compact` and Ctrl+L stay available.
 - `CODEWHALE_MAX_OUTPUT_TOKENS` (environment variable; legacy alias
-  `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap, which is
-  otherwise derived from the window. There is no `max_output_tokens` key in
-  `config.toml`.
+  `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap. Without an
+  override, Codewhale starts at the safe `65536` request cap and intersects it
+  with any smaller documented model or route ceiling; a catalog `max_output`
+  such as DeepSeek V4's 384K remains a capability ceiling, not the amount every
+  response requests. Explicit overrides are preserved within the resolved
+  route context window and any route output ceiling, and preflight/emergency
+  budgeting reserves the same effective value that can reach the wire. A
+  separately documented route input ceiling also clamps preflight and
+  compaction even when the total context window is larger. A blank canonical
+  variable falls through to a nonblank legacy value; a nonblank invalid or
+  zero canonical value is authoritative and falls back to the safe automatic
+  default instead of activating a stale legacy setting. There is no
+  `max_output_tokens` key in `config.toml`.
 
 See [Settings File](#settings-file-persistent-ui-preferences) for the
 compaction settings and [Token Quantities and
@@ -1573,7 +1583,7 @@ Common settings keys:
 - `mention_menu_limit` (integer, default `128`): maximum number of
   `@`-mention popup candidates retained before the composer renders the
   visible window. The visible rows still depend on terminal height.
-- `mention_walk_depth` (integer, default `6`): maximum workspace depth for
+- `mention_walk_depth` (integer, default `10`): maximum workspace depth for
   `@`-mention completion walks. Set to `0` for unlimited depth in deeply
   nested workspaces; keep the default in very large repos unless needed.
 - `mention_menu_behavior` (`fuzzy`, `browser`; default `fuzzy`): controls how
@@ -1586,6 +1596,15 @@ Common settings keys:
   selected block, so setting this to `true` inverts the default without
   removing per-block folding. This is useful in SSH/tmux environments where
   the Space binding may be intercepted.
+- `thinking_preview_lines` (integer, default `2`): how many body rows a
+  **collapsed** completed thought still shows. `0` is header-only; `10` is
+  the older dump. Live streaming preview is unchanged. Expand a block with
+  Space, or set `thinking_default_expanded` to open every block.
+- `help_expand_groups` (on/off, default off): start Help/shortcuts with every
+  group expanded. Default folds the long tail (Grok-style); type-to-filter
+  still unfolds matches.
+- `pin_last_prompt` (on/off, default on): pin the last user prompt at the top
+  of the transcript viewport after it scrolls off.
 - `show_tool_details` (on/off)
 - `inline_diffs` (`full`, `summary`, or `off`; default `full`): controls the
   inline presentation of successful structured File mutations. `full` shows a
@@ -1610,9 +1629,11 @@ Common settings keys:
   context panel, `/cost`, `/tokens`, and long-turn notification summaries. The
   aliases `rmb` and `yuan` normalize to `cny`.
 - `default_mode` (`agent`, `plan`, or `operate`; legacy values are accepted for migration but are not live mode vocabulary)
-- `launch_screen` (`on`/`off`; default `off`): show the pre-session New/
-  Resume/Worktree menu. With it off, Codewhale enters a new session directly;
-  resume remains available in-session.
+- `launch_screen` (`on`/`off`; default `off`): show the pre-session Work/Chat/
+  Resume/Worktree menu. Work uses the current folder under the configured
+  approval policy; Chat starts a read-only conversation. With the launch
+  screen off, Codewhale enters a new session directly; resume remains
+  available in-session.
 - `sidebar_focus` (legacy, migration-only): the classic right sidebar this key
   configured was removed in the 0.9.4 rail unification. The key is still read
   once so old settings carry forward, then folds into the live keys:
@@ -1676,7 +1697,7 @@ separate:
 | Quantity | Meaning | Allowed to drive |
 |---|---|---|
 | Active request input estimate | Conservative estimate of the next request's live system prompt and transcript payload. | Header/footer context percent, auto-compaction trigger, opt-in Flash seam trigger, and emergency overflow preflight. |
-| Reserved response headroom | The internal turn budget plus safety headroom. v0.8.16 keeps normal turns at `262144` reserved output tokens and adds `1024` safety tokens for context-window checks, even though V4 capability metadata reports the official `384000` max output. | Emergency overflow budget checks only. |
+| Reserved response headroom | The effective request cap plus `1024` safety tokens on every route. Normal no-override requests start at `65536`; a smaller route/provider ceiling narrows that value, and an explicit output override raises it only within the resolved route window and output ceiling. The identical cap reaches the wire and drives preflight; reasoning effort does not add a second hidden reservation. A separately published route input ceiling independently clamps the spendable input budget. | Emergency overflow budget checks only. |
 | Cumulative API usage | Provider-reported input plus output tokens summed across completed API calls; multi-tool turns may count the same stable prefix more than once. | Session usage and approximate cost telemetry only. |
 | Prompt cache hit/miss | Provider cache telemetry for the most recent call when available. | Cache-hit display and cost estimation only; never compaction or seam triggers. |
 | Context percent | Active request input estimate divided by the model context window. | Display only; it mirrors the active-input basis used by context safeguards. |
@@ -2193,11 +2214,26 @@ opt into one:
 # Optional safety backstop on automatic goal continuation passes.
 # Default: 0 (unlimited). Set a positive value to opt into a ceiling.
 max_continuations = 100
+
+# Optional cancellable quiet period between successful turns. This is useful
+# for coordinator goals that should poll on a cadence instead of keeping one
+# provider turn open. Default: 0 (continue immediately).
+continuation_delay_seconds = 300
 ```
+
+The effective delay is capped at 86,400 seconds (24 hours); use an automation
+for schedules that are less frequent than once per day.
 
 When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
+
+The delay starts only after a successful turn while an explicitly created goal
+is still active. `/goal pause`, `/goal done`, `/goal blocked`, `/goal clear`,
+Esc, or Ctrl+C cancels a pending continuation before another provider request
+starts. Failed turns and policy/route failures never schedule another turn.
+Only the numeric cadence is stored in config; no prompt, credential, or secret
+is persisted for the loop.
 
 ### Notifications
 

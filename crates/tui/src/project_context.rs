@@ -80,6 +80,12 @@ const GLOBAL_INSTRUCTIONS_LEGACY_PATH: &[&str] = &[".deepseek", "instructions.md
 /// Maximum size for project context files (to prevent loading huge files)
 const MAX_CONTEXT_SIZE: usize = 100 * 1024; // 100KB
 
+/// Maximum total instruction bytes assembled across the repository-root →
+/// workspace chain. One aggregate budget for the whole chain (same policy as
+/// the rules block): every segment's bytes count against it and later
+/// segments are truncated with an explicit marker once it is exhausted.
+const MAX_CHAIN_CONTEXT_BYTES: usize = 200 * 1024; // 200KB
+
 /// Maximum number of rule files loaded per rules directory.
 /// Prevents a project from silently injecting hundreds of rule files.
 const MAX_RULES_FILES: usize = 50;
@@ -97,27 +103,10 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
     let mut ctx = ProjectContext::empty(workspace.to_path_buf());
 
     // Search for active project context files.
-    for filename in PROJECT_CONTEXT_FILES {
-        let file_path = workspace.join(filename);
-
-        if context_candidate_exists(&file_path) {
-            match load_context_file(&file_path) {
-                Ok(content) => {
-                    tracing::info!(
-                        "Loaded project context from {} ({} bytes)",
-                        file_path.display(),
-                        content.len()
-                    );
-                    ctx.instructions = Some(content);
-                    ctx.source_path = Some(file_path);
-                    break;
-                }
-                Err(error) => {
-                    ctx.warnings.push(error.to_string());
-                }
-            }
-        }
-    }
+    let (instructions, source_path, warnings) = load_dir_instructions(workspace);
+    ctx.instructions = instructions;
+    ctx.source_path = source_path;
+    ctx.warnings.extend(warnings);
 
     ctx.warnings
         .extend(ignored_project_whale_warnings(workspace));
@@ -166,9 +155,44 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
     ctx
 }
 
-/// Load project context from parent directories as well.
+/// Load the highest-priority instruction file from one directory.
 ///
-/// This allows for monorepo setups where a root AGENTS.md applies to all subdirectories.
+/// Returns the content, its path, and any warnings from failed candidates.
+/// A directory with no candidate file yields `(None, None, warnings)`.
+fn load_dir_instructions(dir: &Path) -> (Option<String>, Option<PathBuf>, Vec<String>) {
+    let mut warnings = Vec::new();
+
+    for filename in PROJECT_CONTEXT_FILES {
+        let file_path = dir.join(filename);
+
+        if context_candidate_exists(&file_path) {
+            match load_context_file(&file_path) {
+                Ok(content) => {
+                    tracing::info!(
+                        "Loaded project context from {} ({} bytes)",
+                        file_path.display(),
+                        content.len()
+                    );
+                    return (Some(content), Some(file_path), warnings);
+                }
+                Err(error) => warnings.push(error.to_string()),
+            }
+        }
+    }
+
+    (None, None, warnings)
+}
+
+/// Load project context from the containing repository as well.
+///
+/// Applicable instruction files resolve from the repository root down to the
+/// workspace (inclusive) and are assembled in that order under one aggregate
+/// byte budget, so wider scopes read first and the workspace keeps the last
+/// word. Repository identity comes from the containing checkout itself
+/// (Git dir/worktree traversal, [`find_git_root`]) — never from branch names
+/// or paths mentioned in conversation — and the chain never crosses the
+/// repository boundary. Outside any repository only the workspace itself is
+/// searched.
 pub fn load_project_context_with_parents(workspace: &Path) -> ProjectContext {
     load_project_context_with_parents_cached_and_home(
         workspace,
@@ -197,31 +221,69 @@ fn load_project_context_with_parents_and_home(
     home_dir: Option<&Path>,
 ) -> ProjectContext {
     let workspace_canonical = canonicalize_workspace_or_keep(workspace);
-    let mut ctx = load_project_context(workspace);
-    let parent_search_stop = project_context_parent_search_stop_dir(home_dir);
+    let mut ctx = load_project_context(&workspace_canonical);
 
-    // If no context found in workspace, check parent directories
-    if !ctx.has_instructions() {
-        let mut current = workspace_canonical.parent();
+    // Assemble the repository-root → workspace instruction chain. The chain
+    // directories come from Git traversal of the containing checkout, so a
+    // linked worktree contributes its own root and files above the root —
+    // other checkouts, unrelated parents — stay out of scope.
+    let chain_dirs = context_chain_dirs(&workspace_canonical, home_dir);
+    // `chain_dirs` is ordered root → workspace; the workspace itself is the
+    // last entry and was already loaded above.
+    let ancestor_dirs = &chain_dirs[..chain_dirs.len().saturating_sub(1)];
 
-        while let Some(parent) = current {
-            if parent_search_stop
-                .as_deref()
-                .is_some_and(|stop| parent == stop)
-            {
-                break;
-            }
-
-            let parent_ctx = load_project_context(parent);
-            ctx.warnings.extend(parent_ctx.warnings.iter().cloned());
-            if parent_ctx.has_instructions() {
-                ctx.instructions = parent_ctx.instructions;
-                ctx.source_path = parent_ctx.source_path;
-                break;
-            }
-
-            current = parent.parent();
+    let mut ancestor_docs: Vec<(PathBuf, String)> = Vec::new();
+    for dir in ancestor_dirs {
+        ctx.warnings.extend(ignored_project_whale_warnings(dir));
+        let (content, path, warnings) = load_dir_instructions(dir);
+        ctx.warnings.extend(warnings);
+        if let (Some(content), Some(path)) = (content, path) {
+            ancestor_docs.push((path, content));
         }
+    }
+
+    if !ancestor_docs.is_empty() {
+        // One aggregate byte budget spans the whole chain, root first.
+        let mut assembled = String::new();
+        let mut remaining_budget = MAX_CHAIN_CONTEXT_BYTES;
+
+        for (path, content) in &ancestor_docs {
+            if remaining_budget == 0 {
+                tracing::warn!(
+                    target: "project_context",
+                    path = %path.display(),
+                    "Skipping instruction file: aggregate chain budget already exhausted"
+                );
+                continue;
+            }
+            let content = fit_chain_segment_to_budget(content.clone(), path, &mut remaining_budget);
+            append_chain_segment(&mut assembled, path, &content);
+        }
+
+        // The workspace's own file is the most specific link: it reads last
+        // under the same budget, and `source_path` keeps pointing at it so
+        // the user knows where the workspace-level override lives.
+        if let Some(content) = ctx.instructions.take() {
+            if remaining_budget == 0 {
+                tracing::warn!(
+                    target: "project_context",
+                    "Workspace instruction file skipped: aggregate chain budget already exhausted"
+                );
+            } else {
+                let path = ctx
+                    .source_path
+                    .clone()
+                    .unwrap_or_else(|| workspace_canonical.clone());
+                let content = fit_chain_segment_to_budget(content, &path, &mut remaining_budget);
+                append_chain_segment(&mut assembled, &path, &content);
+            }
+        } else if let Some((path, _)) = ancestor_docs.last() {
+            // No workspace-level file: the nearest ancestor is the most
+            // specific source.
+            ctx.source_path = Some(path.clone());
+        }
+
+        ctx.instructions = Some(assembled);
     }
 
     // Always check global instruction files so user-wide preferences
@@ -285,22 +347,14 @@ pub(crate) fn project_context_cache_candidate_paths(
 ) -> Vec<PathBuf> {
     let workspace = canonicalize_workspace_or_keep(workspace);
     let mut paths = Vec::new();
-    let parent_search_stop = project_context_parent_search_stop_dir(home_dir);
 
-    let mut current = Some(workspace.as_path());
-    while let Some(dir) = current {
-        if parent_search_stop
-            .as_deref()
-            .is_some_and(|stop| dir == stop)
-        {
-            break;
-        }
-
+    // Mirror the loader exactly: the same repository-bounded root → workspace
+    // chain decides which files can change the assembled instructions.
+    for dir in context_chain_dirs(&workspace, home_dir) {
         for filename in PROJECT_CONTEXT_FILES {
             paths.push(dir.join(filename));
         }
         paths.push(dir.join(DEPRECATED_WHALE_FILENAME));
-        current = dir.parent();
     }
 
     if let Some(home) = home_dir {
@@ -392,23 +446,118 @@ fn canonicalize_workspace_or_keep(workspace: &Path) -> PathBuf {
     fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
 }
 
-fn find_git_root(cwd: &Path) -> Option<PathBuf> {
-    let mut current = cwd.to_path_buf();
+/// Find the root of the checkout that contains `dir`.
+///
+/// Walks upward looking for a `.git` entry, following Git's own discovery
+/// semantics: a `.git` directory must hold `HEAD`, and a `.git` file must be
+/// a `gitdir:` pointer (a linked worktree). A linked worktree is therefore
+/// its own root — the main checkout is reachable only through that pointer,
+/// never through directory heuristics, branch names, or paths mentioned in
+/// conversation. This is the single source of truth for repository identity
+/// in project-context scope resolution.
+pub(crate) fn find_git_root(dir: &Path) -> Option<PathBuf> {
+    let mut current = dir.to_path_buf();
     loop {
-        if current.join(".git").exists() {
+        let git_entry = current.join(".git");
+        if is_git_metadata_entry(&git_entry) {
             return Some(current);
         }
         match current.parent() {
-            Some(parent) if parent != current => {
-                current = parent.to_path_buf();
-            }
+            Some(parent) if parent != current => current = parent.to_path_buf(),
             _ => return None,
         }
     }
 }
 
-fn project_context_parent_search_stop_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
-    home_dir.map(canonicalize_workspace_or_keep)
+fn is_git_metadata_entry(path: &Path) -> bool {
+    if path.is_dir() {
+        return path.join("HEAD").is_file();
+    }
+
+    fs::read_to_string(path)
+        .map(|content| content.trim_start().starts_with("gitdir:"))
+        .unwrap_or(false)
+}
+
+/// Directories whose instruction files apply to `workspace`, ordered from the
+/// repository root down to the workspace (inclusive).
+///
+/// Repository identity comes from the containing checkout itself
+/// ([`find_git_root`]); the chain never crosses the repository boundary, so
+/// sibling checkouts and unrelated parents stay out of scope. Outside any
+/// repository only the workspace itself is searched. When `home_dir` is an
+/// ancestor it remains an outer boundary the walk never leaves.
+fn context_chain_dirs(workspace: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut stop = find_git_root(workspace).unwrap_or_else(|| workspace.to_path_buf());
+
+    if let Some(home) = home_dir {
+        let home = canonicalize_workspace_or_keep(home);
+        // Clamp only when the walk would otherwise leave the user's home
+        // (home sits between the workspace and the repository root).
+        if workspace.starts_with(&home) && home.starts_with(&stop) {
+            stop = home;
+        }
+    }
+
+    let mut dirs = Vec::new();
+    let mut cursor = workspace.to_path_buf();
+    loop {
+        dirs.push(cursor.clone());
+        if cursor == stop {
+            break;
+        }
+        match cursor.parent() {
+            Some(parent) if parent != cursor => cursor = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    dirs.reverse();
+    dirs
+}
+
+/// Append one chain segment to the assembled instruction text.
+///
+/// The first segment is the file's raw content (a single-file chain stays
+/// byte-identical to a plain load); every later segment is prefixed with a
+/// provenance label so the model can tell the scopes apart, wider scopes
+/// first and the workspace last.
+fn append_chain_segment(assembled: &mut String, path: &Path, content: &str) {
+    if !assembled.is_empty() {
+        assembled.push_str(&format!(
+            "\n\n<!-- scoped instructions: {} (overrides wider scopes where they conflict) -->\n",
+            path.display()
+        ));
+    }
+    assembled.push_str(content);
+}
+
+/// Fit one chain segment into the remaining aggregate budget, truncating with
+/// an explicit marker (same policy as the rules block) when it does not fit.
+fn fit_chain_segment_to_budget(
+    content: String,
+    path: &Path,
+    remaining_budget: &mut usize,
+) -> String {
+    if content.len() <= *remaining_budget {
+        *remaining_budget -= content.len();
+        return content;
+    }
+
+    let mut end = *remaining_budget;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = content[..end].to_string();
+    truncated.push_str("\n\n[…instructions chain truncated at the aggregate byte budget…]");
+    tracing::warn!(
+        target: "project_context",
+        path = %path.display(),
+        remaining_bytes = *remaining_budget,
+        cap = MAX_CHAIN_CONTEXT_BYTES,
+        "Truncating instruction chain segment to the aggregate byte budget"
+    );
+    *remaining_budget = 0;
+    truncated
 }
 
 /// Combine global user-wide preferences with a project-local
@@ -877,6 +1026,7 @@ mod tests {
     #[test]
     fn test_load_with_parents() {
         let tmp = tempdir().expect("tempdir");
+        let home = tempdir().expect("home tempdir");
 
         // Create a nested structure
         let subdir = tmp.path().join("subproject");
@@ -884,11 +1034,13 @@ mod tests {
 
         // Put AGENTS.md in parent
         fs::write(tmp.path().join("AGENTS.md"), "Parent instructions").expect("write");
-        // Also create .git to mark as repo root
-        fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+        // Also create a real .git marker to make the parent the repo root
+        let git_dir = tmp.path().join(".git");
+        fs::create_dir(&git_dir).expect("mkdir .git");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         // Load from subdir should find parent's AGENTS.md
-        let ctx = load_project_context_with_parents(&subdir);
+        let ctx = load_project_context_with_parents_and_home(&subdir, Some(home.path()));
 
         assert!(ctx.has_instructions());
         assert!(
@@ -900,28 +1052,142 @@ mod tests {
     }
 
     #[test]
-    fn test_load_with_parents_searches_above_git_root_when_needed() {
+    fn parent_search_stops_at_the_repository_root() {
         let tmp = tempdir().expect("tempdir");
+        let home = tempdir().expect("home tempdir");
 
-        // AGENTS.md exists above repository root.
+        // AGENTS.md exists above the repository root. It belongs to another
+        // scope (often another checkout) and must not leak into this one.
         fs::write(tmp.path().join("AGENTS.md"), "Organization instructions").expect("write");
 
         // Mark repository root one level below.
         let repo_root = tmp.path().join("repo");
         fs::create_dir(&repo_root).expect("mkdir repo");
-        fs::create_dir(repo_root.join(".git")).expect("mkdir .git");
+        let git_dir = repo_root.join(".git");
+        fs::create_dir(&git_dir).expect("mkdir .git");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let workspace = repo_root.join("apps").join("client");
         fs::create_dir_all(&workspace).expect("mkdir workspace");
 
-        let ctx = load_project_context_with_parents(&workspace);
-        assert!(ctx.has_instructions());
+        let ctx = load_project_context_with_parents_and_home(&workspace, Some(home.path()));
         assert!(
+            !ctx.instructions
+                .as_deref()
+                .is_some_and(|text| text.contains("Organization instructions")),
+            "instruction files above the repository root must not be loaded: {:?}",
             ctx.instructions
-                .as_ref()
-                .unwrap()
-                .contains("Organization instructions")
         );
+        assert_eq!(
+            ctx.source_path, None,
+            "no in-repo instruction file exists, so no source may be claimed"
+        );
+        assert!(
+            !project_context_cache_candidate_paths(&workspace, Some(home.path()))
+                .iter()
+                .any(|candidate| candidate == &tmp.path().join("AGENTS.md")),
+            "cache candidates must respect the repository boundary too"
+        );
+    }
+
+    #[test]
+    fn instruction_chain_assembles_worktree_root_to_cwd_in_order_within_budget() {
+        let tmp = tempdir().expect("tempdir");
+        let home = tempdir().expect("home tempdir");
+
+        // A main checkout with its own AGENTS.md — it must stay out of the
+        // nested worktree's instruction chain.
+        let main = tmp.path().join("main-checkout");
+        fs::create_dir_all(main.join(".git")).expect("mkdir main .git");
+        fs::write(main.join(".git").join("HEAD"), "ref: refs/heads/main\n")
+            .expect("write main HEAD");
+        fs::write(main.join("AGENTS.md"), "MAIN-CHECKOUT-ONLY instructions")
+            .expect("write main agents");
+
+        // A linked worktree: `.git` is a `gitdir:` pointer file, so the
+        // worktree is its own repository root for instruction assembly.
+        let lane = tmp.path().join("worktrees").join("lane");
+        fs::create_dir_all(&lane).expect("mkdir lane");
+        fs::write(
+            lane.join(".git"),
+            format!("gitdir: {}/.git/worktrees/lane\n", main.display()),
+        )
+        .expect("write lane gitdir pointer");
+        fs::write(lane.join("AGENTS.md"), "WORKTREE-ROOT instructions").expect("write lane agents");
+
+        let nested = lane.join("crates").join("tui");
+        fs::create_dir_all(&nested).expect("mkdir nested");
+        fs::write(nested.join("AGENTS.md"), "NESTED-DIR instructions")
+            .expect("write nested agents");
+
+        let ctx = load_project_context_with_parents_and_home(&nested, Some(home.path()));
+
+        let instructions = ctx.instructions.as_deref().unwrap_or("");
+        assert!(
+            instructions.contains("WORKTREE-ROOT instructions")
+                && instructions.contains("NESTED-DIR instructions"),
+            "worktree root and nested AGENTS.md must both assemble:\n{instructions}"
+        );
+        let root_at = instructions
+            .find("WORKTREE-ROOT instructions")
+            .expect("root");
+        let nested_at = instructions
+            .find("NESTED-DIR instructions")
+            .expect("nested");
+        assert!(
+            root_at < nested_at,
+            "repository root must read before the current directory (root={root_at}, nested={nested_at})"
+        );
+        assert!(
+            !instructions.contains("MAIN-CHECKOUT-ONLY instructions"),
+            "the main checkout's file is outside the worktree's chain:\n{instructions}"
+        );
+        let expected_source = fs::canonicalize(&nested)
+            .expect("canonicalize nested")
+            .join("AGENTS.md");
+        assert_eq!(
+            ctx.source_path.as_deref(),
+            Some(expected_source.as_path()),
+            "source_path points at the most specific (current-directory) file"
+        );
+        assert!(
+            instructions.len() <= MAX_CHAIN_CONTEXT_BYTES + 512,
+            "assembled chain must stay within the aggregate budget ({} > {} + label overhead)",
+            instructions.len(),
+            MAX_CHAIN_CONTEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn directory_outside_any_repository_loads_no_instruction_chain() {
+        let tmp = tempdir().expect("tempdir");
+        let home = tempdir().expect("home tempdir");
+
+        // No `.git` anywhere: the parent's AGENTS.md is outside any chain.
+        fs::write(
+            tmp.path().join("AGENTS.md"),
+            "PARENT-OUTSIDE-REPO instructions",
+        )
+        .expect("write parent agents");
+        let child = tmp.path().join("project");
+        fs::create_dir_all(&child).expect("mkdir child");
+        fs::write(child.join("AGENTS.md"), "CHILD-ONLY instructions").expect("write child agents");
+
+        let ctx = load_project_context_with_parents_and_home(&child, Some(home.path()));
+
+        let instructions = ctx.instructions.as_deref().unwrap_or("");
+        assert!(
+            instructions.contains("CHILD-ONLY instructions"),
+            "the workspace's own file still loads outside a repository:\n{instructions}"
+        );
+        assert!(
+            !instructions.contains("PARENT-OUTSIDE-REPO instructions"),
+            "no ancestor chain may be assembled outside a repository:\n{instructions}"
+        );
+        let expected_source = fs::canonicalize(&child)
+            .expect("canonicalize child")
+            .join("AGENTS.md");
+        assert_eq!(ctx.source_path.as_deref(), Some(expected_source.as_path()));
     }
 
     #[test]

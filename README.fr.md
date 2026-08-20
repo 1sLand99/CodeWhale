@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Un agent de programmation open source pour votre terminal — apportez votre propre modèle.
@@ -16,12 +16,20 @@ modèle en cours de tâche avec `/model`. Travaillez de façon interactive dans
 la TUI, ou lancez `codewhale exec` dans des scripts et en CI. Écrit en Rust,
 sous licence MIT, il tourne sur votre machine.
 
-Ce qui ne ressemble pas aux autres harnesses : **vous choisissez le modèle de
-chaque rôle, et ils n'ont pas à correspondre.** Une fleet fige un fournisseur,
-un modèle et un niveau de raisonnement par rôle — ainsi un modèle rapide et bon
-marché peut diriger un modèle de raisonnement coûteux, ou un builder GLM peut
-travailler sur la même tâche qu'un reviewer Kimi. Écrivez vos propres rôles et
-votre propre constitution, et le harness devient le vôtre plutôt que le nôtre.
+Ce que les autres harness n'ont pas : **vous choisissez le modèle de chaque
+rôle — et rien ne les oblige à correspondre** — et **les agents de Codewhale
+se parlent, à travers les modèles.** Une fleet fixe un fournisseur, un
+modèle et un niveau de raisonnement par rôle, si bien qu'un modèle rapide et
+bon marché peut en diriger un autre coûteux et raisonneur, ou qu'un builder
+GLM peut travailler sur la même tâche qu'un reviewer Kimi. Pendant qu'ils
+tournent, envoyez une note à n'importe lequel en plein vol, lisez son
+transcript ou interrompez-le — et ce n'est pas limité aux liens
+parent-enfant : des tâches Codewhale distinctes d'un même workspace
+s'échangent de l'Agent Mail durable qui survit aux redémarrages, livrée
+exactement une fois à une frontière sûre, avec les identifiants masqués. Un
+`/goal` tient un objectif long sur plusieurs tours, jusqu'à ce qu'il soit
+réellement fini. Les rôles sont des fichiers que vous éditez, et tout le
+harness reste le vôtre.
 
 Nous cherchons toujours des contributeurs et des façons de nous améliorer. Si un
 modèle ou un fournisseur que vous utilisez manque, ou si quelque chose casse,
@@ -35,7 +43,7 @@ voir [Contribuer](#contribuer).
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale en cours d'exécution dans un terminal](assets/screenshot.png)
+![Codewhale en cours d'exécution dans un terminal](assets/screenshot.webp)
 
 ## Installation
 
@@ -82,6 +90,18 @@ d'approbation habituel.
   dans une même exécution, et la route d'un rôle ne dépend jamais du
   fournisseur qui se trouve actif. Limites de contexte et prix viennent de
   la vraie route ; un prix inconnu s'affiche comme inconnu, pas comme 0 $.
+- **Des agents qui se parlent — à travers les modèles.** Chaque agent de
+  Codewhale reste joignable pendant qu'il travaille : `message` met une note
+  en file pour un sous-agent en cours, `followup` le réveille avec votre
+  note à sa prochaine frontière sûre, `peek` lit son transcript, et une
+  interruption n'arrête que son tour. Cela va au-delà de l'arbre
+  parent-enfant : des tâches distinctes du même workspace s'échangent de
+  l'**Agent Mail** durable — un résumé de passation en file qui survit au
+  redémarrage, livré exactement une fois à la frontière sûre du
+  destinataire, et qui masque identifiants et chemins. Une session GLM et
+  une session Kimi peuvent ainsi se coordonner dans deux terminaux, sans que
+  vous serviez de courroie de transmission. Chaque côté peut être un modèle
+  différent ; Codewhale porte la conversation.
 - **Un harness que vous rédigez.** Les rôles sont des fichiers que vous
   pouvez lire et modifier — un modèle, une posture d'outils et des
   consignes permanentes par rôle — gardés dans le projet pour que l'équipe
@@ -96,9 +116,12 @@ d'approbation habituel.
   disponible, bubblewrap en option sur Linux. Le `constitution.json` d'un
   dépôt se compile en verrous d'écriture que même Full Access ne peut
   contourner.
-- **Un travail que vous pouvez reprendre.** Une fleet consigne chaque
-  étape dans un registre en ajout seul, donc `fleet resume` reprend là où
-  vous vous étiez arrêté.
+- **Un travail que vous pouvez reprendre.** Une fleet enregistre chaque
+  étape dans un registre en append-only, pour que `fleet resume` reprenne là
+  où vous vous êtes arrêté. `/goal` tient un objectif persistant que l'agent
+  poursuit de tour en tour — pausable, reprisable, restauré avec la session
+  au redémarrage — et `/workflows` ouvre un tableau de bord en direct sur
+  toutes les exécutions que conserve le journal de ce workspace.
 
 ## Intégrations
 
@@ -168,3 +191,5 @@ collaboration sur l'expérience d'agent dans le terminal.
 fournisseur de modèles.
 
 ![Codewhale déployant trois sous-agents scout en lecture seule dans un terminal](assets/fanout.gif)
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

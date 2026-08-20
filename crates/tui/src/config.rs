@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use codewhale_execpolicy::ExecPolicyEngine;
@@ -1526,7 +1528,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Sakana => vec![DEFAULT_SAKANA_MODEL, SAKANA_FUGU_ULTRA_MODEL],
         ApiProvider::LongCat => vec![DEFAULT_LONGCAT_MODEL],
         ApiProvider::OpencodeGo => OPENCODE_GO_CHAT_MODELS.to_vec(),
-        ApiProvider::OpencodeZen => vec![DEFAULT_OPENCODE_ZEN_MODEL],
+        ApiProvider::OpencodeZen => codewhale_config::route::opencode_zen_picker_models(),
         ApiProvider::Meta => vec![
             DEFAULT_META_MODEL,
             "muse-spark-1.1",
@@ -1734,7 +1736,7 @@ pub enum NotificationCondition {
 }
 
 /// Notification delivery method (mirrors `tui::notifications::Method`).
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationMethod {
     /// Auto-detect: picks the best protocol for the current terminal
@@ -1751,6 +1753,38 @@ pub enum NotificationMethod {
     Ghostty,
     /// Disable notifications.
     Off,
+}
+
+impl NotificationMethod {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "osc9" | "osc-9" | "osc_9" => Some(Self::Osc9),
+            "bel" | "bell" => Some(Self::Bel),
+            "kitty" => Some(Self::Kitty),
+            "ghostty" => Some(Self::Ghostty),
+            "off" | "none" | "disable" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Osc9 => "osc9",
+            Self::Bel => "bel",
+            Self::Kitty => "kitty",
+            Self::Ghostty => "ghostty",
+            Self::Off => "off",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "auto, osc9, bel, kitty, ghostty, off"
+    }
 }
 
 fn default_threshold_secs() -> u64 {
@@ -1772,6 +1806,34 @@ pub enum CompletionSound {
     File,
 }
 
+impl CompletionSound {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "disable" | "disabled" => Some(Self::Off),
+            "beep" => Some(Self::Beep),
+            "bell" | "bel" => Some(Self::Bell),
+            "file" => Some(Self::File),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Beep => "beep",
+            Self::Bell => "bell",
+            Self::File => "file",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "off, beep, bell, file"
+    }
+}
+
 /// Controls when per-subagent completion notifications fire during fleet /
 /// workflow runs. Turn-completion notifications are unaffected.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -1788,8 +1850,34 @@ pub enum SubagentCompletionNotification {
     Off,
 }
 
+impl SubagentCompletionNotification {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "always" => Some(Self::Always),
+            "final-only" | "finalonly" | "final" => Some(Self::FinalOnly),
+            "off" | "none" | "never" | "disable" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::FinalOnly => "final-only",
+            Self::Off => "off",
+        }
+    }
+
+    #[must_use]
+    pub fn names_hint() -> &'static str {
+        "always, final-only, off"
+    }
+}
+
 /// Desktop-notification configuration (OSC 9 / BEL on turn completion).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NotificationsConfig {
     /// Delivery method: `auto` | `osc9` | `bel` | `off`. Default: `auto`.
     /// `auto` resolves to OSC 9 for iTerm.app / Ghostty / WezTerm / Cmux
@@ -1842,6 +1930,51 @@ pub struct NotificationsConfig {
     /// one to `false` to silence that event kind without touching the rest.
     #[serde(default)]
     pub events: NotificationEventsConfig,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            method: NotificationMethod::default(),
+            threshold_secs: default_threshold_secs(),
+            include_summary: false,
+            subagent_completion: SubagentCompletionNotification::default(),
+            completion_sound: CompletionSound::default(),
+            sound_file: None,
+            event_sound: EventSoundConfig::default(),
+            quiet: false,
+            events: NotificationEventsConfig::default(),
+        }
+    }
+}
+
+/// One live `[notifications]` scalar edit.
+///
+/// Keeping edits as deltas prevents a later session-only command from
+/// replacing earlier live changes with a freshly loaded disk snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationConfigUpdate {
+    Method(NotificationMethod),
+    ThresholdSecs(u64),
+    IncludeSummary(bool),
+    Quiet(bool),
+    CompletionSound(CompletionSound),
+    SubagentCompletion(SubagentCompletionNotification),
+}
+
+impl NotificationsConfig {
+    pub fn apply_update(&mut self, update: NotificationConfigUpdate) {
+        match update {
+            NotificationConfigUpdate::Method(value) => self.method = value,
+            NotificationConfigUpdate::ThresholdSecs(value) => self.threshold_secs = value,
+            NotificationConfigUpdate::IncludeSummary(value) => self.include_summary = value,
+            NotificationConfigUpdate::Quiet(value) => self.quiet = value,
+            NotificationConfigUpdate::CompletionSound(value) => self.completion_sound = value,
+            NotificationConfigUpdate::SubagentCompletion(value) => {
+                self.subagent_completion = value;
+            }
+        }
+    }
 }
 
 fn default_notification_event_enabled() -> bool {
@@ -2057,6 +2190,12 @@ pub struct GoalConfig {
     /// control ends the run.
     #[serde(default)]
     pub max_continuations: Option<u32>,
+    /// Optional quiet period between successful cross-turn continuations.
+    /// `0` preserves immediate continuation. Positive values make long-lived
+    /// coordinator goals yield visibly between turns instead of sleeping
+    /// inside a provider turn.
+    #[serde(default)]
+    pub continuation_delay_seconds: Option<u64>,
 }
 
 /// One configurable footer item.
@@ -4306,6 +4445,15 @@ impl Config {
     #[must_use]
     pub fn search_provider(&self) -> SearchProvider {
         self.search_provider_resolution().provider
+    }
+
+    /// Store a session/config provider choice and return the effective runtime
+    /// provider after applying the documented environment precedence.
+    pub fn set_search_provider(&mut self, provider: SearchProvider) -> SearchProvider {
+        self.search
+            .get_or_insert_with(SearchConfig::default)
+            .provider = Some(provider);
+        self.search_provider()
     }
 
     /// Return `true` if the `[auto] cost_saving = true` opt-in is set
@@ -6760,6 +6908,17 @@ impl Config {
             .unwrap_or(crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS)
     }
 
+    /// Quiet period between successful interactive goal turns (#5508).
+    /// Absent/zero keeps the existing immediate-continuation behavior.
+    #[must_use]
+    pub fn goal_continuation_delay_seconds(&self) -> u64 {
+        self.goal
+            .as_ref()
+            .and_then(|goal| goal.continuation_delay_seconds)
+            .unwrap_or(0)
+            .min(crate::goal_loop::MAX_GOAL_CONTINUATION_DELAY_SECONDS)
+    }
+
     /// Resolve the explicit local-memory backend.
     #[must_use]
     pub fn memory_backend(&self) -> MemoryBackend {
@@ -7329,6 +7488,16 @@ use paths::{
 pub(crate) use paths::{effective_home_dir, expand_path};
 
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
+    #[cfg(test)]
+    {
+        if !crate::test_support::guarded_environment_provides_state_paths() {
+            return vec![
+                crate::test_support::unsealed_test_state_root()
+                    .join(codewhale_config::CONFIG_FILE_NAME),
+            ];
+        }
+    }
+
     match env_config_path() {
         Ok(Some(path)) => return vec![path],
         Ok(None) => {}
@@ -7430,22 +7599,6 @@ pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<P
         return Ok(Some(expand_pathbuf(path)));
     }
 
-    #[cfg(test)]
-    {
-        let honor_guarded_environment = crate::test_support::current_thread_holds_test_env_lock();
-        crate::test_support::with_test_env_lock(|| {
-            if honor_guarded_environment {
-                try_default_config_path().map(Some)
-            } else {
-                Ok(Some(
-                    crate::test_support::isolated_test_state_root()
-                        .join(codewhale_config::CONFIG_FILE_NAME),
-                ))
-            }
-        })
-    }
-
-    #[cfg(not(test))]
     try_default_config_path().map(Some)
 }
 
@@ -8763,6 +8916,20 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
         .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_BACKEND"))
     {
         config.sandbox_backend = Some(value);
+    }
+    if let Ok(value) = codewhale_env_var("CODEWHALE_PREFER_BWRAP", "DEEPSEEK_PREFER_BWRAP") {
+        let primary_is_set = std::env::var("CODEWHALE_PREFER_BWRAP")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        let legacy_is_set = std::env::var("DEEPSEEK_PREFER_BWRAP")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !primary_is_set && legacy_is_set {
+            tracing::warn!(
+                "DEEPSEEK_PREFER_BWRAP is deprecated; use CODEWHALE_PREFER_BWRAP (the legacy alias is removed in 0.10.0)"
+            );
+        }
+        config.prefer_bwrap = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }
     if let Ok(value) =
         std::env::var("CODEWHALE_SANDBOX_URL").or_else(|_| std::env::var("DEEPSEEK_SANDBOX_URL"))
@@ -10824,16 +10991,46 @@ pub fn active_provider_uses_env_only_api_key(config: &Config) -> bool {
 /// provider table directly (never runs legacy migration, never opens a
 /// write-capable backend). Returns the key only when it reads as a real
 /// literal, not a placeholder.
+struct UserGlobalConfigCache {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    json: serde_json::Value,
+}
+
+fn user_global_config_json() -> Option<serde_json::Value> {
+    static CACHE: Mutex<Option<UserGlobalConfigCache>> = Mutex::new(None);
+    let path = codewhale_config::default_config_path().ok()?;
+    let meta = fs::metadata(&path).ok()?;
+    let modified = meta.modified().ok();
+    let len = meta.len();
+    let mut guard = CACHE.lock().ok()?;
+    if let Some(cached) = guard.as_ref()
+        && cached.path == path
+        && cached.modified == modified
+        && cached.len == len
+    {
+        return Some(cached.json.clone());
+    }
+    let text = fs::read_to_string(&path).ok()?;
+    let doc: codewhale_config::ConfigToml = toml::from_str(&text).ok()?;
+    let json = serde_json::to_value(&doc).ok()?;
+    *guard = Some(UserGlobalConfigCache {
+        path,
+        modified,
+        len,
+        json: json.clone(),
+    });
+    Some(json)
+}
+
 fn user_global_config_api_key(provider: ApiProvider) -> Option<String> {
     if provider == ApiProvider::Custom {
         // Custom providers are per-config by nature; the probe applies to
         // built-in ids whose keys are saved under the user-global file.
         return None;
     }
-    let path = codewhale_config::default_config_path().ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc: codewhale_config::ConfigToml = toml::from_str(&text).ok()?;
-    let json = serde_json::to_value(&doc).ok()?;
+    let json = user_global_config_json()?;
     let provider_config_key = provider.metadata().map_or_else(
         || provider.as_str(),
         |metadata| metadata.provider_config_key(),

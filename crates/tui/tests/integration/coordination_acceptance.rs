@@ -1,9 +1,8 @@
 //! Process-boundary acceptance for delegated coordination (#4647).
 //!
-//! Typed event/App/Work rendering assertions live beside their production
-//! modules, and `qa_pty::real_coordination_details_*` drives the sealed binary.
 //! This target retains the real-Git fan-in proof: terminal reconciliation must
 //! keep both candidates available instead of reducing them to source strings.
+//! Visible focus and composer behavior is accepted in the actual terminal.
 
 use std::path::Path;
 use std::process::Command;

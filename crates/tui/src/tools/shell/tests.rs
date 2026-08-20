@@ -260,7 +260,7 @@ fn execute_shell(
     timeout_ms: u64,
     background: bool,
 ) -> Result<ShellResult> {
-    manager.execute_with_options_env(
+    manager.execute_with_options_env_for_session(
         command,
         working_dir,
         timeout_ms,
@@ -269,6 +269,7 @@ fn execute_shell(
         false,
         None,
         HashMap::new(),
+        "workspace",
     )
 }
 
@@ -1345,6 +1346,67 @@ async fn drain_finished_jobs_reports_once() {
     assert!(!manager.may_have_undelivered_completion());
 }
 
+#[tokio::test]
+async fn background_job_is_hidden_from_replacement_session_and_resumes_once_for_owner() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx_a = ToolContext::new(tmp.path()).with_state_namespace("session-a");
+    let ctx_b = ctx_a.clone().with_state_namespace("session-b");
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": echo_command("owned-by-a"), "background": true}),
+            &ctx_a,
+        )
+        .await
+        .expect("start A background job");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = ctx_b.shell_manager.lock().expect("shell manager");
+    assert!(manager.list_jobs_for_session("session-b").is_empty());
+    assert!(
+        manager
+            .inspect_job_for_session("session-b", &task_id)
+            .is_err()
+    );
+    assert!(
+        manager
+            .write_stdin_for_session("session-b", &task_id, "foreign", false)
+            .is_err()
+    );
+    assert!(manager.kill_for_session("session-b", &task_id).is_err());
+
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+    let owned = manager
+        .list_jobs_for_session("session-a")
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("A job remains visible to A");
+    assert_eq!(owned.owner_session_id, "session-a");
+    assert!(
+        manager
+            .drain_finished_jobs_with_evidence_for_session("session-b")
+            .is_empty(),
+        "B must not claim A's completion"
+    );
+    assert!(manager.has_finished_unreported_jobs_for_session("session-a"));
+    let first = manager.drain_finished_jobs_with_evidence_for_session("session-a");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].event.owner_session_id, "session-a");
+    assert!(first[0].event.stdout_tail.contains("owned-by-a"));
+    assert!(
+        manager
+            .drain_finished_jobs_with_evidence_for_session("session-a")
+            .is_empty(),
+        "A completion is delivered exactly once"
+    );
+}
+
 #[test]
 fn completion_evidence_preserves_arbitrary_stream_bytes() {
     use base64::Engine as _;
@@ -1366,9 +1428,12 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            owner_session_id: "session-test".to_string(),
         },
         stdout: stdout.clone(),
         stderr: stderr.clone(),
+        stdout_omitted: 0,
+        stderr_omitted: 0,
     };
 
     let payload: serde_json::Value =
@@ -2585,7 +2650,17 @@ async fn exec_shell_cancel_kills_descendant_process_group() {
         .shell_manager
         .lock()
         .expect("shell manager")
-        .execute_with_options_env(&command, None, 60_000, true, None, false, None, env)
+        .execute_with_options_env_for_session(
+            &command,
+            None,
+            60_000,
+            true,
+            None,
+            false,
+            None,
+            env,
+            &ctx.state_namespace,
+        )
         .expect("start descendant tree");
     let task_id = started.task_id.expect("task id");
     let descendant = wait_for_shell_pid_file(&pid_file);
@@ -2935,18 +3010,20 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
     let now = std::time::Instant::now();
     let mut shell = BackgroundShell {
         id: "killed-reader".to_string(),
+        owner_session_id: "windows-test-session".to_string(),
         command: "test".to_string(),
         working_dir: std::path::PathBuf::from("."),
         status: ShellStatus::Killed,
         exit_code: None,
         started_at: now,
+        finished_at: Some(now),
         last_output_at: now,
         last_observed_output_len: 0,
         sandbox_type: SandboxType::None,
         ownership: ShellOwnership::Managed,
         linked_task_id: None,
         owner_agent: None,
-        stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        stdout_buffer: super::new_shared_raw_output(),
         stderr_buffer: None,
         heavy_permit: None,
         stdout_cursor: 0,
@@ -3695,4 +3772,200 @@ async fn signal_cleanup_kills_staged_persistent_service_group() {
     };
     assert!(libc::WIFSIGNALED(status));
     assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+}
+
+// === #5472: in-memory retention must be bounded ===
+
+/// ~1.1 MB on stdout, fast: 30,000 lines of 37 bytes.
+#[cfg(unix)]
+fn chatty_command() -> String {
+    "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -n 30000".to_string()
+}
+
+/// The finding-1 regression: before this bound, a single uppercase `Bash` call
+/// left its entire stdout resident in `ShellManager.processes` until the 1 h
+/// `cleanup`, and only if the user happened to open the jobs panel.
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_releases_its_output_once_the_result_is_returned() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": chatty_command()}), &ctx)
+        .await
+        .expect("run chatty foreground command");
+
+    // The result itself is unaffected: still the same 30 KB truncation.
+    assert!(
+        result
+            .content
+            .contains("0123456789abcdefghijklmnopqrstuvwxyz")
+    );
+
+    let manager = ctx.shell_manager.lock().expect("shell manager");
+    let retained = manager.retained_output_bytes_total();
+    assert!(
+        retained <= RAW_STREAM_SETTLED_TAIL_BYTES * 2,
+        "a finished foreground call must not keep its full stdout resident: \
+         {retained} bytes still held (bound {})",
+        RAW_STREAM_SETTLED_TAIL_BYTES * 2
+    );
+}
+
+/// Releasing memory must not rewrite history: the job panel keeps reporting how
+/// much the command actually printed.
+#[cfg(unix)]
+#[tokio::test]
+async fn released_output_still_reports_the_real_stream_length() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    BashTool::new("Bash")
+        .execute(json!({"command": chatty_command()}), &ctx)
+        .await
+        .expect("run chatty foreground command");
+
+    let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    let jobs = manager.list_jobs();
+    let job = jobs.first().expect("the finished job is still listed");
+    assert!(
+        job.stdout_len >= 1_000_000,
+        "stdout_len must stay honest after release, got {}",
+        job.stdout_len
+    );
+    assert!(
+        !job.stdout_tail.is_empty(),
+        "a diagnostic tail must survive the release"
+    );
+}
+
+/// A background job's bytes become a durable session artifact at drain time;
+/// keeping a second copy in the manager afterwards is the pure-waste term.
+#[cfg(unix)]
+#[tokio::test]
+async fn draining_completion_evidence_releases_the_retained_copy() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let started = BashTool::new("Bash")
+        .execute(
+            json!({"command": chatty_command(), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = started
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+
+    let evidence = manager.drain_finished_jobs_with_evidence();
+    assert_eq!(evidence.len(), 1);
+    assert!(
+        evidence[0].event.stdout_len >= 1_000_000,
+        "the event still reports the full length"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&evidence[0].artifact_bytes()).expect("evidence JSON");
+    assert!(
+        payload["stdout"]["content"]
+            .as_str()
+            .expect("stdout content")
+            .len()
+            >= 1_000_000,
+        "the artifact carries the exact bytes; only the manager's copy is dropped"
+    );
+
+    let retained = manager.retained_output_bytes_total();
+    assert!(
+        retained <= RAW_STREAM_SETTLED_TAIL_BYTES * 2,
+        "{retained} bytes still held after the evidence was published"
+    );
+}
+
+/// Age was the only bound, and it only ran from `list_jobs()`. Hundreds of
+/// finished records inside one hour were all retained.
+#[test]
+fn cleanup_bounds_finished_records_by_count() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let seeded_count = MAX_FINISHED_SHELL_RECORDS + 40;
+    for index in 0..seeded_count {
+        // Give every fixture a deterministic ordering while keeping all of
+        // them far younger than the age ceiling. Lower ids are older.
+        manager.seed_finished_record_for_test(
+            format!("record-{index}"),
+            Duration::from_millis((seeded_count - index) as u64),
+        );
+    }
+    manager.cleanup(FINISHED_SHELL_MAX_AGE);
+    assert_eq!(manager.tracked_job_count(), MAX_FINISHED_SHELL_RECORDS);
+    assert!(
+        manager.inspect_job("record-39").is_err(),
+        "the oldest overflow record must be evicted"
+    );
+    assert!(
+        manager.inspect_job("record-40").is_ok(),
+        "the first record inside the cap must survive"
+    );
+    assert!(
+        manager
+            .inspect_job(&format!("record-{}", seeded_count - 1))
+            .is_ok(),
+        "the newest record must survive"
+    );
+}
+
+/// #5478 nit: `/jobs` reported `2m 07s` for a 12-second command, because
+/// elapsed was `started_at.elapsed()` even after the job finished. A completed
+/// job reports the duration it finished with.
+#[test]
+fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let result = manager
+        .execute_with_options_env(
+            &echo_command("frozen-elapsed"),
+            None,
+            10_000,
+            true,
+            None,
+            false,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .expect("spawn");
+    let task_id = result.task_id.expect("task id");
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+
+    let first = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("job listed")
+        .elapsed_ms;
+
+    std::thread::sleep(Duration::from_millis(400));
+
+    let second = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("job still listed")
+        .elapsed_ms;
+
+    assert_eq!(
+        first, second,
+        "a finished job's elapsed must stop moving; it read {first}ms then {second}ms"
+    );
+    assert!(
+        second < 10_000,
+        "the frozen value must be the real duration, not the timeout: {second}ms"
+    );
 }

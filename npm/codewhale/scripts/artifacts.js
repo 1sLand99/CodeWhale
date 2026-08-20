@@ -128,41 +128,102 @@ function executableName(base, platform) {
   return platform === "win32" ? `${base}.exe` : base;
 }
 
+function ensureTrailingSlash(baseUrl) {
+  const trimmed = String(baseUrl).trim();
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+
+function githubReleaseBaseUrl(version, repo = "Hmbown/CodeWhale") {
+  return `https://github.com/${repo}/releases/download/v${version}/`;
+}
+
+function cnbReleaseBaseUrl(version) {
+  return `https://cnb.cool/codewhale.net/codewhale/-/releases/download/v${version}/`;
+}
+
+function releaseAssetUrlFromBase(baseName, baseUrl) {
+  return new URL(baseName, ensureTrailingSlash(baseUrl)).toString();
+}
+
+function explicitReleaseBase(env = process.env) {
+  const candidates = [
+    env.CODEWHALE_RELEASE_BASE_URL,
+    env.DEEPSEEK_TUI_RELEASE_BASE_URL,
+    env.DEEPSEEK_RELEASE_BASE_URL,
+  ];
+  for (const candidate of candidates) {
+    const override = String(candidate || "").trim();
+    if (override) {
+      return ensureTrailingSlash(override);
+    }
+  }
+  return "";
+}
+
+function hasExplicitReleaseBase(env = process.env) {
+  return Boolean(explicitReleaseBase(env));
+}
+
+function isCnbSupportedTarget(
+  rawPlatform = os.platform(),
+  arch = os.arch(),
+) {
+  const platform = PLATFORM_ALIASES[rawPlatform] || rawPlatform;
+  return platform === "linux" && arch === "x64";
+}
+
 function releaseBaseUrl(version, repo = "Hmbown/CodeWhale") {
   // CODEWHALE_RELEASE_BASE_URL is the canonical override.
   // DEEPSEEK_TUI_RELEASE_BASE_URL / DEEPSEEK_RELEASE_BASE_URL are legacy aliases.
-  const override =
-    process.env.CODEWHALE_RELEASE_BASE_URL ||
-    process.env.DEEPSEEK_TUI_RELEASE_BASE_URL ||
-    process.env.DEEPSEEK_RELEASE_BASE_URL;
+  const override = explicitReleaseBase();
   if (override) {
-    const trimmed = String(override).trim();
-    return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+    return override;
   }
   // When CODEWHALE_USE_CNB_MIRROR is set, use the CNB (China-friendly)
   // mirror that already builds and publishes binary release assets.
   if (usesCnbMirror()) {
     assertCnbMirrorSupportedPlatform();
-    return `https://cnb.cool/codewhale.net/codewhale/-/releases/download/v${version}/`;
+    return cnbReleaseBaseUrl(version);
   }
-  return `https://github.com/${repo}/releases/download/v${version}/`;
+  return githubReleaseBaseUrl(version, repo);
 }
 
 function usesCnbMirror(env = process.env) {
-  const hasExplicitBase = Boolean(
-    env.CODEWHALE_RELEASE_BASE_URL ||
-      env.DEEPSEEK_TUI_RELEASE_BASE_URL ||
-      env.DEEPSEEK_RELEASE_BASE_URL,
+  return !hasExplicitReleaseBase(env) && env.CODEWHALE_USE_CNB_MIRROR === "1";
+}
+
+function shouldRaceFirstPartyMirrors(
+  env = process.env,
+  rawPlatform = os.platform(),
+  arch = os.arch(),
+) {
+  return (
+    isCnbSupportedTarget(rawPlatform, arch) &&
+    !hasExplicitReleaseBase(env) &&
+    env.CODEWHALE_USE_CNB_MIRROR !== "1"
   );
-  return !hasExplicitBase && Boolean(env.CODEWHALE_USE_CNB_MIRROR);
+}
+
+function firstPartyReleaseSources(version, repo = "Hmbown/CodeWhale") {
+  return [
+    {
+      id: "github",
+      label: "GitHub Releases",
+      baseUrl: githubReleaseBaseUrl(version, repo),
+    },
+    {
+      id: "cnb",
+      label: "CNB first-party mirror",
+      baseUrl: cnbReleaseBaseUrl(version),
+    },
+  ];
 }
 
 function assertCnbMirrorSupportedPlatform(
   rawPlatform = os.platform(),
   arch = os.arch(),
 ) {
-  const platform = PLATFORM_ALIASES[rawPlatform] || rawPlatform;
-  if (platform === "linux" && arch === "x64") {
+  if (isCnbSupportedTarget(rawPlatform, arch)) {
     return;
   }
   throw new Error(
@@ -174,7 +235,7 @@ function assertCnbMirrorSupportedPlatform(
 }
 
 function releaseAssetUrl(baseName, version, repo = "Hmbown/CodeWhale") {
-  return new URL(baseName, releaseBaseUrl(version, repo)).toString();
+  return releaseAssetUrlFromBase(baseName, releaseBaseUrl(version, repo));
 }
 
 function checksumManifestUrl(version, repo = "Hmbown/CodeWhale") {
@@ -221,12 +282,20 @@ module.exports = {
   CNB_BINARY_ASSET_NAMES,
   CNB_RELEASE_ASSET_NAMES,
   checksumManifestUrl,
+  cnbReleaseBaseUrl,
   detectBinaryNames,
   executableName,
+  explicitReleaseBase,
+  firstPartyReleaseSources,
+  githubReleaseBaseUrl,
+  hasExplicitReleaseBase,
+  isCnbSupportedTarget,
   LEGACY_TUI_BRIDGE_ASSET_NAMES,
   releaseAssetUrl,
+  releaseAssetUrlFromBase,
   releaseBaseUrl,
   releaseBinaryDirectory,
+  shouldRaceFirstPartyMirrors,
   usesCnbMirror,
   WINDOWS_INSTALLER_ASSET,
 };

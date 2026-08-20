@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -7,7 +7,7 @@ Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个�
 
 给它一个 provider、一个模型和一个任务:它会读你的代码、改文件、跑命令、检查自己的工作,并在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI,脚本和 CI 用 `codewhale exec`。它用 Rust 编写,采用 MIT 许可,运行在你自己的机器上。
 
-和其他 harness 不一样的地方在于:**每个角色用哪个模型由你决定,而且它们不必相同。** 一个 Fleet 为每个角色分别固定 provider、模型和推理档位——所以又快又便宜的模型可以指挥昂贵的推理模型,GLM 的 builder 也可以和 Kimi 的 reviewer 干同一份活。写下你自己的角色、你自己的 constitution,这套 harness 就是你的,而不是我们的。
+和其他 harness 不一样的地方在于:**每个角色用哪个模型由你决定,而且它们不必相同**——而且 **Codewhale 里的 agent 可以互相沟通,跨模型的那种。** 一个 Fleet 为每个角色分别固定 provider、模型和推理档位,所以又快又便宜的模型可以指挥昂贵的推理模型,GLM 的 builder 也可以和 Kimi 的 reviewer 干同一份活。它们运行时,你可以随时给其中任何一个发消息、看它的 transcript、或者打断它——而且不只是父子关系:同一工作区里不同的 Codewhale 任务之间可以互发持久、可跨重启的 Agent Mail,在安全边界恰好投递一次,并自动脱敏凭据。`/goal` 让一个长期目标跨回合推进,直到真正完成。角色就是文件,改起来随你,整套 harness 始终是你的。
 
 我们一直在寻找贡献者和改进的方式。如果你在用的某个模型或 provider 还不支持,或者有什么东西坏了,告诉我们就是你能做的最有用的事之一——见[贡献](#贡献)。
 
@@ -18,13 +18,15 @@ Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个�
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale 在终端中运行](assets/screenshot.png)
+![Codewhale 在终端中运行](assets/screenshot.webp)
 
 ## 安装
 
 ```bash
 npm install -g codewhale
 ```
+
+在 Linux x64（含 OpenHarmony x64）上，npm 包装器会同时向 GitHub Releases 和 CNB 第一方镜像请求该版本的小型校验清单（`codewhale-artifacts-sha256.txt`），采用先验证通过的来源下载二进制，而不会等待 GitHub 大文件超时。若设置了 `CODEWHALE_RELEASE_BASE_URL` 或 `CODEWHALE_USE_CNB_MIRROR=1`，则按你指定的来源执行，不再竞速。CNB 仅提供 Linux x64；其他平台仍走 GitHub 或完整镜像。安装进度和 `<binary>.source` 回执会标明选中的来源。校验失败会直接报错，不会混用两个来源的清单和二进制。
 
 Cargo、Docker、Nix、Scoop、预编译归档、Android/Termux,以及面向无法访问 GitHub 用户的 CNB 镜像,均见 [docs/INSTALL.md](docs/INSTALL.md)。从 `deepseek-tui` 迁移过来?你的配置和会话可以直接沿用——见 [docs/REBRAND.md](docs/REBRAND.md)。
 
@@ -42,7 +44,8 @@ codewhale web                            # local browser client on 127.0.0.1
 
 ## 功能
 
-- **任意模型,任意 provider——也可以任意混搭。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider,以及你自己的 vLLM、SGLang、Ollama——无需 key——全都跑在同一套运行时和同一套工具之上。目录会跟踪每家 provider 的最新阵容——DeepSeek 的 V4 Pro 后端(标注为 `DeepSeek-V4-Pro-0813`)仍以 `deepseek-v4-pro` 调用,Grok 4.6 是 xAI 的直接默认模型,OrcaRouter 通过 `orcarouter/auto` 路由。保存下来的角色会显式记录它的 `provider`、`model` 和推理档位,所以一个 Fleet 可以在同一次运行里跨越多家厂商,角色的路由也不会取决于当时恰好激活的是哪个 provider。上下文预算与价格取自真实路由;价格未知时显示未知,而不是 $0。
+- **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。`/goal` 持有一个跨回合持续逼近的目标——可暂停、可恢复,并随会话在重启后一并恢复;`/workflows` 则打开一个实时面板,展示这个工作区的日志所保留的每一次运行。
+- **Agent 之间可以互相沟通——而且跨模型。** Codewhale 里的每个 agent 在干活时都够得着:`message` 给运行中的子 agent 排一条笔记,`followup` 在它的下一个安全边界把它叫醒并送上笔记,`peek` 读它的 transcript,打断只停它自己的回合。它不止于父子树:同一工作区的不同任务之间可以互发持久的 **Agent Mail**——一份排队的交接摘要,能活过重启,在收件方的安全边界恰好投递一次,并对凭据和路径脱敏——于是两个终端里的 GLM 会话和 Kimi 会话可以自己协调,不用你在中间当传话筒。两边可以是不同的模型;Codewhale 负责把对话送到。
 - **由你亲手写就的 harness。** 角色就是你能读、能改的文件——每个角色一个模型、一套工具姿态和一份常驻指令——放在项目里让团队共享,或放在你的个人设置旁边,跟着你在不同仓库之间走。constitution 记录你希望 agent 在每一次会话中如何行事,让这套 harness 贴合你的做法,而不是我们的。
 - **默认只读,放开权限才更进一步。** Plan 模式不改动文件,审批把关每一次高风险命令。只有当命令确实被 OS 沙箱包装时,Codewhale 才会如实标明:macOS 上是可用时启用的 Seatbelt,Linux 上是需显式启用的 bubblewrap。仓库的 `constitution.json` 会编译成写入拦截,连 Full Access 也无法跳过。
 - **随时可以续跑的工作。** Fleet 把每一步记录在只追加的账本里,`fleet resume` 从你停下的地方继续。
@@ -88,3 +91,5 @@ Issue、PR、复现步骤、日志和功能请求,在这里都算真实的项目
 [MIT](LICENSE)。独立的社区项目,与任何模型 provider 均无隶属关系。
 
 ![Codewhale 在终端中并行派出三个只读 scout 子代理](assets/fanout.gif)
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

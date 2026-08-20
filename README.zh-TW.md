@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 給終端機用的開源程式設計智能體——模型由你自備。
@@ -7,7 +7,7 @@ Codewhale 起初是為 DeepSeek 打造的原生體驗，如今已成長為社群
 
 給它一個 provider、一個模型和一項任務。它會讀你的程式碼、改檔案、跑指令、檢查自己的工作，並在任務完成或需要你介入時停下。任務進行中可用 `/model` 切換模型。互動式工作用 TUI，腳本和 CI 用 `codewhale exec`。以 Rust 撰寫，採 MIT 授權，跑在你自己的機器上。
 
-和其他 harness 不一樣的地方在於：**每個角色用哪個模型由你決定，而且不必相同。** 一個 Fleet 會為每個角色分別釘住 provider、模型和推論層級——所以又快又便宜的模型可以指揮昂貴的推論模型，GLM 的 builder 也可以和 Kimi 的 reviewer 做同一份工作。寫下你自己的角色、你自己的 constitution，這套 harness 就是你的，而不是我們的。
+和其他 harness 不一樣的地方在於：**每個角色用哪個模型由你決定，而且不必相同**——而且 **Codewhale 裡的 agent 可以互相溝通，跨模型的那種。** 一個 Fleet 會為每個角色分別釘住 provider、模型和推論層級，所以又快又便宜的模型可以指揮昂貴的推論模型，GLM 的 builder 也可以和 Kimi 的 reviewer 做同一份工作。它們執行時，你可以隨時給其中任何一個發訊息、看它的 transcript、或者打斷它——而且不只是父子關係：同一工作區裡不同的 Codewhale 任務之間可以互發持久、可跨重開的 Agent Mail，在安全邊界恰好投遞一次，並自動遮蔽憑證。`/goal` 讓一個長期目標跨回合推進，直到真正完成。角色就是檔案，改起來隨你，整套 harness 始終是你的。
 
 我們一直在尋找貢獻者和改進的方式。如果你在用的某個模型或 provider 還沒支援，或有東西壞了，告訴我們就是你能做的最有用的事之一——見[貢獻](#貢獻)。
 
@@ -18,7 +18,7 @@ Codewhale 起初是為 DeepSeek 打造的原生體驗，如今已成長為社群
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale 在終端機中執行](assets/screenshot.png)
+![Codewhale 在終端機中執行](assets/screenshot.webp)
 
 ## 安裝
 
@@ -43,7 +43,8 @@ codewhale web                            # local browser client on 127.0.0.1
 
 ## 功能
 
-- **任意模型、任意 provider——也可以任意混搭。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider，以及你自己的 vLLM、SGLang 或 Ollama——不需要金鑰——全都跑在同一套執行環境和同一套工具上。目錄會追蹤每家 provider 的即時陣容——DeepSeek 的 V4 Pro 後端（標示為 `DeepSeek-V4-Pro-0813`）仍以 `deepseek-v4-pro` 呼叫，Grok 4.6 是 xAI 的直接預設，OrcaRouter 則經由 `orcarouter/auto` 路由。儲存下來的角色會明確記錄它的 `provider`、`model` 和推論層級，所以一個 Fleet 可以在同一次執行裡跨越多家廠商，角色的路由也不會取決於當時恰好啟用的是哪個 provider。上下文上限與價格取自真實路由；價格未知時顯示未知，而不是 $0。
+- **隨時可以續跑的工作。** Fleet 把每一步記錄在只附加的帳本裡，`fleet resume` 從你停下的地方繼續。`/goal` 持有一個跨回合持續逼近的目標——可暫停、可恢復，並隨工作階段在重開後一併還原；`/workflows` 則打開一個即時面板，展示這個工作區的日誌所保留的每一次執行。
+- **Agent 之間可以互相溝通——而且跨模型。** Codewhale 裡的每個 agent 在幹活時都構得著：`message` 給執行中的子 agent 排一條筆記，`followup` 在它的下一個安全邊界把它叫醒並送上筆記，`peek` 讀它的 transcript，打斷只停它自己的回合。它不止於父子樹：同一工作區的不同任務之間可以互發持久的 **Agent Mail**——一份排隊的交接摘要，能活過重開，在收件方的安全邊界恰好投遞一次，並對憑證與路徑遮蔽——於是兩個終端機裡的 GLM 工作階段和 Kimi 工作階段可以自己協調，不用你在中間當傳話筒。兩邊可以是不同的模型；Codewhale 負責把對話送到。
 - **由你親手寫就的 harness。** 角色就是你能讀、能改的檔案——每個角色一個模型、一套工具姿態和一份常駐指示——放在專案裡讓團隊共用，或放在你的其他個人設定旁邊，跟著你在不同倉庫之間走。constitution 記錄你希望智能體在每一次工作階段中如何行事，讓這套 harness 貼合你的做法，而不是我們的。
 - **預設唯讀，你允許之後才再放寬。** Plan 模式不能改檔案，核准把關高風險指令。當作業系統沙箱確實包住一條指令時，Codewhale 會說出來：macOS 上是可用時啟用的 Seatbelt，Linux 上是需自行開啟的 bubblewrap。倉庫的 `constitution.json` 會編譯成寫入鎖定，連 Full Access 也無法略過。
 - **隨時可以續跑的工作。** Fleet 把每一步記在只追加的帳本裡，`fleet resume` 從你停下的地方繼續。
@@ -88,3 +89,5 @@ Issue、PR、重現步驟、紀錄檔和功能請求，在這裡都算真實的�
 [MIT](LICENSE)。獨立的社群專案，與任何模型 provider 均無隸屬關係。
 
 ![Codewhale 在終端機中並行派出三個唯讀 scout 子代理](assets/fanout.gif)
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

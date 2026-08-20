@@ -17,7 +17,10 @@ pub(super) const REASONING_RAIL: &str = "\u{254E} "; // ╎ + space
 pub(super) const REASONING_CURSOR: &str = "\u{258E}"; // ▎
 
 const THINKING_SUMMARY_LINE_LIMIT: usize = 4;
-const THINKING_COMPLETED_PREVIEW_LINE_LIMIT: usize = 10;
+/// Completed collapsed thought: a short lede, not a ten-line dump.
+/// Grok's finished thought is header-only; we keep two lines so a one-step
+/// thought is still readable without forcing an expand.
+const THINKING_COMPLETED_PREVIEW_LINE_LIMIT: usize = 2;
 const THINKING_STREAMING_PREVIEW_LINE_LIMIT: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,7 @@ pub(crate) fn render_thinking_with_analysis(
         low_motion,
         highlight,
         0,
+        THINKING_COMPLETED_PREVIEW_LINE_LIMIT,
     )
 }
 
@@ -126,6 +130,7 @@ pub(crate) fn render_thinking_with_preview_limit(
     low_motion: bool,
     highlight: bool,
     preview_extra_lines: usize,
+    completed_preview_lines: usize,
 ) -> (Vec<Line<'static>>, bool) {
     let state = thinking_visual_state(streaming, duration_secs);
     let style = thinking_style();
@@ -164,8 +169,14 @@ pub(crate) fn render_thinking_with_preview_limit(
     lines.push(Line::from(header_spans));
 
     let content_width = width.saturating_sub(3).max(1);
-    let (collapsed_body, expandable) =
-        collapsed_thinking_body(content, width, streaming, body_style, preview_extra_lines);
+    let (collapsed_body, expandable) = collapsed_thinking_body(
+        content,
+        width,
+        streaming,
+        body_style,
+        preview_extra_lines,
+        completed_preview_lines,
+    );
     let rendered = if collapsed {
         collapsed_body
     } else if content.trim().is_empty() {
@@ -216,6 +227,7 @@ fn collapsed_thinking_body(
     streaming: bool,
     style: Style,
     preview_extra_lines: usize,
+    completed_preview_lines: usize,
 ) -> (Vec<Line<'static>>, bool) {
     let (body_text, without_explicit_summary) = if streaming {
         // #861 RC4 / #1324: an in-flight block has no meaningful completed
@@ -239,7 +251,7 @@ fn collapsed_thinking_body(
     let limit = if streaming {
         THINKING_STREAMING_PREVIEW_LINE_LIMIT.saturating_add(preview_extra_lines)
     } else if without_explicit_summary {
-        THINKING_COMPLETED_PREVIEW_LINE_LIMIT.saturating_add(preview_extra_lines)
+        completed_preview_lines.saturating_add(preview_extra_lines)
     } else {
         THINKING_SUMMARY_LINE_LIMIT
     };

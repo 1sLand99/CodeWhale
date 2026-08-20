@@ -106,7 +106,7 @@ main, header, footer, nav { position: relative; z-index: 1; }
 
 /* ---------- type ---------- */
 .font-display { font-family: var(--font-display), "Fraunces", "Noto Serif SC", Georgia, serif; }
-.font-cjk { font-family: "Noto Serif SC", "Source Han Serif SC", serif; }
+.font-cjk { font-family: var(--font-cjk), "Noto Serif SC", "Source Han Serif SC", serif; }
 
 /* CJK paragraph rhythm — looser leading, wider tracking for body; tighter for headings */
 .cjk-body {
@@ -456,10 +456,17 @@ mark.search-highlight {
 }
 
 .paper-wordmark {
-  flex: 1 1 auto;
+  /* The old `flex: 1 1 auto` with `min-width: 0` let long-locale strips
+     (de, pt-BR, id) collapse the home control to a zero-width hit target.
+     `min-width` is a hard flexbox floor, so the shrink factor stays at 1:
+     the box gives back space down to 8.75rem and no further. Refusing to
+     shrink at all instead pushes the overflow onto the compact controls —
+     at 375px on a docs route the menu toggle is the item that gets clipped.
+     The tag still ellipsizes inside this box. */
+  flex: 0 1 auto;
   gap: 0.75rem;
   max-width: 15rem;
-  min-width: 0;
+  min-width: 8.75rem;
   overflow: hidden;
 }
 
@@ -529,6 +536,15 @@ mark.search-highlight {
 }
 
 .site-nav-actions > * { flex-shrink: 0; }
+
+/* Native <select> sizes to the selected option (Safari) or the longest
+   option (Chrome). Unbounded, "Bahasa Indonesia (sebagian)" / "Deutsch
+   (teilweise)" push the compact controls past overflow-x: clip. */
+.site-nav-actions select {
+  width: 6.75rem;
+  max-width: 6.75rem;
+  min-width: 0;
+}
 
 .site-github-link {
   display: inline-flex;
@@ -2889,6 +2905,7 @@ html[lang="ko"] .ocean-column h2 {
   margin-bottom: 1rem;
 }
 
+.docs-portal-hero-inner .docs-hero-title,
 .docs-portal-hero-inner h1,
 .community-welcome-inner h1 {
   max-width: 50rem;
@@ -2900,7 +2917,7 @@ html[lang="ko"] .ocean-column h2 {
   margin-top: 0.85rem;
 }
 
-.docs-portal-hero-inner p,
+.docs-portal-hero-inner p:not(.docs-hero-title),
 .community-welcome-inner p {
   max-width: 47rem;
   margin-top: 1rem;
@@ -2987,6 +3004,40 @@ html[lang="ko"] .ocean-column h2 {
   grid-area: content;
   width: 100%;
   max-width: 52rem;
+}
+
+.docs-breadcrumb {
+  margin-bottom: 1.15rem;
+  color: var(--ink-mute);
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+}
+
+.docs-breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.docs-breadcrumb li:not(:last-child)::after {
+  content: "/";
+  margin-inline: 0.5em;
+  color: var(--ink-mute);
+}
+
+.docs-breadcrumb a {
+  color: var(--indigo);
+}
+
+.docs-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.docs-breadcrumb [aria-current="page"] {
+  color: var(--ink);
 }
 
 .docs-search-block {

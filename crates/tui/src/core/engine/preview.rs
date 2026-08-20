@@ -610,17 +610,19 @@ impl Engine {
             reasons.push("pending LSP diagnostics would be injected as a synthetic message");
         }
 
-        let shell_completion_may_be_injected = self
-            .shell_manager
-            .lock()
-            .map_or(true, |manager| manager.may_have_undelivered_completion());
+        let shell_completion_may_be_injected = self.shell_manager.lock().map_or(true, |manager| {
+            manager.may_have_undelivered_completion_for_session(&self.session.id)
+        });
         if shell_completion_may_be_injected {
             reasons.push("a background shell completion may be injected before the request");
         }
 
         let queued_completions = !self.rx_subagent_completion.is_empty() || {
             let manager = self.subagent_manager.read().await;
-            manager.may_transform_next_parent_request(&self.delivered_subagent_completion_ids)
+            manager.may_transform_next_parent_request_for_session(
+                &self.session.id,
+                &self.delivered_subagent_completion_ids,
+            )
         };
         if queued_completions {
             reasons.push("a running or undelivered sub-agent completion may be injected");

@@ -536,6 +536,26 @@ impl ProviderReadinessSnapshot {
         );
     }
 
+    /// Records a failed `/models` probe. Unlike [`Self::record_failure`],
+    /// this always stores the result so Test Connection can refresh a
+    /// stuck `not checked` row.
+    pub(crate) fn record_models_probe_failure(
+        &mut self,
+        config: &crate::config::Config,
+        provider: ApiProvider,
+        model: &str,
+        category: ErrorCategory,
+        message: &str,
+    ) {
+        self.replace(
+            route_identity_for_model(config, provider, model),
+            LastProviderCheck::Failed {
+                category,
+                message: sanitize_message(message),
+            },
+        );
+    }
+
     /// Records a 2xx `/models` probe as connection-checked, never `Ready`.
     pub(crate) fn record_models_probe_success(
         &mut self,

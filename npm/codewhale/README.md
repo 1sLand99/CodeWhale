@@ -34,9 +34,12 @@ npm install codewhale
 npx codewhale --help
 ```
 
-`postinstall` tries to download platform binaries into `bin/downloads/`. If
-GitHub release assets are temporarily unreachable, install continues and the
-wrapper retries the download on first run.
+`postinstall` tries to download platform binaries into `bin/downloads/`. On
+Linux x64 it concurrently probes the GitHub Releases and CNB first-party
+checksum manifests for this package version, locks the first source that
+validates, and downloads binaries only from that source. If GitHub release
+assets are temporarily unreachable, install continues and the wrapper retries
+the download on first run.
 
 ## First run
 
@@ -90,20 +93,26 @@ guide.
 | Setting | What it does |
 | --- | --- |
 | `codewhaleBinaryVersion` in `package.json` | Default native binary version. `deepseekBinaryVersion` is still read as a backward-compat fallback. |
-| `CODEWHALE_RELEASE_BASE_URL` | Canonical override: use an internal or mirrored release-asset directory when GitHub Releases is unavailable. The directory must contain `codewhale-artifacts-sha256.txt` and the platform binaries. `DEEPSEEK_TUI_RELEASE_BASE_URL` and `DEEPSEEK_RELEASE_BASE_URL` are the implemented legacy fallbacks. |
-| `CODEWHALE_USE_CNB_MIRROR=1` | Download from the CNB (China-friendly) mirror on Linux x64 and OpenHarmony x64. Other targets fail with a clear unsupported-mirror error; use GitHub or a complete `CODEWHALE_RELEASE_BASE_URL` mirror there. |
-| `DEEPSEEK_TUI_VERSION` or `DEEPSEEK_VERSION` | Override the GitHub release version to download. |
-| `DEEPSEEK_TUI_GITHUB_REPO` or `DEEPSEEK_GITHUB_REPO` | Override the source repo. Defaults to `Hmbown/CodeWhale`. |
-| `DEEPSEEK_TUI_FORCE_DOWNLOAD=1` | Force download even when the cached binary is already present. |
-| `DEEPSEEK_TUI_DISABLE_INSTALL=1` | Skip install-time download. |
-| `DEEPSEEK_TUI_OPTIONAL_INSTALL=1` | Make install-time retryable download failures warn and exit `0` instead of failing `npm install`. |
-| `DEEPSEEK_TUI_SKIP_GLIBC_CHECK=1` | Bypass the Linux glibc preflight check at your own risk (`DEEPSEEK_SKIP_GLIBC_CHECK=1` also works). |
+| `CODEWHALE_RELEASE_BASE_URL` | Canonical override: use an internal or mirrored release-asset directory and skip the Linux x64 GitHub/CNB race. The directory must contain `codewhale-artifacts-sha256.txt` and the platform binaries. `DEEPSEEK_TUI_RELEASE_BASE_URL` and `DEEPSEEK_RELEASE_BASE_URL` are the implemented legacy fallbacks. |
+| `CODEWHALE_USE_CNB_MIRROR=1` | Force the CNB (China-friendly) first-party mirror on Linux x64 and OpenHarmony x64, skipping the automatic race. Other targets fail with a clear unsupported-mirror error; use GitHub or a complete `CODEWHALE_RELEASE_BASE_URL` mirror there. Without this variable, Linux x64 still probes CNB and GitHub together and uses the first valid checksum manifest. |
+| `CODEWHALE_VERSION` | Override the release version to download. |
+| `CODEWHALE_GITHUB_REPO` | Override the source repo. Defaults to `Hmbown/CodeWhale`. |
+| `CODEWHALE_FORCE_DOWNLOAD=1` | Force download even when the cached binary is already present. |
+| `CODEWHALE_DISABLE_INSTALL=1` | Skip install-time download. |
+| `CODEWHALE_OPTIONAL_INSTALL=1` | Make install-time retryable download failures warn and exit `0` instead of failing `npm install`. |
+| `CODEWHALE_QUIET_INSTALL=1` | Suppress installer progress messages. |
+| `CODEWHALE_DOWNLOAD_TIMEOUT_MS` | Override the total download budget. |
+| `CODEWHALE_DOWNLOAD_STALL_MS` | Override the no-progress stall budget. |
+| `CODEWHALE_SKIP_GLIBC_CHECK=1` | Bypass the Linux glibc preflight check at your own risk. |
+
+The corresponding `DEEPSEEK_TUI_*` and `DEEPSEEK_*` names remain accepted as
+legacy aliases, after the canonical Codewhale names.
 
 ### Proxies
 
 Downloads respect `HTTPS_PROXY` / `HTTP_PROXY` (CONNECT tunneling included)
 and `NO_PROXY`, so the wrapper works behind corporate proxies. For fully
-offline installs, set `DEEPSEEK_TUI_DISABLE_INSTALL=1` or point
+offline installs, set `CODEWHALE_DISABLE_INSTALL=1` or point
 `CODEWHALE_RELEASE_BASE_URL` at a local mirror.
 
 ## Release integrity

@@ -1211,11 +1211,7 @@ async fn create_summary(
         let request = MessageRequest {
             model: config.model.clone(),
             messages: request_messages.clone(),
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                cost_route.provider,
-                &cost_route.model,
-                None,
-            ),
+            max_tokens: client.effective_max_output_tokens(&cost_route.model),
             system: None,
             tools: None,
             tool_choice: None,
@@ -2308,11 +2304,9 @@ mod tests {
         for (window, output_reserve) in [
             (128_000_u64, 4_096_u64),
             (272_000, 4_096),
-            // CodeWhale's V4-class internal budget reserves up to 262K output.
-            (
-                1_000_000,
-                u64::from(crate::route_budget::TURN_MAX_OUTPUT_TOKENS),
-            ),
+            // Large windows use the same ordinary request reservation; there
+            // is no second, non-wire reasoning allowance.
+            (1_000_000, 65_536),
         ] {
             let budget = crate::context_budget::ContextBudget::new(window, 0, output_reserve);
             let threshold = usize::try_from(budget.compaction_trigger_for_percent(80.0))

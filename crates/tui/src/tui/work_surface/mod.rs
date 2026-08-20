@@ -687,7 +687,7 @@ mod tests {
         capped.work_surface.top_height = 2;
         capped.composer_border = true;
         // Goal + several checklist rows: content wants more than 2, the cap wins.
-        capped.hunt.quarry = Some("ship the release".to_string());
+        capped.goal.objective = Some("ship the release".to_string());
         add_todos(&mut capped, 6);
         let budget = working_budget(&capped, 40);
         assert_eq!(
@@ -702,7 +702,7 @@ mod tests {
         short.work_surface.placement = WorkSurfacePlacement::Top;
         short.work_surface.panel = super::RailPanel::Pinned;
         short.work_surface.top_height = 8;
-        short.hunt.quarry = Some("one goal only".to_string());
+        short.goal.objective = Some("one goal only".to_string());
         let budget = working_budget(&short, 40);
         let h = super::height(&mut short, 100, 40, budget);
         assert!(
@@ -720,7 +720,7 @@ mod tests {
         pinned.work_surface.placement = WorkSurfacePlacement::Top;
         pinned.work_surface.panel = super::RailPanel::Pinned;
         pinned.work_surface.top_height = 12;
-        pinned.hunt.quarry = Some("goal".to_string());
+        pinned.goal.objective = Some("goal".to_string());
         add_todos(&mut pinned, 3);
         let budget = working_budget(&pinned, 40);
         let h = super::height(&mut pinned, 100, 40, budget);
@@ -762,7 +762,7 @@ mod tests {
         with_goal.work_surface.placement = WorkSurfacePlacement::Top;
         with_goal.work_surface.panel = super::RailPanel::Pinned;
         with_goal.work_surface.top_height = 8;
-        with_goal.hunt.quarry = Some("ship 0.9.4".to_string());
+        with_goal.goal.objective = Some("ship 0.9.4".to_string());
         let text = render_text(&mut with_goal, 80, 8);
         assert!(
             text.contains("Goal: ship 0.9.4"),
@@ -797,7 +797,7 @@ mod tests {
         app.work_surface.placement = WorkSurfacePlacement::Top;
         app.work_surface.panel = super::RailPanel::Tasks;
         app.work_surface.top_height = 8;
-        app.hunt.quarry = Some("only a goal".to_string());
+        app.goal.objective = Some("only a goal".to_string());
         let budget = working_budget(&app, 40);
         let h = super::height(&mut app, 100, 40, budget);
         assert!(h >= 2, "goal alone must reserve title + divider, got {h}");
@@ -830,7 +830,7 @@ mod tests {
         full.work_surface.placement = WorkSurfacePlacement::Right;
         full.work_surface.panel = super::RailPanel::Pinned;
         full.work_surface.side_width = 30;
-        full.hunt.quarry = Some("ship it".to_string());
+        full.goal.objective = Some("ship it".to_string());
         let (chat, rail) = super::split_chat(&mut full, area, 0);
         let rail = rail.expect("contentful Pinned reserves a side rail");
         assert_eq!(rail.width, 30);
@@ -1885,7 +1885,7 @@ mod tests {
                 // Content so empty-collapse does not hide the panel. Agents
                 // needs a cached worker; Pinned needs a goal; Context always
                 // has session facts.
-                app.hunt.quarry = Some("ship the release".to_string());
+                app.goal.objective = Some("ship the release".to_string());
                 if panel == super::RailPanel::Agents {
                     app.subagent_cache.push(cached_worker(
                         "agent-a",

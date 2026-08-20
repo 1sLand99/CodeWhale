@@ -1072,6 +1072,7 @@ mod tests {
             lifecycle_seq: 1,
             hunt_verdict: None,
             error: None,
+            terminal_reason: None,
             thread_id: None,
             turn_id: None,
             owner_session_id: None,

@@ -178,24 +178,28 @@ impl crate::task_manager::TaskExecutor for MockExecutor {
     async fn execute(
         &self,
         _task: crate::task_manager::ExecutionTask,
-        events: mpsc::UnboundedSender<crate::task_manager::TaskExecutionEvent>,
+        events: mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> crate::task_manager::TaskExecutionResult {
-        let _ = events.send(crate::task_manager::TaskExecutionEvent::Status {
-            message: "started".to_string(),
-        });
+        let _ = events
+            .send(crate::task_manager::TaskExecutionEvent::Status {
+                message: "started".to_string(),
+            })
+            .await;
         sleep(Duration::from_millis(100)).await;
         if cancel.is_cancelled() {
             return crate::task_manager::TaskExecutionResult {
                 status: crate::task_manager::TaskStatus::Canceled,
                 result_text: None,
                 error: None,
+                terminal_reason: crate::task_manager::TaskTerminalReason::Canceled,
             };
         }
         crate::task_manager::TaskExecutionResult {
             status: crate::task_manager::TaskStatus::Completed,
             result_text: Some("ok".to_string()),
             error: None,
+            terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
         }
     }
 }
@@ -391,6 +395,7 @@ fn messages_from_thread_detail_batches_tool_results() {
             "item_answer".to_string(),
         ],
         steer_count: 0,
+        agent_mail_message_id: None,
     };
     let item = |id: &str,
                 kind: TurnItemKind,
@@ -645,6 +650,56 @@ fn runtime_auth_ignores_blank_configured_tokens() {
 }
 
 #[test]
+fn runtime_token_environment_prefers_the_codewhale_name() {
+    let environment = runtime_token_environment(&|name| match name {
+        RUNTIME_TOKEN_ENV => Some(" canonical-token ".to_string()),
+        LEGACY_RUNTIME_TOKEN_ENV => Some("legacy-token".to_string()),
+        _ => None,
+    });
+
+    assert_eq!(environment.token.as_deref(), Some("canonical-token"));
+    assert!(!environment.legacy_alias_used);
+    assert!(runtime_token_alias_warning(None, &environment).is_none());
+}
+
+#[test]
+fn runtime_token_environment_falls_through_a_blank_primary_to_the_legacy_alias() {
+    let environment = runtime_token_environment(&|name| match name {
+        RUNTIME_TOKEN_ENV => Some(" \t ".to_string()),
+        LEGACY_RUNTIME_TOKEN_ENV => Some(" legacy-token ".to_string()),
+        _ => None,
+    });
+
+    assert_eq!(environment.token.as_deref(), Some("legacy-token"));
+    assert!(environment.legacy_alias_used);
+}
+
+#[test]
+fn consumed_legacy_runtime_token_reports_one_value_free_deprecation_line() {
+    let secret = "legacy-super-secret-token";
+    let environment = runtime_token_environment(&|name| {
+        (name == LEGACY_RUNTIME_TOKEN_ENV).then(|| secret.to_string())
+    });
+    let warning = runtime_token_alias_warning(None, &environment).expect("legacy warning");
+
+    assert_eq!(warning.lines().count(), 1);
+    assert!(warning.contains(LEGACY_RUNTIME_TOKEN_ENV));
+    assert!(warning.contains(RUNTIME_TOKEN_ENV));
+    assert!(warning.contains("0.10.0"));
+    assert!(!warning.contains(secret));
+}
+
+#[test]
+fn explicit_cli_runtime_token_does_not_warn_about_an_unused_legacy_alias() {
+    let environment = runtime_token_environment(&|name| {
+        (name == LEGACY_RUNTIME_TOKEN_ENV).then(|| "legacy-token".to_string())
+    });
+
+    assert!(runtime_token_alias_warning(Some("cli-token"), &environment).is_none());
+    assert!(runtime_token_alias_warning(Some(" \t"), &environment).is_some());
+}
+
+#[test]
 fn url_query_component_percent_encodes_token() {
     assert_eq!(
         url_query_component("abc ABC+/?:=&%"),
@@ -819,6 +874,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             default_mode: "agent".to_string(),
             allow_shell: false,
             trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
         },
         Arc::new(MockExecutor),
     )
@@ -2008,6 +2064,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             child_route: None,
             launch_manifest: None,
         },
+        owner_session_id: "session-receipt".to_string(),
         actor_kind: "subagent".to_string(),
         parent_run_id: Some("parent_run".to_string()),
         follow_up: AgentRunFollowUpTarget {

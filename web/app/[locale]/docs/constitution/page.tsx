@@ -46,10 +46,10 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">
+        <h1 className="font-display text-3xl mb-1">
           {t.overviewTitle}{" "}
           <span className="font-cjk text-indigo text-2xl ml-2">{t.overviewTitleAside}</span>
-        </h2>
+        </h1>
         <p className={`${t.bodyClassName} mt-3`}>
           {splitTokens(t.overviewLead).map((part, i) =>
             "token" in part ? (

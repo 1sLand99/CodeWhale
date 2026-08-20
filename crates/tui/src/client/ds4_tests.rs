@@ -158,6 +158,71 @@ fn malformed_tool_arguments_remain_visible_for_feedback() -> Result<()> {
 }
 
 #[test]
+fn replay_placeholder_echo_is_dropped_from_ingest() {
+    // GLM-5.x mirrors the serializer's outgoing `(reasoning omitted)`
+    // placeholder back as a live reasoning delta. Ingesting it persisted a
+    // fake thinking block into the transcript and rendered it live. Only the
+    // exact transport echo is dropped; genuine reasoning passes through.
+    let mut content_index = 0;
+    let mut text_started = false;
+    let mut thinking_started = false;
+    let mut tool_indices = std::collections::HashMap::new();
+    let mut reasoning_detail_buffers = std::collections::HashMap::new();
+    let chunks = [
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "(reasoning omitted)"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "  (reasoning omitted) \n"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "the user wants a table"},
+                "finish_reason": null
+            }]
+        }),
+    ];
+    let events = chunks
+        .iter()
+        .flat_map(|chunk| {
+            parse_sse_chunk(
+                chunk,
+                &mut content_index,
+                &mut text_started,
+                &mut thinking_started,
+                &mut tool_indices,
+                &mut reasoning_detail_buffers,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let thinking_deltas = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ThinkingDelta { thinking },
+                ..
+            } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        thinking_deltas,
+        vec!["the user wants a table"],
+        "placeholder echoes must be dropped, real reasoning kept"
+    );
+}
+
+#[test]
 fn streaming_fixture_accepts_delayed_tool_arguments_and_usage_tail() {
     let mut content_index = 0;
     let mut text_started = false;

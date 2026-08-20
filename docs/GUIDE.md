@@ -79,10 +79,11 @@ Launch Codewhale from the repository or directory you want it to work in:
 codewhale
 ```
 
-On first launch, Codewhale starts with a short constitution-first setup path:
-choose language, review provider/model readiness, review runtime posture, then
-create or confirm your Codewhale constitution. The bundled/default
-constitution is valid, and you can revisit the setup hub later with `/setup`.
+On first launch, Codewhale opens with a recommended working agreement. Press
+Enter to accept the balanced, safety-conscious default and start working, or
+press `C` to customize the full constitution. This guidance never changes
+runtime permissions. Provider and API-key setup stays separate and can be
+completed later; revisit the setup hub with `/setup` at any time.
 
 DeepSeek is the default provider. If you want to configure its key before or
 after the first launch, the most direct setup path is:
@@ -315,6 +316,7 @@ Common commands for first-time users:
 | `/fleet` | Configure Fleet roles or open worker status |
 | `/goal` | Set a persistent objective the agent works toward across turns; bare `/goal` shows progress |
 | `/workflow` | Orchestrate the current work as a Workflow; `status`, `cancel`, `settings` answer without a model turn |
+| `/workflows` | Open the live Workflow run dashboard: every run this workspace's journal keeps, with phases, children, progress, and host-side cancel |
 | `/config` | Edit runtime and provider settings |
 | `/statusline` | Choose which footer status chips are visible |
 | `/compact` | Summarize long context to recover token budget |

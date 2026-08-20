@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 :: CodeWhale Windows installer
-:: Copies codewhale.exe and codew.exe to %USERPROFILE%\bin (single binary, no codewhale-tui.exe)
+:: Copies codewhale.exe, codew.exe, and codewhale.bat to %USERPROFILE%\bin (single binary, no codewhale-tui.exe)
 
 set "BIN_DIR=%USERPROFILE%\bin"
 set "SCRIPT_DIR=%~dp0"
@@ -22,6 +22,12 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+copy /Y "%SCRIPT_DIR%codewhale.bat" "%BIN_DIR%\codewhale.bat" >nul
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Failed to copy codewhale.bat
+    exit /b 1
+)
+
 echo.
 echo Done. Commands installed to %BIN_DIR%.
 echo.
@@ -36,3 +42,4 @@ echo Or run this in an admin PowerShell:
 echo   [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';%BIN_DIR%', 'User')
 echo.
 echo Then run: codewhale
+echo Double-click codewhale.bat (not codewhale.exe) to open Windows Terminal when it is installed.

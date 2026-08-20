@@ -888,6 +888,12 @@ pub enum AppAction {
     },
     /// Open the named, keyless DS4 local-runtime preset for review and save.
     OpenDs4Setup,
+    /// Open a beginner provider setup template by catalog id (#5350).
+    OpenTemplateSetup {
+        template_id: String,
+    },
+    /// Open the beginner provider template list.
+    OpenProviderTemplateList,
     /// Run the xAI/Grok device-code flow with the TUI temporarily suspended.
     StartXaiDeviceLogin,
     /// Open the `/mode` picker modal for Act / Plan / Operate.
@@ -913,6 +919,12 @@ pub enum AppAction {
     OpenThemePicker,
     /// Open the `/skills` manager — audit inventory + owned mutations.
     OpenSkillsManager,
+    /// Open the `/workflows` run dashboard — live and retained workflow runs.
+    OpenWorkflowsManager,
+    /// Open the unified, read-only extensions inventory on a specific tab.
+    OpenExtensions {
+        tab: crate::tui::views::extensions::ExtensionsTab,
+    },
     /// Open `/fleet` — the saved named-Fleet list (the primary Fleet surface).
     OpenFleetList,
     /// Open the `/fleet` roster — the saved-party view of the agent team.
@@ -957,6 +969,13 @@ pub enum AppAction {
     SetGoalStatus {
         status: crate::tools::goal::GoalStatus,
         clear: bool,
+    },
+    /// Set or replace the goal objective (`/goal <objective>`). The engine
+    /// owns the goal and starts the first goal turn itself as runtime
+    /// steering; the objective is never sent as a raw user message.
+    SetGoalObjective {
+        objective: String,
+        token_budget: Option<u32>,
     },
     ListSubAgents,
     /// Ask the engine to describe the exact next outbound request
@@ -1003,6 +1022,18 @@ pub enum AppAction {
         max_spawn_depth: u32,
         api_timeout_secs: u64,
         heartbeat_timeout_secs: u64,
+    },
+    /// Apply `/config search.provider` to the live Config and engine.
+    UpdateSearchProvider {
+        provider: crate::config::SearchProvider,
+    },
+    /// Apply `/config prompt_suggestion` to the live Config.
+    UpdatePromptSuggestion {
+        enabled: bool,
+    },
+    /// Apply one `/config notifications` scalar to the live Config.
+    UpdateNotification {
+        update: crate::config::NotificationConfigUpdate,
     },
     /// Enable or disable the background advisor watcher for this session (#3982).
     SetAdvisorEnabled {

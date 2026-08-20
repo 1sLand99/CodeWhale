@@ -173,19 +173,20 @@ pub(crate) fn guarded_environment_provides_state_paths() -> bool {
     if !current_thread_holds_test_env_lock() {
         return false;
     }
-    let guarded_override_present = [
+    let guarded_path_is_present = |var: &str| {
+        env_var_currently_guarded(var)
+            && std::env::var_os(var)
+                .is_some_and(|value| value.to_str().is_none_or(|text| !text.trim().is_empty()))
+    };
+    [
         "CODEWHALE_HOME",
         "CODEWHALE_CONFIG_PATH",
         "DEEPSEEK_CONFIG_PATH",
+        "HOME",
+        "USERPROFILE",
     ]
     .iter()
-    .any(|var| {
-        env_var_currently_guarded(var)
-            && std::env::var(var).is_ok_and(|value| !value.trim().is_empty())
-    });
-    guarded_override_present
-        || env_var_currently_guarded("HOME")
-        || env_var_currently_guarded("USERPROFILE")
+    .any(|var| guarded_path_is_present(var))
 }
 
 impl EnvVarGuard {
@@ -380,6 +381,40 @@ mod tests {
         assert!(
             !guarded_environment_provides_state_paths(),
             "removing an override must not expose the developer's HOME"
+        );
+    }
+
+    #[test]
+    fn removing_home_variables_does_not_seal_a_missing_path() {
+        let _lock = lock_test_env();
+        let _home = EnvVarGuard::remove("HOME");
+        let _userprofile = EnvVarGuard::remove("USERPROFILE");
+
+        assert!(
+            !guarded_environment_provides_state_paths(),
+            "removing HOME variables must keep state in the isolated test root"
+        );
+        assert_eq!(
+            crate::config_persistence::config_toml_path(None)
+                .expect("resolve isolated config path"),
+            unsealed_test_state_root().join(codewhale_config::CONFIG_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn lock_without_sealed_paths_does_not_use_developer_config() {
+        let _lock = lock_test_env();
+        let path = crate::config_persistence::config_toml_path(None)
+            .expect("resolve isolated config path");
+        let root = isolated_test_state_root();
+        assert!(
+            path.starts_with(root),
+            "holding lock_test_env without an EnvVarGuard must not read ~/.codewhale ({})",
+            path.display()
+        );
+        assert_eq!(
+            path,
+            unsealed_test_state_root().join(codewhale_config::CONFIG_FILE_NAME)
         );
     }
 

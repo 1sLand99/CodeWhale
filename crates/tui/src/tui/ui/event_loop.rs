@@ -6,6 +6,33 @@
 
 use super::*;
 
+pub(super) fn event_owner_is_active(
+    current_session_id: Option<&str>,
+    owner_session_id: &str,
+) -> bool {
+    !owner_session_id.is_empty() && current_session_id == Some(owner_session_id)
+}
+
+fn persist_current_session_goal(app: &App) -> Result<(), String> {
+    let session_id = app
+        .current_session_id
+        .as_deref()
+        .ok_or_else(|| "session id is not established".to_string())?;
+    let manager = SessionManager::default_location()
+        .map_err(|error| format!("could not open the session store: {error}"))?;
+    manager
+        .save_session_goal(session_id, app.last_known_goal_state.as_ref())
+        .map_err(|error| error.to_string())
+}
+
+fn surface_goal_persistence_failure(app: &mut App, error: &str) {
+    app.push_status_toast(
+        format!("Goal progress is not durable yet: {error}"),
+        StatusToastLevel::Warning,
+        None,
+    );
+}
+
 /// Apply Space only to the owner stored by the final render pass.
 pub(super) fn handle_transcript_space(app: &mut App) -> bool {
     let Some((owner, reasoning_target)) = app.viewport.transcript_cache.take_transcript_action()
@@ -306,15 +333,22 @@ pub async fn run_tui(
             };
 
         match load_result {
-            Ok(Some(saved)) => match apply_loaded_session(&mut app, config, &saved) {
-                Ok(()) => {
-                    app.status_message = Some(format!(
-                        "Resumed session: {}",
-                        crate::session_manager::truncate_id(&saved.metadata.id)
-                    ));
+            Ok(Some(saved)) => match manager.load_session_goal(&saved.metadata.id) {
+                Ok(goal) => {
+                    match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
+                        Ok(()) => {
+                            app.status_message = Some(format!(
+                                "Resumed session: {}",
+                                crate::session_manager::truncate_id(&saved.metadata.id)
+                            ));
+                        }
+                        Err(err) => {
+                            app.status_message = Some(format!("Failed to restore session: {err}"));
+                        }
+                    }
                 }
                 Err(err) => {
-                    app.status_message = Some(format!("Failed to restore session: {err}"));
+                    app.status_message = Some(format!("Failed to restore session goal: {err}"));
                 }
             },
             Ok(None) => {
@@ -1364,6 +1398,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::TurnStarted { turn_id, .. } => {
+                        app.goal_continuation_waiting = false;
                         app.session.last_tool_request_snapshot = None;
                         app.ocean_completion_started_at = None;
                         app.ocean_receipt_settle_start = None;
@@ -1434,7 +1469,7 @@ pub(crate) async fn run_event_loop(
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
                         app.suppress_stream_events_until_turn_complete = false;
                         app.active_allowed_tools = None;
-                        if app.paused_quarry.is_none() {
+                        if app.paused_goal_objective.is_none() {
                             app.pausable = false;
                             app.paused = false;
                         }
@@ -1974,7 +2009,27 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::GoalUpdated { snapshot } => {
                         if apply_goal_snapshot_to_app(app, &snapshot) {
                             transcript_batch_updated = true;
+                            if let Err(error) = persist_current_session_goal(app) {
+                                surface_goal_persistence_failure(app, &error);
+                            }
                         }
+                    }
+                    EngineEvent::GoalContinuationWaiting { delay_seconds } => {
+                        app.goal_continuation_waiting = true;
+                        let delay = crate::elapsed::format_elapsed_secs(delay_seconds);
+                        app.status_message = Some(
+                            app.tr(MessageId::GoalContinuationWaiting)
+                                .replace("{delay}", &delay),
+                        );
+                    }
+                    EngineEvent::GoalContinuationWaitEnded { interrupted } => {
+                        app.goal_continuation_waiting = false;
+                        let message_id = if interrupted {
+                            MessageId::GoalContinuationStopped
+                        } else {
+                            MessageId::GoalContinuationReady
+                        };
+                        app.status_message = Some(app.tr(message_id).to_string());
                     }
                     EngineEvent::SessionUpdated {
                         session_id,
@@ -1984,6 +2039,11 @@ pub(crate) async fn run_event_loop(
                         workspace,
                     } => {
                         app.current_session_id = Some(session_id.clone());
+                        if app.last_known_goal_state.is_some()
+                            && let Err(error) = persist_current_session_goal(app)
+                        {
+                            surface_goal_persistence_failure(app, &error);
+                        }
                         app.context_token_cache.borrow_mut().clear();
                         app.api_messages = messages;
                         app.system_prompt = system_prompt;
@@ -2139,13 +2199,18 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::AgentSpawned {
+                        owner_session_id,
                         id,
                         prompt,
                         parent_run_id,
                         spawn_depth,
                         model,
                         route_source: _,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let prompt_summary = bound_agent_activity_text(&prompt);
                         app.agent_progress
                             .insert(id.clone(), format!("starting: {prompt_summary}"));
@@ -2169,12 +2234,17 @@ pub(crate) async fn run_event_loop(
                         subagent_list_refresh_requested = true;
                     }
                     EngineEvent::AgentProgress {
+                        owner_session_id,
                         id,
                         status,
                         activity,
                         parent_run_id,
                         spawn_depth,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let display = bound_agent_activity_text(&friendly_subagent_progress(
                             app, &id, &status,
                         ));
@@ -2236,7 +2306,15 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::AgentComplete { id, result } => {
+                    EngineEvent::AgentComplete {
+                        owner_session_id,
+                        id,
+                        result,
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let subagent_elapsed = app
                             .agent_activity_started_at
                             .or(app.turn_started_at)
@@ -2315,15 +2393,37 @@ pub(crate) async fn run_event_loop(
                         }
                         subagent_list_refresh_requested = true;
                     }
-                    EngineEvent::SubAgentFollowUp { agent_id, outcome } => {
+                    EngineEvent::SubAgentFollowUp {
+                        owner_session_id,
+                        agent_id,
+                        outcome,
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         crate::tui::agent_focus::apply_follow_up_receipt(app, &agent_id, &outcome);
                     }
                     EngineEvent::AgentList {
+                        owner_session_id,
                         agents,
                         coordination,
                         queued_follow_ups,
-                    } => {
+                        roster,
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         app.agent_queued_follow_ups = queued_follow_ups;
+                        app.agent_roster = roster;
+                        if std::mem::take(&mut app.agent_roster_print_requested) {
+                            let content = crate::tui::agent_roster::render_agent_roster(
+                                &app.agent_roster,
+                                "main",
+                            );
+                            app.add_message(crate::tui::history::HistoryCell::System { content });
+                        }
                         let mut sorted = agents.clone();
                         sort_subagents_in_place(&mut sorted);
                         sorted.retain(|a| !a.from_prior_session);
@@ -2338,11 +2438,26 @@ pub(crate) async fn run_event_loop(
                         // Individual spawn/complete events already log to history;
                         // full list available via /agents command.
                     }
+                    EngineEvent::AgentSpawned { .. }
+                    | EngineEvent::AgentProgress { .. }
+                    | EngineEvent::AgentComplete { .. }
+                    | EngineEvent::SubAgentFollowUp { .. }
+                    | EngineEvent::AgentList { .. } => {
+                        // Process-local senders can outlive a session switch.
+                        // A foreign event must not mutate the active transcript,
+                        // sidebar, status, observer, or notification surface.
+                        received_engine_event = redraw_requested_before_event;
+                    }
                     EngineEvent::SubAgentMailbox {
+                        owner_session_id,
                         turn_id,
                         seq,
                         message,
-                    } => {
+                    } if event_owner_is_active(
+                        app.current_session_id.as_deref(),
+                        &owner_session_id,
+                    ) =>
+                    {
                         let should_refresh_subagents =
                             subagent_message_refreshes_workspace_context(&message);
                         let updated_transcript =
@@ -2371,9 +2486,19 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::WorkflowUi { run_id, event } => {
-                        // #4122: live typed workflow events → panel + history card.
-                        apply_workflow_ui_event(app, &run_id, &event);
+                    EngineEvent::SubAgentMailbox { .. } => {
+                        received_engine_event = redraw_requested_before_event;
+                    }
+                    EngineEvent::WorkflowUi {
+                        owner_session_id,
+                        run_id,
+                        event,
+                    } => {
+                        if !apply_owned_workflow_ui_event(app, &owner_session_id, &run_id, &event) {
+                            tracing::debug!("discarding workflow UI event for an inactive session");
+                            received_engine_event = redraw_requested_before_event;
+                            continue;
+                        }
                         // #4095 residual: budget_updated is high-frequency under
                         // multi-agent fan-out. Data is already applied; pace the
                         // repaint like AgentProgress so the panel does not churn.
@@ -3392,9 +3517,30 @@ pub(crate) async fn run_event_loop(
                     return Ok(());
                 }
                 if let Some(action) = app.pending_launch_action.take() {
+                    // Work and Chat choose only this new session's posture.
+                    // `set_mode` deliberately does not write startup defaults.
+                    if let Some(mode) = action.session_mode() {
+                        let _ = app.set_mode(mode);
+                    }
                     match action {
                         crate::tui::underwater::LaunchAction::None => {}
                         crate::tui::underwater::LaunchAction::NewSession => {
+                            let result = begin_launch_session(app, None);
+                            if apply_command_result(
+                                terminal,
+                                app,
+                                &mut engine_handle,
+                                &task_manager,
+                                config,
+                                &mut web_config_session,
+                                result,
+                            )
+                            .await?
+                            {
+                                return Ok(());
+                            }
+                        }
+                        crate::tui::underwater::LaunchAction::NewChat => {
                             let result = begin_launch_session(app, None);
                             if apply_command_result(
                                 terminal,
@@ -3625,7 +3771,8 @@ pub(crate) async fn run_event_loop(
                         app.ui_locale,
                         &app.workspace,
                         &app.cached_skills,
-                    );
+                    )
+                    .with_groups_expanded(app.help_expand_groups);
                     app.view_stack.push(help);
                 }
                 continue;
@@ -3887,10 +4034,30 @@ pub(crate) async fn run_event_loop(
                 }
 
                 let launch_locale = app.ui_locale;
-                match crate::tui::underwater::handle_launch_key(&mut app.launch, key, launch_locale)
-                {
+                let action =
+                    crate::tui::underwater::handle_launch_key(&mut app.launch, key, launch_locale);
+                if let Some(mode) = action.session_mode() {
+                    let _ = app.set_mode(mode);
+                }
+                match action {
                     crate::tui::underwater::LaunchAction::None => {}
                     crate::tui::underwater::LaunchAction::NewSession => {
+                        let result = begin_launch_session(app, None);
+                        if apply_command_result(
+                            terminal,
+                            app,
+                            &mut engine_handle,
+                            &task_manager,
+                            config,
+                            &mut web_config_session,
+                            result,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                    }
+                    crate::tui::underwater::LaunchAction::NewChat => {
                         let result = begin_launch_session(app, None);
                         if apply_command_result(
                             terminal,
@@ -4437,7 +4604,15 @@ pub(crate) async fn run_event_loop(
                             clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
+                            let was_waiting = app.goal_continuation_waiting;
                             engine_handle.cancel();
+                            if was_waiting {
+                                app.goal_continuation_waiting = false;
+                                app.status_message =
+                                    Some(app.tr(MessageId::GoalContinuationStopped).to_string());
+                                app.disarm_quit();
+                                continue;
+                            }
                             mark_active_turn_cancelled_locally(app);
                             current_streaming_text.clear();
                             stream_display_clock.reset();
@@ -4537,7 +4712,7 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
-                            if app.paused || app.paused_quarry.is_some() {
+                            if app.paused || app.paused_goal_objective.is_some() {
                                 clear_paused_command_state(app, &engine_handle);
                                 if app.is_loading
                                     || matches!(
@@ -4551,14 +4726,22 @@ pub(crate) async fn run_event_loop(
                                     stream_display_clock.reset();
                                 }
                                 app.active_allowed_tools = None;
-                                app.hunt.quarry = None;
-                                app.hunt.tokens_used = 0;
-                                app.hunt.time_used_seconds = 0;
-                                app.hunt.continuation_count = 0;
+                                app.goal.objective = None;
+                                app.goal.tokens_used = 0;
+                                app.goal.time_used_seconds = 0;
+                                app.goal.continuation_count = 0;
                                 app.status_message =
                                     Some(parent_stop_status(app, "Paused command cancelled"));
                             } else {
+                                let was_waiting = app.goal_continuation_waiting;
                                 engine_handle.cancel();
+                                if was_waiting {
+                                    app.goal_continuation_waiting = false;
+                                    app.status_message = Some(
+                                        app.tr(MessageId::GoalContinuationStopped).to_string(),
+                                    );
+                                    continue;
+                                }
                                 mark_active_turn_cancelled_locally(app);
                                 current_streaming_text.clear();
                                 stream_display_clock.reset();

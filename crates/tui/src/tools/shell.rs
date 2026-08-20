@@ -65,7 +65,8 @@ use crate::work_graph::{
 };
 use crate::worker_profile::ShellPolicy;
 use output::{
-    BoundedOutputAccumulator, BoundedOutputSnapshot, tail_from_buffer, tail_text,
+    BoundedOutputAccumulator, BoundedOutputSnapshot, RAW_STREAM_SETTLED_TAIL_BYTES,
+    RawOutputBuffer, SharedRawOutput, new_shared_raw_output, tail_from_buffer, tail_text,
     take_delta_from_buffer,
 };
 
@@ -219,6 +220,10 @@ pub struct ShellJobSnapshot {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    /// Immutable root session that launched the job. Empty legacy records are
+    /// intentionally hidden from session-scoped completion drains.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_session_id: String,
 }
 
 /// Once-only completion event for a tracked background shell job.
@@ -242,22 +247,28 @@ pub struct ShellCompletionEvent {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_session_id: String,
 }
 
-/// Exact byte evidence captured alongside a bounded completion event.
+/// Byte evidence captured alongside a bounded completion event. Exact unless
+/// the stream exceeded the in-memory retention ceiling, in which case the
+/// omission is declared per stream rather than presented as complete.
 #[derive(Debug, Clone)]
 pub(crate) struct ShellCompletionEvidence {
     pub event: ShellCompletionEvent,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    stdout_omitted: usize,
+    stderr_omitted: usize,
 }
 
 impl ShellCompletionEvidence {
     /// Encode each stream losslessly. UTF-8 remains readable; arbitrary bytes
     /// use base64 so `retrieve_tool_result` can still recover exact output.
     pub(crate) fn artifact_bytes(&self) -> Vec<u8> {
-        fn stream(bytes: &[u8]) -> serde_json::Value {
-            match std::str::from_utf8(bytes) {
+        fn stream(bytes: &[u8], omitted: usize) -> serde_json::Value {
+            let mut value = match std::str::from_utf8(bytes) {
                 Ok(content) => serde_json::json!({
                     "encoding": "utf-8",
                     "byte_length": bytes.len(),
@@ -268,7 +279,20 @@ impl ShellCompletionEvidence {
                     "byte_length": bytes.len(),
                     "content": base64::engine::general_purpose::STANDARD.encode(bytes),
                 }),
+            };
+            // Additive and only present when something was actually dropped, so
+            // the common case stays byte-identical to the v1 artifact readers
+            // already parse.
+            if omitted > 0
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("leading_bytes_omitted".into(), omitted.into());
+                object.insert(
+                    "total_byte_length".into(),
+                    bytes.len().saturating_add(omitted).into(),
+                );
             }
+            value
         }
 
         serde_json::json!({
@@ -278,8 +302,8 @@ impl ShellCompletionEvidence {
             "status": format!("{:?}", self.event.status),
             "exit_code": self.event.exit_code,
             "duration_ms": self.event.duration_ms,
-            "stdout": stream(&self.stdout),
-            "stderr": stream(&self.stderr),
+            "stdout": stream(&self.stdout, self.stdout_omitted),
+            "stderr": stream(&self.stderr, self.stderr_omitted),
         })
         .to_string()
         .into_bytes()
@@ -290,7 +314,18 @@ impl ShellCompletionEvidence {
 // artifact carries the exact bytes beyond these diagnostic tails.
 const SHELL_COMPLETION_TAIL_BYTES: usize = 1_024;
 
-fn bounded_completion_tail(buffer: &Arc<Mutex<Vec<u8>>>, max_bytes: usize) -> (usize, String) {
+/// How long a finished shell record stays listed in `/jobs`.
+const FINISHED_SHELL_MAX_AGE: Duration = Duration::from_secs(3600);
+/// Ceiling on finished records kept for the jobs panel. A long automation run
+/// makes hundreds of `Bash` calls per hour; the panel is only useful for the
+/// recent ones (#5472).
+const MAX_FINISHED_SHELL_RECORDS: usize = 128;
+/// Ceiling on bytes still held across all finished records. Each settled record
+/// releases down to a 64 KiB tail, so this only binds when many large outputs
+/// finish inside the same window.
+const MAX_FINISHED_SHELL_BYTES: usize = 8 * 1024 * 1024;
+
+fn bounded_completion_tail(buffer: &SharedRawOutput, max_bytes: usize) -> (usize, String) {
     let (total, candidate) = tail_from_buffer(buffer, max_bytes);
     if candidate.len() <= max_bytes {
         return (total, candidate);
@@ -732,7 +767,7 @@ impl StdinWriter {
 
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
-    buffer: Arc<Mutex<Vec<u8>>>,
+    buffer: SharedRawOutput,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -740,8 +775,18 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Ok(mut guard) = buffer.lock() {
-                        guard.extend_from_slice(&chunk[..n]);
+                    // `RawOutputBuffer::append` enforces the in-flight ceiling
+                    // here, at the only writer, so a chatty command cannot grow
+                    // the process without bound while it runs (#5472). It
+                    // returns false once the stream has been abandoned, which
+                    // is this thread's only exit when a descendant holds the
+                    // pipe open and EOF never arrives.
+                    let keep_reading = buffer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .append(&chunk[..n]);
+                    if !keep_reading {
+                        break;
                     }
                 }
                 Err(_) => break,
@@ -845,9 +890,25 @@ fn spawn_sync_reader_thread<R: Read + Send + 'static>(
 ) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
-        tx.send(buf).ok();
+        // Bounded, unlike the `read_to_end` this replaces (#5472 finding 2).
+        // `recv_sync_reader_output` gives up after 5 s, but the thread lives as
+        // long as the pipe does — an interactive command that keeps printing
+        // grew this Vec without limit, for a result nobody was still waiting
+        // for. The tail is what the caller renders, so keep the tail.
+        let mut buf = RawOutputBuffer::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if !buf.append(&chunk[..n]) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        tx.send(buf.retained().to_vec()).ok();
     });
     rx
 }
@@ -865,14 +926,19 @@ pub struct BackgroundShell {
     pub status: ShellStatus,
     pub exit_code: Option<i64>,
     pub started_at: Instant,
+    /// When the job reached a terminal status. A finished job reports the
+    /// duration it finished with; without this, `started_at.elapsed()` kept
+    /// growing and `/jobs` showed "2m 07s" for a 12-second command (#5478).
+    finished_at: Option<Instant>,
     last_output_at: Instant,
     last_observed_output_len: usize,
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
+    owner_session_id: String,
     ownership: ShellOwnership,
-    stdout_buffer: Arc<Mutex<Vec<u8>>>,
-    stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
+    stdout_buffer: SharedRawOutput,
+    stderr_buffer: Option<SharedRawOutput>,
     /// Lowercase `bash` streams one combined process pipe through a bounded
     /// small-contract-compatible accumulator while persisting the complete output.
     bounded_output: Option<Arc<Mutex<BoundedOutputAccumulator>>>,
@@ -956,6 +1022,7 @@ struct ShellSpawnIntentGuard {
 
 struct ShellSpawnContext {
     owner_agent: Option<ShellJobOwner>,
+    owner_session_id: String,
     work_lifecycle: Option<ShellWorkLifecycle>,
 }
 
@@ -988,10 +1055,30 @@ impl Drop for ShellSpawnIntentGuard {
 }
 
 impl BackgroundShell {
+    /// Wall time to report: elapsed while running, frozen once finished.
+    fn wall_duration(&self) -> Duration {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+    }
+
+    fn wall_millis(&self) -> u64 {
+        u64::try_from(self.wall_duration().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Stamp the finish instant the first time a terminal status is observed.
+    /// Idempotent: a later poll must not restate when the job ended.
+    fn mark_finished(&mut self) {
+        if self.finished_at.is_none() && self.status != ShellStatus::Running {
+            self.finished_at = Some(Instant::now());
+        }
+    }
+
     /// Check if the process has completed and update status
     fn poll(&mut self) -> bool {
         self.refresh_output_activity();
         if self.status != ShellStatus::Running {
+            self.mark_finished();
             self.publish_lifecycle_best_effort();
             return true;
         }
@@ -1028,6 +1115,7 @@ impl BackgroundShell {
         if completed && let Some(process_group_id) = pending_process_group {
             unregister_pending_persistent_process_group(process_group_id);
         }
+        self.mark_finished();
         self.publish_lifecycle_best_effort();
         completed
     }
@@ -1073,14 +1161,53 @@ impl BackgroundShell {
         let stdout_len = self
             .stdout_buffer
             .lock()
-            .map(|data| data.len())
+            .map(|data| data.total_len())
             .unwrap_or(0);
         let stderr_len = self
             .stderr_buffer
             .as_ref()
-            .and_then(|buffer| buffer.lock().ok().map(|data| data.len()))
+            .and_then(|buffer| buffer.lock().ok().map(|data| data.total_len()))
             .unwrap_or(0);
         stdout_len.saturating_add(stderr_len)
+    }
+
+    /// Drop everything but a bounded tail of both raw streams.
+    ///
+    /// Called only once a job is terminal **and** its bytes have already been
+    /// delivered — either returned as the foreground tool result, or written to
+    /// its durable completion artifact. Before that the full bytes are a
+    /// contract; after it they are pure residency for the up-to-1 h the
+    /// finished record stays listed, which is what took the owner's host to
+    /// 11 GB of swap (#5472 finding 1).
+    fn release_delivered_output(&mut self) {
+        if self.status == ShellStatus::Running {
+            return;
+        }
+        for buffer in [Some(&self.stdout_buffer), self.stderr_buffer.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .release_to_tail(RAW_STREAM_SETTLED_TAIL_BYTES);
+        }
+    }
+
+    /// Bytes still held in memory for this job, for the eviction accounting in
+    /// [`ShellManager::cleanup`] and for tests that assert the bound.
+    fn retained_output_bytes(&self) -> usize {
+        let stdout = self
+            .stdout_buffer
+            .lock()
+            .map(|data| data.retained().len())
+            .unwrap_or(0);
+        let stderr = self
+            .stderr_buffer
+            .as_ref()
+            .and_then(|buffer| buffer.lock().ok().map(|data| data.retained().len()))
+            .unwrap_or(0);
+        stdout.saturating_add(stderr)
     }
 
     /// Collect output from the background threads
@@ -1106,10 +1233,10 @@ impl BackgroundShell {
         #[cfg(windows)]
         terminate_and_close_windows_job(self.windows_job.take());
         if let Some(handle) = self.stdout_thread.take() {
-            finish_background_reader(handle, &self.status);
+            finish_background_reader(handle, &self.status, Some(&self.stdout_buffer));
         }
         if let Some(handle) = self.stderr_thread.take() {
-            finish_background_reader(handle, &self.status);
+            finish_background_reader(handle, &self.status, self.stderr_buffer.as_ref());
         }
         self.stdin = None;
         self.child = None;
@@ -1140,9 +1267,11 @@ impl BackgroundShell {
         if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
             return (snapshot.content, String::new(), snapshot.total_bytes, 0);
         }
-        let (stdout_bytes, stderr_bytes) = self.full_output_bytes();
-        let stdout_len = stdout_bytes.len();
-        let stderr_len = stderr_bytes.len();
+        let (stdout_bytes, stderr_bytes, stdout_omitted, stderr_omitted) =
+            self.retained_output_bytes_with_omissions();
+        // Report what the stream produced, not what is still held.
+        let stdout_len = stdout_bytes.len().saturating_add(stdout_omitted);
+        let stderr_len = stderr_bytes.len().saturating_add(stderr_omitted);
 
         (
             String::from_utf8_lossy(&stdout_bytes).to_string(),
@@ -1152,21 +1281,30 @@ impl BackgroundShell {
         )
     }
 
-    fn full_output_bytes(&self) -> (Vec<u8>, Vec<u8>) {
+    /// Retained bytes for both streams plus how many leading bytes the memory
+    /// bound discarded. Callers that publish these bytes as evidence must
+    /// declare the omission rather than presenting a clipped stream as exact.
+    fn retained_output_bytes_with_omissions(&self) -> (Vec<u8>, Vec<u8>, usize, usize) {
         if let Some(snapshot) = self.bounded_output_snapshot(false).ok().flatten() {
-            return (snapshot.content.into_bytes(), Vec::new());
+            let omitted = snapshot.total_bytes.saturating_sub(snapshot.retained_bytes);
+            return (snapshot.content.into_bytes(), Vec::new(), omitted, 0);
         }
-        let stdout_bytes = self
+        let (stdout_bytes, stdout_omitted) = self
             .stdout_buffer
             .lock()
-            .map(|data| data.clone())
+            .map(|data| (data.retained().to_vec(), data.dropped()))
             .unwrap_or_default();
-        let stderr_bytes = self
+        let (stderr_bytes, stderr_omitted) = self
             .stderr_buffer
             .as_ref()
-            .and_then(|buffer| buffer.lock().ok().map(|data| data.clone()))
+            .and_then(|buffer| {
+                buffer
+                    .lock()
+                    .ok()
+                    .map(|data| (data.retained().to_vec(), data.dropped()))
+            })
             .unwrap_or_default();
-        (stdout_bytes, stderr_bytes)
+        (stdout_bytes, stderr_bytes, stdout_omitted, stderr_omitted)
     }
 
     fn take_delta(&mut self) -> (String, String, usize, usize, usize, usize) {
@@ -1266,6 +1404,7 @@ impl BackgroundShell {
             }
         }
         self.status = ShellStatus::Killed;
+        self.mark_finished();
         self.heavy_permit.take();
         self.collect_output();
         self.publish_lifecycle_best_effort();
@@ -1283,8 +1422,7 @@ impl BackgroundShell {
                 exit_code: self.exit_code,
                 stdout: snapshot.content,
                 stderr: String::new(),
-                duration_ms: u64::try_from(self.started_at.elapsed().as_millis())
-                    .unwrap_or(u64::MAX),
+                duration_ms: self.wall_millis(),
                 stdout_len: snapshot.total_bytes,
                 stderr_len: 0,
                 stdout_omitted: snapshot.total_bytes.saturating_sub(snapshot.retained_bytes),
@@ -1296,22 +1434,27 @@ impl BackgroundShell {
                 sandbox_denied: false,
             });
         }
-        let (stdout_full, stderr_full, _, _) = self.full_output();
+        let (stdout_full, stderr_full, stdout_total, stderr_total) = self.full_output();
         let (stdout, stdout_meta) = truncate_with_meta(&stdout_full);
         let (stderr, stderr_meta) = truncate_with_meta(&stderr_full);
+        // `truncate_with_meta` can only see the bytes still held. Fold in what
+        // the in-memory bound dropped so a >16 MiB stream reports its real
+        // length and its real omission instead of silently shrinking (#5472).
+        let stdout_dropped = stdout_total.saturating_sub(stdout_meta.original_len);
+        let stderr_dropped = stderr_total.saturating_sub(stderr_meta.original_len);
         Ok(ShellResult {
             task_id: Some(self.id.clone()),
             status: self.status.clone(),
             exit_code: self.exit_code,
             stdout,
             stderr,
-            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            stdout_len: stdout_meta.original_len,
-            stderr_len: stderr_meta.original_len,
-            stdout_omitted: stdout_meta.omitted,
-            stderr_omitted: stderr_meta.omitted,
-            stdout_truncated: stdout_meta.truncated,
-            stderr_truncated: stderr_meta.truncated,
+            duration_ms: self.wall_millis(),
+            stdout_len: stdout_total,
+            stderr_len: stderr_total,
+            stdout_omitted: stdout_meta.omitted.saturating_add(stdout_dropped),
+            stderr_omitted: stderr_meta.omitted.saturating_add(stderr_dropped),
+            stdout_truncated: stdout_meta.truncated || stdout_dropped > 0,
+            stderr_truncated: stderr_meta.truncated || stderr_dropped > 0,
             sandboxed,
             sandbox_type: if sandboxed {
                 Some(self.sandbox_type.to_string())
@@ -1364,7 +1507,7 @@ impl BackgroundShell {
             cwd: self.working_dir.clone(),
             status: self.status.clone(),
             exit_code: self.exit_code,
-            elapsed_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms: self.wall_millis(),
             stdout_tail,
             stderr_tail,
             stdout_len,
@@ -1381,6 +1524,7 @@ impl BackgroundShell {
                 .owner_agent
                 .as_ref()
                 .map(|owner| owner.agent_name.clone()),
+            owner_session_id: self.owner_session_id.clone(),
         }
     }
 
@@ -1414,16 +1558,20 @@ impl BackgroundShell {
             linked_task_id: snapshot.linked_task_id,
             owner_agent_id: snapshot.owner_agent_id,
             owner_agent_name: snapshot.owner_agent_name,
+            owner_session_id: snapshot.owner_session_id,
         }
     }
 
     fn completion_evidence(&self) -> ShellCompletionEvidence {
         let event = self.completion_event();
-        let (stdout, stderr) = self.full_output_bytes();
+        let (stdout, stderr, stdout_omitted, stderr_omitted) =
+            self.retained_output_bytes_with_omissions();
         ShellCompletionEvidence {
             event,
             stdout,
             stderr,
+            stdout_omitted,
+            stderr_omitted,
         }
     }
 
@@ -1437,7 +1585,11 @@ impl BackgroundShell {
     }
 }
 
-fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellStatus) {
+fn finish_background_reader(
+    handle: std::thread::JoinHandle<()>,
+    status: &ShellStatus,
+    buffer: Option<&SharedRawOutput>,
+) {
     // A killed Windows process can leave a pipe reader blocked even after its
     // Job Object has been closed. Cancellation must return promptly instead of
     // waiting for that reader to observe EOF. Other terminal states still join
@@ -1464,7 +1616,21 @@ fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellS
         let _ = handle.join();
         let _ = done_tx.send(());
     });
-    let _ = done_rx.recv_timeout(READER_JOIN_GRACE);
+    if done_rx.recv_timeout(READER_JOIN_GRACE).is_ok() {
+        return;
+    }
+    // The reader is still blocked in `read()` on a pipe a descendant refuses to
+    // close. Previously both it and the helper thread above stayed alive for the
+    // life of the process, the reader still appending into a buffer nobody would
+    // ever read (#5472 finding 2). Abandoning the stream releases what it holds
+    // and gives the reader an exit on its next wakeup, which also lets the
+    // helper's `join` return.
+    if let Some(buffer) = buffer {
+        buffer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .abandon();
+    }
 }
 
 impl Drop for BackgroundShell {
@@ -1541,6 +1707,20 @@ impl std::fmt::Debug for ShellManager {
 }
 
 impl ShellManager {
+    fn require_session_owner(&self, task_id: &str, active_session_id: &str) -> Result<()> {
+        let owned = self.processes.get(task_id).is_some_and(|shell| {
+            !active_session_id.is_empty() && shell.owner_session_id == active_session_id
+        }) || self.stale_jobs.get(task_id).is_some_and(|job| {
+            !active_session_id.is_empty() && job.owner_session_id == active_session_id
+        });
+        if owned {
+            Ok(())
+        } else {
+            // Do not disclose whether the id exists in another session.
+            Err(anyhow!("Task {task_id} not found"))
+        }
+    }
+
     /// Create a new `ShellManager` with default (no sandbox) policy.
     pub fn new(workspace: PathBuf) -> Self {
         Self {
@@ -1561,6 +1741,51 @@ impl ShellManager {
     #[cfg(all(test, unix))]
     pub(crate) fn set_output_spill_dir_for_test(&mut self, dir: Option<PathBuf>) {
         self.output_spill_dir = dir;
+    }
+
+    /// Insert a finished job without spawning. Count-bound tests would
+    /// otherwise pay for 100+ live shells.
+    #[cfg(test)]
+    pub(crate) fn seed_finished_record_for_test(&mut self, id: impl Into<String>, age: Duration) {
+        let now = Instant::now();
+        let started_at = now.checked_sub(age).unwrap_or(now);
+        let id = id.into();
+        self.processes.insert(
+            id.clone(),
+            BackgroundShell {
+                id,
+                command: String::new(),
+                working_dir: self.default_workspace.clone(),
+                status: ShellStatus::Completed,
+                exit_code: Some(0),
+                started_at,
+                finished_at: Some(now),
+                last_output_at: now,
+                last_observed_output_len: 0,
+                sandbox_type: SandboxType::None,
+                linked_task_id: None,
+                owner_agent: None,
+                owner_session_id: String::new(),
+                ownership: ShellOwnership::Managed,
+                stdout_buffer: new_shared_raw_output(),
+                stderr_buffer: Some(new_shared_raw_output()),
+                bounded_output: None,
+                heavy_permit: None,
+                stdout_cursor: 0,
+                stderr_cursor: 0,
+                completion_reported: false,
+                stdin: None,
+                child: None,
+                #[cfg(windows)]
+                windows_job: None,
+                stdout_thread: None,
+                stderr_thread: None,
+                work_lifecycle: None,
+                lifecycle_seq: 0,
+                last_lifecycle_status: None,
+                last_lifecycle_bytes: 0,
+            },
+        );
     }
 
     /// Test-only observation of the workspace selected by runtime rebuilds.
@@ -1614,6 +1839,7 @@ impl ShellManager {
     /// that is merged into the spawned process environment. Used by the
     /// `shell_env` hook injection path (#456).
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn execute_with_options_env(
         &mut self,
         command: &str,
@@ -1638,9 +1864,42 @@ impl ShellManager {
         )
     }
 
+    /// Launch a parent-owned job stamped to the immutable root session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_options_env_for_session(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_session_id: &str,
+    ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner_and_work(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            None,
+            owner_session_id.to_string(),
+            None,
+            None,
+            false,
+            (1_000, 600_000),
+        )
+    }
+
     /// Same as `execute_with_options_env`, with optional background-job owner
     /// attribution for sub-agent launched jobs.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn execute_with_options_env_for_owner(
         &mut self,
         command: &str,
@@ -1663,6 +1922,41 @@ impl ShellManager {
             policy_override,
             extra_env,
             owner_agent,
+            String::new(),
+            None,
+            None,
+            false,
+            (1_000, 600_000),
+        )
+    }
+
+    /// Test-only owner-aware launch with an explicit immutable session owner.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
+    pub fn execute_with_options_env_for_owner_and_session(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_agent: Option<ShellJobOwner>,
+        owner_session_id: &str,
+    ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner_and_work(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            owner_agent,
+            owner_session_id.to_string(),
             None,
             None,
             false,
@@ -1683,6 +1977,7 @@ impl ShellManager {
         policy_override: Option<ExecutionSandboxPolicy>,
         extra_env: HashMap<String, String>,
         owner_agent: Option<ShellJobOwner>,
+        owner_session_id: String,
         work_lifecycle: Option<ShellWorkLifecycle>,
         readonly_workspace: Option<&std::path::Path>,
         persist_pending: bool,
@@ -1738,6 +2033,7 @@ impl ShellManager {
                 tty,
                 ShellSpawnContext {
                     owner_agent,
+                    owner_session_id,
                     work_lifecycle,
                 },
                 persist_pending,
@@ -2082,6 +2378,7 @@ impl ShellManager {
     ) -> Result<ShellResult> {
         let ShellSpawnContext {
             owner_agent,
+            owner_session_id,
             work_lifecycle,
         } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
@@ -2102,11 +2399,11 @@ impl ShellManager {
             ));
         }
 
-        let stdout_buffer = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buffer = new_shared_raw_output();
         let stderr_buffer = if tty || persist_pending || small_contract_mode {
             None
         } else {
-            Some(Arc::new(Mutex::new(Vec::new())))
+            Some(new_shared_raw_output())
         };
         // The spill file is best-effort: a full disk or exhausted descriptor
         // table must not make `echo ok` unrunnable (that is exactly how the
@@ -2273,11 +2570,13 @@ impl ShellManager {
             status: ShellStatus::Running,
             exit_code: None,
             started_at: started,
+            finished_at: None,
             last_output_at: started,
             last_observed_output_len: 0,
             sandbox_type,
             linked_task_id: None,
             owner_agent,
+            owner_session_id,
             ownership: if persist_pending {
                 ShellOwnership::PersistPending
             } else {
@@ -2326,6 +2625,10 @@ impl ShellManager {
 
         self.processes.insert(task_id.clone(), bg_shell);
         spawn_guard.disarm();
+        // Evict here, not only from `list_jobs()`: retention must not depend on
+        // the user opening the jobs panel, and every spawn is exactly the moment
+        // the previous calls' records became one call staler (#5472).
+        self.cleanup(FINISHED_SHELL_MAX_AGE);
 
         Ok(ShellResult {
             task_id: Some(task_id),
@@ -2385,6 +2688,22 @@ impl ShellManager {
         shell.snapshot()
     }
 
+    /// Poll a job and return only its status.
+    ///
+    /// The foreground wait loop ticks every 100 ms and discards the snapshot
+    /// unless the job is terminal, but `get_output` → `snapshot` clones both
+    /// raw buffers to build it. On a command printing 50 MB that was ~1.5 GB of
+    /// allocate-and-drop churn per wait, all of it thrown away (#5472 finding 1,
+    /// the transient term). Status is what the loop actually needs.
+    fn poll_status(&mut self, task_id: &str) -> Result<ShellStatus> {
+        let shell = self
+            .processes
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
+        shell.poll();
+        Ok(shell.status.clone())
+    }
+
     /// Write data to stdin of a background process.
     pub fn write_stdin(&mut self, task_id: &str, input: &str, close: bool) -> Result<()> {
         let shell = self
@@ -2393,6 +2712,17 @@ impl ShellManager {
             .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
         shell.write_stdin(input, close)?;
         Ok(())
+    }
+
+    pub fn write_stdin_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        input: &str,
+        close: bool,
+    ) -> Result<()> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.write_stdin(task_id, input, close)
     }
 
     /// Get incremental output from a background process, consuming any new output.
@@ -2484,7 +2814,17 @@ impl ShellManager {
         shell.snapshot()
     }
 
+    pub fn kill_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+    ) -> Result<ShellResult> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.kill(task_id)
+    }
+
     /// Kill every currently running background shell process.
+    #[cfg(test)]
     pub fn kill_running(&mut self) -> Result<Vec<ShellResult>> {
         let ids = self
             .processes
@@ -2493,6 +2833,27 @@ impl ShellManager {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
 
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.kill(&id)?);
+        }
+        Ok(results)
+    }
+
+    pub fn kill_running_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> Result<Vec<ShellResult>> {
+        let ids = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| {
+                shell.status == ShellStatus::Running
+                    && !active_session_id.is_empty()
+                    && shell.owner_session_id == active_session_id
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
             results.push(self.kill(&id)?);
@@ -2581,12 +2942,35 @@ impl ShellManager {
     }
 
     /// Poll a background process and return incremental output.
+    #[cfg(test)]
     pub fn poll_delta(
         &mut self,
         task_id: &str,
         wait: bool,
         timeout_ms: u64,
     ) -> Result<ShellDeltaResult> {
+        self.get_output_delta(task_id, wait, timeout_ms)
+    }
+
+    pub fn poll_delta_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        wait: bool,
+        timeout_ms: u64,
+    ) -> Result<ShellDeltaResult> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.get_output_delta(task_id, wait, timeout_ms)
+    }
+
+    fn get_output_delta_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+        wait: bool,
+        timeout_ms: u64,
+    ) -> Result<ShellDeltaResult> {
+        self.require_session_owner(task_id, active_session_id)?;
         self.get_output_delta(task_id, wait, timeout_ms)
     }
 
@@ -2616,13 +3000,22 @@ impl ShellManager {
         Err(anyhow!("Task {task_id} not found"))
     }
 
+    pub fn inspect_job_for_session(
+        &mut self,
+        active_session_id: &str,
+        task_id: &str,
+    ) -> Result<ShellJobDetail> {
+        self.require_session_owner(task_id, active_session_id)?;
+        self.inspect_job(task_id)
+    }
+
     /// List all live and known-stale background shell jobs for the TUI.
     pub fn list_jobs(&mut self) -> Vec<ShellJobSnapshot> {
         for shell in self.processes.values_mut() {
             shell.poll();
         }
         // Evict completed processes older than 1 hour to bound memory growth.
-        self.cleanup(Duration::from_secs(3600));
+        self.cleanup(FINISHED_SHELL_MAX_AGE);
 
         let mut jobs = self
             .processes
@@ -2638,11 +3031,22 @@ impl ShellManager {
         jobs
     }
 
+    pub fn list_jobs_for_session(&mut self, active_session_id: &str) -> Vec<ShellJobSnapshot> {
+        if active_session_id.is_empty() {
+            return Vec::new();
+        }
+        self.list_jobs()
+            .into_iter()
+            .filter(|job| job.owner_session_id == active_session_id)
+            .collect()
+    }
+
     /// Whether a finished parent-owned job's completion is waiting to be
     /// claimed. Unlike
     /// [`Self::may_have_undelivered_completion`] this polls, so it reports
     /// readiness the moment the process exits; the engine's idle shell wake
     /// uses it to fire exactly when evidence exists.
+    #[cfg(test)]
     pub(crate) fn has_finished_unreported_jobs(&mut self) -> bool {
         self.processes.values_mut().any(|shell| {
             shell.poll();
@@ -2652,16 +3056,52 @@ impl ShellManager {
         })
     }
 
+    pub(crate) fn has_finished_unreported_jobs_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> bool {
+        !active_session_id.is_empty()
+            && self.processes.values_mut().any(|shell| {
+                shell.poll();
+                shell.owner_session_id == active_session_id
+                    && shell.owner_agent.is_none()
+                    && shell.status != ShellStatus::Running
+                    && !shell.completion_reported
+            })
+    }
+
     /// Drain once-only completion events together with lossless stream bytes.
     /// The engine publishes the bytes outside this manager's mutex and puts
     /// only the bounded event plus resulting handle into model context.
+    #[cfg(test)]
     pub(crate) fn drain_finished_jobs_with_evidence(&mut self) -> Vec<ShellCompletionEvidence> {
+        self.drain_finished_jobs_with_evidence_inner(None)
+    }
+
+    pub(crate) fn drain_finished_jobs_with_evidence_for_session(
+        &mut self,
+        active_session_id: &str,
+    ) -> Vec<ShellCompletionEvidence> {
+        self.drain_finished_jobs_with_evidence_inner(Some(active_session_id))
+    }
+
+    fn drain_finished_jobs_with_evidence_inner(
+        &mut self,
+        active_session_id: Option<&str>,
+    ) -> Vec<ShellCompletionEvidence> {
         let mut completions = Vec::new();
         for shell in self.processes.values_mut() {
             shell.poll();
-            if shell.status != ShellStatus::Running && !shell.completion_reported {
+            let owned = active_session_id.is_none_or(|session_id| {
+                !session_id.is_empty() && shell.owner_session_id == session_id
+            });
+            if owned && shell.status != ShellStatus::Running && !shell.completion_reported {
                 shell.completion_reported = true;
                 completions.push(shell.completion_evidence());
+                // The bytes are now in the caller's hands (they become a durable
+                // session artifact). Holding a second copy here for the rest of
+                // the retention hour is what #5472 measured.
+                shell.release_delivered_output();
             }
         }
         completions.sort_by(|a, b| a.event.task_id.cmp(&b.event.task_id));
@@ -2673,6 +3113,12 @@ impl ShellManager {
     fn acknowledge_foreground_completion(&mut self, task_id: &str) {
         if let Some(shell) = self.processes.get_mut(task_id) {
             shell.completion_reported = true;
+            // The caller already holds this job's `ShellResult`; the record only
+            // stays listed so `/jobs` can show it. A 1,200-char tail is all any
+            // remaining consumer reads, so the rest is released now instead of
+            // at the 1 h `cleanup` (#5472 finding 1 — the dominant term: every
+            // uppercase `Bash` call, foreground included, went through here).
+            shell.release_delivered_output();
         }
     }
 
@@ -2683,29 +3129,51 @@ impl ShellManager {
     /// `completion_reported`: preview is read-only. A running job counts as
     /// pending because it can finish before production drains completions; in
     /// that race an exact request body cannot be proved without mutation.
+    #[cfg(test)]
     pub fn may_have_undelivered_completion(&self) -> bool {
         self.processes
             .values()
             .any(|shell| shell.owner_agent.is_none() && !shell.completion_reported)
     }
 
+    pub fn may_have_undelivered_completion_for_session(&self, active_session_id: &str) -> bool {
+        !active_session_id.is_empty()
+            && self.processes.values().any(|shell| {
+                shell.owner_session_id == active_session_id
+                    && shell.owner_agent.is_none()
+                    && !shell.completion_reported
+            })
+    }
+
     /// Return agent owners whose tracked shell work is still running. The
     /// engine uses this to keep a worker's heartbeat alive while its only
     /// pending work is an explicitly tracked background shell task.
+    #[cfg(test)]
     pub fn running_owner_agent_ids(&mut self) -> Vec<String> {
+        self.running_owner_agent_ids_inner(None)
+    }
+
+    pub fn running_owner_agent_ids_for_session(&mut self, active_session_id: &str) -> Vec<String> {
+        self.running_owner_agent_ids_inner(Some(active_session_id))
+    }
+
+    fn running_owner_agent_ids_inner(&mut self, active_session_id: Option<&str>) -> Vec<String> {
         let mut owners = self
             .processes
             .values_mut()
             .filter_map(|shell| {
                 shell.poll();
-                (shell.status == ShellStatus::Running)
-                    .then(|| {
-                        shell
-                            .owner_agent
-                            .as_ref()
-                            .map(|owner| owner.agent_id.clone())
-                    })
-                    .flatten()
+                (shell.status == ShellStatus::Running
+                    && active_session_id.is_none_or(|session_id| {
+                        !session_id.is_empty() && shell.owner_session_id == session_id
+                    }))
+                .then(|| {
+                    shell
+                        .owner_agent
+                        .as_ref()
+                        .map(|owner| owner.agent_id.clone())
+                })
+                .flatten()
             })
             .collect::<Vec<_>>();
         owners.sort();
@@ -2743,13 +3211,18 @@ impl ShellManager {
                 linked_task_id,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                owner_session_id: String::new(),
             },
         );
     }
 
-    /// Clean up completed processes older than the given duration
+    /// Clean up completed processes older than the given duration, then enforce
+    /// the count and byte ceilings on what is left.
+    ///
+    /// Age alone is not a bound: it only fired from `list_jobs()`, so a session
+    /// that never opened the jobs panel evicted nothing, and 500 finished
+    /// records inside one hour were all retained regardless of size (#5472).
     pub fn cleanup(&mut self, max_age: Duration) {
-        let _now = Instant::now();
         self.processes.retain(|_, shell| {
             if shell.status == ShellStatus::Running {
                 true
@@ -2757,6 +3230,63 @@ impl ShellManager {
                 shell.started_at.elapsed() < max_age
             }
         });
+        self.enforce_finished_job_bounds();
+    }
+
+    /// Bytes still held across every tracked job. The retention bound in #5472
+    /// is stated in these terms, so the tests assert on them directly.
+    #[cfg(all(test, unix))]
+    pub(crate) fn retained_output_bytes_total(&self) -> usize {
+        self.processes
+            .values()
+            .map(BackgroundShell::retained_output_bytes)
+            .fold(0, usize::saturating_add)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_job_count(&self) -> usize {
+        self.processes.len()
+    }
+
+    /// Drop the oldest finished records once they exceed either ceiling.
+    /// Running jobs are never evicted — killing the handle would orphan a live
+    /// process — and a job whose completion has not been delivered yet is
+    /// evicted last, since dropping it loses the only copy of its result.
+    fn enforce_finished_job_bounds(&mut self) {
+        let mut finished = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| shell.status != ShellStatus::Running)
+            .map(|(id, shell)| {
+                (
+                    id.clone(),
+                    shell.completion_reported,
+                    shell.started_at,
+                    shell.retained_output_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let total_bytes: usize = finished
+            .iter()
+            .map(|(_, _, _, bytes)| *bytes)
+            .fold(0, usize::saturating_add);
+        if finished.len() <= MAX_FINISHED_SHELL_RECORDS && total_bytes <= MAX_FINISHED_SHELL_BYTES {
+            return;
+        }
+        // Undelivered completions last, then oldest first.
+        finished.sort_by(|a, b| a.1.cmp(&b.1).reverse().then_with(|| a.2.cmp(&b.2)));
+        let mut remaining_count = finished.len();
+        let mut remaining_bytes = total_bytes;
+        for (id, _, _, bytes) in finished {
+            if remaining_count <= MAX_FINISHED_SHELL_RECORDS
+                && remaining_bytes <= MAX_FINISHED_SHELL_BYTES
+            {
+                break;
+            }
+            self.processes.remove(&id);
+            remaining_count -= 1;
+            remaining_bytes = remaining_bytes.saturating_sub(bytes);
+        }
     }
 }
 
@@ -3503,6 +4033,7 @@ async fn execute_foreground_via_background(
             policy_override,
             extra_env,
             owner,
+            context.state_namespace.clone(),
             lifecycle,
             direct_argv.then_some(context.workspace.as_path()),
             false,
@@ -3546,7 +4077,11 @@ async fn execute_foreground_via_background(
             return result;
         }
 
-        let snapshot = {
+        // Poll status only. The snapshot — and the buffer clones behind it — is
+        // built once, when there is actually a result to return (#5472). Both
+        // happen under one lock acquisition so the record cannot be evicted
+        // between observing that it finished and reading its result.
+        let finished = {
             let mut manager = context
                 .shell_manager
                 .lock()
@@ -3554,14 +4089,18 @@ async fn execute_foreground_via_background(
             if manager.take_foreground_background_request() {
                 return manager.get_output(&task_id, false, 0);
             }
-            let snapshot = manager.get_output(&task_id, false, 0)?;
-            if snapshot.status != ShellStatus::Running {
+            if manager.poll_status(&task_id)? == ShellStatus::Running {
+                None
+            } else {
+                let snapshot = manager.get_output(&task_id, false, 0)?;
+                // Ordering matters: the snapshot is taken before the
+                // acknowledgement releases the retained bytes.
                 manager.acknowledge_foreground_completion(&task_id);
+                Some(snapshot)
             }
-            snapshot
         };
 
-        if snapshot.status != ShellStatus::Running {
+        if let Some(snapshot) = finished {
             return Ok(snapshot);
         }
 
@@ -3682,7 +4221,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        BashTool::pi_delegate().capabilities()
+        BashTool::contract_delegate().capabilities()
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
@@ -3691,12 +4230,12 @@ impl ToolSpec for LowercaseBashTool {
 
     fn approval_requirement_for(&self, input: &serde_json::Value) -> ApprovalRequirement {
         let translated = contract_bash_legacy_input(input).unwrap_or_else(|_| input.clone());
-        BashTool::pi_delegate().approval_requirement_for(&translated)
+        BashTool::contract_delegate().approval_requirement_for(&translated)
     }
 
     fn is_read_only_for(&self, input: &serde_json::Value) -> bool {
         contract_bash_legacy_input(input)
-            .is_ok_and(|translated| BashTool::pi_delegate().is_read_only_for(&translated))
+            .is_ok_and(|translated| BashTool::contract_delegate().is_read_only_for(&translated))
     }
 
     fn supports_parallel_for(&self, input: &serde_json::Value) -> bool {
@@ -3709,7 +4248,9 @@ impl ToolSpec for LowercaseBashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let translated = contract_bash_legacy_input(&input)?;
-        BashTool::pi_delegate().execute(translated, context).await
+        BashTool::contract_delegate()
+            .execute(translated, context)
+            .await
     }
 }
 
@@ -3767,7 +4308,7 @@ pub struct BashTool {
     name: &'static str,
     forced_action: Option<&'static str>,
     read_only: bool,
-    pi_timeout: bool,
+    optional_timeout: bool,
 }
 
 pub(crate) fn readonly_bash_input_schema() -> serde_json::Value {
@@ -3790,7 +4331,7 @@ impl BashTool {
             name,
             forced_action: None,
             read_only: false,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
@@ -3799,7 +4340,7 @@ impl BashTool {
             name,
             forced_action: None,
             read_only: true,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
@@ -3808,16 +4349,16 @@ impl BashTool {
             name,
             forced_action: Some(action),
             read_only: false,
-            pi_timeout: false,
+            optional_timeout: false,
         }
     }
 
-    const fn pi_delegate() -> Self {
+    const fn contract_delegate() -> Self {
         Self {
             name: "bash",
             forced_action: Some("run"),
             read_only: false,
-            pi_timeout: true,
+            optional_timeout: true,
         }
     }
 }
@@ -4031,7 +4572,7 @@ impl ToolSpec for BashTool {
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }
         enforce_readonly_github_network_policy(command, context)?;
-        let timeout_ms = if self.pi_timeout {
+        let timeout_ms = if self.optional_timeout {
             input
                 .get("timeout_ms")
                 .map(|value| {
@@ -4273,7 +4814,7 @@ impl ToolSpec for BashTool {
 
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
-            if self.pi_timeout {
+            if self.optional_timeout {
                 return Err(ToolError::not_available(
                     "bash is unavailable with this external sandbox backend because it cannot preserve combined streaming output and timeout semantics. Use the native sandbox or search for the backend-specific shell tool.",
                 ));
@@ -4445,6 +4986,7 @@ impl ToolSpec for BashTool {
                 policy_override,
                 extra_env,
                 shell_job_owner_from_context(context),
+                context.state_namespace.clone(),
                 shell_work_lifecycle_from_context(context),
                 None,
                 persist,
@@ -4470,7 +5012,7 @@ impl ToolSpec for BashTool {
                 policy_override,
                 extra_env,
                 matches!(context.shell_policy, ShellPolicy::ReadOnly),
-                if self.pi_timeout {
+                if self.optional_timeout {
                     (1, BASH_MAX_TIMEOUT_MS)
                 } else {
                     (1_000, 600_000)
@@ -4497,7 +5039,7 @@ impl ToolSpec for BashTool {
                     .cancel_token
                     .as_ref()
                     .is_some_and(|token| token.is_cancelled());
-                if self.pi_timeout {
+                if self.optional_timeout {
                     return finish_contract_bash_result(result, timeout_ms, context);
                 }
                 let task_id_str = result.task_id.clone().unwrap_or_default();
@@ -4728,7 +5270,7 @@ impl BashTool {
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             let delta = manager
-                .get_output_delta(task_id, false, timeout_ms)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, timeout_ms)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             (delta, false)
         };
@@ -4784,7 +5326,12 @@ impl BashTool {
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             if !interaction_input.is_empty() || close_stdin {
                 manager
-                    .write_stdin(task_id, interaction_input, close_stdin)
+                    .write_stdin_for_session(
+                        &context.state_namespace,
+                        task_id,
+                        interaction_input,
+                        close_stdin,
+                    )
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             }
         }
@@ -4801,7 +5348,7 @@ impl BashTool {
                     .lock()
                     .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
                 let delta = manager
-                    .get_output_delta(task_id, false, 0)
+                    .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?;
                 let mut result = build_shell_delta_tool_result(delta, context);
                 if let Some(metadata) = result.metadata.as_mut()
@@ -4818,7 +5365,7 @@ impl BashTool {
                     .lock()
                     .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
                 manager
-                    .get_output_delta(task_id, false, 0)
+                    .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                     .map_err(|err| ToolError::execution_failed(err.to_string()))?
             };
 
@@ -4848,7 +5395,7 @@ impl BashTool {
 
         if cancel_all {
             let results = manager
-                .kill_running()
+                .kill_running_for_session(&context.state_namespace)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             if results.is_empty() {
                 return Ok(ToolResult {
@@ -4884,7 +5431,7 @@ impl BashTool {
 
         let task_id = required_task_id(input)?;
         let result = manager
-            .kill(task_id)
+            .kill_for_session(&context.state_namespace, task_id)
             .map_err(|err| ToolError::execution_failed(err.to_string()))?;
         let task_id = result
             .task_id
@@ -5104,7 +5651,7 @@ async fn wait_for_shell_delta_cancellable(
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             let delta = manager
-                .get_output_delta(task_id, false, 0)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
             append_shell_delta_output(&mut stdout_accum, &mut stderr_accum, &delta.result);
             return Ok((
@@ -5126,7 +5673,7 @@ async fn wait_for_shell_delta_cancellable(
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
             manager
-                .get_output_delta(task_id, false, 0)
+                .get_output_delta_for_session(&context.state_namespace, task_id, false, 0)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?
         };
 

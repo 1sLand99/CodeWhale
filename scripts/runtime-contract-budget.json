@@ -1,11 +1,11 @@
 {
-  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492.",
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492. The v0.9.10 full surfaces intentionally add the safe read_media tool; their measured schemas remain below the prior byte/token ceilings. Representative prompt byte metrics now use the same host-independent normalized text as their identities; the normalized base is 6089 bytes.",
   "document_kind": "codewhale.runtime_contract_budget",
   "representative_context": {
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 6084,
+        "bytes": 6089,
         "identity_sha256": "e1bbb7a700c2ed6eea8d2aad15e60c86d0ac386f0583afc659cfc2527db8ce58"
       },
       "goal": {
@@ -100,9 +100,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 72371,
-          "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 18093,
+          "bytes": 69304,
+          "identity_sha256": "5d63bd4c072743c10686cd7f36eb1464e699edd3554058aaa0f15537e24c60fc",
+          "tokens_est": 17326,
           "tool_names": [
             "Git",
             "Run",
@@ -135,6 +135,7 @@
             "notify",
             "project_map",
             "read",
+            "read_media",
             "request_user_input",
             "retrieve_tool_result",
             "revert_turn",
@@ -160,7 +161,7 @@
             "workflow",
             "write"
           ],
-          "tools": 55
+          "tools": 56
         }
       },
       "operate": {
@@ -180,9 +181,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 72371,
-          "identity_sha256": "8f3b51d6221804baac42de911d89f772b89c38a1320da7ebb6d3bdc96c4efb79",
-          "tokens_est": 18093,
+          "bytes": 69304,
+          "identity_sha256": "5d63bd4c072743c10686cd7f36eb1464e699edd3554058aaa0f15537e24c60fc",
+          "tokens_est": 17326,
           "tool_names": [
             "Git",
             "Run",
@@ -215,6 +216,7 @@
             "notify",
             "project_map",
             "read",
+            "read_media",
             "request_user_input",
             "retrieve_tool_result",
             "revert_turn",
@@ -240,7 +242,7 @@
             "workflow",
             "write"
           ],
-          "tools": 55
+          "tools": 56
         }
       },
       "plan": {
@@ -260,9 +262,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 45365,
-          "identity_sha256": "2cf3e5b6810e7840ee2d2df2b6dd81a24058e3e916acdb1199aff3abae916a41",
-          "tokens_est": 11342,
+          "bytes": 42298,
+          "identity_sha256": "f99e12f7fe8f963acb4220ec27d51730f3c213b2a5a8ee4362f3907eb8150adf",
+          "tokens_est": 10575,
           "tool_names": [
             "Git",
             "Web",
@@ -287,6 +289,7 @@
             "load_skill",
             "notify",
             "read",
+            "read_media",
             "request_user_input",
             "review",
             "send_later",
@@ -299,7 +302,7 @@
             "workflow",
             "write"
           ],
-          "tools": 34
+          "tools": 35
         }
       }
     },

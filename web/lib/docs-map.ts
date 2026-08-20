@@ -30,6 +30,15 @@ export interface DocTopic {
   category: "getting-started" | "core-concepts" | "reference" | "extending" | "operations";
 }
 
+/** Sidebar and breadcrumb labels for each docs-map category. */
+export const DOC_CATEGORY_LABELS: Record<DocTopic["category"], { en: string; zh: string }> = {
+  "getting-started": { en: "Getting started", zh: "入门" },
+  "core-concepts": { en: "Core concepts", zh: "核心概念" },
+  reference: { en: "Reference", zh: "参考" },
+  extending: { en: "Extending", zh: "扩展" },
+  operations: { en: "Operations", zh: "运维" },
+};
+
 export const DOC_TOPICS: DocTopic[] = [
   {
     id: "install",
@@ -286,8 +295,8 @@ export function getTopic(id: string): DocTopic | undefined {
 }
 
 /** Group topics by category for sidebar rendering. */
-export function getTopicsByCategory(): Map<string, DocTopic[]> {
-  const map = new Map<string, DocTopic[]>();
+export function getTopicsByCategory(): Map<DocTopic["category"], DocTopic[]> {
+  const map = new Map<DocTopic["category"], DocTopic[]>();
   for (const t of DOC_TOPICS) {
     const group = map.get(t.category) ?? [];
     group.push(t);

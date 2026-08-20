@@ -30,7 +30,10 @@ const OPTIONAL_FILES = [
   "docs-shell.ts",
   "docs-hooks.ts",
   "docs-troubleshooting.ts",
+  "docs-configuration.ts",
   "docs-constitution.ts",
+  "docs-fleet.ts",
+  "docs-modes.ts",
   "docs-runtime-api.ts",
 ];
 

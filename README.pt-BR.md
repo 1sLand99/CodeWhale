@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4fc19c5f9596 -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -15,12 +15,18 @@ termina ou quando precisa de você. Troque de modelo no meio da tarefa com
 `/model`. Trabalhe de forma interativa na TUI, ou rode `codewhale exec` em
 scripts e CI. É escrito em Rust, licenciado sob MIT, e roda na sua máquina.
 
-O que não se parece com outros harnesses: **você escolhe o modelo de cada
-papel, e eles não precisam ser iguais.** Uma fleet fixa um provedor, um modelo e
-um nível de raciocínio por papel — então um modelo barato e rápido pode dirigir
-um modelo de raciocínio caro, ou um builder GLM pode trabalhar na mesma tarefa
-que um reviewer Kimi. Escreva seus próprios papéis e sua própria constitution, e
-o harness passa a ser seu, não nosso.
+O que outros harnesses não têm: **você escolhe o modelo de cada papel — e
+eles não precisam combinar** — e **agentes no Codewhale conversam entre si,
+através de modelos.** Uma fleet fixa provedor, modelo e camada de raciocínio
+por papel, então um modelo barato e rápido pode dirigir um modelo caro de
+raciocínio, ou um builder GLM pode trabalhar na mesma tarefa que um reviewer
+Kimi. Enquanto rodam, mande uma nota para qualquer um em pleno voo, veja o
+transcript dele ou interrompa-o — e não é só de pai para filho: tarefas
+Codewhale separadas no mesmo workspace trocam Agent Mail durável, que
+sobrevive a reinícios, é entregue exatamente uma vez em uma fronteira segura
+e mascara credenciais. Um `/goal` segura um objetivo longo por vários
+turnos, até terminar de verdade. Papéis são arquivos que você edita, e o
+harness inteiro continua seu.
 
 Estamos sempre em busca de pessoas que contribuam e de formas de melhorar. Se um
 modelo ou provedor que você usa está faltando, ou se algo quebra, nos contar é
@@ -33,7 +39,7 @@ uma das coisas mais úteis que você pode fazer — veja [Contribuindo](#contrib
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
-![Codewhale rodando em um terminal](assets/screenshot.png)
+![Codewhale rodando em um terminal](assets/screenshot.webp)
 
 ## Instalação
 
@@ -71,18 +77,29 @@ executa um comando de shell pelo caminho normal de aprovação.
   tudo por um único runtime e um único conjunto de ferramentas. O catálogo acompanha a linha atual de cada provedor — o backend V4 Pro da DeepSeek (rotulado `DeepSeek-V4-Pro-0813`) continua chamável como `deepseek-v4-pro`, Grok 4.6 é o padrão direto da xAI e o OrcaRouter roteia por `orcarouter/auto`. Orçamentos de
   contexto e preços vêm da rota real, e um preço desconhecido aparece como
   desconhecido em vez de $0.
+- **Agentes que conversam entre si — através de modelos.** Todo agente no
+  Codewhale pode ser alcançado enquanto trabalha: `message` enfileira uma
+  nota para um subagente em execução, `followup` o acorda com a sua nota na
+  próxima fronteira segura, `peek` lê o transcript dele, e uma interrupção
+  para só o turno dele. Vai além da árvore pai-filho: tarefas separadas no
+  mesmo workspace trocam **Agent Mail** durável — um resumo de passagem em
+  fila que sobrevive a reinícios, é entregue exatamente uma vez na fronteira
+  segura do destinatário e mascara credenciais e caminhos — então uma sessão
+  GLM e uma sessão Kimi se coordenam em dois terminais sem você servindo de
+  ponte. Cada lado pode ser um modelo diferente; o Codewhale carrega a
+  conversa.
 - **Um harness escrito por você.** Papéis são arquivos que você pode ler e
   editar — um modelo, uma postura de ferramentas e instruções permanentes por
   papel — guardados no projeto para o time compartilhar, ou ao lado das suas
   configurações pessoais para acompanharem você entre repositórios. Uma
   constitution registra como você quer que o agente se comporte em cada sessão,
   para que o harness siga a sua prática, e não a nossa.
-- **Somente leitura até você permitir mais.** O modo Plan não altera arquivos,
-  e as aprovações controlam os comandos arriscados. Quando um sandbox do
-  sistema operacional realmente envolve um comando, o Codewhale avisa: Seatbelt
-  no macOS quando disponível, bubblewrap opcional no Linux. O
-  `constitution.json` de um repositório é compilado em bloqueios de escrita
-  que nem o Full Access consegue pular.
+- **Trabalho que você retoma de onde parou.** Uma fleet registra cada
+  passo num ledger append-only, e `fleet resume` continua de onde você
+  parou. `/goal` mantém um objetivo persistente que o agente persegue turno
+  após turno — pausável, retomável e restaurado junto com a sessão após um
+  reinício — e `/workflows` abre um painel ao vivo com todas as execuções
+  que o journal deste workspace guarda.
 - **Trabalho que você pode retomar.** Um fleet registra cada passo em um
   livro-razão de apenas inclusão, então `fleet resume` retoma de onde você
   parou.
@@ -153,3 +170,5 @@ experiência de agente no terminal.
 provedor de modelos.
 
 ![Codewhale distribuindo três subagentes scout somente leitura em um terminal](assets/fanout.gif)
+
+[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)

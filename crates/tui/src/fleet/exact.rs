@@ -1032,11 +1032,9 @@ impl FleetRouterCaller for LiveFleetRouter {
                     cache_control: None,
                 }],
             }],
-            max_tokens: crate::route_budget::effective_max_output_tokens_for_route(
-                self.provider,
-                &self.route.wire_model,
-                None,
-            ),
+            max_tokens: self
+                .client
+                .effective_max_output_tokens(&self.route.wire_model),
             system: Some(SystemPrompt::Text(router_system_prompt(input))),
             // A router receives no tools. Ever.
             tools: None,

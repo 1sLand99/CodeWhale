@@ -68,7 +68,7 @@ export default async function SandboxPage({ params }: { params: Promise<{ locale
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">{isZh ? "沙箱与审批" : "Sandbox & Approval"}</h2>
+        <h1 className="font-display text-3xl mb-1">{isZh ? "沙箱与审批" : "Sandbox & Approval"}</h1>
         <p className={`${bodyClass} mt-3`}>
           {isZh
             ? "Codewhale 可以启动由模型提出的 shell 命令。审批策略、感知工作区的文件工具和操作系统命令包装器是三个独立的控制：一次审批不是沙箱，选择 workspace-write 也不代表当前平台有可用的 OS 包装器。本页只描述已经接入命令执行路径的行为。"

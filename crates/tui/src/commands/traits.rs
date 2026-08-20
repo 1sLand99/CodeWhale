@@ -31,9 +31,7 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
     "context",
     "diff",
     "edit",
-    "goal",
     "hf",
-    "hooks",
     "lsp",
     "modeldb",
     "models",
@@ -51,15 +49,33 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
     "status",
     "system",
     "theme",
-    "tokens",
     "tools",
-    "translate",
     "trust",
     "verbose",
-    "workspace",
 ];
 
 pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
+
+/// Flagship orchestration trio. Empty `/` pins these first so `/workflow`,
+/// `/goal`, and `/auto` are the first selections from a blank prompt (#5439).
+/// Order is the product "when to use" sequence, not alphabetical.
+pub(crate) const ORCHESTRATION_DISCOVERY_COMMANDS: &[&str] = &["workflow", "goal", "auto"];
+
+#[must_use]
+pub(crate) fn orchestration_slash_hint() -> String {
+    ORCHESTRATION_DISCOVERY_COMMANDS
+        .iter()
+        .map(|name| format!("/{name}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[must_use]
+pub(crate) fn orchestration_discovery_rank(name: &str) -> Option<usize> {
+    ORCHESTRATION_DISCOVERY_COMMANDS
+        .iter()
+        .position(|entry| *entry == name)
+}
 
 /// Built-in commands that the palette pastes into the composer instead of
 /// executing, even though they have no *required* argument.

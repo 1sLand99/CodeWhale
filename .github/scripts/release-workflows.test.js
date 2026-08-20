@@ -410,6 +410,8 @@ assert.match(runbook, /expected_sha/);
 assert.match(runbook, /34/);
 assert.match(runbook, /does not create a tag/i);
 assert.match(runbook, /explicit.*approval/i);
+assert.match(runbook, /last[- ]useful[- ]log/i, "runbook must document the last-useful-log rule (#5496)");
+assert.match(runbook, /404 logs/i, "runbook must document the 404-log cancellation rule (#5496)");
 
 const cnbRustGates = cnb.match(
   /\.rust_workspace_gates_stage: &rust_workspace_gates_stage([\s\S]*?)\n\.linux_rust_gates:/,
@@ -420,6 +422,30 @@ assert.match(
   /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked/,
   "CNB must serialize the memory-heavy Rust gate and preserve the workspace test stack contract",
 );
+assert.match(
+  cnbRustGates[1],
+  /export HOME="\$\{hermetic_home\}"[\s\S]*export CODEWHALE_HOME="\$\{hermetic_home\}\/\.codewhale"[\s\S]*unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME/,
+  "CNB workspace tests must not read a populated runner ~/.codewhale (#5355)",
+);
+
+const nextest = read(".config/nextest.toml");
+const integrationGroup = nextest.search(/^filter = 'binary\(integration\)'$/m);
+const telemetryGroup = nextest.indexOf(
+  "filter = 'binary(integration) & test(/^telemetry_contract::/)'",
+);
+const execGroup = nextest.indexOf(
+  "filter = 'binary(integration) & test(/^exec_persistent_service::/)'",
+);
+assert.ok(integrationGroup >= 0, "nextest must bound the integration binary");
+assert.ok(
+  telemetryGroup >= 0 && telemetryGroup < integrationGroup,
+  "telemetry-contract override must precede binary(integration); first matching group wins",
+);
+assert.ok(
+  execGroup >= 0 && execGroup < integrationGroup,
+  "exec_persistent_service override must precede binary(integration); first matching group wins",
+);
+assert.match(nextest, /exec-persistent-service = \{ max-threads = 1 \}/);
 assert.equal(
   (cnb.match(/^\s+- \*rust_workspace_gates_stage$/gm) || []).length,
   2,
@@ -475,6 +501,98 @@ assert.doesNotMatch(
   /codewhale_config::auto_model::classify/,
   "the CLI dispatcher must leave auto routing to the provider-aware runtime",
 );
+
+// #5496: every release-lane job carries an explicit `timeout-minutes`.
+//
+// GitHub's default is 360 minutes, so an assigned-but-dead runner sits for six
+// hours before anything reclaims it — observed on the v0.9.9 train as a job
+// stuck `in_progress` with 404 logs. Timeouts are containment, not recovery:
+// the runbook keeps the 404-log cancel/rerun rule for infrastructure failures.
+//
+// A job that calls a reusable workflow (`uses:`) cannot carry the key at all —
+// GitHub rejects it — so the callee owns its own caps. That is why the artifact
+// bounds live in release-artifacts.yml rather than in its callers.
+function jobsWithoutTimeout(source) {
+  const lines = source.split("\n");
+  const jobsAt = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+  assert.notEqual(jobsAt, -1, "workflow must declare jobs");
+  const offenders = [];
+  for (let i = jobsAt + 1; i < lines.length; i += 1) {
+    const header = lines[i].match(/^  ([A-Za-z0-9_-]+):\s*$/);
+    if (!header) continue;
+    let reusable = false;
+    let capped = false;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (/^  [A-Za-z0-9_-]+:\s*$/.test(lines[j])) break;
+      if (/^    uses:/.test(lines[j])) reusable = true;
+      if (/^    timeout-minutes:\s*\d+\s*$/.test(lines[j])) capped = true;
+    }
+    if (!reusable && !capped) offenders.push(header[1]);
+  }
+  return offenders;
+}
+
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  uncapped:\n    runs-on: ubuntu-latest\n"),
+  ["uncapped"],
+  "jobsWithoutTimeout must detect an uncapped job",
+);
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  reusable:\n    uses: ./.github/workflows/reusable.yml\n"),
+  [],
+  "jobsWithoutTimeout must skip reusable workflow callers",
+);
+assert.deepEqual(
+  jobsWithoutTimeout("jobs:\n  capped:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n"),
+  [],
+  "jobsWithoutTimeout must accept a capped job",
+);
+
+for (const [name, source] of [
+  ["release-candidate.yml", candidate],
+  ["release-artifacts.yml", artifacts],
+  ["release.yml", release],
+  ["release-republish.yml", republish],
+  ["ci.yml", ci],
+  ["nightly.yml", nightly],
+]) {
+  assert.deepEqual(
+    jobsWithoutTimeout(source),
+    [],
+    `${name}: every job must set timeout-minutes (#5496)`,
+  );
+}
+
+// The Windows artifact build historically runs 40-45 minutes, so its cap has to
+// keep real margin — a tight bound here fails healthy releases.
+const buildTimeout = artifacts.match(/^  build:\n(?:.*\n)*?    timeout-minutes: (\d+)$/m);
+assert.ok(buildTimeout, "release-artifacts build job must be capped");
+assert.ok(
+  Number(buildTimeout[1]) >= 60,
+  `artifact build cap ${buildTimeout[1]}m leaves no margin over a healthy 40-45m Windows build`,
+);
+
+function jobTimeout(source, job) {
+  const match = source.match(
+    new RegExp(`^  ${job}:\\n(?:.*\\n)*?    timeout-minutes: (\\d+)$`, "m"),
+  );
+  assert.ok(match, `${job} must declare timeout-minutes`);
+  return Number(match[1]);
+}
+
+// Pin the measured release-lane budget: fast setup and packaging fail quickly,
+// while cross-platform compilation keeps real margin over the 40-45m Windows
+// build observed on the release train.
+assert.equal(jobTimeout(candidate, "resolve"), 10);
+assert.equal(jobTimeout(candidate, "web"), 15);
+assert.equal(jobTimeout(artifacts, "pin"), 10);
+assert.equal(jobTimeout(artifacts, "build"), 90);
+for (const job of ["bundle", "windows-installer", "assemble", "smoke"]) {
+  assert.equal(jobTimeout(artifacts, job), 15, `${job} must keep the 15m packaging cap`);
+}
+assert.equal(jobTimeout(nightly, "build"), 90);
+assert.equal(jobTimeout(release, "resolve"), 10);
+assert.equal(jobTimeout(release, "parity"), 20);
 
 console.log(
   "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",

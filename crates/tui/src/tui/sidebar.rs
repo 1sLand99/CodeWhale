@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use crate::localization::Locale;
-use crate::tui::app::HuntVerdict;
+use crate::tools::goal::GoalStatus;
 
 use ratatui::{
     style::Style,
@@ -66,13 +66,13 @@ impl SidebarWorkSummary {
 /// quarry; the work summary uses this so a completed goal can still render
 /// with its DONE state.
 pub(crate) fn live_goal_objective(app: &App) -> Option<String> {
-    if app.paused || app.paused_quarry.is_some() {
-        app.hunt
-            .quarry
+    if app.paused || app.paused_goal_objective.is_some() {
+        app.goal
+            .objective
             .clone()
-            .or_else(|| app.paused_quarry.clone())
+            .or_else(|| app.paused_goal_objective.clone())
     } else {
-        app.hunt.quarry.clone()
+        app.goal.objective.clone()
     }
 }
 
@@ -80,10 +80,10 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
     fn live_pause_indicator(app: &App) -> Option<String> {
         if app.paused && app.is_loading {
             Some("(Pausing)".to_string())
-        } else if app.paused || app.paused_quarry.is_some() {
+        } else if app.paused || app.paused_goal_objective.is_some() {
             Some("(Paused)".to_string())
-        } else if app.hunt.verdict == HuntVerdict::Wounded {
-            Some(match app.hunt.pause_reason {
+        } else if app.goal.status == GoalStatus::Paused {
+            Some(match app.goal.pause_reason {
                 Some(reason) => format!("(Paused: {})", reason.label()),
                 None => "(Paused)".to_string(),
             })
@@ -94,14 +94,15 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
 
     fn apply_live_goal_state(summary: &mut SidebarWorkSummary, app: &App) {
         summary.goal_objective = live_goal_objective(app);
-        summary.goal_token_budget = app.hunt.token_budget;
-        summary.goal_completed = app.hunt.verdict == HuntVerdict::Hunted;
-        summary.goal_started_at = app.hunt.started_at;
-        summary.goal_finished_at = app.hunt.finished_at;
+        summary.goal_token_budget = app.goal.token_budget;
+        summary.goal_completed = app.goal.status == GoalStatus::Complete;
+        summary.goal_started_at = app.goal.started_at;
+        summary.goal_finished_at = app.goal.finished_at;
         summary.tokens_used = app.session.total_conversation_tokens;
         summary.pause_indicator = live_pause_indicator(app);
-        summary.workflow_paused =
-            app.paused || app.paused_quarry.is_some() || app.hunt.verdict == HuntVerdict::Wounded;
+        summary.workflow_paused = app.paused
+            || app.paused_goal_objective.is_some()
+            || app.goal.status == GoalStatus::Paused;
     }
 
     let fresh = (|| {
@@ -120,10 +121,10 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
 
         let mut summary = SidebarWorkSummary {
             goal_objective: live_goal_objective(app),
-            goal_token_budget: app.hunt.token_budget,
-            goal_completed: app.hunt.verdict == HuntVerdict::Hunted,
-            goal_started_at: app.hunt.started_at,
-            goal_finished_at: app.hunt.finished_at,
+            goal_token_budget: app.goal.token_budget,
+            goal_completed: app.goal.status == GoalStatus::Complete,
+            goal_started_at: app.goal.started_at,
+            goal_finished_at: app.goal.finished_at,
             tokens_used: app.session.total_conversation_tokens,
             checklist_completion_pct,
             checklist_items,
@@ -132,8 +133,8 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
             state_updating: false,
             pause_indicator: live_pause_indicator(app),
             workflow_paused: app.paused
-                || app.paused_quarry.is_some()
-                || app.hunt.verdict == HuntVerdict::Wounded,
+                || app.paused_goal_objective.is_some()
+                || app.goal.status == GoalStatus::Paused,
         };
         apply_live_goal_state(&mut summary, app);
         Some(summary)
@@ -476,6 +477,11 @@ pub struct SidebarAgentRow {
     /// conservative signal prevents the sidebar from advertising a dead Open.
     pub transcript_available: bool,
     pub expanded: bool,
+    /// `(settled, total)` over this row's direct children, when it has any
+    /// (#5479). A fan-out parent's own status says nothing about whether the
+    /// work it launched is finished; this is the "5/6 agents done" fact the
+    /// rail otherwise makes you count by eye. `None` for a leaf.
+    pub children_settled: Option<(usize, usize)>,
 }
 
 pub(crate) fn foreground_rlm_running(app: &App) -> bool {
@@ -557,6 +563,8 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     &agent.agent_id,
                 ),
                 expanded: app.expanded_sidebar_agents.contains(&agent.agent_id),
+                // Filled in by `annotate_child_progress` once every row exists.
+                children_settled: None,
             }
         })
         .collect();
@@ -596,11 +604,37 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                         app, id,
                     ),
                     expanded: app.expanded_sidebar_agents.contains(id),
+                    children_settled: None,
                 }
             }),
     );
 
-    sort_sidebar_agent_rows_as_tree(rows)
+    let mut rows = sort_sidebar_agent_rows_as_tree(rows);
+    annotate_child_progress(&mut rows);
+    rows
+}
+
+/// Fill in each row's `children_settled` from its direct children.
+///
+/// Counted over the rows actually present: a child whose record has aged out of
+/// the ledger cannot be counted, and inventing a denominator that included it
+/// would misreport progress as worse than it is.
+fn annotate_child_progress(rows: &mut [SidebarAgentRow]) {
+    let mut totals: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for row in rows.iter() {
+        let Some(parent) = row.parent_run_id.as_deref() else {
+            continue;
+        };
+        let entry = totals.entry(parent.to_string()).or_insert((0, 0));
+        entry.1 += 1;
+        if sidebar_agent_status_is_terminal(row.status.as_str()) {
+            entry.0 += 1;
+        }
+    }
+    for row in rows.iter_mut() {
+        row.children_settled = totals.get(&row.id).copied();
+    }
 }
 
 fn sort_sidebar_agent_rows_as_tree(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRow> {
@@ -926,6 +960,9 @@ fn subagent_panel_rows(
         // line (#3030) — the full id remains available in the hover text.
         let mut detail_parts = Vec::new();
         detail_parts.push(row.status.clone());
+        if let Some((settled, total)) = row.children_settled {
+            detail_parts.push(format!("{settled}/{total} agents done"));
+        }
         if let Some(objective) = row.objective.as_deref()
             && !objective.trim().is_empty()
         {
@@ -1191,9 +1228,10 @@ mod tests {
     use crate::localization::Locale;
     use crate::palette;
     use crate::palette::PaletteMode;
+    use crate::tools::goal::GoalStatus;
     use crate::tools::todo::TodoStatus;
     use crate::tui::app::{
-        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App, HuntVerdict,
+        AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App,
         SidebarHoverSection, SidebarHoverState, SidebarRowAction, TuiOptions,
     };
     use ratatui::text::Line;
@@ -1600,16 +1638,16 @@ mod tests {
     #[test]
     fn sidebar_work_summary_keeps_live_fields_on_cache_fallback() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("test quarry".to_string());
-        app.hunt.verdict = HuntVerdict::Hunted;
+        app.goal.objective = Some("test quarry".to_string());
+        app.goal.status = GoalStatus::Complete;
         {
             let mut todos = app.todos.try_lock().expect("todos lock");
             todos.add("item".to_string(), TodoStatus::Pending);
         }
         let _first = sidebar_work_summary(&mut app);
 
-        app.hunt.quarry = Some("updated quarry".to_string());
-        app.hunt.verdict = HuntVerdict::Hunting;
+        app.goal.objective = Some("updated quarry".to_string());
+        app.goal.status = GoalStatus::Active;
         let held_arc = app.todos.clone();
         let _held = held_arc.try_lock().expect("hold todos lock");
 
@@ -1620,11 +1658,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_work_summary_uses_paused_quarry_when_goal_is_cleared() {
+    fn sidebar_work_summary_uses_paused_goal_objective_when_goal_is_cleared() {
         let mut app = create_test_app();
-        app.hunt.quarry = None;
+        app.goal.objective = None;
         app.paused = true;
-        app.paused_quarry = Some("Scan nested git repositories".to_string());
+        app.paused_goal_objective = Some("Scan nested git repositories".to_string());
 
         let summary = sidebar_work_summary(&mut app);
 
@@ -1639,9 +1677,9 @@ mod tests {
     #[test]
     fn sidebar_names_goal_pause_reason() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("Finish within budget".to_string());
-        app.hunt.verdict = HuntVerdict::Wounded;
-        app.hunt.pause_reason = Some(crate::tools::goal::GoalPauseReason::BudgetLimit);
+        app.goal.objective = Some("Finish within budget".to_string());
+        app.goal.status = GoalStatus::Paused;
+        app.goal.pause_reason = Some(crate::tools::goal::GoalPauseReason::BudgetLimit);
 
         let summary = sidebar_work_summary(&mut app);
 
@@ -1655,9 +1693,9 @@ mod tests {
     #[test]
     fn work_panel_renders_paused_command_goal() {
         let mut app = create_test_app();
-        app.hunt.quarry = None;
+        app.goal.objective = None;
         app.paused = false;
-        app.paused_quarry = Some("Deploy to staging".to_string());
+        app.paused_goal_objective = Some("Deploy to staging".to_string());
 
         let summary = sidebar_work_summary(&mut app);
         let text = lines_to_text(&work_panel_lines(
@@ -2066,6 +2104,88 @@ mod tests {
         }
     }
 
+    // === #5479: a fan-out parent shows how much of its fan-out is done ===
+
+    #[test]
+    fn a_fanout_parent_row_reports_how_many_children_have_settled() {
+        let mut app = create_test_app();
+        let parent = cached_agent("workflow_parent", None);
+        for index in 0..6 {
+            let mut child = cached_agent(&format!("child_{index}"), None);
+            child.parent_run_id = Some("workflow_parent".to_string());
+            child.spawn_depth = 1;
+            if index < 5 {
+                child.status = crate::tools::subagent::SubAgentStatus::Completed;
+                child.worker_status = Some(crate::tools::subagent::AgentWorkerStatus::Completed);
+            }
+            app.subagent_cache.push(child);
+        }
+        app.subagent_cache.push(parent);
+
+        let rows = sidebar_agent_rows(&app);
+        let parent_row = rows
+            .iter()
+            .find(|row| row.id == "workflow_parent")
+            .expect("parent row");
+        assert_eq!(
+            parent_row.children_settled,
+            Some((5, 6)),
+            "the parent's own status says nothing about its fan-out"
+        );
+        for row in rows.iter().filter(|row| row.id != "workflow_parent") {
+            assert_eq!(
+                row.children_settled, None,
+                "a leaf must not claim a fan-out it does not have"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parent_whose_children_aged_out_reports_no_progress_rather_than_zero() {
+        // A denominator that counted rows no longer in the ledger would report
+        // progress as worse than it is.
+        let mut app = create_test_app();
+        app.subagent_cache.push(cached_agent("lonely_parent", None));
+        let rows = sidebar_agent_rows(&app);
+        assert_eq!(rows[0].children_settled, None);
+    }
+
+    #[test]
+    fn fanout_progress_appears_in_the_expanded_dossier() {
+        let mut app = create_test_app();
+        let parent = cached_agent("workflow_parent", None);
+        let mut child = cached_agent("child_0", None);
+        child.parent_run_id = Some("workflow_parent".to_string());
+        child.status = crate::tools::subagent::SubAgentStatus::Completed;
+        app.subagent_cache.push(child);
+        app.subagent_cache.push(parent);
+        app.expanded_sidebar_agents
+            .insert("workflow_parent".to_string());
+
+        let rows = sidebar_agent_rows(&app);
+        let summary = SidebarSubagentSummary {
+            cached_total: rows.len(),
+            ..Default::default()
+        };
+        let lines = subagent_panel_lines(
+            &summary,
+            &rows,
+            Locale::En,
+            120,
+            40,
+            &palette::UiTheme::detect(),
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("1/1 agents done"),
+            "the fan-out fact must reach the rendered panel:\n{text}"
+        );
+    }
+
     #[test]
     fn sidebar_agent_rows_use_worker_status_from_cached_agents() {
         let mut app = create_test_app();
@@ -2286,6 +2406,7 @@ mod tests {
             duration_ms: Some(124_838),
             transcript_available: false,
             expanded: true,
+            children_settled: None,
         }
     }
 

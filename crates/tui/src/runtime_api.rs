@@ -20,6 +20,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use codewhale_protocol::agent_mail::{
+    AgentMailDeliveryMode, AgentMailEnvelope, AgentMailMessageId, AgentMailSendRequest,
+    AgentMailSendResponse,
+};
 use codewhale_protocol::runtime::{
     DynamicToolCallResult, RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION,
     RuntimeCapabilities, RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
@@ -102,6 +106,45 @@ use self::sessions::{messages_from_thread_detail, session_to_detail};
 #[cfg(test)]
 use self::workspace::collect_workspace_status;
 use self::workspace::{collect_workspace_git_metadata, workspace_status};
+
+const RUNTIME_TOKEN_ENV: &str = "CODEWHALE_RUNTIME_TOKEN";
+const LEGACY_RUNTIME_TOKEN_ENV: &str = "DEEPSEEK_RUNTIME_TOKEN";
+const LEGACY_RUNTIME_TOKEN_WARNING: &str = "Warning: DEEPSEEK_RUNTIME_TOKEN is deprecated; use \
+CODEWHALE_RUNTIME_TOKEN (the legacy alias is removed in 0.10.0).";
+
+struct RuntimeTokenEnvironment {
+    token: Option<String>,
+    legacy_alias_used: bool,
+}
+
+fn runtime_token_environment(lookup: &dyn Fn(&str) -> Option<String>) -> RuntimeTokenEnvironment {
+    let nonblank = |name| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+
+    if let Some(token) = nonblank(RUNTIME_TOKEN_ENV) {
+        return RuntimeTokenEnvironment {
+            token: Some(token),
+            legacy_alias_used: false,
+        };
+    }
+
+    let token = nonblank(LEGACY_RUNTIME_TOKEN_ENV);
+    RuntimeTokenEnvironment {
+        legacy_alias_used: token.is_some(),
+        token,
+    }
+}
+
+fn runtime_token_alias_warning(
+    cli_token: Option<&str>,
+    environment: &RuntimeTokenEnvironment,
+) -> Option<&'static str> {
+    let cli_token_is_used = cli_token.is_some_and(|token| !token.trim().is_empty());
+    (!cli_token_is_used && environment.legacy_alias_used).then_some(LEGACY_RUNTIME_TOKEN_WARNING)
+}
 
 #[derive(Clone)]
 pub struct RuntimeApiState {
@@ -500,6 +543,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         memory: true,
         mcp_server_management: true,
         skill_lifecycle: true,
+        agent_mail: true,
     }
 }
 
@@ -820,12 +864,12 @@ pub async fn run_http_server(
     );
 
     let sessions_dir = default_sessions_dir().unwrap_or_else(|_| fallback_sessions_dir());
-    let runtime_token_env = std::env::var("CODEWHALE_RUNTIME_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("DEEPSEEK_RUNTIME_TOKEN").ok());
+    let runtime_token_env = runtime_token_environment(&|name| std::env::var(name).ok());
+    let runtime_token_alias_warning =
+        runtime_token_alias_warning(options.auth_token.as_deref(), &runtime_token_env);
     let resolved_auth = resolve_runtime_auth(
         options.auth_token.clone(),
-        runtime_token_env,
+        runtime_token_env.token,
         options.insecure_no_auth,
     );
     let runtime_token = resolved_auth.token.clone();
@@ -881,6 +925,9 @@ pub async fn run_http_server(
     println!("Runtime API listening on http://{bound_addr}");
     for line in runtime_auth_status_lines(&resolved_auth) {
         println!("{line}");
+    }
+    if let Some(warning) = runtime_token_alias_warning {
+        println!("{warning}");
     }
     if options.mobile {
         print_mobile_urls(
@@ -1034,6 +1081,16 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
+        .route("/v1/agent-mail", post(send_agent_mail))
+        .route("/v1/threads/{id}/agent-mail", get(list_agent_mail))
+        .route(
+            "/v1/threads/{id}/agent-mail/{message_id}/deliver",
+            post(deliver_agent_mail),
+        )
+        .route(
+            "/v1/threads/{id}/agent-mail/{message_id}/read",
+            post(mark_agent_mail_read),
+        )
         .route(
             "/v1/threads/{id}/goal",
             get(get_thread_goal)
@@ -3983,6 +4040,83 @@ async fn start_thread_turn(
     ))
 }
 
+#[derive(Debug, Serialize)]
+struct AgentMailDeliveryResponse {
+    envelope: AgentMailEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn: Option<TurnRecord>,
+}
+
+async fn send_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Json(request): Json<AgentMailSendRequest>,
+) -> Result<(StatusCode, Json<AgentMailSendResponse>), ApiError> {
+    let mut response = state
+        .runtime_threads
+        .queue_agent_mail(request)
+        .await
+        .map_err(map_agent_mail_err)?;
+    if response.envelope.delivery_mode == AgentMailDeliveryMode::WakeAtSafeBoundary
+        && response.envelope.trigger_turn
+    {
+        let (envelope, _) = state
+            .runtime_threads
+            .deliver_agent_mail(
+                &response.envelope.destination.thread_id,
+                &response.envelope.message_id,
+            )
+            .await
+            .map_err(map_agent_mail_err)?;
+        response.envelope = envelope;
+    }
+    let status = if response.idempotent_replay {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(response)))
+}
+
+async fn list_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AgentMailEnvelope>>, ApiError> {
+    let inbox = state
+        .runtime_threads
+        .list_agent_mail_for_thread(&id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(inbox))
+}
+
+async fn deliver_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<AgentMailDeliveryResponse>, ApiError> {
+    let message_id = AgentMailMessageId::parse(message_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let (envelope, turn) = state
+        .runtime_threads
+        .deliver_agent_mail(&id, &message_id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(AgentMailDeliveryResponse { envelope, turn }))
+}
+
+async fn mark_agent_mail_read(
+    State(state): State<RuntimeApiState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<AgentMailEnvelope>, ApiError> {
+    let message_id = AgentMailMessageId::parse(message_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let envelope = state
+        .runtime_threads
+        .mark_agent_mail_read(&id, &message_id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(envelope))
+}
+
 async fn steer_thread_turn(
     State(state): State<RuntimeApiState>,
     Path((id, turn_id)): Path<(String, String)>,
@@ -4247,18 +4381,29 @@ async fn block_thread_goal(
     Ok(Json(updated))
 }
 
+/// Runtime-authenticated administrative task inventory.
+///
+/// Unlike in-session TUI/model controls, the Runtime API token authorizes the
+/// caller for the whole host runtime, so these endpoints intentionally span
+/// sessions. Running with `--insecure` explicitly opts out of that host boundary.
 async fn list_tasks(
     State(state): State<RuntimeApiState>,
     Query(query): Query<TasksQuery>,
 ) -> Result<Json<TasksResponse>, ApiError> {
-    let tasks = state
-        .task_manager
-        .list_tasks_scoped(query.limit, query.workspace.as_deref())
-        .await;
+    let tasks = match query.workspace.as_deref() {
+        Some(workspace) => {
+            state
+                .task_manager
+                .list_tasks_scoped(query.limit, Some(workspace))
+                .await
+        }
+        None => state.task_manager.list_tasks(query.limit).await,
+    };
     let counts = state.task_manager.counts().await;
     Ok(Json(TasksResponse { tasks, counts }))
 }
 
+/// Runtime-authenticated administrative task lookup across host sessions.
 async fn get_task(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -4271,6 +4416,7 @@ async fn get_task(
     Ok(Json(task))
 }
 
+/// Runtime-authenticated administrative task cancellation across host sessions.
 async fn cancel_task(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -6265,6 +6411,23 @@ fn map_thread_err(err: anyhow::Error) -> ApiError {
             status: StatusCode::CONFLICT,
             message,
         }
+    } else {
+        ApiError::bad_request(message)
+    }
+}
+
+fn map_agent_mail_err(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("ownership denied") {
+        ApiError::forbidden(message)
+    } else if lower.contains("already exists with different delivery intent") {
+        ApiError::conflict(message)
+    } else if lower.contains("failed to read agent mail envelope") && lower.contains("no such file")
+    {
+        ApiError::not_found(message)
+    } else if lower.starts_with("thread '") && lower.ends_with("' not found") {
+        ApiError::not_found(message)
     } else {
         ApiError::bad_request(message)
     }

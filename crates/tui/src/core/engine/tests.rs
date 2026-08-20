@@ -1,6 +1,6 @@
 use super::*;
 
-use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
+use super::context::COMPACTION_SUMMARY_MARKER;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     auto_review_block_tool_error, initial_stream_error_user_message, merge_new_runtime_mcp_tools,
@@ -186,7 +186,7 @@ fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
             .expect("system prompt"),
     );
     assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
-    assert!(prompt.contains("must call `registry_sync {}` before `exec_shell`"));
+    assert!(prompt.contains("must call `registry_sync` with a `query` describing that capability"));
 
     let mut disabled = EngineConfig::default();
     disabled.features.disable(Feature::Mcp);
@@ -1310,7 +1310,7 @@ async fn queued_failed_turn_cancels_older_goal_continuation_without_third_call()
         ))
         .await
         .expect("queue failing ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     assert!(engine.has_scheduled_goal_continuation());
     let run_task = tokio::spawn(engine.run());
 
@@ -1336,6 +1336,365 @@ async fn queued_failed_turn_cancels_older_goal_continuation_without_third_call()
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn configured_goal_delay_is_cancellable_without_starting_another_turn() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the delayed provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    {
+        let mut events = handle.rx_event.write().await;
+        let waiting = tokio::time::timeout(model_turn_event_timeout(), events.recv())
+            .await
+            .expect("missing continuation wait event")
+            .expect("engine event channel closed");
+        assert!(matches!(
+            waiting,
+            Event::GoalContinuationWaiting { delay_seconds: 300 }
+        ));
+    }
+
+    handle.cancel();
+    {
+        let mut events = handle.rx_event.write().await;
+        let ended = tokio::time::timeout(model_turn_event_timeout(), async {
+            loop {
+                if let Some(Event::GoalContinuationWaitEnded { interrupted }) = events.recv().await
+                {
+                    break interrupted;
+                }
+            }
+        })
+        .await
+        .expect("cancel did not end the continuation delay");
+        assert!(
+            ended,
+            "the wait receipt must identify an explicit interrupt"
+        );
+    }
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("engine did not accept controls after cancelling the delay")
+        .expect("session snapshot after cancelled delay");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "cancelling the quiet period must happen before provider dispatch"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after delay cancellation")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn sync_session_boundary_discards_delayed_goal_and_runtime_mcp_capabilities() {
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.id = "session-a".to_string();
+    engine.schedule_goal_continuation(Vec::new()).await;
+    assert!(engine.has_scheduled_goal_continuation());
+    engine.ensure_mcp_pool().await.expect("initialize MCP pool");
+    assert!(engine.mcp_pool.is_some());
+
+    assert_eq!(
+        engine.install_synced_session_id("session-a".to_string()),
+        None
+    );
+    assert!(engine.has_scheduled_goal_continuation());
+    assert!(
+        engine.mcp_pool.is_some(),
+        "same-id reload keeps runtime state"
+    );
+
+    assert_eq!(
+        engine.install_synced_session_id("session-b".to_string()),
+        Some("session-a".to_string())
+    );
+    assert!(!engine.has_scheduled_goal_continuation());
+    assert!(
+        engine.mcp_pool.is_none(),
+        "same-workspace B must not inherit A's runtime-added MCP servers"
+    );
+    assert_eq!(
+        engine.install_synced_session_id("session-a".to_string()),
+        Some("session-b".to_string())
+    );
+    assert!(
+        !engine.has_scheduled_goal_continuation() && engine.mcp_pool.is_none(),
+        "A -> B -> A must not resurrect process-local state from the first A"
+    );
+}
+
+#[tokio::test]
+async fn sync_session_boundary_rejects_an_already_enqueued_goal_token() {
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            goal_continuation_delay_seconds: 0,
+            ..EngineConfig::default()
+        },
+        &Config::default(),
+    );
+    engine.session.id = "session-a".to_string();
+    engine.schedule_goal_continuation(Vec::new()).await;
+    assert!(
+        engine
+            .scheduled_goal_continuation
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.enqueued),
+        "fixture must place A's token in the engine mailbox"
+    );
+
+    engine.install_synced_session_id("session-b".to_string());
+    let input = engine
+        .next_run_input(false)
+        .await
+        .expect("queued continuation token");
+    let EngineRunInput::Operation(op) = input else {
+        panic!("expected queued continuation operation");
+    };
+    let Op::ContinueGoal {
+        dynamic_tools,
+        engine_schedule_id,
+    } = *op
+    else {
+        panic!("expected queued continuation token");
+    };
+    assert!(
+        engine
+            .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
+            .is_none(),
+        "B must reject A's already-enqueued synthetic turn token"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_delay_expiry_beats_queued_continuation_dispatch() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the raced provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+
+    engine.schedule_goal_continuation(Vec::new()).await;
+    // Deterministically place the fixture at the timer/mailbox boundary: the
+    // quiet period expired and its one coalesced token is already queued, but
+    // the engine has not consumed it yet.
+    engine
+        .scheduled_goal_continuation
+        .as_mut()
+        .expect("scheduled continuation")
+        .ready_at = None;
+    engine.try_flush_pending_goal_continuation();
+    assert!(
+        engine
+            .scheduled_goal_continuation
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.enqueued)
+    );
+    handle.cancel();
+    let run_task = tokio::spawn(engine.run());
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("engine did not settle the delay-expiry cancellation race")
+        .expect("session snapshot after expiry race");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "cancelled delayed token must be discarded before provider dispatch"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after expiry race")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn configured_goal_delay_expires_into_exactly_one_continuation() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "stop after proving delayed dispatch".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("dispatch once after the cadence".to_string()),
+            goal_continuation_delay_seconds: 1,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    engine
+        .config
+        .goal_state
+        .lock()
+        .expect("goal lock")
+        .sync_from_host_status(
+            Some("dispatch once after the cadence"),
+            None,
+            crate::tools::goal::GoalStatus::Active,
+        );
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    let (mut saw_waiting, mut saw_ready, mut saw_started) = (false, false, false);
+    {
+        let mut events = handle.rx_event.write().await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    Event::GoalContinuationWaiting { delay_seconds: 1 } => saw_waiting = true,
+                    Event::GoalContinuationWaitEnded { interrupted: false } => saw_ready = true,
+                    Event::TurnStarted { .. } => {
+                        saw_started = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("configured delay did not dispatch its continuation");
+    }
+    assert!(saw_waiting && saw_ready && saw_started);
+
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("delayed failing turn did not settle")
+        .expect("session snapshot after delayed dispatch");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one delayed schedule must create exactly one provider request"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after delayed dispatch")
+        .expect("engine task");
+}
+
+#[tokio::test]
+async fn goal_pause_during_configured_delay_cancels_pending_continuation() {
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "the paused provider turn must not start".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("coordinate until paused".to_string()),
+            goal_continuation_delay_seconds: 300,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    goal_state.lock().expect("goal lock").sync_from_host_status(
+        Some("coordinate until paused"),
+        None,
+        crate::tools::goal::GoalStatus::Active,
+    );
+    engine.schedule_goal_continuation(Vec::new()).await;
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SetGoalStatus {
+            status: crate::tools::goal::GoalStatus::Paused,
+            clear: false,
+        })
+        .await
+        .expect("pause delayed goal");
+    {
+        let mut events = handle.rx_event.write().await;
+        let interrupted = tokio::time::timeout(model_turn_event_timeout(), async {
+            loop {
+                if let Some(Event::GoalContinuationWaitEnded { interrupted }) = events.recv().await
+                {
+                    break interrupted;
+                }
+            }
+        })
+        .await
+        .expect("goal pause did not end the continuation delay");
+        assert!(
+            interrupted,
+            "a pause is an explicit interruption, not a ready-to-run receipt"
+        );
+    }
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("goal pause did not settle during delay")
+        .expect("session snapshot after goal pause");
+
+    assert_eq!(
+        goal_state.lock().expect("goal lock").snapshot().status,
+        "paused"
+    );
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a goal status control must beat the delayed continuation"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    tokio::time::timeout(model_turn_event_timeout(), run_task)
+        .await
+        .expect("engine did not shut down after pausing delayed goal")
+        .expect("engine task");
 }
 
 #[tokio::test]
@@ -1371,7 +1730,7 @@ async fn queued_not_started_turn_cancels_older_goal_continuation() {
         ))
         .await
         .expect("queue not-started ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     let run_task = tokio::spawn(engine.run());
 
     let session = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
@@ -1432,7 +1791,7 @@ async fn queued_interrupted_turn_cancels_older_goal_continuation_without_third_c
         ))
         .await
         .expect("queue interruptible ordinary turn");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     let run_task = tokio::spawn(engine.run());
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
         .await
@@ -1614,11 +1973,12 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
     engine
         .tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_during_backpressure".to_string(),
             payload: "ready child completion".to_string(),
         })
         .expect("queue ready idle child completion");
-    engine.schedule_goal_continuation(vec![stale_tool]);
+    engine.schedule_goal_continuation(vec![stale_tool]).await;
     assert!(
         engine.has_scheduled_goal_continuation(),
         "a live schedule must activate temporary op priority"
@@ -1649,7 +2009,9 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
             // Refresh after capacity opens. The existing token must retain its
             // FIFO position behind the remaining controls while carrying the
             // newest runtime tool catalog when it is eventually consumed.
-            engine.schedule_goal_continuation(vec![fresh_tool.clone()]);
+            engine
+                .schedule_goal_continuation(vec![fresh_tool.clone()])
+                .await;
         }
     }
 
@@ -1708,11 +2070,12 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     engine
         .tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_without_backpressure".to_string(),
             payload: "ready child completion".to_string(),
         })
         .expect("queue ready idle child completion");
-    engine.schedule_goal_continuation(Vec::new());
+    engine.schedule_goal_continuation(Vec::new()).await;
     assert!(engine.has_scheduled_goal_continuation());
     assert!(
         handle.tx_op.capacity() > 0,
@@ -2230,6 +2593,112 @@ fn goal_custom_route_config() -> Config {
         }),
         ..Config::default()
     }
+}
+
+#[tokio::test]
+async fn explicit_natural_goal_activates_before_provider_request() {
+    let request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = std::sync::Arc::new(FirstRequestGatedGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        request_entered: std::sync::Arc::clone(&request_entered),
+        release_request: std::sync::Arc::clone(&release_request),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            max_steps: 1,
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "hello - take over and make it your /goal to solve navier stokes".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send explicit natural goal turn");
+
+    let mut saw_goal_before_turn = false;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("explicit goal event timeout")
+        .expect("explicit goal event");
+        match event {
+            Event::GoalUpdated { snapshot } => {
+                assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
+                assert_eq!(snapshot.status, "active");
+                saw_goal_before_turn = true;
+            }
+            Event::TurnStarted { .. } => {
+                assert!(
+                    saw_goal_before_turn,
+                    "durable goal must be published before provider work starts"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
+        .await
+        .expect("provider request was never entered");
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
+    assert!(snapshot.is_active());
+
+    // Stop autonomous continuation after the one provider-boundary receipt.
+    handle
+        .send(Op::SetGoalStatus {
+            status: crate::tools::goal::GoalStatus::Paused,
+            clear: false,
+        })
+        .await
+        .expect("queue goal pause");
+    release_request.notify_one();
+    let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+        .await
+        .expect("goal pause did not settle")
+        .expect("post-goal session snapshot");
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        goal_state.lock().expect("goal lock").snapshot().status,
+        "paused"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
 }
 
 fn without_named_custom_route(mut config: Config) -> Config {
@@ -2917,11 +3386,13 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new(engine_config, &config);
+    let owner_session_id = engine.session.id.clone();
     let tx_subagent_completion = engine.tx_subagent_completion.clone();
     let run_task = tokio::spawn(engine.run());
 
     tx_subagent_completion
         .send(SubAgentCompletion {
+            owner_session_id,
             agent_id: "agent_deferred".to_string(),
             payload: "deferred child result".to_string(),
         })
@@ -2995,14 +3466,17 @@ fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
 
     let mut delivered = HashSet::new();
     let first = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_same".to_string(),
         payload: "first delivery".to_string(),
     };
     let duplicate = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_same".to_string(),
         payload: "duplicate delivery".to_string(),
     };
     let second = SubAgentCompletion {
+        owner_session_id: "session-a".to_string(),
         agent_id: "agent_other".to_string(),
         payload: "other delivery".to_string(),
     };
@@ -3013,6 +3487,43 @@ fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
     assert_eq!(
         delivered,
         HashSet::from(["agent_same".to_string(), "agent_other".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn session_switch_drops_old_completion_before_deduplication() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, _handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    engine.session.id = "session-new".to_string();
+    let messages_before = engine.session.messages.len();
+
+    engine
+        .handle_idle_subagent_completion(SubAgentCompletion {
+            owner_session_id: "session-old".to_string(),
+            agent_id: "agent_same".to_string(),
+            payload: "foreign task state".to_string(),
+        })
+        .await;
+
+    assert_eq!(engine.session.messages.len(), messages_before);
+    assert!(engine.delivered_subagent_completion_ids.is_empty());
+    assert!(
+        claim_subagent_completion_for_session(
+            &mut engine.delivered_subagent_completion_ids,
+            "session-new",
+            SubAgentCompletion {
+                owner_session_id: "session-new".to_string(),
+                agent_id: "agent_same".to_string(),
+                payload: "current task state".to_string(),
+            },
+        )
+        .is_some(),
+        "the rejected foreign completion must not suppress the same id in the active session"
     );
 }
 
@@ -3037,6 +3548,7 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
 
     engine
         .handle_idle_subagent_completion(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
             agent_id: "agent_retryable".to_string(),
             payload: "completed work".to_string(),
         })
@@ -3048,10 +3560,12 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
             .contains("agent_retryable"),
         "a completion that never reached the transcript must remain retryable"
     );
+    let owner_session_id = engine.session.id.clone();
     assert!(
         claim_subagent_completion(
             &mut engine.delivered_subagent_completion_ids,
             SubAgentCompletion {
+                owner_session_id,
                 agent_id: "agent_retryable".to_string(),
                 payload: "retry".to_string(),
             },
@@ -3406,7 +3920,7 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
     assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    let (status, error) = engine.run_turn(&mut turn, policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let mut events = handle.rx_event.write().await;
@@ -3464,7 +3978,7 @@ async fn run_budgeted_read_turn(
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     let mut events = handle.rx_event.write().await;
     let completions = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|event| match event {
@@ -4224,7 +4738,7 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let request = mock.last_request().expect("mock request");
@@ -4305,9 +4819,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     ));
     let first_policy = test_tool_surface(&engine, first_registry, None, AppMode::Agent);
     let mut first_turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut first_turn, first_policy, None)
-        .await;
+    let (status, error) = engine.run_turn(&mut first_turn, first_policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(first_turn.usage.input_tokens, 7);
     assert_eq!(first_turn.usage.output_tokens, 11);
@@ -4338,9 +4850,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     ));
     let second_policy = test_tool_surface(&engine, second_registry, None, AppMode::Agent);
     let mut second_turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut second_turn, second_policy, None)
-        .await;
+    let (status, error) = engine.run_turn(&mut second_turn, second_policy, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let kernel = engine.repl_kernel.as_ref().expect("persistent kernel");
@@ -4393,7 +4903,7 @@ async fn snapshot_for_catalog(
         crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.to_path_buf()));
     let surface = test_tool_surface(&engine, registry, catalog, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(2);
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     std::iter::from_fn(|| events.try_recv().ok())
@@ -4456,7 +4966,7 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
     let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let (status, error) = engine.run_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     let snapshots = std::iter::from_fn(|| events.try_recv().ok())
@@ -4517,9 +5027,7 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
     let policy = test_tool_surface(&engine, registry, tools, AppMode::Agent);
 
     let mut turn = crate::core::turn::TurnContext::new(4);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut turn, policy, Some(surface))
-        .await;
+    let (status, error) = engine.run_turn(&mut turn, policy, Some(surface)).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let mut events = handle.rx_event.write().await;
@@ -5273,7 +5781,7 @@ async fn duplicate_raw_read_errors_each_touch_the_working_set() {
         let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
         let mut turn = crate::core::turn::TurnContext::new(8);
 
-        let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+        let (status, error) = engine.run_turn(&mut turn, surface, None).await;
 
         assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
         engine
@@ -7823,12 +8331,14 @@ fn registry_first_guidance_is_attached_to_the_shell_fallback_once() {
 }
 
 #[test]
-fn registry_catalog_bypasses_generic_tool_result_compaction() {
-    let middle = "app.cleanor/cleanor";
+fn registry_sync_results_are_bounded_like_every_other_tool() {
+    // The full-catalog bypass is gone: an oversized registry payload now
+    // flows through the same generic compaction as any other tool result,
+    // because the model-visible catalog is already bounded to eight
+    // matches by the tool itself.
     let raw = format!(
-        "{{\"instruction\":\"compare all\",\"servers\":[{{\"name\":\"{}\"}},{{\"name\":\"{middle}\"}},{{\"name\":\"{}\"}}]}}",
-        "a".repeat(7_000),
-        "z".repeat(7_000),
+        "{{\"instruction\":\"compare all\",\"servers\":[{{\"name\":\"{}\"}}]}}",
+        "a".repeat(40_000),
     );
     let output = ToolResult::success(raw.clone());
 
@@ -7840,9 +8350,8 @@ fn registry_catalog_bypasses_generic_tool_result_compaction() {
         &output,
     );
 
-    assert_eq!(context, raw);
-    assert!(context.contains(middle));
-    assert!(!context.contains("output compacted to protect context"));
+    assert_ne!(context, raw);
+    assert!(context.contains("output compacted to protect context"));
 }
 
 #[test]
@@ -7961,6 +8470,22 @@ async fn registry_discovery_and_start_handlers_exist_in_agent_and_plan_modes() {
             )
             .build(engine.build_tool_context(mode, false));
         assert!(registry.contains("registry_sync"), "missing in {mode:?}");
+        assert!(registry.contains("read_media"), "missing in {mode:?}");
+        let media_tools = registry
+            .to_api_tools_with_cache(true)
+            .into_iter()
+            .filter(|tool| tool.name == "read_media")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            media_tools.len(),
+            1,
+            "read_media must be registered exactly once in {mode:?}"
+        );
+        assert_eq!(
+            media_tools[0].defer_loading,
+            Some(true),
+            "read_media must remain default-off/deferred in {mode:?}"
+        );
         assert!(
             registry.contains("start_registry_mcp_server"),
             "missing in {mode:?}"
@@ -8505,15 +9030,17 @@ fn measure_representative_runtime_context()
     let mut stage_metrics = serde_json::Map::new();
     for (index, stage) in stages.iter().enumerate() {
         let mut metrics = serde_json::json!({
-            "bytes": stage.flat.len(),
+            // Keep byte ceilings host-independent just like the structural
+            // identity: temporary workspace/home paths vary across runners.
+            "bytes": stage.normalized.len(),
             "identity_sha256": crate::hashing::sha256_hex(stage.normalized.as_bytes()),
         });
         if let Some(previous) = index.checked_sub(1).and_then(|i| stages.get(i)) {
             metrics["delta_bytes"] = serde_json::json!(
                 stage
-                    .flat
+                    .normalized
                     .len()
-                    .checked_sub(previous.flat.len())
+                    .checked_sub(previous.normalized.len())
                     .unwrap_or_else(|| panic!(
                         "representative {} stage unexpectedly shrank prompt",
                         stage.name
@@ -8526,8 +9053,8 @@ fn measure_representative_runtime_context()
     let payload = serde_json::json!({
         "fixture_id": REPRESENTATIVE_FIXTURE_ID,
         "stages": stage_metrics,
-        "total_bytes": final_stage.flat.len(),
-        "total_tokens_est": final_stage.flat.len().div_ceil(4),
+        "total_bytes": final_stage.normalized.len(),
+        "total_tokens_est": final_stage.normalized.len().div_ceil(4),
         "system_prompt_blocks": final_blocks,
         "prompts_byte_identical": final_stage.flat == repeated_flat,
     });
@@ -8559,7 +9086,7 @@ fn representative_runtime_context_fixture_is_stable_and_contains_expected_marker
         };
         assert_eq!(
             payload["stages"][current.name]["delta_bytes"],
-            current.flat.len() - previous.flat.len(),
+            current.normalized.len() - previous.normalized.len(),
             "representative {} delta must be computed from its adjacent stages",
             current.name
         );
@@ -12851,7 +13378,9 @@ async fn sync_session_different_id_finalizes_live_worker() {
 
     let agent_id = {
         let mut manager = manager.write().await;
-        manager.insert_test_running_agent("close", &workspace)
+        let agent_id = manager.insert_test_running_agent("close", &workspace);
+        manager.assign_test_session_owner(&agent_id, "session-a");
+        agent_id
     };
 
     // A different id is a conversation boundary: the live worker must be
@@ -13224,12 +13753,15 @@ fn context_budget_reserves_output_and_headroom() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // the internal effective_max_output_tokens() call sees a stable env.
     let _lock = lock_test_env();
-    // V4 has a 1M context window — the only family that comfortably hosts
-    // a 256K output reservation without saturating the input budget to 0.
+    // Preflight reserves exactly the route-effective output request plus the
+    // shared safety headroom, even on a 1M route.
     let budget = context_input_budget_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro")
         .expect("deepseek-v4-pro should have a known context window");
     let v4_window: usize = 1_000_000;
-    let expected = v4_window - (TURN_MAX_OUTPUT_TOKENS as usize) - 1_024usize;
+    let expected = v4_window
+        - effective_max_output_tokens_for_route(ApiProvider::Deepseek, "deepseek-v4-pro", None)
+            as usize
+        - 1_024usize;
     assert_eq!(budget, expected);
 }
 
@@ -13303,6 +13835,33 @@ fn route_context_budget_prefers_resolved_route_limits() {
     assert_eq!(budget.window_tokens, 128_000);
     assert_eq!(budget.output_cap_tokens, 32_768);
     assert_eq!(budget.available_input_tokens, 34_208);
+}
+
+#[test]
+fn route_input_limit_blocks_oversized_preflight_before_transport() {
+    let _lock = lock_test_env();
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(1_000_000),
+        input_tokens: Some(128_000),
+        output_tokens: Some(64_000),
+    };
+    let estimated_input = 200_000;
+    let budget = route_context_budget_for_route(
+        ApiProvider::Vllm,
+        "DeepSeek-V4-Flash",
+        Some(limits),
+        estimated_input,
+    )
+    .expect("resolved route limits should produce the turn-loop preflight budget");
+
+    assert_eq!(budget.window_tokens, 1_000_000);
+    assert_eq!(budget.output_cap_tokens, 64_000);
+    assert_eq!(budget.input_budget_ceiling, 128_000);
+    assert_eq!(budget.available_input_tokens, 0);
+    assert!(
+        estimated_input > usize::try_from(budget.input_budget_ceiling).unwrap(),
+        "the turn-loop preflight must recover before constructing a network request"
+    );
 }
 
 #[test]
@@ -13419,18 +13978,56 @@ fn effective_max_output_tokens_caps_api_request_for_large_window_models() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // v4_cap and flash_cap below see the same env state.
     let _lock = lock_test_env();
-    // Hosted V4 documents a 384K output ceiling in the bundled catalogue.
-    // That raise is intentional (#5373): the generic 65K floor is only the
-    // fallback for undescribed models. Self-hosted vLLM/SGLang stay
-    // RouteDeclaredUnknown and do not inherit this number.
+    // Hosted V4 documents a 384K capability ceiling in the bundled catalogue,
+    // but a ceiling is not a safe no-config request size. The operator can
+    // still request a larger value explicitly; the automatic request starts
+    // at the ordinary 64K cap (#5516/#5518).
     let v4_cap = effective_max_output_tokens("deepseek-v4-pro");
     assert_eq!(
-        v4_cap, 384_000,
-        "hosted V4 must use the documented catalogue ceiling, got {v4_cap}"
+        v4_cap, 65_536,
+        "hosted V4 must not turn the 384K capability maximum into the default request, got {v4_cap}"
     );
 
     let flash_cap = effective_max_output_tokens("deepseek-v4-flash");
     assert_eq!(v4_cap, flash_cap);
+}
+
+#[test]
+fn reasoning_max_does_not_add_a_second_deepseek_v4_output_reservation() {
+    let _lock = lock_test_env();
+    let _codewhale = EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+    let _deepseek = EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+    let limits = codewhale_config::route::RouteLimits {
+        context_tokens: Some(327_680),
+        input_tokens: None,
+        output_tokens: None,
+    };
+    let cap =
+        effective_max_output_tokens_for_route(ApiProvider::Vllm, "DeepSeek-V4-Flash", Some(limits));
+    let request = codewhale_core::request::prepare_primary_turn_request(
+        codewhale_core::request::PrimaryTurnRequest {
+            model: "DeepSeek-V4-Flash".to_string(),
+            messages: Vec::new(),
+            max_tokens: cap,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            reasoning_effort: Some("max".to_string()),
+        },
+    );
+    let budget = route_context_budget_for_route(
+        ApiProvider::Vllm,
+        "DeepSeek-V4-Flash",
+        Some(limits),
+        105_000,
+    )
+    .expect("max-reasoning vLLM route budget");
+
+    assert_eq!(request.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(request.max_tokens, 65_536);
+    assert_eq!(budget.output_cap_tokens, u64::from(request.max_tokens));
+    assert_eq!(budget.input_budget_ceiling, 261_120);
+    assert!(budget.available_input_tokens > 0);
 }
 
 struct ScopedDeepSeekMaxOutputTokens {
@@ -13476,8 +14073,8 @@ fn effective_max_output_tokens_env_override_returns_positive_value() {
     let _lock = lock_test_env();
     let _guard = ScopedDeepSeekMaxOutputTokens::set("16384");
 
-    // Override applies regardless of model — V4 hosted, V4 flash, sub-500K
-    // self-hosted all return the env value verbatim.
+    // Override applies regardless of model — V4 hosted, V4 flash, and
+    // self-hosted routes all return the env value verbatim before route clamps.
     assert_eq!(effective_max_output_tokens("deepseek-v4-pro"), 16_384);
     assert_eq!(effective_max_output_tokens("deepseek-v4-flash"), 16_384);
     assert_eq!(effective_max_output_tokens("qwen3-32b-256k"), 16_384);
@@ -13507,23 +14104,23 @@ fn effective_max_output_tokens_env_override_rejects_zero_and_invalid() {
 }
 
 #[test]
-fn internal_context_budget_tiers_reserved_output_by_window() {
+fn internal_context_budget_uses_the_wire_cap_across_window_sizes() {
     // Serialize with other tests that mutate DEEPSEEK_MAX_OUTPUT_TOKENS so
     // both branches below see a stable env.
     let _lock = lock_test_env();
-    // Large-context (>=500K) models reserve the full TURN_MAX_OUTPUT_TOKENS
-    // headroom so long V4 sessions don't compact prematurely.
+    // Large routes use the same effective output cap that reaches the wire.
     let internal_budget =
         context_input_budget_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro")
             .expect("V4 should have a known context window");
     let v4_window: usize = 1_000_000;
-    let expected_internal = v4_window - (TURN_MAX_OUTPUT_TOKENS as usize) - 1_024usize;
+    let expected_internal = v4_window
+        - effective_max_output_tokens_for_route(ApiProvider::Deepseek, "deepseek-v4-pro", None)
+            as usize
+        - 1_024usize;
     assert_eq!(internal_budget, expected_internal);
 
-    // Sub-500K windows cross into the effective-cap branch: a 256K self-hosted
-    // deployment must yield a usable positive budget rather than None. The
-    // previous formula reserved the full 262K and computed 256K - 262K - 1K,
-    // which underflowed to None and silently disabled preflight/recovery.
+    // A 256K self-hosted deployment uses the same rule and yields a usable
+    // positive budget rather than silently disabling preflight/recovery.
     let small_window_budget =
         context_input_budget_for_provider(ApiProvider::Openai, "qwen3-32b-256k")
             .expect("a 256K-suffix model must yield Some budget via the effective-cap branch");
@@ -14241,29 +14838,6 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
     let marker = tmp.path().join("survivor-marker.txt");
     let shell_manager = crate::tools::shell::new_shared_shell_manager(tmp.path().to_path_buf());
 
-    // Background sleep-then-write: still running at interrupt time, and its
-    // write lands only after the UI would have said "interrupted".
-    let task_id = {
-        let mut manager = shell_manager.lock().expect("shell manager");
-        let result = manager
-            .execute_with_options_env(
-                &format!("sleep 5 && touch '{}'", marker.display()),
-                None,
-                60_000,
-                true,
-                None,
-                false,
-                None,
-                HashMap::new(),
-            )
-            .expect("spawn background job");
-        result.task_id.expect("background task id")
-    };
-    assert!(
-        !marker.exists(),
-        "marker must not exist before the interrupt"
-    );
-
     let runtime_services = crate::tools::spec::RuntimeToolServices {
         shell_manager: Some(shell_manager.clone()),
         ..crate::tools::spec::RuntimeToolServices::default()
@@ -14277,6 +14851,32 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new(engine_config, &Config::default());
+
+    // Background sleep-then-write: still running at interrupt time, and its
+    // write lands only after the UI would have said "interrupted". Stamp the
+    // engine's immutable session owner so a replacement session cannot see or
+    // control it.
+    let task_id = {
+        let mut manager = shell_manager.lock().expect("shell manager");
+        let result = manager
+            .execute_with_options_env_for_session(
+                &format!("sleep 5 && touch '{}'", marker.display()),
+                None,
+                60_000,
+                true,
+                None,
+                false,
+                None,
+                HashMap::new(),
+                &engine.session.id,
+            )
+            .expect("spawn background job");
+        result.task_id.expect("background task id")
+    };
+    assert!(
+        !marker.exists(),
+        "marker must not exist before the interrupt"
+    );
 
     engine.emit_interrupted_survivor_status().await;
 
@@ -14306,8 +14906,10 @@ async fn interrupted_turn_names_surviving_background_shell_jobs() {
 
 /// R6 injection-size regression: the per-turn `<turn_meta>` block, built
 /// (never sent) from the same snapshot path production uses. Measured 254B
-/// on 2026-08-02; ceiling is measured +10% so growth is a reviewed act.
-const TURN_META_BYTE_CEILING: usize = 280;
+/// on 2026-08-02; the unavailable-backend qualifier adds 48B (Linux without
+/// bwrap, all Windows). Ceiling is that host's measured size +10%
+/// so growth is a reviewed act.
+const TURN_META_BYTE_CEILING: usize = 333;
 
 #[test]
 fn turn_meta_block_stays_within_measured_ceiling() {
@@ -14366,9 +14968,9 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let (engine, _handle) = Engine::new(config, &Config::default());
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
 
-    let meta_for_mode = |mode: AppMode| -> String {
+    let meta_for_mode = |engine: &Engine, mode: AppMode| -> String {
         let prompt_context = NextTurnPromptContext::for_planned_turn(
             ApiProvider::Deepseek,
             "deepseek-v4-flash".to_string(),
@@ -14402,7 +15004,7 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
         text.clone()
     };
 
-    let agent_meta = meta_for_mode(AppMode::Agent);
+    let agent_meta = meta_for_mode(&engine, AppMode::Agent);
     assert!(
         agent_meta.contains("Current sandbox posture: workspace-write"),
         "{agent_meta}"
@@ -14410,12 +15012,47 @@ fn turn_metadata_names_the_effective_sandbox_posture() {
 
     // Plan mode must surface the read-only clamp without promising that this
     // non-interactive posture can open an escalation prompt.
-    let plan_meta = meta_for_mode(AppMode::Plan);
+    let plan_meta = meta_for_mode(&engine, AppMode::Plan);
     assert!(
         plan_meta.contains(
             "Current sandbox posture: read-only (shell writes are blocked; ordinary approval does not change this)"
         ),
         "{plan_meta}"
+    );
+
+    // Pin deterministic states instead of branching on the CI host. The
+    // production value is also captured once at engine construction.
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::LocalOs;
+    let local_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        local_meta.contains("local OS sandbox applied"),
+        "{local_meta}"
+    );
+
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::Unavailable;
+    let unavailable_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        unavailable_meta.contains("policy only; no execution sandbox available"),
+        "{unavailable_meta}"
+    );
+
+    engine.sandbox_enforcement = crate::sandbox::policy::SandboxEnforcement::ExternalBackend;
+    let external_meta = meta_for_mode(&engine, AppMode::Agent);
+    assert!(
+        external_meta.contains("workspace-write policy"),
+        "{external_meta}"
+    );
+    assert!(
+        external_meta.contains("external execution backend configured"),
+        "{external_meta}"
+    );
+    assert!(
+        external_meta.contains("isolation unverified by Codewhale"),
+        "{external_meta}"
+    );
+    assert!(
+        !external_meta.contains("writes inside the workspace"),
+        "{external_meta}"
     );
 }
 
@@ -16401,13 +17038,15 @@ fn network_drop_resume_respects_budget_and_cancellation() {
     );
 }
 
-// === interactive mid-stream network-drop resume (0.9.4) ======================
+// === interactive mid-stream network-drop resume (0.9.4; reworked 0.9.10) =========
 //
 // The interactive TUI used to fail the turn when a provider stream dropped
 // after partial output because the #103 policy treated any post-content error
-// as terminal. The model now preserves the partial reply, commits it as an
-// assistant message, appends a runtime continuation user message, and re-issues
-// the request.
+// as terminal. The model now preserves a visible partial reply as a committed
+// assistant message and re-issues the request. Since 0.9.10 the recovery is
+// typed engine-internal state (`StreamResume`): no synthetic `[runtime]` user
+// continuation message is appended, and a thinking-only drop preserves
+// nothing and never claims it did.
 
 #[test]
 fn interactive_network_drop_resume_only_fires_for_interactive_hosts() {
@@ -16469,6 +17108,29 @@ fn interactive_network_drop_resume_respects_budget_and_cancellation() {
         !super::should_resume_interactive_after_network_drop(true, true, true, true, 0, true),
         "cancelled turn must not resume"
     );
+}
+
+#[test]
+fn stream_retry_budget_caps_resumes_in_mechanism() {
+    // "At most one bounded retry per drop" is enforced by types, not by a
+    // comment: `authorize()` is the only way to spend a resume and it refuses
+    // once MAX_STREAM_RETRIES resumes have been issued, whatever the guard
+    // predicates say. A healthy round resets the chain.
+    let mut budget = super::StreamRetryBudget::default();
+    assert_eq!(budget.spent(), 0);
+    assert_eq!(budget.authorize(), Some(1));
+    assert_eq!(budget.authorize(), Some(2));
+    assert_eq!(budget.authorize(), Some(3));
+    assert_eq!(
+        budget.authorize(),
+        None,
+        "authorize() must refuse past MAX_STREAM_RETRIES"
+    );
+    assert_eq!(budget.authorize(), None, "and keep refusing");
+    assert_eq!(budget.spent(), super::MAX_STREAM_RETRIES);
+    budget.reset();
+    assert_eq!(budget.spent(), 0);
+    assert_eq!(budget.authorize(), Some(1));
 }
 
 /// Model client whose first `failures` streams emit partial content and then
@@ -16996,7 +17658,7 @@ async fn run_interactive_turn_with_flaky_network(
 }
 
 #[tokio::test]
-async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_drop() {
+async fn interactive_turn_preserves_partial_reply_and_recovers_after_network_drop() {
     let (model, events) = run_interactive_turn_with_flaky_network(1).await;
 
     assert_eq!(
@@ -17031,15 +17693,45 @@ async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_d
         "a transient drop that the retry recovers must not surface an error event: {events:?}"
     );
 
-    // The partial reply must survive in the transcript, followed by a runtime
-    // continuation user message and the retried assistant content.
-    let transcript_text = events
+    // The visible fragment must survive as an assistant message, followed by
+    // the retried assistant content — and nothing else. The recovery is
+    // typed internal state, so no synthetic `[runtime]` user turn may appear.
+    let transcript = events
         .iter()
-        .filter_map(|event| match event {
-            Event::SessionUpdated { messages, .. } => Some(messages),
+        .rev()
+        .find_map(|event| match event {
+            Event::SessionUpdated { messages, .. } => Some(messages.clone()),
             _ => None,
         })
-        .flatten()
+        .expect("final SessionUpdated");
+    assert!(
+        transcript
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .all(|block| match block {
+                ContentBlock::Text { text, .. } => !text.contains("[runtime]"),
+                _ => true,
+            }),
+        "a retried turn must not insert a synthetic [runtime] user message: {transcript:?}"
+    );
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1,
+        "the operator's own turn must be the only user message: {transcript:?}"
+    );
+    let assistant_cells = transcript
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .count();
+    assert_eq!(
+        assistant_cells, 2,
+        "preserved fragment + one authoritative continuation: {transcript:?}"
+    );
+    let transcript_text = transcript
+        .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -17049,15 +17741,237 @@ async fn interactive_turn_preserves_partial_reply_and_recoveries_after_network_d
         .join("\n");
     assert!(
         transcript_text.contains("partial answer that must be discarded"),
-        "the partial reply must be preserved in the session: {transcript_text}"
+        "the visible partial reply must be preserved in the session: {transcript_text}"
+    );
+    assert_eq!(
+        transcript_text.matches("recovered after retry").count(),
+        1,
+        "exactly one authoritative final answer, not a duplicate: {transcript_text}"
+    );
+}
+
+/// Streams only hidden reasoning and then dies with the network-class read
+/// error; later streams complete a normal text turn. This is the shape of the
+/// 0.9.10 regression: a thinking-only drop used to persist a synthetic
+/// `[runtime]` user message claiming a partial answer had been preserved.
+struct ThinkingOnlyDropModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    failures: usize,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
+    fn provider_name(&self) -> &str {
+        "flaky-network"
+    }
+
+    fn model(&self) -> &str {
+        "local-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("thinking-only drop regression uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if call <= self.failures {
+            // Hidden reasoning only — no text block is ever opened, so nothing
+            // visible streams before the transport dies. This still flips
+            // `any_content_received`, which is what routes the drop to the
+            // interactive resume path instead of the transparent retry.
+            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+                Ok(canned::message_start("thinking_only_msg")),
+                Ok(StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: crate::models::ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                }),
+                Ok(canned::thinking_delta(
+                    0,
+                    "hidden reasoning that no operator ever saw",
+                )),
+                Err(anyhow::anyhow!(
+                    "Stream read error: error decoding response body"
+                )),
+            ];
+            return Ok(Box::pin(futures_util::stream::iter(events)));
+        }
+        let events = canned::simple_text_turn("the one authoritative answer")
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A thinking-only mid-stream drop must recover without ever claiming a
+/// visible partial reply was preserved, and must leave exactly one
+/// authoritative assistant answer in the persisted conversation.
+#[tokio::test]
+async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_did() {
+    let model = std::sync::Arc::new(ThinkingOnlyDropModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        failures: 1,
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let config = Config::default();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: true,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "solve the task".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send thinking-only drop turn");
+
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), async {
+            handle.rx_event.write().await.recv().await
+        })
+        .await
+        .expect("thinking-only drop event timeout")
+        .expect("thinking-only drop event");
+        let terminal = matches!(event, Event::TurnComplete { .. });
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the thinking-only drop must be re-issued exactly once"
+    );
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete { status, .. } => Some(*status),
+            _ => None,
+        })
+        .expect("terminal TurnComplete");
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+
+    // Only hidden reasoning streamed, so the recovery copy must say "retrying"
+    // and must never claim a partial reply was preserved.
+    let retry_statuses = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Status { message } if message.contains("Connection interrupted") => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retry_statuses.len(),
+        1,
+        "exactly one bounded retry per drop: {events:?}"
     );
     assert!(
-        transcript_text.contains("recovered after retry"),
-        "retried content must be committed: {transcript_text}"
+        retry_statuses[0].contains("retrying (1/"),
+        "the retry status must be announced: {retry_statuses:?}"
     );
     assert!(
-        transcript_text.contains("provider stream dropped mid-response"),
-        "the runtime continuation message must be appended: {transcript_text}"
+        !retry_statuses[0].contains("preserving partial reply"),
+        "a thinking-only drop has no visible text to preserve: {retry_statuses:?}"
+    );
+
+    // The persisted conversation keeps the operator's turn and exactly one
+    // authoritative assistant answer — no synthetic `[runtime]` user message,
+    // no duplicated answer, no orphaned thinking-only assistant cell.
+    let transcript = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::SessionUpdated { messages, .. } => Some(messages.clone()),
+            _ => None,
+        })
+        .expect("final SessionUpdated");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1,
+        "the operator's own turn must be the only user message: {transcript:?}"
+    );
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1,
+        "exactly one authoritative assistant answer after recovery: {transcript:?}"
+    );
+    let transcript_text = transcript
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !transcript_text.contains("[runtime]"),
+        "a retried turn must not insert a synthetic user message: {transcript_text}"
+    );
+    assert!(
+        !transcript_text.contains("hidden reasoning that no operator ever saw"),
+        "an invisible thinking-only fragment must not be persisted as reply text: {transcript_text}"
+    );
+    assert_eq!(
+        transcript_text
+            .matches("the one authoritative answer")
+            .count(),
+        1,
+        "the recovered answer must be persisted exactly once: {transcript_text}"
     );
 }
 
@@ -17358,7 +18272,7 @@ fn agent_list_event_carries_the_typed_coordination_projection() {
     use crate::tools::subagent::coord::{DecisionRecord, DecisionStatus};
 
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
-    manager
+    let recorded = manager
         .record_coordination_decision(DecisionRecord {
             decision_id: "decision-event".to_string(),
             subject: "typed event".to_string(),
@@ -17371,16 +18285,21 @@ fn agent_list_event_carries_the_typed_coordination_projection() {
             sequence: 0,
         })
         .expect("record decision");
+    manager
+        .stamp_coordination_sequence_for_session(recorded.sequence, "session-a")
+        .expect("stamp decision owner");
 
     let Event::AgentList {
+        owner_session_id,
         agents,
         coordination,
         ..
-    } = agent_list_event(&manager)
+    } = agent_list_event(&manager, "session-a")
     else {
         panic!("expected AgentList event");
     };
     assert!(agents.is_empty());
+    assert_eq!(owner_session_id, "session-a");
     assert_eq!(coordination.decisions.len(), 1);
     assert_eq!(coordination.decisions[0].decision_id, "decision-event");
     assert_eq!(coordination.decisions[0].status, DecisionStatus::Accepted);
@@ -17577,10 +18496,12 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
     // This must return Err immediately — the handler should never hang.
     let agents = vec![];
     let result = tx_event.try_send(Event::AgentList {
+        owner_session_id: "session-a".to_string(),
         agents,
         coordination: crate::tools::subagent::SubAgentManager::new(PathBuf::from("."), 1)
             .coordination_detail_projection(None, 24),
         queued_follow_ups: std::collections::HashMap::new(),
+        roster: Vec::new(),
     });
     assert!(
         result.is_err(),
@@ -17785,6 +18706,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
+    let owner_session_id = engine.session.id.clone();
 
     let stdout_body = format!("stdout-start-{}-stdout-end", "o".repeat(2_048));
     let stderr_body = format!("stderr-start-{}-stderr-end", "e".repeat(2_048));
@@ -17797,7 +18719,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
     let task_id = {
         let mut shell = engine.shell_manager.lock().expect("shell manager");
         let started = shell
-            .execute_with_options_env_for_owner(
+            .execute_with_options_env_for_owner_and_session(
                 &command,
                 None,
                 30_000,
@@ -17807,6 +18729,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
                 None,
                 std::collections::HashMap::new(),
                 None,
+                &owner_session_id,
             )
             .expect("start background job");
         started.task_id.expect("background task id")
@@ -18002,11 +18925,12 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         ..Default::default()
     };
     let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let owner_session_id = engine.session.id.clone();
 
     let _task_id = {
         let mut shell = engine.shell_manager.lock().expect("shell manager");
         let started = shell
-            .execute_with_options_env_for_owner(
+            .execute_with_options_env_for_owner_and_session(
                 "echo shell-wake-done",
                 None,
                 30_000,
@@ -18016,6 +18940,7 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
                 None,
                 std::collections::HashMap::new(),
                 None,
+                &owner_session_id,
             )
             .expect("start background job");
         started.task_id.expect("background task id")

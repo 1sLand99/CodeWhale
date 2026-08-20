@@ -93,9 +93,17 @@ default_text_model = "deepseek-v4-pro"
 # Auto-Review / Full Access — not the reasoning tier.)
 reasoning_effort = "max"
 
-# NOTE: `show_thinking`, `thinking_default_expanded`, and `cost_currency`
-# live in `~/.codewhale/settings.toml`, not here — `Config` has no such
-# fields and unknown keys are ignored. See crates/tui/src/settings.rs.
+# NOTE: `show_thinking`, `thinking_default_expanded`, `thinking_preview_lines`,
+# `help_expand_groups`, `pin_last_prompt`, and `cost_currency` live in
+# `~/.codewhale/settings.toml`, not here — `Config` has no such fields and
+# unknown keys are ignored. See crates/tui/src/settings.rs.
+#
+# Density (Grok-like compact defaults; turn these up if you want more shown):
+#   thinking_preview_lines = 2     # 0 header-only, 10 older dump
+#   thinking_default_expanded = false
+#   help_expand_groups = false     # true = F1 starts fully expanded
+#   pin_last_prompt = true
+#   show_tool_details = false
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Startup update check
@@ -122,8 +130,10 @@ check_interval_hours = 24
 #
 # Invalid slots are skipped with a warning, duplicate slots use the last entry,
 # and unknown actions are preserved so the UI can show a disabled entry.
-# Slash commands can be bound as slash.<name>, for example slash.mode. Commands
-# that require arguments pre-fill the composer instead of running incomplete.
+# Slash commands can be bound as slash.<name>, for example slash.workflow.
+# `/hotbar on` writes the default slots: slash.workflow, slash.goal, slash.auto,
+# then Plan/Work/Operate, palette, and sidebar. Commands that require arguments
+# pre-fill the composer instead of running incomplete.
 #
 # [[hotbar]]
 # slot = 1
@@ -381,7 +391,8 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 #
 # prefer_bwrap = false  # default — use Landlock only
 #
-# Env override: DEEPSEEK_PREFER_BWRAP=true
+# Env override: CODEWHALE_PREFER_BWRAP=true
+# Legacy alias (deprecated until 0.10.0): DEEPSEEK_PREFER_BWRAP=true
 #
 # With prefer_bwrap = true, the sandbox gets a private /dev and /proc plus a
 # writable isolated /tmp by default, so toolchains work without widening the

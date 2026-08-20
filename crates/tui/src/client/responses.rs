@@ -52,10 +52,14 @@ pub(super) fn build_responses_body_for_provider(
     if !is_deepseek {
         body["store"] = json!(false);
     }
+    // Every Responses route receives the same resolved request envelope as
+    // Chat and Messages. Omitting this field let auxiliary Responses calls
+    // escape the central route cap and made preview unable to prove the wire
+    // allowance.
+    if request.max_tokens > 0 {
+        body["max_output_tokens"] = json!(request.max_tokens);
+    }
     if is_deepseek {
-        if request.max_tokens > 0 {
-            body["max_output_tokens"] = json!(request.max_tokens);
-        }
         if let Some(temperature) = request.temperature {
             body["temperature"] = json!(temperature);
         }
@@ -659,7 +663,7 @@ impl DeepSeekClient {
     }
 }
 
-fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Value {
+pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Value]>) -> Value {
     let (image, omitted) = crate::image_attach::provider_tool_result_image_refs(content_blocks);
     let content = crate::image_attach::tool_result_text_with_omission(content, omitted);
     let Some((mime_type, data)) = image else {

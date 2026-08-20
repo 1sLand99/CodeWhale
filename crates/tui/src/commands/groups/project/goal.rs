@@ -1,27 +1,28 @@
-//! /goal command, with /hunt kept as a compatibility alias (#2092).
-
-use std::io::Write;
+//! `/goal` — codex-style thread goals: set, inspect, pause, resume, and close
+//! a durable objective. The engine owns the goal: setting or resuming one
+//! starts work through the runtime's continuation steering, never by echoing
+//! the objective back as a user message.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
 use crate::tools::goal::GoalStatus;
-use crate::tui::app::{App, AppAction, HuntVerdict};
-use serde_json::{Value, json};
+use crate::tui::app::{App, AppAction};
+use serde_json::json;
 
 use crate::commands::CommandResult;
 
 /// Declare, show, pause, resume, or close a goal.
-fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn goal_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg {
         Some("clear") | Some("reset") => {
-            app.hunt.quarry = None;
-            app.hunt.token_budget = None;
-            app.hunt.tokens_used = 0;
-            app.hunt.time_used_seconds = 0;
-            app.hunt.continuation_count = 0;
-            app.hunt.started_at = None;
-            app.hunt.finished_at = None;
-            app.hunt.verdict = HuntVerdict::default();
+            app.goal.objective = None;
+            app.goal.token_budget = None;
+            app.goal.tokens_used = 0;
+            app.goal.time_used_seconds = 0;
+            app.goal.continuation_count = 0;
+            app.goal.started_at = None;
+            app.goal.finished_at = None;
+            app.goal.status = GoalStatus::default();
             CommandResult::with_message_and_action(
                 "Goal cleared.",
                 AppAction::SetGoalStatus {
@@ -30,45 +31,43 @@ fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
                 },
             )
         }
-        Some("declare-hunted")
-        | Some("declare_hunted")
-        | Some("force-complete")
-        | Some("force_complete") => declare_hunted(app),
-        Some("done") | Some("complete") | Some("hunted") => {
-            close_hunt(app, HuntVerdict::Hunted, GoalStatus::Complete)
-        }
-        Some("pause") | Some("paused") | Some("wound") | Some("wounded") => {
-            close_hunt(app, HuntVerdict::Wounded, GoalStatus::Paused)
-        }
-        Some("resume") | Some("continue") => resume_hunt(app),
+        Some("done") | Some("complete") => close_goal(app, GoalStatus::Complete),
+        Some("pause") | Some("paused") => close_goal(app, GoalStatus::Paused),
+        Some("resume") | Some("continue") => resume_goal(app),
         Some("help") | Some("?") | Some("usage") => CommandResult::message(goal_usage()),
         Some("status") | Some("show") => goal_status(app),
-        Some("block") | Some("blocked") | Some("escape") | Some("escaped") => {
-            close_hunt(app, HuntVerdict::Escaped, GoalStatus::Blocked)
-        }
+        Some("block") | Some("blocked") => close_goal(app, GoalStatus::Blocked),
         Some(text) if !text.is_empty() => {
-            let (objective, budget) = parse_hunt_budget(text);
+            let (objective, budget) = parse_goal_budget(text);
             if objective.is_empty() || objective.chars().all(|c| c == '|') {
                 return CommandResult::error(goal_usage());
             }
-            app.hunt.quarry = Some(objective.clone());
-            app.hunt.token_budget = budget;
-            app.hunt.tokens_used = 0;
-            app.hunt.time_used_seconds = 0;
-            app.hunt.continuation_count = 0;
-            app.hunt.started_at = Some(std::time::Instant::now());
-            app.hunt.finished_at = None;
-            app.hunt.verdict = HuntVerdict::Hunting;
+            // Host projection first so the chip and status render the new
+            // goal immediately; the engine is authoritative and starts the
+            // first goal turn itself (runtime steering, not a user echo).
+            app.goal.objective = Some(objective.clone());
+            app.goal.token_budget = budget;
+            app.goal.tokens_used = 0;
+            app.goal.time_used_seconds = 0;
+            app.goal.continuation_count = 0;
+            app.goal.started_at = Some(std::time::Instant::now());
+            app.goal.finished_at = None;
+            app.goal.status = GoalStatus::Active;
             let budget_str = budget
                 .map(|b| format!(" (budget: {b} tokens)"))
                 .unwrap_or_default();
             CommandResult::with_message_and_action(
-                format!("Goal set: \"{objective}\"{budget_str} - tracking progress."),
-                AppAction::SendMessage(objective),
+                format!(
+                    "Goal set: \"{objective}\"{budget_str} — the agent works toward it across turns."
+                ),
+                AppAction::SetGoalObjective {
+                    objective,
+                    token_budget: budget,
+                },
             )
         }
         _ => {
-            if app.hunt.quarry.is_some() {
+            if app.goal.objective.is_some() {
                 goal_status(app)
             } else if app.api_messages.is_empty() {
                 // Nothing has happened yet: there is no context to derive an
@@ -100,26 +99,26 @@ fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// Plain status line: objective, state, elapsed, budget, continuations, and
 /// — for an active goal that no turn is driving right now — how to continue.
 fn goal_status(app: &App) -> CommandResult {
-    let Some(obj) = app.hunt.quarry.as_deref() else {
+    let Some(obj) = app.goal.objective.as_deref() else {
         return CommandResult::message(goal_usage());
     };
     let elapsed = app
-        .hunt
+        .goal
         .time_used_seconds
         .gt(&0)
-        .then(|| crate::elapsed::format_elapsed_secs(app.hunt.time_used_seconds))
+        .then(|| crate::elapsed::format_elapsed_secs(app.goal.time_used_seconds))
         .or_else(|| {
-            app.hunt
+            app.goal
                 .started_at
                 .map(|t| crate::elapsed::format_elapsed_secs(t.elapsed().as_secs()))
         })
         .unwrap_or_else(|| "unknown".to_string());
     let budget_str = app
-        .hunt
+        .goal
         .token_budget
         .map(|b| {
-            let used = if app.hunt.tokens_used > 0 {
-                app.hunt.tokens_used
+            let used = if app.goal.tokens_used > 0 {
+                app.goal.tokens_used
             } else {
                 u64::from(app.session.total_conversation_tokens)
             };
@@ -131,131 +130,134 @@ fn goal_status(app: &App) -> CommandResult {
             format!(" · tokens {used}/{b} ({pct:.0}%)")
         })
         .unwrap_or_default();
-    let mut state = hunt_verdict_label(app.hunt.verdict).to_string();
-    if let (HuntVerdict::Wounded, Some(reason)) = (app.hunt.verdict, app.hunt.pause_reason) {
+    let mut state = goal_status_label(app.goal.status).to_string();
+    if let (GoalStatus::Paused, Some(reason)) = (app.goal.status, app.goal.pause_reason) {
         state = format!("{state} ({})", reason.label());
     }
     let mut line = format!(
         "Goal {state}: \"{obj}\" · elapsed {elapsed}{budget_str} · continuations {}",
-        app.hunt.continuation_count
+        app.goal.continuation_count
     );
-    if app.hunt.verdict == HuntVerdict::Hunting && !app.is_loading {
+    if app.goal.status == GoalStatus::Active && !app.is_loading && !app.goal_continuation_waiting {
         line.push_str(" · ");
         line.push_str(&app.tr(MessageId::GoalStatusIdleHint));
     }
     CommandResult::message(line)
 }
 
-fn declare_hunted(app: &mut App) -> CommandResult {
-    let previous = app.hunt.verdict;
-    let result = close_hunt(app, HuntVerdict::Hunted, GoalStatus::Complete);
-    if !result.is_error {
-        crate::audit::log_sensitive_event(
-            "goal.declare_hunted",
-            declare_hunted_audit_details(previous, app),
-        );
-    }
-    result
-}
-
-fn declare_hunted_audit_details(previous: HuntVerdict, app: &App) -> Value {
-    json!({
-        "previous_verdict": hunt_verdict_name(previous),
-        "current_verdict": hunt_verdict_name(app.hunt.verdict),
-        "has_quarry": app.hunt.quarry.as_deref().is_some_and(|quarry| !quarry.is_empty()),
-    })
-}
-
-fn close_hunt(app: &mut App, verdict: HuntVerdict, status: GoalStatus) -> CommandResult {
-    if app.hunt.quarry.as_deref().is_none_or(str::is_empty) {
+/// Close out the goal at `status`. Pure control plane: the engine stops (or
+/// re-arms) the continuation loop from the `SetGoalStatus` op; no model turn
+/// is dispatched.
+fn close_goal(app: &mut App, status: GoalStatus) -> CommandResult {
+    if app.goal.objective.as_deref().is_none_or(str::is_empty) {
         return CommandResult::error("No goal set. Use /goal <objective> [budget: N] first.");
     }
 
-    let prev = app.hunt.verdict;
-    let should_write_trophy = matches!(verdict, HuntVerdict::Hunted) && prev != verdict;
-    if should_write_trophy && let Err(err) = write_trophy_card(app, verdict) {
-        return CommandResult::error(err);
-    }
-    app.hunt.verdict = verdict;
-    // Freeze the sidebar timer at the moment of close-out so it stops ticking
-    // for hunted/escaped goals. Wounded (paused) goals are not terminal — the
-    // timer re-arms on resume — but we still record the pause instant so a
-    // paused goal doesn't read as still-running in the sidebar.
-    if app.hunt.finished_at.is_none() {
-        app.hunt.finished_at = Some(std::time::Instant::now());
+    let previous = app.goal.status;
+    app.goal.status = status;
+    // Freeze the sidebar timer at close-out so terminal goals stop ticking.
+    // Paused goals are not terminal — the timer re-arms on resume — but the
+    // pause instant is still recorded so a paused goal doesn't read as
+    // still-running in the sidebar.
+    if app.goal.finished_at.is_none() {
+        app.goal.finished_at = Some(std::time::Instant::now());
     }
 
-    // Push the new status to the engine's SharedGoalState so the cross-turn
-    // continuation loop respects it: pause/blocked stops the loop, complete
-    // ends it, resume restarts it.
+    // `/goal done` overrides the model's own completion verdict; record it as
+    // an auditable control decision like every other authority-relevant act.
+    if status == GoalStatus::Complete && previous != status {
+        crate::audit::log_sensitive_event(
+            "goal.user_completed",
+            json!({
+                "previous_status": goal_status_name(previous),
+                "current_status": goal_status_name(status),
+            }),
+        );
+    }
+
     let action = AppAction::SetGoalStatus {
         status,
         clear: false,
     };
 
-    match verdict {
-        HuntVerdict::Hunted => {
-            let elapsed = goal_elapsed_at_close(&app.hunt);
+    match status {
+        GoalStatus::Complete => {
+            let elapsed = goal_elapsed_at_close(&app.goal);
             CommandResult::with_message_and_action(
                 format!("Goal complete. Elapsed: {elapsed}"),
                 action,
             )
         }
-        HuntVerdict::Wounded => CommandResult::with_message_and_action(
+        GoalStatus::Paused => CommandResult::with_message_and_action(
             "Goal paused. Progress is saved; use /goal resume to continue.",
             action,
         ),
-        HuntVerdict::Escaped => CommandResult::with_message_and_action("Goal blocked.", action),
-        HuntVerdict::Hunting => CommandResult::with_message_and_action("Goal active.", action),
+        GoalStatus::Blocked => CommandResult::with_message_and_action("Goal blocked.", action),
+        GoalStatus::Active => CommandResult::with_message_and_action("Goal active.", action),
     }
 }
 
-fn resume_hunt(app: &mut App) -> CommandResult {
-    let Some(objective) = app
-        .hunt
-        .quarry
+/// Resume a paused goal. The engine restarts the continuation loop itself
+/// (`SetGoalStatus` → schedule kickoff); the objective is never re-sent as a
+/// user message.
+fn resume_goal(app: &mut App) -> CommandResult {
+    if app
+        .goal
+        .objective
         .as_deref()
         .map(str::trim)
-        .filter(|objective| !objective.is_empty())
-        .map(str::to_string)
-    else {
+        .is_none_or(str::is_empty)
+    {
         return CommandResult::error("No paused goal set. Use /goal <objective> first.");
-    };
-
-    app.hunt.verdict = HuntVerdict::Hunting;
-    if app.hunt.started_at.is_none() {
-        app.hunt.started_at = Some(std::time::Instant::now());
     }
-    // Re-arm the elapsed timer: a resumed goal should keep ticking from where
-    // it left off (started_at is preserved), not stay frozen at the pause.
-    app.hunt.finished_at = None;
-    CommandResult::with_message_and_action("Goal resumed.", AppAction::SendMessage(objective))
+
+    // Resuming an already-active goal is a no-op: the continuation loop is
+    // already running, and re-asserting Active could stack a second
+    // autonomous turn. Report progress instead.
+    if app.goal.status == GoalStatus::Active {
+        return goal_status(app);
+    }
+
+    app.goal.status = GoalStatus::Active;
+    if app.goal.started_at.is_none() {
+        app.goal.started_at = Some(std::time::Instant::now());
+    }
+    // Re-arm the elapsed timer: a resumed goal keeps ticking from where it
+    // left off (started_at is preserved), not frozen at the pause.
+    app.goal.finished_at = None;
+    CommandResult::with_message_and_action(
+        "Goal resumed.",
+        AppAction::SetGoalStatus {
+            status: GoalStatus::Active,
+            clear: false,
+        },
+    )
 }
 
 fn goal_usage() -> &'static str {
-    "No goal set. /goal <objective> [budget: N] sets one; the agent works toward it \
+    "No goal set. /goal <objective> [budget: N] starts one; the agent works toward it \
      across turns until it is verified complete, blocked, or you stop it.\n\
-     /goal - progress of the current goal\n\
-     /goal pause - pause without continuing\n\
-     /goal resume - resume and continue\n\
-     /goal done - mark complete (declare-hunted skips verification)\n\
-     /goal blocked - mark blocked\n\
-     /goal clear - remove the current goal."
+     /goal — progress of the current goal\n\
+     /goal pause — pause without continuing\n\
+     /goal resume — resume and continue\n\
+     /goal done — mark complete (skips the model's verification)\n\
+     /goal blocked — mark blocked\n\
+     /goal clear — remove the current goal."
 }
 
-fn hunt_verdict_label(verdict: HuntVerdict) -> &'static str {
-    match verdict {
-        HuntVerdict::Hunting => "active",
-        HuntVerdict::Hunted => "complete",
-        HuntVerdict::Wounded => "paused",
-        HuntVerdict::Escaped => "blocked",
+fn goal_status_label(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "active",
+        GoalStatus::Complete => "complete",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Blocked => "blocked",
     }
 }
 
 /// Humanized elapsed time for a closed goal, frozen at the finish instant so
 /// the close-out message doesn't drift further each time it's read.
-fn goal_elapsed_at_close(hunt: &crate::tui::app::HuntState) -> String {
-    match (hunt.started_at, hunt.finished_at) {
+fn goal_elapsed_at_close(goal: &crate::tui::app::HostGoalState) -> String {
+    match (goal.started_at, goal.finished_at) {
         (Some(started), Some(finished)) => crate::elapsed::format_elapsed_secs(
             finished.saturating_duration_since(started).as_secs(),
         ),
@@ -264,134 +266,38 @@ fn goal_elapsed_at_close(hunt: &crate::tui::app::HuntState) -> String {
     }
 }
 
-fn hunt_verdict_name(verdict: HuntVerdict) -> &'static str {
-    match verdict {
-        HuntVerdict::Hunting => "hunting",
-        HuntVerdict::Hunted => "hunted",
-        HuntVerdict::Wounded => "wounded",
-        HuntVerdict::Escaped => "escaped",
+fn goal_status_name(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "active",
+        GoalStatus::Complete => "complete",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Blocked => "blocked",
     }
 }
 
 /// Parse text like "Implement login | budget: 50000" into (objective, budget).
-fn parse_hunt_budget(text: &str) -> (String, Option<u32>) {
-    if let Some((obj, rest)) = text.split_once(" | budget:") {
-        let budget = rest
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<u32>().ok());
-        (obj.trim().to_string(), budget)
-    } else if let Some((obj, rest)) = text.split_once("budget:") {
-        let budget = rest
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<u32>().ok());
-        (obj.trim().to_string(), budget)
-    } else {
-        (text.trim().to_string(), None)
-    }
-}
-
-/// Write a legacy trophy card to `~/.codewhale/trophies/<date>-<time>-<slug>.md`
-/// for the current goal result (#2092).
-fn write_trophy_card(app: &App, verdict: HuntVerdict) -> Result<std::path::PathBuf, String> {
-    let quarry = app
-        .hunt
-        .quarry
-        .as_deref()
-        .ok_or_else(|| "No goal set. Use /goal <objective> [budget: N] first.".to_string())?;
-    // Collapse consecutive non-alphanumeric chars into a single '-'
-    let mut slug = String::new();
-    let mut last_dash = false;
-    for c in quarry.chars() {
-        if c.is_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
+fn parse_goal_budget(text: &str) -> (String, Option<u32>) {
+    // Only an explicit, well-formed budget suffix splits the objective.
+    // `budget:` followed by something that is not a number is prose that
+    // belongs to the objective — truncating it would silently rewrite what
+    // the user asked for.
+    for separator in [" | budget:", " budget:", "budget:"] {
+        if let Some((objective, rest)) = text.split_once(separator) {
+            let budget = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u32>().ok());
+            if let Some(budget) = budget {
+                return (objective.trim().to_string(), Some(budget));
+            }
         }
     }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        return Err(
-            "Cannot write trophy card: goal objective has no filename-safe characters.".into(),
-        );
-    }
-    let now = chrono::Local::now();
-    let time = now.format("%H%M%S");
-    let date = now.format("%Y-%m-%d");
-    let date_str = date.to_string();
-    let now_str = now.to_string();
-    let dir = codewhale_config::ensure_state_dir("trophies")
-        .map_err(|err| format!("Could not resolve trophy directory: {err}"))?;
-    // Include time in filename to avoid collisions on same-date hunts.
-    let filename = format!("{date}-{time}-{slug}.md");
-    let path = dir.join(&filename);
-
-    let elapsed = app
-        .hunt
-        .started_at
-        .as_ref()
-        .map(|t| crate::elapsed::format_elapsed_secs(t.elapsed().as_secs()))
-        .unwrap_or_else(|| "unknown".to_string());
-    let verdict_str = hunt_verdict_name(verdict);
-    let tokens = if app.hunt.tokens_used > 0 {
-        u32::try_from(app.hunt.tokens_used).unwrap_or(u32::MAX)
-    } else {
-        app.session.total_conversation_tokens
-    };
-    let budget_str = app
-        .hunt
-        .token_budget
-        .map(|b| format!("{b}"))
-        .unwrap_or_else(|| "—".to_string());
-
-    let mut f = std::fs::File::create(&path)
-        .map_err(|err| format!("Could not create trophy card {}: {err}", path.display()))?;
-    write_trophy_card_contents(
-        &mut f,
-        TrophyCard {
-            quarry,
-            verdict: verdict_str,
-            date: &date_str,
-            elapsed: &elapsed,
-            tokens,
-            budget: &budget_str,
-            now: &now_str,
-        },
-    )
-    .map_err(|err| format!("Could not write trophy card {}: {err}", path.display()))?;
-
-    Ok(path)
-}
-
-struct TrophyCard<'a> {
-    quarry: &'a str,
-    verdict: &'a str,
-    date: &'a str,
-    elapsed: &'a str,
-    tokens: u32,
-    budget: &'a str,
-    now: &'a str,
-}
-
-fn write_trophy_card_contents(mut f: impl Write, card: TrophyCard<'_>) -> std::io::Result<()> {
-    writeln!(f, "# Goal result: {}", card.quarry)?;
-    writeln!(f)?;
-    writeln!(f, "- **Verdict**: {}", card.verdict)?;
-    writeln!(f, "- **Date**: {}", card.date)?;
-    writeln!(f, "- **Elapsed**: {}", card.elapsed)?;
-    writeln!(f, "- **Tokens used**: {}", card.tokens)?;
-    writeln!(f, "- **Token budget**: {}", card.budget)?;
-    writeln!(f)?;
-    writeln!(f, "_Generated by Codewhale `/goal` - {}_", card.now)?;
-    Ok(())
+    (text.trim().to_string(), None)
 }
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "goal",
-    aliases: &["hunt", "mubiao", "狩猎"],
+    aliases: &[],
     usage: "/goal [objective|status|pause|resume|done|blocked|clear] [budget: N]",
     description_id: MessageId::CmdGoalDescription,
 };
@@ -404,7 +310,7 @@ impl RegisterCommand for GoalCmd {
     }
 
     fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
-        hunt(app, arg)
+        goal_command(app, arg)
     }
 }
 
@@ -422,23 +328,78 @@ mod tests {
     }
 
     #[test]
-    fn test_set_hunt() {
+    fn test_set_goal_dispatches_control_plane_not_user_echo() {
         let mut app = create_test_app();
-        let result = hunt(&mut app, Some("Fix the login bug"));
+        let result = goal_command(&mut app, Some("Fix the login bug"));
         assert!(result.message.unwrap().contains("Goal set"));
-        assert_eq!(app.hunt.quarry.as_deref(), Some("Fix the login bug"));
-        assert_eq!(
-            app.hunt.verdict.goal_status(),
-            crate::tools::goal::GoalStatus::Active
-        );
+        assert_eq!(app.goal.objective.as_deref(), Some("Fix the login bug"));
+        assert_eq!(app.goal.status, GoalStatus::Active);
+        // The engine owns the kickoff: the objective must reach it as a
+        // SetGoalObjective control op, never as a SendMessage user echo.
         assert!(matches!(
             result.action,
-            Some(AppAction::SendMessage(msg)) if msg == "Fix the login bug"
+            Some(AppAction::SetGoalObjective { ref objective, token_budget: None })
+                if objective == "Fix the login bug"
         ));
     }
 
     #[test]
-    fn test_hunt_without_argument_synthesizes_goal_from_context() {
+    fn test_goal_budget_parsing_reaches_the_op() {
+        let mut app = create_test_app();
+        let result = goal_command(&mut app, Some("Ship 0.9.10 | budget: 5000"));
+        assert_eq!(app.goal.objective.as_deref(), Some("Ship 0.9.10"));
+        assert_eq!(app.goal.token_budget, Some(5000));
+        assert!(matches!(
+            result.action,
+            Some(AppAction::SetGoalObjective { ref objective, token_budget: Some(5000) })
+                if objective == "Ship 0.9.10"
+        ));
+    }
+
+    #[test]
+    fn pause_resume_and_clear_are_control_ops_without_model_turns() {
+        let mut app = create_test_app();
+        let _ = goal_command(&mut app, Some("Keep the build green"));
+        let paused = goal_command(&mut app, Some("pause"));
+        assert!(paused.message.unwrap().contains("paused"));
+        assert_eq!(app.goal.status, GoalStatus::Paused);
+        assert!(matches!(
+            paused.action,
+            Some(AppAction::SetGoalStatus {
+                status: GoalStatus::Paused,
+                clear: false
+            })
+        ));
+        assert!(app.goal.finished_at.is_some(), "pause freezes the timer");
+
+        let resumed = goal_command(&mut app, Some("resume"));
+        assert!(resumed.message.unwrap().contains("resumed"));
+        assert_eq!(app.goal.status, GoalStatus::Active);
+        assert!(app.goal.finished_at.is_none(), "resume re-arms the timer");
+        // Resume is a control op — the engine schedules the continuation
+        // itself; the objective is not echoed as a user message.
+        assert!(matches!(
+            resumed.action,
+            Some(AppAction::SetGoalStatus {
+                status: GoalStatus::Active,
+                clear: false
+            })
+        ));
+
+        let cleared = goal_command(&mut app, Some("clear"));
+        assert!(cleared.message.unwrap().contains("cleared"));
+        assert_eq!(app.goal.objective, None);
+        assert!(matches!(
+            cleared.action,
+            Some(AppAction::SetGoalStatus {
+                status: GoalStatus::Active,
+                clear: true
+            })
+        ));
+    }
+
+    #[test]
+    fn test_goal_without_argument_synthesizes_goal_from_context() {
         // Bare /goal with no active goal is context-dependent: the model
         // derives the objective from the conversation and sets it via
         // create_goal — it must not error with a usage demand.
@@ -450,7 +411,7 @@ mod tests {
                 cache_control: None,
             }],
         });
-        let result = hunt(&mut app, None);
+        let result = goal_command(&mut app, None);
         assert!(!result.is_error);
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected SendMessage action");
@@ -464,313 +425,58 @@ mod tests {
         // No conversation yet: there is nothing to derive an objective from,
         // so the answer is usage — free, and not a question to the model.
         let mut app = create_test_app();
-        let result = hunt(&mut app, None);
+        let result = goal_command(&mut app, None);
         assert!(!result.is_error);
         assert!(result.action.is_none());
         assert!(result.message.unwrap().contains("/goal <objective>"));
+    }
 
-        let result = hunt(&mut app, Some("help"));
-        assert!(result.action.is_none());
-        assert!(result.message.unwrap().contains("/goal resume"));
+    #[test]
+    fn goal_status_reports_objective_and_state() {
+        let mut app = create_test_app();
+        let _ = goal_command(&mut app, Some("Make the suite green | budget: 100"));
+        let result = goal_command(&mut app, Some("status"));
+        let line = result.message.unwrap();
+        assert!(line.contains("Make the suite green"));
+        assert!(line.contains("active"));
+        assert!(line.contains("100"));
+    }
+
+    #[test]
+    fn resume_on_an_active_goal_is_a_no_op_report() {
+        // Re-asserting Active while the loop is already running must not
+        // schedule a second autonomous turn.
+        let mut app = create_test_app();
+        goal_command(&mut app, Some("Keep the build green"));
+        let resumed = goal_command(&mut app, Some("resume"));
+        assert!(!resumed.is_error);
         assert!(
-            app.hunt.quarry.is_none(),
-            "help must not become an objective"
+            resumed.action.is_none(),
+            "no control op on already-active goal"
         );
+        assert!(resumed.message.unwrap().contains("Keep the build green"));
     }
 
     #[test]
-    fn goal_status_is_plain_and_says_how_to_continue_when_idle() {
+    fn invalid_budget_suffix_stays_part_of_the_objective() {
         let mut app = create_test_app();
-        let _ = hunt(&mut app, Some("ship the release notes"));
-        app.is_loading = false;
-        let result = hunt(&mut app, Some("status"));
-        let text = result.message.unwrap();
-        assert!(
-            text.starts_with("Goal active: \"ship the release notes\""),
-            "{text}"
-        );
-        assert!(text.contains("/goal resume"), "{text}");
-        assert!(!text.contains('['), "no bracket tags: {text}");
-
-        app.is_loading = true;
-        let text = hunt(&mut app, None).message.unwrap();
-        assert!(!text.contains("/goal resume"), "{text}");
-    }
-
-    #[test]
-    fn test_hunt_without_argument_shows_state_when_goal_active() {
-        // With an active goal, bare /goal stays a status readout.
-        let mut app = create_test_app();
-        let _ = hunt(&mut app, Some("Fix the login bug"));
-        let result = hunt(&mut app, None);
-        assert!(result.action.is_none());
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap()
-                .contains("Fix the login bug")
-        );
-    }
-
-    #[test]
-    fn test_command_usage_mentions_host_verbs() {
-        assert!(COMMAND_INFO.usage.contains("status"));
-        assert!(COMMAND_INFO.usage.contains("pause"));
-        assert!(COMMAND_INFO.usage.contains("resume"));
-        assert!(COMMAND_INFO.usage.contains("done"));
-        assert!(COMMAND_INFO.usage.contains("blocked"));
-        assert!(COMMAND_INFO.usage.contains("clear"));
-    }
-
-    #[test]
-    fn test_set_hunt_with_budget() {
-        let mut app = create_test_app();
-        let _ = hunt(&mut app, Some("Refactor auth | budget: 50000"));
-        assert_eq!(app.hunt.quarry.as_deref(), Some("Refactor auth"));
-        assert_eq!(app.hunt.token_budget, Some(50_000));
-        assert!(app.hunt.started_at.is_some());
-    }
-
-    #[test]
-    fn test_set_hunt_rejects_budget_only_objective() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("existing objective".to_string());
-        app.hunt.token_budget = Some(10_000);
-
-        let result = hunt(&mut app, Some("budget: 50000"));
-        assert!(result.is_error);
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("/goal <objective>")
-        );
-        assert_eq!(app.hunt.quarry.as_deref(), Some("existing objective"));
-        assert_eq!(app.hunt.token_budget, Some(10_000));
-    }
-
-    #[test]
-    fn test_clear_hunt() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("test".to_string());
-        app.hunt.token_budget = Some(100);
-        app.hunt.tokens_used = 5;
-        app.hunt.time_used_seconds = 3;
-        app.hunt.continuation_count = 1;
-        app.hunt.finished_at = Some(std::time::Instant::now());
-        let _ = hunt(&mut app, Some("clear"));
-        assert!(app.hunt.quarry.is_none());
-        assert!(app.hunt.token_budget.is_none());
-        assert_eq!(app.hunt.tokens_used, 0);
-        assert_eq!(app.hunt.time_used_seconds, 0);
-        assert_eq!(app.hunt.continuation_count, 0);
-        assert!(app.hunt.finished_at.is_none());
+        let result = goal_command(&mut app, Some("Fix budget: handling in settings"));
         assert_eq!(
-            app.hunt.verdict.goal_status(),
-            crate::tools::goal::GoalStatus::Active
+            app.goal.objective.as_deref(),
+            Some("Fix budget: handling in settings")
         );
-    }
-
-    #[test]
-    fn test_verdict_requires_existing_hunt() {
-        let mut app = create_test_app();
-
-        let result = hunt(&mut app, Some("wounded"));
-
-        assert!(result.is_error);
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
-        assert!(app.hunt.quarry.is_none());
-    }
-
-    #[test]
-    fn test_goal_pause_and_resume_update_status() {
-        let mut app = create_test_app();
-        let _ = hunt(&mut app, Some("Finish release prep"));
-
-        let paused = hunt(&mut app, Some("pause"));
-        // Pause now dispatches SetGoalStatus to push Paused into SharedGoalState.
-        assert!(matches!(
-            paused.action,
-            Some(AppAction::SetGoalStatus {
-                status: crate::tools::goal::GoalStatus::Paused,
-                clear: false
-            })
-        ));
-        assert_eq!(app.hunt.verdict, HuntVerdict::Wounded);
-        assert_eq!(
-            app.hunt.verdict.goal_status(),
-            crate::tools::goal::GoalStatus::Paused
-        );
-
-        let resumed = hunt(&mut app, Some("resume"));
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
-        assert_eq!(
-            app.hunt.verdict.goal_status(),
-            crate::tools::goal::GoalStatus::Active
-        );
-        assert!(matches!(
-            resumed.action,
-            Some(AppAction::SendMessage(msg)) if msg == "Finish release prep"
-        ));
-    }
-
-    #[test]
-    fn test_close_hunt_freezes_elapsed_timer() {
-        // close_hunt writes a trophy card under CODEWHALE_HOME/trophies. Isolate
-        // the home dir so sandbox/readonly HOME cannot turn a successful close
-        // into a trophy path error (and so we never touch the real home).
-        let _lock = crate::test_support::lock_test_env();
-        let temp = tempfile::tempdir().expect("isolated CODEWHALE_HOME");
-        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
-
-        let mut app = create_test_app();
-        let _ = hunt(&mut app, Some("Freeze the timer on close"));
-        assert!(
-            app.hunt.finished_at.is_none(),
-            "an active goal must not have a frozen finish time"
-        );
-
-        // Closing the goal as hunted must set finished_at so the sidebar timer
-        // stops ticking instead of reading "completed in {growing elapsed}".
-        let result = hunt(&mut app, Some("done"));
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Goal complete. Elapsed:"),
-            "close-out message should report a frozen elapsed; got {:?}",
-            result.message
-        );
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunted);
-        assert!(
-            app.hunt.finished_at.is_some(),
-            "hunted goal should freeze the elapsed timer"
-        );
-
-        // Resume must re-arm the timer so a resumed goal keeps ticking.
-        let _ = hunt(&mut app, Some("resume"));
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
-        assert!(
-            app.hunt.finished_at.is_none(),
-            "resume should clear the frozen timer"
-        );
-    }
-
-    #[test]
-    fn test_show_hunt_uses_hunt_verdict_label() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("Review verifier claim".to_string());
-        app.hunt.verdict = HuntVerdict::Escaped;
-
-        let result = hunt(&mut app, None);
-
-        let message = result.message.as_deref().unwrap_or_default();
-        assert!(message.starts_with("Goal blocked:"), "{message}");
-    }
-
-    #[test]
-    fn test_failed_trophy_write_does_not_mutate_verdict() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("!!!".to_string());
-        app.hunt.verdict = HuntVerdict::Hunting;
-
-        let result = hunt(&mut app, Some("hunted"));
-
-        assert!(result.is_error);
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
-        assert_eq!(app.hunt.quarry.as_deref(), Some("!!!"));
-    }
-
-    #[test]
-    fn test_escaped_verdict_does_not_write_trophy_card() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("!!!".to_string());
-        app.hunt.verdict = HuntVerdict::Hunting;
-
-        let result = hunt(&mut app, Some("escaped"));
-
-        assert!(!result.is_error);
-        assert_eq!(app.hunt.verdict, HuntVerdict::Escaped);
-        assert_eq!(app.hunt.quarry.as_deref(), Some("!!!"));
+        assert_eq!(app.goal.token_budget, None);
         assert!(matches!(
             result.action,
-            Some(AppAction::SetGoalStatus {
-                status: crate::tools::goal::GoalStatus::Blocked,
-                clear: false
-            })
+            Some(AppAction::SetGoalObjective { ref objective, token_budget: None })
+                if objective == "Fix budget: handling in settings"
         ));
     }
 
     #[test]
-    fn test_declare_hunted_alias_uses_trophy_override_path() {
+    fn completing_a_goal_without_one_is_an_error() {
         let mut app = create_test_app();
-        app.hunt.quarry = Some("!!!".to_string());
-        app.hunt.verdict = HuntVerdict::Hunting;
-
-        let result = hunt(&mut app, Some("declare-hunted"));
-
+        let result = goal_command(&mut app, Some("done"));
         assert!(result.is_error);
-        assert_eq!(app.hunt.verdict, HuntVerdict::Hunting);
-        assert_eq!(app.hunt.quarry.as_deref(), Some("!!!"));
-        assert!(
-            result
-                .message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Cannot write trophy card")
-        );
-    }
-
-    #[test]
-    fn test_declare_hunted_audit_details_use_hunt_vocabulary() {
-        let mut app = create_test_app();
-        app.hunt.quarry = Some("Verify release gate".to_string());
-        app.hunt.verdict = HuntVerdict::Hunted;
-
-        let details = declare_hunted_audit_details(HuntVerdict::Wounded, &app);
-
-        assert_eq!(details["previous_verdict"], "wounded");
-        assert_eq!(details["current_verdict"], "hunted");
-        assert_eq!(details["has_quarry"], true);
-    }
-
-    #[test]
-    fn test_show_hunt_when_none() {
-        // Bare /goal with no active goal but a live conversation declares one
-        // from context instead of printing usage.
-        let mut app = create_test_app();
-        app.api_messages.push(crate::models::Message {
-            role: "user".to_string(),
-            content: vec![crate::models::ContentBlock::Text {
-                text: "fix the flaky test".to_string(),
-                cache_control: None,
-            }],
-        });
-        let result = hunt(&mut app, None);
-        assert!(
-            result
-                .message
-                .unwrap()
-                .contains("Declaring a goal from the current context")
-        );
-    }
-
-    #[test]
-    fn test_parse_budget() {
-        assert_eq!(
-            parse_hunt_budget("Do a thing | budget: 50000"),
-            ("Do a thing".to_string(), Some(50_000))
-        );
-        assert_eq!(
-            parse_hunt_budget("Simple goal"),
-            ("Simple goal".to_string(), None)
-        );
-        assert_eq!(
-            parse_hunt_budget("Goal budget:1000"),
-            ("Goal".to_string(), Some(1000))
-        );
     }
 }

@@ -128,8 +128,16 @@ describe("navigation parity and accessibility", () => {
     // The six-link desktop strip does not replace the compact menu until xl;
     // translated labels are wider than English and used to push real controls
     // beyond the clipped viewport at md widths.
-    expect(navLinks).toContain('className="hidden xl:flex items-center gap-5"');
-    expect(navLinks).toContain("nav-link-secondary hidden 2xl:inline");
+    // Wrapping is the escape valve for a translated strip that outgrows the
+    // 76rem container; the row gap stays tight so a second row does not
+    // double the sticky header's height.
+    expect(navLinks).toContain(
+      'className="hidden xl:flex min-w-0 shrink items-center gap-x-5 gap-y-1 flex-wrap"',
+    );
+    // Companion labels remain on the compact sheet. They must not return to
+    // the 76rem desktop strip — at 2xl they zeroed the wordmark on de/pt-BR.
+    expect(navLinks).not.toContain("nav-link-secondary");
+    expect(mobileMenu).toContain("l.secondary");
     expect(mobileMenu).toContain("xl:hidden inline-flex");
     expect(nav).toContain("paper-install-cta hidden xl:inline-flex");
     // A fixed descendant of the blurred sticky header uses the header as its
@@ -141,6 +149,11 @@ describe("navigation parity and accessibility", () => {
     expect(mobileMenu).toContain('if (e.key !== "Tab") return');
     expect(mobileMenu).toContain('window.matchMedia("(min-width: 1280px)")');
     expect(mobileMenu).toContain("if (event.matches) closeImmediately()");
+    // Locale and docs-route handlers are shared so a regional tag cannot
+    // nest (`/ja/pt-BR/...`) or hide the theme control on `/pt-BR/docs`.
+    expect(webText("components/locale-switcher.tsx")).toContain("replacePathLocale(pathname, code)");
+    expect(webText("components/theme-toggle.tsx")).toContain("isDocsPath(pathname)");
+    expect(webText("middleware.ts")).toContain("pathLocale(pathname)");
   });
 
   it("keeps nav link paths in exact locale-swap parity for every routed locale", () => {
@@ -206,6 +219,15 @@ describe("navigation parity and accessibility", () => {
     expect(css).toContain(".skip-link:focus-visible");
   });
 
+  it("keeps the docs trail on the docs-map registry", () => {
+    const docsLayout = webText("app/[locale]/docs/layout.tsx");
+    const docsMap = webText("lib/docs-map.ts");
+    expect(docsMap).toContain("sidebar, breadcrumbs, and drift/parity checks");
+    expect(docsMap).toContain("export const DOC_CATEGORY_LABELS");
+    expect(docsLayout).toContain("<DocsBreadcrumb locale={locale} />");
+    expect(css).toContain(".docs-breadcrumb");
+  });
+
   it("keeps responsive breakpoints for the getting-started steps", () => {
     // 4-up grid by default, 2-up at the tablet breakpoint, 1-up on phones —
     // the same responsive ladder as the existing workflow steps.
@@ -255,7 +277,7 @@ describe("homepage integration", () => {
     // (plain "Unreleased", per docs/design/WEB_VOICE.md).
     expect(homepage).toContain("d.sourceCandidate");
     expect(getHome("en").sourceCandidate).toBe("Unreleased");
-    expect(homepage).toContain('src="/codewhale-tui.png"');
+    expect(homepage).toContain('src="/codewhale-tui.webp"');
     for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
       expect(homepage).toContain(label);
     }
