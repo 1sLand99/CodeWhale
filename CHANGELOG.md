@@ -40,6 +40,17 @@ abort under load.
 
 ### Fixed
 
+- A foreground `bash` command that named no timeout is bounded again. The
+  model-facing `bash` tool left an omitted `timeout_ms` at the internal
+  ceiling (~24.8 days) instead of the 120 s default its own schema
+  advertises, so a CLI that blocked on an interactive prompt or a hung
+  network call held the turn open indefinitely — one report sat on a single
+  unauthenticated CLI call for over two hours with the tool row simply
+  counting seconds. The advertised default now applies, which arms the
+  existing recovery: the process is killed and the model is told to rerun
+  with `background=true` and poll with `action="wait"`. An explicit
+  `timeout_ms` is still honored for genuinely long foreground work, and
+  background and interactive runs keep their own lifetimes.
 - The Extensions (`/plugin`) Marketplace is no longer a read-only list.
   Every recommendation and stored candidate names its truthful state and
   primary action — Add, Enable, Configured, or Unavailable — and Enter or a
