@@ -31,8 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed for anyone who types the short one. Each shell gets its own
   idiomatic hook rather than a second copy of the script: bash re-binds the
   generated function, zsh widens the `#compdef` tag line to
-  `#compdef codewhale codew`, fish adds `complete -c codew -w codewhale`, and
-  PowerShell registers `-CommandName 'codewhale','codew'`.
+  `#compdef codewhale codew`, fish adds `complete -c codew -w codewhale`,
+  PowerShell registers `-CommandName 'codewhale','codew'`, and Elvish aliases
+  the completer with
+  `set edit:completion:arg-completer[codew] = $edit:completion:arg-completer[codewhale]`.
 
 - Documented shell completions. `docs/INSTALL.md` § 8 now gives the generate
   and install commands for bash, zsh, fish, PowerShell, and Elvish, with a

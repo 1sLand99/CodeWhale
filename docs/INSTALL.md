@@ -831,7 +831,7 @@ For the current session only:
 codewhale completion powershell | Out-String | Invoke-Expression
 ```
 
-**Elvish**:
+**Elvish** — the script registers both command names:
 
 ```elvish
 codewhale completion elvish >> ~/.config/elvish/rc.elv

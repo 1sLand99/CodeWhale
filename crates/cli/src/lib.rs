@@ -450,6 +450,9 @@ Examples:
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PROFILE)
     codewhale completion powershell >> $PROFILE
 
+  Elvish:
+    codewhale completion elvish >> ~/.config/elvish/rc.elv
+
 The command prints the completion script to stdout; redirect it to a path your shell loads automatically."#
     )]
     Completion {
@@ -487,9 +490,9 @@ fn render_completion_script(shell: Shell) -> String {
 ///
 /// Each shell gets its own idiomatic hook rather than a second copy of the
 /// script: bash re-binds the generated function, zsh widens the `#compdef`
-/// tag line, fish wraps the primary command, and PowerShell registers an
-/// array of command names. Elvish (and any future shell) falls through
-/// unchanged — a script that completes one name is still correct.
+/// tag line, fish wraps the primary command, PowerShell registers an array
+/// of command names, and Elvish aliases the completer map entry. `Shell` is
+/// non-exhaustive, so any future variant falls through unchanged.
 fn register_completion_alias(shell: Shell, script: String) -> String {
     let bin = COMPLETION_BIN_NAME;
     let alias = COMPLETION_ALIAS_NAME;
@@ -523,6 +526,10 @@ fn register_completion_alias(shell: Shell, script: String) -> String {
             &format!("-CommandName '{bin}'"),
             &format!("-CommandName '{bin}','{alias}'"),
             1,
+        ),
+        Shell::Elvish => format!(
+            "{script}\n\
+             set edit:completion:arg-completer[{alias}] = $edit:completion:arg-completer[{bin}]\n"
         ),
         _ => script,
     }
@@ -5565,11 +5572,30 @@ mod tests {
             "PowerShell script must register both published command names"
         );
 
+        let elvish = render_completion_script(Shell::Elvish);
+        assert!(
+            has_line(
+                &elvish,
+                &format!("set edit:completion:arg-completer[{bin}] = {{|@words|")
+            ),
+            "elvish script must bind the real binary name:\n{elvish}"
+        );
+        assert!(
+            has_line(
+                &elvish,
+                &format!(
+                    "set edit:completion:arg-completer[{alias}] = $edit:completion:arg-completer[{bin}]"
+                )
+            ),
+            "elvish script must alias the {alias} shorthand onto {bin}"
+        );
+
         for (shell, script) in [
             ("bash", &bash),
             ("zsh", &zsh),
             ("fish", &fish),
             ("powershell", &powershell),
+            ("elvish", &elvish),
         ] {
             assert!(
                 !script.contains("codewhale-tui"),
@@ -8695,11 +8721,13 @@ mod tests {
                 vec![
                     "<SHELL>",
                     "bash",
+                    "Every script completes both `codewhale` and the `codew` shorthand.",
                     "source <(codewhale completion bash)",
                     "~/.local/share/bash-completion/completions/codewhale",
                     "fpath=(~/.zfunc $fpath)",
                     "codewhale completion fish > ~/.config/fish/completions/codewhale.fish",
                     "codewhale completion powershell | Out-String | Invoke-Expression",
+                    "codewhale completion elvish >> ~/.config/elvish/rc.elv",
                 ],
             ),
             ("metrics", vec!["--json", "--since"]),
