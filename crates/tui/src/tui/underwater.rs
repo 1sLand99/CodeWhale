@@ -636,31 +636,46 @@ fn mode_label(locale: Locale, mode: AppMode) -> Cow<'static, str> {
 /// Permission chip words. This maps from the typed [`ApprovalMode`] state —
 /// never from the English `permission_chip_label()` strings — so localizing
 /// (or rewording) the upstream chip labels can never silently break the chip.
+///
+/// Tool-approval posture only. Filesystem scope is a separate fact and only
+/// earns header columns when it is worth reading — see
+/// [`filesystem_scope_notice`].
 fn permission_label(app: &App) -> Cow<'static, str> {
     let locale = app.ui_locale;
     if app.mode == AppMode::Plan {
         return tr(locale, MessageId::ChipPermissionReadOnly);
     }
-    let approval = match app.approval_mode {
+    match app.approval_mode {
         ApprovalMode::Suggest => tr(locale, MessageId::ChipPermissionAsk),
         ApprovalMode::Auto => tr(locale, MessageId::ChipPermissionAuto),
         // Keep the effective permission explicit. `bypass` is an
         // implementation detail and, more importantly, can imply that
         // repository law no longer applies. Full Access never bypasses
         // constitution rules. This is **tool-approval posture**, not
-        // filesystem scope — see filesystem_scope_label.
+        // filesystem scope — see filesystem_scope_notice.
         ApprovalMode::Bypass => tr(locale, MessageId::ChipPermissionFullAccess),
         ApprovalMode::Never => tr(locale, MessageId::ChipPermissionNever),
-    };
-    // Append filesystem scope so "Full Access" (approval) is never confused
-    // with unrestricted disk writes.
-    let fs = filesystem_scope_label(app);
-    Cow::Owned(format!("{approval} · {fs}"))
+    }
 }
 
-/// Always-legible effective filesystem scope for the shell chrome.
+/// The effective filesystem scope — but only when it says something the
+/// permission word beside it does not already say.
+///
+/// This chip exists because "Full Access" (tool approval) was being read as
+/// unrestricted disk writes (user report, 2026-07-23), and because a policy
+/// with no enforcement backend used to name a boundary nobody applied
+/// (2026-08-04 audit). Both of those are deviations. The default — an
+/// enforced workspace-write boundary — is what every ordinary session already
+/// has, and printing `files: workspace` on every frame of every session spent
+/// seventeen columns of the primary chrome saying so. A notice that is always
+/// on cannot signal anything; folding the expected case away is what lets
+/// `files: full disk` and `files: workspace (unenforced)` land as warnings
+/// when they do appear.
+///
+/// `read-only` under Plan is dropped for the same reason from the other side:
+/// the permission word there is already the literal phrase "read only".
 #[must_use]
-fn filesystem_scope_label(app: &App) -> Cow<'static, str> {
+fn filesystem_scope_notice(app: &App) -> Option<Cow<'static, str>> {
     // Spelled out because the old `fs:` prefix read as an unexplained
     // acronym (user report, 2026-07-23): this chip states which files the
     // session may write.
@@ -672,11 +687,10 @@ fn filesystem_scope_label(app: &App) -> Cow<'static, str> {
         crate::core::authority::SandboxNetworkAccess::from_config(app.configured_sandbox_network),
     );
     // A policy is an intent; enforcement needs a backend. On default Linux
-    // (bubblewrap is opt-in) and on all Windows there is none, and this chip
-    // used to say "files: workspace" while nothing restricted anything
-    // (2026-08-04 audit). Say "unenforced" rather than name a boundary that
-    // is not applied. `DangerFullAccess` is already honest, and
-    // `ExternalSandbox` is enforced by the external runner, not by us.
+    // (bubblewrap is opt-in) and on all Windows there is none. Say
+    // "unenforced" rather than name a boundary that is not applied.
+    // `DangerFullAccess` is already honest, and `ExternalSandbox` is enforced
+    // by the external runner, not by us.
     let unenforced = app.sandbox_backend.is_none()
         && !matches!(
             policy,
@@ -685,17 +699,19 @@ fn filesystem_scope_label(app: &App) -> Cow<'static, str> {
         );
     match policy {
         crate::sandbox::SandboxPolicy::ReadOnly if unenforced => {
-            Cow::Borrowed("files: read-only (unenforced)")
+            Some(Cow::Borrowed("files: read-only (unenforced)"))
         }
-        crate::sandbox::SandboxPolicy::ReadOnly => Cow::Borrowed("files: read-only"),
-        crate::sandbox::SandboxPolicy::DangerFullAccess => Cow::Borrowed("files: full disk"),
+        crate::sandbox::SandboxPolicy::ReadOnly => {
+            (app.mode != AppMode::Plan).then_some(Cow::Borrowed("files: read-only"))
+        }
+        crate::sandbox::SandboxPolicy::DangerFullAccess => Some(Cow::Borrowed("files: full disk")),
         crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => {
-            Cow::Borrowed("files: external sandbox")
+            Some(Cow::Borrowed("files: external sandbox"))
         }
         crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } if unenforced => {
-            Cow::Borrowed("files: workspace (unenforced)")
+            Some(Cow::Borrowed("files: workspace (unenforced)"))
         }
-        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => Cow::Borrowed("files: workspace"),
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => None,
     }
 }
 
@@ -1094,11 +1110,27 @@ fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
     })
 }
 
-/// Append one right-hand chrome element, inserting the two-space separator
-/// only between elements so an absent element never leaves trailing padding.
+/// The header speaks with exactly two separators, and each one means one
+/// thing.
+///
+/// [`FIELD_JOIN`] binds words that qualify one another into a single phrase:
+/// `work · ask` is one statement of posture, not two facts. [`GROUP_GAP`]
+/// stands between whole facts — posture, then the goal chip, then the update
+/// notice; workspace, then the context meter.
+///
+/// Before this, every one of those boundaries was the same dotted separator at
+/// the same dim ink, so the header read as an undifferentiated list and there
+/// was nothing for the eye to group on. The gap is deliberately wider than the
+/// visual whitespace inside `" · "` — four blank columns against one — because
+/// that ratio is the only thing carrying the grouping.
+const FIELD_JOIN: &str = " · ";
+const GROUP_GAP: &str = "    ";
+
+/// Append one chrome element, inserting the group separator only between
+/// elements so an absent element never leaves trailing padding.
 fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
     if !spans.is_empty() {
-        spans.push(Span::raw("  "));
+        spans.push(Span::raw(GROUP_GAP));
     }
     spans.push(span);
 }
@@ -1142,13 +1174,17 @@ fn render_header_with_git_status(
             .flatten(),
         &app.status_indicator,
     );
+    // The posture lockup: mark, then mode and permission (and the filesystem
+    // scope when it deviates) joined into one phrase. This is the guaranteed
+    // floor of the header — everything after it is sheddable — so it is built
+    // once and reused by the cramped rebuild below rather than spelled twice.
     let mut left = Vec::new();
     if let Some(indicator) = status_indicator {
         left.push(Span::styled(
             indicator,
             header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
         ));
-        left.push(Span::raw("  "));
+        left.push(Span::raw(GROUP_GAP));
     }
     left.push(Span::styled(
         mode_label(app.ui_locale, app.mode),
@@ -1156,11 +1192,17 @@ fn render_header_with_git_status(
     ));
     // Permission is safety state, not optional chrome. Compact terminals shed
     // auxiliary detail, but keep mode and the effective posture.
-    left.push(Span::styled(" · ", dim));
+    left.push(Span::styled(FIELD_JOIN, dim));
     left.push(Span::styled(
         permission_label(app),
         Style::default().fg(permission_color),
     ));
+    let scope_notice = filesystem_scope_notice(app);
+    if let Some(scope) = scope_notice.clone() {
+        left.push(Span::styled(FIELD_JOIN, dim));
+        left.push(Span::styled(scope, Style::default().fg(permission_color)));
+    }
+    let posture = left.clone();
     // Active-goal chip (#39): the ocean shell has no sidebar, so the topbar
     // is the only always-on surface where a goal set via `create_goal` can
     // live. Objective truncated to a fixed budget; terminal goals render
@@ -1182,7 +1224,7 @@ fn render_header_with_git_status(
             (text, color)
         });
     if let Some((text, color)) = &goal_chip {
-        left.push(Span::styled(" · ", dim));
+        left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1197,7 +1239,7 @@ fn render_header_with_git_status(
         .as_ref()
         .map(|panel| (panel.top_bar_chip(), ChromeInk::Info.color(&app.ui_theme)));
     if let Some((text, color)) = &workflow_chip {
-        left.push(Span::styled(" · ", dim));
+        left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1213,7 +1255,7 @@ fn render_header_with_git_status(
         .as_ref()
         .map(|label| (label.clone(), ChromeInk::Attention.color(&app.ui_theme)));
     if let Some((text, color)) = &update_chip {
-        left.push(Span::styled(" · ", dim));
+        left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
             text.clone(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1225,14 +1267,19 @@ fn render_header_with_git_status(
         .flatten()
         .map(|(used, max, percent)| {
             let filled = ((percent / 100.0) * 5.0).ceil().clamp(0.0, 5.0) as usize;
+            // One number, stated twice on purpose and no more: the fraction is
+            // the precise fact, the bar is the glance. The `0%` numeral that
+            // used to close the meter was a third encoding of the same
+            // quantity at a resolution between the other two, and the brackets
+            // fenced a bar that its own filled/hollow glyphs already delimit —
+            // together nine columns of permanent chrome carrying nothing.
             Span::styled(
                 format!(
-                    "{}/{} [{}{}] {:.0}%",
+                    "{}/{} {}{}",
                     compact_tokens(used),
                     compact_tokens(i64::from(max)),
                     "▰".repeat(filled),
                     "▱".repeat(5usize.saturating_sub(filled)),
-                    percent
                 ),
                 header_fg(app, ChromeInk::Info),
             )
@@ -1240,12 +1287,6 @@ fn render_header_with_git_status(
     let token_breakdown = (tier != ShellTier::Compact)
         .then(|| session_token_breakdown(app))
         .flatten();
-    let version = (tier == ShellTier::Wide).then(|| {
-        Span::styled(
-            format!("v{}", shell_build_version()),
-            header_fg(app, ChromeInk::MetadataHint),
-        )
-    });
     // Cached repository/worktree status only — never probe from the render path.
     // Background refresh is scheduled from the event loop / idle ticks.
     let git_label = crate::tui::git_status::chrome_label(git_status).map(|label| {
@@ -1260,7 +1301,16 @@ fn render_header_with_git_status(
         )
     });
 
-    // Baseline right-hand chrome: git, context meter, version.
+    // Baseline right-hand chrome: git, then the context meter.
+    //
+    // The build version used to close this cluster. It was already the first
+    // thing the header sacrificed — present only on `Wide`, gone below 110
+    // columns — which is the layout admitting it was never load-bearing. It is
+    // a fact you check deliberately (`codewhale --version`, `codewhale
+    // doctor`, the launch screen) exactly once, and the half of it that *is*
+    // worth reading mid-session — "your build is stale" — already has its own
+    // chip on the left. Fifteen columns of the primary chrome on every screen
+    // forever bought a numeral nobody was reading.
     let mut right = Vec::new();
     if let Some(git_label) = git_label.clone() {
         push_chrome(&mut right, git_label);
@@ -1268,16 +1318,12 @@ fn render_header_with_git_status(
     if let Some(context_meter) = context_meter.clone() {
         push_chrome(&mut right, context_meter);
     }
-    if let Some(version) = version.clone() {
-        push_chrome(&mut right, version);
-    }
 
-    // The mark leads the header and carries its own two-space gutter, so it
-    // costs `width + 2` when present and nothing at all when `off` (#5512).
-    let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
-    let minimum_left_width = indicator_width
-        .saturating_add(mode_label(app.ui_locale, app.mode).width())
-        .saturating_add(3 + permission_label(app).width());
+    // The posture lockup is the header's floor: mark, mode, permission, and a
+    // deviating filesystem scope never yield their columns to anything on the
+    // right. It is measured, not re-derived, so the floor cannot drift away
+    // from what actually gets drawn.
+    let minimum_left_width = span_width(&posture);
     let available = usize::from(area.width);
     // The optional token breakdown is the only elidable element: it is added
     // between the git label and the context meter when the terminal is wide
@@ -1290,9 +1336,6 @@ fn render_header_with_git_status(
         push_chrome(&mut enhanced_right, token_breakdown);
         if let Some(context_meter) = context_meter.clone() {
             push_chrome(&mut enhanced_right, context_meter);
-        }
-        if let Some(version) = version.clone() {
-            push_chrome(&mut enhanced_right, version);
         }
         let enhanced_width = span_width(&enhanced_right);
         let gap = usize::from(enhanced_width > 0);
@@ -1308,34 +1351,22 @@ fn render_header_with_git_status(
     let right_width = span_width(&right);
     let left_budget = available.saturating_sub(right_width + usize::from(right_width > 0));
     if span_width(&left) > left_budget {
-        let mode = mode_label(app.ui_locale, app.mode);
-        let permission = permission_label(app);
-        let mut compact_left = Vec::new();
-        if let Some(indicator) = status_indicator {
-            compact_left.push(Span::styled(
-                indicator,
-                header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
-            ));
-            compact_left.push(Span::raw("  "));
-        }
-        compact_left.push(Span::styled(mode, Style::default().fg(mode_color)));
-        compact_left.push(Span::styled(" · ", dim));
-        compact_left.push(Span::styled(
-            permission,
-            Style::default().fg(permission_color),
-        ));
+        // Cramped: keep the posture lockup exactly as composed and re-hang the
+        // chips behind it. Rebuilding the lockup by hand here is how the two
+        // passes used to disagree about what the header guarantees.
+        let mut compact_left = posture.clone();
         // The goal chip survives cramped layouts too — it is operator state,
         // not decoration. The route label yields its budget first (down to
         // nothing, as it always has); below that the goal itself truncates,
         // and when even a minimal chip cannot fit it drops rather than
         // clipping mid-word (#39).
-        // Same accounting as the baseline pass: the mark leads and owns its
-        // gutter, so it is `width + 2` present and 0 when `off` (#5512).
         let base_fixed = span_width(&compact_left);
         if let Some((text, color)) = &goal_chip {
-            let goal_room = left_budget.saturating_sub(base_fixed).saturating_sub(3);
+            let goal_room = left_budget
+                .saturating_sub(base_fixed)
+                .saturating_sub(GROUP_GAP.len());
             if goal_room >= 8 {
-                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::raw(GROUP_GAP));
                 compact_left.push(Span::styled(
                     truncate_to_width(text, goal_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1349,9 +1380,9 @@ fn render_header_with_git_status(
         if let Some((text, color)) = &workflow_chip {
             let workflow_room = left_budget
                 .saturating_sub(span_width(&compact_left))
-                .saturating_sub(3);
+                .saturating_sub(GROUP_GAP.len());
             if workflow_room >= 8 {
-                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::raw(GROUP_GAP));
                 compact_left.push(Span::styled(
                     truncate_to_width(text, workflow_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1363,9 +1394,9 @@ fn render_header_with_git_status(
         if let Some((text, color)) = &update_chip {
             let update_room = left_budget
                 .saturating_sub(span_width(&compact_left))
-                .saturating_sub(3);
+                .saturating_sub(GROUP_GAP.len());
             if update_room >= 8 {
-                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::raw(GROUP_GAP));
                 compact_left.push(Span::styled(
                     truncate_to_width(text, update_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -1823,5 +1854,129 @@ mod empty_state_caption_tests {
     fn shorten_workspace_is_a_no_op_when_it_already_fits() {
         assert_eq!(shorten_workspace("~/code/app", 2), "~/code/app".to_string());
         assert_eq!(shorten_workspace("app", 2), "app".to_string());
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::{FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, render_header_with_git_status};
+    use crate::tui::app::{App, AppMode};
+    use crate::tui::approval::ApprovalMode;
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    fn app() -> App {
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(std::env::temp_dir()),
+        );
+        // Enforcement present, so the scope chip reflects the policy rather
+        // than the host's missing backend.
+        app.sandbox_backend = Some(crate::sandbox::SandboxType::None);
+        app.mode = AppMode::Agent;
+        app.approval_mode = ApprovalMode::Suggest;
+        app
+    }
+
+    fn header_line(app: &App, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        render_header_with_git_status(
+            area,
+            &mut buf,
+            app,
+            &crate::tui::git_status::GitStatusSnapshot::default(),
+        );
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn default_posture_spends_no_columns_on_the_expected_scope() {
+        // `files: workspace` used to be printed on every frame of every
+        // session: seventeen columns of the primary chrome restating the
+        // default. A notice that never turns off cannot warn.
+        let app = app();
+        assert!(filesystem_scope_notice(&app).is_none());
+        let line = header_line(&app, 120);
+        assert!(!line.contains("files:"), "{line:?}");
+        assert!(line.starts_with("cw"), "{line:?}");
+        assert!(line.contains("work"), "{line:?}");
+        assert!(line.contains("ask"), "{line:?}");
+    }
+
+    #[test]
+    fn a_deviating_scope_still_takes_the_header() {
+        // The chip exists for exactly this: tool-approval "Full Access" being
+        // read as unrestricted disk writes. Folding the default away is what
+        // makes this one land.
+        let mut app = app();
+        app.approval_mode = ApprovalMode::Bypass;
+        app.configured_sandbox_mode = Some("danger-full-access".to_string());
+        let notice = filesystem_scope_notice(&app).expect("full disk must be stated");
+        assert_eq!(notice, "files: full disk");
+        assert!(header_line(&app, 120).contains("files: full disk"));
+    }
+
+    #[test]
+    fn plan_mode_does_not_say_read_only_twice() {
+        let mut app = app();
+        app.mode = AppMode::Plan;
+        assert!(filesystem_scope_notice(&app).is_none());
+        let line = header_line(&app, 120);
+        assert!(line.contains("read only"), "{line:?}");
+        assert!(!line.contains("files: read-only"), "{line:?}");
+    }
+
+    #[test]
+    fn the_build_version_is_not_permanent_chrome() {
+        // It was already `Wide`-only, which is the layout admitting it was
+        // never load-bearing; `codewhale --version`, `codewhale doctor` and
+        // the launch screen are where a version is actually looked up, and
+        // the half worth reading mid-session is the update chip.
+        let app = app();
+        for width in [60u16, 80, 120, 200] {
+            let line = header_line(&app, width);
+            assert!(
+                !line.contains(concat!("v", env!("CODEWHALE_BUILD_VERSION"))),
+                "width {width}: {line:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn chips_are_separated_from_posture_by_a_wider_gap_than_the_posture_join() {
+        // One weight per meaning: `" · "` binds words into one phrase, the
+        // group gap stands between whole facts. If a goal chip hangs off the
+        // same dotted separator that joins mode to permission, the header is
+        // an undifferentiated list again.
+        let mut app = app();
+        app.update_available = Some("update 0.9.11".to_string());
+        let line = header_line(&app, 120);
+        assert!(
+            line.contains(&format!("ask{GROUP_GAP}update 0.9.11")),
+            "{line:?}",
+        );
+        assert!(line.contains(&format!("work{FIELD_JOIN}ask")), "{line:?}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(GROUP_GAP)
+                > unicode_width::UnicodeWidthStr::width(FIELD_JOIN),
+            "the group gap must out-space the phrase join or nothing groups",
+        );
+    }
+
+    #[test]
+    fn the_context_meter_states_its_number_twice_not_four_times() {
+        // Fraction (precise) + bar (glance). The `%` numeral was a third
+        // encoding of the same quantity and the brackets fenced a bar its own
+        // glyphs already delimit.
+        let mut app = app();
+        app.session.total_input_tokens = 3_000;
+        let line = header_line(&app, 120);
+        if line.contains('▱') || line.contains('▰') {
+            assert!(!line.contains('['), "{line:?}");
+            assert!(!line.contains('%'), "{line:?}");
+        }
     }
 }
