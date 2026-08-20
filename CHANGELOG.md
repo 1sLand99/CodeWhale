@@ -317,6 +317,10 @@ abort under load.
   the dictionary spine, retiring their inline bilingual literals in favor of
   locale dictionaries with token-aware code spans (#5504, closes #5337, which
   they also filed).
+- Lstarsky0 (@Lstarsky0) — `docs/constitution` and `docs/runtime-api` follow
+  the same dictionary spine: 28 inline `isZh` branches become typed English
+  and Chinese dictionaries held to key and token parity, while the other
+  sixteen locales keep the English fallback (#5517, a further phase of #5337).
 - @thejayjetson — the header status-indicator report that pinned the
   regression to a specific setting, with every value, theme, and
   `fancy_animations` combination already ruled out (#5512).
