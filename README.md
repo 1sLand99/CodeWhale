@@ -3,7 +3,7 @@
 An open source coding agent for your terminal — bring your own model.
 
 Codewhale started as a native experience for DeepSeek. It has since grown into a
-community-driven project: one coding harness that fits a growing international
+community-driven project: one coding agent that fits a growing international
 community and supports as many models and providers as possible — open models
 first, hosted or local, none privileged over the rest.
 
@@ -13,7 +13,7 @@ you. Switch models mid-task with `/model`. Work interactively in the TUI, or run
 `codewhale exec` in scripts and CI. It's written in Rust, licensed MIT, and runs
 on your machine.
 
-The parts that aren't like other harnesses: **you pick the model for each
+What sets it apart: **you pick the model for each
 role — and they don't have to match** — and **agents in Codewhale talk to each
 other, across models.** A fleet pins a provider, a model, and a reasoning tier
 per role, so a cheap fast model can direct an expensive reasoning one, or a
@@ -22,7 +22,7 @@ any of them mid-flight, peek at its transcript, or interrupt it — and it isn't
 just parent-to-child: separate Codewhale tasks in the same workspace exchange
 durable, restart-safe Agent Mail, delivered once at a safe boundary, with
 credentials redacted. A `/goal` holds a long objective across turns until it's
-actually done. Roles are files you edit, and the whole harness stays yours.
+actually done. Roles are files you edit, and Codewhale stays yours.
 
 We're always looking for contributors and ways to improve. If a model or
 provider you use is missing, or something breaks, telling us is one of the most
@@ -88,11 +88,11 @@ shell command through the normal approval path.
   paths — so a GLM session and a Kimi session can coordinate in two terminals
   with you out of the relay loop. Each side can be a different model; Codewhale
   carries the conversation either way.
-- **A harness you author.** Roles are files you can read and edit — a model, a
+- **An agent you author.** Roles are files you can read and edit — a model, a
   tool posture, and standing instructions per role — kept in the project so the
   team shares them, or beside your other personal settings so they follow you
   between repos. A constitution records how you want the agent to behave across
-  every session, so the harness matches your practice instead of ours.
+  every session, so Codewhale matches your practice instead of ours.
 - **Read-only until you allow more.** Plan mode can't change files, and
   approvals gate risky commands. When an OS sandbox actually wraps a command,
   Codewhale says so: Seatbelt on macOS where available, opt-in bubblewrap on
