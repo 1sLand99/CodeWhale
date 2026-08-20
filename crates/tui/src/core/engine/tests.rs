@@ -186,7 +186,7 @@ fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
             .expect("system prompt"),
     );
     assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
-    assert!(prompt.contains("must call `registry_sync {}` before `exec_shell`"));
+    assert!(prompt.contains("must call `registry_sync` with a `query` describing that capability"));
 
     let mut disabled = EngineConfig::default();
     disabled.features.disable(Feature::Mcp);
@@ -8331,12 +8331,14 @@ fn registry_first_guidance_is_attached_to_the_shell_fallback_once() {
 }
 
 #[test]
-fn registry_catalog_bypasses_generic_tool_result_compaction() {
-    let middle = "app.cleanor/cleanor";
+fn registry_sync_results_are_bounded_like_every_other_tool() {
+    // The full-catalog bypass is gone: an oversized registry payload now
+    // flows through the same generic compaction as any other tool result,
+    // because the model-visible catalog is already bounded to eight
+    // matches by the tool itself.
     let raw = format!(
-        "{{\"instruction\":\"compare all\",\"servers\":[{{\"name\":\"{}\"}},{{\"name\":\"{middle}\"}},{{\"name\":\"{}\"}}]}}",
-        "a".repeat(7_000),
-        "z".repeat(7_000),
+        "{{\"instruction\":\"compare all\",\"servers\":[{{\"name\":\"{}\"}}]}}",
+        "a".repeat(40_000),
     );
     let output = ToolResult::success(raw.clone());
 
@@ -8348,9 +8350,8 @@ fn registry_catalog_bypasses_generic_tool_result_compaction() {
         &output,
     );
 
-    assert_eq!(context, raw);
-    assert!(context.contains(middle));
-    assert!(!context.contains("output compacted to protect context"));
+    assert_ne!(context, raw);
+    assert!(context.contains("output compacted to protect context"));
 }
 
 #[test]

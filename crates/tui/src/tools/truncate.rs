@@ -477,13 +477,6 @@ pub fn apply_spillover_with_artifact(
     tool_name: &str,
     session_id: &str,
 ) -> Option<PathBuf> {
-    // Registry discovery intentionally sends the complete eligible catalog to
-    // the model for semantic selection. Spilling it here would replace most of
-    // that candidate set with an artifact pointer before context shaping gets
-    // a chance to preserve it.
-    if tool_name == "registry_sync" {
-        return None;
-    }
     apply_spillover_inner(
         result,
         tool_id,
@@ -1520,21 +1513,26 @@ mod tests {
     }
 
     #[test]
-    fn registry_catalog_is_never_spilled_out_of_model_context() {
-        let original = "registry-entry\n".repeat(10_000);
-        assert!(original.len() > SPILLOVER_THRESHOLD_BYTES);
-        let mut result = ToolResult::success(original.clone());
+    fn registry_results_spill_to_artifacts_like_every_other_tool() {
+        // The Registry bypass is gone: an oversized payload (which today can
+        // only be a bug, since the tool caps model-visible matches at eight)
+        // takes the same artifact path as any other tool result.
+        let _g = setup();
+        let tmp = tempdir().unwrap();
+        with_test_home(tmp.path(), || {
+            let original = "registry-entry\n".repeat(10_000);
+            assert!(original.len() > SPILLOVER_THRESHOLD_BYTES);
+            let mut result = ToolResult::success(original);
 
-        let path = apply_spillover_with_artifact(
-            &mut result,
-            "call-registry",
-            "registry_sync",
-            "session-registry",
-        );
+            let path = apply_spillover_with_artifact(
+                &mut result,
+                "call-registry",
+                "registry_sync",
+                "session-registry",
+            );
 
-        assert!(path.is_none());
-        assert_eq!(result.content, original);
-        assert!(result.metadata.is_none());
+            assert!(path.is_some(), "oversized registry payload must spill");
+        });
     }
 
     #[test]

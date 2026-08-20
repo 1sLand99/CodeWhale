@@ -563,44 +563,94 @@ fn server_to_entry(server: RegistryServer) -> Option<McpRegistryServerEntry> {
 
 /// Prompt attached to every `registry_sync` result (Registry-first policy).
 const REGISTRY_FIRST_PROMPT: &str = concat!(
-    "REGISTRY-FIRST POLICY: Compare the user's full task ",
-    "against every server name and description. Treat a server as a match ",
-    "when it plausibly covers the task's core specialized capability; ",
-    "wording need not be exact. If any plausible match exists, you must ",
-    "call start_registry_mcp_server with its exact name and inspect its ",
-    "tools before using shell commands, local programs, custom code, or a ",
-    "manual implementation. A familiar local alternative is not a reason ",
-    "to skip it. Fall back only when every catalog entry is clearly ",
-    "irrelevant or the matching server fails to start.",
+    "REGISTRY-FIRST POLICY: These are the top scored matches for your ",
+    "query from the local Registry snapshot; the full catalog stays on the ",
+    "host. Treat a server as a match when it plausibly covers the task's ",
+    "core specialized capability; wording need not be exact. If a returned ",
+    "match is plausible, you must call start_registry_mcp_server with its ",
+    "exact name and inspect its tools before using shell commands, local ",
+    "programs, custom code, or a manual implementation. When no returned ",
+    "match plausibly covers the capability, refine the query once; if the ",
+    "refined query still returns nothing plausible, fall back to local ",
+    "tools.",
 );
+
+/// Host-side cap on model-visible Registry matches. The complete catalog
+/// stays on disk; only this many matched entries ever reach the model.
+const MAX_REGISTRY_MATCHES: usize = 8;
 
 #[derive(Serialize)]
 struct RegistryCatalogResult {
     instruction: &'static str,
-    count: usize,
+    /// Total entries in the on-disk catalog (reported, never shipped).
+    total: usize,
+    query: String,
     servers: Vec<DigestEntry>,
 }
 
-fn catalog_from_cache(cache: &McpRegistryIndex) -> RegistryCatalogResult {
-    let servers = cache
-        .servers
-        .iter()
-        .map(|server| DigestEntry {
-            name: server.name.clone(),
-            description: server.description.clone(),
-            required_args: server.launch.required_args.clone(),
-        })
-        .collect::<Vec<_>>();
+fn catalog_from_cache(cache: &McpRegistryIndex, query: &str) -> RegistryCatalogResult {
+    let servers = search_registry_entries(&cache.servers, query, MAX_REGISTRY_MATCHES);
     RegistryCatalogResult {
         instruction: REGISTRY_FIRST_PROMPT,
-        count: servers.len(),
+        total: cache.servers.len(),
+        query: query.to_string(),
         servers,
     }
 }
 
+/// Deterministic host-side scoring: name hits outrank description hits,
+/// exact name match outranks substring, ties break alphabetically. The model
+/// never sees the un-matched remainder of the catalog.
+fn search_registry_entries(
+    entries: &[McpRegistryServerEntry],
+    query: &str,
+    limit: usize,
+) -> Vec<DigestEntry> {
+    let terms = query
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let mut scored = entries
+        .iter()
+        .map(|server| {
+            let name = server.name.to_ascii_lowercase();
+            let description = server.description.to_ascii_lowercase();
+            let mut score = 0u32;
+            for term in &terms {
+                if name == *term {
+                    score = score.saturating_add(100);
+                } else if name.contains(term) {
+                    score = score.saturating_add(50);
+                }
+                if description.contains(term) {
+                    score = score.saturating_add(10);
+                }
+            }
+            (score, server)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect::<Vec<_>>();
+    scored.sort_by(|(a_score, a), (b_score, b)| {
+        b_score.cmp(a_score).then_with(|| a.name.cmp(&b.name))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, server)| DigestEntry {
+            name: server.name.clone(),
+            description: server.description.clone(),
+            required_args: server.launch.required_args.clone(),
+        })
+        .collect()
+}
+
 /// Always fast: serve the local snapshot and start a background download
 /// only when it is missing or stale.
-async fn load_registry_catalog(path: &Path) -> Result<RegistryCatalogResult, ToolError> {
+async fn load_registry_catalog(
+    path: &Path,
+    query: &str,
+) -> Result<RegistryCatalogResult, ToolError> {
     let existing = read_cache(path);
     let fresh = existing
         .as_ref()
@@ -608,20 +658,22 @@ async fn load_registry_catalog(path: &Path) -> Result<RegistryCatalogResult, Too
     if !fresh {
         spawn_background_sync(path);
     }
-    Ok(catalog_for_snapshot(existing))
+    Ok(catalog_for_snapshot(existing, query))
 }
 
-/// Decide what `registry_sync` returns: the cached entries as-is (they
-/// pin their own package versions, so snapshot age is irrelevant to the
-/// model), or an empty catalog when no snapshot exists yet.
-fn catalog_for_snapshot(existing: Option<McpRegistryIndex>) -> RegistryCatalogResult {
+/// Decide what `registry_sync` returns: the scored top matches for the
+/// query from the cached entries (they pin their own package versions, so
+/// snapshot age is irrelevant), or an empty match set when no snapshot
+/// exists yet.
+fn catalog_for_snapshot(existing: Option<McpRegistryIndex>, query: &str) -> RegistryCatalogResult {
     match existing {
-        Some(cache) => catalog_from_cache(&cache),
-        // No snapshot yet: an empty catalog has no candidates to match, so
-        // the Registry-first prompt would be noise — keep it empty.
+        Some(cache) => catalog_from_cache(&cache, query),
+        // No snapshot yet: an empty match set has no candidates to act on;
+        // a background sync has already been queued.
         None => RegistryCatalogResult {
             instruction: "",
-            count: 0,
+            total: 0,
+            query: query.to_string(),
             servers: Vec::new(),
         },
     }
@@ -818,22 +870,29 @@ impl ToolSpec for McpSyncRegistry {
     }
 
     fn description(&self) -> &str {
-        "List installable local MCP servers for Registry-first capability \
-         selection. Compare their names and descriptions against the user's \
-         full task context before using shell commands, local programs, custom \
-         code, or manually reproducing a specialized integration. \
-         The index contains only stdio packages \
-         that declare no environment variables or API keys. If any server \
-         plausibly covers the task's core specialized capability, call \
-         start_registry_mcp_server with its exact name and inspect its tools \
-         before choosing a local alternative; do not run its package command \
-         through exec_shell."
+        "Search installable local MCP servers for a specialized capability \
+         and return at most eight scored matches; the full Registry index \
+         stays host-side. Describe the capability you need in the query. \
+         The index contains only stdio packages that declare no environment \
+         variables or API keys. If a match plausibly covers the task's core \
+         specialized capability, call start_registry_mcp_server with its \
+         exact name and inspect its tools before choosing a local \
+         alternative; do not run its package command through exec_shell."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Required. The specialized capability to \
+                     search for, e.g. 'convert PDF to markdown' or 'postgres \
+                     database access'. Matched server names and descriptions \
+                     are scored host-side; at most eight matches return."
+                }
+            },
+            "required": ["query"],
             "additionalProperties": false
         })
     }
@@ -850,9 +909,20 @@ impl ToolSpec for McpSyncRegistry {
         true
     }
 
-    async fn execute(&self, _input: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| {
+                ToolError::invalid_input(
+                    "registry_sync requires a non-empty 'query' describing the \
+                     specialized capability to search for.",
+                )
+            })?;
         let path = self.cache_path()?;
-        let result = load_registry_catalog(&path).await?;
+        let result = load_registry_catalog(&path, query).await?;
         let json = serde_json::to_string(&result)
             .map_err(|e| ToolError::execution_failed(format!("Serialize: {e}")))?;
         Ok(ToolResult::success(json))
@@ -1239,7 +1309,7 @@ mod tests {
 
         let ctx = ToolContext::new(tmp_path.clone());
 
-        let input = json!({});
+        let input = json!({ "query": "filesystem file access" });
 
         let result = McpSyncRegistry::with_cache_path(cache_path.clone())
             .execute(input, &ctx)
@@ -1255,7 +1325,7 @@ mod tests {
         // background.
         let first_payload: serde_json::Value =
             serde_json::from_str(&result.content).expect("result content must parse");
-        assert_eq!(first_payload["count"], 0, "no cache ⇒ empty catalog");
+        assert_eq!(first_payload["total"], 0, "no cache ⇒ empty catalog");
 
         // Poll for the background download to land, then assert on the
         // final snapshot (page pacing + upstream stalls take minutes).
@@ -1300,15 +1370,20 @@ mod tests {
         // After the background download lands, the next call serves the
         // fresh snapshot and its payload must match the cache file.
         let result = McpSyncRegistry::with_cache_path(cache_path.clone())
-            .execute(json!({}), &ctx)
+            .execute(json!({ "query": "filesystem file access" }), &ctx)
             .await
             .expect("execute() should succeed once the cache is fresh");
         let payload: serde_json::Value =
             serde_json::from_str(&result.content).expect("result content must parse");
-        assert_eq!(payload["count"].as_u64(), Some(cache.count as u64));
-        assert_eq!(
-            payload["servers"].as_array().map(Vec::len),
-            Some(cache.count)
+        assert_eq!(payload["total"].as_u64(), Some(cache.count as u64));
+        let matches = payload["servers"].as_array().map(Vec::len);
+        assert!(
+            matches.is_some_and(|len| len <= 8),
+            "model-visible matches must stay bounded: {matches:?}"
+        );
+        assert!(
+            matches.is_some_and(|len| len >= 1),
+            "the filesystem fixture must match the filesystem query"
         );
     }
 
@@ -1330,10 +1405,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_exposes_every_server_for_model_selection() {
+    fn catalog_search_reports_total_and_returns_only_matches() {
         let cache = make_test_cache();
-        let catalog = catalog_from_cache(&cache);
-        assert_eq!(catalog.count, 1);
+        let catalog = catalog_from_cache(&cache, "filesystem");
+        assert_eq!(catalog.total, 1);
         assert_eq!(catalog.servers.len(), 1);
         assert_eq!(
             catalog.servers[0].name,
@@ -1343,6 +1418,11 @@ mod tests {
             catalog.servers[0].description,
             "Read/write local files with sandboxed paths"
         );
+        // A query that does not match still reports the total, but returns
+        // an empty match set — never the full catalog.
+        let miss = catalog_from_cache(&cache, "database");
+        assert_eq!(miss.total, 1);
+        assert!(miss.servers.is_empty());
     }
 
     /// Parse one `ServerResponse` JSON object the way the upstream list
@@ -1411,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_is_not_programmatically_filtered_or_bounded() {
+    fn catalog_search_caps_model_visible_matches() {
         let servers = (0..12)
             .map(|index| cache_entry(&format!("example/file-{index}"), "file server"))
             .collect::<Vec<_>>();
@@ -1421,9 +1501,12 @@ mod tests {
             servers,
             synced_at: Some(Utc::now()),
         };
-        let result = catalog_from_cache(&cache);
-        assert_eq!(result.count, 12);
-        assert_eq!(result.servers.len(), 12);
+        let result = catalog_from_cache(&cache, "file");
+        assert_eq!(result.total, 12);
+        assert!(
+            result.servers.len() <= MAX_REGISTRY_MATCHES,
+            "model-visible matches stay bounded"
+        );
     }
 
     #[test]
@@ -1460,15 +1543,16 @@ mod tests {
 
     #[test]
     fn catalog_for_snapshot_returns_empty_catalog_when_no_cache() {
-        let result = catalog_for_snapshot(None);
-        assert_eq!(result.count, 0);
+        let result = catalog_for_snapshot(None, "anything");
+        assert_eq!(result.total, 0);
         assert!(result.servers.is_empty());
     }
 
     #[test]
     fn catalog_for_snapshot_serves_cached_entries_without_flags() {
-        let result = catalog_for_snapshot(Some(make_test_cache()));
-        assert_eq!(result.count, 1);
+        let result = catalog_for_snapshot(Some(make_test_cache()), "filesystem");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.servers.len(), 1);
     }
 
     #[test]
@@ -1477,8 +1561,9 @@ mod tests {
         // package version, so even a month-old snapshot is served as-is.
         let mut cache = make_test_cache();
         cache.synced_at = Some(Utc::now() - chrono::Duration::days(31));
-        let result = catalog_for_snapshot(Some(cache));
-        assert_eq!(result.count, 1);
+        let result = catalog_for_snapshot(Some(cache), "filesystem");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.servers.len(), 1);
     }
 
     #[test]
@@ -1605,6 +1690,70 @@ mod tests {
 
     /// The sync permit is exclusive while held (no duplicate background
     /// downloads) and reusable after release (failed syncs get retried).
+    /// Direct acceptance: a 4,786-entry fixture must never expose more
+    /// than eight model-visible matches, and the serialized payload stays
+    /// bounded regardless of catalog size.
+    #[test]
+    fn huge_catalog_search_stays_bounded_at_eight_matches() {
+        let entries = (0..4_786)
+            .map(|index| McpRegistryServerEntry {
+                name: format!("com.example/server-{index}"),
+                description: format!("Specialized capability server number {index} for conversion"),
+                launch: McpLaunchSpec {
+                    run_command: "npx -y com.example/server <ARGS>".into(),
+                    required_args: vec![],
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let matches = search_registry_entries(&entries, "conversion server", MAX_REGISTRY_MATCHES);
+        assert_eq!(matches.len(), MAX_REGISTRY_MATCHES, "cap at eight matches");
+
+        let payload = serde_json::to_string(&matches).expect("serialize matches");
+        assert!(
+            payload.len() < 16_000,
+            "bounded payload, got {} bytes",
+            payload.len()
+        );
+
+        // A query that matches nothing returns an empty set — never the
+        // whole catalog.
+        let none = search_registry_entries(&entries, "nothing matches this", MAX_REGISTRY_MATCHES);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn search_ranks_exact_name_over_substring_and_ties_break_alphabetically() {
+        let entries = [
+            entry("b/convert", "converts documents"),
+            entry("a/convert-pro", "converts documents better"),
+            entry(
+                "zzz-unrelated",
+                "but mentions convert deep in a long description",
+            ),
+        ];
+        let matches = search_registry_entries(&entries, "convert", MAX_REGISTRY_MATCHES);
+        let names = matches.iter().map(|m| m.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["a/convert-pro", "b/convert", "zzz-unrelated"]);
+    }
+
+    #[test]
+    fn empty_query_matches_nothing_instead_of_everything() {
+        let entries = [entry("a/server", "does things")];
+        assert!(search_registry_entries(&entries, "   ", MAX_REGISTRY_MATCHES).is_empty());
+    }
+
+    fn entry(name: &str, description: &str) -> McpRegistryServerEntry {
+        McpRegistryServerEntry {
+            name: name.into(),
+            description: description.into(),
+            launch: McpLaunchSpec {
+                run_command: "npx -y pkg <ARGS>".into(),
+                required_args: vec![],
+            },
+        }
+    }
+
     #[tokio::test]
     async fn background_sync_permit_is_exclusive_until_released() {
         let first = try_acquire_sync_permit();
@@ -1642,13 +1791,13 @@ mod tests {
 
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let result = McpSyncRegistry::with_cache_path(cache_file)
-            .execute(json!({}), &ctx)
+            .execute(json!({ "query": "filesystem" }), &ctx)
             .await
             .expect("fresh cache must serve without network");
 
         let payload: serde_json::Value =
             serde_json::from_str(&result.content).expect("result content must parse");
-        assert_eq!(payload["count"], 1, "fixture catalog must be served as-is");
+        assert_eq!(payload["total"], 1, "fixture catalog is reported in full");
         assert_eq!(
             payload["servers"][0]["name"], "io.modelcontextprotocol/filesystem",
             "cache-first path must return the cached entry, not a live sync"
@@ -1679,7 +1828,7 @@ mod tests {
 
         let ctx = ToolContext::new(tmp_path.clone());
 
-        let input = json!({});
+        let input = json!({ "query": "filesystem file access" });
 
         let result = McpSyncRegistry::with_cache_path(cache_path.clone())
             .execute(input, &ctx)

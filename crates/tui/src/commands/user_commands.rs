@@ -287,7 +287,7 @@ pub fn try_dispatch_user_command(app: &mut App, input: &str) -> Option<CommandRe
             let (metadata, body) = parse_frontmatter(content);
             app.goal.objective = None;
             app.goal.started_at = None;
-            app.goal.status = GoalStatus::Active;
+            app.goal.status = crate::tools::goal::GoalStatus::Active;
             app.goal.token_budget = None;
             app.goal.tokens_used = 0;
             app.goal.time_used_seconds = 0;
