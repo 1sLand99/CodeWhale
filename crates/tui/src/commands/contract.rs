@@ -1104,6 +1104,25 @@ mod tests {
     }
 
     #[test]
+    fn media_adapter_attaches_valid_video_reference() {
+        // A real (non-image) media file with a video extension passes the
+        // extension gate without byte validation, matching baseline /attach.
+        let tmpdir = tempfile::TempDir::new().expect("tempdir");
+        let video_path = tmpdir.path().join("clip.mp4");
+        std::fs::write(&video_path, b"not a real mp4 but extension-gated").expect("write");
+
+        let mut app = test_app();
+        let mut bundle = app.command_contexts();
+        let mut parts = bundle.parts();
+        let media = parts.media.as_mut().expect("media facet");
+        let receipt = media
+            .attach_media(&video_path)
+            .expect("video path attaches by extension");
+        assert_eq!(receipt.kind, "video");
+        assert!(app.input.contains("[Attached video:"), "{}", app.input);
+    }
+
+    #[test]
     fn workspace_digest_adapter_preserves_no_active_and_failure_semantics() {
         let mut app = test_app();
         app.runtime_services.work = None;

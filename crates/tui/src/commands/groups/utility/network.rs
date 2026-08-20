@@ -436,4 +436,47 @@ mod tests {
         );
         assert_eq!(NetworkCmd::info().aliases, &[] as &[&str]);
     }
+
+    #[test]
+    fn host_normalization_handles_wildcard_trailing_dot_and_url_paths() {
+        // Wildcard prefix normalizes to a leading-dot suffix form.
+        assert_eq!(normalize_host_for_compare("*.example.com"), ".example.com");
+        // Trailing dot and case are normalized away.
+        assert_eq!(normalize_host_for_compare("Example.COM."), "example.com");
+        // A bare wildcard suffix compares equal to its explicit form.
+        assert_eq!(normalize_host_for_compare("*.github.com"), ".github.com");
+
+        // URL input extracts the host; a URL path is rejected.
+        assert_eq!(
+            host_from_url("https://API.Github.com/path").as_deref(),
+            Some("api.github.com")
+        );
+        assert_eq!(host_from_url("not a url"), None);
+        assert!(normalize_host_arg("https://github.com/path").is_ok());
+        assert!(normalize_host_arg("a/b").is_err(), "URL path rejected");
+        assert!(
+            normalize_host_arg("https://").is_err(),
+            "hostless URL rejected"
+        );
+    }
+
+    #[test]
+    fn exact_conflict_removal_is_case_and_wildcard_aware() {
+        let mut allow = vec!["github.com".to_string()];
+        let mut deny = vec!["GitHub.COM".to_string(), "*.example.com".to_string()];
+        // Production normalizes the host argument before update_host; the
+        // normalized form then removes the exact deny entry (case-insensitive).
+        let host = normalize_host_arg("GitHub.COM").expect("normalize");
+        assert_eq!(host, "github.com");
+        remove_host(&mut deny, &host);
+        assert_eq!(deny, vec!["*.example.com".to_string()]);
+        // Denying removes the exact allow entry.
+        remove_host(&mut allow, &host);
+        assert!(allow.is_empty());
+        // Adding an existing normalized host is a no-op (production passes
+        // the already-normalized host into add_host).
+        add_host(&mut allow, "github.com");
+        add_host(&mut allow, "github.com");
+        assert_eq!(allow, vec!["github.com".to_string()]);
+    }
 }
