@@ -25,7 +25,7 @@ fn persist_current_session_goal(app: &App) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn surface_goal_persistence_failure(app: &mut App, error: &str) {
+pub(crate) fn surface_goal_persistence_failure(app: &mut App, error: &str) {
     app.push_status_toast(
         format!("Goal progress is not durable yet: {error}"),
         StatusToastLevel::Warning,
@@ -798,6 +798,10 @@ pub(crate) async fn run_event_loop(
         // A manual compaction deferred by a full engine mailbox retries here
         // each iteration until a slot frees or a live pass supersedes it.
         flush_deferred_manual_compaction(app, config, &engine_handle);
+        // Goal controls are accepted only after their bounded sidecar is
+        // durable. Mailbox backpressure must therefore defer delivery, never
+        // block keyboard input or silently drop the accepted control.
+        flush_pending_goal_controls(app, &engine_handle);
 
         while let Some(completion) = app.clipboard.poll_write_completion() {
             if let Err(err) = completion {

@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "shell somente leitura",
   "AgentFocusPostureShellNone": "sem shell",
   "GoalReceiptSet": "Meta definida: \"{objective}\" · /goal mostra o progresso · /goal pause ou /goal clear interrompe",
+  "GoalControlAccepted": "Controle da meta salvo; será aplicado no próximo limite seguro.",
+  "GoalControlRuntimeUnavailable": "O controle da meta está salvo, mas o runtime não está disponível. Ele será restaurado após reiniciar.",
   "GoalStatusIdleHint": "parada no momento — envie uma mensagem ou /goal resume para continuar",
   "CmdAutoDescription": "Trabalhe com Auto-Review — sem meta ou workflow",
   "AutoReceiptOn": "Auto-Review ligado. /goal mantém um objetivo; /workflow executa um script.",

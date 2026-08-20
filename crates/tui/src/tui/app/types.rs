@@ -870,6 +870,30 @@ impl QueuedMessage {
 
 // === Actions ===
 
+/// A typed goal-control request accepted by the TUI and delivered to the
+/// engine mailbox. Keeping this separate from transcript text lets the host
+/// persist, retry, and reconcile controls without impersonating the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GoalControlIntent {
+    SetStatus {
+        status: crate::tools::goal::GoalStatus,
+        clear: bool,
+    },
+    SetObjective {
+        objective: String,
+        token_budget: Option<u32>,
+    },
+}
+
+/// One accepted goal control waiting for its authoritative GoalUpdated
+/// receipt. `dispatched` distinguishes mailbox backpressure from an operation
+/// already ordered in the engine channel; both remain pending until receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingGoalControl {
+    pub intent: GoalControlIntent,
+    pub dispatched: bool,
+}
+
 /// Actions emitted by the UI event loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {

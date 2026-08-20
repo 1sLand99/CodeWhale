@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "唯讀 shell",
   "AgentFocusPostureShellNone": "無 shell",
   "GoalReceiptSet": "已設定目標：「{objective}」 · /goal 查看進度 · /goal pause 或 /goal clear 停止",
+  "GoalControlAccepted": "目標控制已儲存；將在下一個安全邊界套用。",
+  "GoalControlRuntimeUnavailable": "目標控制已儲存，但執行階段目前無法使用。重新啟動後將還原此狀態。",
   "GoalStatusIdleHint": "目前未執行 — 傳送訊息或 /goal resume 以繼續",
   "CmdAutoDescription": "以自動審核工作——不必先設目標或工作流程",
   "AutoReceiptOn": "已開啟自動審核。/goal 盯住一個目標；/workflow 執行腳本。",

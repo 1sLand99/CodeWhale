@@ -139,10 +139,10 @@ use super::key_actions;
 use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
     AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
-    OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort, StatusToast,
-    StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence,
-    TuiOptions, bound_agent_activity_text, is_stop_word, looks_like_slash_command_input,
-    shell_command_from_bang_input,
+    GoalControlIntent, OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage,
+    ReasoningEffort, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
+    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
+    looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,

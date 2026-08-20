@@ -265,6 +265,208 @@ pub(crate) fn apply_message_submit_outcome(
     }
 }
 
+fn visible_goal_as_durable(
+    app: &App,
+) -> Result<Option<crate::session_manager::SessionGoalState>, String> {
+    let Some(objective) = app.goal.objective.as_deref() else {
+        return Ok(None);
+    };
+    let elapsed_seconds = app
+        .goal
+        .started_at
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or(app.goal.time_used_seconds)
+        .max(app.goal.time_used_seconds);
+    crate::session_manager::SessionGoalState::from_runtime(&GoalSnapshot {
+        objective: Some(objective.to_string()),
+        status: app.goal.status.as_str().to_string(),
+        token_budget: app.goal.token_budget,
+        tokens_used: app.goal.tokens_used,
+        time_used_seconds: app.goal.time_used_seconds,
+        continuation_count: app.goal.continuation_count,
+        elapsed_seconds: Some(elapsed_seconds),
+        pause_reason: app.goal.pause_reason,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn desired_goal_state(
+    app: &App,
+    intent: &GoalControlIntent,
+) -> Result<Option<crate::session_manager::SessionGoalState>, String> {
+    let mut base = if app.pending_goal_controls.is_empty() {
+        match app.last_known_goal_state.clone() {
+            Some(goal) => Some(goal),
+            None => visible_goal_as_durable(app)?,
+        }
+    } else {
+        // Accepted controls compose over the latest durable target, not the
+        // older visible projection that is still waiting on GoalUpdated.
+        app.last_known_goal_state.clone()
+    };
+    match intent {
+        GoalControlIntent::SetStatus { clear: true, .. } => Ok(None),
+        GoalControlIntent::SetStatus {
+            status,
+            clear: false,
+        } => {
+            let goal = base
+                .as_mut()
+                .ok_or_else(|| "No goal is available for this control.".to_string())?;
+            goal.status = match status {
+                GoalStatus::Active => crate::session_manager::SessionGoalStatus::Active,
+                GoalStatus::Paused => crate::session_manager::SessionGoalStatus::Paused,
+                GoalStatus::Complete => crate::session_manager::SessionGoalStatus::Complete,
+                GoalStatus::Blocked => crate::session_manager::SessionGoalStatus::Blocked,
+            };
+            goal.pause_reason = (*status == GoalStatus::Paused)
+                .then_some(crate::tools::goal::GoalPauseReason::User);
+            Ok(base)
+        }
+        GoalControlIntent::SetObjective {
+            objective,
+            token_budget,
+        } => crate::session_manager::SessionGoalState::from_runtime(&GoalSnapshot {
+            objective: Some(objective.clone()),
+            status: GoalStatus::Active.as_str().to_string(),
+            token_budget: *token_budget,
+            elapsed_seconds: Some(0),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string()),
+    }
+}
+
+fn persist_accepted_goal_state(
+    app: &mut App,
+    desired: Option<&crate::session_manager::SessionGoalState>,
+) -> Result<(), String> {
+    let manager = SessionManager::default_location()
+        .map_err(|error| format!("could not open the session store: {error}"))?;
+    if app.current_session_id.is_none() {
+        let session = build_session_snapshot(app, &manager)?;
+        let session_id = session.metadata.id.clone();
+        if !persistence_actor::try_persist(PersistRequest::SaveCheckpoint { session }) {
+            return Err("the persistence worker is unavailable".to_string());
+        }
+        app.current_session_id = Some(session_id);
+    }
+    let session_id = app
+        .current_session_id
+        .as_deref()
+        .ok_or_else(|| "session id is not established".to_string())?;
+    manager
+        .save_session_goal(session_id, desired)
+        .map_err(|error| error.to_string())
+}
+
+fn goal_control_op(intent: &GoalControlIntent) -> Op {
+    match intent {
+        GoalControlIntent::SetStatus { status, clear } => Op::SetGoalStatus {
+            status: *status,
+            clear: *clear,
+        },
+        GoalControlIntent::SetObjective {
+            objective,
+            token_budget,
+        } => Op::SetGoalObjective {
+            objective: objective.clone(),
+            token_budget: *token_budget,
+        },
+    }
+}
+
+/// Retry accepted goal controls without ever awaiting mailbox capacity on the
+/// input loop. FIFO order is retained until each authoritative receipt lands.
+pub(crate) fn flush_pending_goal_controls(app: &mut App, engine_handle: &EngineHandle) -> bool {
+    for pending in &mut app.pending_goal_controls {
+        if pending.dispatched {
+            continue;
+        }
+        if engine_handle
+            .try_send(goal_control_op(&pending.intent))
+            .is_err()
+        {
+            return engine_handle.tx_op.is_closed();
+        }
+        pending.dispatched = true;
+    }
+    false
+}
+
+fn goal_control_matches(
+    intent: &GoalControlIntent,
+    durable: Option<&crate::session_manager::SessionGoalState>,
+) -> bool {
+    match intent {
+        GoalControlIntent::SetStatus { clear: true, .. } => durable.is_none(),
+        GoalControlIntent::SetStatus {
+            status,
+            clear: false,
+        } => durable.is_some_and(|goal| {
+            goal.status
+                == match status {
+                    GoalStatus::Active => crate::session_manager::SessionGoalStatus::Active,
+                    GoalStatus::Paused => crate::session_manager::SessionGoalStatus::Paused,
+                    GoalStatus::Complete => crate::session_manager::SessionGoalStatus::Complete,
+                    GoalStatus::Blocked => crate::session_manager::SessionGoalStatus::Blocked,
+                }
+        }),
+        GoalControlIntent::SetObjective {
+            objective,
+            token_budget,
+        } => durable.is_some_and(|goal| {
+            goal.objective == *objective
+                && goal.status == crate::session_manager::SessionGoalStatus::Active
+                && goal.token_budget == *token_budget
+        }),
+    }
+}
+
+fn accept_goal_control(app: &mut App, engine_handle: &EngineHandle, intent: GoalControlIntent) {
+    let desired = match desired_goal_state(app, &intent) {
+        Ok(desired) => desired,
+        Err(error) => {
+            surface_goal_persistence_failure(app, &error);
+            return;
+        }
+    };
+    if let Err(error) = persist_accepted_goal_state(app, desired.as_ref()) {
+        surface_goal_persistence_failure(app, &error);
+        return;
+    }
+
+    if matches!(
+        intent,
+        GoalControlIntent::SetStatus {
+            status: GoalStatus::Complete,
+            clear: false
+        }
+    ) {
+        crate::audit::log_sensitive_event(
+            "goal.user_completed",
+            serde_json::json!({ "accepted": true }),
+        );
+    }
+    app.last_known_goal_state = desired;
+    app.pending_goal_controls.push_back(PendingGoalControl {
+        intent,
+        dispatched: false,
+    });
+    let runtime_closed = flush_pending_goal_controls(app, engine_handle);
+    app.add_message(HistoryCell::System {
+        content: app.tr(MessageId::GoalControlAccepted).to_string(),
+    });
+    if runtime_closed {
+        app.push_status_toast(
+            app.tr(MessageId::GoalControlRuntimeUnavailable).to_string(),
+            StatusToastLevel::Warning,
+            None,
+        );
+    }
+}
+
 pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot) -> bool {
     let durable_goal = match crate::session_manager::SessionGoalState::from_runtime(snapshot) {
         Ok(goal) => goal,
@@ -273,6 +475,14 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
             return false;
         }
     };
+    let pending_desired = app.last_known_goal_state.clone();
+    let matched_pending = app
+        .pending_goal_controls
+        .front()
+        .is_some_and(|pending| goal_control_matches(&pending.intent, durable_goal.as_ref()));
+    if matched_pending {
+        app.pending_goal_controls.pop_front();
+    }
     // An explicit engine-side clear is represented by the one canonical empty
     // state emitted by GoalState::snapshot. Require both fields so a malformed
     // objective-less Active/Blocked update cannot erase valid visible state.
@@ -286,8 +496,12 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
             || app.goal.finished_at.is_some()
             || app.goal.status != GoalStatus::default();
         app.goal = crate::tui::app::HostGoalState::default();
-        app.last_known_goal_state = None;
-        return changed;
+        app.last_known_goal_state = if app.pending_goal_controls.is_empty() {
+            None
+        } else {
+            pending_desired
+        };
+        return changed || matched_pending;
     }
 
     let Some(objective) = snapshot
@@ -316,8 +530,12 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         || app.goal.pause_reason != snapshot.pause_reason
         || app.goal.status != verdict;
     if !changed {
-        app.last_known_goal_state = durable_goal;
-        return false;
+        app.last_known_goal_state = if app.pending_goal_controls.is_empty() {
+            durable_goal
+        } else {
+            pending_desired
+        };
+        return matched_pending;
     }
 
     // The runtime introduced a new active objective (the model called
@@ -356,7 +574,11 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         }
         GoalStatus::Active => app.goal.finished_at = None,
     }
-    app.last_known_goal_state = durable_goal;
+    app.last_known_goal_state = if app.pending_goal_controls.is_empty() {
+        durable_goal
+    } else {
+        pending_desired
+    };
     true
 }
 
@@ -1064,20 +1286,24 @@ pub(crate) async fn apply_command_result(
                 .await?;
             }
             AppAction::SetGoalStatus { status, clear } => {
-                let _ = engine_handle
-                    .send(Op::SetGoalStatus { status, clear })
-                    .await;
+                accept_goal_control(
+                    app,
+                    engine_handle,
+                    GoalControlIntent::SetStatus { status, clear },
+                );
             }
             AppAction::SetGoalObjective {
                 objective,
                 token_budget,
             } => {
-                let _ = engine_handle
-                    .send(Op::SetGoalObjective {
+                accept_goal_control(
+                    app,
+                    engine_handle,
+                    GoalControlIntent::SetObjective {
                         objective,
                         token_budget,
-                    })
-                    .await;
+                    },
+                );
             }
             AppAction::OpenTextPager { title, content } => {
                 open_text_pager(app, title, content);
@@ -2765,6 +2991,7 @@ pub(crate) fn apply_loaded_session_with_goal(
     // rebuilds both the visible hunt and the EngineConfig seeded below.
     app.goal = crate::tui::app::HostGoalState::default();
     app.last_known_goal_state = None;
+    app.pending_goal_controls.clear();
     if let Some(goal) = goal {
         let snapshot = goal.to_runtime_snapshot();
         let _ = apply_goal_snapshot_to_app(app, &snapshot);

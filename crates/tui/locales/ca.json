@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "shell de només lectura",
   "AgentFocusPostureShellNone": "sense shell",
   "GoalReceiptSet": "Objectiu establert: \"{objective}\" · /goal mostra el progrés · /goal pause o /goal clear l'atura",
+  "GoalControlAccepted": "Control de l'objectiu desat; s'aplicarà al següent punt segur.",
+  "GoalControlRuntimeUnavailable": "El control de l'objectiu està desat, però el procés no està disponible. Es restaurarà després de reiniciar.",
   "GoalStatusIdleHint": "no s'està executant — envia un missatge o /goal resume per continuar",
   "CmdAutoDescription": "Treballa amb Auto-Review — sense objectiu ni workflow",
   "AutoReceiptOn": "Auto-Review activat. /goal manté un objectiu; /workflow executa un script.",

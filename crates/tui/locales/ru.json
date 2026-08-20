@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "shell только чтение",
   "AgentFocusPostureShellNone": "без shell",
   "GoalReceiptSet": "Цель задана: «{objective}» · /goal показывает прогресс · /goal pause или /goal clear останавливает",
+  "GoalControlAccepted": "Команда цели сохранена и будет применена на следующей безопасной границе.",
+  "GoalControlRuntimeUnavailable": "Команда цели сохранена, но среда выполнения недоступна. Она будет восстановлена после перезапуска.",
   "GoalStatusIdleHint": "сейчас не выполняется — отправьте сообщение или /goal resume, чтобы продолжить",
   "CmdAutoDescription": "Работать с Auto-Review — без цели и workflow",
   "AutoReceiptOn": "Auto-Review включён. /goal держит одну цель; /workflow запускает скрипт.",

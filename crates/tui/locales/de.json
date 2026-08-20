@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "Nur-Lese-Shell",
   "AgentFocusPostureShellNone": "keine Shell",
   "GoalReceiptSet": "Ziel gesetzt: \"{objective}\" · /goal zeigt den Fortschritt · /goal pause oder /goal clear beendet es",
+  "GoalControlAccepted": "Zielsteuerung gespeichert; sie wird am nächsten sicheren Übergang angewendet.",
+  "GoalControlRuntimeUnavailable": "Die Zielsteuerung ist gespeichert, aber die Laufzeit ist nicht verfügbar. Sie wird nach dem Neustart wiederhergestellt.",
   "GoalStatusIdleHint": "läuft gerade nicht — Nachricht senden oder /goal resume zum Fortsetzen",
   "CmdAutoDescription": "Mit Auto-Review arbeiten — ohne Ziel oder Workflow",
   "AutoReceiptOn": "Auto-Review an. /goal hält ein Ziel; /workflow führt ein Skript aus.",

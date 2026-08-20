@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "read-only shell",
   "AgentFocusPostureShellNone": "no shell",
   "GoalReceiptSet": "Goal set: \"{objective}\" · /goal shows progress · /goal pause or /goal clear stops it",
+  "GoalControlAccepted": "Goal control saved; applying at the next safe boundary.",
+  "GoalControlRuntimeUnavailable": "Goal control is saved, but the runtime is unavailable. It will be restored after restart.",
   "GoalStatusIdleHint": "not running now — send a message or /goal resume to continue",
   "CmdAutoDescription": "Work with Auto-Review — skip a goal or workflow",
   "AutoReceiptOn": "Auto-Review on. /goal keeps one objective; /workflow runs a script.",

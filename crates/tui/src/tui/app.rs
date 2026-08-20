@@ -69,7 +69,8 @@ pub use types::{
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 pub(crate) use types::{
-    CacheReplayTarget, EffectiveReasoningEffort, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
+    CacheReplayTarget, EffectiveReasoningEffort, GoalControlIntent, PendingGoalControl,
+    WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
 };
 
 // === Types ===
@@ -1636,6 +1637,10 @@ pub struct App {
     /// the owning saved session so a resumed process rebuilds the same goal
     /// control state instead of inferring it from transcript prose.
     pub(crate) last_known_goal_state: Option<crate::session_manager::SessionGoalState>,
+    /// FIFO of accepted typed controls not yet reconciled by GoalUpdated.
+    /// The durable desired state lives in `last_known_goal_state`; this queue
+    /// preserves in-process ordering and mailbox retry state only.
+    pub(crate) pending_goal_controls: VecDeque<PendingGoalControl>,
     /// Metadata for the active session, cached in memory so automatic
     /// checkpoints never synchronously reload and parse a growing JSON file on
     /// the UI thread.

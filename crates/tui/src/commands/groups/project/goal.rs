@@ -7,30 +7,16 @@ use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
 use crate::tools::goal::GoalStatus;
 use crate::tui::app::{App, AppAction};
-use serde_json::json;
 
 use crate::commands::CommandResult;
 
 /// Declare, show, pause, resume, or close a goal.
 fn goal_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg {
-        Some("clear") | Some("reset") => {
-            app.goal.objective = None;
-            app.goal.token_budget = None;
-            app.goal.tokens_used = 0;
-            app.goal.time_used_seconds = 0;
-            app.goal.continuation_count = 0;
-            app.goal.started_at = None;
-            app.goal.finished_at = None;
-            app.goal.status = GoalStatus::default();
-            CommandResult::with_message_and_action(
-                "Goal cleared.",
-                AppAction::SetGoalStatus {
-                    status: GoalStatus::Active,
-                    clear: true,
-                },
-            )
-        }
+        Some("clear") | Some("reset") => CommandResult::action(AppAction::SetGoalStatus {
+            status: GoalStatus::Active,
+            clear: true,
+        }),
         Some("done") | Some("complete") => close_goal(app, GoalStatus::Complete),
         Some("pause") | Some("paused") => close_goal(app, GoalStatus::Paused),
         Some("resume") | Some("continue") => resume_goal(app),
@@ -42,32 +28,18 @@ fn goal_command(app: &mut App, arg: Option<&str>) -> CommandResult {
             if objective.is_empty() || objective.chars().all(|c| c == '|') {
                 return CommandResult::error(goal_usage());
             }
-            // Host projection first so the chip and status render the new
-            // goal immediately; the engine is authoritative and starts the
-            // first goal turn itself (runtime steering, not a user echo).
-            app.goal.objective = Some(objective.clone());
-            app.goal.token_budget = budget;
-            app.goal.tokens_used = 0;
-            app.goal.time_used_seconds = 0;
-            app.goal.continuation_count = 0;
-            app.goal.started_at = Some(std::time::Instant::now());
-            app.goal.finished_at = None;
-            app.goal.status = GoalStatus::Active;
-            let budget_str = budget
-                .map(|b| format!(" (budget: {b} tokens)"))
-                .unwrap_or_default();
-            CommandResult::with_message_and_action(
-                format!(
-                    "Goal set: \"{objective}\"{budget_str} — the agent works toward it across turns."
-                ),
-                AppAction::SetGoalObjective {
-                    objective,
-                    token_budget: budget,
-                },
-            )
+            // The command layer never mutates the visible projection. The UI
+            // first persists and accepts this typed intent; only the engine's
+            // authoritative GoalUpdated event may change what the user sees.
+            CommandResult::action(AppAction::SetGoalObjective {
+                objective,
+                token_budget: budget,
+            })
         }
         _ => {
-            if app.goal.objective.is_some() {
+            if !app.pending_goal_controls.is_empty() {
+                CommandResult::message(app.tr(MessageId::GoalControlAccepted))
+            } else if app.goal.objective.is_some() {
                 goal_status(app)
             } else if app.api_messages.is_empty() {
                 // Nothing has happened yet: there is no context to derive an
@@ -149,62 +121,27 @@ fn goal_status(app: &App) -> CommandResult {
 /// re-arms) the continuation loop from the `SetGoalStatus` op; no model turn
 /// is dispatched.
 fn close_goal(app: &mut App, status: GoalStatus) -> CommandResult {
-    if app.goal.objective.as_deref().is_none_or(str::is_empty) {
+    if effective_goal_objective(app).is_none_or(str::is_empty) {
         return CommandResult::error("No goal set. Use /goal <objective> [budget: N] first.");
     }
-
-    let previous = app.goal.status;
-    app.goal.status = status;
-    // Freeze the sidebar timer at close-out so terminal goals stop ticking.
-    // Paused goals are not terminal — the timer re-arms on resume — but the
-    // pause instant is still recorded so a paused goal doesn't read as
-    // still-running in the sidebar.
-    if app.goal.finished_at.is_none() {
-        app.goal.finished_at = Some(std::time::Instant::now());
+    if effective_goal_status(app) == status {
+        if !app.pending_goal_controls.is_empty() {
+            return CommandResult::message(app.tr(MessageId::GoalControlAccepted));
+        }
+        return goal_status(app);
     }
 
-    // `/goal done` overrides the model's own completion verdict; record it as
-    // an auditable control decision like every other authority-relevant act.
-    if status == GoalStatus::Complete && previous != status {
-        crate::audit::log_sensitive_event(
-            "goal.user_completed",
-            json!({
-                "previous_status": goal_status_name(previous),
-                "current_status": goal_status_name(status),
-            }),
-        );
-    }
-
-    let action = AppAction::SetGoalStatus {
+    CommandResult::action(AppAction::SetGoalStatus {
         status,
         clear: false,
-    };
-
-    match status {
-        GoalStatus::Complete => {
-            let elapsed = goal_elapsed_at_close(&app.goal);
-            CommandResult::with_message_and_action(
-                format!("Goal complete. Elapsed: {elapsed}"),
-                action,
-            )
-        }
-        GoalStatus::Paused => CommandResult::with_message_and_action(
-            "Goal paused. Progress is saved; use /goal resume to continue.",
-            action,
-        ),
-        GoalStatus::Blocked => CommandResult::with_message_and_action("Goal blocked.", action),
-        GoalStatus::Active => CommandResult::with_message_and_action("Goal active.", action),
-    }
+    })
 }
 
 /// Resume a paused goal. The engine restarts the continuation loop itself
 /// (`SetGoalStatus` → schedule kickoff); the objective is never re-sent as a
 /// user message.
 fn resume_goal(app: &mut App) -> CommandResult {
-    if app
-        .goal
-        .objective
-        .as_deref()
+    if effective_goal_objective(app)
         .map(str::trim)
         .is_none_or(str::is_empty)
     {
@@ -214,24 +151,39 @@ fn resume_goal(app: &mut App) -> CommandResult {
     // Resuming an already-active goal is a no-op: the continuation loop is
     // already running, and re-asserting Active could stack a second
     // autonomous turn. Report progress instead.
-    if app.goal.status == GoalStatus::Active {
+    if effective_goal_status(app) == GoalStatus::Active {
+        if !app.pending_goal_controls.is_empty() {
+            return CommandResult::message(app.tr(MessageId::GoalControlAccepted));
+        }
         return goal_status(app);
     }
 
-    app.goal.status = GoalStatus::Active;
-    if app.goal.started_at.is_none() {
-        app.goal.started_at = Some(std::time::Instant::now());
+    CommandResult::action(AppAction::SetGoalStatus {
+        status: GoalStatus::Active,
+        clear: false,
+    })
+}
+
+fn effective_goal_objective(app: &App) -> Option<&str> {
+    if app.pending_goal_controls.is_empty() {
+        app.goal.objective.as_deref()
+    } else {
+        app.last_known_goal_state
+            .as_ref()
+            .map(|goal| goal.objective.as_str())
     }
-    // Re-arm the elapsed timer: a resumed goal keeps ticking from where it
-    // left off (started_at is preserved), not frozen at the pause.
-    app.goal.finished_at = None;
-    CommandResult::with_message_and_action(
-        "Goal resumed.",
-        AppAction::SetGoalStatus {
-            status: GoalStatus::Active,
-            clear: false,
-        },
-    )
+}
+
+fn effective_goal_status(app: &App) -> GoalStatus {
+    if app.pending_goal_controls.is_empty() {
+        return app.goal.status;
+    }
+    match app.last_known_goal_state.as_ref().map(|goal| goal.status) {
+        Some(crate::session_manager::SessionGoalStatus::Paused) => GoalStatus::Paused,
+        Some(crate::session_manager::SessionGoalStatus::Complete) => GoalStatus::Complete,
+        Some(crate::session_manager::SessionGoalStatus::Blocked) => GoalStatus::Blocked,
+        Some(crate::session_manager::SessionGoalStatus::Active) | None => GoalStatus::Active,
+    }
 }
 
 fn goal_usage() -> &'static str {
@@ -246,27 +198,6 @@ fn goal_usage() -> &'static str {
 }
 
 fn goal_status_label(status: GoalStatus) -> &'static str {
-    match status {
-        GoalStatus::Active => "active",
-        GoalStatus::Complete => "complete",
-        GoalStatus::Paused => "paused",
-        GoalStatus::Blocked => "blocked",
-    }
-}
-
-/// Humanized elapsed time for a closed goal, frozen at the finish instant so
-/// the close-out message doesn't drift further each time it's read.
-fn goal_elapsed_at_close(goal: &crate::tui::app::HostGoalState) -> String {
-    match (goal.started_at, goal.finished_at) {
-        (Some(started), Some(finished)) => crate::elapsed::format_elapsed_secs(
-            finished.saturating_duration_since(started).as_secs(),
-        ),
-        (Some(started), None) => crate::elapsed::format_elapsed_secs(started.elapsed().as_secs()),
-        (None, _) => "unknown".to_string(),
-    }
-}
-
-fn goal_status_name(status: GoalStatus) -> &'static str {
     match status {
         GoalStatus::Active => "active",
         GoalStatus::Complete => "complete",
@@ -331,9 +262,8 @@ mod tests {
     fn test_set_goal_dispatches_control_plane_not_user_echo() {
         let mut app = create_test_app();
         let result = goal_command(&mut app, Some("Fix the login bug"));
-        assert!(result.message.unwrap().contains("Goal set"));
-        assert_eq!(app.goal.objective.as_deref(), Some("Fix the login bug"));
-        assert_eq!(app.goal.status, GoalStatus::Active);
+        assert!(result.message.is_none());
+        assert_eq!(app.goal.objective, None);
         // The engine owns the kickoff: the objective must reach it as a
         // SetGoalObjective control op, never as a SendMessage user echo.
         assert!(matches!(
@@ -347,8 +277,8 @@ mod tests {
     fn test_goal_budget_parsing_reaches_the_op() {
         let mut app = create_test_app();
         let result = goal_command(&mut app, Some("Ship 0.9.10 | budget: 5000"));
-        assert_eq!(app.goal.objective.as_deref(), Some("Ship 0.9.10"));
-        assert_eq!(app.goal.token_budget, Some(5000));
+        assert_eq!(app.goal.objective, None);
+        assert_eq!(app.goal.token_budget, None);
         assert!(matches!(
             result.action,
             Some(AppAction::SetGoalObjective { ref objective, token_budget: Some(5000) })
@@ -357,12 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_and_clear_are_control_ops_without_model_turns() {
+    fn pause_and_clear_are_control_ops_without_optimistic_state() {
         let mut app = create_test_app();
-        let _ = goal_command(&mut app, Some("Keep the build green"));
+        app.goal.objective = Some("Keep the build green".to_string());
+        app.goal.status = GoalStatus::Active;
         let paused = goal_command(&mut app, Some("pause"));
-        assert!(paused.message.unwrap().contains("paused"));
-        assert_eq!(app.goal.status, GoalStatus::Paused);
+        assert!(paused.message.is_none());
+        assert_eq!(app.goal.status, GoalStatus::Active);
         assert!(matches!(
             paused.action,
             Some(AppAction::SetGoalStatus {
@@ -370,25 +301,11 @@ mod tests {
                 clear: false
             })
         ));
-        assert!(app.goal.finished_at.is_some(), "pause freezes the timer");
-
-        let resumed = goal_command(&mut app, Some("resume"));
-        assert!(resumed.message.unwrap().contains("resumed"));
-        assert_eq!(app.goal.status, GoalStatus::Active);
-        assert!(app.goal.finished_at.is_none(), "resume re-arms the timer");
-        // Resume is a control op — the engine schedules the continuation
-        // itself; the objective is not echoed as a user message.
-        assert!(matches!(
-            resumed.action,
-            Some(AppAction::SetGoalStatus {
-                status: GoalStatus::Active,
-                clear: false
-            })
-        ));
+        assert!(app.goal.finished_at.is_none());
 
         let cleared = goal_command(&mut app, Some("clear"));
-        assert!(cleared.message.unwrap().contains("cleared"));
-        assert_eq!(app.goal.objective, None);
+        assert!(cleared.message.is_none());
+        assert_eq!(app.goal.objective.as_deref(), Some("Keep the build green"));
         assert!(matches!(
             cleared.action,
             Some(AppAction::SetGoalStatus {
@@ -434,7 +351,9 @@ mod tests {
     #[test]
     fn goal_status_reports_objective_and_state() {
         let mut app = create_test_app();
-        let _ = goal_command(&mut app, Some("Make the suite green | budget: 100"));
+        app.goal.objective = Some("Make the suite green".to_string());
+        app.goal.token_budget = Some(100);
+        app.goal.status = GoalStatus::Active;
         let result = goal_command(&mut app, Some("status"));
         let line = result.message.unwrap();
         assert!(line.contains("Make the suite green"));
@@ -447,7 +366,8 @@ mod tests {
         // Re-asserting Active while the loop is already running must not
         // schedule a second autonomous turn.
         let mut app = create_test_app();
-        goal_command(&mut app, Some("Keep the build green"));
+        app.goal.objective = Some("Keep the build green".to_string());
+        app.goal.status = GoalStatus::Active;
         let resumed = goal_command(&mut app, Some("resume"));
         assert!(!resumed.is_error);
         assert!(
@@ -461,10 +381,7 @@ mod tests {
     fn invalid_budget_suffix_stays_part_of_the_objective() {
         let mut app = create_test_app();
         let result = goal_command(&mut app, Some("Fix budget: handling in settings"));
-        assert_eq!(
-            app.goal.objective.as_deref(),
-            Some("Fix budget: handling in settings")
-        );
+        assert_eq!(app.goal.objective, None);
         assert_eq!(app.goal.token_budget, None);
         assert!(matches!(
             result.action,

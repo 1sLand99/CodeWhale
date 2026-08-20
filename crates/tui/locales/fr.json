@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "shell en lecture seule",
   "AgentFocusPostureShellNone": "sans shell",
   "GoalReceiptSet": "Objectif défini : « {objective} » · /goal affiche la progression · /goal pause ou /goal clear l'arrête",
+  "GoalControlAccepted": "Commande d'objectif enregistrée ; elle sera appliquée au prochain point sûr.",
+  "GoalControlRuntimeUnavailable": "La commande d'objectif est enregistrée, mais le moteur est indisponible. Elle sera restaurée après le redémarrage.",
   "GoalStatusIdleHint": "à l'arrêt pour l'instant — envoyez un message ou /goal resume pour continuer",
   "CmdAutoDescription": "Travailler avec Auto-Review — sans objectif ni workflow",
   "AutoReceiptOn": "Auto-Review activé. /goal suit un objectif ; /workflow lance un script.",

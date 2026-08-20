@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "読み取り専用シェル",
   "AgentFocusPostureShellNone": "シェル不可",
   "GoalReceiptSet": "目標を設定: 「{objective}」 · /goal で進捗表示 · /goal pause または /goal clear で停止",
+  "GoalControlAccepted": "目標操作を保存しました。次の安全な区切りで適用します。",
+  "GoalControlRuntimeUnavailable": "目標操作は保存されていますが、ランタイムを利用できません。再起動後に復元します。",
   "GoalStatusIdleHint": "現在は実行中ではありません — メッセージを送るか /goal resume で続行",
   "CmdAutoDescription": "Auto-Review で作業する — ゴールやワークフローは不要",
   "AutoReceiptOn": "Auto-Review をオンにしました。/goal は一つの目標、/workflow は脚本です。",

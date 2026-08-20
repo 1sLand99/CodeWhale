@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "केवल-पढ़ने शेल",
   "AgentFocusPostureShellNone": "शेल नहीं",
   "GoalReceiptSet": "लक्ष्य सेट: \"{objective}\" · /goal प्रगति दिखाता है · /goal pause या /goal clear इसे रोकता है",
+  "GoalControlAccepted": "लक्ष्य नियंत्रण सहेजा गया; इसे अगले सुरक्षित विराम पर लागू किया जाएगा।",
+  "GoalControlRuntimeUnavailable": "लक्ष्य नियंत्रण सहेजा गया है, लेकिन रनटाइम उपलब्ध नहीं है। पुनः आरंभ के बाद इसे बहाल किया जाएगा।",
   "GoalStatusIdleHint": "अभी नहीं चल रहा — जारी रखने के लिए संदेश भेजें या /goal resume",
   "CmdAutoDescription": "Auto-Review से काम करें — लक्ष्य या वर्कफ़्लो के बिना",
   "AutoReceiptOn": "Auto-Review चालू है। /goal एक लक्ष्य रखता है; /workflow स्क्रिप्ट चलाता है।",

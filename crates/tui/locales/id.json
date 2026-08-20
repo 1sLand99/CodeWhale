@@ -1572,6 +1572,8 @@
   "AgentFocusPostureShellReadOnly": "shell hanya-baca",
   "AgentFocusPostureShellNone": "tanpa shell",
   "GoalReceiptSet": "Tujuan ditetapkan: \"{objective}\" · /goal menampilkan progres · /goal pause atau /goal clear menghentikannya",
+  "GoalControlAccepted": "Kontrol tujuan disimpan; akan diterapkan pada batas aman berikutnya.",
+  "GoalControlRuntimeUnavailable": "Kontrol tujuan tersimpan, tetapi runtime tidak tersedia. Kontrol akan dipulihkan setelah dimulai ulang.",
   "GoalStatusIdleHint": "tidak sedang berjalan — kirim pesan atau /goal resume untuk melanjutkan",
   "CmdAutoDescription": "Bekerja dengan Auto-Review — tanpa tujuan atau workflow",
   "AutoReceiptOn": "Auto-Review aktif. /goal menjaga satu tujuan; /workflow menjalankan skrip.",

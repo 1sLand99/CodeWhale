@@ -9839,6 +9839,53 @@ async fn dispatch_user_message_keeps_auto_review_separate_from_bypass() {
 }
 
 #[test]
+fn pending_goal_control_waits_for_authoritative_receipt() {
+    let mut app = create_test_app();
+    app.goal.objective = Some("Ship the release".to_string());
+    app.goal.status = crate::tools::goal::GoalStatus::Active;
+    let paused = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release".to_string()),
+        status: "paused".to_string(),
+        pause_reason: Some(crate::tools::goal::GoalPauseReason::User),
+        elapsed_seconds: Some(3),
+        ..Default::default()
+    };
+    app.last_known_goal_state = crate::session_manager::SessionGoalState::from_runtime(&paused)
+        .expect("valid paused target");
+    app.pending_goal_controls
+        .push_back(crate::tui::app::PendingGoalControl {
+            intent: crate::tui::app::GoalControlIntent::SetStatus {
+                status: crate::tools::goal::GoalStatus::Paused,
+                clear: false,
+            },
+            dispatched: true,
+        });
+
+    let before_receipt = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release".to_string()),
+        status: "active".to_string(),
+        elapsed_seconds: Some(2),
+        ..Default::default()
+    };
+    assert!(!apply_goal_snapshot_to_app(&mut app, &before_receipt));
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Active);
+    assert_eq!(app.pending_goal_controls.len(), 1);
+    assert_eq!(
+        app.last_known_goal_state.as_ref().map(|goal| goal.status),
+        Some(crate::session_manager::SessionGoalStatus::Paused),
+        "an intermediate runtime update must not overwrite the durable accepted target"
+    );
+
+    assert!(apply_goal_snapshot_to_app(&mut app, &paused));
+    assert_eq!(app.goal.status, crate::tools::goal::GoalStatus::Paused);
+    assert!(app.pending_goal_controls.is_empty());
+    assert_eq!(
+        app.last_known_goal_state.as_ref().map(|goal| goal.status),
+        Some(crate::session_manager::SessionGoalStatus::Paused)
+    );
+}
+
+#[test]
 fn apply_goal_snapshot_updates_visible_goal_status() {
     let mut app = create_test_app();
     app.goal.objective = Some("Ship the release lane".to_string());
