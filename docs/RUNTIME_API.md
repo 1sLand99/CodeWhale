@@ -50,7 +50,7 @@ CLI/API surfaces are not implemented yet.
 | `codewhale app-server --http` | HTTP/SSE on `127.0.0.1:7878` | Full `/v1/*` runtime API (canonical) |
 | `codewhale app-server --mobile` | HTTP/SSE on `0.0.0.0:7878` + `/mobile` | Runtime API + phone control page |
 | `codewhale app-server --stdio` | JSON-RPC 2.0 over stdio | Local SDK / control probe (no listener) |
-| `codewhale app-server` | HTTP on `127.0.0.1:8787` | Legacy in-process app-server (`/healthz`, `/thread`, `/app`, `/prompt`, `/tool`, `/jobs`) |
+| `codewhale app-server` | HTTP on `127.0.0.1:8787` | Legacy in-process app-server (`/healthz`, `/thread`, `/app`, `/prompt`, `/tool`, `/jobs`); `/prompt` and `/thread` messages execute real turns via the runtime bridge |
 | `codewhale serve --http` / `--mobile` | same server as `app-server --http`/`--mobile` | Compatibility aliases |
 
 `app-server --http` and `--mobile` launch the same mature runtime API server
@@ -136,6 +136,36 @@ interrupt's own reply, since the turn owns the writer until it unwinds.
 bridge that the turn holds, so without that it would wait for the very turn
 it was meant to stop. Other requests that arrive mid-turn are queued and run
 in order once the turn finishes.
+
+### Running a prompt
+
+`prompt/request` and `prompt/run` (byte-identical aliases) and the legacy
+HTTP `POST /prompt` all execute a **real turn** on the runtime, through the
+same bridge `thread/message` uses. There is no local fallback: nothing else
+in the app-server can produce model output, so a prompt either runs or fails.
+
+- `params.prompt` is required and must be non-empty (`-32602` otherwise).
+- `params.thread_id` is optional. With one, the prompt runs on that thread and
+  its history. Without one, the runtime gets a fresh thread for that single
+  turn; the mapping is dropped when the turn ends, so a one-shot prompt is not
+  addressable by `thread/interrupt`. Use `thread/message` when you need to be
+  able to interrupt.
+- `params.model` selects the model only when the call is the one that creates
+  the runtime thread; an existing thread keeps the model it was created with.
+- The response carries what the model actually said: `output` is the
+  concatenated `agent_message` text, `model` is the model the runtime reports
+  for the thread that ran it, and `events` are the real
+  `response_start`/`response_delta`/`response_end` frames. Over stdio the same
+  frames are also streamed to stdout while the turn runs, exactly as for
+  `thread/message`.
+- If the runtime cannot be reached, the call fails with `-32005`
+  (`runtime_unavailable`) on stdio, or HTTP `503` with
+  `{"error":{"code":"runtime_unavailable", ...}}` on `POST /prompt`. Failures
+  are never shaped like a successful `PromptResponse`.
+
+`POST /thread` with a `Message` body behaves the same way — it runs the turn
+and replies `status: "completed"` with the streamed frames in `events` — where
+it previously replied `accepted` without doing anything.
 
 ## SDK contract
 
