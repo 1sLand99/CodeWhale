@@ -1,9 +1,11 @@
-//! Constitution-first setup wizard shell (#3404/#3794).
+//! Progressive setup and repair guide.
 //!
-//! This module owns the reusable setup shell: step ordering, navigation,
-//! per-step status projection, and the v0.8.67 constitution checkpoint action.
-//! Individual step contents can grow behind [`SetupWizardStep`] without
-//! changing the navigation or commit contract.
+//! Bare `/setup` starts at the first missing decision and otherwise shows a
+//! compact readiness summary. Optional power tools only join that journey when
+//! they are already configured or need repair. Named `/setup <target>` routes
+//! and the versioned Constitution checkpoint remain compatibility entrypoints,
+//! but ordinary preferences belong to `/settings` and advanced keys belong to
+//! `/config <key>`.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -162,11 +164,11 @@ pub struct SetupWizardView {
     state: SetupState,
     selected: usize,
     locale: Locale,
-    /// The full `/setup` surface owns a ten-step rail. The versioned
-    /// working-agreement checkpoint is a standalone handoff, including when
-    /// it follows first-run onboarding, so it must not borrow that rail's
-    /// `4/10` position.
-    show_wizard_progress: bool,
+    /// Bare `/setup` is a short runtime-derived repair journey. Explicit
+    /// targets remain focused compatibility cards outside that journey.
+    progressive_guide: bool,
+    /// Technical inventory and preset details stay off the first paint.
+    details_expanded: bool,
     facts: SetupRuntimeFacts,
     guided_draft: GuidedConstitutionDraft,
     /// First-run shows one plain-language initiative choice. The six-axis
@@ -237,6 +239,7 @@ struct SetupRuntimeFacts {
     remote_mode_result: String,
     remote_command_provider: String,
     remote_result: String,
+    remote_control_result: String,
     /// The four observed remote modes (#3409). Empty only before facts load.
     remote_modes: Vec<remote::RemoteModeFact>,
     /// True when a mode is missing a token or config. Recorded as
@@ -296,6 +299,7 @@ impl Default for SetupRuntimeFacts {
             remote_mode_result: "remote setup mode not loaded".to_string(),
             remote_command_provider: "deepseek".to_string(),
             remote_result: "remote runtime not loaded".to_string(),
+            remote_control_result: "off".to_string(),
             remote_modes: Vec::new(),
             remote_needs_action: false,
             persistence: SetupPersistenceFacts::default(),
@@ -522,6 +526,21 @@ impl SetupRuntimeFacts {
             remote_mode_result: remote.mode_result,
             remote_command_provider: remote.command_provider,
             remote_result: remote.result,
+            remote_control_result: {
+                let status = app.remote_control.status_line();
+                let message = if status.starts_with("Remote control: connected") {
+                    MessageId::SetupRemoteStatusReady
+                } else if status.starts_with("Remote control: connecting")
+                    || status.starts_with("Remote control: stopping")
+                {
+                    MessageId::SetupStatusInProgress
+                } else if status.starts_with("Remote control: disconnected") {
+                    MessageId::SetupRemoteStatusNeedsAction
+                } else {
+                    MessageId::SetupRemoteStatusDisabled
+                };
+                tr(app.ui_locale, message).into_owned()
+            },
             remote_needs_action,
             remote_modes: remote.modes,
             persistence,
@@ -2277,12 +2296,13 @@ impl SetupWizardView {
     }
 
     fn new_with_facts(state: SetupState, locale: Locale, facts: SetupRuntimeFacts) -> Self {
-        let selected = initial_step_index(&state);
+        let selected = progressive_initial_step_index(&state, &facts);
         Self {
             state,
             selected,
             locale,
-            show_wizard_progress: true,
+            progressive_guide: true,
+            details_expanded: false,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             constitution_advanced: false,
@@ -2308,7 +2328,8 @@ impl SetupWizardView {
             state,
             selected: visible_step_index(step),
             locale,
-            show_wizard_progress: true,
+            progressive_guide: false,
+            details_expanded: false,
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             constitution_advanced: false,
@@ -2329,34 +2350,61 @@ impl SetupWizardView {
         locale: Locale,
         facts: SetupRuntimeFacts,
     ) -> Self {
-        let mut view = Self::new_at_with_facts(state, locale, SetupStep::Constitution, facts);
-        view.show_wizard_progress = false;
-        view
+        Self::new_at_with_facts(state, locale, SetupStep::Constitution, facts)
     }
 
     fn surface_title(&self) -> String {
-        let wizard_title = tr(self.locale, MessageId::SetupWizardTitle);
-        if self.show_wizard_progress {
-            format!(
-                "{wizard_title} · {} {}/{}",
-                tr(self.locale, MessageId::SetupWizardProgress),
-                self.selected + 1,
-                STEP_SPECS.len()
-            )
-        } else {
-            wizard_title.into_owned()
+        tr(self.locale, MessageId::SetupWizardTitle).into_owned()
+    }
+
+    fn tools_relevant(&self) -> bool {
+        self.facts.tools_mcp_needs_action || !self.facts.tools_mcp_result.contains("overall=off")
+    }
+
+    fn progressive_steps(&self) -> Vec<SetupStep> {
+        let mut steps = vec![
+            SetupStep::ProviderModel,
+            SetupStep::TrustSandbox,
+            SetupStep::RemoteRuntime,
+        ];
+        if self.tools_relevant() {
+            steps.push(SetupStep::ToolsMcp);
         }
+        steps.push(SetupStep::Verification);
+        steps
     }
 
     fn move_next(&mut self) {
-        self.selected = (self.selected + 1).min(STEP_SPECS.len().saturating_sub(1));
+        if self.progressive_guide {
+            let steps = self.progressive_steps();
+            let position = steps
+                .iter()
+                .position(|step| *step == self.selected_step())
+                .unwrap_or(0);
+            let next = steps[(position + 1).min(steps.len().saturating_sub(1))];
+            self.selected = visible_step_index(next);
+        } else {
+            self.selected = (self.selected + 1).min(STEP_SPECS.len().saturating_sub(1));
+        }
         self.constitution_advanced = false;
+        self.details_expanded = false;
         self.body_scroll = 0;
     }
 
     fn move_back(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.progressive_guide {
+            let steps = self.progressive_steps();
+            let position = steps
+                .iter()
+                .position(|step| *step == self.selected_step())
+                .unwrap_or(0);
+            let previous = steps[position.saturating_sub(1)];
+            self.selected = visible_step_index(previous);
+        } else {
+            self.selected = self.selected.saturating_sub(1);
+        }
         self.constitution_advanced = false;
+        self.details_expanded = false;
         self.body_scroll = 0;
     }
 
@@ -2640,10 +2688,15 @@ impl SetupWizardView {
                 .with_result(setup_report_result(&state, &self.facts)),
         );
         self.state = state.clone();
-        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+        let event = ViewEvent::SetupStateCommitRequested {
             state,
             message: tr(self.locale, MessageId::SetupReportRecorded).to_string(),
-        })
+        };
+        if self.progressive_guide {
+            ViewAction::EmitAndClose(event)
+        } else {
+            ViewAction::Emit(event)
+        }
     }
 
     fn open_constitution_advanced(&mut self) -> ViewAction {
@@ -2999,6 +3052,11 @@ impl ModalView for SetupWizardView {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
+            KeyCode::Char('i') | KeyCode::Char('?') if self.progressive_guide => {
+                self.details_expanded = !self.details_expanded;
+                self.body_scroll = 0;
+                ViewAction::None
+            }
             KeyCode::Left | KeyCode::Char('b') => {
                 self.move_back();
                 ViewAction::None
@@ -3015,6 +3073,14 @@ impl ModalView for SetupWizardView {
                 self.body_scroll = self.body_scroll.saturating_add(8);
                 ViewAction::None
             }
+            KeyCode::Up if self.progressive_guide => {
+                self.body_scroll = self.body_scroll.saturating_sub(1);
+                ViewAction::None
+            }
+            KeyCode::Down if self.progressive_guide => {
+                self.body_scroll = self.body_scroll.saturating_add(1);
+                ViewAction::None
+            }
             KeyCode::Up => {
                 self.move_back();
                 ViewAction::None
@@ -3023,10 +3089,42 @@ impl ModalView for SetupWizardView {
                 self.move_next();
                 ViewAction::None
             }
+            KeyCode::Char('s') if self.progressive_guide => {
+                if self.selected_step() == SetupStep::Verification {
+                    ViewAction::Close
+                } else {
+                    self.move_next();
+                    ViewAction::None
+                }
+            }
             KeyCode::Char('s') => {
                 self.commit_selected_status(StepStatus::Skipped, MessageId::SetupStepSkipped, true)
             }
-            KeyCode::Char('r') if self.selected_step() == SetupStep::ToolsMcp => {
+            KeyCode::Char('r')
+                if self.progressive_guide
+                    && matches!(
+                        self.selected_step(),
+                        SetupStep::RemoteRuntime | SetupStep::Verification
+                    ) =>
+            {
+                ViewAction::EmitAndClose(ViewEvent::SetupOpenRemoteControlRequested)
+            }
+            KeyCode::Char('p')
+                if self.progressive_guide && self.selected_step() == SetupStep::Verification =>
+            {
+                ViewAction::EmitAndClose(ViewEvent::SetupOpenProviderRequested)
+            }
+            KeyCode::Char('c')
+                if self.progressive_guide && self.selected_step() == SetupStep::Verification =>
+            {
+                self.selected = visible_step_index(SetupStep::TrustSandbox);
+                self.details_expanded = false;
+                self.body_scroll = 0;
+                ViewAction::None
+            }
+            KeyCode::Char('r')
+                if !self.progressive_guide && self.selected_step() == SetupStep::ToolsMcp =>
+            {
                 self.preview_tools_mcp_on_ramp()
             }
             KeyCode::Char('r') if self.selected_step() == SetupStep::RemoteRuntime => {
@@ -3092,7 +3190,11 @@ impl ModalView for SetupWizardView {
                 self.commit_language_review()
             }
             KeyCode::Enter if self.selected_step() == SetupStep::ProviderModel => {
-                self.commit_provider_model_review()
+                if self.progressive_guide && !self.facts.provider_ready {
+                    ViewAction::EmitAndClose(ViewEvent::SetupOpenProviderRequested)
+                } else {
+                    self.commit_provider_model_review()
+                }
             }
             KeyCode::Enter if self.selected_step() == SetupStep::TrustSandbox => {
                 self.commit_runtime_posture_review()
@@ -3135,7 +3237,9 @@ impl ModalView for SetupWizardView {
         let inner = render_underwater_surface(area, buf, self.surface_title());
         let simple_constitution =
             self.selected_step() == SetupStep::Constitution && !self.constitution_advanced;
-        let mut hints = if simple_constitution {
+        let hints = if self.progressive_guide {
+            self.progressive_action_hints()
+        } else if simple_constitution {
             vec![
                 ActionHint::new(
                     "Enter",
@@ -3160,177 +3264,61 @@ impl ModalView for SetupWizardView {
                 ),
             ]
         } else {
-            vec![
-                ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
+            let mut hints = vec![
                 ActionHint::new(
-                    "N",
+                    "Enter",
                     tr(self.locale, MessageId::SetupActionContinue).to_string(),
                 ),
+                ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
                 ActionHint::new("S", tr(self.locale, MessageId::SetupActionSkip).to_string()),
-                ActionHint::new(
-                    "R",
-                    tr(self.locale, MessageId::SetupActionRetry).to_string(),
-                ),
-                ActionHint::new(
-                    "PgUp/Dn",
-                    tr(self.locale, MessageId::SetupActionScrollBody).to_string(),
-                ),
-            ]
+            ];
+            self.extend_focused_action_hints(&mut hints);
+            hints.push(ActionHint::new(
+                "Esc",
+                tr(self.locale, MessageId::SetupActionCancel).to_string(),
+            ));
+            hints
         };
-        if self.selected_step() == SetupStep::Constitution && self.constitution_advanced {
-            hints.push(ActionHint::new(
-                "1-6",
-                tr(self.locale, MessageId::SetupActionTuneGuided).to_string(),
-            ));
-            if self.facts.provider_ready {
-                hints.push(ActionHint::new(
-                    "A",
-                    tr(self.locale, MessageId::SetupActionModelDraft).to_string(),
-                ));
-            }
-            hints.push(ActionHint::new(
-                "G",
-                tr(self.locale, MessageId::SetupActionGuided).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "F",
-                tr(self.locale, MessageId::SetupActionFreeform).to_string(),
-            ));
-            if self.facts.constitution_file == SetupConstitutionFileState::Loaded {
-                hints.push(ActionHint::new(
-                    "K",
-                    tr(self.locale, MessageId::SetupActionKeepExisting).to_string(),
-                ));
-            }
-        } else if self.selected_step() == SetupStep::ProviderModel {
-            hints.push(ActionHint::new(
-                "P",
-                tr(self.locale, MessageId::SetupActionProvider).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "M",
-                tr(self.locale, MessageId::SetupActionModel).to_string(),
-            ));
-        } else if self.selected_step() == SetupStep::OperateFleet {
-            hints.push(ActionHint::new(
-                "P",
-                tr(self.locale, MessageId::SetupActionProvider).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "F",
-                tr(self.locale, MessageId::SetupActionFleet).to_string(),
-            ));
-        } else if self.selected_step() == SetupStep::Hotbar {
-            hints.push(ActionHint::new(
-                "H",
-                tr(self.locale, MessageId::SetupActionHotbar).to_string(),
-            ));
-        } else if self.selected_step() == SetupStep::RemoteRuntime {
-            hints.push(ActionHint::new(
-                "R",
-                tr(self.locale, MessageId::SetupActionRemote).to_string(),
-            ));
-        } else if self.selected_step() == SetupStep::TrustSandbox {
-            hints.push(ActionHint::new(
-                "1-3",
-                tr(self.locale, MessageId::SetupActionRuntimePreset).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "A",
-                tr(self.locale, MessageId::SetupActionApplyRuntimePreset).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "M",
-                tr(self.locale, MessageId::SetupActionMode).to_string(),
-            ));
-            hints.push(ActionHint::new(
-                "C",
-                tr(self.locale, MessageId::SetupActionConfig).to_string(),
-            ));
-        }
-        if !simple_constitution {
-            hints.extend([
-                ActionHint::new(
-                    "U",
-                    tr(self.locale, MessageId::SetupActionUseBundled).to_string(),
-                ),
-                ActionHint::new(
-                    "D",
-                    tr(self.locale, MessageId::SetupActionDefer).to_string(),
-                ),
-                ActionHint::new(
-                    "Esc",
-                    tr(
-                        self.locale,
-                        if self.selected_step() == SetupStep::Constitution {
-                            MessageId::SetupActionBack
-                        } else {
-                            MessageId::SetupActionCancel
-                        },
-                    )
-                    .to_string(),
-                ),
-            ]);
-        }
         let content_area = render_modal_footer(inner, buf, &hints);
         let spec = self.selected_spec();
+        let (title_text, question_text) = if self.progressive_guide {
+            match self.selected_step() {
+                SetupStep::ProviderModel => (
+                    tr(self.locale, MessageId::OnboardProviderTitle).into_owned(),
+                    tr(self.locale, MessageId::OnboardProviderBlurb).into_owned(),
+                ),
+                SetupStep::TrustSandbox => (
+                    tr(self.locale, MessageId::SetupStepTrustSandboxTitle).into_owned(),
+                    tr(self.locale, MessageId::SetupRuntimePostureReviewHint).into_owned(),
+                ),
+                SetupStep::RemoteRuntime => (
+                    "/rc".to_string(),
+                    tr(self.locale, MessageId::CmdRemoteControlDescription).into_owned(),
+                ),
+                SetupStep::Verification => (
+                    tr(self.locale, MessageId::OnboardReadyTitle).into_owned(),
+                    tr(self.locale, MessageId::OnboardReadyLead).into_owned(),
+                ),
+                _ => (
+                    tr(self.locale, spec.title_id()).into_owned(),
+                    tr(self.locale, spec.why_id()).into_owned(),
+                ),
+            }
+        } else {
+            (
+                tr(self.locale, spec.title_id()).into_owned(),
+                tr(self.locale, spec.why_id()).into_owned(),
+            )
+        };
         let title = Line::from(Span::styled(
-            tr(self.locale, spec.title_id()).to_string(),
+            title_text,
             Style::default()
                 .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         ));
-        let why = Line::from(Span::raw(tr(self.locale, spec.why_id()).to_string()));
-        let mut lines = if simple_constitution {
-            vec![title, why]
-        } else {
-            vec![title, Line::from(""), why, Line::from("")]
-        };
+        let why = Line::from(Span::raw(question_text));
+        let mut lines = vec![title, why, Line::from("")];
         lines.extend(self.selected_step_detail_lines());
-        if !simple_constitution {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                tr(self.locale, MessageId::SetupWizardWhy).to_string(),
-                Style::default().fg(palette::TEXT_MUTED),
-            )));
-            lines.push(Line::from(""));
-            for (idx, step) in STEP_SPECS.iter().enumerate() {
-                let selected = idx == self.selected;
-                let status = self.state.status(step.id());
-                let status_color = match status {
-                    StepStatus::InProgress => palette::WHALE_LIVE,
-                    StepStatus::NeedsAction => palette::WHALE_HUMAN,
-                    StepStatus::Verified => palette::STATUS_SUCCESS,
-                    StepStatus::Failed => palette::STATUS_ERROR,
-                    StepStatus::NotStarted
-                    | StepStatus::Recommended
-                    | StepStatus::Optional
-                    | StepStatus::Deferred
-                    | StepStatus::Skipped => palette::TEXT_MUTED,
-                };
-                let marker = crate::tui::glyphs::selection_marker(selected);
-                let style = if selected {
-                    Style::default()
-                        .fg(palette::TEXT_PRIMARY)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(palette::TEXT_MUTED)
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{marker} "), style),
-                    Span::styled(tr(self.locale, step.title_id()).to_string(), style),
-                    Span::raw("  "),
-                    Span::styled(
-                        self.status_label(status).to_string(),
-                        Style::default().fg(status_color),
-                    ),
-                ]));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::raw(
-                tr(self.locale, MessageId::SetupCheckpointLayerOrder).to_string(),
-            )));
-        }
         let wrap_width = usize::from(content_area.width).max(1);
         let visual_rows: usize = lines
             .iter()
@@ -3353,7 +3341,141 @@ impl ModalView for SetupWizardView {
 }
 
 impl SetupWizardView {
+    fn progressive_action_hints(&self) -> Vec<ActionHint> {
+        let back = || ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string());
+        let exit = || {
+            ActionHint::new(
+                "Esc",
+                tr(self.locale, MessageId::SetupActionCancel).to_string(),
+            )
+        };
+        let details = || {
+            ActionHint::new(
+                "I",
+                tr(self.locale, MessageId::CtxMenuOpenDetails).to_string(),
+            )
+        };
+        let skip = || ActionHint::new("S", tr(self.locale, MessageId::SetupActionSkip).to_string());
+        let mut hints = match self.selected_step() {
+            SetupStep::ProviderModel => vec![
+                ActionHint::new(
+                    "Enter",
+                    tr(
+                        self.locale,
+                        if self.facts.provider_ready {
+                            MessageId::SetupActionContinue
+                        } else {
+                            MessageId::SetupActionProvider
+                        },
+                    )
+                    .to_string(),
+                ),
+                skip(),
+                details(),
+                exit(),
+            ],
+            SetupStep::TrustSandbox => vec![
+                ActionHint::new(
+                    "Enter",
+                    tr(self.locale, MessageId::SetupActionKeepExisting).to_string(),
+                ),
+                skip(),
+                details(),
+                exit(),
+            ],
+            SetupStep::RemoteRuntime => vec![
+                ActionHint::new(
+                    "R",
+                    tr(self.locale, MessageId::CmdRemoteControlDescription).to_string(),
+                ),
+                skip(),
+                details(),
+                exit(),
+            ],
+            SetupStep::ToolsMcp => vec![
+                ActionHint::new(
+                    "Enter",
+                    tr(self.locale, MessageId::SetupActionContinue).to_string(),
+                ),
+                skip(),
+                details(),
+                exit(),
+            ],
+            SetupStep::Verification => vec![
+                ActionHint::new(
+                    "Enter",
+                    tr(self.locale, MessageId::OnboardReadyStart).to_string(),
+                ),
+                details(),
+                exit(),
+            ],
+            _ => vec![exit()],
+        };
+        let position = self
+            .progressive_steps()
+            .iter()
+            .position(|step| *step == self.selected_step())
+            .unwrap_or(0);
+        if position > 0 {
+            hints.insert(hints.len().saturating_sub(1), back());
+        }
+        hints
+    }
+
+    fn extend_focused_action_hints(&self, hints: &mut Vec<ActionHint>) {
+        match self.selected_step() {
+            SetupStep::Constitution if self.constitution_advanced => {
+                hints.push(ActionHint::new(
+                    "1-6",
+                    tr(self.locale, MessageId::SetupActionTuneGuided).to_string(),
+                ));
+                hints.push(ActionHint::new(
+                    "G",
+                    tr(self.locale, MessageId::SetupActionGuided).to_string(),
+                ));
+                hints.push(ActionHint::new(
+                    "F",
+                    tr(self.locale, MessageId::SetupActionFreeform).to_string(),
+                ));
+            }
+            SetupStep::ProviderModel => {
+                hints.push(ActionHint::new(
+                    "P",
+                    tr(self.locale, MessageId::SetupActionProvider).to_string(),
+                ));
+                hints.push(ActionHint::new(
+                    "M",
+                    tr(self.locale, MessageId::SetupActionModel).to_string(),
+                ));
+            }
+            SetupStep::OperateFleet => hints.push(ActionHint::new(
+                "F",
+                tr(self.locale, MessageId::SetupActionFleet).to_string(),
+            )),
+            SetupStep::Hotbar => hints.push(ActionHint::new(
+                "H",
+                tr(self.locale, MessageId::SetupActionHotbar).to_string(),
+            )),
+            SetupStep::ToolsMcp | SetupStep::RemoteRuntime => hints.push(ActionHint::new(
+                "R",
+                tr(self.locale, MessageId::SetupActionRetry).to_string(),
+            )),
+            SetupStep::TrustSandbox => hints.push(ActionHint::new(
+                "C",
+                tr(self.locale, MessageId::SetupActionConfig).to_string(),
+            )),
+            _ => {}
+        }
+    }
+
     fn selected_step_detail_lines(&self) -> Vec<Line<'static>> {
+        if self.progressive_guide {
+            return if self.details_expanded {
+                self.progressive_expanded_lines()
+            } else {
+                self.progressive_detail_lines()
+            };
+        }
         match self.selected_step() {
             SetupStep::ProviderModel => self.provider_model_detail_lines(),
             SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
@@ -3369,6 +3491,116 @@ impl SetupWizardView {
             SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
+    }
+
+    fn progressive_detail_lines(&self) -> Vec<Line<'static>> {
+        match self.selected_step() {
+            SetupStep::ProviderModel => {
+                let answer = format!(
+                    "{} · {} · {}",
+                    self.facts.provider, self.facts.model, self.facts.auth
+                );
+                vec![self.detail_row(MessageId::SetupCardRouteLabel, &answer)]
+            }
+            SetupStep::TrustSandbox => {
+                let answer = format!(
+                    "{} · {} · {}",
+                    self.facts.approval, self.facts.trust, self.facts.sandbox
+                );
+                let mut lines = vec![self.detail_row(MessageId::SetupCardApprovalLabel, &answer)];
+                if let Some(warning) = &self.facts.project_override_warning {
+                    lines.push(
+                        self.detail_row(MessageId::SetupRuntimeProjectOverrideLabel, warning),
+                    );
+                }
+                lines
+            }
+            SetupStep::RemoteRuntime => vec![self.detail_row(
+                MessageId::SetupRemoteModeLabel,
+                &self.facts.remote_control_result,
+            )],
+            SetupStep::ToolsMcp => {
+                let status = tr(
+                    self.locale,
+                    if self.facts.tools_mcp_needs_action {
+                        MessageId::SetupStatusNeedsAction
+                    } else {
+                        MessageId::SetupStatusVerified
+                    },
+                )
+                .into_owned();
+                vec![self.detail_row(MessageId::SetupStepToolsMcpTitle, &status)]
+            }
+            SetupStep::Verification => self.progressive_summary_lines(),
+            _ => self.selected_step_detail_lines_expanded(),
+        }
+    }
+
+    fn selected_step_detail_lines_expanded(&self) -> Vec<Line<'static>> {
+        match self.selected_step() {
+            SetupStep::ProviderModel => self.provider_model_detail_lines(),
+            SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
+            SetupStep::ToolsMcp => self.tools_mcp_detail_lines(),
+            SetupStep::RemoteRuntime => self.remote_runtime_detail_lines(),
+            SetupStep::Verification => self.verification_detail_lines(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn progressive_expanded_lines(&self) -> Vec<Line<'static>> {
+        if self.selected_step() != SetupStep::Verification {
+            return self.selected_step_detail_lines_expanded();
+        }
+        let mut lines = self.progressive_summary_lines();
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "/settings  ",
+                Style::default()
+                    .fg(palette::WHALE_INFO)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(tr(self.locale, MessageId::CmdSettingsDescription).to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "/config <key>  ",
+                Style::default()
+                    .fg(palette::TEXT_MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(tr(self.locale, MessageId::SetupActionConfig).to_string()),
+        ]));
+        lines
+    }
+
+    fn progressive_summary_lines(&self) -> Vec<Line<'static>> {
+        let route = format!("{} · {}", self.facts.provider, self.facts.model);
+        let permissions = format!(
+            "{} · {} · {}",
+            self.facts.approval, self.facts.trust, self.facts.sandbox
+        );
+        let mut lines = vec![
+            self.detail_row(MessageId::SetupStepProviderModelTitle, &route),
+            self.detail_row(MessageId::SetupStepTrustSandboxTitle, &permissions),
+            self.detail_row(
+                MessageId::SetupStepRemoteRuntimeTitle,
+                &self.facts.remote_control_result,
+            ),
+        ];
+        if self.tools_relevant() {
+            let tools_status = tr(
+                self.locale,
+                if self.facts.tools_mcp_needs_action {
+                    MessageId::SetupStatusNeedsAction
+                } else {
+                    MessageId::SetupStatusVerified
+                },
+            )
+            .into_owned();
+            lines.push(self.detail_row(MessageId::SetupStepToolsMcpTitle, &tools_status));
+        }
+        lines
     }
 
     fn constitution_simple_lines(&self) -> Vec<Line<'static>> {
@@ -5175,24 +5407,30 @@ fn expert_override_path() -> Option<std::path::PathBuf> {
 }
 
 #[must_use]
-fn initial_step_index(state: &SetupState) -> usize {
-    if state.needs_constitution_checkpoint(CONSTITUTION_CHECKPOINT_VERSION) {
-        return step_index(SetupStep::Constitution);
+fn progressive_initial_step_index(state: &SetupState, facts: &SetupRuntimeFacts) -> usize {
+    if !facts.provider_ready {
+        return step_index(SetupStep::ProviderModel);
     }
-    STEP_SPECS
-        .iter()
-        .position(|step| {
-            step.required()
-                && !matches!(
-                    state.status(step.id()),
-                    StepStatus::Verified
-                        | StepStatus::NeedsAction
-                        | StepStatus::Deferred
-                        | StepStatus::Optional
-                        | StepStatus::Skipped
-                )
-        })
-        .unwrap_or_else(|| step_index(SetupStep::Verification))
+    let runtime_current = if state.inherited {
+        matches!(state.status(SetupStep::TrustSandbox), StepStatus::Verified)
+            && state.runtime_posture_source.is_reviewed()
+    } else {
+        state
+            .steps
+            .get(&SetupStep::TrustSandbox)
+            .is_some_and(|entry| {
+                entry.status == StepStatus::Verified
+                    && entry.result.as_deref() == Some(facts.runtime_result.as_str())
+            })
+            && state.runtime_posture_source.is_reviewed()
+    };
+    if !runtime_current {
+        return step_index(SetupStep::TrustSandbox);
+    }
+    if facts.tools_mcp_needs_action {
+        return step_index(SetupStep::ToolsMcp);
+    }
+    step_index(SetupStep::Verification)
 }
 
 #[must_use]
@@ -5208,4 +5446,206 @@ fn visible_step_index(step: SetupStep) -> usize {
         .iter()
         .position(|spec| spec.id() == step)
         .unwrap_or_else(|| step_index(SetupStep::Constitution))
+}
+
+#[cfg(test)]
+mod progressive_tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn facts(provider_ready: bool) -> SetupRuntimeFacts {
+        SetupRuntimeFacts {
+            provider: "local".to_string(),
+            model: "stub-model".to_string(),
+            auth: if provider_ready { "ready" } else { "missing" }.to_string(),
+            provider_ready,
+            runtime_result: "approval=ask; sandbox=workspace; network=prompt".to_string(),
+            tools_mcp_result: "mcp=off, skills=off, tools=off, plugins=off, overall=off"
+                .to_string(),
+            remote_control_result: tr(Locale::En, MessageId::SetupRemoteStatusDisabled)
+                .into_owned(),
+            ..SetupRuntimeFacts::default()
+        }
+    }
+
+    fn complete_state(runtime_result: &str) -> SetupState {
+        let mut state = SetupState {
+            runtime_posture_source: RuntimePostureSource::Confirmed,
+            ..SetupState::default()
+        };
+        state.set_step(
+            SetupStep::TrustSandbox,
+            StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(runtime_result),
+        );
+        state
+    }
+
+    fn render_text(view: &SetupWizardView, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        ModalView::render(view, area, &mut buffer);
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn fresh_setup_starts_at_the_missing_provider_decision() {
+        let view = SetupWizardView::new_with_facts(SetupState::default(), Locale::En, facts(false));
+
+        assert_eq!(view.selected_step(), SetupStep::ProviderModel);
+        assert!(matches!(
+            ModalView::handle_key(
+                &mut view.clone(),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            ViewAction::EmitAndClose(ViewEvent::SetupOpenProviderRequested)
+        ));
+    }
+
+    #[test]
+    fn partial_setup_skips_the_ready_provider_and_asks_for_permissions() {
+        let mut view =
+            SetupWizardView::new_with_facts(SetupState::default(), Locale::En, facts(true));
+
+        assert_eq!(view.selected_step(), SetupStep::TrustSandbox);
+        let action =
+            ModalView::handle_key(&mut view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message, .. }) = action
+        else {
+            panic!("reviewing the current permissions posture should persist a receipt");
+        };
+        assert_eq!(
+            state.runtime_posture_source,
+            RuntimePostureSource::Confirmed
+        );
+        assert_eq!(state.status(SetupStep::TrustSandbox), StepStatus::Verified);
+        assert!(!message.is_empty());
+        assert_eq!(view.selected_step(), SetupStep::RemoteRuntime);
+    }
+
+    #[test]
+    fn fully_configured_setup_opens_the_compact_summary() {
+        let facts = facts(true);
+        let state = complete_state(&facts.runtime_result);
+        let mut view = SetupWizardView::new_with_facts(state, Locale::En, facts);
+
+        assert_eq!(view.selected_step(), SetupStep::Verification);
+        let action =
+            ModalView::handle_key(&mut view, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, .. }) = action
+        else {
+            panic!("starting from Ready should persist the report before closing");
+        };
+        assert!(state.steps.contains_key(&SetupStep::Verification));
+    }
+
+    #[test]
+    fn stale_complete_receipts_reopen_the_real_broken_surface() {
+        let mut provider_broken = facts(false);
+        provider_broken.runtime_result = "current".to_string();
+        let state = complete_state("old");
+        assert_eq!(
+            SetupWizardView::new_with_facts(state, Locale::En, provider_broken).selected_step(),
+            SetupStep::ProviderModel
+        );
+
+        let runtime_current = facts(true);
+        let stale_state = complete_state("old runtime snapshot");
+        assert_eq!(
+            SetupWizardView::new_with_facts(stale_state, Locale::En, runtime_current)
+                .selected_step(),
+            SetupStep::TrustSandbox
+        );
+    }
+
+    #[test]
+    fn configured_broken_tools_join_the_journey_but_empty_tools_do_not() {
+        let mut broken = facts(true);
+        let state = complete_state(&broken.runtime_result);
+        broken.tools_mcp_needs_action = true;
+        broken.tools_mcp_result = "overall=needs_config".to_string();
+        let mut broken_view = SetupWizardView::new_with_facts(state.clone(), Locale::En, broken);
+        assert_eq!(broken_view.selected_step(), SetupStep::ToolsMcp);
+        let action = ModalView::handle_key(
+            &mut broken_view,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, .. }) = action else {
+            panic!("continuing past a broken optional tool should save its visible issue");
+        };
+        assert_eq!(state.status(SetupStep::ToolsMcp), StepStatus::NeedsAction);
+        assert_eq!(broken_view.selected_step(), SetupStep::Verification);
+
+        let empty = facts(true);
+        assert_eq!(
+            SetupWizardView::new_with_facts(state, Locale::En, empty).selected_step(),
+            SetupStep::Verification
+        );
+    }
+
+    #[test]
+    fn account_action_uses_the_real_remote_control_handoff() {
+        let facts = facts(true);
+        let state = complete_state(&facts.runtime_result);
+        let mut view = SetupWizardView::new_with_facts(state, Locale::En, facts);
+        view.selected = visible_step_index(SetupStep::RemoteRuntime);
+
+        assert!(matches!(
+            ModalView::handle_key(
+                &mut view,
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            ViewAction::EmitAndClose(ViewEvent::SetupOpenRemoteControlRequested)
+        ));
+    }
+
+    #[test]
+    fn progressive_arrow_keys_scroll_details_without_changing_the_decision() {
+        let mut view =
+            SetupWizardView::new_with_facts(SetupState::default(), Locale::En, facts(false));
+        view.details_expanded = true;
+        view.body_scroll = 4;
+        let step = view.selected_step();
+
+        assert!(matches!(
+            ModalView::handle_key(&mut view, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            ViewAction::None
+        ));
+        assert_eq!(view.selected_step(), step);
+        assert_eq!(view.body_scroll, 3);
+
+        assert!(matches!(
+            ModalView::handle_key(&mut view, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            ViewAction::None
+        ));
+        assert_eq!(view.selected_step(), step);
+        assert_eq!(view.body_scroll, 4);
+    }
+
+    #[test]
+    fn fresh_and_complete_guides_remain_reachable_at_compact_and_normal_sizes() {
+        let fresh =
+            SetupWizardView::new_with_facts(SetupState::default(), Locale::En, facts(false));
+        let fresh_text = render_text(&fresh, 40, 12);
+        assert!(fresh_text.contains(tr(Locale::En, MessageId::OnboardProviderTitle).as_ref()));
+        let normal_text = render_text(&fresh, 100, 28);
+        assert!(normal_text.contains(tr(Locale::En, MessageId::OnboardProviderTitle).as_ref()));
+        assert!(normal_text.contains("local · stub-model"));
+
+        let facts = facts(true);
+        let complete = SetupWizardView::new_with_facts(
+            complete_state(&facts.runtime_result),
+            Locale::En,
+            facts,
+        );
+        let complete_text = render_text(&complete, 40, 12);
+        assert!(complete_text.contains(tr(Locale::En, MessageId::OnboardReadyTitle).as_ref()));
+    }
 }

@@ -528,6 +528,28 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
     let list = app.plugin_registry.list();
     let manifest_total = list.len();
     let manifest_active = list.iter().filter(|plugin| plugin.active()).count();
+    let active_commands = list
+        .iter()
+        .filter(|plugin| {
+            plugin
+                .component_active(crate::plugins::activation::PluginActivationCapability::Commands)
+        })
+        .map(|plugin| plugin.inventory.commands)
+        .sum::<usize>();
+    let active_agents = list
+        .iter()
+        .filter(|plugin| {
+            plugin.component_active(crate::plugins::activation::PluginActivationCapability::Agents)
+        })
+        .map(|plugin| plugin.inventory.agents)
+        .sum::<usize>();
+    let active_hooks = list
+        .iter()
+        .filter(|plugin| {
+            plugin.component_active(crate::plugins::activation::PluginActivationCapability::Hooks)
+        })
+        .map(|plugin| plugin.inventory.hooks)
+        .sum::<usize>();
 
     // Script plugins under [tools].plugin_dir (distinct from slash commands;
     // Hotbar Plugin source remains deferred/exploratory).
@@ -547,7 +569,7 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
         return InventoryRow {
             status: InventoryStatus::Off,
             detail: format!(
-                "nothing configured yet (missing at {path}); optional — `codewhale setup --plugins`; plugin commands stay distinct from slash and are deferred on Hotbar"
+                "nothing configured yet (missing at {path}); optional — use /plugin to add or review plugins"
             ),
         };
     }
@@ -562,9 +584,7 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
     if manifest_total == 0 && script_count == 0 {
         return InventoryRow {
             status: InventoryStatus::Off,
-            detail: format!(
-                "dir present at {path} with 0 plugins; plugin commands not enumerated as slash commands (Hotbar plugin source deferred)"
-            ),
+            detail: format!("dir present at {path} with 0 plugins; use /plugin to add one"),
         };
     }
 
@@ -572,7 +592,7 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
     InventoryRow {
         status: InventoryStatus::Healthy,
         detail: format!(
-            "{manifest_total} manifest plugin bundles ({manifest_active} trusted+active, {inactive} inactive), {script_count} legacy script tools; path {path}; setup is read-only — use /plugin to review trust and enablement"
+            "{manifest_total} bundles ({manifest_active} trusted+active, {inactive} inactive); active adapters: {active_commands} commands, {active_agents} agents, {active_hooks} hooks; {script_count} legacy script tools; use /plugin to review trust and enablement"
         ),
     }
 }
