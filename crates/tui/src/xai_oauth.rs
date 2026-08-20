@@ -48,7 +48,7 @@ const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
 const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
 /// One entry in `~/.grok/auth.json` (map key = `{issuer}::{client_id}`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GrokAuthEntry {
     /// Access token (JWT). Field name matches the Grok CLI (`key`).
     #[serde(default)]
@@ -70,7 +70,7 @@ pub struct GrokAuthEntry {
 }
 
 /// Token endpoint response (device-code exchange or refresh).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TokenResponse {
     access_token: Option<String>,
     refresh_token: Option<String>,
@@ -83,7 +83,7 @@ struct TokenResponse {
     interval: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct DeviceCodeResponse {
     device_code: Option<String>,
     user_code: Option<String>,
@@ -95,7 +95,7 @@ struct DeviceCodeResponse {
     error_description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct DeviceCodeGrant {
     device_code: String,
     user_code: String,
@@ -119,7 +119,7 @@ struct DeviceOauthEndpoints {
 }
 
 /// Resolved bearer credential ready for API use.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaiOAuthCredentials {
     pub access_token: String,
     #[allow(dead_code)]
@@ -170,6 +170,85 @@ pub struct XaiDeviceActivation {
     pub credentials: XaiOAuthCredentials,
     pub config_path: PathBuf,
     pub auth_path: PathBuf,
+}
+
+// ── redacted Debug ─────────────────────────────────────────────────────────
+//
+// Every type below holds bearer material — an access token, a refresh token,
+// or the device code that is exchanged for one. A derived `Debug` prints all
+// of it, and `Debug` reaches production through `tracing`'s `?` sigil, through
+// `anyhow` context, and through panic messages. These impls keep the shape
+// useful for diagnosis while making the secret unprintable, so the containers
+// that hold these types can keep deriving `Debug` safely.
+
+fn redacted(present: bool) -> &'static str {
+    if present { "<redacted>" } else { "<none>" }
+}
+
+impl std::fmt::Debug for GrokAuthEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrokAuthEntry")
+            .field("key", &redacted(self.key.is_some()))
+            .field("refresh_token", &redacted(self.refresh_token.is_some()))
+            .field("expires_at", &self.expires_at)
+            .field("oidc_issuer", &self.oidc_issuer)
+            .field("oidc_client_id", &self.oidc_client_id)
+            .field("auth_mode", &self.auth_mode)
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &redacted(self.access_token.is_some()))
+            .field("refresh_token", &redacted(self.refresh_token.is_some()))
+            .field("expires_in", &self.expires_in)
+            .field("error", &self.error)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeviceCodeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCodeResponse")
+            .field("device_code", &redacted(self.device_code.is_some()))
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .field("error", &self.error)
+            .field("error_description", &self.error_description)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeviceCodeGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCodeGrant")
+            .field("device_code", &redacted(true))
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for XaiOAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaiOAuthCredentials")
+            .field("access_token", &redacted(true))
+            .field("refresh_token", &redacted(self.refresh_token.is_some()))
+            .field("expires_at", &self.expires_at)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .finish()
+    }
 }
 
 /// Whether `[providers.xai] auth_mode` selects the OAuth path.
@@ -1720,6 +1799,55 @@ mod tests {
         let error = result.expect_err("a non-web verification URI must abort login");
         let message = format!("{error:#}");
         assert!(message.contains("untrusted verification URI"), "{message}");
+    }
+
+    /// `Debug` reaches production through tracing's `?` sigil, anyhow context,
+    /// and panic messages. Nothing that holds bearer material may print it.
+    #[test]
+    fn debug_output_never_contains_bearer_material() {
+        let entry = GrokAuthEntry {
+            key: Some("secret-access-token".to_string()),
+            refresh_token: Some("secret-refresh-token".to_string()),
+            expires_at: Some("2030-01-01T00:00:00.000Z".to_string()),
+            oidc_issuer: Some(XAI_OIDC_ISSUER.to_string()),
+            oidc_client_id: Some(GROK_OIDC_CLIENT_ID.to_string()),
+            auth_mode: Some("oidc".to_string()),
+            extra: BTreeMap::new(),
+        };
+        let token = TokenResponse {
+            access_token: Some("secret-access-token".to_string()),
+            refresh_token: Some("secret-refresh-token".to_string()),
+            expires_in: Some(3600),
+            error: None,
+            interval: None,
+        };
+        let grant = DeviceCodeGrant {
+            device_code: "secret-device-code".to_string(),
+            user_code: "CW-TEST".to_string(),
+            verification_uri: Some("https://auth.x.ai/device".to_string()),
+            verification_uri_complete: None,
+            expires_in: Some(60),
+            interval: Some(5),
+        };
+        let credentials = credentials_from_entry(
+            format!("{XAI_OIDC_ISSUER}::{GROK_OIDC_CLIENT_ID}"),
+            &entry,
+            "secret-access-token".to_string(),
+        );
+        let pending = pending_device_login_for_test("secret-access-token", "secret-refresh-token");
+
+        let rendered = format!("{entry:?} {token:?} {grant:?} {credentials:?} {pending:?}");
+        for secret in [
+            "secret-access-token",
+            "secret-refresh-token",
+            "secret-device-code",
+        ] {
+            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+        }
+        // The shape stays useful for diagnosis.
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("CW-TEST"), "{rendered}");
+        assert!(rendered.contains(GROK_OIDC_CLIENT_ID), "{rendered}");
     }
 
     fn pending_login(access: &str, refresh: &str) -> PendingXaiDeviceLogin {
