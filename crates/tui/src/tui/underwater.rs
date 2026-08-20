@@ -1084,26 +1084,6 @@ fn compact_tokens(tokens: i64) -> String {
     }
 }
 
-fn compact_effort_label(label: &str) -> &'static str {
-    let effective = label
-        .rsplit_once('→')
-        .map_or(label, |(_, effective)| effective);
-    let effective = effective
-        .rsplit_once(':')
-        .map_or(effective, |(_, effective)| effective)
-        .trim()
-        .to_ascii_lowercase();
-    match effective.as_str() {
-        "off" => "o",
-        "low" => "l",
-        "med" | "medium" => "m",
-        "high" => "h",
-        "max" | "maximum" | "xhigh" => "x",
-        "auto" => "a",
-        _ => "·",
-    }
-}
-
 fn session_token_breakdown(app: &App) -> Option<Span<'static>> {
     app.header_items.contains(&HeaderItem::Tokens).then(|| {
         Span::styled(
@@ -1127,8 +1107,8 @@ fn push_chrome(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
     spans.push(span);
 }
 
-/// Render the one-line shell header. Route, mode, requested/effective effort,
-/// permission, active-agent count, and context each have exactly one owner.
+/// Render the one-line shell header. Immediate operating posture and workspace
+/// truth live here; quieter route identity lives beside the phase footer.
 pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     let git_status = crate::tui::git_status::cached_status();
     render_header_with_git_status(area, buf, app, &git_status);
@@ -1148,9 +1128,6 @@ fn render_header_with_git_status(
         .style(Style::default().bg(app.ui_theme.header_bg))
         .render(area, buf);
 
-    let (effective_provider, effective_model) = app.effective_route_identity_display();
-    let route_label = format!("{effective_provider} · {effective_model}");
-    let effort_label = app.reasoning_effort_display_label();
     let mode_color = header_mode_ink(app.mode).color(&app.ui_theme);
     // Match the composer's warm top edge exactly: Ask amber, Auto-Review
     // Signal Gold, and Full Access coral.
@@ -1177,19 +1154,12 @@ fn render_header_with_git_status(
         ));
         left.push(Span::raw("  "));
     }
-    left.extend([
-        Span::styled(route_label.clone(), header_fg(app, ChromeInk::Metadata)),
-        Span::styled(" · ", dim),
-        Span::styled(
-            mode_label(app.ui_locale, app.mode),
-            Style::default().fg(mode_color),
-        ),
-        Span::styled(" · ", dim),
-        Span::styled(effort_label.clone(), header_fg(app, ChromeInk::Info)),
-    ]);
+    left.push(Span::styled(
+        mode_label(app.ui_locale, app.mode),
+        Style::default().fg(mode_color),
+    ));
     // Permission is safety state, not optional chrome. Compact terminals shed
-    // route detail and the context meter, but keep mode, effective effort, and
-    // the effective posture.
+    // auxiliary detail, but keep mode and the effective posture.
     left.push(Span::styled(" · ", dim));
     left.push(Span::styled(
         permission_label(app),
@@ -1274,7 +1244,6 @@ fn render_header_with_git_status(
     let token_breakdown = (tier != ShellTier::Compact)
         .then(|| session_token_breakdown(app))
         .flatten();
-    let token_breakdown_requested = token_breakdown.is_some();
     let version = (tier == ShellTier::Wide).then(|| {
         Span::styled(
             format!("v{}", shell_build_version()),
@@ -1295,8 +1264,7 @@ fn render_header_with_git_status(
         )
     });
 
-    // Baseline right-hand chrome: git, context meter, version. Exact route
-    // identity outranks this auxiliary chrome when the full line cannot fit.
+    // Baseline right-hand chrome: git, context meter, version.
     let mut right = Vec::new();
     if let Some(git_label) = git_label.clone() {
         push_chrome(&mut right, git_label);
@@ -1308,17 +1276,11 @@ fn render_header_with_git_status(
         push_chrome(&mut right, version);
     }
 
-    let minimum_effort = if tier == ShellTier::Compact {
-        compact_effort_label(&effort_label).to_string()
-    } else {
-        effort_label.clone()
-    };
     // The mark leads the header and carries its own two-space gutter, so it
     // costs `width + 2` when present and nothing at all when `off` (#5512).
     let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
     let minimum_left_width = indicator_width
-        .saturating_add(3 + mode_label(app.ui_locale, app.mode).width())
-        .saturating_add(3 + minimum_effort.width())
+        .saturating_add(mode_label(app.ui_locale, app.mode).width())
         .saturating_add(3 + permission_label(app).width());
     let available = usize::from(area.width);
     // The optional token breakdown is the only elidable element: it is added
@@ -1347,66 +1309,25 @@ fn render_header_with_git_status(
         }
     }
 
-    // Provider + model are routing truth. Shed auxiliary right-hand chrome in
-    // least-important-first order before shortening that identity on a normal
-    // 100+ column shell. Narrow shells keep the context meter, and an explicit
-    // token-breakdown opt-in keeps its documented width priority.
-    let full_left_width = span_width(&left);
-    let route_identity_priority = available >= 100
-        && !token_breakdown_requested
-        && app.api_provider == crate::config::ApiProvider::Custom;
-    if route_identity_priority
-        && full_left_width
-            .saturating_add(usize::from(!right.is_empty()))
-            .saturating_add(span_width(&right))
-            > available
-    {
-        right.clear();
-        if let Some(context_meter) = context_meter.clone() {
-            push_chrome(&mut right, context_meter);
-        }
-        if let Some(version) = version.clone() {
-            push_chrome(&mut right, version);
-        }
-    }
-    if route_identity_priority
-        && full_left_width
-            .saturating_add(usize::from(!right.is_empty()))
-            .saturating_add(span_width(&right))
-            > available
-    {
-        right.clear();
-        if let Some(context_meter) = context_meter {
-            push_chrome(&mut right, context_meter);
-        }
-    }
-    if route_identity_priority
-        && full_left_width
-            .saturating_add(usize::from(!right.is_empty()))
-            .saturating_add(span_width(&right))
-            > available
-    {
-        right.clear();
-    }
-
     let right_width = span_width(&right);
     let left_budget = available.saturating_sub(right_width + usize::from(right_width > 0));
     if span_width(&left) > left_budget {
         let mode = mode_label(app.ui_locale, app.mode);
         let permission = permission_label(app);
-        let effort = if tier == ShellTier::Compact {
-            compact_effort_label(&effort_label).to_string()
-        } else {
-            effort_label.clone()
-        };
-        let mut suffix = vec![
-            Span::styled(" · ", dim),
-            Span::styled(mode, Style::default().fg(mode_color)),
-            Span::styled(" · ", dim),
-            Span::styled(effort, header_fg(app, ChromeInk::Info)),
-            Span::styled(" · ", dim),
-            Span::styled(permission, Style::default().fg(permission_color)),
-        ];
+        let mut compact_left = Vec::new();
+        if let Some(indicator) = status_indicator {
+            compact_left.push(Span::styled(
+                indicator,
+                header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
+            ));
+            compact_left.push(Span::raw("  "));
+        }
+        compact_left.push(Span::styled(mode, Style::default().fg(mode_color)));
+        compact_left.push(Span::styled(" · ", dim));
+        compact_left.push(Span::styled(
+            permission,
+            Style::default().fg(permission_color),
+        ));
         // The goal chip survives cramped layouts too — it is operator state,
         // not decoration. The route label yields its budget first (down to
         // nothing, as it always has); below that the goal itself truncates,
@@ -1414,13 +1335,12 @@ fn render_header_with_git_status(
         // clipping mid-word (#39).
         // Same accounting as the baseline pass: the mark leads and owns its
         // gutter, so it is `width + 2` present and 0 when `off` (#5512).
-        let indicator_width = status_indicator.map_or(0, |indicator| indicator.width() + 2);
-        let base_fixed = indicator_width.saturating_add(span_width(&suffix));
+        let base_fixed = span_width(&compact_left);
         if let Some((text, color)) = &goal_chip {
             let goal_room = left_budget.saturating_sub(base_fixed).saturating_sub(3);
             if goal_room >= 8 {
-                suffix.push(Span::styled(" · ", dim));
-                suffix.push(Span::styled(
+                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::styled(
                     truncate_to_width(text, goal_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
                 ));
@@ -1432,11 +1352,11 @@ fn render_header_with_git_status(
         // cannot fit. The route label still yields its budget first.
         if let Some((text, color)) = &workflow_chip {
             let workflow_room = left_budget
-                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
+                .saturating_sub(span_width(&compact_left))
                 .saturating_sub(3);
             if workflow_room >= 8 {
-                suffix.push(Span::styled(" · ", dim));
-                suffix.push(Span::styled(
+                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::styled(
                     truncate_to_width(text, workflow_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
                 ));
@@ -1446,31 +1366,17 @@ fn render_header_with_git_status(
         // useful, but it yields to every piece of operator state ahead of it.
         if let Some((text, color)) = &update_chip {
             let update_room = left_budget
-                .saturating_sub(indicator_width.saturating_add(span_width(&suffix)))
+                .saturating_sub(span_width(&compact_left))
                 .saturating_sub(3);
             if update_room >= 8 {
-                suffix.push(Span::styled(" · ", dim));
-                suffix.push(Span::styled(
+                compact_left.push(Span::styled(" · ", dim));
+                compact_left.push(Span::styled(
                     truncate_to_width(text, update_room),
                     Style::default().fg(*color).add_modifier(Modifier::BOLD),
                 ));
             }
         }
-        let fixed_width = indicator_width.saturating_add(span_width(&suffix));
-        let route_budget = left_budget.saturating_sub(fixed_width);
-        left = Vec::new();
-        if let Some(indicator) = status_indicator {
-            left.push(Span::styled(
-                indicator,
-                header_fg(app, ChromeInk::Identity).add_modifier(Modifier::BOLD),
-            ));
-            left.push(Span::raw("  "));
-        }
-        left.push(Span::styled(
-            truncate_to_width(&route_label, route_budget),
-            header_fg(app, ChromeInk::Metadata),
-        ));
-        left.extend(suffix);
+        left = compact_left;
     }
     let left_width = span_width(&left);
     let gap = available.saturating_sub(left_width + right_width);
@@ -1512,8 +1418,9 @@ pub(crate) const AMBIENT_MIN_CHAT_HEIGHT: u16 = 16;
 /// Companion column floor, same reasoning as [`AMBIENT_MIN_CHAT_HEIGHT`].
 pub(crate) const AMBIENT_MIN_CHAT_WIDTH: u16 = 60;
 
-/// Build the post-launch idle composition: brand, workspace context, Fleet,
-/// help, and the orchestration trio (`/workflow /goal /auto`).
+/// Build the post-launch idle composition: brand, workspace context, and one
+/// direct invitation. Commands stay in the command surface instead of reading
+/// like onboarding homework.
 ///
 /// Expressed in terms of the ambient floor constants so the layout rule that
 /// reserves the rows and the gate that spends them cannot disagree. (The old
@@ -1740,82 +1647,15 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         format!("{inset}{context}"),
         Style::default().fg(app.ui_theme.text_soft),
     )));
-    if area.height >= 6 {
+    if area.height >= 4 {
         lines.push(Line::from(""));
-        let (fleet_label, fleet_action) = if app.onboarding_needs_api_key {
-            // `--skip-onboarding` can expose the launch shell without a usable
-            // provider route. Do not claim that Fleet is ready in that state;
-            // point at the boundary that can actually make it runnable.
-            (
-                tr(app.ui_locale, MessageId::EmptyStateFleetLabel),
-                "/provider",
-            )
-        } else {
-            // Built-in roles are immediately usable with the active route.
-            // Keep this truth at every responsive tier so `/fleet setup`
-            // reads as optional customization instead of required setup.
-            (
-                tr(app.ui_locale, MessageId::EmptyStateFleetSetupLabel),
-                "/fleet setup",
-            )
-        };
-        let fleet = format!("{fleet_label}  {fleet_action}");
-        let inset = " ".repeat(width.saturating_sub(fleet.width()) / 2);
-        lines.push(Line::from(vec![
-            Span::raw(inset),
-            Span::styled(
-                fleet_label.into_owned(),
-                Style::default().fg(app.ui_theme.text_soft),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                fleet_action,
-                Style::default()
-                    .fg(app.ui_theme.accent_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        if area.height >= 7 {
-            let help_connector = tr(app.ui_locale, MessageId::EmptyStateHelpConnector);
-            let help_command = format!("/help {help_connector} Ctrl+K");
-            let help_hint = tr(app.ui_locale, MessageId::EmptyStateHelpHint);
-            let help = format!("{help_command} {help_hint}");
-            let inset = " ".repeat(width.saturating_sub(help.width()) / 2);
-            lines.push(Line::from(vec![
-                Span::raw(inset),
-                Span::styled(
-                    help_command,
-                    Style::default()
-                        .fg(app.ui_theme.accent_primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    help_hint.into_owned(),
-                    Style::default().fg(app.ui_theme.text_soft),
-                ),
-            ]));
-        }
-        if area.height >= 8 {
-            let orch_label = tr(app.ui_locale, MessageId::EmptyStateOrchestrationLabel);
-            let orch_commands = crate::commands::traits::orchestration_slash_hint();
-            let orch = format!("{orch_label}  {orch_commands}");
-            let inset = " ".repeat(width.saturating_sub(orch.width()) / 2);
-            lines.push(Line::from(vec![
-                Span::raw(inset),
-                Span::styled(
-                    orch_label.into_owned(),
-                    Style::default().fg(app.ui_theme.text_soft),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    orch_commands,
-                    Style::default()
-                        .fg(app.ui_theme.accent_primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        }
+        let prompt = tr(app.ui_locale, MessageId::EmptyStatePrompt);
+        let prompt = truncate_to_width(prompt.as_ref(), width);
+        let inset = " ".repeat(width.saturating_sub(prompt.width()) / 2);
+        lines.push(Line::from(Span::styled(
+            format!("{inset}{prompt}"),
+            Style::default().fg(app.ui_theme.text_body),
+        )));
     }
     lines
 }

@@ -3366,10 +3366,6 @@ pub(crate) fn composer_empty_hint_text(app: &App) -> Cow<'static, str> {
         Cow::Owned(placeholder)
     } else if app.is_history_search_active() {
         app.tr(crate::localization::MessageId::HistorySearchPlaceholder)
-    } else if app.mode == crate::tui::app::AppMode::Operate {
-        // Operate is goal-driven; the empty composer says what to type, not
-        // orchestration jargon a first-run user has no model for.
-        app.tr(crate::localization::MessageId::ComposerOperatePlaceholder)
     } else {
         app.tr(crate::localization::MessageId::ComposerPlaceholder)
     }
@@ -4268,16 +4264,16 @@ mod tests {
         COMPOSER_PLACEHOLDER, COMPOSER_PROMPT_GUTTER_WIDTH, ChatWidget, ComposerWidget, Renderable,
         SlashMenuEntry, active_entry_revision, apply_detail_target_highlight,
         apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
-        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
-        composer_height, composer_max_height, composer_top_padding, cursor_row_col,
-        empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
-        fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
-        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
-        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
-        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        build_empty_state_lines, composer_content_geometry, composer_height, composer_max_height,
+        composer_top_padding, cursor_row_col, empty_composer_visual_rows,
+        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
+        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
+        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
+        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
+        wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
-    use crate::localization::{Locale, MessageId, tr};
+    use crate::localization::Locale;
     use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
@@ -4290,8 +4286,6 @@ mod tests {
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
-        Terminal,
-        backend::TestBackend,
         buffer::Buffer,
         layout::Rect,
         style::{Color, Modifier, Style},
@@ -6277,28 +6271,6 @@ mod tests {
     }
 
     #[test]
-    fn operate_composer_invites_ordinary_parallel_tasks() {
-        let mut app = create_test_app();
-        app.mode = AppMode::Operate;
-
-        assert_eq!(
-            composer_empty_hint_text(&app),
-            "Describe the goal — Codewhale keeps working until it's done"
-        );
-
-        app.ui_locale = Locale::Es419;
-        assert_eq!(
-            composer_empty_hint_text(&app),
-            "Describe el objetivo — Codewhale seguirá trabajando hasta terminarlo"
-        );
-        assert_ne!(
-            composer_empty_hint_text(&app),
-            tr(Locale::En, MessageId::ComposerOperatePlaceholder),
-            "Operate mode must use the active non-English locale"
-        );
-    }
-
-    #[test]
     fn localized_composer_placeholders_render_at_narrow_widths() {
         for locale in [Locale::Ja, Locale::ZhHans, Locale::PtBr] {
             let mut app = create_test_app();
@@ -6502,63 +6474,8 @@ mod tests {
 
         assert!(rendered.contains("Codewhale"));
         assert!(rendered.contains("/tmp/codewhale-test-workspace · no git · mcp 2"));
-        assert!(rendered.contains("Fleet ready  /fleet setup"));
-        assert!(
-            !rendered.contains("Fleet setup  /fleet setup"),
-            "the idle action must not imply that built-in Fleet roles still require setup"
-        );
-        assert!(rendered.contains("/help or Ctrl+K"));
-        assert!(rendered.contains("Keep going  /workflow /goal /auto"));
-        assert!(!rendered.contains("Model  /model"));
-        assert!(!rendered.contains("Rules  /constitution"));
-    }
-
-    #[test]
-    fn empty_state_uses_readable_brand_and_command_hierarchy() {
-        let mut app = create_test_app();
-        app.onboarding_needs_api_key = false;
-        let lines = build_empty_state_lines(&app, Rect::new(0, 0, 100, 20));
-        let span_for = |needle: &str| {
-            lines
-                .iter()
-                .flat_map(|line| line.spans.iter())
-                .find(|span| span.content.contains(needle))
-                .unwrap_or_else(|| panic!("missing empty-state span {needle:?}"))
-        };
-
-        let brand = span_for("Codewhale");
-        assert_eq!(brand.style.fg, Some(app.ui_theme.text_body));
-        assert!(brand.style.add_modifier.contains(Modifier::BOLD));
-
-        let fleet_label = span_for("Fleet ready");
-        assert_eq!(fleet_label.style.fg, Some(app.ui_theme.text_soft));
-        assert!(!fleet_label.style.add_modifier.contains(Modifier::BOLD));
-
-        let fleet_command = span_for("/fleet setup");
-        assert_eq!(fleet_command.style.fg, Some(app.ui_theme.accent_primary));
-        assert!(fleet_command.style.add_modifier.contains(Modifier::BOLD));
-
-        let help_command = span_for("/help or Ctrl+K");
-        assert_eq!(help_command.style.fg, Some(app.ui_theme.accent_primary));
-        assert!(help_command.style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn empty_state_does_not_claim_fleet_ready_without_a_provider_route() {
-        let mut app = create_test_app();
-        app.onboarding_needs_api_key = true;
-
-        for area in [Rect::new(0, 0, 40, 12), Rect::new(0, 0, 100, 20)] {
-            let rendered = build_empty_state_lines(&app, area)
-                .iter()
-                .flat_map(|line| line.spans.iter())
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-
-            assert!(rendered.contains("Fleet  /provider"), "{rendered}");
-            assert!(!rendered.contains("Fleet ready"), "{rendered}");
-            assert!(!rendered.contains("/fleet setup"), "{rendered}");
-        }
+        assert!(rendered.contains("What do you want to accomplish?"));
+        assert!(!rendered.contains("/workflow /goal /auto"));
     }
 
     #[test]
@@ -6641,57 +6558,6 @@ mod tests {
             buf[context_cell].bg, base,
             "the water column should continue behind ordinary text"
         );
-    }
-
-    #[test]
-    fn compact_launch_states_that_fleet_is_ready_without_ambient_clutter() {
-        let mut app = create_test_app();
-        app.onboarding_needs_api_key = false;
-        let rendered = build_empty_state_lines(&app, Rect::new(0, 0, 40, 12))
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-
-        assert!(rendered.contains("Fleet ready  /fleet setup"));
-        assert!(rendered.contains("/workflow /goal /auto"));
-        assert!(!rendered.contains("▗▄▄"));
-    }
-
-    #[test]
-    fn launch_hierarchy_survives_responsive_gate_sizes() {
-        for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
-            let mut app = create_test_app();
-            app.onboarding_needs_api_key = false;
-            app.low_motion = false;
-            app.fancy_animations = true;
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-            terminal
-                .draw(|frame| {
-                    let area = frame.area();
-                    let widget = ChatWidget::new(&mut app, area);
-                    widget.render(area, frame.buffer_mut());
-                })
-                .expect("responsive idle draw");
-            let area = Rect::new(0, 0, width, height);
-            let rendered = buffer_text(terminal.backend().buffer(), area);
-
-            assert!(
-                rendered.contains("Fleet ready") && rendered.contains("/fleet setup"),
-                "Fleet readiness must remain explicit at {width}x{height}:\n{rendered}"
-            );
-            if height < 14 {
-                assert!(
-                    !rendered.contains("▗▄▄"),
-                    "the decorative whale must yield before the Fleet action at {width}x{height}"
-                );
-            } else if width >= 60 && height >= 16 {
-                assert!(
-                    rendered.contains("▗▄▄"),
-                    "the idle whale should remain visible at {width}x{height}:\n{rendered}"
-                );
-            }
-        }
     }
 
     #[test]

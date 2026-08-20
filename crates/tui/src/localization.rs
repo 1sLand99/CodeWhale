@@ -117,7 +117,6 @@ impl Locale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageId {
     ComposerPlaceholder,
-    ComposerOperatePlaceholder,
     ComposerDispatchFailedRestored,
     DispatchFailedQueued,
     DispatchFailedInitial,
@@ -1383,11 +1382,7 @@ pub enum MessageId {
     // Underwater post-launch empty state.
     EmptyStateNoGit,
     EmptyStateMcpLabel,
-    EmptyStateFleetLabel,
-    EmptyStateFleetSetupLabel,
-    EmptyStateHelpConnector,
-    EmptyStateHelpHint,
-    EmptyStateOrchestrationLabel,
+    EmptyStatePrompt,
     // Session picker surface.
     SessionsSurfaceTitle,
     SessionsPaneTitle,
@@ -1817,7 +1812,6 @@ pub enum MessageId {
 #[allow(dead_code)]
 pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ComposerPlaceholder,
-    MessageId::ComposerOperatePlaceholder,
     MessageId::ComposerDispatchFailedRestored,
     MessageId::DispatchFailedQueued,
     MessageId::DispatchFailedInitial,
@@ -3032,11 +3026,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SessionMetricsStatusLine,
     MessageId::EmptyStateNoGit,
     MessageId::EmptyStateMcpLabel,
-    MessageId::EmptyStateFleetLabel,
-    MessageId::EmptyStateFleetSetupLabel,
-    MessageId::EmptyStateHelpConnector,
-    MessageId::EmptyStateHelpHint,
-    MessageId::EmptyStateOrchestrationLabel,
+    MessageId::EmptyStatePrompt,
     MessageId::SessionsSurfaceTitle,
     MessageId::SessionsPaneTitle,
     MessageId::SessionsHistoryPaneTitle,
@@ -4485,11 +4475,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_state_and_operate_composer_strings_are_translated_in_complete_locales() {
-        let ids = [
-            MessageId::ComposerOperatePlaceholder,
-            MessageId::EmptyStateHelpConnector,
-        ];
+    fn launch_copy_is_translated_in_complete_locales() {
+        let ids = [MessageId::ComposerPlaceholder, MessageId::EmptyStatePrompt];
         for locale in Locale::shipped_complete() {
             if *locale == Locale::En {
                 continue;

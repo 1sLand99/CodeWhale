@@ -62,15 +62,6 @@ pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
 pub(crate) const ORCHESTRATION_DISCOVERY_COMMANDS: &[&str] = &["workflow", "goal", "auto"];
 
 #[must_use]
-pub(crate) fn orchestration_slash_hint() -> String {
-    ORCHESTRATION_DISCOVERY_COMMANDS
-        .iter()
-        .map(|name| format!("/{name}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[must_use]
 pub(crate) fn orchestration_discovery_rank(name: &str) -> Option<usize> {
     ORCHESTRATION_DISCOVERY_COMMANDS
         .iter()

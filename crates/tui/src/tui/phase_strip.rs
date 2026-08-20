@@ -100,6 +100,26 @@ fn session_cache_hit_percentage(app: &App) -> Option<u8> {
     Some(((hit * 100 + total / 2) / total) as u8)
 }
 
+/// Quiet route identity for the phase rail. The header owns posture and
+/// workspace truth; this secondary line keeps the active provider, model, and
+/// reasoning choice available without making them the first thing a user sees.
+fn route_identity_label(app: &App, tier: ShellTier) -> String {
+    let (provider, model) = app.effective_route_identity_display();
+    let effort = app.reasoning_effort_display_label();
+    let label = match tier {
+        // On the smallest shell, model + effort are more useful than repeating
+        // the provider. The full route remains available in /model and /status.
+        ShellTier::Compact => format!("{model} · {effort}"),
+        ShellTier::Normal | ShellTier::Wide => format!("{provider} · {model} · {effort}"),
+    };
+    let budget = match tier {
+        ShellTier::Compact => 24,
+        ShellTier::Normal => 44,
+        ShellTier::Wide => 64,
+    };
+    truncate_to_width(&label, budget)
+}
+
 /// Toasts share the footer rail, so their typed level must resolve through
 /// the same closed status-bar grammar as the phase marker around them.
 fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
@@ -161,6 +181,18 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 tr(app.ui_locale, MessageId::FooterHintEscInterrupt)
             ),
             Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
+        ));
+    }
+
+    let route_label = route_identity_label(app, tier);
+    if !route_label.is_empty() {
+        left.push(Span::styled(
+            " · ",
+            Style::default().fg(ChromeInk::MetadataDim.color(&app.ui_theme)),
+        ));
+        left.push(Span::styled(
+            route_label,
+            Style::default().fg(ChromeInk::Metadata.color(&app.ui_theme)),
         ));
     }
 
