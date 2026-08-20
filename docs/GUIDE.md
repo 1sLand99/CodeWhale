@@ -79,11 +79,18 @@ Launch Codewhale from the repository or directory you want it to work in:
 codewhale
 ```
 
-On first launch, Codewhale opens with a recommended working agreement. Press
-Enter to accept the balanced, safety-conscious default and start working, or
-press `C` to customize the full constitution. This guidance never changes
-runtime permissions. Provider and API-key setup stays separate and can be
-completed later; revisit the setup hub with `/setup` at any time.
+On first launch, Codewhale asks only for decisions this installation still
+needs: language when it cannot infer one, a provider when no usable route is
+configured, and workspace trust when the folder requires a decision. The
+provider step includes an explicit offline route. The ready screen then opens
+the real composer, preserving a task supplied on the command line or suggesting
+a first task for the current folder.
+
+Everything optional stays available after that. Use `/setup` for the
+progressive setup and repair guide, `/settings` for the full typed editor, and
+`/constitution` when you want to customize the bundled working agreement.
+The localized telemetry choice appears only after the workspace is ready and
+does not block the composer.
 
 DeepSeek is the default provider. If you want to configure its key before or
 after the first launch, the most direct setup path is:

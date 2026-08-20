@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partial reply was preserved, the retry budget is enforced in mechanism, and
   recovery produces exactly one authoritative final answer.
 
-Codewhale v0.9.10 is a retention-and-identity release: the shell and
+Codewhale v0.9.10 is a retention, identity, and product-clarity release: the shell and
 transcript can no longer retain unbounded tool output in memory or on disk,
 mid-turn history inserts no longer strand in-flight tool rows, every agent
 that ran this session is visible from `/agents list`, the PTY acceptance
@@ -157,15 +157,20 @@ abort under load.
 - Short CLI no longer waits up to three seconds for a telemetry POST on
   exit; `session_end` is recorded and the buffer ships on the next
   interactive session.
-- `/goal`, `/workspace`, `/tokens`, `/translate`, and `/hooks` appear at
-  the empty palette and bare `/` menu instead of only under Advanced
-  (#5442, #5439).
-- Welcome, the last onboarding tips screen, and `/home` name
-  `/workspace`, `/restore`, and `/tokens` instead of opening on
-  governance and setup. That copy says `/restore` rolls workspace
-  files back to a per-turn snapshot rather than rewinding a turn,
-  which is what `/undo` does, and `/home` aligns its `/links` row to
-  the same command column as the rest of the list (#5442).
+- Bare `/` now opens a deliberately small starter set: `/help`, `/setup`,
+  `/model`, `/settings`, `/resume`, and `/rc`. The full command inventory
+  remains searchable through `/help`, the command palette, and direct prefix
+  typing, without front-loading the entire control surface (#5442, #5439).
+- First run now asks only for decisions needed to become usable, keeps the
+  offline route explicit, and leaves optional provider, tools, policy, and
+  appearance work in the progressive `/setup` repair guide. The idle aquarium
+  asks one task-oriented question instead of advertising a tutorial or command
+  billboard, and the localized telemetry choice appears after the workspace is
+  ready without blocking the composer.
+- Provider, active model, and reasoning effort moved out of the crowded header
+  into a quiet, width-aware footer identity. Compact layouts keep model and
+  effort before provider detail and shed whole low-priority groups instead of
+  clipping the composer or control hints.
 - The model picker no longer re-parses `~/.codewhale/config.toml` once per
   provider when deciding who has a saved key.
 
@@ -214,10 +219,10 @@ abort under load.
   validate, and downloads binaries only from that source. Explicit
   `CODEWHALE_RELEASE_BASE_URL` / `CODEWHALE_USE_CNB_MIRROR=1` still skip the
   race; other targets stay on GitHub.
-- `/workflow`, `/goal`, and `/auto` are pinned at the top of the empty `/`
-  menu, named on the idle welcome and footer, and occupy the first three
-  default Hotbar slots. `/auto` turns on Auto-Review (the existing
-  permission posture) and says when to use the other two instead (#5439).
+- `/workflow <objective>` and `/workflow run <path>` now produce a bounded,
+  tool-less proposal for review. Only `/workflow confirm` can launch that
+  reviewed draft; status, cancel, settings, and the `/workflows` dashboard stay
+  host-owned and do not spend a model turn (#5439).
 - `feat(tui): add cancellable cadence to continuous goals` (M-Maciej) —
   `[goal] continuation_delay_seconds` gives coordinator goals a visible quiet
   period between successful turns while reusing the existing coalesced goal

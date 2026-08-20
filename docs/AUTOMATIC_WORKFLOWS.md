@@ -77,13 +77,17 @@ isolation by itself.
 settings` are answered by Codewhale itself from the run journal and the live
 run state — they never spend a model turn, so a status check is free and a
 cancel lands even while the model is busy. `/workflow cancel` with no id stops
-the only running workflow. `/workflow run <path/to/x.workflow.js>` launches a
-checked-in workflow as-is; `/workflow <objective>` and bare `/workflow` ask
-the model to author and run one. The `[workflow]` table above is read from
-your `config.toml` for every launch decision (auto-start, write-approval
-card, child limits); `/workflow settings` prints the effective values with
-what each one does. Reloading `config.toml` refreshes that table for both
-settings and the workflow tool.
+the only running workflow.
+
+Starting work is review-first. `/workflow <objective>` and bare `/workflow`
+ask the model for a bounded, tool-less proposal; `/workflow run
+<path/to/x.workflow.js>` prepares a review of that exact checked-in source.
+Neither form executes anything. After reviewing the proposal, run `/workflow
+confirm` to launch the latest reviewed draft. The `[workflow]` table above is
+read from your `config.toml` for every launch decision (auto-start,
+write-approval card, child limits); `/workflow settings` prints the effective
+values with what each one does. Reloading `config.toml` refreshes that table
+for both settings and the workflow tool.
 
 `/workflows` opens the run dashboard: every run this workspace's journal
 keeps for the session — running and finished — newest first. Each row shows

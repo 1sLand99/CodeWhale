@@ -107,12 +107,18 @@ claim one.
 ## When anything is sent, and where
 
 Nothing is sent when the persistent opt-out or a run-scoped kill switch is in
-force. Otherwise there is exactly one flush point: an attempt during shutdown,
-bounded at three seconds. There is no
-startup flush, mid-session flush, per-turn flush, or per-tool-call flush. The
-shutdown flush re-resolves your setting from disk immediately beforehand, so
-`codewhale config set telemetry false` written from another terminal stops the
-flush of a session that is already running.
+force. TUI and `exec` sessions have exactly one network flush point: an attempt
+during shutdown, bounded at three seconds. Short CLI commands such as `config`,
+`doctor`, and `auth` do not wait for that network request. They record
+`session_end`, seal the event to the local buffer with a much shorter bound, and
+return; a configured endpoint sends those buffered events with the next
+interactive shutdown flush. An explicitly empty endpoint finalizes its local
+dry-run batch immediately.
+
+There is no startup flush, mid-session flush, per-turn flush, or per-tool-call
+flush. Every network shutdown flush re-resolves your setting from disk
+immediately beforehand, so `codewhale config set telemetry false` written from
+another terminal stops the flush of a session that is already running.
 
 A flush is **one `POST`** to the resolved endpoint — by default
 `https://telemetry.codewhale.net/v1/telemetry`. The request carries a
@@ -147,7 +153,7 @@ most once per flush point and never grows a queue.
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC, second precision
   "install_id":  "3f2a…",                  // uuid v4, rotates every 90 days
   "app_version": "0.9.4",
-  "git_sha":     null,                     // non-null only for release-CI builds
+  "git_sha":     null,                     // non-null only for SHA-stamped builds
   "surface":     "tui",
   "os":          "macos",
   "arch":        "aarch64",
@@ -163,7 +169,7 @@ most once per flush point and never grows a queue.
 | `sent_at` | RFC3339 | `chrono::Utc::now()` | Second precision. Per-**batch** only — events carry no timestamps at all. |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | Random, never derived, rotated every 90 days. See "Where it lives" above. |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`, as at `crates/telemetry/src/lib.rs:112` | Must match `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`. |
-| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")` — a **new** rustc-env | First 12 hex chars. Emitted **only** when `codewhale_build_support::release_build_sha` saw `DEEPSEEK_BUILD_SHA` or `GITHUB_SHA` in the build environment, i.e. only for release-CI builds. `null` for every locally built binary, unconditionally, with no runtime lookup of any kind. **Never** `CODEWHALE_BUILD_COMMIT` — that falls back to `git_commit` and is the builder's private HEAD. **Never** `Thread.git_sha` (`crates/state/src/lib.rs:93`) — that is the user's workspace commit and a red line, one identifier away by name. |
+| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")` — a **new** rustc-env | First 12 hex chars. Emitted **only** when `codewhale_build_support::release_build_sha` saw a valid full SHA in `CODEWHALE_BUILD_SHA`, the legacy `DEEPSEEK_BUILD_SHA`, or `GITHUB_SHA`, in that precedence order. `null` for every unstamped build, with no runtime lookup of any kind. **Never** `CODEWHALE_BUILD_COMMIT` — that falls back to `git_commit` and is the builder's private HEAD. **Never** `Thread.git_sha` (`crates/state/src/lib.rs:93`) — that is the user's workspace commit and a red line, one identifier away by name. |
 | `surface` | enum | set explicitly at each subcommand dispatch | `tui \| exec \| cli \| app-server \| mcp-server \| serve`. **Not derivable from the executable**: `codewhale-tui` serves at least five surfaces, and app-server runs *in-process* inside `codewhale` (`crates/cli/src/lib.rs:4225`), so `current_exe()` would report every app-server session as CLI. `desktop` is omitted — no desktop surface exists. Which of these can emit is governed by the opt-out policy, not by the surface: see "Which surfaces emit" below. |
 | `os` | enum | `std::env::consts::OS`, as at `crates/cli/src/update.rs:41` | Whitelist: `linux \| macos \| windows \| freebsd \| android \| other`. |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`. |
