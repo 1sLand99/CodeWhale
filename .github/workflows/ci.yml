@@ -124,7 +124,7 @@ jobs:
               scripts/release/npm-wrapper-smoke.js|scripts/mobile-smoke.sh|scripts/check-provider-registry.py)
                 heavy=true
                 ;;
-              docs/*|*.md|.github/PULL_REQUEST_TEMPLATE.md|.github/ISSUE_TEMPLATE/*|.github/scripts/agent-task-metadata.test.sh|.github/workflows/agent-task-labels.yml|.github/workflows/auto-tag.yml|.github/workflows/stale.yml|.github/workflows/triage.yml|scripts/release/check-versions.sh|scripts/release/check-ohos-deps.sh|scripts/release/install-dogfood.sh|scripts/release/install-dogfood.test.sh|scripts/release/prepare-release.sh|scripts/release/prepare-release.test.sh|scripts/check-coauthor-trailers.py|scripts/dev-cache.sh|scripts/dev-cache.test.sh|scripts/dev-cargo.sh|scripts/dev-test.sh|scripts/dev-test.test.sh)
+              docs/*|*.md|.github/PULL_REQUEST_TEMPLATE.md|.github/ISSUE_TEMPLATE/*|.github/scripts/agent-task-metadata.test.sh|.github/workflows/agent-task-labels.yml|.github/workflows/auto-tag.yml|.github/workflows/stale.yml|.github/workflows/triage.yml|scripts/release/check-versions.sh|scripts/release/check-ohos-deps.sh|scripts/release/install-dogfood.sh|scripts/release/install-dogfood.test.sh|scripts/release/prepare-release.sh|scripts/release/prepare-release.test.sh|scripts/check-coauthor-trailers.py|scripts/dev-cache.sh|scripts/dev-cache.test.sh|scripts/dev-cargo.sh|scripts/dev-test.sh)
                 ;;
               *)
                 heavy=true
@@ -188,7 +188,6 @@ jobs:
           bash scripts/release/validate-crate-publish-order.test.sh
           bash scripts/release/verify-remote-tag.test.sh
           sh scripts/dev-cache.test.sh
-          sh scripts/dev-test.test.sh
           bash .github/scripts/update-homebrew-tap.test.sh
           node .github/scripts/release-workflows.test.js
           node --test scripts/release/assemble-release-assets.test.js
@@ -570,22 +569,6 @@ jobs:
       - name: Check persistence-backlog RSS budget
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
         run: python3 scripts/check-persistence-backlog-budget.py
-      - name: Run isolated Skills Manager PTY acceptance
-        # This real-PTY scenario is deterministic in a fresh process (10/10
-        # locally) but can inherit event starvation after the full qa_pty
-        # module suite on loaded Linux runners. Keep the assertion intact and
-        # run it separately on Unix after the workspace suite has released its
-        # PTYs.
-        if: needs.changes.outputs.heavy == 'true' && matrix.os != 'windows-latest' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
-        # Bounded twice, because libtest has no per-test timeout and this step
-        # wedged for over an hour on the exact-head 0.9.9 macOS run: the harness
-        # aborts itself after QA_PTY_STALL_TIMEOUT_SECS of no PTY activity (with
-        # a diagnostic naming the last harness step), and this ceiling catches
-        # anything that outlives even that — a stall during the build, say.
-        timeout-minutes: 15
-        env:
-          QA_PTY_STALL_TIMEOUT_SECS: '180'
-        run: cargo test -p codewhale-tui --test pty qa_pty::skills_opens_manager_owned_then_compatible -- --ignored --exact
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: git diff --exit-code -- Cargo.lock

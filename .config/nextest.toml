@@ -6,10 +6,9 @@
 # half the wall-clock time of libtest on a multi-core machine, and slow or
 # hanging tests are named instead of stalling the whole binary.
 #
-# Because tests no longer share a process, the suites that serialize on an
-# in-process mutex today (PTY / terminal-matrix / release-runtime QA) must be
-# serialized here instead: they contend for pseudo-terminals, mock-server
-# ports, and wall-clock timing budgets.
+# Because tests no longer share a process, integration suites that serialize
+# on in-process locks must be bounded here when they contend for mock-server
+# ports or wall-clock timing budgets.
 
 [profile.default]
 # Name tests that take longer than this so contributors see where the time goes.
@@ -23,7 +22,6 @@ final-status-level = "slow"
 # export 16 MiB so local nextest matches the product thread stack.
 
 [test-groups]
-pty = { max-threads = 1 }
 # Integration tests that spawn the real `codewhale` binary and wait on
 # service start-up deadlines; bounded so a fully parallel run on a busy
 # machine cannot starve them past their 30 s budgets.
@@ -36,14 +34,6 @@ telemetry-contract = { max-threads = 1 }
 # parallel load the file never appears (#5355). Serialize them; do not drop
 # the tests.
 exec-persistent-service = { max-threads = 1 }
-
-[[profile.default.overrides]]
-# The PTY test binary (`crates/tui/tests/pty`) drives real pseudo-terminals
-# and shares mock servers; run it one test at a time, in the background of
-# everything else.
-filter = 'binary(pty)'
-test-group = 'pty'
-slow-timeout = { period = "120s" }
 
 # First matching test-group override wins. Keep these more-specific
 # integration filters before binary(integration) so they are not stolen

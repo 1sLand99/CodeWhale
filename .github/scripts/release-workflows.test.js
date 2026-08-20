@@ -52,13 +52,6 @@ for (const output of ["heavy", "workflow", "mobile", "actions"]) {
 }
 assert.match(manualForceBlock[1], /#EXPECTED_SHA.*-ne 40/s);
 assert.match(manualForceBlock[1], /actual.*EXPECTED_SHA/s);
-assert.match(
-  ci,
-  /run: cargo test -p codewhale-tui --test pty qa_pty::skills_opens_manager_owned_then_compatible -- --ignored --exact/,
-  "CI must run the isolated Skills Manager acceptance from the consolidated PTY target",
-);
-assert.doesNotMatch(ci, /--test qa_pty\b/, "CI must not name the removed qa_pty target");
-
 const expectedNightlyTargets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",

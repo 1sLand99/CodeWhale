@@ -359,10 +359,10 @@ fn sanitize_agent_mail_text(raw: &str, max_bytes: usize) -> String {
         let replacement = if redact_next_credential || agent_mail_token_is_credential(token) {
             redact_next_credential = false;
             "[redacted-credential]"
-        } else if matches!(lower.as_str(), "bearer" | "basic" | "digest" | "apikey") {
-            redact_next_credential = true;
-            "[redacted-credential]"
-        } else if lower.contains("authorization:") || lower.contains("proxy-authorization:") {
+        } else if matches!(lower.as_str(), "bearer" | "basic" | "digest" | "apikey")
+            || lower.contains("authorization:")
+            || lower.contains("proxy-authorization:")
+        {
             redact_next_credential = true;
             "[redacted-credential]"
         } else if token.contains("://") {

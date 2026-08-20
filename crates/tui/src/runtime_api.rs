@@ -6423,10 +6423,10 @@ fn map_agent_mail_err(err: anyhow::Error) -> ApiError {
         ApiError::forbidden(message)
     } else if lower.contains("already exists with different delivery intent") {
         ApiError::conflict(message)
-    } else if lower.contains("failed to read agent mail envelope") && lower.contains("no such file")
+    } else if (lower.contains("failed to read agent mail envelope")
+        && lower.contains("no such file"))
+        || (lower.starts_with("thread '") && lower.ends_with("' not found"))
     {
-        ApiError::not_found(message)
-    } else if lower.starts_with("thread '") && lower.ends_with("' not found") {
         ApiError::not_found(message)
     } else {
         ApiError::bad_request(message)
