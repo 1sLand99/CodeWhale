@@ -3,6 +3,7 @@ pub mod auth_source;
 pub mod auto_model;
 pub mod catalog;
 mod config_document;
+pub mod device_code;
 pub mod external_credentials;
 mod harness;
 pub mod model_reference;
