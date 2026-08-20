@@ -307,6 +307,32 @@ fn fingerprint_never_hashes_secret_bearing_url_text() {
 }
 
 #[test]
+fn fingerprint_strips_userinfo_from_a_scheme_less_base_url() {
+    // A base_url typed without a scheme took the fall-through branch, which
+    // only split off `?`/`#` — so `user:pass@host` went into SHA-256 verbatim,
+    // against the documented "userinfo never enters the digest function".
+    let expected = base_url_fingerprint("api.example.com/v1");
+    for url in [
+        "user:secret@api.example.com/v1",
+        "user:other-secret@api.example.com/v1",
+        "token@api.example.com/v1",
+    ] {
+        assert_eq!(base_url_fingerprint(url), expected, "{url}");
+    }
+}
+
+#[test]
+fn fingerprint_of_an_empty_base_url_is_the_redacted_constant() {
+    // The fall-through's `unwrap_or(REDACTED)` never fired — `split` always
+    // yields at least one (possibly empty) piece — so an empty base URL
+    // fingerprinted the empty string instead of the redacted sentinel.
+    let redacted = base_url_fingerprint("ftp://api.example.com");
+    for url in ["", "   ", "?api_key=secret"] {
+        assert_eq!(base_url_fingerprint(url), redacted, "{url:?}");
+    }
+}
+
+#[test]
 fn ttl_marks_entries_stale_and_excludes_them_from_fresh() {
     let fp = base_url_fingerprint("https://api.example.com");
     let mut cache = ProviderCatalogCache::new();
