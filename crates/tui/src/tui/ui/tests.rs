@@ -14285,8 +14285,12 @@ fn missing_key_recovery_still_requires_workspace_trust() {
 
 #[test]
 fn provider_back_walks_to_the_last_decision_this_run_asked() {
+    // The first two cases are the fresh-first-run walk-back, so they must say
+    // so: `App::new` classifies a default route with no key as missing-key
+    // recovery, and that branch owns a different (also asserted) exit.
     let mut app = create_test_app();
     app.onboarding = OnboardingState::Provider;
+    app.onboarding_missing_key_recovery = false;
     app.onboarding_had_language_step = true;
     back_from_provider_onboarding(&mut app);
     assert_eq!(app.onboarding, OnboardingState::Language);
@@ -14294,6 +14298,7 @@ fn provider_back_walks_to_the_last_decision_this_run_asked() {
     // Without the language screen the previous stop is the welcome.
     let mut app = create_test_app();
     app.onboarding = OnboardingState::Provider;
+    app.onboarding_missing_key_recovery = false;
     app.onboarding_had_language_step = false;
     back_from_provider_onboarding(&mut app);
     assert_eq!(app.onboarding, OnboardingState::Welcome);
