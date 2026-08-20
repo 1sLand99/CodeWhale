@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The workspace-trust screen no longer cuts its own question in half on a small
+  terminal. The question, the prompt-injection risk hint, and the trust-effect
+  hint were each pushed as one unwrapped line, so at 40 columns the screen read
+  "Should Codewhale work with the instruc" — severed mid-word with nothing
+  marking the cut, while the workspace path directly beneath it wrapped
+  correctly. Asking someone to grant filesystem trust while the question itself
+  is truncated is the worst place in the product for that to happen. All three
+  now wrap through the same helper the rest of onboarding uses, which also
+  means they wrap correctly in Japanese and Chinese. Verified across all
+  fifteen shipped locales at 40, 60, 80 and 120 columns.
+
 - The bottom status rail is no longer one run-on sentence. At 120 columns it
   read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are
   on. … ⌥V:output · /context:context · fn+F1:keys` — live state, route
