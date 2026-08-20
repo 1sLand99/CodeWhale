@@ -56,9 +56,6 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
 
 pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
 
-/// Flagship orchestration surfaces retained in the full Help/palette catalog.
-pub(crate) const ORCHESTRATION_DISCOVERY_COMMANDS: &[&str] = &["workflow", "goal", "auto"];
-
 /// Small, task-oriented starting set for a bare `/` in the composer.
 ///
 /// The full command catalog remains searchable through `/help`, the command

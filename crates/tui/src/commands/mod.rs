@@ -1102,10 +1102,6 @@ mod tests {
                 "/{name} must not stay on the Advanced discovery list"
             );
         }
-        assert_eq!(
-            traits::ORCHESTRATION_DISCOVERY_COMMANDS,
-            ["workflow", "goal", "auto"]
-        );
     }
 
     #[test]
