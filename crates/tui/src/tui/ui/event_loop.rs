@@ -4391,6 +4391,25 @@ pub(crate) async fn run_event_loop(
                 let _ = send_next_queued_message_now(app, config, &engine_handle).await?;
                 continue;
             }
+
+            if let Some(shortcut) = crate::tui::agent_focus::shell_shortcut(
+                app,
+                &key,
+                slash_menu_open || mention_menu_open,
+            ) {
+                match shortcut {
+                    crate::tui::agent_focus::AgentShellShortcut::FocusAgents => {
+                        if !crate::tui::work_surface::enter_agents(app) {
+                            open_agents_register(app, &engine_handle).await;
+                        }
+                    }
+                    crate::tui::agent_focus::AgentShellShortcut::ManageAgents => {
+                        open_agents_register(app, &engine_handle).await;
+                    }
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Enter
                     if key.modifiers == KeyModifiers::NONE
@@ -4597,35 +4616,6 @@ pub(crate) async fn run_event_loop(
                         && !mention_menu_open =>
                 {
                     crate::tui::agent_focus::exit_focus(app);
-                    continue;
-                }
-                // `← for agents`: with an empty composer, Left enters the agent
-                // list (rail Agents panel, or the /agents register when the rail
-                // is off) so a worker can be selected and focused.
-                KeyCode::Left
-                    if key.modifiers.is_empty()
-                        && app.input.is_empty()
-                        && !slash_menu_open
-                        && !mention_menu_open
-                        && crate::tui::agent_focus::agents_exist(app) =>
-                {
-                    if !crate::tui::work_surface::enter_agents(app) {
-                        open_agents_register(app, &engine_handle).await;
-                    }
-                    continue;
-                }
-                // `↓ to manage`: with an empty composer, Down opens the agents
-                // register (focus, stop, refresh) instead of moving a cursor
-                // that has nowhere to go.
-                KeyCode::Down
-                    if key.modifiers.is_empty()
-                        && app.input.is_empty()
-                        && !slash_menu_open
-                        && !mention_menu_open
-                        && app.selected_composer_attachment_index().is_none()
-                        && crate::tui::agent_focus::agents_exist(app) =>
-                {
-                    open_agents_register(app, &engine_handle).await;
                     continue;
                 }
                 // Vim composer mode: Esc from Insert/Visual → Normal.

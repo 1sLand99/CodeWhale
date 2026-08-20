@@ -2975,6 +2975,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_entry_focuses_a_visible_row_and_esc_returns_to_composer() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Top;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-live",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+
+        assert!(super::enter_agents(&mut app));
+        assert_eq!(app.work_surface.panel, super::RailPanel::Agents);
+        assert!(app.work_surface.focused);
+        assert_eq!(
+            app.work_surface.selected.as_ref().map(|row| row.0.as_str()),
+            Some("worker:agent-live")
+        );
+
+        let handled = super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(handled.is_some());
+        assert!(
+            !app.work_surface.focused,
+            "Esc returns ownership to composer"
+        );
+    }
+
+    #[test]
+    fn agent_entry_rejects_a_surface_that_is_not_rendered() {
+        let mut app = app();
+        app.work_surface.placement = super::WorkSurfacePlacement::Top;
+        app.work_surface.effective_placement = super::WorkSurfacePlacement::Off;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-live",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+
+        assert!(!super::enter_agents(&mut app));
+        assert!(
+            !app.work_surface.focused,
+            "hidden surface cannot own arrows"
+        );
+    }
+
     /// Acceptance for owner regression A2: an agent row is a door in the
     /// Agents panel too, and a FINISHED agent's world still opens — the
     /// panel is a standing register, not a live-only view. Since v0.9.7 the

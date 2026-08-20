@@ -17,6 +17,7 @@
 
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -424,6 +425,50 @@ pub(crate) fn agents_exist(app: &App) -> bool {
     !app.subagent_cache.is_empty() || !app.agent_progress.is_empty()
 }
 
+/// Shell action owned by the agent shortcuts advertised above the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentShellShortcut {
+    FocusAgents,
+    ManageAgents,
+}
+
+/// Whether the composer currently owns the two agent shortcuts.
+///
+/// This is deliberately stricter than [`agents_exist`]. A visible worker is
+/// not enough to advertise a key when a modal, attachment, or focused inline
+/// surface owns that same arrow. Rendering and dispatch both consume this
+/// predicate so the footer cannot promise an action that another owner will
+/// swallow.
+pub(crate) fn shell_shortcuts_available(app: &App, completion_menu_open: bool) -> bool {
+    agents_exist(app)
+        && !completion_menu_open
+        && app.input.is_empty()
+        && app.view_stack.is_empty()
+        && app.selected_composer_attachment_index().is_none()
+        && !app.work_surface.focused
+        && !app
+            .workflow_panel
+            .as_ref()
+            .is_some_and(|panel| panel.keyboard_focus)
+}
+
+/// Resolve a key only while the agent shortcut contract is actually active.
+pub(crate) fn shell_shortcut(
+    app: &App,
+    key: &KeyEvent,
+    completion_menu_open: bool,
+) -> Option<AgentShellShortcut> {
+    if key.modifiers != KeyModifiers::NONE || !shell_shortcuts_available(app, completion_menu_open)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Left => Some(AgentShellShortcut::FocusAgents),
+        KeyCode::Down => Some(AgentShellShortcut::ManageAgents),
+        _ => None,
+    }
+}
+
 /// Footer hint chain fragment `← for agents · ↓ to manage` (ASCII-safe:
 /// `<- for agents · v to manage`). Words are localized; the glyphs follow the
 /// shell's ASCII-safe switch.
@@ -589,6 +634,76 @@ mod tests {
             },
             &Config::default(),
         )
+    }
+
+    #[test]
+    fn agent_shell_shortcuts_only_claim_an_unowned_empty_composer() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+        assert_eq!(
+            shell_shortcut(&app, &left, false),
+            None,
+            "no agents: cursor owns Left"
+        );
+        assert_eq!(
+            shell_shortcut(&app, &down, false),
+            None,
+            "no agents: cursor owns Down"
+        );
+
+        app.agent_progress
+            .insert("agent_one".to_string(), "working".to_string());
+        assert_eq!(
+            shell_shortcut(&app, &left, false),
+            Some(AgentShellShortcut::FocusAgents)
+        );
+        assert_eq!(
+            shell_shortcut(&app, &down, false),
+            Some(AgentShellShortcut::ManageAgents)
+        );
+
+        app.input = "draft".to_string();
+        assert_eq!(
+            shell_shortcut(&app, &left, false),
+            None,
+            "text cursor keeps Left"
+        );
+        app.input.clear();
+        app.work_surface.focused = true;
+        assert_eq!(
+            shell_shortcut(&app, &down, false),
+            None,
+            "focused work surface keeps Down for row navigation"
+        );
+    }
+
+    #[test]
+    fn open_completion_menu_keeps_agent_shortcuts_out_of_its_arrows() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        app.agent_progress
+            .insert("agent_one".to_string(), "working".to_string());
+
+        assert_eq!(
+            shell_shortcut(
+                &app,
+                &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            shell_shortcut(
+                &app,
+                &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                true,
+            ),
+            None
+        );
+        assert!(!shell_shortcuts_available(&app, true));
     }
 
     fn seed_resident_transcript(app: &mut App, agent_id: &str, messages: serde_json::Value) {

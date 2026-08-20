@@ -266,11 +266,15 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         })
     };
 
-    // `← for agents · ↓ to manage`: advertised only while workers exist,
-    // because those keys only take that meaning then (an empty composer with
-    // no workers keeps ← and ↓ as ordinary cursor keys).
-    let agent_hints = (tier != ShellTier::Compact && crate::tui::agent_focus::agents_exist(app))
-        .then(|| crate::tui::agent_focus::footer_agent_hints(app));
+    // `← for agents · ↓ to manage`: advertise only while the empty
+    // composer owns those keys and a worker exists. Focused surfaces, modals,
+    // attachments, and draft text keep the arrows' local meaning.
+    let agent_hints = (tier != ShellTier::Compact
+        // Slash and mention menus require non-empty trigger text, which the
+        // shared predicate rejects; dispatch additionally passes its exact
+        // post-completion menu ownership into the same predicate.
+        && crate::tui::agent_focus::shell_shortcuts_available(app, false))
+    .then(|| crate::tui::agent_focus::footer_agent_hints(app));
     let right_text: Cow<'static, str> = match agent_hints {
         Some(hints) if !right_text.is_empty() => Cow::Owned(format!("{hints} · {right_text}")),
         // A settled turn keeps the strip above the composer without the key
@@ -613,27 +617,6 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
-    }
-
-    #[test]
-    fn idle_footer_advertises_agents_and_manage_keys_only_while_workers_exist() {
-        let mut app = test_app();
-        app.ui_locale = crate::localization::Locale::En;
-        let quiet = strip_text(&mut app, 160);
-        assert!(!quiet.contains("for agents"), "{quiet}");
-        assert!(!quiet.contains("to manage"), "{quiet}");
-
-        app.agent_progress
-            .insert("agent_one".to_string(), "working".to_string());
-        let with_workers = strip_text(&mut app, 160);
-        assert!(
-            with_workers.contains("← for agents · ↓ to manage · "),
-            "dot-chain hint before the existing key hints: {with_workers}"
-        );
-        assert!(
-            with_workers.contains("fn+F1:") || with_workers.contains("F1:"),
-            "{with_workers}"
-        );
     }
 
     #[test]

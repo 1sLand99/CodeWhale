@@ -20,19 +20,26 @@ pub struct MouseOutcome {
 /// caller then opens the `/agents` register instead so the key still lands.
 pub fn enter_agents(app: &mut App) -> bool {
     app.work_surface.panel = super::model::RailPanel::Agents;
-    if app.work_surface.placement == WorkSurfacePlacement::Off {
+    if app.work_surface.placement == WorkSurfacePlacement::Off
+        || app.work_surface.effective_placement == WorkSurfacePlacement::Off
+    {
         return false;
     }
     let rows = visible_rows_for_panel(app);
-    if rows.iter().all(|row| !row.selectable) {
+    let first_agent = rows
+        .iter()
+        .find(|row| row.selectable && row.id.0.starts_with("worker:"))
+        .map(|row| row.id.clone());
+    let Some(first_agent) = first_agent else {
         return false;
-    }
+    };
     claim_focus(app);
-    if app.work_surface.selected.is_none() {
-        app.work_surface.selected = rows
-            .iter()
-            .find(|row| row.selectable)
-            .map(|row| row.id.clone());
+    let selected_agent_is_visible = app.work_surface.selected.as_ref().is_some_and(|selected| {
+        rows.iter()
+            .any(|row| row.selectable && row.id == *selected && row.id.0.starts_with("worker:"))
+    });
+    if !selected_agent_is_visible {
+        app.work_surface.selected = Some(first_agent);
     }
     app.work_surface.clamp_selection(&rows);
     app.needs_redraw = true;
