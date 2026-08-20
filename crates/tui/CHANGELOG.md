@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Removed the placeholder engine tree in `crates/core/src/engine/`. Its
+  `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
+  `TurnComplete { status: "completed" }` without ever contacting a model, and
+  `TurnExecutor` was a struct with a field-copy constructor and a
+  `step < max_steps` comparison. Nothing in the workspace referenced any of it —
+  the only mention of `codewhale_core::engine` anywhere was a doc comment inside
+  the tree itself — but its comments ("the real turn loop is wired here in the
+  next slice") were what `docs/ARCHITECTURE.md` leaned on to claim that
+  `crates/core` owns the agent loop. There is now exactly one turn loop in the
+  workspace, `Engine::run_turn`, and a guard test fails if a second one appears.
+  `docs/ARCHITECTURE.md` and `AGENTS.md` now say where it actually lives.
+
 - First-run onboarding no longer silently truncates its explanation in
   languages that do not put spaces between words. `wrap_words` split on
   whitespace, so a Japanese sentence arrived as a single token, the
@@ -69,6 +81,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace-write policy. Platforms with no sandbox backend (default Linux
   without bubblewrap, and Windows) still enforce nothing, and both `/status`
   and `doctor` continue to say so.
+
+- The nightly Windows ARM64 artifact build works again. Every nightly from
+  2026-08-16 failed while compiling `codewhale-tui`, deterministically on the
+  same codegen unit across all three build attempts, with
+  `thread 'optimize module codewhale_tui...-cgu.13' has overflowed its stack`.
+  The trigger is stack depth in the LLVM worker threads that run per-codegen-unit
+  optimization, not the workflow's `lto=off` override: holding the crate and
+  every flag fixed and varying only `RUST_MIN_STACK` on aarch64 shows 1 MiB
+  crashes rustc while 2 MiB and 4 MiB succeed. Unix std defaults to 2 MiB and
+  passed; the Windows ARM64 runner sat under the requirement. Nightly now sets
+  `RUST_MIN_STACK` explicitly for every target, because the requirement follows
+  from the size of `crates/tui` rather than from the platform. The redundant
+  `codegen-units` override is gone -- `[profile.release]` already sets 16, so
+  restating it never changed anything. Shipped binaries were never affected;
+  `release-artifacts.yml` builds `--profile dist` with fat LTO and
+  `codegen-units = 1`.
 
 ## [0.9.10] - 2026-08-19
 
