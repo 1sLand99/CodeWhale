@@ -46,6 +46,8 @@ const WORKFLOW_DISPLAY_MAX_CHARS: usize = 160;
 struct WorkflowDraftEnvelope {
     id: String,
     objective: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
 }
 
 fn truncate_workflow_text(text: &str, max_chars: usize) -> String {
@@ -76,6 +78,7 @@ fn workflow_draft_instruction(id: &str, objective: Option<&str>) -> String {
     let envelope = WorkflowDraftEnvelope {
         id: id.to_string(),
         objective: objective.map(ToOwned::to_owned),
+        source_path: None,
     };
     let encoded =
         serde_json::to_string(&envelope).expect("workflow draft envelope is serializable");
@@ -87,8 +90,32 @@ fn workflow_draft_instruction(id: &str, objective: Option<&str>) -> String {
     )
 }
 
+fn workflow_source_draft_instruction(id: &str, source_path: &str) -> String {
+    let envelope = WorkflowDraftEnvelope {
+        id: id.to_string(),
+        objective: None,
+        source_path: Some(source_path.to_string()),
+    };
+    let encoded = serde_json::to_string(&envelope).expect("workflow source draft is serializable");
+    format!(
+        "{WORKFLOW_DRAFT_INSTRUCTION_PREFIX}{encoded}\n\
+         Review the request to run this checked-in Workflow source. State the exact path, explain \
+         that its saved definition will run as-is, identify material risks, and ask the user to \
+         run `/workflow confirm` to start it. Do not call tools, inspect files, or execute work."
+    )
+}
+
 fn workflow_confirm_instruction(draft: &WorkflowDraftEnvelope) -> String {
     let encoded = serde_json::to_string(draft).expect("workflow confirmation is serializable");
+    if let Some(source_path) = draft.source_path.as_deref() {
+        return format!(
+            "{WORKFLOW_CONFIRM_INSTRUCTION_PREFIX}{encoded}\n\
+             The user explicitly confirmed the saved Workflow source at {source_path:?}. Call the \
+             canonical `workflow` tool with `source_path` set to that exact relative path. Run the \
+             saved definition as-is; do not rewrite or replace it. Keep the existing approval, \
+             budget, cancellation, and receipt behavior."
+        );
+    }
     format!(
         "{WORKFLOW_CONFIRM_INSTRUCTION_PREFIX}{encoded}\n\
          The user explicitly confirmed the Workflow proposal from the preceding review turn. \
@@ -192,7 +219,10 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
     match verb {
         "confirm" if rest.is_empty() => Some(match pending_workflow_draft(app) {
             Some(draft) => {
-                let display = workflow_display("Workflow confirmed: ", draft.objective.as_deref());
+                let display = match draft.source_path.as_deref() {
+                    Some(path) => workflow_display("Workflow file confirmed: ", Some(path)),
+                    None => workflow_display("Workflow confirmed: ", draft.objective.as_deref()),
+                };
                 CommandResult::with_message_and_action(
                     "Workflow confirmed. Starting the reviewed plan...",
                     AppAction::WorkflowInstruction {
@@ -209,20 +239,33 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
         "cancel" | "stop" | "abort" => Some(workflow_cancel(app, rest)),
         "settings" | "config" => Some(super::super::config::workflow_settings(app)),
         "help" | "?" => Some(CommandResult::message(WORKFLOW_USAGE)),
-        // `/workflow run <path>` — the form the checked-in examples document.
-        // The run itself needs the tool's runtime, so the model is asked to
-        // launch exactly this source path (no re-authoring, no new plan).
+        // Saved definitions use the same two-turn review/confirm gate as a
+        // conversational Workflow. The draft turn has an empty tool catalog;
+        // only the later confirmation can launch the exact checked-in path.
         "run" if !rest.is_empty() && !rest.contains(char::is_whitespace) => {
-            let message = format!(
-                "The user invoked /workflow run with the checked-in source path {rest:?} — this is \
-                 authorization to launch it as-is. Call the `workflow` tool with `source_path` set \
-                 to that path (action `run` to wait, or `start` then `status` if it is long), do not \
-                 rewrite or replace the script, narrate phases as they complete, and end with a \
-                 compact receipt: run_id, status, and per-leaf outcomes."
-            );
+            let path = std::path::Path::new(rest);
+            let unsafe_path = path.is_absolute()
+                || path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                });
+            if unsafe_path || rest.chars().count() > WORKFLOW_OBJECTIVE_MAX_CHARS {
+                return Some(CommandResult::error(
+                    "Workflow source must be a bounded relative path inside this workspace.",
+                ));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let display = workflow_display("Workflow file draft: ", Some(rest));
             Some(CommandResult::with_message_and_action(
-                format!("Running workflow {rest}..."),
-                AppAction::SendMessage(message),
+                "Reviewing the saved workflow. Nothing will run until /workflow confirm.",
+                AppAction::WorkflowInstruction {
+                    display,
+                    instruction: workflow_source_draft_instruction(&id, rest),
+                },
             ))
         }
         _ => None,
@@ -232,6 +275,7 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
 const WORKFLOW_USAGE: &str =
     "/workflow <objective> — draft a Workflow for review (does not execute)
 /workflow — draft a Workflow for the current work
+/workflow run <path> — review a saved Workflow before it can run
 /workflow confirm — explicitly start the latest reviewed draft
 /workflow status [run_id] — runs known to this workspace (no model turn)
 /workflow cancel [run_id] — stop a running workflow (no model turn)
@@ -683,14 +727,55 @@ mod tests {
         let result = workflow(&mut app, Some("help"));
         assert!(result.message.unwrap().contains("/workflow status"));
 
-        // `/workflow run <path>` launches exactly that source through the tool.
+        // `/workflow run <path>` now drafts a tool-less review. Only a later
+        // explicit confirmation may launch the exact saved source.
         let result = workflow(&mut app, Some("run workflows/tiny.workflow.js"));
-        let Some(AppAction::SendMessage(message)) = result.action else {
-            panic!("expected SendMessage action");
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = result.action
+        else {
+            panic!("expected WorkflowInstruction action");
         };
-        assert!(message.contains("`source_path`"), "{message}");
-        assert!(message.contains("workflows/tiny.workflow.js"), "{message}");
-        assert!(message.contains("do not"), "{message}");
+        assert!(display.contains("workflows/tiny.workflow.js"), "{display}");
+        let draft = envelope_from_instruction(WORKFLOW_DRAFT_INSTRUCTION_PREFIX, &instruction)
+            .expect("typed saved-workflow draft");
+        assert_eq!(
+            draft.source_path.as_deref(),
+            Some("workflows/tiny.workflow.js")
+        );
+        let queued = crate::tui::app::QueuedMessage::new(display, Some(instruction.clone()));
+        assert_eq!(
+            crate::tui::ui::allowed_tools_for_message(None, &queued),
+            Some(Vec::new())
+        );
+
+        app.api_messages.push(crate::models::Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: instruction,
+                cache_control: None,
+            }],
+        });
+        app.api_messages.push(crate::models::Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Saved Workflow path and risks reviewed.".to_string(),
+                cache_control: None,
+            }],
+        });
+        let confirmed = workflow(&mut app, Some("confirm"));
+        let Some(AppAction::WorkflowInstruction { instruction, .. }) = confirmed.action else {
+            panic!("expected confirmed saved Workflow action");
+        };
+        assert!(instruction.contains("`source_path`"), "{instruction}");
+        assert!(
+            instruction.contains("workflows/tiny.workflow.js"),
+            "{instruction}"
+        );
+
+        assert!(workflow(&mut app, Some("run ../outside.workflow.js")).is_error);
+        assert!(workflow(&mut app, Some("run /tmp/outside.workflow.js")).is_error);
     }
 
     #[test]
