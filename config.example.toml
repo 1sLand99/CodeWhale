@@ -278,6 +278,22 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 # (default Linux without bubblewrap, and Windows) nothing is enforced either
 # way -- `/status` and `doctor` both say so.
 # sandbox_network_access = false
+
+# Which other agents' instruction files to import as project instructions.
+# Empty by default. Codewhale reads AGENTS.md (the cross-agent standard) and
+# its own .codewhale/instructions.md without being asked; a CLAUDE.md,
+# .cursorrules, or .github/copilot-instructions.md written as law for a
+# different tool is not treated as law here until you say so. Codewhale's own
+# files always outrank anything imported.
+# Accepts: "claude", "cursor", "cline", "windsurf", "gemini", "copilot",
+# "muse", or "all". Env: CODEWHALE_PROJECT_INSTRUCTION_IMPORTS (comma-separated).
+# project_instruction_imports = ["claude"]
+#
+# Everything that reaches the model as standing project instruction authority —
+# the repository-root -> workspace AGENTS.md chain, the global fallback layer,
+# .codewhale/rules/*.md, and any imported foreign files — shares one 48 KiB
+# aggregate budget. Instructions claim it first and are trimmed from the
+# broadest scope inward, so the nearest-scope file is the last thing dropped.
 # prompt_suggestion = true  # opt-in: show ghost-text follow-up question in composer after each turn
 
 # Optional tab/window title shown as `[title] …` in front of the terminal

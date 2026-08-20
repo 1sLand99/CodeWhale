@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Project instructions are bounded by one budget and no longer treat other
+  agents' files as law by default. Previously `.claude/instructions.md` and
+  `CLAUDE.md` sat at ranks 2 and 3 of the canonical instruction list — *above*
+  Codewhale's own `.codewhale/instructions.md` — `.claude/rules/` was an
+  auto-discovered rules directory, and `.cursorrules`, `.cursor/rules`,
+  `.clinerules`, `.windsurf/rules`, `.gemini`, `.github/copilot-instructions.md`
+  and `.github/muse-instructions.md` were all imported into the system prompt
+  with no opt-in. Dropping a `CLAUDE.md` written for a different tool into a
+  repository silently made it standing authority here, which is an injection
+  surface rather than a convenience. Codewhale now reads `AGENTS.md`, the
+  cross-agent `.agents/AGENTS.md`, and its own instruction files by default;
+  every other agent's format is opt-in by name through
+  `project_instruction_imports` (env `CODEWHALE_PROJECT_INSTRUCTION_IMPORTS`),
+  imported files rank *below* Codewhale's own, and a workspace that contains an
+  un-imported format says so in a warning naming the exact setting.
+- Separately, a symlinked candidate rules directory — `.cursor/rules`,
+  `.windsurf/rules`, or `.gemini` pointing outside the workspace — was
+  traversed and its contents imported as instruction authority, because the
+  directory check followed the link while only the files inside it were
+  checked. The two instruction loaders now apply the same no-follow rule that
+  `.codewhale/rules/` already had.
+- The three separate ceilings on standing instructions (200 KiB for the
+  root->workspace chain, 500 KiB for the rules block, 40 KiB for imported
+  fragments, and a global layer that was merged in after the chain budget had
+  already closed and so counted against nothing) are replaced by a single
+  48 KiB aggregate budget covering all of them together. Instructions claim it
+  before rules, and are trimmed from the broadest scope inward so the
+  nearest-scope file is the last thing dropped rather than the first thing
+  stranded. Truncation still leaves an explicit marker.
+
 - Editing the workspace no longer grants the shell outbound network access.
   `workspace-write` sandboxes are created network-restricted; `curl`, package
   installs, and `git fetch` inside a sandboxed shell are denied by the OS

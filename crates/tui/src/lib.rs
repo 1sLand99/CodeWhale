@@ -7743,7 +7743,31 @@ fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Opt
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    // Install the foreign-instruction opt-in before anything can load project
+    // context. This is the single funnel every runtime goes through — TUI,
+    // exec, ACP, and the app-server passthrough all resolve config here — so
+    // the loader never has to be handed the setting at each of its call sites.
+    install_foreign_instruction_imports(&config);
     Ok((config, profile))
+}
+
+/// Resolve `project_instruction_imports` into the loader's opt-in set.
+///
+/// Unrecognized names are reported rather than dropped: a typo in this key
+/// silently means "import nothing", which is exactly the failure mode a user
+/// would not notice.
+fn install_foreign_instruction_imports(config: &Config) {
+    let (imports, unknown) = crate::project_context::ForeignInstructionImports::from_config(
+        &config.project_instruction_imports,
+    );
+    for name in unknown {
+        tracing::warn!(
+            target: "project_context",
+            value = %name,
+            "Ignoring unknown project_instruction_imports entry; expected one of              claude, cursor, cline, windsurf, gemini, copilot, muse, all"
+        );
+    }
+    crate::project_context::set_foreign_instruction_imports(imports);
 }
 
 /// Apply the same reasoning-preference precedence as interactive `App`

@@ -2868,6 +2868,13 @@ pub struct Config {
     /// resolves to `danger-full-access`, which is unsandboxed by definition.
     #[serde(alias = "sandboxNetworkAccess")]
     pub sandbox_network_access: Option<bool>,
+    /// Foreign-agent instruction formats to import as project instructions.
+    /// Empty by default: a `CLAUDE.md`, `.cursorrules`, or
+    /// `.github/copilot-instructions.md` written as law for another tool is
+    /// not silently treated as law for this one. Accepts `claude`, `cursor`,
+    /// `cline`, `windsurf`, `gemini`, `copilot`, `muse`, or `all`.
+    #[serde(default, alias = "projectInstructionImports")]
+    pub project_instruction_imports: Vec<String>,
     /// `telemetry` as written to the config file, before environment and
     /// default resolution. Kept so doctor and config displays can state the
     /// *resolved* consent with its source (default | env | config) instead of
@@ -8917,6 +8924,14 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
     {
         config.sandbox_network_access = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }
+    if let Ok(value) = std::env::var("CODEWHALE_PROJECT_INSTRUCTION_IMPORTS") {
+        config.project_instruction_imports = value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
     if let Ok(value) = std::env::var("CODEWHALE_YOLO").or_else(|_| std::env::var("DEEPSEEK_YOLO")) {
         config.yolo = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }
@@ -10054,6 +10069,11 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         sandbox_network_access: override_cfg
             .sandbox_network_access
             .or(base.sandbox_network_access),
+        project_instruction_imports: if override_cfg.project_instruction_imports.is_empty() {
+            base.project_instruction_imports
+        } else {
+            override_cfg.project_instruction_imports
+        },
         fallback_providers: if override_cfg.fallback_providers.is_empty() {
             base.fallback_providers
         } else {
