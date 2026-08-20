@@ -372,22 +372,29 @@ impl TokenBucket {
         self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
     }
 
+    /// Reserve `tokens` and report how long the caller must sleep first.
+    ///
+    /// The debt is *kept* (the balance is allowed to go negative) rather than
+    /// floored at zero. Callers release the bucket lock before sleeping, so a
+    /// floored balance would hand every queued waiter the same short delay and
+    /// they would all wake — and fire — at the same instant, which is the
+    /// burst the configured limit exists to prevent. Carrying the deficit
+    /// spaces successive waiters one refill interval apart, and `refill`'s
+    /// clamp to `capacity` still caps how much credit an idle bucket banks.
     fn delay_until_available(&mut self, tokens: f64) -> Option<Duration> {
         if !self.enabled {
             return None;
         }
         let now = Instant::now();
         self.refill(now);
-        if self.tokens >= tokens {
-            self.tokens -= tokens;
+        self.tokens -= tokens;
+        if self.tokens >= 0.0 {
             return None;
         }
-        let needed = tokens - self.tokens;
-        self.tokens = 0.0;
         if self.refill_per_sec <= 0.0 {
             return Some(Duration::from_secs(1));
         }
-        Some(Duration::from_secs_f64(needed / self.refill_per_sec))
+        Some(Duration::from_secs_f64(-self.tokens / self.refill_per_sec))
     }
 }
 
@@ -9992,6 +9999,41 @@ mod tests {
         assert!(
             delay >= Duration::from_millis(400) && delay <= Duration::from_millis(600),
             "unexpected refill delay: {delay:?}"
+        );
+    }
+
+    /// Every queued waiter must be given a *distinct* wake time. `client.rs`
+    /// releases the bucket lock before sleeping (`wait_for_rate_limit`), and a
+    /// clone of the client shares one `Arc<AsyncMutex<TokenBucket>>` across
+    /// sub-agents, so if the bucket hands two waiters the same delay they both
+    /// wake at the same instant and fire together — a burst the configured
+    /// limit was supposed to prevent.
+    #[test]
+    fn token_bucket_queues_concurrent_waiters_instead_of_stacking_them() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket {
+            enabled: true,
+            capacity: 1.0,
+            tokens: 1.0,
+            refill_per_sec: 1.0,
+            last_refill: now,
+        };
+
+        assert!(bucket.delay_until_available(1.0).is_none());
+        let first = bucket
+            .delay_until_available(1.0)
+            .expect("second caller waits for a refill");
+        let second = bucket
+            .delay_until_available(1.0)
+            .expect("third caller waits for a refill");
+
+        assert!(
+            first >= Duration::from_millis(900) && first <= Duration::from_millis(1100),
+            "unexpected first wait: {first:?}"
+        );
+        assert!(
+            second >= Duration::from_millis(1900) && second <= Duration::from_millis(2100),
+            "third caller must queue behind the second, not wake with it: {second:?}"
         );
     }
 
