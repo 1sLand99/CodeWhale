@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Shell output truncation now stays inside its own budget. A truncated shell
+  result keeps a 6 KB head, a 24 KB tail, and any high-signal lines rescued
+  from the omitted middle — but that rescued block was bounded only by a line
+  count. One rustc `error:` line carrying a long inferred type or a minified
+  bundler frame is routinely hundreds of kilobytes, so a "30 KB" result could
+  arrive at 430 KB with the omitted line pasted back in whole. Each rescued
+  line is now clipped and the block has a 4 KiB ceiling; the signal survives,
+  the payload does not.
+
+- Fetched web pages in non-Latin scripts no longer arrive half-read. Page text
+  was reflowed against a column budget measured in bytes, so Cyrillic and Greek
+  wrapped at roughly half the intended width and CJK at two thirds — and since
+  the page view is delivered by line count, the surplus lines pushed real
+  content off the end of the window. A Russian or Japanese URL returned a
+  fraction of the text an English one did, for the same call. Wrapping now
+  measures display width.
+
+- The `bash` tool no longer tells the model it has no default timeout when it
+  does. An omitted timeout has always been bounded at 120 seconds and the
+  command killed there, but the tool description and its `timeout` field both
+  claimed otherwise — steering the model away from the one parameter that
+  would have saved a longer build. Both now name the real bound.
+
 - Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
   auditors not to delete — prompt zones, context budget, the route seam —
   and on the next-largest holders (palette tokens, hotbar actions, core
