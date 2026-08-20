@@ -797,33 +797,22 @@ pub enum MessageId {
     HomeOperateModeTip,
     HomeOperateModeFleetTip,
     HomeGoalModeTip,
-    // Onboarding screens — welcome.
-    OnboardWelcomeVersion,
+    // Onboarding screens — calm first-run welcome (#3938 rewrite).
+    OnboardWelcomeTitle,
     OnboardWelcomeLead,
-    OnboardWelcomeSetupBlurb,
-    OnboardWelcomeSteps,
-    OnboardWelcomeStepLanguage,
-    OnboardWelcomeStepAppearance,
-    OnboardWelcomeStepApiKey,
-    OnboardWelcomeStepTrust,
-    OnboardWelcomeStepMentalModels,
-    OnboardWelcomeStepTips,
-    OnboardWelcomeDefaults,
-    OnboardWelcomeEnter,
-    OnboardWelcomeExit,
+    OnboardWelcomeBegin,
+    OnboardActionBack,
+    OnboardActionExit,
+    OnboardStepsTitle,
     // Onboarding screens — language picker.
     OnboardLanguageTitle,
     OnboardLanguageBlurb,
-    OnboardLanguageFooter,
+    OnboardLanguagePick,
+    OnboardLanguageKeep,
     OnboardProviderTitle,
     OnboardProviderBlurb,
-    OnboardProviderFooter,
-    OnboardApiKeyTitle,
-    OnboardApiKeyStep1,
-    OnboardApiKeyStep2,
-    OnboardApiKeyLocalHint,
-    OnboardApiKeySavedHint,
-    OnboardApiKeyFormatHint,
+    OnboardProviderChoose,
+    OnboardProviderOffline,
     KimiCodePlanApiKeyHint,
     KimiCodePlanRouteHint,
     KimiCodePlanNoImportHint,
@@ -833,9 +822,6 @@ pub enum MessageId {
     StepfunBillingRoutePlanOption,
     StepfunPlanApiKeyHint,
     StepfunPlanRouteHint,
-    OnboardApiKeyPlaceholder,
-    OnboardApiKeyLabel,
-    OnboardApiKeyFooter,
     OnboardApiKeyRejectedEnv,
     // Onboarding screens — workspace trust prompt.
     OnboardTrustTitle,
@@ -843,44 +829,21 @@ pub enum MessageId {
     OnboardTrustLocationPrefix,
     OnboardTrustRiskHint,
     OnboardTrustEffectHint,
-    OnboardTrustFooterPrefix,
-    OnboardTrustFooterMiddle,
-    OnboardTrustFooterUntrustedMiddle,
-    OnboardTrustFooterSuffix,
+    OnboardTrustActionTrust,
+    OnboardTrustActionSkip,
+    OnboardTrustActionQuit,
     OnboardTrustEnterHint,
     OnboardTrustUntrustedNotice,
-    // Onboarding screens — product mental model primer.
-    OnboardMentalTitle,
-    OnboardMentalModesLabel,
-    OnboardMentalPlanHint,
-    OnboardMentalActHint,
-    OnboardMentalOperateHint,
-    OnboardMentalPermissionLabel,
-    OnboardMentalCurrentLabel,
-    OnboardMentalConstitution,
-    OnboardMentalCycleMode,
-    OnboardMentalCyclePermission,
-    OnboardMentalContinue,
-    OnboardMentalBack,
-    // Onboarding screens — "Make it yours" appearance step (#3937).
-    OnboardAppearanceTitle,
-    OnboardAppearanceBlurb,
-    OnboardAppearanceFooter,
     // Onboarding screens — explicit offline ("explore") choice (#3927).
     OnboardOfflineOption,
     OnboardOfflineNotice,
-    OnboardOfflineTipsLine,
-    // Onboarding screens — final tips screen.
-    OnboardTipsTitle,
-    OnboardTipsLine1,
-    OnboardTipsLine2,
-    OnboardTipsLine3,
-    OnboardTipsLine4,
-    OnboardTipsLine5,
-    OnboardTipsDoctorPrefix,
-    OnboardTipsDoctorSuffix,
-    OnboardTipsFooterEnter,
-    OnboardTipsFooterAction,
+    // Onboarding screens — ready screen and the seeded first task.
+    OnboardReadyTitle,
+    OnboardReadyLead,
+    OnboardReadyStart,
+    OnboardReadyCustomize,
+    OnboardSeedCodeProject,
+    OnboardSeedFolder,
     // Constitution-first setup wizard.
     SetupWizardTitle,
     SetupWizardWhy,
@@ -2531,31 +2494,20 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::HomeOperateModeTip,
     MessageId::HomeOperateModeFleetTip,
     MessageId::HomeGoalModeTip,
-    MessageId::OnboardWelcomeVersion,
+    MessageId::OnboardWelcomeTitle,
     MessageId::OnboardWelcomeLead,
-    MessageId::OnboardWelcomeSetupBlurb,
-    MessageId::OnboardWelcomeSteps,
-    MessageId::OnboardWelcomeStepLanguage,
-    MessageId::OnboardWelcomeStepAppearance,
-    MessageId::OnboardWelcomeStepApiKey,
-    MessageId::OnboardWelcomeStepTrust,
-    MessageId::OnboardWelcomeStepMentalModels,
-    MessageId::OnboardWelcomeStepTips,
-    MessageId::OnboardWelcomeDefaults,
-    MessageId::OnboardWelcomeEnter,
-    MessageId::OnboardWelcomeExit,
+    MessageId::OnboardWelcomeBegin,
+    MessageId::OnboardActionBack,
+    MessageId::OnboardActionExit,
+    MessageId::OnboardStepsTitle,
     MessageId::OnboardLanguageTitle,
     MessageId::OnboardLanguageBlurb,
-    MessageId::OnboardLanguageFooter,
+    MessageId::OnboardLanguagePick,
+    MessageId::OnboardLanguageKeep,
     MessageId::OnboardProviderTitle,
     MessageId::OnboardProviderBlurb,
-    MessageId::OnboardProviderFooter,
-    MessageId::OnboardApiKeyTitle,
-    MessageId::OnboardApiKeyStep1,
-    MessageId::OnboardApiKeyStep2,
-    MessageId::OnboardApiKeyLocalHint,
-    MessageId::OnboardApiKeySavedHint,
-    MessageId::OnboardApiKeyFormatHint,
+    MessageId::OnboardProviderChoose,
+    MessageId::OnboardProviderOffline,
     MessageId::KimiCodePlanApiKeyHint,
     MessageId::KimiCodePlanRouteHint,
     MessageId::KimiCodePlanNoImportHint,
@@ -2565,49 +2517,25 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::StepfunBillingRoutePlanOption,
     MessageId::StepfunPlanApiKeyHint,
     MessageId::StepfunPlanRouteHint,
-    MessageId::OnboardApiKeyPlaceholder,
-    MessageId::OnboardApiKeyLabel,
-    MessageId::OnboardApiKeyFooter,
     MessageId::OnboardApiKeyRejectedEnv,
     MessageId::OnboardTrustTitle,
     MessageId::OnboardTrustQuestion,
     MessageId::OnboardTrustLocationPrefix,
     MessageId::OnboardTrustRiskHint,
     MessageId::OnboardTrustEffectHint,
-    MessageId::OnboardTrustFooterPrefix,
-    MessageId::OnboardTrustFooterMiddle,
-    MessageId::OnboardTrustFooterUntrustedMiddle,
-    MessageId::OnboardTrustFooterSuffix,
+    MessageId::OnboardTrustActionTrust,
+    MessageId::OnboardTrustActionSkip,
+    MessageId::OnboardTrustActionQuit,
     MessageId::OnboardTrustEnterHint,
     MessageId::OnboardTrustUntrustedNotice,
-    MessageId::OnboardMentalTitle,
-    MessageId::OnboardMentalModesLabel,
-    MessageId::OnboardMentalPlanHint,
-    MessageId::OnboardMentalActHint,
-    MessageId::OnboardMentalOperateHint,
-    MessageId::OnboardMentalPermissionLabel,
-    MessageId::OnboardMentalCurrentLabel,
-    MessageId::OnboardMentalConstitution,
-    MessageId::OnboardMentalCycleMode,
-    MessageId::OnboardMentalCyclePermission,
-    MessageId::OnboardMentalContinue,
-    MessageId::OnboardMentalBack,
-    MessageId::OnboardAppearanceTitle,
-    MessageId::OnboardAppearanceBlurb,
-    MessageId::OnboardAppearanceFooter,
     MessageId::OnboardOfflineOption,
     MessageId::OnboardOfflineNotice,
-    MessageId::OnboardOfflineTipsLine,
-    MessageId::OnboardTipsTitle,
-    MessageId::OnboardTipsLine1,
-    MessageId::OnboardTipsLine2,
-    MessageId::OnboardTipsLine3,
-    MessageId::OnboardTipsLine4,
-    MessageId::OnboardTipsLine5,
-    MessageId::OnboardTipsDoctorPrefix,
-    MessageId::OnboardTipsDoctorSuffix,
-    MessageId::OnboardTipsFooterEnter,
-    MessageId::OnboardTipsFooterAction,
+    MessageId::OnboardReadyTitle,
+    MessageId::OnboardReadyLead,
+    MessageId::OnboardReadyStart,
+    MessageId::OnboardReadyCustomize,
+    MessageId::OnboardSeedCodeProject,
+    MessageId::OnboardSeedFolder,
     MessageId::SetupWizardTitle,
     MessageId::SetupWizardWhy,
     MessageId::SetupWizardProgress,
@@ -4353,7 +4281,6 @@ mod tests {
         // would only force a brand into copy that does not need one (#5442).
         let welcome = tr(Locale::ZhHans, MessageId::OnboardWelcomeLead);
         assert!(!welcome.contains("代码"));
-        assert!(tr(Locale::ZhHans, MessageId::OnboardTipsLine4).contains("/constitution"));
         assert!(
             tr(
                 Locale::ZhHans,
@@ -4364,15 +4291,13 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_and_home_name_flagship_capabilities_in_every_complete_pack() {
-        // #5442: welcome, last-step tips, and /home must name the shipped
-        // surfaces a new user never finds from governance copy alone.
+    fn home_quick_rows_name_flagship_capabilities_in_every_complete_pack() {
+        // #5442: /home must name the shipped surfaces a new user never finds
+        // from governance copy alone. First-run onboarding no longer carries a
+        // command tour — contextual help and /setup own that job — so the
+        // flagship-command guard lives on the /home surface that still shows it.
         for locale in Locale::shipped_complete() {
             for id in [
-                MessageId::OnboardWelcomeLead,
-                MessageId::OnboardTipsLine1,
-                MessageId::OnboardTipsLine2,
-                MessageId::OnboardTipsLine3,
                 MessageId::HomeQuickWorkspace,
                 MessageId::HomeQuickRestore,
                 MessageId::HomeQuickTokens,
@@ -4380,29 +4305,6 @@ mod tests {
                 let text = tr(*locale, id);
                 assert!(!text.trim().is_empty(), "{} {id:?} is empty", locale.tag());
             }
-            let welcome = tr(*locale, MessageId::OnboardWelcomeLead);
-            assert!(
-                welcome.contains("/workspace")
-                    && welcome.contains("/restore")
-                    && welcome.contains("/tokens"),
-                "{} welcome lead lost a flagship command: {welcome}",
-                locale.tag()
-            );
-            assert!(
-                tr(*locale, MessageId::OnboardTipsLine1).contains("/workspace"),
-                "{} tips line 1 must name /workspace",
-                locale.tag()
-            );
-            assert!(
-                tr(*locale, MessageId::OnboardTipsLine2).contains("/restore"),
-                "{} tips line 2 must name /restore",
-                locale.tag()
-            );
-            assert!(
-                tr(*locale, MessageId::OnboardTipsLine3).contains("/tokens"),
-                "{} tips line 3 must name /tokens",
-                locale.tag()
-            );
             assert!(
                 tr(*locale, MessageId::HomeQuickWorkspace).contains("/workspace"),
                 "{} /home lost /workspace",
@@ -4418,23 +4320,6 @@ mod tests {
                 "{} /home lost /tokens",
                 locale.tag()
             );
-            // The welcome preview names the final step; the step it names is
-            // the tips screen, so the two must be one phrase, not two. Case is
-            // the only permitted difference (the title is title-cased).
-            assert_eq!(
-                tr(*locale, MessageId::OnboardWelcomeStepTips).to_lowercase(),
-                tr(*locale, MessageId::OnboardTipsTitle).to_lowercase(),
-                "{} names the last onboarding step differently than the screen titles itself",
-                locale.tag()
-            );
-            if *locale != Locale::En {
-                assert_ne!(
-                    tr(*locale, MessageId::OnboardWelcomeLead),
-                    tr(Locale::En, MessageId::OnboardWelcomeLead),
-                    "{} still ships the English welcome lead",
-                    locale.tag()
-                );
-            }
         }
     }
 
@@ -4474,33 +4359,21 @@ mod tests {
     #[test]
     fn restore_copy_never_promises_to_rewind_the_conversation() {
         // #5442: `/restore` rolls *workspace files* back to a snapshot. `/undo`
-        // is what drops a conversation turn. Onboarding and /home copy that
-        // says "rewind a turn" sends new users to the wrong command.
+        // is what drops a conversation turn. Copy that says "rewind a turn"
+        // sends new users to the wrong command.
         for locale in Locale::shipped_complete() {
-            for id in [
-                MessageId::OnboardWelcomeLead,
-                MessageId::OnboardTipsLine2,
-                MessageId::HomeQuickRestore,
-            ] {
-                let text = tr(*locale, id);
-                assert!(
-                    text.contains("/restore"),
-                    "{} {id:?} stopped naming /restore: {text}",
-                    locale.tag()
-                );
-            }
-        }
-        for id in [
-            MessageId::OnboardWelcomeLead,
-            MessageId::OnboardTipsLine2,
-            MessageId::HomeQuickRestore,
-        ] {
-            let english = tr(Locale::En, id);
+            let text = tr(*locale, MessageId::HomeQuickRestore);
             assert!(
-                !english.contains("rewind a turn") && !english.contains("rewind turn"),
-                "{id:?} describes /restore as rewinding a turn: {english}"
+                text.contains("/restore"),
+                "{} HomeQuickRestore stopped naming /restore: {text}",
+                locale.tag()
             );
         }
+        let english = tr(Locale::En, MessageId::HomeQuickRestore);
+        assert!(
+            !english.contains("rewind a turn") && !english.contains("rewind turn"),
+            "HomeQuickRestore describes /restore as rewinding a turn: {english}"
+        );
     }
 
     #[test]

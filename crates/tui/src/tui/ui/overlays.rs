@@ -46,16 +46,15 @@ pub(crate) fn is_explore_offline_shortcut(key: &KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Open the one canonical theme surface for the appearance step (#3937).
+/// Open the one canonical theme surface (`/theme`) as an ordinary modal.
 ///
-/// This is the same `ThemePickerView` `/theme` uses, so onboarding inherits its
-/// transactional contract wholesale: navigating previews live through a
-/// non-persisting `ConfigUpdated`, Enter persists, and Escape reverts to the
-/// theme captured here. There is no second theme list and no second registry.
-pub(crate) fn open_onboarding_theme_picker(app: &mut App) {
-    if app.onboarding != OnboardingState::Appearance
-        || app.view_stack.top_kind() == Some(ModalKind::ThemePicker)
-    {
+/// Onboarding's ready screen exposes this as the optional "customize later"
+/// secondary action: onboarding is finished first, so the picker is a normal
+/// modal over the live product. It reuses the same `ThemePickerView`, so the
+/// preview is live and transactional (Enter persists, Escape reverts) and
+/// there is no second theme registry.
+pub(crate) fn open_theme_picker(app: &mut App) {
+    if app.view_stack.top_kind() == Some(ModalKind::ThemePicker) {
         return;
     }
     let original = app.theme_id.name().to_string();

@@ -3838,32 +3838,6 @@ pub(crate) async fn run_event_loop(
                     }
                     continue;
                 }
-                // #3937: the theme picker owns the appearance step, including
-                // Escape — its revert path restores the theme the session
-                // started with. When it closes (Enter persisted, or Escape
-                // reverted) the step is done either way, so the spine advances.
-                OnboardingKeyRoute::ThemePicker => {
-                    let events = app.view_stack.handle_key(key);
-                    app.needs_redraw = true;
-                    if handle_view_events_boxed(
-                        terminal,
-                        app,
-                        config,
-                        &task_manager,
-                        &mut engine_handle,
-                        &mut web_config_session,
-                        events,
-                    )
-                    .await?
-                    {
-                        return Ok(());
-                    }
-                    if app.view_stack.top_kind() != Some(ModalKind::ThemePicker) {
-                        onboarding::advance_onboarding_after_appearance(app);
-                        open_onboarding_provider_picker(app, config, &engine_handle, false).await;
-                    }
-                    continue;
-                }
                 OnboardingKeyRoute::Legacy => {}
             }
 
@@ -3877,31 +3851,9 @@ pub(crate) async fn run_event_loop(
                     KeyCode::Esc if app.onboarding == OnboardingState::Provider => {
                         back_from_provider_onboarding(app);
                     }
-                    // Only reachable with the picker closed; with it open the
-                    // picker owns Escape so its theme revert runs first.
-                    KeyCode::Esc if app.onboarding == OnboardingState::Appearance => {
-                        app.onboarding = OnboardingState::Language;
-                        app.status_message = None;
-                    }
                     KeyCode::Esc if app.onboarding == OnboardingState::Language => {
                         app.onboarding = OnboardingState::Welcome;
                         app.status_message = None;
-                    }
-                    KeyCode::Esc if app.onboarding == OnboardingState::MentalModels => {
-                        onboarding::back_from_mental_models(app);
-                        open_onboarding_provider_picker(app, config, &engine_handle, true).await;
-                    }
-                    _ if app.onboarding == OnboardingState::MentalModels
-                        && is_permission_cycle_shortcut(&key) =>
-                    {
-                        cycle_permission_posture(app, config, &engine_handle).await;
-                    }
-                    KeyCode::Tab
-                        if app.onboarding == OnboardingState::MentalModels
-                            && key.modifiers.is_empty() =>
-                    {
-                        app.cycle_mode();
-                        sync_mode_update(app, &engine_handle).await;
                     }
                     // Language picker hotkeys select + persist (#566).
                     //
@@ -3925,7 +3877,13 @@ pub(crate) async fn run_event_loop(
                                         Some(2_500),
                                     );
                                     onboarding::advance_onboarding_after_language(app);
-                                    open_onboarding_theme_picker(app);
+                                    open_onboarding_provider_picker(
+                                        app,
+                                        config,
+                                        &engine_handle,
+                                        false,
+                                    )
+                                    .await;
                                 }
                                 Err(err) => {
                                     app.status_message =
@@ -3937,19 +3895,15 @@ pub(crate) async fn run_event_loop(
                     KeyCode::Enter => match app.onboarding {
                         OnboardingState::Welcome => {
                             onboarding::advance_onboarding_from_welcome(app);
+                            open_onboarding_provider_picker(app, config, &engine_handle, false)
+                                .await;
                         }
                         OnboardingState::Language => {
                             // Enter without a digit pick keeps the existing
                             // setting (which defaults to "auto").
                             onboarding::advance_onboarding_after_language(app);
-                            open_onboarding_theme_picker(app);
-                        }
-                        // Reached only when the picker is not on the stack —
-                        // e.g. after walking Back from the mental-model
-                        // screen. Enter re-opens it rather than skipping the
-                        // step with no way to return.
-                        OnboardingState::Appearance => {
-                            open_onboarding_theme_picker(app);
+                            open_onboarding_provider_picker(app, config, &engine_handle, false)
+                                .await;
                         }
                         OnboardingState::Provider => {
                             open_onboarding_provider_picker(app, config, &engine_handle, false)
@@ -3961,24 +3915,29 @@ pub(crate) async fn run_event_loop(
                             // key on every other onboarding screen — must NOT
                             // grant trust by reflex (accidental-trust risk). Nor
                             // is it a silent dead key: point the user at the
-                            // explicit keys the footer advertises.
+                            // explicit keys the rail advertises.
                             app.status_message =
                                 Some(app.tr(MessageId::OnboardTrustEnterHint).to_string());
                         }
-                        OnboardingState::MentalModels => {
-                            app.status_message = None;
-                            app.onboarding = OnboardingState::Tips;
-                        }
-                        OnboardingState::Tips => {
-                            app.finish_onboarding_without_feature_intro();
-                            if !app.launch.visible
-                                && !open_setup_checkpoint_if_due(app, config, false)
-                            {
-                                app.maybe_show_feature_intro();
-                            }
+                        OnboardingState::Ready => {
+                            // Enter opens the product: the real composer,
+                            // pre-seeded with a first task for this folder —
+                            // never another educational surface.
+                            onboarding::finish_ready_and_open_composer(app);
+                            app.maybe_show_feature_intro();
                         }
                         OnboardingState::None => {}
                     },
+                    // "Customize later": the appearance choice from the ready
+                    // screen, as an optional secondary action. Onboarding is
+                    // finished first so the theme picker is an ordinary modal
+                    // over the live product, not a required step.
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                        if app.onboarding == OnboardingState::Ready =>
+                    {
+                        onboarding::finish_ready_and_open_composer(app);
+                        open_theme_picker(app);
+                    }
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1')
                         if app.onboarding == OnboardingState::TrustDirectory =>
                     {

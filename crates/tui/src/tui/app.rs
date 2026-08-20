@@ -115,24 +115,24 @@ impl ContextTokenCache {
     }
 }
 
-/// State machine for onboarding new users.
+/// State machine for onboarding new users: one decision per screen, and
+/// only the decisions this install genuinely needs (#3938).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingState {
     Welcome,
-    /// Pick the UI locale before any other config decisions (#566).
-    /// Defaults to auto-detection from `LC_ALL` / `LANG`; explicit picks
+    /// Pick the UI locale — shown only when it cannot be confidently
+    /// inferred from settings or `LC_ALL` / `LANG` (#566). Explicit picks
     /// land in the persisted settings.toml via `Settings::set("locale", …)`.
     Language,
-    /// "Make it yours" — pick a theme right after language (#3937).
-    ///
-    /// This is a one-key default step: it reuses the `/theme` picker, so the
-    /// preview is live and transactional (Enter persists, Esc restores the
-    /// theme the session started with) and there is no second theme registry.
-    Appearance,
+    /// Choose a provider/model route — shown only when no usable local,
+    /// authenticated, or BYOK route is configured. The canonical provider
+    /// picker modal carries the choice itself.
     Provider,
+    /// Trust the workspace — shown only when a trust decision is required.
     TrustDirectory,
-    MentalModels,
-    Tips,
+    /// "You're ready." Enter opens the real composer pre-seeded with a
+    /// first task for this folder. Never an educational surface.
+    Ready,
     None,
 }
 
@@ -1554,7 +1554,9 @@ pub struct App {
     /// was saved: the session browses with queued input until a route is
     /// activated later (`/provider`), which is the only thing that clears it.
     pub onboarding_explore_offline: bool,
-    /// First-run route receipts used by the mental-model screen's Back action.
+    /// First-run route receipts: which required decisions this run contains.
+    /// The surface title counts only these ("1 of 2"), never a fixed spine.
+    pub onboarding_had_language_step: bool,
     pub onboarding_had_provider_step: bool,
     pub onboarding_had_trust_step: bool,
     /// True when the active credential was discovered only through an

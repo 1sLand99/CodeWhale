@@ -5895,12 +5895,12 @@ fn onboarding_provider_copy_is_provider_neutral_in_en() {
 
     let title = tr(Locale::En, MessageId::OnboardProviderTitle);
     let blurb = tr(Locale::En, MessageId::OnboardProviderBlurb);
-    let api_title = tr(Locale::En, MessageId::OnboardApiKeyTitle);
     assert!(!title.to_ascii_lowercase().contains("deepseek"), "{title}");
     assert!(!blurb.to_ascii_lowercase().contains("deepseek"), "{blurb}");
+    let choose = tr(Locale::En, MessageId::OnboardProviderChoose);
     assert!(
-        !api_title.to_ascii_lowercase().contains("deepseek"),
-        "{api_title}"
+        !choose.to_ascii_lowercase().contains("deepseek"),
+        "{choose}"
     );
 }
 

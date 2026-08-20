@@ -535,6 +535,11 @@ impl App {
         // by --yolo, default_mode=yolo, /zidong, or Alt+Y.
         let yolo_compat = yolo_requested && !approval_policy_locked;
         let needs_workspace_trust = !yolo_compat && crate::tui::onboarding::needs_trust(&workspace);
+        // The language screen is required only when the locale cannot be
+        // confidently inferred from settings or the environment; returning
+        // users never see it.
+        let onboarding_needs_language = !was_onboarded
+            && !crate::tui::onboarding::locale_confidently_inferred(&settings.locale);
         // Suppress the missing-key provider picker for the xAI-OAuth-missing-
         // credential case: the user already chose xAI and just needs to
         // re-authenticate it, not re-pick a provider every launch.
@@ -858,6 +863,7 @@ impl App {
             onboarding_workspace_trust_gate,
             onboarding_missing_key_recovery,
             onboarding_explore_offline: false,
+            onboarding_had_language_step: onboarding_needs_language,
             onboarding_had_provider_step: !was_onboarded && needs_api_key,
             onboarding_had_trust_step: !was_onboarded && needs_workspace_trust,
             api_key_env_only,

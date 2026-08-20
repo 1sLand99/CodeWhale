@@ -1,4 +1,8 @@
 //! Workspace trust prompt for onboarding.
+//!
+//! One decision: trust the instructions and files in this folder, or
+//! continue without trust. The explicit 1/Y · 2/U · 3/N keys stay — trusting
+//! a workspace is a security boundary and must never happen by reflex.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -84,44 +88,6 @@ pub fn lines(app: &App, content_width: usize) -> Vec<Line<'static>> {
             Style::default().fg(palette::STATUS_WARNING),
         )));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            app.tr(MessageId::OnboardTrustFooterPrefix).to_string(),
-            Style::default().fg(palette::TEXT_MUTED),
-        ),
-        Span::styled(
-            "1/Y",
-            Style::default()
-                .fg(palette::TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            app.tr(MessageId::OnboardTrustFooterMiddle).to_string(),
-            Style::default().fg(palette::TEXT_MUTED),
-        ),
-        Span::styled(
-            "2/U",
-            Style::default()
-                .fg(palette::TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            app.tr(MessageId::OnboardTrustFooterUntrustedMiddle)
-                .to_string(),
-            Style::default().fg(palette::TEXT_MUTED),
-        ),
-        Span::styled(
-            "3/N/Esc",
-            Style::default()
-                .fg(palette::TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            app.tr(MessageId::OnboardTrustFooterSuffix).to_string(),
-            Style::default().fg(palette::TEXT_MUTED),
-        ),
-    ]));
     lines
 }
 
@@ -130,6 +96,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::tui::app::TuiOptions;
+    use crate::tui::views::action_footer_lines;
     use std::path::PathBuf;
 
     #[test]
@@ -150,10 +117,42 @@ mod tests {
         assert!(body.contains("instructions and files"));
         assert!(body.contains("prompt injection"));
         assert!(body.contains("tools and hooks"));
-        assert!(body.contains("1/Y"));
-        assert!(body.contains("2/U"));
-        assert!(body.contains("continue without trusting"));
-        assert!(body.contains("3/N/Esc"));
-        assert!(body.contains("quit Codewhale"));
+    }
+
+    /// Trust keys stay explicit and in the action rail: Enter must never
+    /// grant trust, and the three choices must each advertise their own key.
+    #[test]
+    fn trust_actions_are_explicit_keys_in_the_action_rail() {
+        let mut app = App::new(
+            TuiOptions {
+                model: "test-model".to_string(),
+                ..crate::test_support::test_tui_options(PathBuf::from("workspace-fixture"))
+            },
+            &Config::default(),
+        );
+        app.ui_locale = crate::localization::Locale::En;
+        app.onboarding = crate::tui::app::OnboardingState::TrustDirectory;
+
+        let rail = super::super::action_hints(&app)
+            .iter()
+            .flat_map(|hint| action_footer_lines(std::slice::from_ref(hint), 60))
+            .flat_map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        for expected in ["1/Y", "2/U", "3/N"] {
+            assert!(
+                rail.contains(expected),
+                "missing {expected} in rail: {rail}"
+            );
+        }
+        assert!(rail.contains("trust and continue"), "{rail}");
+        assert!(rail.contains("continue without trusting"), "{rail}");
+        assert!(rail.contains("quit Codewhale"), "{rail}");
     }
 }

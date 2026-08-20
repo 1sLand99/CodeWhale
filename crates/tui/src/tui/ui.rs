@@ -675,10 +675,6 @@ pub(crate) enum OnboardingKeyRoute {
     Quit,
     /// Hand the key to the provider picker on the view stack.
     ProviderPicker,
-    /// Hand the key to the theme picker owning the appearance step (#3937).
-    /// Escape belongs to the picker so its revert path runs; the shell must
-    /// not pop the modal and strand a previewed-but-unsaved theme.
-    ThemePicker,
     /// Take the advertised offline exit (#3927). Reachable from Provider
     /// setup even while the provider picker owns the screen, so the choice is
     /// never hidden behind a modal the user cannot satisfy.

@@ -5293,7 +5293,7 @@ fn setup_checkpoint_waits_for_onboarding_and_skip_flag() {
     let _home = SettingsHomeGuard::new();
     let config = Config::default();
     let mut app = App::new(create_test_options(), &config);
-    app.onboarding = OnboardingState::Tips;
+    app.onboarding = OnboardingState::Provider;
 
     assert!(!open_setup_checkpoint_if_due(&mut app, &config, false));
     assert!(app.view_stack.is_empty());
@@ -14221,7 +14221,7 @@ fn onboarding_after_provider_setup_does_not_repeat_language_step() {
 
     crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
-    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert_eq!(app.onboarding, OnboardingState::Ready);
     assert_eq!(app.status_message, None);
 }
 
@@ -14241,7 +14241,7 @@ fn onboarding_after_provider_setup_routes_to_trust_when_needed() {
 }
 
 #[test]
-fn missing_key_recovery_skips_first_run_mental_models() {
+fn missing_key_recovery_ends_on_ready_without_a_command_tour() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::Provider;
     app.onboarding_missing_key_recovery = true;
@@ -14249,7 +14249,7 @@ fn missing_key_recovery_skips_first_run_mental_models() {
 
     crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
-    assert_eq!(app.onboarding, OnboardingState::Tips);
+    assert_eq!(app.onboarding, OnboardingState::Ready);
 }
 
 #[test]
@@ -14267,43 +14267,26 @@ fn missing_key_recovery_still_requires_workspace_trust() {
 }
 
 #[test]
-fn mental_models_backtracks_to_the_last_first_run_decision() {
+fn provider_back_walks_to_the_last_decision_this_run_asked() {
     let mut app = create_test_app();
-    app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_provider_step = false;
-    app.onboarding_had_trust_step = true;
-    crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_had_language_step = true;
+    back_from_provider_onboarding(&mut app);
+    assert_eq!(app.onboarding, OnboardingState::Language);
 
-    app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_trust_step = false;
-    app.onboarding_had_provider_step = true;
-    crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::Provider);
-
-    // With neither optional step, the last decision before the primer is the
-    // appearance step (#3937), not language.
-    app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_provider_step = false;
-    crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::Appearance);
-}
-
-#[tokio::test]
-async fn mental_models_back_reopens_the_canonical_provider_picker() {
+    // Without the language screen the previous stop is the welcome.
     let mut app = create_test_app();
-    app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_provider_step = true;
-    app.onboarding_had_trust_step = false;
-    app.onboarding_provider = ApiProvider::Openrouter;
-    let config = Config::default();
-    let engine = mock_engine_handle();
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_had_language_step = false;
+    back_from_provider_onboarding(&mut app);
+    assert_eq!(app.onboarding, OnboardingState::Welcome);
 
-    crate::tui::onboarding::back_from_mental_models(&mut app);
-    open_onboarding_provider_picker(&mut app, &config, &engine.handle, true).await;
-
-    assert_eq!(app.onboarding, OnboardingState::Provider);
-    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
+    // Missing-key recovery keeps its direct exit to the offline composer.
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_missing_key_recovery = true;
+    back_from_provider_onboarding(&mut app);
+    assert_eq!(app.onboarding, OnboardingState::None);
 }
 
 // ---- Issue #4763: provider onboarding must never be a trap ----
@@ -14332,55 +14315,8 @@ fn onboarding_ctrl_c_quits_even_with_the_provider_picker_on_the_view_stack() {
         OnboardingKeyRoute::Quit,
     );
     assert_eq!(
-        onboarding_key_route(
-            OnboardingState::MentalModels,
-            Some(ModalKind::Help),
-            &ctrl_c,
-        ),
+        onboarding_key_route(OnboardingState::Ready, Some(ModalKind::Help), &ctrl_c,),
         OnboardingKeyRoute::Quit,
-    );
-}
-
-/// #3937: the theme picker owns every key on the appearance step, Escape
-/// included — the shell popping the modal itself would strand a previewed but
-/// unsaved theme instead of running the picker's revert.
-#[test]
-fn appearance_step_hands_every_key_including_escape_to_the_theme_picker() {
-    for key in [
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    ] {
-        assert_eq!(
-            onboarding_key_route(
-                OnboardingState::Appearance,
-                Some(ModalKind::ThemePicker),
-                &key,
-            ),
-            OnboardingKeyRoute::ThemePicker,
-            "{key:?}",
-        );
-    }
-
-    // Ctrl+C still quits from under the picker.
-    assert_eq!(
-        onboarding_key_route(
-            OnboardingState::Appearance,
-            Some(ModalKind::ThemePicker),
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ),
-        OnboardingKeyRoute::Quit,
-    );
-
-    // With the picker closed the step falls back to the legacy switch, which
-    // is what lets Enter re-open it and Escape walk back to Language.
-    assert_eq!(
-        onboarding_key_route(
-            OnboardingState::Appearance,
-            None,
-            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        ),
-        OnboardingKeyRoute::Legacy,
     );
 }
 
@@ -14488,7 +14424,7 @@ fn external_grant_reuse_completes_provider_onboarding() {
 }
 
 #[test]
-fn trust_directory_completion_advances_to_mental_models() {
+fn trust_directory_completion_advances_to_ready() {
     let _guard = ConfigPathEnvGuard::new();
     let tmpdir = TempDir::new().expect("workspace tempdir");
     let mut app = create_test_app();
@@ -14503,7 +14439,7 @@ fn trust_directory_completion_advances_to_mental_models() {
         .expect("trust completion should succeed");
 
     assert!(app.trust_mode);
-    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert_eq!(app.onboarding, OnboardingState::Ready);
     assert!(app.runtime_services.hook_executor.is_some());
 }
 
@@ -14522,7 +14458,7 @@ fn trust_directory_continue_untrusted_advances_without_recording_trust() {
     continue_without_trusting_directory(&mut app);
 
     assert!(!app.trust_mode);
-    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert_eq!(app.onboarding, OnboardingState::Ready);
     assert!(
         crate::tui::onboarding::needs_trust(&app.workspace),
         "declining trust must not write a trusted marker"
@@ -14535,7 +14471,7 @@ fn trust_directory_continue_untrusted_advances_without_recording_trust() {
 }
 
 #[test]
-fn trust_completion_during_missing_key_recovery_advances_to_tips() {
+fn trust_completion_during_missing_key_recovery_advances_to_ready() {
     let _guard = ConfigPathEnvGuard::new();
     let tmpdir = TempDir::new().expect("workspace tempdir");
     let mut app = create_test_app();
@@ -14548,7 +14484,7 @@ fn trust_completion_during_missing_key_recovery_advances_to_tips() {
     complete_trust_directory_onboarding(&mut app, &Config::default())
         .expect("trust completion should succeed");
 
-    assert_eq!(app.onboarding, OnboardingState::Tips);
+    assert_eq!(app.onboarding, OnboardingState::Ready);
 }
 
 #[test]

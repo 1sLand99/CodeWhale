@@ -40,10 +40,10 @@ pub(crate) fn advance_after_trust_directory_choice(app: &mut App) {
     if app.onboarding_workspace_trust_gate {
         app.onboarding_workspace_trust_gate = false;
         app.onboarding = OnboardingState::None;
-    } else if app.onboarding_missing_key_recovery {
-        app.onboarding = OnboardingState::Tips;
     } else {
-        app.onboarding = OnboardingState::MentalModels;
+        // Both a first run and missing-key recovery end on the ready screen;
+        // a trust-gate-only launch (already onboarded) exits directly above.
+        app.onboarding = OnboardingState::Ready;
     }
 }
 
@@ -73,9 +73,6 @@ pub(crate) fn onboarding_key_route(
     if onboarding == OnboardingState::Provider && top_kind == Some(ModalKind::ProviderPicker) {
         return OnboardingKeyRoute::ProviderPicker;
     }
-    if onboarding == OnboardingState::Appearance && top_kind == Some(ModalKind::ThemePicker) {
-        return OnboardingKeyRoute::ThemePicker;
-    }
     OnboardingKeyRoute::Legacy
 }
 
@@ -88,7 +85,13 @@ pub(crate) fn back_from_provider_onboarding(app: &mut App) {
         app.needs_redraw = true;
         return;
     }
-    app.onboarding = OnboardingState::Language;
+    // Esc walks back to the previous decision this run actually asked: the
+    // language screen when it appeared, otherwise the welcome screen.
+    app.onboarding = if app.onboarding_had_language_step {
+        OnboardingState::Language
+    } else {
+        OnboardingState::Welcome
+    };
     app.status_message = None;
 }
 
