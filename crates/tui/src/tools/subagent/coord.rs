@@ -50,6 +50,15 @@ impl AgentsListTool {
 
 #[async_trait]
 impl ToolSpec for AgentsListTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/list"
     }
@@ -158,6 +167,15 @@ impl AgentsMessageTool {
 
 #[async_trait]
 impl ToolSpec for AgentsMessageTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/message"
     }
@@ -278,6 +296,15 @@ impl AgentsFollowupTool {
 
 #[async_trait]
 impl ToolSpec for AgentsFollowupTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/followup"
     }
@@ -456,6 +483,15 @@ impl AgentsInterruptTool {
 
 #[async_trait]
 impl ToolSpec for AgentsInterruptTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/interrupt"
     }
@@ -555,6 +591,15 @@ impl AgentsWaitTool {
 
 #[async_trait]
 impl ToolSpec for AgentsWaitTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/wait"
     }
@@ -3185,6 +3230,15 @@ impl AgentsCoordinateTool {
 
 #[async_trait]
 impl ToolSpec for AgentsCoordinateTool {
+    fn model_visible(&self) -> bool {
+        // #5462: `agent` is the sole model-facing sub-agent surface. These
+        // narrow tools stay registered and executable by name so a persisted
+        // transcript replays byte-for-byte, but they are never advertised in
+        // the catalog and can never be returned by `tool_search` — the same
+        // shape `rlm` and `exec_shell` already use.
+        false
+    }
+
     fn name(&self) -> &'static str {
         "agents/coordinate"
     }
