@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- OAuth device-code login is now one implementation. xAI/Grok device login and
+  Codewhale account login each carried their own hand-rolled RFC 8628 polling
+  loop with nothing shared between them; both now call a single primitive
+  (`codewhale-config`'s `device_code`), ported from pi. Three fixes come with
+  it. `slow_down` now honours a server-supplied `interval` instead of always
+  adding five seconds, which is what stops polling from running early forever
+  under WSL and VM clock drift. Timing out after a `slow_down` now says so and
+  names clock drift, rather than reading as a plain timeout. And the xAI
+  verification URI is validated before it is handed to the browser opener —
+  Codewhale previously opened whatever the device-code response said, so a
+  spoofed or compromised issuer could point the platform "open this" call at a
+  `file:` path or a custom application scheme. It must now be `https:`, or
+  `http:` on a loopback host for self-hosted issuers. Stored credential files
+  are unchanged and existing logins keep working. MCP OAuth is untouched: it
+  delegates to `rmcp`/`oauth2` and was never hand-rolled.
+
 - Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
   auditors not to delete — prompt zones, context budget, the route seam —
   and on the next-largest holders (palette tokens, hotbar actions, core
