@@ -183,8 +183,8 @@ pub struct AmbientFrameStats {
     pub cells_written: u32,
 }
 
-/// Hard upper bound on marks built in one frame: 7 fish + 1 jellyfish × 5
-/// parts (2 dome rows + 3 tentacles) + 2 bubbles + 2 whale-cameo cells = 16,
+/// Hard upper bound on marks built in one frame: 7 fish + 1 jellyfish × 4
+/// parts (2 dome rows + 2 tentacles) + 2 bubbles + 2 whale-cameo cells = 15,
 /// plus headroom. This is a test-gate ceiling asserted against
 /// [`AmbientFrameStats::marks_built`], not a runtime clamp: the population is
 /// bounded by construction, and this constant is what fails the build if a
@@ -356,9 +356,9 @@ fn build_frame_marks(
     // tentacles. The dome opens and closes on a slow floor-bounded sin²;
     // the tentacles repeat the pulse ~350 ms later and sway out of phase
     // with each other — the lag is what sells "jellyfish". Rich/Normal get
-    // the full 5-cell dome with three tentacles; Sparse (narrow) swaps in a
-    // compact 3-cell dome with two — a real fallback silhouette, not just
-    // fewer jellies. They drift slowly upward through a side lane of the deep
+    // the full 5-cell dome; Sparse (narrow) swaps in a compact 3-cell one — a
+    // real fallback silhouette, not just fewer jellies. Both hang two
+    // tentacles. They drift slowly upward through a side lane of the deep
     // water and vanish before the rise would reach the composition.
     //
     // It only visits water deep enough to hold it: three rows of silhouette,
@@ -385,7 +385,11 @@ fn build_frame_marks(
         let (dome_top, dome_skirt, tentacle_cols): (&[&str], &[&str], &[u16]) = if compact {
             (JELLY_DOME_TOP_COMPACT, JELLY_DOME_SKIRT_COMPACT, &[0, 2])
         } else {
-            (JELLY_DOME_TOP_FRAMES, JELLY_DOME_SKIRT_FRAMES, &[1, 2, 3])
+            // Two tentacles hanging from the rim, not three abreast. Three
+            // adjacent one-cell strokes spend most of their sway table
+            // rendering as `||\` or `|||` — a solid bar of punctuation under
+            // the bell, which is what the dogfood frame actually showed.
+            (JELLY_DOME_TOP_FRAMES, JELLY_DOME_SKIRT_FRAMES, &[1, 3])
         };
         let dome_w = dome_top[0].len() as u16; // ASCII frames: len == width
         let x = lane_x
@@ -608,13 +612,18 @@ const LEAD_FISH_LEFT: &str = "<o><";
 /// rim (`(v_v)` / `(v.v)`), which read as two eyes and a mouth. The motion the
 /// silhouette is meant to sell lives in the tentacle row below, not in the
 /// skirt.
-const JELLY_DOME_TOP_FRAMES: &[&str] = &[".-~-.", ".'-.'"];
+///
+/// Both contracted frames are left-right symmetric on purpose. The former
+/// `.'-.'` and `'.'` were not — a dot on one side and an apostrophe on the
+/// other — and an asymmetric five-cell arc does not read as a bell at all; in
+/// the 80×24 dogfood frame it read as three unrelated rows of punctuation.
+const JELLY_DOME_TOP_FRAMES: &[&str] = &[".-~-.", ".'-'."];
 const JELLY_DOME_SKIRT_FRAMES: &[&str] = &["\\___/", "(___)"];
 /// Compact dome for the Sparse (narrow) tier: same two-row read at 3 cells.
-const JELLY_DOME_TOP_COMPACT: &[&str] = &[".-.", "'.'"];
+const JELLY_DOME_TOP_COMPACT: &[&str] = &[".-.", "'-'"];
 const JELLY_DOME_SKIRT_COMPACT: &[&str] = &["\\_/", "(_)"];
 /// Tentacle sway frames (all width-1). Each column runs the same table with
-/// a phase offset so the trio lags instead of strobing in sync.
+/// a phase offset so the pair lags instead of strobing in sync.
 const JELLY_TENTACLE_FRAMES: &[&str] = &["|", "/", "|", "\\"];
 
 /// How far sideways a jellyfish may dodge to clear transcript text before it
@@ -680,8 +689,8 @@ const JELLY_PULSE_MS: u128 = 5_200;
 const JELLY_TENTACLE_LAG_MS: u128 = 620;
 /// Wall-clock milliseconds per tentacle sway frame.
 const JELLY_TENTACLE_SWAY_MS: u128 = 2_600;
-/// Per-column sway phase offset, so adjacent tentacles never move in sync.
-/// Keep this a non-divisor of [`JELLY_TENTACLE_SWAY_MS`] or the trio strobes.
+/// Per-column sway phase offset, so the two tentacles never move in sync.
+/// Keep this a non-divisor of [`JELLY_TENTACLE_SWAY_MS`] or the pair strobes.
 const JELLY_TENTACLE_PHASE_STEP_MS: u128 = 700;
 /// Dimmest point of the pulse: still legible against the water, no lower.
 const JELLY_BRIGHTNESS_FLOOR: f32 = 0.28;

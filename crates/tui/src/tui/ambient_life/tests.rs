@@ -146,7 +146,7 @@ fn ambient_glyphs_are_ascii_or_have_fallbacks() {
 #[test]
 fn jellyfish_reads_as_dome_with_lagging_tentacles() {
     // Find a frame where a full jelly is on-screen and assert its
-    // structure: a two-row dome at least four cells wide, exactly three
+    // structure: a two-row dome at least four cells wide, exactly two
     // tentacle columns one row below the skirt, and both dome and
     // tentacles holding their brightness floors.
     let mut seen = false;
@@ -220,7 +220,7 @@ fn jellyfish_tentacles_sway_out_of_phase_and_dome_pulses() {
             if let Some(tentacle) = frame.marks.iter().find(|mark| {
                 JELLY_TENTACLE_FRAMES.contains(&mark.glyph)
                     && mark.y == top.y + 2
-                    && mark.x == top.x + 1 + col as u16
+                    && mark.x == top.x + 1 + 2 * col as u16
             }) {
                 *slot = tentacle.glyph;
                 column_frames[col].insert(tentacle.glyph);
@@ -244,7 +244,7 @@ fn jellyfish_tentacles_sway_out_of_phase_and_dome_pulses() {
 
 /// Tentacle columns hanging from the full-size bell. Named so the structural
 /// assertions read as one decision rather than a repeated magic number.
-const JELLY_TENTACLE_COLUMNS: usize = 3;
+const JELLY_TENTACLE_COLUMNS: usize = 2;
 
 #[test]
 fn life_defers_to_every_row_the_composition_touches() {
