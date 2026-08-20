@@ -711,7 +711,19 @@ fn filesystem_scope_notice(app: &App) -> Option<Cow<'static, str>> {
         crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } if unenforced => {
             Some(Cow::Borrowed("files: workspace (unenforced)"))
         }
-        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => None,
+        // The unremarkable case: writes are confined to the workspace and the
+        // OS is actually enforcing it. Saying so on every frame of every
+        // session spends the header on a fact nobody is asking about — with
+        // one exception. When the permission chip reads "Full Access", the
+        // scope chip is the only thing on screen that says the writes are
+        // still confined. Suppressing it there recreates precisely the
+        // misreading the chip was added for (tool-approval "Full Access" taken
+        // to mean unrestricted disk writes), and that pairing is reachable:
+        // Bypass with a configured `workspace-write` is clamped to this policy
+        // by `sandbox_policy_for_turn`.
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => {
+            (app.approval_mode == ApprovalMode::Bypass).then_some(Cow::Borrowed("files: workspace"))
+        }
     }
 }
 
@@ -1917,6 +1929,28 @@ mod header_tests {
         let notice = filesystem_scope_notice(&app).expect("full disk must be stated");
         assert_eq!(notice, "files: full disk");
         assert!(header_line(&app, 120).contains("files: full disk"));
+    }
+
+    #[test]
+    fn full_access_never_stands_alone_without_its_scope() {
+        // Bypass clamped to workspace-write: the permission chip says
+        // "Full Access" while writes are in fact confined. That pairing is the
+        // exact misreading the scope chip exists to prevent, so the chip must
+        // speak even though workspace-write is otherwise the quiet default.
+        let mut full = app();
+        full.approval_mode = ApprovalMode::Bypass;
+        full.configured_sandbox_mode = Some("workspace-write".to_string());
+        let notice = filesystem_scope_notice(&full)
+            .expect("Full Access must never appear without a scope beside it");
+        assert_eq!(notice, "files: workspace");
+        let line = header_line(&full, 120);
+        assert!(line.contains("files: workspace"), "{line:?}");
+
+        // And the default posture still stays quiet.
+        let mut quiet = app();
+        quiet.approval_mode = ApprovalMode::Suggest;
+        quiet.configured_sandbox_mode = Some("workspace-write".to_string());
+        assert!(filesystem_scope_notice(&quiet).is_none());
     }
 
     #[test]
