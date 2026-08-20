@@ -11,6 +11,7 @@ use crate::artifacts::ArtifactRecord;
 use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
+use crate::project_context::find_git_root;
 use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
 use crate::tools::goal::{GoalPauseReason, GoalSnapshot};
 use crate::tools::plan::PlanSnapshot;
@@ -1926,9 +1927,13 @@ pub(crate) fn workspace_scope_matches(saved_workspace: &Path, current_workspace:
         return true;
     }
 
+    // Repository identity comes from the containing checkout itself (Git
+    // dir/worktree traversal shared with project-context scope resolution),
+    // never from branch names or paths mentioned in conversation.
+    let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     match (
-        find_git_root(saved_workspace),
-        find_git_root(current_workspace),
+        find_git_root(&canonical(saved_workspace)),
+        find_git_root(&canonical(current_workspace)),
     ) {
         (Some(saved_root), Some(current_root)) => paths_equivalent(&saved_root, &current_root),
         _ => false,
@@ -1950,30 +1955,6 @@ fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
         (Some(lhs), Some(rhs)) => lhs == rhs,
         _ => lhs == rhs,
     }
-}
-
-fn find_git_root(path: &Path) -> Option<PathBuf> {
-    let mut current = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    loop {
-        let git_entry = current.join(".git");
-        if git_entry.exists() {
-            return is_git_metadata_entry(&git_entry).then_some(current);
-        }
-        match current.parent() {
-            Some(parent) if parent != current => current = parent.to_path_buf(),
-            _ => return None,
-        }
-    }
-}
-
-fn is_git_metadata_entry(path: &Path) -> bool {
-    if path.is_dir() {
-        return path.join("HEAD").is_file();
-    }
-
-    fs::read_to_string(path)
-        .map(|content| content.trim_start().starts_with("gitdir:"))
-        .unwrap_or(false)
 }
 
 /// Resolve the default session directory path.
