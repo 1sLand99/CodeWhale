@@ -2733,12 +2733,18 @@ impl McpPool {
         }
 
         for (name, server_cfg) in &self.config.servers {
+            // Only stand in for a missing diagnosis. When the connect attempt
+            // above already reported why this server failed, appending a
+            // second, contentless entry for the same name buries it: callers
+            // fold these pairs into a `HashMap<name, message>`, so the later
+            // generic string silently replaced the real cause.
             if server_cfg.required
                 && server_cfg.is_enabled()
                 && !self
                     .connections
                     .get(name)
                     .is_some_and(McpConnection::is_ready)
+                && !errors.iter().any(|(failed, _)| failed == name)
             {
                 errors.push((
                     name.clone(),

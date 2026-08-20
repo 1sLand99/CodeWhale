@@ -3795,6 +3795,89 @@ async fn discover_snapshot_includes_underlying_spawn_error_in_chain() {
     );
 }
 
+/// The same guarantee for a server the user marked `required`. `connect_all`
+/// appends a generic "required MCP server failed to initialize" entry after
+/// the real per-server connect error, and every snapshot path folds the
+/// returned pairs into a `HashMap<name, message>` — so the later, contentless
+/// entry overwrites the diagnosis. Marking a server required must not blind
+/// the user to *why* it did not start.
+#[tokio::test]
+async fn required_server_snapshot_keeps_the_real_spawn_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "broken": {
+                    "command": "codewhale-tui-test-this-binary-does-not-exist-9f8e7d6c5b4a",
+                    "args": [],
+                    "required": true
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let snapshot = discover_manager_snapshot(&path, None, false).await.unwrap();
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|s| s.name == "broken")
+        .expect("broken server should appear in snapshot");
+    let err = server
+        .error
+        .as_deref()
+        .expect("broken server should have an error");
+    let lowered = err.to_lowercase();
+    assert!(
+        lowered.contains("os error")
+            || lowered.contains("not found")
+            || lowered.contains("no such"),
+        "required server must still report why it failed, got: {err}"
+    );
+}
+
+/// `connect_all` must report one error per failed server. A `required`
+/// server that already failed to connect got a second, contentless entry
+/// appended for the same name.
+#[tokio::test]
+async fn connect_all_reports_one_error_per_failed_required_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "broken": {
+                    "command": "codewhale-tui-test-this-binary-does-not-exist-9f8e7d6c5b4a",
+                    "args": [],
+                    "required": true
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let mut pool = McpPool::from_config_path(&path).unwrap();
+    let errors = pool.connect_all().await;
+    let for_broken: Vec<_> = errors.iter().filter(|(name, _)| name == "broken").collect();
+    assert_eq!(
+        for_broken.len(),
+        1,
+        "expected exactly one error for 'broken', got: {:?}",
+        errors
+            .iter()
+            .map(|(name, err)| format!("{name}: {err:#}"))
+            .collect::<Vec<_>>()
+    );
+    let rendered = format!("{:#}", for_broken[0].1).to_lowercase();
+    assert!(
+        rendered.contains("spawn failed"),
+        "the single error must be the real cause, got: {rendered}"
+    );
+}
+
 #[test]
 fn parse_sse_message_data_extracts_message_events() {
     let body = "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n\r\n";
