@@ -2525,6 +2525,21 @@ impl McpTransport for ScriptedThenHangingTransport {
     }
 }
 
+/// A transport whose write side is gone — the shape a crashed or exited
+/// stdio MCP child leaves behind (EPIPE on the next `write_all`).
+struct FailingSendTransport;
+
+#[async_trait::async_trait]
+impl McpTransport for FailingSendTransport {
+    async fn send(&mut self, _msg: Vec<u8>) -> Result<()> {
+        anyhow::bail!("Broken pipe (os error 32)")
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        std::future::pending().await
+    }
+}
+
 struct DropCountingTransport {
     drops: Arc<AtomicUsize>,
 }
@@ -2694,6 +2709,84 @@ async fn call_method_times_out_while_waiting_for_response() {
         "unexpected error: {err:#}"
     );
     assert_eq!(sent.lock().unwrap().len(), 1);
+}
+
+/// A failed *write* has to disconnect the connection, exactly like a failed
+/// read does. `McpPool::get_or_connect` reuses any connection whose
+/// `is_ready()` is true, so a connection left in `Ready` after its transport
+/// write side died is never rebuilt — the pool hands the same dead child back
+/// on every later tool call and the server stays broken for the rest of the
+/// session even though a reconnect would fix it.
+#[tokio::test]
+async fn call_method_disconnects_when_the_transport_write_side_is_gone() {
+    let mut conn = test_connection(Box::new(FailingSendTransport));
+
+    let err = conn
+        .call_method("tools/call", serde_json::json!({"name": "echo"}), 1)
+        .await
+        .expect_err("a dead write side must fail the call");
+    assert!(
+        format!("{err:#}").contains("Broken pipe"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(conn.state(), ConnectionState::Disconnected);
+    assert!(
+        !conn.is_ready(),
+        "a connection whose write side died must not be reused"
+    );
+}
+
+/// The pool-level consequence of the same defect: `/mcp` (and every
+/// `connected_servers` caller) reported a server with a dead write side as
+/// still connected, and `get_or_connect` handed the dead connection back
+/// instead of rebuilding it.
+#[tokio::test]
+async fn pool_stops_advertising_a_server_whose_write_side_died() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "mock": {
+                    "command": "codewhale-tui-test-this-binary-does-not-exist-9f8e7d6c5b4a",
+                    "args": []
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let mut pool = McpPool::from_config_path(&path).unwrap();
+    let mut conn = test_connection(Box::new(FailingSendTransport));
+    conn.tools.push(McpTool {
+        name: "echo".to_string(),
+        description: None,
+        input_schema: serde_json::json!({"type": "object"}),
+    });
+    pool.connections.insert("mock".to_string(), conn);
+    assert_eq!(pool.connected_servers(), vec!["mock"]);
+
+    let err = pool
+        .call_tool("mcp_mock_echo", serde_json::json!({}))
+        .await
+        .expect_err("a dead write side must fail the call");
+    assert!(
+        format!("{err:#}").contains("Broken pipe"),
+        "unexpected error: {err:#}"
+    );
+
+    assert!(
+        pool.connected_servers().is_empty(),
+        "a server whose write side died must not report as connected"
+    );
+    let reconnect = match pool.get_or_connect("mock").await {
+        Ok(_) => panic!("the pool must rebuild rather than reuse the dead connection"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{reconnect:#}").contains("spawn failed"),
+        "expected a fresh spawn attempt, got: {reconnect:#}"
+    );
 }
 
 #[tokio::test]

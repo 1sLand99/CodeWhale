@@ -2187,14 +2187,23 @@ impl McpConnection {
 
     async fn send(&mut self, msg: serde_json::Value) -> Result<()> {
         let bytes = serde_json::to_vec(&msg).context("Failed to serialize MCP JSON-RPC message")?;
-        tokio::select! {
+        let cancel_token = self.cancel_token.clone();
+        let name = self.name.clone();
+        let result = tokio::select! {
             biased;
-            _ = self.cancel_token.cancelled() => {
-                self.state = ConnectionState::Disconnected;
-                anyhow::bail!("MCP connection '{}' was cancelled", self.name)
+            _ = cancel_token.cancelled() => {
+                Err(anyhow::anyhow!("MCP connection '{name}' was cancelled"))
             }
             result = self.transport.send(bytes) => result,
+        };
+        if result.is_err() {
+            // A dead write side is as fatal as a dead read side: the pool
+            // reuses any connection whose `is_ready()` is true, so leaving
+            // this one in `Ready` would hand the same broken transport back
+            // on every later call instead of rebuilding it.
+            self.state = ConnectionState::Disconnected;
         }
+        result
     }
 
     async fn recv(&mut self, expected_id: String) -> Result<serde_json::Value> {
