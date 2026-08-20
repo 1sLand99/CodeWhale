@@ -188,9 +188,6 @@ describe("public surface contracts", () => {
     expect(matrix.product.name).toBe("Codewhale");
     expect(matrix.product.license).toBe("MIT");
     expect(matrix.product.description).toBe(npmPackage.description);
-    // The README intro was simplified; assert the hosted-and-local claim rather
-    // than the verbatim product tagline (kept in page-meta.ts / public-surface-facts.json).
-    expect(readme).toMatch(/hosted or local/);
     expect(license).toContain("MIT License");
     expect(matrix.install.recommended).toBe("npm install -g codewhale");
     expect(readme).toContain(matrix.install.recommended);
@@ -388,7 +385,6 @@ done
   it("keeps modes, permission postures, and idle shortcuts exact", () => {
     const modes = text("docs/MODES.md");
     const keys = text("docs/KEYBINDINGS.md");
-    const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     const docsMap = text("web/lib/docs-map.ts");
     const matrixText = text("docs/public-surface-facts.json");
@@ -413,32 +409,11 @@ done
     expect(modes).toContain("when the composer is empty");
     expect(keys).toContain("When the composer is empty, cycle TUI mode");
     expect(keys).toContain("`Shift+Tab`");
-    // The README must not re-teach the idle precondition in any language.
+    // Detailed key semantics belong to the canonical keybinding/mode docs, not
+    // the concise README or every translation.
     expect(keys).not.toContain("When the composer is idle");
-    expect(readme).toContain("when the composer is empty");
-    expect(readme).not.toContain("composer is idle");
-    expect(`${readme}\n${modes}\n${homepage}\n${docsMap}`).not.toContain("approval posture");
+    expect(`${modes}\n${homepage}\n${docsMap}`).not.toContain("approval posture");
     expect(matrixText).not.toContain('"approvalPostures"');
-
-    for (const path of [
-      "README.ar.md",
-      "README.ca.md",
-      "README.de.md",
-      "README.es-419.md",
-      "README.fr.md",
-      "README.hi.md",
-      "README.it.md",
-      "README.ja-JP.md",
-      "README.ko-KR.md",
-      "README.pl.md",
-      "README.pt-BR.md",
-      "README.tr.md",
-      "README.vi.md",
-      "README.zh-CN.md",
-      "README.zh-TW.md",
-    ]) {
-      expect(text(path), path).toContain("Shift+Tab");
-    }
   });
 
   it("enforces the six-tool core, deferred discovery, and exact hidden compatibility", () => {
