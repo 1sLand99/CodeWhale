@@ -1565,6 +1565,67 @@ fn idle_whale_block_width(spout: &str, rows: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
+/// Shorten a workspace path to its trailing components, marked with a leading
+/// ellipsis so it reads as "somewhere above here" rather than as a real path.
+fn shorten_workspace(workspace: &str, keep: usize) -> String {
+    let sep = if workspace.contains('/') { '/' } else { '\\' };
+    let parts: Vec<&str> = workspace.split(sep).filter(|p| !p.is_empty()).collect();
+    if parts.len() <= keep {
+        return workspace.to_string();
+    }
+    let tail = parts[parts.len() - keep..].join(&sep.to_string());
+    let shortened = format!("…{sep}{tail}");
+    // Only elide when it actually buys width. `~/code/app` -> `…/code/app` is
+    // the same length and throws away the `~`, which carries more meaning than
+    // the ellipsis does.
+    if shortened.width() >= workspace.width() {
+        return workspace.to_string();
+    }
+    shortened
+}
+
+/// Compose the empty-state caption so the caller's centering can survive.
+///
+/// This line sits between the wordmark and "What do you want to accomplish?",
+/// and every other element of that block is centered. It used to be built at
+/// full length and then handed to `truncate_to_width(.., width)`, which made it
+/// exactly `width` wide — so the caller's `(width - context.width()) / 2` inset
+/// evaluated to zero and the caption rendered flush-left, full-bleed, cutting
+/// the composition in half. The clipping also destroyed the information: an
+/// absolute path truncated mid-directory ("…/34267917-11f4-4d15-911a-…") tells
+/// the reader nothing about where they are.
+///
+/// So the caption sheds detail rather than getting cut. In order of what goes
+/// first: the MCP count, then the branch, then the leading path components. The
+/// folder you are in is the last thing to go, because it is the only part a
+/// person actually reads here.
+fn empty_state_caption(
+    workspace: &str,
+    branch: &str,
+    mcp_label: &str,
+    mcp_count: usize,
+    width: usize,
+) -> String {
+    // Leave a margin so the line is visibly inset rather than merely fitting.
+    let budget = width.saturating_sub(4).max(8);
+    let candidates = [
+        format!("{workspace} · {branch} · {mcp_label} {mcp_count}"),
+        format!("{workspace} · {branch}"),
+        workspace.to_string(),
+        format!("{} · {branch}", shorten_workspace(workspace, 2)),
+        shorten_workspace(workspace, 2),
+        shorten_workspace(workspace, 1),
+    ];
+    for candidate in &candidates {
+        if candidate.width() <= budget {
+            return candidate.clone();
+        }
+    }
+    // Nothing fit: the last resort is the folder name alone, and the caller
+    // still clamps. Better a bare name than a path clipped mid-component.
+    shorten_workspace(workspace, 1)
+}
+
 pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
@@ -1628,10 +1689,12 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     let context = if tier == ShellTier::Compact {
         branch.into_owned()
     } else {
-        format!(
-            "{workspace} · {branch} · {} {}",
-            tr(app.ui_locale, MessageId::EmptyStateMcpLabel),
-            app.mcp_configured_count
+        empty_state_caption(
+            &workspace,
+            &branch,
+            tr(app.ui_locale, MessageId::EmptyStateMcpLabel).as_ref(),
+            app.mcp_configured_count,
+            width,
         )
     };
     let brand = "Codewhale";
@@ -1659,4 +1722,86 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         )));
     }
     lines
+}
+
+#[cfg(test)]
+mod empty_state_caption_tests {
+    use super::{empty_state_caption, shorten_workspace};
+    use unicode_width::UnicodeWidthStr;
+
+    const DEEP: &str = "/private/tmp/claude-501/-Volumes-VIXinSSD-CW-codewhale/34267917-11f4-4d15-911a-2a8acd5c49e1/scratchpad/surface/ws2";
+
+    #[test]
+    fn caption_stays_narrow_enough_to_actually_centre() {
+        // The caller centres this line with `(width - caption.width()) / 2`.
+        // Building it at full length and truncating to `width` made that inset
+        // zero, so the caption rendered flush-left and full-bleed straight
+        // through the centred whale/wordmark/prompt composition.
+        for width in [60usize, 80, 100, 120] {
+            let caption = empty_state_caption(DEEP, "no git", "MCP", 0, width);
+            assert!(
+                caption.width() <= width,
+                "width {width}: caption {caption:?} overflows the lane",
+            );
+            assert!(
+                width.saturating_sub(caption.width()) / 2 > 0,
+                "width {width}: caption {caption:?} would render flush-left",
+            );
+        }
+    }
+
+    #[test]
+    fn caption_keeps_the_folder_you_are_standing_in() {
+        let long = "/a/very/deeply/nested/checkout/somewhere/far/away/myproject";
+        for width in [40usize, 60, 80, 120] {
+            let caption = empty_state_caption(long, "main", "MCP", 2, width);
+            assert!(
+                caption.contains("myproject"),
+                "width {width}: {caption:?} dropped the current folder",
+            );
+        }
+    }
+
+    #[test]
+    fn caption_sheds_the_least_important_detail_first() {
+        let ws = "~/code/app";
+        let wide = empty_state_caption(ws, "main", "MCP", 3, 120);
+        assert!(wide.contains("MCP 3") && wide.contains("main") && wide.contains(ws));
+
+        let mid = empty_state_caption(ws, "main", "MCP", 3, 24);
+        assert!(
+            !mid.contains("MCP"),
+            "{mid:?} should shed the MCP count first"
+        );
+        assert!(mid.contains("main"), "{mid:?} should still name the branch");
+
+        let tight = empty_state_caption(ws, "main", "MCP", 3, 16);
+        assert!(
+            tight.contains("app"),
+            "{tight:?} should still name the folder"
+        );
+    }
+
+    #[test]
+    fn elision_lands_on_a_separator_not_mid_component() {
+        // The old line ended in an ellipsis mid-directory
+        // ("…/34267917-11f4-4d15-911a-"), which told the reader nothing.
+        let caption = empty_state_caption(DEEP, "no git", "MCP", 0, 60);
+        assert!(
+            !caption.contains("2a8acd5c49e1"),
+            "{caption:?} clipped mid-component"
+        );
+        if caption.starts_with('…') {
+            assert!(
+                caption.starts_with("…/"),
+                "elision must land on a separator: {caption:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn shorten_workspace_is_a_no_op_when_it_already_fits() {
+        assert_eq!(shorten_workspace("~/code/app", 2), "~/code/app".to_string());
+        assert_eq!(shorten_workspace("app", 2), "app".to_string());
+    }
 }

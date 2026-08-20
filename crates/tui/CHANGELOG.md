@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The idle screen no longer has an absolute path stretched across it. The
+  workspace caption between the wordmark and "What do you want to accomplish?"
+  was composed at full length and then truncated to the lane width, which made
+  the centering inset `(width - caption.width()) / 2` evaluate to zero — so a
+  line that was written to be centered rendered flush-left and full-bleed,
+  cutting the centered whale/wordmark/prompt composition in half. The clipping
+  also destroyed the information it was supposed to carry: at 80 columns the
+  line read `/private/tmp/claude-501/-Volumes-.../34267917-11f4-4d15-911a-…`,
+  which tells the reader nothing about where they are. The caption now sheds
+  detail instead of being cut — MCP count first, then branch, then leading path
+  components — so it always fits with room to center, and the folder you are
+  standing in is the last thing to go. Elisions land on a path separator rather
+  than mid-directory.
+
 - Removed the placeholder engine tree in `crates/core/src/engine/`. Its
   `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
   `TurnComplete { status: "completed" }` without ever contacting a model, and
