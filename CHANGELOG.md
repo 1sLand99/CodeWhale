@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Removed the placeholder engine tree in `crates/core/src/engine/`. Its
+  `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
+  `TurnComplete { status: "completed" }` without ever contacting a model, and
+  `TurnExecutor` was a struct with a field-copy constructor and a
+  `step < max_steps` comparison. Nothing in the workspace referenced any of it —
+  the only mention of `codewhale_core::engine` anywhere was a doc comment inside
+  the tree itself — but its comments ("the real turn loop is wired here in the
+  next slice") were what `docs/ARCHITECTURE.md` leaned on to claim that
+  `crates/core` owns the agent loop. There is now exactly one turn loop in the
+  workspace, `Engine::run_turn`, and a guard test fails if a second one appears.
+  `docs/ARCHITECTURE.md` and `AGENTS.md` now say where it actually lives.
+
 - First-run onboarding no longer silently truncates its explanation in
   languages that do not put spaces between words. `wrap_words` split on
   whitespace, so a Japanese sentence arrived as a single token, the
