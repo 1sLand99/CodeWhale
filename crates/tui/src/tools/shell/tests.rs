@@ -42,6 +42,47 @@ fn lowercase_bash_schema_is_small_contract() {
 }
 
 #[test]
+fn contract_bash_foreground_without_a_timeout_is_bounded_not_endless() {
+    use super::{
+        BASH_MAX_TIMEOUT_MS, CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS, contract_bash_timeout_ms,
+    };
+
+    // The reported hang: `bash` in the foreground with no timeout. It used to
+    // resolve to BASH_MAX_TIMEOUT_MS (~24.8 days), so an unauthenticated CLI
+    // waiting on a prompt held the turn open indefinitely. It now takes the
+    // default the tool's own schema advertises, which is what arms the
+    // kill-and-rerun-in-background recovery.
+    assert_eq!(
+        contract_bash_timeout_ms(true, None, false, false),
+        Some(CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS)
+    );
+    const { assert!(CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS < BASH_MAX_TIMEOUT_MS) };
+
+    // An explicit request still wins, including one far above the default:
+    // long foreground work stays possible when the model asks for it.
+    assert_eq!(
+        contract_bash_timeout_ms(true, Some(1_800_000), false, false),
+        Some(1_800_000)
+    );
+    assert_eq!(
+        contract_bash_timeout_ms(true, Some(5), false, false),
+        Some(5)
+    );
+
+    // Background and interactive runs are meant to outlive the call, so they
+    // keep "no timeout" and are never bounded by the foreground default.
+    assert_eq!(contract_bash_timeout_ms(true, None, true, false), None);
+    assert_eq!(contract_bash_timeout_ms(true, None, false, true), None);
+
+    // The standalone Bash tools already resolve their own default upstream;
+    // this helper must not second-guess the value they pass in.
+    assert_eq!(
+        contract_bash_timeout_ms(false, Some(120_000), false, false),
+        Some(120_000)
+    );
+}
+
+#[test]
 fn contract_bash_nonzero_is_an_error_with_status_after_output() {
     let error = finish_contract_bash_result(
         ShellResult {

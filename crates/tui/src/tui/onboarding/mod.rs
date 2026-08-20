@@ -448,12 +448,24 @@ mod tests {
     use crate::tui::app::{App, TuiOptions};
     use std::path::PathBuf;
 
+    /// A first-run app with the onboarding decision reset to "nothing asked
+    /// yet". `App::new` derives that decision from the ambient machine —
+    /// inferable locale, an existing `settings.toml`, a provider key in the
+    /// environment — so a fixture that overrides only the flags it names
+    /// inherits the rest of the developer's box and asserts something
+    /// different in CI. Every test below opts in to the steps it is about.
     fn test_app_with_locale(locale: Locale) -> App {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = App::new(options, &Config::default());
         app.ui_locale = locale;
+        app.onboarding_needs_api_key = false;
+        app.onboarding_missing_key_recovery = false;
+        app.onboarding_explore_offline = false;
+        app.onboarding_had_language_step = false;
+        app.onboarding_had_provider_step = false;
+        app.onboarding_had_trust_step = false;
         app
     }
 

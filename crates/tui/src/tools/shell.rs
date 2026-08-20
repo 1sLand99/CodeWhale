@@ -4121,6 +4121,40 @@ async fn execute_foreground_via_background(
 
 const BASH_MAX_TIMEOUT_MS: u64 = i32::MAX as u64;
 
+/// Default foreground lifetime for a contract-`bash` `action=run` that names
+/// no `timeout_ms`. Matches the value the tool's own input schema advertises;
+/// before this existed the omitted case fell through to
+/// `BASH_MAX_TIMEOUT_MS`.
+const CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// Resolve the lifetime for one `bash` run.
+///
+/// A foreground contract-`bash` run that names no timeout used to inherit
+/// `BASH_MAX_TIMEOUT_MS` (~24.8 days), so a command that blocked on an
+/// interactive prompt or a hung network call pinned the turn indefinitely —
+/// the tool row just counted seconds while the model waited. The tool's own
+/// schema already promises `action=run 120000`, and its description already
+/// says foreground is for bounded commands, so honor that: an omitted
+/// timeout takes the advertised default, which lets
+/// `FOREGROUND_TIMEOUT_RECOVERY_HINT` kill the process and tell the model to
+/// rerun with `background=true`.
+///
+/// An explicit `timeout_ms` is still honored up to the full contract ceiling,
+/// and background and interactive runs keep their own lifetimes: their
+/// processes are meant to outlive the call, so bounding them here would kill
+/// long-lived jobs the model deliberately detached.
+fn contract_bash_timeout_ms(
+    optional_timeout: bool,
+    requested_ms: Option<u64>,
+    background: bool,
+    interactive: bool,
+) -> Option<u64> {
+    if optional_timeout && requested_ms.is_none() && !background && !interactive {
+        return Some(CONTRACT_BASH_FOREGROUND_DEFAULT_TIMEOUT_MS);
+    }
+    requested_ms
+}
+
 fn contract_bash_error_status(result: &ShellResult, timeout_ms: Option<u64>) -> String {
     match result.status {
         ShellStatus::TimedOut => {
@@ -4399,7 +4433,7 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
+                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (the standalone Bash tool caps it at 600000), action=wait 30000, action=interact 1000. A foreground action=run that omits this is bounded by that default and killed with a background-rerun hint; pass an explicit value for longer foreground work, or background=true. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
                 },
                 "background": {
                     "type": "boolean",
@@ -4572,7 +4606,7 @@ impl ToolSpec for BashTool {
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }
         enforce_readonly_github_network_policy(command, context)?;
-        let timeout_ms = if self.optional_timeout {
+        let requested_timeout_ms = if self.optional_timeout {
             input
                 .get("timeout_ms")
                 .map(|value| {
@@ -4584,11 +4618,17 @@ impl ToolSpec for BashTool {
         } else {
             Some(optional_u64(&input, "timeout_ms", 120_000)?.min(600_000))
         };
-        let timeout_value_ms = timeout_ms.unwrap_or(BASH_MAX_TIMEOUT_MS);
         let background = optional_bool(&input, "background", false)?;
         let interactive = optional_bool(&input, "interactive", false)?;
         let combined_output = optional_bool(&input, "combined_output", false)?;
         let tty = optional_bool(&input, "tty", false)? || (combined_output && background);
+        let timeout_ms = contract_bash_timeout_ms(
+            self.optional_timeout,
+            requested_timeout_ms,
+            background,
+            interactive,
+        );
+        let timeout_value_ms = timeout_ms.unwrap_or(BASH_MAX_TIMEOUT_MS);
         // Strict types (2026-08-04 review): a non-string here used to be
         // silently dropped — the command then ran with NO stdin and reported
         // success, the exact silent-drop failure the alias hardening closed
