@@ -85,13 +85,13 @@ The fast `deepseek-v4-flash` / thinking-off path is called Fin in the product
 language. Fin is a seam for routing, summaries, cheap child calls, and
 coordination work; it does not change approval behavior.
 
-The orchestration trio is the first selection from a blank prompt (press `/`,
-then Enter):
-`/auto` turns on Auto-Review so the agent just works, `/goal` keeps one
-objective across turns, and `/workflow` runs a repeatable ordered or fan-out
-workflow. They also
-sit on the idle welcome, the idle footer, and the first three Hotbar slots
-when the bar is enabled.
+The orchestration controls remain available without taking over the starting
+screen: `/auto` turns on Auto-Review so the agent just works, `/goal` keeps one
+objective across turns, and `/workflow` prepares a repeatable ordered or
+fan-out workflow. They are directly callable and searchable through the full
+command palette, but are not pinned to the starter slash menu, idle welcome,
+footer, or default Hotbar. A bare `/` instead opens the small task-oriented
+starter set; use `/help` or the command palette for the complete inventory.
 
 `/goal <objective>` sets a session objective with an optional token budget and
 keeps active objectives visible as Work context. The agent may also create the

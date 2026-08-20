@@ -57,6 +57,9 @@ generic checklist does not enumerate.
       (the recent-releases slice embedded in the binary for `/change`). Do
       not edit that file by hand, and do not copy the full root changelog
       into it — older entries live in `docs/CHANGELOG_ARCHIVE.md`.
+- [ ] Run `scripts/release/check-feature-release-notes.sh vPREV HEAD`. Every
+      issue-linked `feat` commit must leave a receipt in `CHANGELOG.md` or the
+      archive; the Version drift CI gate runs the same check with full history.
 
 ## 2. Version pins are in sync
 

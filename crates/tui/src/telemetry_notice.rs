@@ -2,8 +2,9 @@
 //!
 //! Rendering belongs to the native TUI in [`crate::tui::telemetry_notice`].
 //! This module owns only the privacy-sensitive state transitions: deciding
-//! whether a disclosure is owed, recording the user's choice, and preserving
-//! an in-memory decision even when persistence fails.
+//! whether a disclosure is owed, recording that the default-on disclosure was
+//! drawn, and applying an explicit Settings opt-out without weakening failure
+//! posture.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use anyhow::{Result, anyhow};
 use codewhale_config::{SetupState, TELEMETRY_NOTICE_VERSION};
 use codewhale_telemetry::SessionSource;
 
-use crate::localization::MessageId;
+use crate::localization::{Locale, MessageId, tr};
 
 /// Everything the native notice needs to commit the choice against the same
 /// files and session source that were resolved before the first TUI frame.
@@ -55,6 +56,57 @@ impl TelemetryNoticePlan {
 pub(crate) struct AppliedTelemetryDecision {
     pub(crate) setup_state: SetupState,
     pub(crate) status_message_id: MessageId,
+}
+
+/// Typed result of changing the durable telemetry preference from `/settings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedTelemetryPreference {
+    outcome: TelemetryPreferenceOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelemetryPreferenceOutcome {
+    EnabledNextLaunch,
+    Disabled,
+    DisabledWithWarning(String),
+    DisabledForSession(String),
+    SaveFailed(String),
+}
+
+impl AppliedTelemetryPreference {
+    pub(crate) fn is_error(&self) -> bool {
+        matches!(
+            self.outcome,
+            TelemetryPreferenceOutcome::DisabledWithWarning(_)
+                | TelemetryPreferenceOutcome::DisabledForSession(_)
+                | TelemetryPreferenceOutcome::SaveFailed(_)
+        )
+    }
+
+    pub(crate) fn message(&self, locale: Locale) -> String {
+        let (id, detail) = match &self.outcome {
+            TelemetryPreferenceOutcome::EnabledNextLaunch => {
+                (MessageId::TelemetryPreferenceEnabledNextLaunch, None)
+            }
+            TelemetryPreferenceOutcome::Disabled => (MessageId::TelemetryPreferenceDisabled, None),
+            TelemetryPreferenceOutcome::DisabledWithWarning(detail) => (
+                MessageId::TelemetryPreferenceDisabledWithWarning,
+                Some(detail),
+            ),
+            TelemetryPreferenceOutcome::DisabledForSession(detail) => (
+                MessageId::TelemetryPreferenceDisabledForSession,
+                Some(detail),
+            ),
+            TelemetryPreferenceOutcome::SaveFailed(detail) => {
+                (MessageId::TelemetryPreferenceSaveFailed, Some(detail))
+            }
+        };
+        let mut message = tr(locale, id).into_owned();
+        if let Some(detail) = detail {
+            message = message.replace("{detail}", detail);
+        }
+        message
+    }
 }
 
 /// Return a native-notice plan when this interactive launch owes disclosure.
@@ -123,12 +175,13 @@ fn plan_for_store_and_state(
     }
 }
 
-/// Apply the native choice without ever making telemetry a launch blocker.
+/// Apply the native disclosure decision without ever making telemetry a
+/// launch blocker.
 ///
-/// Disable is durable when either the root config or setup-state write lands.
-/// Keep-on is durable when the notice-version record lands. When no write can
-/// land, the choice still governs this process and the notice is shown again
-/// next launch.
+/// Disable remains supported for the legacy notice path and is durable when
+/// either the root config or setup-state write lands. Default-on is durable
+/// when the notice-version record lands. When no write can land, the decision
+/// still governs this process and the notice is shown again next launch.
 pub(crate) fn apply_decision(
     pending: &PendingTelemetryNotice,
     enabled: bool,
@@ -194,6 +247,196 @@ pub(crate) fn apply_decision(
     }
 }
 
+/// Return the saved telemetry preference shown by `/settings`.
+///
+/// A missing setup record is the documented default-on state. An existing
+/// unreadable record may contain an opt-out, so the Settings row fails closed
+/// and shows Off rather than guessing.
+pub(crate) fn saved_preference_enabled(config: &crate::config::Config) -> bool {
+    let Ok(path) = SetupState::path() else {
+        return false;
+    };
+    saved_preference_enabled_at(config, &path)
+}
+
+fn saved_preference_enabled_at(config: &crate::config::Config, setup_state_path: &Path) -> bool {
+    if config.telemetry == Some(false) {
+        return false;
+    }
+    match codewhale_telemetry::load_setup_state_for_decision_at(setup_state_path) {
+        // The telemetry owner returns a fresh default state for a genuinely
+        // absent sidecar. `None` therefore means an existing record was
+        // unreadable (or the path could not be inspected) and must fail closed.
+        Some(state) => !state.telemetry_opted_out(),
+        None => false,
+    }
+}
+
+/// Persist the `/settings` telemetry toggle through the same two privacy
+/// registers as the first-run disclosure.
+///
+/// Turning off is successful when either durable register records the opt-out;
+/// existing local telemetry is then wiped under the telemetry ordering lock.
+/// The wipe writes its tombstone first, so a partial erase still fails closed.
+/// Turning on is stricter: both registers must agree before the UI reports the
+/// preference as enabled. Re-enabling takes effect for new sessions so a
+/// process that was disabled never starts collecting again behind the user's
+/// back.
+pub(crate) fn apply_persistent_preference(
+    config_path: Option<PathBuf>,
+    enabled: bool,
+) -> AppliedTelemetryPreference {
+    let setup_state_path = match SetupState::path() {
+        Ok(path) => path,
+        Err(error) => {
+            return AppliedTelemetryPreference {
+                outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(
+                    error.to_string(),
+                )),
+            };
+        }
+    };
+    let telemetry_root = codewhale_config::codewhale_home()
+        .ok()
+        .map(|home| home.join(codewhale_telemetry::TELEMETRY_DIR));
+    apply_persistent_preference_at(config_path, setup_state_path, telemetry_root, enabled)
+}
+
+fn apply_persistent_preference_at(
+    config_path: Option<PathBuf>,
+    setup_state_path: PathBuf,
+    telemetry_root: Option<PathBuf>,
+    enabled: bool,
+) -> AppliedTelemetryPreference {
+    if enabled {
+        // Keep a durable Off floor in place until both privacy registers have
+        // accepted the explicit re-enable. This makes every partial failure
+        // resolve Off on the next launch.
+        let mut state = match load_notice_state_at(&setup_state_path) {
+            Ok(state) => state,
+            Err(error) => {
+                return AppliedTelemetryPreference {
+                    outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(
+                        format!("privacy record: {error}"),
+                    )),
+                };
+            }
+        };
+        if let Err(error) = write_config_preference(config_path.clone(), false) {
+            return AppliedTelemetryPreference {
+                outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(format!(
+                    "config: {error}"
+                ))),
+            };
+        }
+        state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, true);
+        if let Err(error) = state.save_to(&setup_state_path) {
+            return AppliedTelemetryPreference {
+                outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(format!(
+                    "privacy record: {error}"
+                ))),
+            };
+        }
+        if let Err(error) = write_config_preference(config_path.clone(), true) {
+            let mut failures = vec![format!("config: {error}")];
+            if let Err(rollback) = write_config_preference(config_path, false) {
+                failures.push(format!("restoring the config Off floor: {rollback}"));
+            }
+            // The config Off floor is authoritative, but put the privacy
+            // sidecar back in the same fail-closed state as well. Otherwise a
+            // later manual edit could expose the partial enable as consent.
+            state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
+            if let Err(rollback) = state.save_to(&setup_state_path) {
+                failures.push(format!("restoring the privacy opt-out: {rollback}"));
+            }
+            return AppliedTelemetryPreference {
+                outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(
+                    failures.join("; "),
+                )),
+            };
+        }
+        return AppliedTelemetryPreference {
+            outcome: TelemetryPreferenceOutcome::EnabledNextLaunch,
+        };
+    }
+
+    let config_result = write_config_preference(config_path, false);
+    let state_result = load_notice_state_at(&setup_state_path).and_then(|mut state| {
+        state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
+        state.save_to(&setup_state_path)
+    });
+    // Wipe even if both durable writes fail: a successful tombstone stops the
+    // already-armed process for the remainder of this session.
+    let wipe_result = match telemetry_root.as_deref().filter(|root| root.is_dir()) {
+        Some(root) => codewhale_telemetry::buffer::wipe(root),
+        None => Ok(()),
+    };
+    let durable = config_result.is_ok() || state_result.is_ok();
+    if !durable {
+        let mut failures = vec![
+            format!("config: {}", config_result.expect_err("failed result")),
+            format!(
+                "privacy record: {}",
+                state_result.expect_err("failed result")
+            ),
+        ];
+        if let Err(error) = wipe_result {
+            failures.push(format!("local erase: {error}"));
+            return AppliedTelemetryPreference {
+                outcome: TelemetryPreferenceOutcome::SaveFailed(bounded_failure_detail(
+                    failures.join("; "),
+                )),
+            };
+        }
+        let detail = bounded_failure_detail(failures.join("; "));
+        return AppliedTelemetryPreference {
+            outcome: TelemetryPreferenceOutcome::DisabledForSession(detail),
+        };
+    }
+
+    let mut warnings = Vec::new();
+    if let Err(error) = config_result {
+        warnings.push(format!("config: {error}"));
+    }
+    if let Err(error) = state_result {
+        warnings.push(format!("privacy record: {error}"));
+    }
+    if let Err(error) = wipe_result {
+        warnings.push(format!("local erase: {error}"));
+    }
+    if warnings.is_empty() {
+        AppliedTelemetryPreference {
+            outcome: TelemetryPreferenceOutcome::Disabled,
+        }
+    } else {
+        AppliedTelemetryPreference {
+            outcome: TelemetryPreferenceOutcome::DisabledWithWarning(bounded_failure_detail(
+                warnings.join("; "),
+            )),
+        }
+    }
+}
+
+fn bounded_failure_detail(detail: String) -> String {
+    const MAX_CHARS: usize = 240;
+    let single_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = single_line.chars();
+    let bounded = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
+fn write_config_preference(config_path: Option<PathBuf>, enabled: bool) -> Result<()> {
+    let mut store = codewhale_config::ConfigStore::load(config_path)?;
+    store
+        .config
+        .set_value("telemetry", if enabled { "true" } else { "false" })?;
+    store.save()
+}
+
 /// Load a missing sidecar as a fresh state, but distinguish it from an
 /// existing unreadable/corrupt sidecar so the notice can never overwrite the
 /// latter with defaults.
@@ -208,8 +451,7 @@ fn load_notice_state_at(path: &Path) -> Result<SetupState> {
         .ok_or_else(|| anyhow!("{} could not be read as setup state", path.display()))
 }
 
-/// Everything that decides whether the question may be put, as opposed to how
-/// it is answered.
+/// Everything that decides whether the disclosure may be shown.
 struct NoticeGate {
     needs_notice: bool,
     persisted_off: bool,
@@ -415,6 +657,180 @@ mod tests {
             std::fs::read_to_string(corrupt_state).expect("read corrupt state"),
             "not-json"
         );
+    }
+
+    #[test]
+    fn settings_saved_preference_is_default_on_but_fails_closed_on_unreadable_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("setup_state.json");
+        let config = crate::config::Config::default();
+
+        assert!(
+            saved_preference_enabled_at(&config, &state_path),
+            "a genuinely missing privacy record uses the documented default"
+        );
+
+        std::fs::write(&state_path, "not-json").expect("seed corrupt state");
+        assert!(
+            !saved_preference_enabled_at(&config, &state_path),
+            "an unreadable privacy record may contain an opt-out"
+        );
+
+        let explicitly_off = crate::config::Config {
+            telemetry: Some(false),
+            ..crate::config::Config::default()
+        };
+        assert!(!saved_preference_enabled_at(&explicitly_off, &state_path));
+    }
+
+    #[test]
+    fn settings_off_persists_both_registers_and_stops_the_armed_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let state_path = dir.path().join("setup_state.json");
+        let telemetry_root = dir.path().join("telemetry");
+        std::fs::write(&config_path, "telemetry = true\n").expect("seed config");
+        std::fs::create_dir_all(&telemetry_root).expect("seed telemetry root");
+        std::fs::write(
+            codewhale_telemetry::buffer::buffer_path(&telemetry_root),
+            "queued-event\n",
+        )
+        .expect("seed buffer");
+
+        let applied = apply_persistent_preference_at(
+            Some(config_path.clone()),
+            state_path.clone(),
+            Some(telemetry_root.clone()),
+            false,
+        );
+
+        assert_eq!(applied.outcome, TelemetryPreferenceOutcome::Disabled);
+        assert!(
+            std::fs::read_to_string(&config_path)
+                .expect("read config")
+                .contains("telemetry = false")
+        );
+        assert!(
+            SetupState::load_from(&state_path)
+                .expect("saved state")
+                .telemetry_opted_out()
+        );
+        assert!(codewhale_telemetry::buffer::tombstone_present(
+            &telemetry_root
+        ));
+        assert_eq!(
+            std::fs::read_to_string(codewhale_telemetry::buffer::buffer_path(&telemetry_root))
+                .expect("read wiped buffer"),
+            ""
+        );
+    }
+
+    #[test]
+    fn settings_on_is_saved_for_next_launch_without_clearing_the_tombstone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let state_path = dir.path().join("setup_state.json");
+        let telemetry_root = dir.path().join("telemetry");
+        std::fs::write(&config_path, "telemetry = true\n").expect("seed config");
+        std::fs::create_dir_all(&telemetry_root).expect("seed telemetry root");
+        let disabled = apply_persistent_preference_at(
+            Some(config_path.clone()),
+            state_path.clone(),
+            Some(telemetry_root.clone()),
+            false,
+        );
+        assert_eq!(disabled.outcome, TelemetryPreferenceOutcome::Disabled);
+
+        let enabled = apply_persistent_preference_at(
+            Some(config_path.clone()),
+            state_path.clone(),
+            Some(telemetry_root.clone()),
+            true,
+        );
+
+        assert_eq!(
+            enabled.outcome,
+            TelemetryPreferenceOutcome::EnabledNextLaunch
+        );
+        assert!(
+            std::fs::read_to_string(&config_path)
+                .expect("read config")
+                .contains("telemetry = true")
+        );
+        assert!(
+            SetupState::load_from(&state_path)
+                .expect("saved state")
+                .telemetry_accepted(TELEMETRY_NOTICE_VERSION)
+        );
+        assert!(
+            codewhale_telemetry::buffer::tombstone_present(&telemetry_root),
+            "the already-running process stays off; the next launch clears this after a fresh permission check"
+        );
+
+        let store = codewhale_config::ConfigStore::load(Some(config_path))
+            .expect("reload enabled config for the next launch");
+        let resolved = store
+            .config
+            .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
+        let reloaded_state = SetupState::load_from(&state_path).expect("reload enabled state");
+        assert!(
+            codewhale_telemetry::decide_in_home(
+                Some(dir.path()),
+                &resolved,
+                &reloaded_state,
+                codewhale_telemetry::Surface::Tui,
+            )
+            .is_enabled(),
+            "a fresh launch may clear the prior tombstone only after both saved registers resolve enabled"
+        );
+    }
+
+    #[test]
+    fn failed_settings_enable_preserves_the_existing_opt_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().to_path_buf();
+        let state_path = dir.path().join("setup_state.json");
+        let mut state = SetupState::default();
+        state.record_telemetry_notice(TELEMETRY_NOTICE_VERSION, false);
+        state.save_to(&state_path).expect("seed opt-out");
+
+        let applied =
+            apply_persistent_preference_at(Some(config_path), state_path.clone(), None, true);
+
+        assert!(matches!(
+            applied.outcome,
+            TelemetryPreferenceOutcome::SaveFailed(_)
+        ));
+        assert!(
+            SetupState::load_from(&state_path)
+                .expect("saved state")
+                .telemetry_opted_out()
+        );
+    }
+
+    #[test]
+    fn unsaved_settings_off_still_suppresses_the_current_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().to_path_buf();
+        let state_path = dir.path().join("setup_state.json");
+        let telemetry_root = dir.path().join("telemetry");
+        std::fs::write(&state_path, "not-json").expect("seed corrupt state");
+        std::fs::create_dir_all(&telemetry_root).expect("seed telemetry root");
+
+        let applied = apply_persistent_preference_at(
+            Some(config_path),
+            state_path,
+            Some(telemetry_root.clone()),
+            false,
+        );
+
+        assert!(matches!(
+            applied.outcome,
+            TelemetryPreferenceOutcome::DisabledForSession(_)
+        ));
+        assert!(codewhale_telemetry::buffer::tombstone_present(
+            &telemetry_root
+        ));
     }
 
     #[test]

@@ -244,8 +244,8 @@ pub fn load_setup_state_for_decision_at(path: &Path) -> Option<SetupState> {
 /// 4. Endpoint configured but refused by [`validate_endpoint`] → `ForcedOff`.
 /// 5. Otherwise `Enabled`.
 ///
-/// The notice is only ever *rendered* on a TTY. The interactive TUI explains
-/// the default in a native startup modal before telemetry is armed; headless
+/// The notice is only ever *rendered* on a TTY. The interactive TUI draws a
+/// localized nonblocking disclosure before telemetry is armed; headless
 /// surfaces use the same documented default and kill switches.
 pub fn decide_in_home(
     home: Option<&Path>,

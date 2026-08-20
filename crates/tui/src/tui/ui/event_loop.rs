@@ -514,11 +514,13 @@ pub async fn run_tui(
             (handle, task)
         });
 
-    // Returning users with a missing key begin directly in the same canonical
-    // provider setup picker as first-run. Focus their persisted route so
-    // recovery does not silently replace a Kimi Code bare-K3 endpoint.
+    // Fresh users begin with the small local-runtime list. Returning users
+    // recovering a missing key focus their persisted route instead, so
+    // recovery cannot silently replace a Kimi Code bare-K3 endpoint.
     if app.onboarding == OnboardingState::Provider {
-        open_onboarding_provider_picker(&mut app, config, &engine_handle, true).await;
+        let recover_configured_route = app.onboarding_missing_key_recovery;
+        open_onboarding_provider_picker(&mut app, config, &engine_handle, recover_configured_route)
+            .await;
     }
 
     // #4605: create the dispatch completion channel before any submit path so
@@ -671,12 +673,7 @@ fn apply_telemetry_after_disclosure_draw(
     let applied = crate::telemetry_notice::apply_decision(&pending, true);
     if applied.status_message_id != MessageId::TelemetryNoticeReceiptEnabled {
         let receipt = app.tr(applied.status_message_id);
-        let settings = app.tr(MessageId::CmdSettingsDescription);
-        app.push_status_toast(
-            format!("{receipt}  /settings — {settings}"),
-            StatusToastLevel::Info,
-            Some(12_000),
-        );
+        app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
         app.needs_redraw = true;
     }
     crate::apply_tui_telemetry_decision(&pending, &applied.setup_state);
@@ -785,12 +782,7 @@ pub(crate) async fn run_event_loop(
             && let Some(pending) = pending_telemetry_notice.take()
         {
             let receipt = app.tr(MessageId::TelemetryNoticeReceiptEnabled);
-            let settings = app.tr(MessageId::CmdSettingsDescription);
-            app.push_status_toast(
-                format!("{receipt}  /settings — {settings}"),
-                StatusToastLevel::Info,
-                Some(12_000),
-            );
+            app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));
             app.needs_redraw = true;
             telemetry_waiting_for_disclosure_draw = Some(pending);
         }
@@ -3916,8 +3908,14 @@ pub(crate) async fn run_event_loop(
                             onboarding::advance_onboarding_after_language(app);
                         }
                         OnboardingState::Provider => {
-                            open_onboarding_provider_picker(app, config, &engine_handle, false)
-                                .await;
+                            let recover_configured_route = app.onboarding_missing_key_recovery;
+                            open_onboarding_provider_picker(
+                                app,
+                                config,
+                                &engine_handle,
+                                recover_configured_route,
+                            )
+                            .await;
                         }
                         OnboardingState::TrustDirectory => {
                             // Trusting a workspace is a security boundary, so it

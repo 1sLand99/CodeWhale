@@ -983,6 +983,7 @@ fn closing_work_inspector_pager_clears_opened_row_owner() {
         "Inspect me".to_string(),
         crate::tools::todo::TodoStatus::InProgress,
     );
+    let _ = render_underwater_test_app(&mut app, 100, 32);
     let _ = crate::tui::work_surface::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),

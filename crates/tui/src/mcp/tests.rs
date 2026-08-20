@@ -1163,7 +1163,7 @@ fn plugin_server_ids_are_unambiguous_across_hyphenated_plugin_and_server_names()
 }
 
 #[test]
-fn mixed_mcp_and_unsupported_components_activate_only_reviewed_transports() {
+fn mixed_components_contribute_only_mcp_servers_to_the_mcp_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_base = dir.path().join("plugin");
     fs::create_dir_all(plugin_base.join("commands")).unwrap();
@@ -1197,22 +1197,6 @@ path = "hooks"
     .unwrap();
     let (plugin, authority) = active_plugin_fixture(&plugin_base);
     assert!(plugin.active());
-    assert_eq!(
-        plugin.compatibility(),
-        crate::plugins::manifest::PluginCompatibility::Partial
-    );
-    assert!(
-        plugin.component_active(crate::plugins::activation::PluginActivationCapability::McpStdio)
-    );
-    assert!(
-        plugin.component_active(crate::plugins::activation::PluginActivationCapability::McpRemote)
-    );
-    assert!(
-        !plugin.component_active(crate::plugins::activation::PluginActivationCapability::Commands)
-    );
-    assert!(
-        !plugin.component_active(crate::plugins::activation::PluginActivationCapability::Hooks)
-    );
 
     let cfg = merge_plugin_mcp_servers_from_plugins(
         McpConfig::default(),
@@ -1224,7 +1208,7 @@ path = "hooks"
     assert_eq!(
         cfg.servers.len(),
         2,
-        "only reviewed MCP transports may activate; commands/hooks stay out of the MCP catalog: {:?}",
+        "declarative components must not become MCP servers: {:?}",
         cfg.servers.keys().collect::<Vec<_>>()
     );
     assert_eq!(

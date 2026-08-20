@@ -505,6 +505,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "search" | "search.provider" | "search_provider" => load_command_config(app)
             .ok()
             .map(|config| search_provider_display(&config, app.ui_locale)),
+        "telemetry" => load_command_config(app)
+            .ok()
+            .map(|config| crate::telemetry_notice::saved_preference_enabled(&config).to_string()),
         "prompt_suggestion" => load_command_config(app)
             .ok()
             .map(|config| prompt_suggestion_display(&config)),
@@ -1926,6 +1929,31 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     }
 
     match key.as_str() {
+        "telemetry" => {
+            if !persist {
+                return CommandResult::error(
+                    "Telemetry is a durable privacy preference. Change it in /settings or add --save.",
+                );
+            }
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(err) => return CommandResult::error(err),
+            };
+            let applied = crate::telemetry_notice::apply_persistent_preference(
+                app.config_path.clone(),
+                enabled,
+            );
+            let message = applied.message(app.ui_locale);
+            return if applied.is_error() {
+                CommandResult {
+                    message: Some(message),
+                    action: None,
+                    is_error: true,
+                }
+            } else {
+                CommandResult::message(message)
+            };
+        }
         "model" => {
             // Support "/model auto" — auto-select model based on request complexity
             if value.trim().eq_ignore_ascii_case("auto") {

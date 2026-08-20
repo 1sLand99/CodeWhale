@@ -8502,15 +8502,22 @@ fn registry_first_guidance_is_attached_to_the_shell_fallback_once() {
     let mut catalog = vec![api_tool("read_file"), api_tool("exec_shell")];
 
     apply_registry_first_shell_guidance(&mut catalog);
+    let after_first = catalog
+        .iter()
+        .find(|tool| tool.name == "exec_shell")
+        .expect("shell tool")
+        .description
+        .clone();
     apply_registry_first_shell_guidance(&mut catalog);
 
-    let description = &catalog
+    let after_second = &catalog
         .iter()
         .find(|tool| tool.name == "exec_shell")
         .expect("shell tool")
         .description;
-    assert_eq!(description.matches("call registry_sync first").count(), 1);
-    assert!(description.contains("start_registry_mcp_server"));
+    assert_eq!(after_second, &after_first);
+    assert!(after_second.contains("registry_sync"));
+    assert!(after_second.contains("start_registry_mcp_server"));
 }
 
 #[test]

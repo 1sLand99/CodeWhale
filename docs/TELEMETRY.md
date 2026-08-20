@@ -1,13 +1,13 @@
 # Codewhale product telemetry
 
-**Status for 0.9.6: anonymous usage counting is on by default and can be
-disabled immediately.** The first interactive launch summarizes what is counted,
-links the exact field-by-field schema, and preselects "Keep on" in a native
-startup modal. Arrow keys or Tab choose, Enter confirms, and `Y`/`N` are direct
-shortcuts. Telemetry remains unarmed until that choice. Headless surfaces follow
-the same documented default without pretending an interactive notice was shown.
-Every decline recorded by the former 0.9.4 opt-in notice remains off after
-upgrade.
+**Status for 0.9.10: anonymous usage counting is on by default and can be
+disabled immediately.** The first interactive launch shows one localized,
+nonblocking notice after the terminal is ready. It says what is never collected,
+points to this field-by-field schema, and links the ordinary `/settings` toggle.
+Telemetry remains unarmed until that notice has actually been drawn. Headless
+surfaces follow the same documented default without pretending an interactive
+notice was shown. Every decline recorded by the former 0.9.4 opt-in notice
+remains off after upgrade.
 
 Codewhale does not collect conversations, code, prompts, files, file/repo/branch
 names, model content, or credentials. It sends no per-turn or per-tool timeline.
@@ -68,9 +68,9 @@ want the erasing kind, use the config file.
 A value this list cannot read also resolves to off — a typo in a kill switch
 must never resolve to "on".
 
-The first-run notice is not shown at all when either switch is already set:
-it never asks a question this environment would override, and answering it
-never rewrites a `telemetry = false` you put there yourself.
+The first-run notice is not shown when telemetry is already persistently off or
+a run-scoped kill switch is active. The notice never rewrites a
+`telemetry = false` you put there yourself.
 
 A repo-local `.codewhale/config.toml` can set neither `telemetry` nor
 `telemetry_endpoint`, and a workspace `.env` can set neither. Someone else's
@@ -107,12 +107,18 @@ claim one.
 ## When anything is sent, and where
 
 Nothing is sent when the persistent opt-out or a run-scoped kill switch is in
-force. Otherwise there is exactly one flush point: an attempt during shutdown,
-bounded at three seconds. There is no
-startup flush, mid-session flush, per-turn flush, or per-tool-call flush. The
-shutdown flush re-resolves your setting from disk immediately beforehand, so
-`codewhale config set telemetry false` written from another terminal stops the
-flush of a session that is already running.
+force. TUI and `exec` sessions have exactly one network flush point: an attempt
+during shutdown, bounded at three seconds. Short CLI commands such as `config`,
+`doctor`, and `auth` do not wait for that network request. They record
+`session_end`, seal the event to the local buffer with a much shorter bound, and
+return; a configured endpoint sends those buffered events with the next
+interactive shutdown flush. An explicitly empty endpoint finalizes its local
+dry-run batch immediately.
+
+There is no startup flush, mid-session flush, per-turn flush, or per-tool-call
+flush. Every network shutdown flush re-resolves your setting from disk
+immediately beforehand, so `codewhale config set telemetry false` written from
+another terminal stops the flush of a session that is already running.
 
 A flush is **one `POST`** to the resolved endpoint — by default
 `https://telemetry.codewhale.net/v1/telemetry`. The request carries a
@@ -147,7 +153,7 @@ most once per flush point and never grows a queue.
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC, second precision
   "install_id":  "3f2a…",                  // uuid v4, rotates every 90 days
   "app_version": "0.9.4",
-  "git_sha":     null,                     // non-null only for release-CI builds
+  "git_sha":     null,                     // non-null only for SHA-stamped builds
   "surface":     "tui",
   "os":          "macos",
   "arch":        "aarch64",
@@ -163,7 +169,7 @@ most once per flush point and never grows a queue.
 | `sent_at` | RFC3339 | `chrono::Utc::now()` | Second precision. Per-**batch** only — events carry no timestamps at all. |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | Random, never derived, rotated every 90 days. See "Where it lives" above. |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`, as at `crates/telemetry/src/lib.rs:112` | Must match `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`. |
-| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")` — a **new** rustc-env | First 12 hex chars. Emitted **only** when `codewhale_build_support::release_build_sha` saw `DEEPSEEK_BUILD_SHA` or `GITHUB_SHA` in the build environment, i.e. only for release-CI builds. `null` for every locally built binary, unconditionally, with no runtime lookup of any kind. **Never** `CODEWHALE_BUILD_COMMIT` — that falls back to `git_commit` and is the builder's private HEAD. **Never** `Thread.git_sha` (`crates/state/src/lib.rs:93`) — that is the user's workspace commit and a red line, one identifier away by name. |
+| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")` — a **new** rustc-env | First 12 hex chars. Emitted **only** when `codewhale_build_support::release_build_sha` saw a valid full SHA in `CODEWHALE_BUILD_SHA`, the legacy `DEEPSEEK_BUILD_SHA`, or `GITHUB_SHA`, in that precedence order. `null` for every unstamped build, with no runtime lookup of any kind. **Never** `CODEWHALE_BUILD_COMMIT` — that falls back to `git_commit` and is the builder's private HEAD. **Never** `Thread.git_sha` (`crates/state/src/lib.rs:93`) — that is the user's workspace commit and a red line, one identifier away by name. |
 | `surface` | enum | set explicitly at each subcommand dispatch | `tui \| exec \| cli \| app-server \| mcp-server \| serve`. **Not derivable from the executable**: `codewhale-tui` serves at least five surfaces, and app-server runs *in-process* inside `codewhale` (`crates/cli/src/lib.rs:4225`), so `current_exe()` would report every app-server session as CLI. `desktop` is omitted — no desktop surface exists. Which of these can emit is governed by the opt-out policy, not by the surface: see "Which surfaces emit" below. |
 | `os` | enum | `std::env::consts::OS`, as at `crates/cli/src/update.rs:41` | Whitelist: `linux \| macos \| windows \| freebsd \| android \| other`. |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`. |
@@ -178,8 +184,8 @@ most once per flush point and never grows a queue.
 A surface emits by default unless the machine has a persistent opt-out or the
 run has a kill switch. The notice is only rendered on a TTY. So:
 
-- **`tui`** — enters the native TUI first, shows the disclosure as a startup
-  modal, stays unarmed until the first interactive choice, then follows it.
+- **`tui`** — enters the native TUI first, draws the localized nonblocking
+  disclosure, and stays unarmed until that frame is visible.
 - **`exec`, `cli`, `app-server`, `mcp-server`, `serve`** — follow the documented
   default on a fresh home and every persistent/run-scoped opt-out on any home.
 - **Fleet workers never emit**, on any surface, by construction (`crates/tui/src/fleet/host.rs:1386-1388`).

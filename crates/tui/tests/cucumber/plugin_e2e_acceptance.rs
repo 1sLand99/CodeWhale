@@ -776,6 +776,26 @@ fn expect_visible(tui: &mut Harness, needle: &str, label: &str) {
 }
 
 #[cfg(all(unix, feature = "long-running-tests"))]
+fn wait_for_composer_ready(tui: &mut Harness) {
+    if tui
+        .wait_for(
+            |frame| {
+                let (row, _) = frame.cursor();
+                frame.any_visible_text() && row >= frame.rows().saturating_sub(3)
+            },
+            BINARY_ACCEPTANCE_TIMEOUT,
+        )
+        .is_err()
+    {
+        panic!(
+            "TUI did not paint a focused composer within {:?}\n{}",
+            qa_harness::harness::ci_scaled(BINARY_ACCEPTANCE_TIMEOUT),
+            short_diagnostics(tui, None)
+        );
+    }
+}
+
+#[cfg(all(unix, feature = "long-running-tests"))]
 fn wait_for_log(tui: &mut Harness, path: &std::path::Path, needle: &str) {
     let budget = qa_harness::harness::ci_scaled(BINARY_ACCEPTANCE_TIMEOUT);
     let deadline = std::time::Instant::now() + budget;
@@ -829,8 +849,9 @@ async fn plugin_toml_binary_lifecycle_skill_and_stdio_mcp_acceptance() {
         .size(52, 200)
         .spawn()
         .expect("start distributed TUI binary");
-    expect_visible(&mut tui, "Write a task", "TUI composer");
 
+    // Readiness is a painted, focused composer—not localized placeholder copy.
+    wait_for_composer_ready(&mut tui);
     submit_tui_command(&mut tui, "/plugin show demo");
     expect_visible(
         &mut tui,
