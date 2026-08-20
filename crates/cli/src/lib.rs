@@ -4449,6 +4449,9 @@ fn run_app_server_command(
     // Legacy in-process app-server HTTP transport (`/healthz`, `/thread`, `/app`,
     // `/prompt`, `/tool`, `/jobs`). Kept for backward compatibility; defaults to
     // 127.0.0.1:8787 to avoid colliding with the runtime API default of :7878.
+    // `/prompt` and `/thread` messages are not served locally: they run a real
+    // turn by bridging to a runtime API child, and fail with an explicit
+    // `runtime_unavailable` when one cannot be started.
     let host = args.host.as_deref().unwrap_or("127.0.0.1");
     let port = args.port.unwrap_or(8787);
     let outcome = format!("{host}:{port}")

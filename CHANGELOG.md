@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking (app-server):** `/prompt`, `prompt/request` and `prompt/run` now
+  execute a real model turn instead of reporting success for work they never
+  did. `Runtime::handle_prompt` called no model: it resolved config, ran a
+  local `ModelRegistry` lookup, emitted three canned hook events
+  (`ResponseDelta` was literally the string `model-selected`), and returned
+  HTTP 200 with `output` set to a stringified JSON echo of the caller's own
+  routing metadata — the prompt included. Worse, when a `thread_id` was
+  supplied it appended a real user row, flipped the thread to `Running`, and
+  then wrote that echo into durable history as an **assistant message** plus a
+  `prompt_response` checkpoint. Nothing marked the row synthetic and nothing
+  ever moved the thread out of `Running`. All three endpoints now route
+  through the same `RuntimeBridge` that stdio `thread/message` has always
+  used, so `output` is the model's streamed text, `model` is what the runtime
+  reports for the thread that ran the turn, and `events` are the real
+  streaming frames. `Runtime::handle_prompt` and its synthetic history write
+  are gone.
+
+- **Breaking (app-server):** a failed prompt is now a typed failure rather
+  than a success-shaped body. `POST /prompt` returns
+  `{"error":{"code":...,"message":...}}` with `400` (invalid request), `404`
+  (thread not found), `503` (`runtime_unavailable`) or `500`, instead of HTTP
+  500 carrying a `PromptResponse` with the error text stuffed into `output`
+  where model text belongs. The stdio surface gained JSON-RPC `-32005`
+  `runtime_unavailable` for "the turn engine could not be reached, so nothing
+  ran" — distinct from `-32603`, and retryable. There is no configuration in
+  which a prompt silently echoes instead of running.
+
+- **Breaking (app-server):** `POST /thread` with a `Message` body runs the
+  turn. It previously replied `status: "accepted"` with a
+  `ResponseDelta("queued")` frame while starting no worker and calling no
+  bridge — the stdio path for the same request has always done real work, so
+  the two transports disagreed about what `accepted` meant. HTTP now replies
+  `status: "completed"` once the turn reaches a terminal state, with the
+  streamed frames in `events` and the turn id in `data`. `Runtime::handle_thread`
+  no longer accepts `ThreadRequest::Message` at all: it owns thread
+  bookkeeping, not the turn engine, and returns an error naming
+  `POST /v1/threads/{id}/turns` rather than a canned acceptance.
+
+- **Breaking (app-server):** `AppRequest::SubmitUserInput` now refuses
+  explicitly (`ok: false`, `error: "user_input_reply_unsupported"`) instead of
+  returning `resolved: true` and filing the answers in a map that had no
+  reader anywhere in the crate — every answer submitted was silently
+  discarded. It cannot be made to work on this transport: while a turn
+  streams, the stdio loop executes only `thread/interrupt` and queues
+  everything else, so an answer sent there would wait on the very turn
+  waiting for it. The refusal names the surface that does accept it,
+  `POST /v1/user-input/{thread_id}/{request_id}` on the runtime API. The
+  `/tool` path that mints the `UserInputRequest` is unchanged and still
+  genuine.
+
 - Removed the placeholder engine tree in `crates/core/src/engine/`. Its
   `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
   `TurnComplete { status: "completed" }` without ever contacting a model, and
