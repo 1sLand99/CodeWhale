@@ -3908,7 +3908,7 @@ fn completed_assistant_answer_projection_excludes_reasoning_tools_and_status() {
     // no reasoning, tool calls/results, runtime status, or scaffolding.
     use crate::tui::ui_text::history_cell_to_clipboard_text;
 
-    let cells = vec![
+    let cells = [
         HistoryCell::User {
             content: "please summarize".to_string(),
         },

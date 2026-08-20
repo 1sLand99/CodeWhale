@@ -737,8 +737,8 @@ mod tests {
     fn raw_stream_ceiling_clears_every_downstream_bound() {
         // The clip must be unreachable by the model-visible surfaces: the 30 KB
         // result truncation, the 1,200-char job tail, the 1 KiB completion tail.
-        assert!(RAW_STREAM_MAX_BYTES > 30_000 * 100);
-        assert!(super::RAW_STREAM_SETTLED_TAIL_BYTES > 30_000);
+        const { assert!(RAW_STREAM_MAX_BYTES > 30_000 * 100) };
+        const { assert!(super::RAW_STREAM_SETTLED_TAIL_BYTES > 30_000) };
     }
 
     #[test]
