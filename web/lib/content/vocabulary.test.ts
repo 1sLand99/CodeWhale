@@ -128,11 +128,18 @@ describe("shared getting-started path", () => {
     expect(first.body.en).toContain("without any API key");
     expect(first.body.en).toContain("Plan mode");
     expect(first.body.en).toMatch(/Model replies need a provider/);
-    // The keyless-launch claim is documented behavior, not invented copy.
+    // The keyless-launch claim must stay backed by documented runtime
+    // behavior. Assert the meaning docs/GUIDE.md owes this step -- a first
+    // launch that asks only for the decisions still needed, and a provider
+    // step that keeps an explicit offline route -- rather than one frozen
+    // sentence, which is what broke when the first-run flow was rewritten.
+    // Heading-level hashes only: shell comments inside the fenced install
+    // snippets start with a single "#" and must not end the section slice.
     const guide = repoText("docs/GUIDE.md");
-    expect(guide).toContain(
-      "On first launch, Codewhale opens with a recommended working agreement",
-    );
+    const firstLaunch = guide.split(/^#{2,} .*First Launch.*$/m)[1]?.split(/^#{2,} /m)[0] ?? "";
+    expect(firstLaunch, "docs/GUIDE.md must keep a First Launch section").not.toBe("");
+    expect(firstLaunch).toMatch(/asks only for decisions/i);
+    expect(firstLaunch).toMatch(/offline route/i);
   });
 
   it("uses only documented commands", () => {

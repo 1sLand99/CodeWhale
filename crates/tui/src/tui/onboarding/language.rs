@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn every_option_is_visible_at_80_columns() {
         let rows = lines(&app(), 72, 17);
-        let text = rows.iter().map(|line| row_text(line)).collect::<Vec<_>>();
+        let text = rows.iter().map(row_text).collect::<Vec<_>>();
 
         for (_, tag, native, _) in LANGUAGE_OPTIONS {
             let shown = text.iter().any(|row| row.contains(native));

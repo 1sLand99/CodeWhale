@@ -66,11 +66,11 @@ fn stall_timeout() -> Option<Duration> {
 pub fn progress(label: &str) {
     let elapsed = epoch().elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     last_progress_millis().store(elapsed, Ordering::Relaxed);
-    if let Ok(mut slot) = last_label().try_lock() {
-        if slot.as_str() != label {
-            slot.clear();
-            slot.push_str(label);
-        }
+    if let Ok(mut slot) = last_label().try_lock()
+        && slot.as_str() != label
+    {
+        slot.clear();
+        slot.push_str(label);
     }
 }
 
