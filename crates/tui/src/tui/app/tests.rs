@@ -2279,22 +2279,22 @@ fn returning_user_missing_api_key_goes_to_canonical_provider_setup() {
 }
 
 #[test]
-fn first_run_user_starts_at_the_first_missing_decision() {
+fn first_run_user_starts_at_welcome() {
     assert_eq!(
         initial_onboarding_state(false, false, true, true, true),
-        OnboardingState::Language
+        OnboardingState::Welcome
     );
     assert_eq!(
         initial_onboarding_state(false, false, false, true, true),
-        OnboardingState::Provider
+        OnboardingState::Welcome
     );
     assert_eq!(
         initial_onboarding_state(false, false, false, false, true),
-        OnboardingState::TrustDirectory
+        OnboardingState::Welcome
     );
     assert_eq!(
         initial_onboarding_state(false, false, false, false, false),
-        OnboardingState::Ready
+        OnboardingState::Welcome
     );
 }
 
@@ -2356,6 +2356,44 @@ fn app_new_detects_missing_api_key_with_default_config() {
         app.onboarding_needs_api_key,
         "default config (no key) must set onboarding_needs_api_key"
     );
+}
+
+#[test]
+fn first_run_app_starts_on_welcome_when_a_key_is_missing() {
+    let _lock = lock_test_env();
+    let home = tempfile::TempDir::new().expect("isolated first-run home");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path().to_string_lossy().as_ref());
+    let config_path = home.path().join("config.toml");
+    let _config_path = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let _provider_env = EnvVarGuard::remove("CODEWHALE_PROVIDER");
+    let _legacy_provider_env = EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+    let _api_key_envs: Vec<_> = [
+        "DEEPSEEK_API_KEY",
+        "NVIDIA_API_KEY",
+        "NVIDIA_NIM_API_KEY",
+        "OPENAI_API_KEY",
+        "ATLASCLOUD_API_KEY",
+        "WANJIE_ARK_API_KEY",
+        "WANJIE_API_KEY",
+        "WANJIE_MAAS_API_KEY",
+        "OPENROUTER_API_KEY",
+        "NOVITA_API_KEY",
+        "FIREWORKS_API_KEY",
+        "SILICONFLOW_API_KEY",
+        "MOONSHOT_API_KEY",
+        "KIMI_API_KEY",
+        "SGLANG_API_KEY",
+        "VLLM_API_KEY",
+        "OLLAMA_API_KEY",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+
+    let app = App::new(test_options(false), &Config::default());
+    assert_eq!(app.onboarding, OnboardingState::Welcome);
+    assert!(app.onboarding_needs_api_key);
+    assert!(!app.onboarding_missing_key_recovery);
 }
 
 #[test]
@@ -7009,21 +7047,20 @@ fn launch_onboarding_clean_when_onboarded_with_key() {
 }
 
 #[test]
-fn launch_onboarding_starts_at_the_first_missing_decision() {
-    // A NOT-yet-onboarded user still gets first-run onboarding even if their
-    // xAI OAuth credential is missing — the picker suppression is only for the
-    // onboarded missing-key-RECOVERY case, not first run. The redundant
-    // welcome click is gone: the provider question is the first screen.
+fn launch_onboarding_starts_first_run_at_welcome() {
+    // First run always starts at Welcome, even when a key is missing and even
+    // when an xAI OAuth credential is absent. Enter then routes to language,
+    // provider setup, or trust. Auto-opening the picker is recovery-only.
     let (onboarding, recovery) = launch_onboarding_decision(false, false, false, true, false, true);
-    assert_eq!(onboarding, OnboardingState::Provider);
+    assert_eq!(onboarding, OnboardingState::Welcome);
     assert!(!recovery);
 
     let (language, _) = launch_onboarding_decision(false, false, true, true, true, false);
-    assert_eq!(language, OnboardingState::Language);
+    assert_eq!(language, OnboardingState::Welcome);
 
     let (trust, _) = launch_onboarding_decision(false, false, false, false, true, false);
-    assert_eq!(trust, OnboardingState::TrustDirectory);
+    assert_eq!(trust, OnboardingState::Welcome);
 
     let (ready, _) = launch_onboarding_decision(false, false, false, false, false, false);
-    assert_eq!(ready, OnboardingState::Ready);
+    assert_eq!(ready, OnboardingState::Welcome);
 }

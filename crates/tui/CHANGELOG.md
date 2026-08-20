@@ -40,6 +40,11 @@ abort under load.
 
 ### Fixed
 
+- First run starts on the welcome screen again. A missing key no longer
+  skips Welcome and auto-opens the local-provider list: Enter walks to the
+  calm provider explanation, then Enter opens the picker so a first API key
+  can be set. Returning missing-key recovery still opens the picker on
+  launch.
 - A foreground `bash` command that named no timeout is bounded again. The
   model-facing `bash` tool left an omitted `timeout_ms` at the internal
   ceiling (~24.8 days) instead of the 120 s default its own schema

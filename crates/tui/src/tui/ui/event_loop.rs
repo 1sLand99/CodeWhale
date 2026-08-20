@@ -514,13 +514,12 @@ pub async fn run_tui(
             (handle, task)
         });
 
-    // Fresh users begin with the small local-runtime list. Returning users
-    // recovering a missing key focus their persisted route instead, so
-    // recovery cannot silently replace a Kimi Code bare-K3 endpoint.
-    if app.onboarding == OnboardingState::Provider {
-        let recover_configured_route = app.onboarding_missing_key_recovery;
-        open_onboarding_provider_picker(&mut app, config, &engine_handle, recover_configured_route)
-            .await;
+    // Returning users recovering a missing key open the picker immediately so
+    // recovery cannot silently replace a persisted route. First-run users
+    // start on Welcome; Enter shows the provider explanation, and a second
+    // Enter opens the picker.
+    if app.onboarding == OnboardingState::Provider && app.onboarding_missing_key_recovery {
+        open_onboarding_provider_picker(&mut app, config, &engine_handle, true).await;
     }
 
     // #4605: create the dispatch completion channel before any submit path so

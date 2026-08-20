@@ -227,7 +227,7 @@ pub(crate) fn is_stop_word(input: &str, stop_words: &[String]) -> Option<String>
 fn initial_onboarding_state(
     skip_onboarding: bool,
     was_onboarded: bool,
-    needs_language: bool,
+    _needs_language: bool,
     needs_api_key: bool,
     needs_workspace_trust: bool,
 ) -> OnboardingState {
@@ -242,14 +242,12 @@ fn initial_onboarding_state(
         OnboardingState::Provider
     } else if was_onboarded && needs_workspace_trust {
         OnboardingState::TrustDirectory
-    } else if needs_language {
-        OnboardingState::Language
-    } else if needs_api_key {
-        OnboardingState::Provider
-    } else if needs_workspace_trust {
-        OnboardingState::TrustDirectory
     } else {
-        OnboardingState::Ready
+        // First run always starts at Welcome. Enter then routes to language,
+        // provider setup, trust, or ready depending on what this run needs.
+        // Skipping Welcome to land on the provider list was an over-correction:
+        // new users never saw a start screen or the calm API-key explanation.
+        OnboardingState::Welcome
     }
 }
 
