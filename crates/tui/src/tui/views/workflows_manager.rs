@@ -15,7 +15,7 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -46,7 +46,9 @@ fn now_ms() -> u64 {
 /// failures) spends red.
 fn status_style(status: &str) -> Style {
     match status {
-        "running" | "pending" => Style::default().fg(palette::STATUS_WARNING),
+        "queued" | "running" | "waiting" | "pending" => {
+            Style::default().fg(palette::STATUS_WARNING)
+        }
         "completed" | "succeeded" => Style::default().fg(palette::STATUS_SUCCESS),
         "degraded" => Style::default().fg(palette::STATUS_WARNING),
         "failed" | "budget_exceeded" | "replay_diverged" => {
@@ -74,6 +76,9 @@ pub struct WorkflowsManagerView {
     status: Option<String>,
     workspace: PathBuf,
     owner_session_id: Option<String>,
+    /// The manager follows owner-state changes while open without polling the
+    /// journal on every terminal frame.
+    last_refresh_at: Instant,
     /// Screen rect of the run list body, recorded at render for mouse parity.
     list_body: Cell<Rect>,
 }
@@ -89,23 +94,30 @@ impl WorkflowsManagerView {
             status: None,
             workspace: app.workspace.clone(),
             owner_session_id: app.current_session_id.clone(),
+            last_refresh_at: Instant::now(),
             list_body: Cell::new(Rect::ZERO),
         };
         view.refresh();
         view
     }
 
-    /// Re-read the journal (newest first), keeping the selection clamped to
-    /// the run list. Refresh preserves the selected index, so a run that is
-    /// still in the journal keeps focus across status changes.
+    /// Re-read the journal (newest first), preserving the selected run id when
+    /// a newer run arrives rather than silently moving focus to a different
+    /// row.
     fn refresh(&mut self) {
+        let selected_id = self.selected().map(|detail| detail.line.run_id.clone());
         self.runs = host_workflow_run_details(&self.workspace, self.owner_session_id.as_deref())
             .into_iter()
             .rev()
             .collect();
-        if self.row >= self.runs.len() {
-            self.row = self.runs.len().saturating_sub(1);
-        }
+        self.row = selected_id
+            .and_then(|run_id| {
+                self.runs
+                    .iter()
+                    .position(|detail| detail.line.run_id == run_id)
+            })
+            .unwrap_or_else(|| self.row.min(self.runs.len().saturating_sub(1)));
+        self.last_refresh_at = Instant::now();
     }
 
     fn selected(&self) -> Option<&HostWorkflowRunDetail> {
@@ -127,7 +139,7 @@ impl WorkflowsManagerView {
         let Some(detail) = self.selected() else {
             return;
         };
-        if detail.line.status != "running" {
+        if !detail.line.active {
             self.status = Some(format!(
                 "Run {} already {} — nothing to cancel.",
                 detail.line.run_id, detail.line.status
@@ -156,7 +168,7 @@ impl WorkflowsManagerView {
         } else {
             hints.push(ActionHint::new("Enter", "detail"));
         }
-        if self.selected().is_some_and(|d| d.line.status == "running") {
+        if self.selected().is_some_and(|d| d.line.active) {
             hints.push(ActionHint::new("x", "cancel"));
         }
         hints.push(ActionHint::new("r", "refresh"));
@@ -165,12 +177,8 @@ impl WorkflowsManagerView {
     }
 
     fn header_lines(&self) -> Vec<Line<'static>> {
-        let running = self
-            .runs
-            .iter()
-            .filter(|d| d.line.status == "running")
-            .count();
-        let finished = self.runs.len() - running;
+        let active = self.runs.iter().filter(|d| d.line.active).count();
+        let finished = self.runs.len() - active;
         let mut header = vec![
             Line::from(vec![
                 Span::styled(
@@ -178,7 +186,7 @@ impl WorkflowsManagerView {
                     Style::default().fg(palette::WHALE_ACTION).bold(),
                 ),
                 Span::styled(
-                    format!("· {running} running · {finished} finished"),
+                    format!("· {active} active · {finished} finished"),
                     Style::default().fg(palette::TEXT_MUTED),
                 ),
             ]),
@@ -482,6 +490,18 @@ impl ModalView for WorkflowsManagerView {
                     self.row = idx;
                 }
             }
+        }
+        ViewAction::None
+    }
+
+    fn tick(&mut self) -> ViewAction {
+        let interval = if self.runs.iter().any(|detail| detail.line.active) {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(2)
+        };
+        if self.last_refresh_at.elapsed() >= interval {
+            self.refresh();
         }
         ViewAction::None
     }

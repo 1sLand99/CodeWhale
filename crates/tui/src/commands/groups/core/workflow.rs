@@ -329,9 +329,9 @@ fn workflow_status(app: &App, run_id: &str) -> CommandResult {
             "No workflow runs in this workspace yet. /workflow <objective> starts one.",
         );
     }
-    let running = runs.iter().filter(|line| line.status == "running").count();
+    let active = runs.iter().filter(|line| line.active).count();
     let mut lines = vec![format!(
-        "{} workflow run{} · {running} running",
+        "{} workflow run{} · {active} active",
         runs.len(),
         if runs.len() == 1 { "" } else { "s" }
     )];
@@ -358,15 +358,15 @@ fn workflow_cancel(app: &App, run_id: &str) -> CommandResult {
             app.current_session_id.as_deref(),
         )
         .into_iter()
-        .filter(|line| line.status == "running")
+        .filter(|line| line.active)
         .collect();
         match running.as_slice() {
-            [] => return CommandResult::message("No workflow is running."),
+            [] => return CommandResult::message("No workflow is active."),
             [only] => only.run_id.clone(),
             many => {
                 let ids: Vec<&str> = many.iter().map(|line| line.run_id.as_str()).collect();
                 return CommandResult::error(format!(
-                    "{} workflows are running; name one: {}",
+                    "{} workflows are active; name one: {}",
                     many.len(),
                     ids.join(", ")
                 ));
@@ -697,10 +697,10 @@ mod tests {
         let result = workflow(&mut app, Some("runs"));
         let text = result.message.unwrap();
         assert!(text.contains("workflow_seed"), "{text}");
-        assert!(text.contains("running"), "{text}");
+        assert!(text.contains("queued"), "{text}");
         assert!(result.action.is_none());
 
-        // Cancel with one running run needs no id and never asks the model.
+        // Cancel with one active run needs no id and never asks the model.
         // The seeded record has no live controller (no VM ran); cancel still
         // marks the journal cancelled with an honest nothing-live receipt.
         let result = workflow(&mut app, Some("cancel"));

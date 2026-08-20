@@ -3,7 +3,7 @@
 //! The JS VM stays in `codewhale-workflow-js`; this module supplies the TUI
 //! driver that turns each `task(...)` call into a real `SubAgentManager` spawn.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -5256,6 +5256,84 @@ mod journal {
         }
 
         #[test]
+        fn host_stage_is_derived_from_typed_owner_events() {
+            let mut record = sample_record("workflow_stage", WorkflowRunStatus::Running);
+            record.push_event(WorkflowUiEvent::at(
+                1,
+                "session-journal",
+                WorkflowUiEventKind::RunStarted {
+                    workflow_id: Some("fixture".to_string()),
+                    workflow_goal: Some("review release".to_string()),
+                    source_path: None,
+                    token_budget: None,
+                },
+            ));
+            assert_eq!(super::super::host_workflow_stage(&record), "queued");
+
+            record.push_event(WorkflowUiEvent::at(
+                2,
+                "session-journal",
+                WorkflowUiEventKind::PhaseStarted {
+                    title: "review".to_string(),
+                },
+            ));
+            assert_eq!(super::super::host_workflow_stage(&record), "running");
+
+            record.push_event(WorkflowUiEvent::at(
+                3,
+                "session-journal",
+                WorkflowUiEventKind::TaskStarted(Box::new(
+                    super::super::WorkflowTaskStartedEvent {
+                        task_id: "reviewer-1".to_string(),
+                        label: Some("reviewer".to_string()),
+                        role: None,
+                        profile: None,
+                        model: None,
+                        strength: None,
+                        thinking: None,
+                        requested_reasoning: None,
+                        effective_reasoning: None,
+                        resolved_role: Some("reviewer".to_string()),
+                        resolved_profile: None,
+                        resolved_provider: "local".to_string(),
+                        resolved_model: "stub".to_string(),
+                        route_source: "session".to_string(),
+                        child_route: None,
+                        worktree: false,
+                        workspace: None,
+                        git_branch: None,
+                        parent_task_id: None,
+                        depth: 0,
+                        workflow_run_id: Some("workflow_stage".to_string()),
+                        workflow_phase_id: Some("review".to_string()),
+                        workflow_task_label: Some("reviewer".to_string()),
+                        workflow_child_index: Some(0),
+                        fleet_receipt: None,
+                    },
+                )),
+            ));
+            assert_eq!(super::super::host_workflow_stage(&record), "waiting");
+
+            record.push_event(WorkflowUiEvent::at(
+                4,
+                "session-journal",
+                WorkflowUiEventKind::TaskCompleted {
+                    task_id: "reviewer-1".to_string(),
+                    status: super::super::IrWorkflowRunStatus::Succeeded,
+                    usage: None,
+                },
+            ));
+            assert_eq!(super::super::host_workflow_stage(&record), "running");
+
+            record.status = WorkflowRunStatus::Completed;
+            assert_eq!(super::super::host_workflow_stage(&record), "completed");
+            record.status = WorkflowRunStatus::Failed;
+            assert_eq!(super::super::host_workflow_stage(&record), "failed");
+            record.status = WorkflowRunStatus::Cancelled;
+            assert_eq!(super::super::host_workflow_stage(&record), "cancelled");
+        }
+
+        #[test]
         fn host_run_details_derive_phases_and_child_states_from_the_journal() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let state = WorkflowWorkspaceState::open(tmp.path());
@@ -5414,8 +5492,13 @@ pub(crate) fn structcopy_run_projection(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostWorkflowRunLine {
     pub run_id: String,
-    /// Machine token: running | completed | degraded | failed | cancelled.
+    /// Human-facing stage derived from the durable owner record and its typed
+    /// event tail: queued | running | waiting | completed | degraded | failed |
+    /// cancelled. This is presentation state, not a second lifecycle owner.
     pub status: &'static str,
+    /// Whether the canonical owner record is still nonterminal. Controls key
+    /// off this bit instead of reverse-parsing the display stage.
+    pub active: bool,
     /// The run's goal, its workflow id, or the source file name.
     pub label: String,
     pub started_at_ms: u64,
@@ -5423,6 +5506,48 @@ pub(crate) struct HostWorkflowRunLine {
     pub child_count: usize,
     pub last_progress: Option<String>,
     pub error: Option<String>,
+}
+
+fn host_workflow_stage(record: &WorkflowRunRecord) -> &'static str {
+    match record.status {
+        WorkflowRunStatus::Completed => return "completed",
+        WorkflowRunStatus::Degraded => return "degraded",
+        WorkflowRunStatus::Failed => return "failed",
+        WorkflowRunStatus::Cancelled => return "cancelled",
+        WorkflowRunStatus::Running => {}
+    }
+
+    // The owner journal remains the sole lifecycle source. These finer
+    // nonterminal stages come only from its typed event stream: before the VM
+    // reports real activity the accepted run is queued; while one or more
+    // children remain open the VM is waiting on those agents; otherwise it is
+    // actively running host/script work. A truncated tail may forget a child's
+    // start event, in which case we safely show the coarser `running` state.
+    let mut open_children = HashSet::new();
+    let mut work_started = !record.progress.is_empty();
+    for event in &record.events {
+        match &event.kind {
+            WorkflowUiEventKind::TaskStarted(started) => {
+                work_started = true;
+                open_children.insert(started.task_id.clone());
+            }
+            WorkflowUiEventKind::TaskCompleted { task_id, .. } => {
+                work_started = true;
+                open_children.remove(task_id);
+            }
+            WorkflowUiEventKind::RunStarted { .. }
+            | WorkflowUiEventKind::RunCompleted { .. }
+            | WorkflowUiEventKind::RunCancelled { .. } => {}
+            _ => work_started = true,
+        }
+    }
+    if !open_children.is_empty() {
+        "waiting"
+    } else if work_started {
+        "running"
+    } else {
+        "queued"
+    }
 }
 
 fn host_run_line(record: &WorkflowRunRecord) -> HostWorkflowRunLine {
@@ -5441,13 +5566,8 @@ fn host_run_line(record: &WorkflowRunRecord) -> HostWorkflowRunLine {
         .unwrap_or_else(|| "workflow".to_string());
     HostWorkflowRunLine {
         run_id: summary.run_id,
-        status: match summary.status {
-            WorkflowRunStatus::Running => "running",
-            WorkflowRunStatus::Completed => "completed",
-            WorkflowRunStatus::Degraded => "degraded",
-            WorkflowRunStatus::Failed => "failed",
-            WorkflowRunStatus::Cancelled => "cancelled",
-        },
+        status: host_workflow_stage(record),
+        active: summary.status == WorkflowRunStatus::Running,
         label,
         started_at_ms: summary.started_at_ms,
         completed_at_ms: summary.completed_at_ms,
