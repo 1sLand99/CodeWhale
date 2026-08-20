@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The bottom status rail is no longer one run-on sentence. At 120 columns it
+  read `▌· idle · Ollama · deepseek-v4-flash · max · Anonymous usage counts are
+  on. … ⌥V:output · /context:context · fn+F1:keys` — live state, route
+  identity, a telemetry consent notice, and keyboard hints all strung together
+  by the same middle dot in the same ink, so nothing was grouped and the eye
+  had nothing to skim by. At 80 columns it simply stopped mid-notice, and at 60
+  the row overflowed and was clipped by the terminal mid-word. The rail now
+  divides its groups with a blank gutter instead of another dot (the dot is
+  kept for peers *inside* a group), the model name reads one step brighter than
+  the qualifiers that narrow it, and `Esc to interrupt` reads in the same hint
+  weight as the right-hand chords rather than in the separator weight.
+
+- Nothing on the status rail is ever truncated now. A notice sheds whole
+  sentences to fit, and if one sentence is still too long it sheds at the inner
+  joints — a colon, a semicolon — with the trailing mark cut so the phrase that
+  survives does not itself advertise that more was coming. Route identity sheds
+  the provider, then the reasoning effort, rather than rendering
+  `deepseek-v4-flash-prev…`; a clipped model name is worse than no model name
+  because routes share prefixes. Clauses rejoin without a Latin space after a
+  full-width stop, so the Japanese receipt reads as Japanese.
+
+- A notice now stands the standing facts down instead of queueing behind them.
+  Route identity and the ledger chips are still there in ten seconds; the
+  notice is not, so it takes the row and the key hints yield last. This is what
+  makes the telemetry receipt readable at 80 columns, where it used to be
+  simultaneously always present and never legible.
+
+- The status rail no longer advertises `/context:context`. It was spending
+  eighteen columns of a 24-row screen to name a slash command that announces
+  itself the moment you type `/`; the rail advertises chords you cannot
+  discover any other way. The rail now reads the same at 80 columns as at 200.
+
 - The idle screen no longer has an absolute path stretched across it. The
   workspace caption between the wordmark and "What do you want to accomplish?"
   was composed at full length and then truncated to the lane width, which made
