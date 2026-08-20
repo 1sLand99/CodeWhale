@@ -64,6 +64,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command killed there, but the tool description and its `timeout` field both
   claimed otherwise — steering the model away from the one parameter that
   would have saved a longer build. Both now name the real bound.
+- MCP servers no longer restart because an unrelated setting was saved. The
+  lazy config reload re-reads every watched source whenever one of their
+  mtimes moves and keeps the live connections only when the content hash
+  matches — but the hash was taken over `serde_json` bytes produced straight
+  from the config's `HashMap`s, and two `HashMap`s with identical contents do
+  not iterate in the same order. Any touch of any watched file therefore hashed
+  differently, tore down every connection, and SIGTERMed and respawned every
+  stdio child. Keys are now sorted before hashing.
+
+- An MCP server marked `required` now still tells you *why* it failed to start.
+  `connect_all` appended a generic "required MCP server failed to initialize"
+  entry after the real per-server error, and the snapshot folds those pairs into
+  a map keyed by server name — so the contentless entry replaced the diagnosis
+  and /mcp showed the marker instead of "No such file or directory". The marker
+  is now only synthesized when nothing else reported a cause.
+
+- A crashed stdio MCP server is now rebuilt instead of being handed back dead.
+  A failed transport *read* disconnected the connection; a failed *write* did
+  not, so after the child exited the connection stayed `Ready`, the pool reused
+  it on every later tool call, and /mcp kept listing the server as connected.
+
+- An MCP response carrying neither `result` nor `error` is now an error rather
+  than an empty success. It previously reached the model as a successful tool
+  call with a `null` payload, indistinguishable from a tool that did nothing.
+  An explicit `"result": null` is still a valid empty success.
 
 - Silent `#[allow(dead_code)]` suppressions on the modules AGENTS.md warns
   auditors not to delete — prompt zones, context budget, the route seam —
