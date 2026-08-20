@@ -169,21 +169,25 @@ fn screen_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
 }
 
 fn provider_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        heading(app, MessageId::OnboardProviderTitle),
-        Line::from(""),
-    ];
+    let mut lines = Vec::new();
+    heading(&mut lines, app, MessageId::OnboardProviderTitle, width);
+    lines.push(Line::from(""));
     wrap_body(&mut lines, app, MessageId::OnboardProviderBlurb, width);
     lines
 }
 
-fn heading(app: &App, id: MessageId) -> Line<'static> {
-    Line::from(Span::styled(
-        app.tr(id).to_string(),
-        Style::default()
-            .fg(palette::WHALE_INFO)
-            .add_modifier(Modifier::BOLD),
-    ))
+/// Same rule as the welcome headline: a heading is prose and wraps. Today's
+/// provider title happens to fit at 40 columns in every shipped locale, but it
+/// fit by luck rather than by construction.
+fn heading(out: &mut Vec<Line<'static>>, app: &App, id: MessageId, width: usize) {
+    for segment in wrap_words(&app.tr(id), width) {
+        out.push(Line::from(Span::styled(
+            segment,
+            Style::default()
+                .fg(palette::WHALE_INFO)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
 }
 
 /// Append a body sentence word-wrapped to `width` in the muted body lane.

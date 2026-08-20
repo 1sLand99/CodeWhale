@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The first screen of first run no longer cuts its own headline. The welcome
+  and ready titles, and the provider-step heading, were emitted as single
+  unwrapped lines while the sentence beneath them wrapped, so at 40 columns
+  German read "Codewhale arbeitet mit dir in diesem O", Russian lost its final
+  stop, and Japanese lost "します。". Headings are prose and now wrap like it,
+  in every shipped locale.
+
 - The workspace-trust screen no longer cuts its own question in half on a small
   terminal. The question, the prompt-injection risk hint, and the trust-effect
   hint were each pushed as one unwrapped line, so at 40 columns the screen read
