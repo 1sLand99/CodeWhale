@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Message roles are a closed `Role` enum (`crates/core/src/role.rs`) instead of
+  a free-form `String` on `Message`. Four wire adapters each decided
+  independently what an unfamiliar role meant, and a typo in a role string was
+  a silent transcript edit rather than a compile error. `Role` keeps an
+  `Unrecognized(String)` variant and serializes via `as_str()`, so a saved
+  session's bytes are unchanged, a transcript written by a newer build still
+  loads here, and `assistant_interrupted` stays a distinct session item — no
+  session schema bump and no migration ladder.
+
 - Removed the placeholder engine tree in `crates/core/src/engine/`. Its
   `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
   `TurnComplete { status: "completed" }` without ever contacting a model, and

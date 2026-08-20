@@ -5,6 +5,7 @@
 //! engine-event pump it drives.
 
 use super::*;
+use crate::models::Role;
 
 pub(super) fn event_owner_is_active(
     current_session_id: Option<&str>,
@@ -1343,7 +1344,7 @@ pub(crate) async fn run_event_loop(
                                 Err(err) => sanitize_stream_chunk(&format!("Error: {err}")),
                             };
                             app.api_messages.push(Message {
-                                role: "user".to_string(),
+                                role: Role::User,
                                 content: vec![ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),
                                     content: tool_content,

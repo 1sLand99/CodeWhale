@@ -280,13 +280,14 @@ impl super::DeepSeekClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Role;
     use crate::models::{Message, MessageRequest, SystemBlock, SystemPrompt};
 
     fn text_request(model: &str, prompt: &str) -> MessageRequest {
         MessageRequest {
             model: model.to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: prompt.to_string(),
                     cache_control: None,

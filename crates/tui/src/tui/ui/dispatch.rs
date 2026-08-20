@@ -4,6 +4,7 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::*;
+use crate::models::Role;
 
 pub(crate) fn dispatch_hotbar_slot(
     app: &mut App,
@@ -102,7 +103,7 @@ pub(crate) fn push_assistant_message(
     });
     if has_sendable_content {
         app.api_messages.push(Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: blocks,
         });
     }
@@ -595,7 +596,7 @@ pub(crate) fn prepare_user_dispatch(
     // failure path restores the pre-send timestamp from the snapshot.
     app.last_send_at = Some(Instant::now());
     app.api_messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: content.clone(),
             cache_control: None,
@@ -1073,7 +1074,7 @@ pub(crate) async fn steer_user_message(
     let history_cell = app.history.len().saturating_sub(1);
     app.record_context_references(history_cell, message_index, references);
     app.api_messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: content.clone(),
             cache_control: None,

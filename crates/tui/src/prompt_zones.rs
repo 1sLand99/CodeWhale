@@ -21,6 +21,7 @@
 //! `AppendLog` / `TurnScratch` / `ThreeZoneRequest` are type scaffolding
 //! for future phases — not yet wired into the request path.
 
+use crate::models::Role;
 use crate::models::{Message, SystemPrompt, Tool};
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -355,7 +356,7 @@ impl<'a> ThreeZoneRequest<'a> {
         match self.system.as_ref() {
             Some(SystemPrompt::Text(text)) => {
                 messages.push(Message {
-                    role: "system".to_string(),
+                    role: Role::System,
                     content: vec![crate::models::ContentBlock::Text {
                         text: text.clone(),
                         cache_control: None,
@@ -371,7 +372,7 @@ impl<'a> ThreeZoneRequest<'a> {
                     })
                     .collect();
                 messages.push(Message {
-                    role: "system".to_string(),
+                    role: Role::System,
                     content,
                 });
             }
@@ -424,7 +425,7 @@ mod tests {
 
     fn make_message(role: &str, text: &str) -> Message {
         Message {
-            role: role.to_string(),
+            role: Role::from(role),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,

@@ -51,6 +51,7 @@ use super::{
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
+use crate::models::Role;
 
 fn apply_provider_token_limit(
     body: &mut Value,
@@ -1625,7 +1626,7 @@ impl<'a> PromptBuilder<'a> {
             .map(<[Tool]>::to_vec);
         let tool_choice = tools.as_ref().map(|_| json!("none"));
         messages.push(Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: CACHE_WARMUP_USER_TAIL.to_string(),
                 cache_control: None,
@@ -4252,13 +4253,14 @@ mod minimax_reasoning_replay_tests {
         ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MINIMAX_MODEL,
         DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K3_MODEL,
     };
+    use crate::models::Role;
     use crate::models::{ContentBlock, Message, MessageRequest};
 
     fn request_with_assistant_thinking() -> MessageRequest {
         MessageRequest {
             model: DEFAULT_MINIMAX_MODEL.to_string(),
             messages: vec![Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "Inspect tool state".to_string(),
@@ -4350,14 +4352,14 @@ mod minimax_reasoning_replay_tests {
         request.model = "qwen3.8-max".to_string();
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "HANDOFF-SENTINEL: fix the widget.".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "stale thinking from the prior turn".to_string(),
@@ -4378,7 +4380,7 @@ mod minimax_reasoning_replay_tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_qwen38_001".to_string(),
                     content: "widget.rs: struct Widget { .. }".to_string(),
@@ -5864,6 +5866,7 @@ mod image_block_wire_tests {
     //! message whose `content` is an array of parts, with the image as
     //! `{"type":"image_url","image_url":{"url":…}}`.
     use super::{ApiProvider, build_chat_wire_body};
+    use crate::models::Role;
     use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
@@ -5872,7 +5875,7 @@ mod image_block_wire_tests {
         MessageRequest {
             model: "gpt-4o".to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![
                     ContentBlock::Text {
                         text: "what is in this screenshot?".to_string(),
@@ -5970,7 +5973,7 @@ mod image_block_wire_tests {
         let mut request = request_with_image();
         request.messages = vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_image_1".to_string(),
                     name: "read".to_string(),
@@ -5980,7 +5983,7 @@ mod image_block_wire_tests {
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_image_1".to_string(),
                     content: "screenshot captured".to_string(),
@@ -6031,7 +6034,7 @@ mod mistral_reasoning_tests {
             model: "mistral-medium-latest".to_string(),
             messages: vec![
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![
                         ContentBlock::Thinking {
                             thinking: "Inspect the current state before calling the tool."
@@ -6053,7 +6056,7 @@ mod mistral_reasoning_tests {
                     ],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-1".to_string(),
                         content: "contents".to_string(),
@@ -6447,14 +6450,14 @@ mod google_thought_signature_tests {
             model: "gemini-3.1-pro-preview".to_string(),
             messages: vec![
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "Read the config.".to_string(),
                         cache_control: None,
                     }],
                 },
                 Message {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: vec![
                         ContentBlock::Text {
                             text: "Reading now.".to_string(),
@@ -6470,7 +6473,7 @@ mod google_thought_signature_tests {
                     ],
                 },
                 Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-g-1".to_string(),
                         content: "key = \"value\"".to_string(),

@@ -4,6 +4,7 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::*;
+use crate::models::Role;
 
 /// Map the host terminal rect onto the session shell canvas.
 ///
@@ -595,7 +596,7 @@ pub(crate) fn live_tool_receipt_messages(
         messages.push(tool_use_msg.clone());
     }
     messages.push(Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: id.to_string(),
             content: raw.to_string(),

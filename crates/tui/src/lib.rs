@@ -165,6 +165,7 @@ use crate::mcp::{
     McpCommandAvailability, McpConfig, McpPool, McpServerConfig, McpServerOAuthConfig,
     is_relative_stdio_path_arg,
 };
+use crate::models::Role;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::session_manager::{SessionManager, create_saved_session, truncate_id};
 use crate::tui::history::{summarize_tool_args, summarize_tool_output};
@@ -7537,7 +7538,7 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hi".to_string(),
                 cache_control: None,
@@ -7982,7 +7983,7 @@ Provide findings ordered by severity with file references, then open questions, 
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: user_prompt,
                 cache_control: None,
@@ -10179,7 +10180,7 @@ async fn run_one_shot(
     let request = MessageRequest {
         model,
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: prompt.to_string(),
                 cache_control: None,
@@ -10240,7 +10241,7 @@ async fn run_one_shot_json(
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: prompt.to_string(),
                 cache_control: None,
@@ -16236,14 +16237,14 @@ mod terminal_mode_tests {
         let system = SystemPrompt::Text("system rules".to_string());
         let messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "run tests".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::thinking("checking context"),
                     ContentBlock::Text {
@@ -16260,7 +16261,7 @@ mod terminal_mode_tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call-1".to_string(),
                     content: "stdout line\nstderr line".to_string(),
@@ -17784,7 +17785,7 @@ mod setup_helper_tests {
         with_home(tmp.path(), || {
             let manager = SessionManager::default_location().expect("manager");
             let messages = vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "in flight".to_string(),
                     cache_control: None,
@@ -17826,7 +17827,7 @@ mod setup_helper_tests {
             let manager = SessionManager::default_location().expect("manager");
             let session = create_saved_session(
                 &[Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "legacy in flight".to_string(),
                         cache_control: None,
@@ -17870,7 +17871,7 @@ mod setup_helper_tests {
         with_home(tmp.path(), || {
             let manager = SessionManager::default_location().expect("manager");
             let messages = vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "continue me".to_string(),
                     cache_control: None,
@@ -17913,7 +17914,7 @@ mod setup_helper_tests {
         with_home(tmp.path(), || {
             let manager = SessionManager::default_location().expect("manager");
             let messages = vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "legacy continue".to_string(),
                     cache_control: None,
@@ -17959,7 +17960,7 @@ mod setup_helper_tests {
         with_home(tmp.path(), || {
             let manager = SessionManager::default_location().expect("manager");
             let messages = vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "belongs elsewhere".to_string(),
                     cache_control: None,
@@ -17993,7 +17994,7 @@ mod setup_helper_tests {
             let manager = SessionManager::default_location().expect("manager");
             let stale = create_saved_session(
                 &[Message {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: "crash-time state".to_string(),
                         cache_control: None,
@@ -18011,7 +18012,7 @@ mod setup_helper_tests {
             // regular session file exists for the same id.
             let mut advanced = stale.clone();
             advanced.messages.push(Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: "post-recovery progress".to_string(),
                     cache_control: None,

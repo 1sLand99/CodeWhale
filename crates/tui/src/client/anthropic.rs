@@ -885,6 +885,7 @@ fn anthropic_error_fields(error: &Value) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Role;
     use crate::models::{CacheControl, Message, SystemBlock, SystemPrompt, Tool};
 
     fn request_with(
@@ -896,7 +897,7 @@ mod tests {
         MessageRequest {
             model: model.to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "hello".to_string(),
                     cache_control: None,
@@ -1180,14 +1181,14 @@ mod tests {
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "run both tools".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::ToolUse {
                         id: "toolu_ok".to_string(),
@@ -1207,7 +1208,7 @@ mod tests {
             },
             // Pre-dispatch failure left only one tool_result behind.
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_ok".to_string(),
                     content: "contents".to_string(),
@@ -1217,7 +1218,7 @@ mod tests {
             },
             // Trailing assistant tool_use with no user turn at all.
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "toolu_tail".to_string(),
                     name: "task".to_string(),
@@ -1498,14 +1499,14 @@ mod tests {
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
         request.messages = vec![
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "do the thing".to_string(),
                     cache_control: None,
                 }],
             },
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "signed reasoning".to_string(),
@@ -1527,7 +1528,7 @@ mod tests {
                 ],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "toolu_1".to_string(),
                     content: "contents".to_string(),
@@ -1563,7 +1564,7 @@ mod tests {
         // Five caller-marked user turns + the two placed breakpoints.
         request.messages = (0..5)
             .map(|i| Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: format!("turn {i}"),
                     cache_control: Some(CacheControl {

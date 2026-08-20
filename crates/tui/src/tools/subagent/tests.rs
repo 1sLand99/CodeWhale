@@ -1937,7 +1937,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> String {
 
 fn text_message(role: &str, text: &str) -> Message {
     Message {
-        role: role.to_string(),
+        role: Role::from(role),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
@@ -4553,7 +4553,7 @@ fn spawn_request_parses_token_budget_override() {
 #[test]
 fn forked_subagent_messages_preserve_parent_prefix_then_append_task() {
     let parent_message = Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "parent turn".to_string(),
             cache_control: None,
@@ -6814,7 +6814,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
     let context = SubAgentForkContext {
         messages: vec![
             Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "search-1".to_string(),
                     name: TOOL_SEARCH_NAME.to_string(),
@@ -6824,7 +6824,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
                 }],
             },
             Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "search-1".to_string(),
                     content: json!({
@@ -9887,7 +9887,7 @@ fn fresh_forked_and_nested_subagents_share_authority_bound_skill_catalogs() {
 
     let fork_context = SubAgentForkContext {
         messages: vec![Message {
-            role: "user".to_string(),
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "parent".to_string(),
                 cache_control: None,
@@ -10648,7 +10648,7 @@ fn todo_source_for(runtime: &SubAgentRuntime) -> crate::todo_snapshot::TodoSourc
 async fn child_request_messages_are_exactly_its_stored_messages() {
     let child = stub_runtime().child_runtime();
     let stored = vec![Message {
-        role: "user".to_string(),
+        role: Role::User,
         content: vec![ContentBlock::Text {
             text: "child assignment".to_string(),
             cache_control: None,
@@ -19190,7 +19190,7 @@ async fn resume_from_checkpoint_spawns_seeded_agent_with_checkpoint_context() {
             "paused_child",
             tmp.path(),
             vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "prior work".to_string(),
                     cache_control: None,
@@ -19251,7 +19251,7 @@ async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
             "paused_child",
             tmp.path(),
             vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "prior work".to_string(),
                     cache_control: None,

@@ -1234,6 +1234,7 @@ mod tests {
 mod dialect_seam_tests {
     use super::*;
     use crate::config::{Config, ProviderConfig, ProvidersConfig};
+    use crate::models::Role;
     use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Tool};
     use serde_json::json;
 
@@ -1257,7 +1258,7 @@ mod dialect_seam_tests {
         MessageRequest {
             model: model.to_string(),
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "hello".to_string(),
                     cache_control: None,
