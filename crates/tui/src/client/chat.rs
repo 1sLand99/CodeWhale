@@ -1422,8 +1422,15 @@ impl DeepSeekClient {
 
                     lines_processed = lines_processed.saturating_add(1);
                     if lines_processed >= SSE_MAX_LINES_PER_CHUNK {
-                        // Yield backpressure relief to avoid starving downstream consumers.
-                        break;
+                        // Backpressure relief: hand the executor a turn so a
+                        // slow consumer is not starved. Keep draining after
+                        // that — leaving complete lines buffered would strand
+                        // them, because the outer loop only resumes draining
+                        // once ANOTHER chunk arrives and the end-of-stream
+                        // flush treats the whole remainder as a single
+                        // unterminated line.
+                        lines_processed = 0;
+                        tokio::task::yield_now().await;
                     }
                 }
             }

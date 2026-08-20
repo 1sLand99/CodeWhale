@@ -1204,3 +1204,39 @@ fn tool_result_image_becomes_native_function_output_content() {
     assert_eq!(content[1]["type"], "input_image");
     assert_eq!(content[1]["image_url"], "data:image/png;base64,QUJD");
 }
+
+/// A `system`-role history message — the shape a compaction summary, a branch
+/// summary, or an imported journal `system` entry takes once it reaches
+/// `MessageRequest::messages` — must survive the Responses conversion. The
+/// Chat Completions adapter already keeps it
+/// (`request_builder_preserves_internal_system_messages`); dropping it here
+/// silently deletes the only record of everything the compaction replaced.
+#[test]
+fn responses_input_keeps_system_role_history_messages() {
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: "system".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "[compaction summary] the user is porting the parser".to_string(),
+                cache_control: None,
+            }],
+        },
+    );
+
+    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+
+    let system = items
+        .iter()
+        .find(|item| item["role"] == "system")
+        .expect("system-role history message survives conversion");
+    assert_eq!(system["type"], "message");
+    assert_eq!(
+        system["content"][0],
+        serde_json::json!({
+            "type": "input_text",
+            "text": "[compaction summary] the user is porting the parser",
+        })
+    );
+}
