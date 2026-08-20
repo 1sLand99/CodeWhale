@@ -26,6 +26,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use codewhale_config::device_code::DevicePollOutcome;
+
 use crate::config::{ApiProvider, Config};
 
 /// Official Grok CLI public OIDC client id (public client; no secret).
@@ -39,10 +41,7 @@ pub const XAI_OIDC_ISSUER: &str = "https://auth.x.ai";
 /// the user-principal login request.
 pub const DEFAULT_SCOPES: &str = "openid profile email offline_access api:access grok-cli:access";
 const REFRESH_SKEW_SECS: i64 = 60;
-const DEVICE_POLL_DEFAULT_SECS: u64 = 5;
 const DEVICE_POLL_MAX_SECS: u64 = 900;
-/// RFC 8628 §3.5: on `slow_down` the polling interval increases by 5 seconds.
-const DEVICE_SLOW_DOWN_STEP_SECS: u64 = 5;
 const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
 const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
@@ -75,6 +74,11 @@ struct TokenResponse {
     refresh_token: Option<String>,
     expires_in: Option<u64>,
     error: Option<String>,
+    /// RFC 8628 §3.5 lets the server restate the required minimum polling
+    /// interval alongside `slow_down`. Preferring it over a client-tracked
+    /// interval is what stops WSL/VM clock drift from polling early forever.
+    #[serde(default)]
+    interval: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,6 +156,7 @@ pub(crate) fn pending_device_login_for_test(
             refresh_token: Some(refresh_token.to_string()),
             expires_in: Some(3600),
             error: None,
+            interval: None,
         },
     }
 }
@@ -537,6 +542,13 @@ fn device_code_login_with(
         .clone()
         .or(device.verification_uri.clone())
         .unwrap_or_else(|| format!("{issuer}/device"));
+    // This string comes off the wire and is handed to `webbrowser::open`, so a
+    // malicious device-code response must not be able to launch something
+    // other than a browser navigation.
+    let verify = codewhale_config::device_code::validate_browser_verification_uri(
+        &verify,
+        "xAI device-code request",
+    )?;
 
     eprintln!("xAI device-code login");
     eprintln!("  Open:  {verify}");
@@ -546,40 +558,29 @@ fn device_code_login_with(
         eprintln!("Could not open the browser automatically: {err}");
     }
 
-    let mut interval = device.interval.unwrap_or(DEVICE_POLL_DEFAULT_SECS).max(1);
-    let deadline = std::time::Instant::now()
-        + Duration::from_secs(device.expires_in.unwrap_or(DEVICE_POLL_MAX_SECS).max(30));
+    let lifetime = Duration::from_secs(device.expires_in.unwrap_or(DEVICE_POLL_MAX_SECS).max(30));
+    let token = codewhale_config::device_code::DeviceCodePoll::new(
+        lifetime,
+        "xAI device-code authorization timed out. Re-run device login \
+         and approve the code before it expires.",
+    )
+    .interval_seconds(device.interval)
+    .wait_before_first_poll(true)
+    .slow_down_timeout_message(
+        "xAI device-code authorization timed out after one or more slow_down \
+         responses. That is usually clock drift in a WSL or VM environment; \
+         sync the clock, then re-run device login and approve the code before \
+         it expires.",
+    )
+    .run(thread::sleep, || {
+        poll_device_token(&endpoints.token_endpoint, client_id, &device.device_code)
+    })?;
 
-    loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            bail!(
-                "xAI device-code authorization timed out. Re-run device login \
-                 and approve the code before it expires."
-            );
-        }
-        // Never sleep past the code's expiry, even after slow_down backoff.
-        thread::sleep(Duration::from_secs(interval).min(deadline - now));
-        match poll_device_token(&endpoints.token_endpoint, client_id, &device.device_code) {
-            Ok(token) => {
-                return Ok(PendingXaiDeviceLogin {
-                    issuer: issuer.to_string(),
-                    client_id: client_id.to_string(),
-                    token,
-                });
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                match device_poll_backoff(interval, &msg) {
-                    Some(next_interval) => {
-                        interval = next_interval;
-                        continue;
-                    }
-                    None => return Err(err),
-                }
-            }
-        }
-    }
+    Ok(PendingXaiDeviceLogin {
+        issuer: issuer.to_string(),
+        client_id: client_id.to_string(),
+        token,
+    })
 }
 
 /// Commit a pending device login as a uniquely named owned generation and
@@ -983,22 +984,6 @@ fn fallback_device_oauth_endpoints(issuer: &str) -> DeviceOauthEndpoints {
     }
 }
 
-/// RFC 8628 §3.5 polling update for a failed token poll.
-///
-/// Returns the interval to use for the next poll when polling should
-/// continue: `authorization_pending` keeps the current interval, `slow_down`
-/// increases it by [`DEVICE_SLOW_DOWN_STEP_SECS`]. Any other error is
-/// terminal and returns `None`.
-fn device_poll_backoff(interval: u64, error: &str) -> Option<u64> {
-    if error.contains("authorization_pending") {
-        Some(interval)
-    } else if error.contains("slow_down") {
-        Some(interval + DEVICE_SLOW_DOWN_STEP_SECS)
-    } else {
-        None
-    }
-}
-
 fn resolve_device_oauth_endpoints(issuer: &str) -> DeviceOauthEndpoints {
     match discover_device_oauth_endpoints(issuer) {
         Ok(endpoints) => endpoints,
@@ -1253,11 +1238,15 @@ fn request_device_code(
     })
 }
 
+/// One poll of the device token endpoint, classified for the shared RFC 8628
+/// loop. Transient states (`authorization_pending`, `slow_down`) are values,
+/// not errors: the previous implementation returned them as `Err` and the
+/// caller substring-matched the message to decide whether to keep polling.
 fn poll_device_token(
     token_endpoint: &str,
     client_id: &str,
     device_code: &str,
-) -> Result<TokenResponse> {
+) -> Result<DevicePollOutcome<TokenResponse>> {
     let client = crate::tls::reqwest_blocking_client_builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -1277,8 +1266,13 @@ fn poll_device_token(
     let (status, body): (_, TokenResponse) =
         parse_oauth_json_response(response, "xAI device-code token exchange")?;
     if let Some(err) = body.error.as_deref() {
-        if matches!(err, "authorization_pending" | "slow_down") {
-            bail!("{err}");
+        if err == "authorization_pending" {
+            return Ok(DevicePollOutcome::Pending);
+        }
+        if err == "slow_down" {
+            return Ok(DevicePollOutcome::SlowDown {
+                interval_seconds: body.interval,
+            });
         }
         // Poll requests carry the device credential. Keep diagnostics to the
         // standard error code and HTTP status rather than echoing descriptions.
@@ -1289,7 +1283,7 @@ fn poll_device_token(
         let detail = oauth_failure_detail(None, None, status);
         bail!("xAI device-code token exchange failed: {detail}");
     }
-    Ok(body)
+    Ok(DevicePollOutcome::Complete(body))
 }
 
 fn jwt_expiry_seconds(token: &str) -> Option<u64> {
@@ -1636,6 +1630,98 @@ mod tests {
         assert_ne!(owned, auth_file_path());
     }
 
+    /// #4257 storage contract: the on-disk credential file is a JSON object
+    /// keyed `{issuer}::{client_id}` whose entries use the Grok CLI's field
+    /// names. Consolidating the device-code poller must not touch it, so pin
+    /// the format with literal bytes rather than a round-trip through the
+    /// writer — a round-trip would follow the code if the code drifted.
+    #[test]
+    fn a_token_stored_in_the_current_on_disk_format_still_loads() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+
+        let generation = "xai-auth-fedcba9876543210fedcba9876543210.json";
+        let expires_at = rfc3339_from_now(3600);
+        let stored = format!(
+            r#"{{
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {{
+    "key": "stored-access-token",
+    "refresh_token": "stored-refresh-token",
+    "expires_at": "{expires_at}",
+    "oidc_issuer": "https://auth.x.ai",
+    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
+    "auth_mode": "oidc",
+    "unknown_cli_field": "preserved"
+  }}
+}}"#
+        );
+
+        let credentials = codewhale_config::with_xai_oauth_lifecycle_lock(|store| {
+            store.write(generation, stored.as_bytes(), false)?;
+            // A fresh stored token must be used as-is: refreshing here would
+            // mean an existing login stopped working offline.
+            get_owned_credentials_locked(store, generation, |_, _, _| {
+                panic!("a fresh stored token must not be refreshed")
+            })
+        })
+        .expect("read back a credential stored in the current format");
+
+        assert_eq!(credentials.access_token, "stored-access-token");
+        assert_eq!(
+            credentials.refresh_token.as_deref(),
+            Some("stored-refresh-token")
+        );
+        assert_eq!(credentials.issuer, XAI_OIDC_ISSUER);
+        assert_eq!(credentials.client_id, GROK_OIDC_CLIENT_ID);
+    }
+
+    /// The verification URI is handed to `webbrowser::open`. Before this was
+    /// consolidated onto the shared primitive, Codewhale opened whatever the
+    /// device-code response said — pi validated it, Codewhale did not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_login_refuses_a_verification_uri_that_is_not_a_web_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device-advertised"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "device-token",
+                "user_code": "CW-TEST",
+                "verification_uri": "https://auth.x.ai/device",
+                "verification_uri_complete": "vscode://attacker/run?code=CW-TEST",
+                "expires_in": 60,
+                "interval": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // No token-endpoint mock: the flow must fail before it ever polls.
+
+        let result = tokio::task::block_in_place(|| {
+            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
+        });
+
+        let error = result.expect_err("a non-web verification URI must abort login");
+        let message = format!("{error:#}");
+        assert!(message.contains("untrusted verification URI"), "{message}");
+    }
+
     fn pending_login(access: &str, refresh: &str) -> PendingXaiDeviceLogin {
         pending_device_login_for_test(access, refresh)
     }
@@ -1719,6 +1805,7 @@ mod tests {
                         refresh_token: Some("rotated-refresh".to_string()),
                         expires_in: Some(3600),
                         error: None,
+                        interval: None,
                     })
                 })
             })
@@ -1788,6 +1875,7 @@ mod tests {
                         refresh_token: Some("last-refresh-rotation".to_string()),
                         expires_in: Some(3600),
                         error: None,
+                        interval: None,
                     })
                 })
             })
@@ -2658,18 +2746,78 @@ consent_version = 1
         assert!(credentials_valid(&live), "activated login must be usable");
     }
 
-    #[test]
-    fn device_poll_backoff_follows_rfc8628() {
-        // authorization_pending keeps the current interval.
-        assert_eq!(device_poll_backoff(5, "authorization_pending"), Some(5));
-        // slow_down increases the interval by 5 seconds (RFC 8628 §3.5).
-        assert_eq!(
-            device_poll_backoff(5, "slow_down"),
-            Some(5 + DEVICE_SLOW_DOWN_STEP_SECS)
-        );
+    /// Replaces `device_poll_backoff_follows_rfc8628`, which pinned the old
+    /// internal shape: a stringly-typed backoff helper that decided whether to
+    /// keep polling by substring-matching the poll error message. The same
+    /// RFC 8628 behaviours are now pinned in two places — the interval
+    /// arithmetic in `codewhale_config::device_code`, and the classification of
+    /// a real token-endpoint response here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poll_device_token_classifies_rfc8628_poll_states() {
+        async fn outcome(
+            body: serde_json::Value,
+            status: u16,
+        ) -> Result<DevicePollOutcome<TokenResponse>> {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/oauth2/token"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            tokio::task::block_in_place(|| {
+                poll_device_token(
+                    &format!("{}/oauth2/token", server.uri()),
+                    GROK_OIDC_CLIENT_ID,
+                    "device-token",
+                )
+            })
+        }
+
+        // authorization_pending keeps polling at the current interval.
+        assert!(matches!(
+            outcome(serde_json::json!({ "error": "authorization_pending" }), 400).await,
+            Ok(DevicePollOutcome::Pending)
+        ));
+
+        // slow_down backs off, and a server-supplied interval is carried
+        // through so the loop can prefer it over its own tracked value.
+        assert!(matches!(
+            outcome(
+                serde_json::json!({ "error": "slow_down", "interval": 12 }),
+                400
+            )
+            .await,
+            Ok(DevicePollOutcome::SlowDown {
+                interval_seconds: Some(12)
+            })
+        ));
+        assert!(matches!(
+            outcome(serde_json::json!({ "error": "slow_down" }), 400).await,
+            Ok(DevicePollOutcome::SlowDown {
+                interval_seconds: None
+            })
+        ));
+
         // Terminal errors stop polling.
-        assert_eq!(device_poll_backoff(5, "access_denied"), None);
-        assert_eq!(device_poll_backoff(5, "expired_token"), None);
+        for error in ["access_denied", "expired_token"] {
+            let result = outcome(serde_json::json!({ "error": error }), 400).await;
+            let Err(failure) = result else {
+                panic!("{error} must stop polling");
+            };
+            assert!(failure.to_string().contains(error), "{failure}");
+        }
+
+        // Success carries the token material through.
+        let result = outcome(
+            serde_json::json!({ "access_token": "a", "refresh_token": "r", "expires_in": 3600 }),
+            200,
+        )
+        .await;
+        let Ok(DevicePollOutcome::Complete(token)) = result else {
+            panic!("an approved device code must complete");
+        };
+        assert_eq!(token.access_token.as_deref(), Some("a"));
     }
 
     #[test]
@@ -2688,6 +2836,7 @@ consent_version = 1
             refresh_token: Some("fresh-refresh".to_string()),
             expires_in: Some(3600),
             error: None,
+            interval: None,
         };
         let before = now_unix_secs().expect("clock");
 
@@ -2725,6 +2874,7 @@ consent_version = 1
             refresh_token: None,
             expires_in: None,
             error: None,
+            interval: None,
         };
 
         let error = apply_token_response(&mut entry, XAI_OIDC_ISSUER, GROK_OIDC_CLIENT_ID, &token)
@@ -2863,14 +3013,16 @@ consent_version = 1
             .mount(&server)
             .await;
 
-        let error = tokio::task::block_in_place(|| {
+        let result = tokio::task::block_in_place(|| {
             poll_device_token(
                 &format!("{}/oauth2/token", server.uri()),
                 GROK_OIDC_CLIENT_ID,
                 "device-token",
             )
-            .expect_err("expired device code must fail")
         });
+        let Err(error) = result else {
+            panic!("expired device code must fail");
+        };
         let message = error.to_string();
 
         assert!(message.contains("expired_token"), "{message}");
@@ -2890,14 +3042,16 @@ consent_version = 1
             .mount(&server)
             .await;
 
-        let error = tokio::task::block_in_place(|| {
+        let result = tokio::task::block_in_place(|| {
             poll_device_token(
                 &format!("{}/oauth2/token", server.uri()),
                 GROK_OIDC_CLIENT_ID,
                 "device-token",
             )
-            .expect_err("non-JSON response must fail")
         });
+        let Err(error) = result else {
+            panic!("non-JSON response must fail");
+        };
         let message = error.to_string();
 
         assert!(message.contains("HTTP 503"), "{message}");
