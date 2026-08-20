@@ -162,17 +162,12 @@ pub fn handle_launch_key(
 }
 
 impl ShellTier {
-    #[must_use]
-    pub fn for_area(area: Rect) -> Self {
-        if area.width < 60 || area.height < 16 {
-            Self::Compact
-        } else if area.width < 110 || area.height < 30 {
-            Self::Normal
-        } else {
-            Self::Wide
-        }
-    }
-
+    // `for_area` (the two-dimensional variant) went with the empty state's
+    // tier branch: the idle caption sheds detail continuously now, so nothing
+    // was left that wanted a coarse three-way answer about a whole Rect. The
+    // row and column floors it encoded still exist, spelled out as
+    // `AMBIENT_MIN_CHAT_HEIGHT` / `AMBIENT_MIN_CHAT_WIDTH` where the layout
+    // can honour them.
     #[must_use]
     pub fn for_chrome_width(width: u16) -> Self {
         if width < 60 {
@@ -1410,8 +1405,7 @@ pub fn render_footer(area: Rect, buf: &mut Buffer, app: &mut App) {
 
 /// The transcript rows the idle brand mark needs before it will draw at all.
 ///
-/// This is [`ShellTier::for_area`]'s `Compact` floor, named so the *layout*
-/// can honour it before the frame is split. Anything that reserves rows above
+/// Named so the *layout* can honour it before the frame is split. Anything that reserves rows above
 /// the transcript must subtract against this constant rather than guess, or
 /// the reservation and the render gate drift and the mark is evicted by
 /// chrome that was sized without knowing the mark existed.
@@ -1599,6 +1593,13 @@ fn shorten_workspace(workspace: &str, keep: usize) -> String {
 /// first: the MCP count, then the branch, then the leading path components. The
 /// folder you are in is the last thing to go, because it is the only part a
 /// person actually reads here.
+///
+/// One rule was added after watching it at 120 columns: the margin is
+/// proportional, not a flat four. A flat four let a 114-column path "fit" a
+/// 119-column lane, which put the centring inset back at two and reproduced
+/// the full-bleed banner this function exists to prevent — the same failure,
+/// arrived at from the other direction. A sixth of the lane, split either
+/// side, means the caption is always visibly a caption.
 fn empty_state_caption(
     workspace: &str,
     branch: &str,
@@ -1606,8 +1607,9 @@ fn empty_state_caption(
     mcp_count: usize,
     width: usize,
 ) -> String {
-    // Leave a margin so the line is visibly inset rather than merely fitting.
-    let budget = width.saturating_sub(4).max(8);
+    // Leave a margin so the line is visibly inset rather than merely fitting,
+    // and scale it, because "four columns" is only a margin at 60 columns.
+    let budget = width.saturating_sub((width / 6).max(4)).max(8);
     let candidates = [
         format!("{workspace} · {branch} · {mcp_label} {mcp_count}"),
         format!("{workspace} · {branch}"),
@@ -1631,7 +1633,6 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let width = usize::from(area.width);
-    let tier = ShellTier::for_area(area);
     let mut lines = vec![Line::from(""); usize::from(area.height / 4)];
     if empty_state_mark_visible(area) {
         let animated = idle_mark_animation_enabled(app);
@@ -1686,17 +1687,18 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         || tr(app.ui_locale, MessageId::EmptyStateNoGit),
         |branch| Cow::Owned(branch.to_string()),
     );
-    let context = if tier == ShellTier::Compact {
-        branch.into_owned()
-    } else {
-        empty_state_caption(
-            &workspace,
-            &branch,
-            tr(app.ui_locale, MessageId::EmptyStateMcpLabel).as_ref(),
-            app.mcp_configured_count,
-            width,
-        )
-    };
+    // Compact used to bypass the caption entirely and print the bare branch,
+    // which in a plain folder rendered as the single centred word "no git" —
+    // a whole row of the hero spent naming something that is not there. The
+    // shedding ladder already degrades gracefully at any width, so every tier
+    // now goes through it.
+    let context = empty_state_caption(
+        &workspace,
+        &branch,
+        tr(app.ui_locale, MessageId::EmptyStateMcpLabel).as_ref(),
+        app.mcp_configured_count,
+        width,
+    );
     let brand = "Codewhale";
     let brand_inset = " ".repeat(width.saturating_sub(brand.width()) / 2);
     lines.push(Line::from(Span::styled(
@@ -1796,6 +1798,24 @@ mod empty_state_caption_tests {
                 caption.starts_with("…/"),
                 "elision must land on a separator: {caption:?}",
             );
+        }
+    }
+
+    #[test]
+    fn caption_margin_scales_so_it_is_always_visibly_a_caption() {
+        // The flat four-column margin only looked like a margin at 60 columns.
+        // At 119 it let a 114-column path through with an inset of two — a
+        // full-bleed banner cutting the centred composition in half, which is
+        // the exact failure the shedding ladder exists to prevent.
+        for width in [40usize, 60, 80, 100, 119, 120, 200] {
+            for workspace in [DEEP, "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/project"] {
+                let caption = empty_state_caption(workspace, "main", "MCP", 2, width);
+                let inset = width.saturating_sub(caption.width()) / 2;
+                assert!(
+                    inset * 12 >= width,
+                    "width {width}: caption {caption:?} insets by only {inset}",
+                );
+            }
         }
     }
 
