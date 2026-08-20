@@ -56,14 +56,21 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
 
 pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
 
-/// Flagship orchestration trio. Empty `/` pins these first so `/workflow`,
-/// `/goal`, and `/auto` are the first selections from a blank prompt (#5439).
-/// Order is the product "when to use" sequence, not alphabetical.
+/// Flagship orchestration surfaces retained in the full Help/palette catalog.
 pub(crate) const ORCHESTRATION_DISCOVERY_COMMANDS: &[&str] = &["workflow", "goal", "auto"];
 
+/// Small, task-oriented starting set for a bare `/` in the composer.
+///
+/// The full command catalog remains searchable through `/help`, the command
+/// palette, and by typing any command prefix. `agents` is the preferred alias
+/// for the compatibility-owned `subagents` command.
+pub(crate) const BARE_SLASH_DISCOVERY_COMMANDS: &[&str] = &[
+    "help", "setup", "model", "settings", "resume", "rc",
+];
+
 #[must_use]
-pub(crate) fn orchestration_discovery_rank(name: &str) -> Option<usize> {
-    ORCHESTRATION_DISCOVERY_COMMANDS
+pub(crate) fn bare_slash_discovery_rank(name: &str) -> Option<usize> {
+    BARE_SLASH_DISCOVERY_COMMANDS
         .iter()
         .position(|entry| *entry == name)
 }
@@ -158,7 +165,12 @@ impl CommandInfo {
     }
 
     pub fn show_in_slash_completion(&self, prefix: &str) -> bool {
-        !prefix.trim_start_matches('/').trim().is_empty() || self.show_in_empty_discovery()
+        if !prefix.trim_start_matches('/').trim().is_empty() {
+            return true;
+        }
+        BARE_SLASH_DISCOVERY_COMMANDS
+            .iter()
+            .any(|name| self.name == *name || self.aliases.contains(name))
     }
 }
 

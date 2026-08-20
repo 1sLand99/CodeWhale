@@ -13175,15 +13175,25 @@ fn visible_slash_menu_entries_respects_hide_flag() {
 }
 
 #[test]
-fn visible_slash_menu_entries_excludes_removed_commands() {
+fn visible_slash_menu_starts_with_six_tasks_and_keeps_long_tail_searchable() {
     let mut app = create_test_app();
     app.input = "/".to_string();
 
-    let entries = visible_slash_menu_entries(&app, 128);
-    assert!(entries.iter().any(|entry| entry.name == "/config"));
-    assert!(entries.iter().any(|entry| entry.name == "/links"));
+    let entries = visible_slash_menu_entries(&app, SLASH_MENU_LIMIT);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["/help", "/setup", "/model", "/settings", "/resume", "/rc"]
+    );
     assert!(!entries.iter().any(|entry| entry.name == "/set"));
     assert!(!entries.iter().any(|entry| entry.name == "/codewhale"));
+
+    app.input = "/conf".to_string();
+    app.cursor_position = app.input.chars().count();
+    let searched = visible_slash_menu_entries(&app, SLASH_MENU_LIMIT);
+    assert!(searched.iter().any(|entry| entry.name == "/config"));
 }
 
 #[test]

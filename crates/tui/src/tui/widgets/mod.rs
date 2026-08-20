@@ -3714,6 +3714,29 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         }
     }
 
+    // A bare slash is an invitation, not a manual. Keep the root list to the
+    // small task-oriented set while leaving every command available once the
+    // user types a prefix or searches Help. User commands retain token
+    // ownership, but do not flood the empty root.
+    if prefix_lower.is_empty() {
+        entries.retain(|entry| {
+            let key = entry.name.trim_start_matches('/');
+            commands::traits::BARE_SLASH_DISCOVERY_COMMANDS
+                .iter()
+                .any(|name| {
+                    key == *name
+                        || commands::get_command_info(key)
+                            .is_some_and(|info| info.aliases.contains(name))
+                })
+        });
+        for entry in &mut entries {
+            if entry.name == "/subagents" {
+                entry.name = "/agents".to_string();
+                entry.alias_hint = None;
+            }
+        }
+    }
+
     // Rank exact-alias matches above prefix/alias matches so e.g. typing
     // `/q` ranks `/exit` (alias `q` is an exact hit) above `/clear` (alias
     // `qingping` only matches by prefix). Inside each tier, fall back to
@@ -3739,22 +3762,18 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         }
         2
     };
-    // Bare `/` pins the orchestration trio first so the shipped surfaces
-    // are the first selections, not buried alphabetically (#5439). Typed prefixes
+    // Bare `/` follows the deliberately short task sequence. Typed prefixes
     // keep the existing rank/alpha order.
-    let orch_rank = |entry: &SlashMenuEntry| -> u8 {
+    let root_rank = |entry: &SlashMenuEntry| -> usize {
         if !prefix_lower.is_empty() {
-            return 1;
+            return 0;
         }
         let command_key = entry.name.trim_start_matches('/');
-        match commands::traits::orchestration_discovery_rank(command_key) {
-            Some(idx) => u8::try_from(idx).unwrap_or(0),
-            None => 3,
-        }
+        commands::traits::bare_slash_discovery_rank(command_key).unwrap_or(usize::MAX)
     };
     entries.sort_by(|a, b| {
-        orch_rank(a)
-            .cmp(&orch_rank(b))
+        root_rank(a)
+            .cmp(&root_rank(b))
             .then_with(|| rank(a).cmp(&rank(b)))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -3895,7 +3914,7 @@ fn push_command_entry(
             .into_iter()
             .filter(|alias| hint.as_deref() != Some(*alias))
             .collect();
-        let desc = if remaining_aliases.is_empty() {
+        let desc = if prefix_lower.is_empty() || remaining_aliases.is_empty() {
             info.description_for(locale).to_string()
         } else {
             format!(
@@ -5027,36 +5046,41 @@ mod tests {
     }
 
     #[test]
-    fn slash_completion_hints_include_links_and_config() {
-        let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
-        assert!(hints.iter().any(|hint| hint.name == "/config"));
-        assert!(hints.iter().any(|hint| hint.name == "/links"));
-    }
-
-    #[test]
-    fn empty_slash_menu_pins_the_orchestration_trio_first() {
+    fn bare_slash_menu_is_bounded_and_the_long_tail_remains_searchable() {
         let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         let names: Vec<&str> = hints.iter().map(|hint| hint.name.as_str()).collect();
         assert_eq!(
-            &names[..3],
-            ["/workflow", "/goal", "/auto"],
-            "bare / must pin the orchestration trio (#5439): {names:?}"
+            names,
+            [
+                "/help",
+                "/setup",
+                "/model",
+                "/settings",
+                "/resume",
+                "/rc",
+            ],
+            "bare / should offer the small starting set: {names:?}"
         );
-        let workflow = hints
-            .iter()
-            .find(|hint| hint.name == "/workflow")
-            .expect("/workflow");
-        let goal = hints
-            .iter()
-            .find(|hint| hint.name == "/goal")
-            .expect("/goal");
-        let auto = hints
-            .iter()
-            .find(|hint| hint.name == "/auto")
-            .expect("/auto");
-        assert!(workflow.description.contains("repeatable workflow"));
-        assert!(goal.description.contains("objective"));
-        assert!(auto.description.contains("Auto-Review"));
+        assert!(
+            slash_completion_hints("/wor", 128, &[], Locale::En, None, ApiProvider::Deepseek)
+                .iter()
+                .any(|hint| hint.name == "/workflow")
+        );
+        assert!(
+            slash_completion_hints("/conf", 128, &[], Locale::En, None, ApiProvider::Deepseek)
+                .iter()
+                .any(|hint| hint.name == "/config")
+        );
+        assert!(
+            slash_completion_hints("/age", 128, &[], Locale::En, None, ApiProvider::Deepseek)
+                .iter()
+                .any(|hint| hint.name == "/subagents")
+        );
+        assert!(
+            slash_completion_hints("/comp", 128, &[], Locale::En, None, ApiProvider::Deepseek)
+                .iter()
+                .any(|hint| hint.name == "/compact")
+        );
     }
 
     #[test]
@@ -5140,11 +5164,11 @@ mod tests {
     #[test]
     fn slash_completion_hints_hide_toolbox_commands_until_typed() {
         let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
-        assert!(root.iter().any(|hint| hint.name == "/provider"));
         assert!(root.iter().any(|hint| hint.name == "/model"));
-        assert!(root.iter().any(|hint| hint.name == "/fleet"));
-        assert!(root.iter().any(|hint| hint.name == "/config"));
-        assert!(root.iter().any(|hint| hint.name == "/statusline"));
+        assert!(!root.iter().any(|hint| hint.name == "/provider"));
+        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
+        assert!(!root.iter().any(|hint| hint.name == "/config"));
+        assert!(!root.iter().any(|hint| hint.name == "/statusline"));
         assert!(!root.iter().any(|hint| hint.name == "/rlm"));
         assert!(!root.iter().any(|hint| hint.name == "/modeldb"));
         assert!(!root.iter().any(|hint| hint.name == "/models"));
