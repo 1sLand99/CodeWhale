@@ -268,7 +268,7 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    timeout-minutes: 30
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -312,15 +312,24 @@ jobs:
         if: needs.changes.outputs.heavy == 'true'
         run: cargo fmt --all -- --check
       - name: Run clippy
+        # --all-targets, because without it CI never lints test code at all.
+        # That gap is not theoretical: the v0.9.10 release gate opened with
+        # four clippy failures sitting on a green main, and every one of them
+        # was in a test target. crates/tui/AGENTS.md already documents the
+        # all-targets command as the release gate; this makes CI run the gate
+        # it points contributors at instead of a weaker subset.
+        #
+        # collapsible_if and assertions_on_constants are no longer allowed for
+        # the same reason — they were three of those four, so the allowances
+        # were hiding exactly the class of problem that reached the gate. The
+        # three that remain are deliberate project style, not oversights.
         if: needs.changes.outputs.heavy == 'true'
         run: |
-          cargo clippy --workspace --all-features --locked -- \
+          cargo clippy --workspace --all-targets --all-features --locked -- \
             -D warnings \
             -A clippy::uninlined_format_args \
             -A clippy::too_many_arguments \
-            -A clippy::unnecessary_map_or \
-            -A clippy::collapsible_if \
-            -A clippy::assertions_on_constants
+            -A clippy::unnecessary_map_or
       - name: sccache stats
         if: needs.changes.outputs.heavy == 'true' && steps.sccache.outcome == 'success'
         continue-on-error: true
