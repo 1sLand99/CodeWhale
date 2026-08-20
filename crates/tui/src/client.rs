@@ -4196,6 +4196,84 @@ mod tests {
         client
     }
 
+    /// The per-chunk line cap is backpressure relief, not a data budget. When
+    /// one transport chunk carries more SSE lines than the cap, the drain loop
+    /// stops mid-buffer and the outer loop waits for the *next* chunk before
+    /// draining any more — so whatever is still buffered when the stream ends
+    /// never reaches the decoder. `flush_sse_line` cannot rescue it: it treats
+    /// the whole remainder as one unterminated line. A long stream of small
+    /// deltas (or provider heartbeats) therefore loses its tail — the last
+    /// tokens, `finish_reason`, and usage — silently.
+    #[tokio::test]
+    async fn chat_stream_drains_chunks_carrying_more_lines_than_the_per_chunk_cap() {
+        // Comment lines are counted by the drain loop and are cheap enough
+        // that one transport read holds far more than SSE_MAX_LINES_PER_CHUNK.
+        let heartbeats = ": ping\n".repeat(20 * SSE_MAX_LINES_PER_CHUNK * 4);
+        let body = format!(
+            "{heartbeats}data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "pong"},
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "sse drain regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(true),
+            temperature: None,
+            top_p: None,
+        };
+
+        let mut stream = client
+            .create_message_stream(request)
+            .await
+            .expect("streaming request succeeds");
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::ContentBlockDelta {
+                delta: Delta::TextDelta { text: chunk },
+                ..
+            } = event.expect("heartbeat-padded SSE stays valid")
+            {
+                text.push_str(&chunk);
+            }
+        }
+
+        assert_eq!(
+            text, "pong",
+            "the data frame after the heartbeat flood must still be decoded"
+        );
+    }
+
     async fn capture_deepseek_chat_request(
         route_base_url: &str,
         strict: bool,
