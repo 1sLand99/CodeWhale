@@ -2711,6 +2711,60 @@ async fn call_method_times_out_while_waiting_for_response() {
     assert_eq!(sent.lock().unwrap().len(), 1);
 }
 
+/// JSON-RPC requires exactly one of `result` / `error` on a response. A
+/// response carrying neither is a broken server, and reporting it as a
+/// successful call with a `null` payload is a fake success: the tool result
+/// reaches the model as `ToolResult::success("null")`, indistinguishable from
+/// a tool that genuinely did nothing.
+#[tokio::test]
+async fn call_method_rejects_a_response_with_neither_result_nor_error() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    let err = conn
+        .call_method("tools/call", serde_json::json!({"name": "echo"}), 1)
+        .await
+        .expect_err("a result-less, error-less response is not a successful call");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("neither a result nor an error"),
+        "unexpected error: {rendered}"
+    );
+    assert!(
+        rendered.contains("tools/call"),
+        "unexpected error: {rendered}"
+    );
+}
+
+/// …while an *explicit* `"result": null` is a well-formed empty success and
+/// must keep flowing through unchanged.
+#[tokio::test]
+async fn call_method_preserves_an_explicit_null_result() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    let result = conn
+        .call_method("tools/call", serde_json::json!({"name": "echo"}), 1)
+        .await
+        .expect("an explicit null result is a valid response");
+    assert_eq!(result, serde_json::Value::Null);
+}
+
 /// A failed *write* has to disconnect the connection, exactly like a failed
 /// read does. `McpPool::get_or_connect` reuses any connection whose
 /// `is_ready()` is true, so a connection left in `Ready` after its transport

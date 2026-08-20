@@ -2133,10 +2133,17 @@ impl McpConnection {
             ));
         }
 
-        Ok(response
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::json!(null)))
+        // JSON-RPC requires exactly one of `result` / `error`. Treating a
+        // response carrying neither as an empty success handed the model a
+        // `null` tool result that is indistinguishable from a tool that
+        // genuinely returned nothing. An explicit `"result": null` is still a
+        // valid empty success and passes through unchanged.
+        response.get("result").cloned().with_context(|| {
+            format!(
+                "MCP response from server '{}' for '{method}' contained neither a result nor an error",
+                self.name
+            )
+        })
     }
 
     /// Get discovered tools
