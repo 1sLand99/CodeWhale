@@ -13,12 +13,16 @@ you. Switch models mid-task with `/model`. Work interactively in the TUI, or run
 `codewhale exec` in scripts and CI. It's written in Rust, licensed MIT, and runs
 on your machine.
 
-The part that isn't like other harnesses: **you pick the model for each role,
-and they don't have to match.** A fleet pins a provider, a model, and a
-reasoning tier per role — so a cheap fast model can direct an expensive
-reasoning one, or a GLM builder can work the same job as a Kimi reviewer.
-Write your own roles, your own constitution, and the harness is yours rather
-than ours.
+The parts that aren't like other harnesses: **you pick the model for each
+role — and they don't have to match** — and **agents in Codewhale talk to each
+other, across models.** A fleet pins a provider, a model, and a reasoning tier
+per role, so a cheap fast model can direct an expensive reasoning one, or a
+GLM builder can work the same job as a Kimi reviewer. While they run, message
+any of them mid-flight, peek at its transcript, or interrupt it — and it isn't
+just parent-to-child: separate Codewhale tasks in the same workspace exchange
+durable, restart-safe Agent Mail, delivered once at a safe boundary, with
+credentials redacted. A `/goal` holds a long objective across turns until it's
+actually done. Roles are files you edit, and the whole harness stays yours.
 
 We're always looking for contributors and ways to improve. If a model or
 provider you use is missing, or something breaks, telling us is one of the most
@@ -74,6 +78,16 @@ shell command through the normal approval path.
   fleet can span vendors in a single run and a role's route never depends on
   whichever provider happens to be active. Context limits and prices come from
   the real route, and an unknown price shows as unknown rather than $0.
+- **Agents that talk to each other — across models.** Every agent in Codewhale
+  is reachable while it works: `message` queues a note to a running sub-agent,
+  `followup` wakes it with your note at its next safe boundary, `peek` reads its
+  transcript, and an interrupt stops just its turn. It goes further than the
+  parent-child tree: separate tasks in the same workspace exchange durable
+  **Agent Mail** — a queued handoff summary that survives restart, delivers
+  exactly once at the recipient's safe boundary, and redacts credentials and
+  paths — so a GLM session and a Kimi session can coordinate in two terminals
+  with you out of the relay loop. Each side can be a different model; Codewhale
+  carries the conversation either way.
 - **A harness you author.** Roles are files you can read and edit — a model, a
   tool posture, and standing instructions per role — kept in the project so the
   team shares them, or beside your other personal settings so they follow you
@@ -85,7 +99,10 @@ shell command through the normal approval path.
   Linux. A repo's `constitution.json` compiles into write holds that even Full
   Access can't skip.
 - **Work you can resume.** A fleet records every step to an append-only ledger,
-  so `fleet resume` picks up where you left off.
+  so `fleet resume` picks up where you left off. `/goal` holds a persistent
+  objective the agent keeps working toward across turns — pausable, resumable,
+  and restored with the session on restart — and `/workflows` opens a live
+  dashboard over every run this workspace's journal keeps.
 
 ## Integrations
 

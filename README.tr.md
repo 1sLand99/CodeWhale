@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:d4367bdef21a -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Terminaliniz için açık kaynak bir kodlama ajanı — modeli siz getirin.
@@ -15,12 +15,18 @@ ihtiyaç duyunca durur. Görev sırasında `/model` ile model değiştirin. TUI'
 etkileşimli çalışın veya betiklerde ve CI'da `codewhale exec` çalıştırın. Rust
 ile yazılmıştır, MIT lisanslıdır ve sizin makinenizde çalışır.
 
-Diğer harness'lerden farkı şu: **her rol için modeli siz seçersiniz ve
-birbirleriyle aynı olmak zorunda değiller.** Bir fleet her rol için bir
-sağlayıcı, bir model ve bir akıl yürütme katmanı sabitler — böylece ucuz ve
-hızlı bir model pahalı bir akıl yürütme modelini yönetebilir veya bir GLM
-builder, bir Kimi reviewer ile aynı işte çalışabilir. Kendi rollerinizi, kendi
-constitution'ınızı yazın; harness bizim değil sizin olur.
+Diğer harness'lerin olmadığı yer: **her rol için modeli sen seçersin — ve
+aynı olmak zorunda değiller** — ve **Codewhale'daki agent'lar birbiriyle
+konuşur, modeller arası.** Bir fleet her role sağlayıcı, model ve akıl
+yürütme düzeyini sabitler; bu yüzden ucuz ve hızlı bir model pahalı bir akıl
+yürüten modeli yönetebilir ya da GLM builder, Kimi reviewer ile aynı işte
+çalışabilir. Çalışırken onlardan herhangi birine uçarken not bırakabilir,
+transcript'ine bakabilir veya kesebilirsin — üstelik bu sadece ebeveyn-çocuk
+ile sınırlı değil: aynı workspace'teki ayrı Codewhale görevleri, yeniden
+başlatmalara dayanan, tam olarak bir kez güvenli bir sınırdan teslim edilen
+ve kimlik bilgilerini maskeleyen kalıcı Agent Mail alışverişi yapar. Bir
+`/goal`, gerçekten bitene kadar uzun bir hedefi turlar boyunca taşır. Roller
+düzenlediğin dosyalardır ve bütün harness senin kalır.
 
 Her zaman katkıda bulunanlar ve iyileştirme yolları arıyoruz. Kullandığınız bir
 model veya sağlayıcı eksikse ya da bir şey bozulursa, bize söylemek
@@ -80,18 +86,29 @@ normal onay yolundan çalıştırır.
   hangi sağlayıcının etkin olduğuna bağlı olmaz. Bağlam sınırları ve fiyatlar
   gerçek rotadan gelir; bilinmeyen bir fiyat $0 değil, bilinmiyor olarak
   görünür.
+- **Birbiriyle konuşan agent'lar — modeller arası.** Codewhale'daki her
+  agent çalışırken ulaşılabilir: `message` çalışan bir sub-agent'a not
+  kuyruğa alır, `followup` onu senin notunla bir sonraki güvenli sınırlarda
+  uyandırır, `peek` transcript'ini okur, bir kesme yalnızca onun turunu
+  durdurur. Bu ebeveyn-çocuk ağacının ötesine geçer: aynı workspace'teki
+  ayrı görevler kalıcı **Agent Mail** alışverişi yapar — yeniden başlatmaya
+  dayanan, alıcının güvenli sınırında tam olarak bir kez teslim edilen ve
+  kimlik bilgileriyle yolları maskeleyen, kuyruğa alınmış bir devir özeti —
+  böylece bir GLM oturumu ve bir Kimi oturumu iki terminalde koordinasyon
+  kurar, sen aracı olmaktan çıkarsın. Taraflar farklı modeller olabilir;
+  konuşmayı Codewhale taşır.
 - **Sizin yazdığınız bir harness.** Roller okuyup düzenleyebileceğiniz
   dosyalardır — rol başına bir model, bir araç duruşu ve kalıcı yönergeler —
   ekibin paylaşması için projede veya sizi depolar arasında izlemesi için
   diğer kişisel ayarlarınızın yanında tutulur. Bir constitution, ajanın her
   oturumda nasıl davranmasını istediğinizi kaydeder; böylece harness bizim
   değil sizin pratiğinize uyar.
-- **Daha fazlasına izin verene kadar salt okunur.** Plan kipi dosyaları
-  değiştiremez ve onaylar riskli komutları kapılar. Bir işletim sistemi
-  sanal alanı bir komutu gerçekten sardığında Codewhale bunu söyler: macOS'ta
-  varsa Seatbelt, Linux'ta isteğe bağlı bubblewrap. Bir deponun
-  `constitution.json` dosyası, Full Access'in bile atlayamayacağı yazma
-  kilitlerine derlenir.
+- **Kaldığın yerden süren iş.** Bir fleet her adımı append-only bir
+  deftere kaydeder, `fleet resume` kaldığın yerden devam eder. `/goal`,
+  agent'ın tur tur peşinden gittiği kalıcı bir hedefi tutar —
+  duraklatılabilir, sürdürülebilir ve yeniden başlatmada oturumla birlikte
+  geri yüklenir — `/workflows` ise bu workspace'in günlüğünde tuttuğu her
+  çalıştırmayı canlı gösteren bir panel açar.
 - **Kaldığınız yerden sürebileceğiniz iş.** Bir fleet her adımı yalnızca
   eklenen bir deftere yazar, böylece `fleet resume` kaldığınız yerden devam
   eder.

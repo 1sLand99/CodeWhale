@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:d4367bdef21a -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Un agente di programmazione open source per il tuo terminale — porta il tuo modello.
@@ -15,12 +15,18 @@ compito è finito o ha bisogno di te. Cambia modello a metà compito con
 `/model`. Lavora in modo interattivo nella TUI, oppure esegui `codewhale exec`
 in script e CI. È scritto in Rust, con licenza MIT, e gira sulla tua macchina.
 
-Quello che non assomiglia agli altri harness: **scegli tu il modello di ogni
-ruolo, e non devono coincidere.** Una fleet fissa un fornitore, un modello e
-un livello di ragionamento per ruolo — così un modello economico e veloce può
-dirigere uno di ragionamento costoso, o un builder GLM può lavorare sullo
-stesso compito di un reviewer Kimi. Scrivi i tuoi ruoli e la tua constitution,
-e l'harness è tuo invece che nostro.
+Ciò che gli altri harness non hanno: **scegli tu il modello di ogni ruolo —
+e non devono coincidere** — e **gli agenti in Codewhale si parlano,
+attraverso i modelli.** Una fleet fissa provider, modello e livello di
+ragionamento per ruolo, così un modello economico e veloce può dirigerne uno
+costoso e ragionativo, o un builder GLM può lavorare allo stesso compito di
+un reviewer Kimi. Mentre girano, mandi una nota a qualunque di loro in piena
+corsa, leggi il suo transcript o lo interrompi — e non è solo da genitore a
+figlio: task Codewhale separati nello stesso workspace si scambiano Agent
+Mail durevole, che sopravvive ai riavvii, viene consegnato esattamente una
+volta su un confine sicuro e maschera le credenziali. Un `/goal` regge un
+obiettivo lungo per più turni, finché non è davvero finito. I ruoli sono
+file che modifichi, e l'intero harness resta tuo.
 
 Cerchiamo sempre contributori e modi per migliorare. Se manca un modello o un
 fornitore che usi, o qualcosa si rompe, dircelo è una delle cose più utili che
@@ -78,18 +84,29 @@ comando shell dal percorso di approvazione normale.
   ruolo non dipende mai da quale fornitore capita di essere attivo. Limiti di
   contesto e prezzi arrivano dalla rotta vera; un prezzo sconosciuto si mostra
   come sconosciuto, non come 0 $.
+- **Agenti che si parlano — attraverso i modelli.** Ogni agente in
+  Codewhale è raggiungibile mentre lavora: `message` mette in coda una nota
+  per un sub-agente in esecuzione, `followup` lo sveglia con la tua nota al
+  suo prossimo confine sicuro, `peek` legge il suo transcript, e un
+  interrupt ferma solo il suo turno. Va oltre l'albero genitore-figlio: task
+  separati nello stesso workspace si scambiano **Agent Mail** durevole — un
+  riepilogo di passaggio in coda che sopravvive al riavvio, consegnato
+  esattamente una volta al confine sicuro del destinatario e che maschera
+  credenziali e percorsi — così una sessione GLM e una sessione Kimi si
+  coordinano in due terminali senza di te come ripetitore. Ogni lato può
+  essere un modello diverso; Codewhale porta la conversazione.
 - **Un harness che scrivi tu.** I ruoli sono file che puoi leggere e
   modificare — un modello, una postura degli strumenti e istruzioni permanenti
   per ruolo — tenuti nel progetto perché la squadra li condivida, o accanto
   alle altre impostazioni personali perché ti seguano tra i repo. Una
   constitution registra come vuoi che l'agente si comporti in ogni sessione,
   così l'harness segue la tua pratica invece della nostra.
-- **Sola lettura finché non concedi di più.** La modalità Plan non può
-  cambiare file e le approvazioni filtrano i comandi rischiosi. Quando una
-  sandbox del sistema operativo avvolge davvero un comando, Codewhale lo dice:
-  Seatbelt su macOS dove disponibile, bubblewrap opzionale su Linux. Il
-  `constitution.json` di un repo si compila in blocchi in scrittura che nemmeno
-  Full Access può saltare.
+- **Lavoro che puoi riprendere.** Una fleet registra ogni passo in un
+  registro append-only, e `fleet resume` riprende da dove ti eri fermato.
+  `/goal` mantiene un obiettivo persistente su cui l'agente lavora turno
+  dopo turno — pausabile, riprendibile e ripristinato con la sessione al
+  riavvio — e `/workflows` apre una dashboard live su ogni esecuzione che il
+  journal di questo workspace conserva.
 - **Lavoro che puoi riprendere.** Una fleet registra ogni passo in un registro
   in sola appendice, così `fleet resume` riparte da dove ti eri fermato.
 

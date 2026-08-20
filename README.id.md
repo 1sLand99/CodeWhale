@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:d4367bdef21a -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -7,7 +7,19 @@ Codewhale berawal sebagai pengalaman asli (native) untuk DeepSeek. Sejak saat it
 
 Berikan penyedia, model, dan tugas: Codewhale akan membaca kode Anda, mengedit berkas, menjalankan perintah, serta memeriksa hasil kerjanya sendiri, lalu berhenti setelah pekerjaan selesai atau ketika membutuhkan arahan Anda. Ganti model di tengah tugas dengan `/model`. Bekerja secara interaktif di TUI, atau jalankan `codewhale exec` dalam skrip dan CI. Dibuat menggunakan Rust, berlisensi MIT, dan berjalan langsung di mesin Anda sendiri.
 
-Yang membedakannya dari harness lain: **Anda memilih model untuk setiap peran, dan model-model itu tidak harus sama.** Sebuah fleet menyematkan penyedia, model, dan tingkat penalaran per peran — sehingga model yang murah dan cepat bisa mengarahkan model penalaran yang mahal, atau seorang builder GLM bisa mengerjakan tugas yang sama dengan seorang reviewer Kimi. Tulis peran Anda sendiri, constitution Anda sendiri, dan harness itu menjadi milik Anda, bukan milik kami.
+Yang membedakannya dari harness lain: **Anda memilih model untuk setiap
+peran — dan model-model itu tidak harus sama** — dan **para agent di
+Codewhale saling berbicara, lintas model.** Sebuah fleet menyematkan
+penyedia, model, dan tingkat penalaran per peran, sehingga model murah dan
+cepat bisa mengarahkan model penalaran yang mahal, atau seorang builder GLM
+bisa mengerjakan tugas yang sama dengan seorang reviewer Kimi. Selagi mereka
+bekerja, Anda bisa mengirim catatan ke salah satunya di tengah jalan,
+mengintip transcript-nya, atau menghentikannya — dan bukan hanya dari induk
+ke anak: task Codewhale terpisah di workspace yang sama saling bertukar
+Agent Mail yang tahan restart, terkirim tepat satu kali pada batas aman, dan
+menyamarkan kredensial. Sebuah `/goal` menahan tujuan panjang lintas giliran
+sampai benar-benar selesai. Peran adalah berkas yang Anda sunting, dan
+seluruh harness tetap milik Anda.
 
 Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkembang. Jika model atau penyedia yang Anda gunakan belum tersedia, atau ada hal yang tidak berjalan semestinya, memberi tahu kami adalah salah satu kontribusi paling berharga yang bisa Anda lakukan — lihat [Kontribusi](#kontribusi).
 
@@ -43,7 +55,23 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 ## Fitur & Kapabilitas
 
 - **Model mana saja, penyedia apa saja.** DeepSeek, Claude, GPT, Kimi, GLM, dan 30+ penyedia lainnya, ditambah vLLM, SGLang, atau Ollama milik Anda sendiri tanpa memerlukan API key — semuanya melalui satu runtime dan satu kumpulan alat. Katalog melacak jajaran live setiap penyedia — backend V4 Pro DeepSeek (berlabel `DeepSeek-V4-Pro-0813`) tetap dapat dipanggil sebagai `deepseek-v4-pro`, Grok 4.6 adalah default langsung xAI, dan OrcaRouter melakukan routing melalui `orcarouter/auto`. Batas konteks dan harga diambil dari rute sebenarnya, dan harga yang tidak diketahui ditampilkan sebagai *unknown* daripada $0.
-- **Harness yang Anda tulis sendiri.** Peran adalah berkas yang bisa Anda baca dan sunting — satu model, satu sikap perkakas, dan instruksi tetap untuk tiap peran — disimpan di dalam proyek agar tim berbagi, atau di samping pengaturan pribadi Anda agar ikut berpindah antar repo. Constitution mencatat bagaimana Anda ingin agen berperilaku di setiap sesi, sehingga harness mengikuti cara kerja Anda, bukan cara kami.
+- **Agent yang saling berbicara — lintas model.** Setiap agent di
+  Codewhale bisa dijangkau selagi bekerja: `message` mengantrekan catatan
+  untuk sub-agent yang sedang berjalan, `followup` membangunkannya dengan
+  catatan Anda pada batas aman berikutnya, `peek` membaca transcript-nya,
+  dan interupsi hanya menghentikan gilirannya. Ini melampaui pohon
+  induk-anak: task terpisah di workspace yang sama saling bertukar **Agent
+  Mail** yang tahan restart — ringkasan serah terima yang mengantre, selamat
+  melewati restart, terkirim tepat satu kali pada batas aman penerima, dan
+  menyamarkan kredensial serta path — sehingga sesi GLM dan sesi Kimi bisa
+  berkoordinasi di dua terminal tanpa Anda menjadi perantara. Setiap sisi
+  boleh memakai model berbeda; Codewhale yang mengantar percakapannya.
+- **Kerja yang bisa dilanjutkan.** Sebuah fleet mencatat setiap langkah ke
+  buku besar append-only, sehingga `fleet resume` melanjutkan dari tempat
+  Anda berhenti. `/goal` menahan tujuan yang gigih dikerjakan agent dari
+  giliran ke giliran — bisa dijeda, dilanjutkan, dan dipulihkan bersama sesi
+  setelah restart — sedangkan `/workflows` membuka dasbor langsung atas
+  setiap eksekusi yang disimpan journal workspace ini.
 - **Read-only sampai Anda memberi izin lebih.** Mode Plan tidak dapat mengubah berkas, dan gerbang persetujuan memproteksi perintah berisiko. Ketika sandbox OS membungkus perintah, Codewhale akan menginformasikannya: Seatbelt pada macOS (jika tersedia), serta opsi bubblewrap di Linux. Berkas `constitution.json` repositori dikompilasi menjadi pembatas penulisan yang bahkan tidak dapat dilewati oleh mode Full Access.
 - **Pekerjaan yang dapat dilanjutkan.** Fleet mencatat setiap langkah ke ledger bertipe append-only, sehingga `fleet resume` dapat melanjutkan pekerjaan tepat di mana Anda meninggalkannya.
 

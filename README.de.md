@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:d4367bdef21a -->
+<!-- source: README.md sha256:1f5bf984e975 -->
 # Codewhale
 
 Ein Open-Source-Programmieragent für Ihr Terminal — bringen Sie Ihr eigenes Modell mit.
@@ -16,13 +16,19 @@ Sie mitten in der Aufgabe das Modell mit `/model`. Arbeiten Sie interaktiv
 in der TUI, oder starten Sie `codewhale exec` in Skripten und CI.
 Geschrieben in Rust, lizenziert unter MIT, läuft es auf Ihrem Rechner.
 
-Was es von anderen Harnessen unterscheidet: **Sie wählen das Modell für
-jede Rolle, und sie müssen nicht übereinstimmen.** Eine Fleet legt
-Anbieter, Modell und Reasoning-Stufe pro Rolle fest — sodass ein günstiges,
-schnelles Modell ein teures Reasoning-Modell führen kann, oder ein
-GLM-Builder dieselbe Aufgabe bearbeitet wie ein Kimi-Reviewer. Schreiben
-Sie Ihre eigenen Rollen und Ihre eigene constitution, und der Harness
-gehört Ihnen, nicht uns.
+Was andere Harnesses nicht haben: **Sie wählen das Modell für jede Rolle —
+und sie müssen nicht übereinstimmen** — und **Agenten in Codewhale sprechen
+miteinander, modellübergreifend.** Ein Fleet legt Anbieter, Modell und
+Reasoning-Stufe pro Rolle fest, sodass ein billiges, schnelles Modell ein
+teures Reasoning-Modell steuern kann oder ein GLM-Builder dieselbe Aufgabe
+bearbeitet wie ein Kimi-Reviewer. Während sie laufen, können Sie jedem von
+ihnen unterwegs eine Nachricht senden, sein Transcript einsehen oder es
+unterbrechen — und das gilt nicht nur für Eltern-Kind-Beziehungen: Separate
+Codewhale-Tasks im selben Workspace tauschen dauerhafte, restart-sichere
+Agent Mail aus, die an einer sicheren Grenze genau einmal zugestellt wird
+und Zugangsdaten maskiert. Ein `/goal` hält ein langfristiges Ziel über
+Runden hinweg, bis es wirklich erledigt ist. Rollen sind Dateien, die Sie
+bearbeiten, und der ganze Harness bleibt Ihrer.
 
 Wir suchen immer Mitwirkende und Wege, besser zu werden. Fehlt ein Modell
 oder ein Anbieter, den Sie nutzen, oder bricht etwas, uns das zu sagen ist
@@ -83,6 +89,18 @@ Shell-Befehl über den normalen Freigabepfad aus.
   einer Rolle nie davon abhängt, welcher Anbieter gerade aktiv ist.
   Kontextlimits und Preise kommen von der echten Route; ein unbekannter
   Preis erscheint als unbekannt, nicht als 0 $.
+- **Agenten, die miteinander sprechen — modellübergreifend.** Jeder Agent
+  in Codewhale ist erreichbar, während er arbeitet: `message` stellt eine
+  Notiz für einen laufenden Sub-Agenten in die Warteschlange, `followup`
+  weckt ihn mit Ihrer Notiz an seiner nächsten sicheren Grenze, `peek` liest
+  sein Transcript, und ein Interrupt stoppt nur seinen Lauf. Das geht über
+  den Eltern-Kind-Baum hinaus: Separate Tasks im selben Workspace tauschen
+  dauerhafte **Agent Mail** aus — eine warteschlangengestützte
+  Übergabe-Zusammenfassung, die Neustarts übersteht, beim Empfänger an einer
+  sicheren Grenze genau einmal zugestellt wird und Zugangsdaten sowie Pfade
+  maskiert. So können sich eine GLM-Session und eine Kimi-Session in zwei
+  Terminals koordinieren, ohne dass Sie als Relais dienen. Beide Seiten
+  können verschiedene Modelle sein; Codewhale trägt das Gespräch.
 - **Ein Harness, den Sie schreiben.** Rollen sind Dateien, die Sie lesen
   und bearbeiten können — ein Modell, eine Werkzeughaltung und stehende
   Anweisungen pro Rolle — im Projekt, damit das Team sie teilt, oder
@@ -90,12 +108,13 @@ Shell-Befehl über den normalen Freigabepfad aus.
   Repo zu Repo folgen. Eine constitution hält fest, wie sich der Agent
   über alle Sitzungen verhalten soll, sodass der Harness Ihrer Praxis
   folgt, nicht unserer.
-- **Nur lesen, bis Sie mehr erlauben.** Der Plan-Modus kann keine Dateien
-  ändern, und Freigaben sperren riskante Befehle. Wenn eine OS-Sandbox
-  einen Befehl tatsächlich umschließt, sagt Codewhale das: Seatbelt auf
-  macOS, sofern verfügbar, opt-in bubblewrap auf Linux. Das
-  `constitution.json` eines Repos kompiliert zu Schreibsperren, die selbst
-  Full Access nicht überspringt.
+- **Arbeit, die Sie jederzeit fortsetzen.** Ein Fleet zeichnet jeden
+  Schritt in ein append-only Ledger, sodass `fleet resume` dort weitermacht,
+  wo Sie aufgehört haben. `/goal` hält ein dauerhaftes Ziel, dem der Agent
+  über Runden hinweg nacharbeitet — pausierbar, fortsetzbar und mit der
+  Sitzung nach einem Neustart wiederhergestellt — und `/workflows` öffnet
+  ein Live-Dashboard über alle Läufe, die das Journal dieses Workspaces
+  verwahrt.
 - **Arbeit, die Sie fortsetzen können.** Eine Fleet schreibt jeden Schritt
   in ein nur anhängendes Ledger, sodass `fleet resume` dort weitermacht,
   wo Sie aufgehört haben.
