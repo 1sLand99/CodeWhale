@@ -219,10 +219,10 @@ pub(crate) const UI_UNDERWATER_ANIMATION_MS: u64 = 80;
 /// Full-motion compatibility cadence for VTE, tmux, and other terminals that
 /// explicitly request the 30 FPS safety cap.
 pub(crate) const UI_CONSTRAINED_UNDERWATER_ANIMATION_MS: u64 = 34;
-/// 60 FPS Ghostty atmosphere clock. Its renderer is capped separately from
-/// the legacy 30 FPS compatibility lane, so truecolor motion stays smooth
-/// without restoring the 120 FPS flicker that originally motivated #1445.
-pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 17;
+/// 30 FPS Ghostty atmosphere clock. Input, streaming, and other interactive
+/// state still request immediate frames up to the separate 60 FPS draw cap;
+/// idle water no longer forces a full-screen repaint at that rate.
+pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 34;
 // Minimum chat-host width at which the file-tree pane renders. At an
 // 80-column terminal the file tree owns 20 columns, leaving a 60-column chat
 // host; below this floor the tree is hidden rather than squeezing the

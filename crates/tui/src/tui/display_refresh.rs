@@ -19,10 +19,10 @@ pub const FALLBACK_ANIMATION_MS: u64 = 120;
 pub const MIN_ANIMATION_HZ: u32 = 4;
 /// Absolute ceiling for adaptive animation intervals (≈ 30 fps).
 pub const MAX_ANIMATION_HZ: u32 = 30;
-/// Ghostty's dedicated full-motion cap. Its GPU renderer and DEC 2026 support
-/// can sustain this cadence, while the historical 30 FPS compatibility lane
-/// makes truecolor caustics and fades visibly step.
-pub const GHOSTTY_MOTION_HZ: u32 = 60;
+/// Ghostty keeps interactive feedback responsive, but ambient water must not
+/// force a full-screen 60 FPS repaint while the user is idle.
+pub const GHOSTTY_ATMOSPHERE_HZ: u32 = 30;
+pub const GHOSTTY_INTERACTIVE_HZ: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayRefreshSource {
@@ -330,7 +330,11 @@ pub fn content_driven_draw_interval(
     low_motion: bool,
 ) -> Duration {
     if !low_motion && terminal_is_ghostty() {
-        return Duration::from_nanos(1_000_000_000u64 / u64::from(GHOSTTY_MOTION_HZ));
+        let hz = match tier {
+            DrawCadenceTier::Atmosphere => GHOSTTY_ATMOSPHERE_HZ,
+            DrawCadenceTier::Interactive => GHOSTTY_INTERACTIVE_HZ,
+        };
+        return Duration::from_nanos(1_000_000_000u64 / u64::from(hz));
     }
     match tier {
         DrawCadenceTier::Atmosphere => animation_interval_for_hz(display_hz, low_motion),
@@ -387,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_gets_a_smooth_60_fps_cap_for_ambient_and_interactive_frames() {
+    fn ghostty_separates_ambient_and_interactive_cadence() {
         let _guard = crate::test_support::lock_test_env();
         let previous_program = std::env::var_os("TERM_PROGRAM");
         let previous_term = std::env::var_os("TERM");
@@ -396,14 +400,13 @@ mod tests {
             std::env::set_var("TERM_PROGRAM", "Ghostty");
             std::env::set_var("TERM", "xterm-ghostty");
         }
-        let expected = Duration::from_nanos(1_000_000_000 / 60);
         assert_eq!(
             content_driven_draw_interval(DrawCadenceTier::Atmosphere, Some(120), false),
-            expected
+            Duration::from_nanos(1_000_000_000 / 30)
         );
         assert_eq!(
             content_driven_draw_interval(DrawCadenceTier::Interactive, Some(120), false),
-            expected
+            Duration::from_nanos(1_000_000_000 / 60)
         );
         // SAFETY: cleanup under the same lock.
         unsafe {

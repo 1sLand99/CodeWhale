@@ -471,7 +471,7 @@ fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
 }
 
 #[test]
-fn ghostty_uses_its_smooth_60_fps_lane_for_underwater_motion() {
+fn ghostty_caps_underwater_motion_without_slowing_interaction() {
     let _guard = crate::test_support::lock_test_env();
     let previous_program = std::env::var_os("TERM_PROGRAM");
     let previous_term = std::env::var_os("TERM");
@@ -496,7 +496,7 @@ fn ghostty_uses_its_smooth_60_fps_lane_for_underwater_motion() {
     assert_eq!(
         underwater_animation_interval_ms(&app),
         UI_CONSTRAINED_UNDERWATER_ANIMATION_MS,
-        "tmux/SSH compatibility must override Ghostty's native 60 FPS lane"
+        "tmux/SSH compatibility must override Ghostty's native atmosphere lane"
     );
     // SAFETY: cleanup under the same lock.
     unsafe {
