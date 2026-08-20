@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.
+- `registry_sync` no longer ships the full MCP Registry catalog into the
+  conversation. It takes a required query, scores the local snapshot
+  host-side, and returns at most eight matches; the complete catalog stays on
+  disk, and the compaction and spillover exemptions that let a multi-hundred-
+  kilobyte dump reach the model unchanged are gone.
+- Providers that mirror the outgoing `(reasoning omitted)` replay placeholder
+  back as a reasoning delta no longer have that echo ingested as real
+  thinking: the exact transport placeholder is dropped on arrival, so live
+  sessions stop showing a stream of placeholder reasoning blocks and saved
+  transcripts stay free of them.
+- Mid-stream connection drops during an interactive turn no longer persist a
+  synthetic `[runtime]` user message. Retry state is a typed engine-internal
+  descriptor; a thinking-only drop re-issues the request without claiming a
+  partial reply was preserved, the retry budget is enforced in mechanism, and
+  recovery produces exactly one authoritative final answer.
 
 Codewhale v0.9.10 is a retention-and-identity release: the shell and
 transcript can no longer retain unbounded tool output in memory or on disk,
@@ -156,6 +171,19 @@ abort under load.
 
 ### Added
 
+- `/workflows` opens a live run dashboard over this workspace's durable
+  workflow journal: every retained run with status, phases, child roster,
+  progress, and host-side cancel — observation only, it never launches a run.
+- Repository instructions now assemble from the actual containing checkout:
+  applicable `AGENTS.md` files resolve repository-root to current-directory in
+  order under one aggregate budget, a linked worktree is its own root, and
+  scope is never inferred from path mentions or whichever branch is named
+  `main`.
+- `/goal` is a codex-style control plane: setting an objective dispatches it
+  to the engine, which owns the goal and starts the first goal turn itself —
+  the objective is never echoed back as the user's own message, pause/resume
+  are real control ops, and the hunt-era vocabulary and trophy cards are
+  gone.
 - `/extensions` and `/plugins` open one localized inventory for Hooks,
   Plugins, local Marketplace catalogs, Skills, and MCP. Reviewed suggestions
   include Playwright, Chrome DevTools, Cua Computer Use, Browser Use, and the
