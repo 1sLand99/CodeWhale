@@ -8,10 +8,11 @@
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::IpAddr;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
+use codewhale_config::device_code::DevicePollOutcome;
 use codewhale_config::{ConfigStore, ProviderKind};
 use codewhale_secrets::Secrets;
 use codewhale_secrets::account::{
@@ -318,43 +319,39 @@ impl<'a, T: CloudTransport> CloudClient<'a, T> {
         validate_device_code(&device.device_code)?;
         let server_lifetime =
             Duration::from_secs(device.expires_in.clamp(1, MAX_LOGIN_TIMEOUT_SECONDS));
-        let timeout = timeout.min(server_lifetime);
-        let interval = Duration::from_secs(device.interval.clamp(1, 10));
-        let started = Instant::now();
-
-        loop {
-            if started.elapsed() >= timeout {
-                bail!(
-                    "Codewhale account login timed out; run `codewhale account login` to try again"
-                );
-            }
-            let response = self.transport.execute(CloudRequest {
-                method: HttpMethod::Post,
-                path: "/api/cli/device/token".to_string(),
-                bearer: None,
-                body: Some(json_body(&DeviceTokenRequest {
-                    device_code: &device.device_code,
-                })?),
-            })?;
-            match response.status {
-                200 => {
-                    let bundle: AuthBundle = parse_json_body(&response.body)?;
-                    validate_auth_bundle(&bundle)?;
-                    self.save_auth(bundle.clone())?;
-                    return Ok(bundle);
-                }
-                202 => {
-                    let remaining = timeout.saturating_sub(started.elapsed());
-                    if remaining.is_zero() {
-                        bail!(
-                            "Codewhale account login timed out; run `codewhale account login` to try again"
-                        );
+        // The Codewhale account service answers HTTP 202 while the code is
+        // still pending, so the first response is already meaningful: poll
+        // immediately and sleep afterwards. It has no slow_down.
+        let bundle = codewhale_config::device_code::DeviceCodePoll::new(
+            timeout.min(server_lifetime),
+            "Codewhale account login timed out; run `codewhale account login` to try again",
+        )
+        .interval_seconds(Some(device.interval))
+        .max_interval_seconds(10)
+        .run(
+            |duration| sleep(duration),
+            || {
+                let response = self.transport.execute(CloudRequest {
+                    method: HttpMethod::Post,
+                    path: "/api/cli/device/token".to_string(),
+                    bearer: None,
+                    body: Some(json_body(&DeviceTokenRequest {
+                        device_code: &device.device_code,
+                    })?),
+                })?;
+                match response.status {
+                    200 => {
+                        let bundle: AuthBundle = parse_json_body(&response.body)?;
+                        validate_auth_bundle(&bundle)?;
+                        Ok(DevicePollOutcome::Complete(bundle))
                     }
-                    sleep(interval.min(remaining));
+                    202 => Ok(DevicePollOutcome::Pending),
+                    _ => Err(response_error(&response)),
                 }
-                _ => return Err(response_error(&response)),
-            }
-        }
+            },
+        )?;
+        self.save_auth(bundle.clone())?;
+        Ok(bundle)
     }
 
     fn load_auth(&self) -> Result<Option<StoredCloudAuth>> {
