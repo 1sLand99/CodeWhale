@@ -2970,6 +2970,71 @@ fn hash_mcp_config_is_stable_and_change_sensitive() {
     );
 }
 
+/// #1267 part 2: `hash_mcp_config` is the *only* thing standing between a
+/// touched-but-unchanged config file and a full teardown of every live MCP
+/// connection (stdio children included). `McpConfig::servers`, `env`,
+/// `headers`, and `env_headers` are all `HashMap`s, and two `HashMap`s built
+/// separately in one process iterate in different orders — so hashing the
+/// config's `serde_json` bytes straight from the struct is not
+/// content-addressed once a map holds more than one entry. Parse the same
+/// bytes repeatedly and require one hash.
+#[test]
+fn hash_mcp_config_is_order_independent_across_identical_parses() {
+    let raw = r#"{
+        "servers": {
+            "alpha":   { "command": "a", "env": { "A": "1", "B": "2", "C": "3", "D": "4" } },
+            "bravo":   { "command": "b" },
+            "charlie": { "command": "c" },
+            "delta":   { "command": "d" },
+            "echo":    { "command": "e" },
+            "foxtrot": { "command": "f" },
+            "golf":    { "command": "g" },
+            "hotel":   { "command": "h" },
+            "india":   { "command": "i" },
+            "juliett": { "command": "j" }
+        }
+    }"#;
+    let hashes: HashSet<u64> = (0..16)
+        .map(|_| {
+            let parsed: McpConfig = serde_json::from_str(raw).expect("fixture parses");
+            hash_mcp_config(&parsed)
+        })
+        .collect();
+    assert_eq!(
+        hashes.len(),
+        1,
+        "byte-identical MCP config must hash identically; got {} distinct hashes",
+        hashes.len()
+    );
+}
+
+/// The same invariant for the nested per-server maps: an unchanged server
+/// whose `env` / `headers` hold several entries must not look changed.
+#[test]
+fn hash_mcp_config_is_order_independent_for_nested_server_maps() {
+    let raw = r#"{
+        "servers": {
+            "only": {
+                "url": "https://example.invalid/mcp",
+                "headers": { "H1": "1", "H2": "2", "H3": "3", "H4": "4", "H5": "5", "H6": "6" },
+                "env_headers": { "E1": "V1", "E2": "V2", "E3": "V3", "E4": "V4" }
+            }
+        }
+    }"#;
+    let hashes: HashSet<u64> = (0..16)
+        .map(|_| {
+            let parsed: McpConfig = serde_json::from_str(raw).expect("fixture parses");
+            hash_mcp_config(&parsed)
+        })
+        .collect();
+    assert_eq!(
+        hashes.len(),
+        1,
+        "byte-identical MCP config must hash identically; got {} distinct hashes",
+        hashes.len()
+    );
+}
+
 /// #1319: discovered tools must be sorted by name so the prompt prefix
 /// is stable across runs (cache-hit stability), even when the server
 /// returns them in arbitrary or paginated order.
