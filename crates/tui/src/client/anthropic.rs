@@ -575,13 +575,35 @@ fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
         ));
     }
     Some(json!({
-        "role": if message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE {
-            "assistant"
-        } else {
-            message.role.as_str()
-        },
+        "role": anthropic_wire_role(&message.role),
         "content": blocks
     }))
+}
+
+/// Project an internal role onto the only two the Messages API accepts.
+///
+/// `messages[].role` is a closed enum on this wire — anything other than
+/// `user` or `assistant` fails the whole conversation with a 400 on every
+/// retry, not just the offending turn. Internal roles do reach here: a
+/// compaction summary, a branch summary, and an imported journal `system`
+/// entry all arrive as `system`-role messages in `MessageRequest::messages`
+/// (`SessionJournal::to_messages` → `session_manager.messages`), and the Chat
+/// Completions adapter carries them deliberately. They are transcript content
+/// whose position matters, so they are projected onto a `user` turn — text
+/// untouched — rather than being hoisted into the `system` field or dropped.
+/// Consecutive `user` turns are already routine on this wire (tool results
+/// ride on user messages), so this needs no alternation repair.
+fn anthropic_wire_role(role: &str) -> &'static str {
+    match role {
+        "assistant" | crate::models::INTERRUPTED_ASSISTANT_ROLE => "assistant",
+        "user" | "system" | "developer" => "user",
+        other => {
+            logging::warn(format!(
+                "Anthropic adapter mapped unrecognized role {other:?} onto a user turn"
+            ));
+            "user"
+        }
+    }
 }
 
 /// Project the shared `ImageUrl` block onto Anthropic's tagged image source.
@@ -1974,5 +1996,45 @@ mod tests {
             text.contains("HTTP 401") && text.contains("authentication_error"),
             "error envelope should be preserved: {text}"
         );
+    }
+
+    /// A `system`-role history message — what a compaction summary, a branch
+    /// summary, or an imported journal `system` entry becomes once it reaches
+    /// `MessageRequest::messages` — must not be emitted verbatim: the Messages
+    /// API accepts only `user` and `assistant` in `messages[].role` and 400s
+    /// the whole conversation otherwise, on every retry.
+    #[test]
+    fn system_role_history_message_is_not_emitted_verbatim_on_the_messages_wire() {
+        let mut request = request_with("claude-opus-4-6", None, None, None);
+        request.messages.insert(
+            0,
+            Message {
+                role: "system".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "[compaction summary] the user is porting the parser".to_string(),
+                    cache_control: None,
+                }],
+            },
+        );
+
+        let body = test_client().build_anthropic_body(&request, false);
+        let messages = body["messages"].as_array().expect("messages array");
+
+        for message in messages {
+            let role = message["role"].as_str().expect("role is a string");
+            assert!(
+                role == "user" || role == "assistant",
+                "Messages API rejects role {role:?}"
+            );
+        }
+        let carried = messages.iter().any(|message| {
+            message["content"].as_array().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block["text"].as_str()
+                        == Some("[compaction summary] the user is porting the parser")
+                })
+            })
+        });
+        assert!(carried, "the summary text must survive: {messages:?}");
     }
 }
