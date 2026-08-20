@@ -64,8 +64,6 @@ pub enum ModalKind {
     FilePicker,
     StatusPicker,
     FeedbackPicker,
-    /// Blocking first-run disclosure rendered inside the native TUI.
-    TelemetryNotice,
     ThemePicker,
     ContextMenu,
     ContextInspector,
@@ -646,14 +644,6 @@ pub enum ContextMenuAction {
 
 #[derive(Debug, Clone)]
 pub enum ViewEvent {
-    /// The native privacy disclosure was explicitly answered.
-    TelemetryNoticeDecided {
-        enabled: bool,
-        pending: crate::telemetry_notice::PendingTelemetryNotice,
-    },
-    /// The disclosure was dismissed without an answer; exit this launch and
-    /// ask again next time rather than inventing a choice.
-    TelemetryNoticeCancelled,
     CommandPaletteSelected {
         action: CommandPaletteAction,
     },

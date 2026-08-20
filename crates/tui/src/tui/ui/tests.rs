@@ -13736,50 +13736,6 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
 }
 
 #[tokio::test]
-async fn startup_prompt_waits_for_native_telemetry_decision_then_dispatches() {
-    let mut app = create_test_app();
-    app.input = "inspect the workspace".to_string();
-    app.cursor_position = app.input.chars().count();
-    app.auto_submit_initial_input = true;
-    app.onboarding = OnboardingState::None;
-    app.view_stack
-        .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
-            crate::telemetry_notice::PendingTelemetryNotice {
-                config_path: Some("config.toml".into()),
-                setup_state_path: "setup_state.json".into(),
-                session_source: codewhale_telemetry::SessionSource::Interactive,
-            },
-            app.ui_locale,
-        ));
-    let config = Config::default();
-    let mut engine = crate::core::engine::mock_engine_handle();
-
-    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
-        .await
-        .expect("defer for disclosure");
-
-    assert!(app.auto_submit_initial_input);
-    assert_eq!(app.input, "inspect the workspace");
-    assert!(engine.rx_op.try_recv().is_err());
-
-    assert_eq!(
-        app.view_stack.pop().map(|view| view.kind()),
-        Some(ModalKind::TelemetryNotice)
-    );
-    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
-        .await
-        .expect("submit after disclosure");
-
-    assert!(!app.auto_submit_initial_input);
-    match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
-            assert!(content.contains("inspect the workspace"));
-        }
-        other => panic!("expected SendMessage, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn steer_user_message_records_prompt_for_cancel_restore() {
     let mut app = create_test_app();
     let mut engine = crate::core::engine::mock_engine_handle();

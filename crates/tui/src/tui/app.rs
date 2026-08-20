@@ -226,6 +226,7 @@ pub(crate) fn is_stop_word(input: &str, stop_words: &[String]) -> Option<String>
 fn initial_onboarding_state(
     skip_onboarding: bool,
     was_onboarded: bool,
+    needs_language: bool,
     needs_api_key: bool,
     needs_workspace_trust: bool,
 ) -> OnboardingState {
@@ -240,8 +241,14 @@ fn initial_onboarding_state(
         OnboardingState::Provider
     } else if was_onboarded && needs_workspace_trust {
         OnboardingState::TrustDirectory
+    } else if needs_language {
+        OnboardingState::Language
+    } else if needs_api_key {
+        OnboardingState::Provider
+    } else if needs_workspace_trust {
+        OnboardingState::TrustDirectory
     } else {
-        OnboardingState::Welcome
+        OnboardingState::Ready
     }
 }
 
@@ -262,6 +269,7 @@ fn onboarding_is_workspace_trust_gate(
 fn launch_onboarding_decision(
     skip_onboarding: bool,
     was_onboarded: bool,
+    needs_language: bool,
     needs_api_key: bool,
     needs_workspace_trust: bool,
     xai_oauth_needs_reauth: bool,
@@ -272,6 +280,7 @@ fn launch_onboarding_decision(
         initial_onboarding_state(
             skip_onboarding,
             was_onboarded,
+            needs_language,
             needs_api_key,
             needs_workspace_trust,
         )

@@ -546,6 +546,7 @@ impl App {
         let (onboarding, onboarding_missing_key_recovery) = launch_onboarding_decision(
             skip_onboarding,
             was_onboarded,
+            onboarding_needs_language,
             needs_api_key,
             needs_workspace_trust,
             xai_oauth_needs_reauth,

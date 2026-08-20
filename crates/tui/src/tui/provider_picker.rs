@@ -174,6 +174,10 @@ pub struct ProviderPickerView {
     stage: Stage,
     view: ProviderListView,
     setup_mode: bool,
+    /// First-run/recovery keeps the canonical provider engine but removes
+    /// the advanced management hotkeys from the decision surface. They remain
+    /// available from `/provider` after onboarding.
+    onboarding_mode: bool,
     query: String,
     api_key_input: String,
     /// An error surfaced after a failed key verification, shown inline
@@ -1586,6 +1590,7 @@ impl ProviderPickerView {
             stage: Stage::List,
             view,
             setup_mode: false,
+            onboarding_mode: false,
             query: String::new(),
             api_key_input: String::new(),
             key_entry_error: None,
@@ -1740,7 +1745,9 @@ impl ProviderPickerView {
         config: &Config,
         runtime_status: Option<ProviderRuntimeStatus>,
     ) -> Self {
-        Self::new_for_setup_inner(active, target, config, runtime_status, false)
+        let mut picker = Self::new_for_setup_inner(active, target, config, runtime_status, false);
+        picker.onboarding_mode = true;
+        picker
     }
 
     fn new_for_setup_inner(
@@ -2439,21 +2446,25 @@ impl ProviderPickerView {
         } else {
             self.tr(MessageId::PickerActionSetKey)
         };
-        let title = match (self.setup_mode, self.view) {
-            (true, ProviderListView::Configured) => {
-                format!(" Provider setup{} ", catalog_freshness_title_suffix())
+        let title = if self.onboarding_mode {
+            format!(" {} ", self.tr(MessageId::OnboardProviderTitle))
+        } else {
+            match (self.setup_mode, self.view) {
+                (true, ProviderListView::Configured) => {
+                    format!(" Provider setup{} ", catalog_freshness_title_suffix())
+                }
+                (true, ProviderListView::Catalog) => {
+                    format!(" Provider setup · all{} ", catalog_freshness_title_suffix())
+                }
+                (true, ProviderListView::Local) => " Local models · no cloud key ".to_string(),
+                (false, ProviderListView::Configured) => {
+                    format!(" Provider{} ", catalog_freshness_title_suffix())
+                }
+                (false, ProviderListView::Catalog) => {
+                    format!(" Provider · all{} ", catalog_freshness_title_suffix())
+                }
+                (false, ProviderListView::Local) => " Provider · local only ".to_string(),
             }
-            (true, ProviderListView::Catalog) => {
-                format!(" Provider setup · all{} ", catalog_freshness_title_suffix())
-            }
-            (true, ProviderListView::Local) => " Local models · no cloud key ".to_string(),
-            (false, ProviderListView::Configured) => {
-                format!(" Provider{} ", catalog_freshness_title_suffix())
-            }
-            (false, ProviderListView::Catalog) => {
-                format!(" Provider · all{} ", catalog_freshness_title_suffix())
-            }
-            (false, ProviderListView::Local) => " Provider · local only ".to_string(),
         };
         let outer = Block::default()
             .title(Line::from(Span::styled(
@@ -2476,7 +2487,23 @@ impl ProviderPickerView {
         let search_active = !self.query.trim().is_empty();
         // The action footer moves into the body so it wraps instead of clipping
         // at narrow widths (#3732); the provider list renders above it.
-        let content = if search_active {
+        let content = if self.onboarding_mode {
+            let mut hints = vec![
+                ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
+                ActionHint::new("Enter", enter_action),
+            ];
+            if self.view == ProviderListView::Local {
+                hints.push(ActionHint::new(
+                    "A",
+                    self.tr(MessageId::PickerActionBrowseAll),
+                ));
+            }
+            hints.extend([
+                ActionHint::new("Ctrl+O", self.tr(MessageId::OnboardProviderOffline)),
+                ActionHint::new("Esc", self.tr(MessageId::OnboardActionBack)),
+            ]);
+            render_modal_footer(inner, buf, &hints)
+        } else if search_active {
             render_modal_footer(
                 inner,
                 buf,
@@ -2546,7 +2573,18 @@ impl ProviderPickerView {
             return;
         }
 
-        let layout = ListDetailLayout::split(content, 34);
+        // Onboarding asks one question. The ordinary provider manager keeps
+        // its technical detail pane, but first-run gives the available rows
+        // the whole body so 40x12 still has room to choose and proceed.
+        let layout = if self.onboarding_mode {
+            ListDetailLayout {
+                list: content,
+                detail: Rect::new(content.x, content.y, 0, 0),
+                stacked: false,
+            }
+        } else {
+            ListDetailLayout::split(content, 34)
+        };
         let selected_pos = filtered
             .iter()
             .position(|(idx, _)| *idx == self.selected_idx)
@@ -2625,7 +2663,9 @@ impl ProviderPickerView {
             lines.push(line);
         }
         Paragraph::new(lines).render(layout.list, buf);
-        self.render_provider_detail(layout.detail, buf, &self.rows[self.selected_idx]);
+        if !self.onboarding_mode {
+            self.render_provider_detail(layout.detail, buf, &self.rows[self.selected_idx]);
+        }
     }
 
     fn render_provider_detail(&self, area: Rect, buf: &mut Buffer, row: &ProviderDashboardRow) {
@@ -6254,10 +6294,8 @@ mod tests {
     fn lm_studio_preset_is_loopback_keyless_and_requests_the_loaded_model() {
         let config = Config::default();
         let mut picker =
-            ProviderPickerView::new_for_onboarding(ApiProvider::Deepseek, None, &config, None);
+            ProviderPickerView::new_for_setup(ApiProvider::Deepseek, None, &config, None);
 
-        assert_eq!(picker.view, ProviderListView::Local);
-        assert_eq!(picker.selected_provider(), ApiProvider::Ollama);
         let rendered = render_text(&picker, 100, 28);
         assert!(rendered.contains("I LM Studio"), "{rendered}");
         assert!(matches!(
@@ -6789,12 +6827,18 @@ mod tests {
         assert!(!visible.contains(&ApiProvider::OllamaCloud));
         assert!(!visible.contains(&ApiProvider::Deepseek));
 
-        let rendered = render_text(&picker, 100, 28);
+        let rendered = render_text(&picker, 40, 12);
+        assert!(rendered.contains("Ollama"), "{rendered}");
         assert!(
-            rendered.contains("Local models · no cloud key"),
+            rendered.contains(crate::tui::glyphs::SELECTION),
             "{rendered}"
         );
-        assert!(rendered.contains("local · no cloud key"), "{rendered}");
+        for (idx, line) in rendered.lines().enumerate() {
+            assert!(
+                crate::tui::ui_text::text_display_width(line) <= 40,
+                "40x12 line {idx} clips: {line:?}\n{rendered}"
+            );
+        }
 
         match picker.handle_key(key(KeyCode::Enter)) {
             ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied {

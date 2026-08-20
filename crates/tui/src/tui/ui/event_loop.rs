@@ -531,21 +531,7 @@ pub async fn run_tui(
         tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
     app.dispatch_completion_tx = Some(dispatch_completion_tx);
 
-    // The disclosure is the final startup view pushed, so setup/provider
-    // surfaces remain ready underneath but nothing can appear above the
-    // privacy decision. This also makes the first visible frame a native
-    // Codewhale surface instead of a shell questionnaire.
-    if let Some(pending) = pending_telemetry_notice {
-        app.view_stack
-            .push(crate::tui::telemetry_notice::TelemetryNoticeView::new(
-                pending,
-                app.ui_locale,
-            ));
-    }
-
-    if app.view_stack.top_kind() != Some(ModalKind::TelemetryNotice)
-        && std::mem::take(&mut app.start_remote_control_on_launch)
-    {
+    if std::mem::take(&mut app.start_remote_control_on_launch) {
         start_remote_control_session(&mut app);
     }
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
@@ -565,6 +551,7 @@ pub async fn run_tui(
         task_manager,
         &event_broker,
         translation_client,
+        pending_telemetry_notice,
         dispatch_completion_rx,
     )
     .await;
@@ -673,6 +660,28 @@ pub async fn run_tui(
     result
 }
 
+/// Commit the already-rendered inline disclosure and then arm from the exact
+/// applied setup state. A concurrent opt-out or failed persistence replaces
+/// the optimistic one-line receipt with the truthful existing localized
+/// result and remains retry-safe on the next launch.
+fn apply_telemetry_after_disclosure_draw(
+    app: &mut App,
+    pending: crate::telemetry_notice::PendingTelemetryNotice,
+) {
+    let applied = crate::telemetry_notice::apply_decision(&pending, true);
+    if applied.status_message_id != MessageId::TelemetryNoticeReceiptEnabled {
+        let receipt = app.tr(applied.status_message_id);
+        let settings = app.tr(MessageId::CmdSettingsDescription);
+        app.push_status_toast(
+            format!("{receipt}  /settings — {settings}"),
+            StatusToastLevel::Info,
+            Some(12_000),
+        );
+        app.needs_redraw = true;
+    }
+    crate::apply_tui_telemetry_decision(&pending, &applied.setup_state);
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn run_event_loop(
     terminal: &mut AppTerminal,
@@ -682,6 +691,7 @@ pub(crate) async fn run_event_loop(
     task_manager: SharedTaskManager,
     event_broker: &EventBroker,
     translation_client: Option<Arc<DeepSeekClient>>,
+    mut pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
     mut dispatch_completion_rx: tokio::sync::mpsc::Receiver<crate::tui::app::DispatchApplyFn>,
 ) -> Result<()> {
     // Track streaming state
@@ -733,6 +743,13 @@ pub(crate) async fn run_event_loop(
         .checked_sub(TERMINAL_INPUT_RECOVERY_COOLDOWN)
         .unwrap_or_else(Instant::now);
     let mut last_recovery_snapshot_at: Option<Instant> = None;
+    // Disclosure is queued in the chosen locale, rendered once as a normal
+    // non-blocking receipt, and only then allowed to arm telemetry. Keeping
+    // the applied state separate makes the draw itself the privacy boundary:
+    // a failed draw exits without arming.
+    let mut telemetry_waiting_for_disclosure_draw: Option<
+        crate::telemetry_notice::PendingTelemetryNotice,
+    > = None;
 
     // Fire-and-forget version check — runs once per session in the
     // background. On success, a short status toast advertises the update
@@ -763,6 +780,21 @@ pub(crate) async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
+        if telemetry_waiting_for_disclosure_draw.is_none()
+            && app.onboarding == OnboardingState::None
+            && let Some(pending) = pending_telemetry_notice.take()
+        {
+            let receipt = app.tr(MessageId::TelemetryNoticeReceiptEnabled);
+            let settings = app.tr(MessageId::CmdSettingsDescription);
+            app.push_status_toast(
+                format!("{receipt}  /settings — {settings}"),
+                StatusToastLevel::Info,
+                Some(12_000),
+            );
+            app.needs_redraw = true;
+            telemetry_waiting_for_disclosure_draw = Some(pending);
+        }
+
         // A manual compaction deferred by a full engine mailbox retries here
         // each iteration until a slot frees or a live pass supersedes it.
         flush_deferred_manual_compaction(app, config, &engine_handle);
@@ -3268,6 +3300,9 @@ pub(crate) async fn run_event_loop(
         }
         if app.needs_redraw && draw_wait.is_none() {
             draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
+            if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
+                apply_telemetry_after_disclosure_draw(app, pending);
+            }
             force_terminal_repaint = false;
             frame_rate_limiter.mark_emitted(Instant::now());
             app.needs_redraw = false;
@@ -3486,6 +3521,9 @@ pub(crate) async fn run_event_loop(
                     backend.set_terminal_size(new_size);
                 }
                 draw_app_frame_inner(terminal, app, config, true)?;
+                if let Some(pending) = telemetry_waiting_for_disclosure_draw.take() {
+                    apply_telemetry_after_disclosure_draw(app, pending);
+                }
                 {
                     let backend = terminal.backend_mut();
                     backend.clear_forced_size();
@@ -3666,30 +3704,6 @@ pub(crate) async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
-
-            // The first-run disclosure is the launch's decision boundary. It
-            // owns every key before Help, Settings, onboarding, decision
-            // cards, or the composer can see it; Esc/Ctrl+C exit without
-            // recording a choice, and Enter/Y/N are handled by the native
-            // view itself.
-            if app.view_stack.top_kind() == Some(ModalKind::TelemetryNotice) {
-                let events = app.view_stack.handle_key(key);
-                app.needs_redraw = true;
-                if handle_view_events_boxed(
-                    terminal,
-                    app,
-                    config,
-                    &task_manager,
-                    &mut engine_handle,
-                    &mut web_config_session,
-                    events,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-                continue;
-            }
 
             // A route change made in-session is temporary and stays that way
             // until the user EXPLICITLY persists it with a command

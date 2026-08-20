@@ -2241,19 +2241,18 @@ fn composer_keeps_legitimate_closing_bracket_digit_text() {
 
 // initial_onboarding_state tests
 // These pin the logic that decides whether the TUI shows the
-// onboarding flow (Welcome → Language → Provider setup → …) or goes
-// straight to the chat view.  Getting this wrong either locks
-// first-run users out of the API-key prompt or nags returning
-// users whose key is already configured.
+// first missing decision or goes straight to the chat view. Getting this
+// wrong either locks first-run users out of provider setup or nags returning
+// users whose configuration is already usable.
 
 #[test]
 fn skip_onboarding_suppresses_all_onboarding_states() {
     assert_eq!(
-        initial_onboarding_state(true, false, true, true),
+        initial_onboarding_state(true, false, true, true, true),
         OnboardingState::None
     );
     assert_eq!(
-        initial_onboarding_state(true, true, true, true),
+        initial_onboarding_state(true, true, true, true, true),
         OnboardingState::None
     );
 }
@@ -2261,7 +2260,7 @@ fn skip_onboarding_suppresses_all_onboarding_states() {
 #[test]
 fn fully_configured_returning_user_skips_onboarding() {
     assert_eq!(
-        initial_onboarding_state(false, true, false, false),
+        initial_onboarding_state(false, true, false, false, false),
         OnboardingState::None
     );
 }
@@ -2269,29 +2268,33 @@ fn fully_configured_returning_user_skips_onboarding() {
 #[test]
 fn returning_user_missing_api_key_goes_to_canonical_provider_setup() {
     assert_eq!(
-        initial_onboarding_state(false, true, true, false),
+        initial_onboarding_state(false, true, false, true, false),
         OnboardingState::Provider
     );
     // workspace trust doesn't affect the api-key gate
     assert_eq!(
-        initial_onboarding_state(false, true, true, true),
+        initial_onboarding_state(false, true, false, true, true),
         OnboardingState::Provider
     );
 }
 
 #[test]
-fn first_run_user_always_starts_at_welcome() {
+fn first_run_user_starts_at_the_first_missing_decision() {
     assert_eq!(
-        initial_onboarding_state(false, false, false, false),
-        OnboardingState::Welcome
+        initial_onboarding_state(false, false, true, true, true),
+        OnboardingState::Language
     );
     assert_eq!(
-        initial_onboarding_state(false, false, true, false),
-        OnboardingState::Welcome
+        initial_onboarding_state(false, false, false, true, true),
+        OnboardingState::Provider
     );
     assert_eq!(
-        initial_onboarding_state(false, false, false, true),
-        OnboardingState::Welcome
+        initial_onboarding_state(false, false, false, false, true),
+        OnboardingState::TrustDirectory
+    );
+    assert_eq!(
+        initial_onboarding_state(false, false, false, false, false),
+        OnboardingState::Ready
     );
 }
 
@@ -2308,7 +2311,7 @@ fn onboarding_workspace_trust_gate_only_fires_for_onboarded_user() {
 #[test]
 fn onboarded_user_still_gets_workspace_trust_prompt_when_needed() {
     assert_eq!(
-        initial_onboarding_state(false, true, false, true),
+        initial_onboarding_state(false, true, false, false, true),
         OnboardingState::TrustDirectory
     );
 }
@@ -6979,6 +6982,7 @@ fn launch_onboarding_skips_picker_when_xai_oauth_needs_reauth() {
     let (onboarding, recovery) = launch_onboarding_decision(
         false, // skip_onboarding
         true,  // was_onboarded
+        false, // needs_language
         true,  // needs_api_key
         false, // needs_workspace_trust
         true,  // xai_oauth_needs_reauth
@@ -6991,24 +6995,35 @@ fn launch_onboarding_skips_picker_when_xai_oauth_needs_reauth() {
 fn launch_onboarding_opens_picker_for_generic_missing_key() {
     // A generic missing key (not the xAI-OAuth re-auth case) still reopens the
     // provider picker for recovery.
-    let (onboarding, recovery) = launch_onboarding_decision(false, true, true, false, false);
+    let (onboarding, recovery) = launch_onboarding_decision(false, true, false, true, false, false);
     assert_eq!(onboarding, OnboardingState::Provider);
     assert!(recovery);
 }
 
 #[test]
 fn launch_onboarding_clean_when_onboarded_with_key() {
-    let (onboarding, recovery) = launch_onboarding_decision(false, true, false, false, false);
+    let (onboarding, recovery) =
+        launch_onboarding_decision(false, true, false, false, false, false);
     assert_eq!(onboarding, OnboardingState::None);
     assert!(!recovery);
 }
 
 #[test]
-fn launch_onboarding_keeps_first_run_when_not_onboarded_even_if_xai_reauth() {
+fn launch_onboarding_starts_at_the_first_missing_decision() {
     // A NOT-yet-onboarded user still gets first-run onboarding even if their
     // xAI OAuth credential is missing — the picker suppression is only for the
-    // onboarded missing-key-RECOVERY case, not first run.
-    let (onboarding, recovery) = launch_onboarding_decision(false, false, true, false, true);
-    assert_eq!(onboarding, OnboardingState::Welcome);
+    // onboarded missing-key-RECOVERY case, not first run. The redundant
+    // welcome click is gone: the provider question is the first screen.
+    let (onboarding, recovery) = launch_onboarding_decision(false, false, false, true, false, true);
+    assert_eq!(onboarding, OnboardingState::Provider);
     assert!(!recovery);
+
+    let (language, _) = launch_onboarding_decision(false, false, true, true, true, false);
+    assert_eq!(language, OnboardingState::Language);
+
+    let (trust, _) = launch_onboarding_decision(false, false, false, false, true, false);
+    assert_eq!(trust, OnboardingState::TrustDirectory);
+
+    let (ready, _) = launch_onboarding_decision(false, false, false, false, false, false);
+    assert_eq!(ready, OnboardingState::Ready);
 }

@@ -873,23 +873,6 @@ pub(crate) async fn handle_view_events(
 ) -> Result<bool> {
     for event in events {
         match event {
-            ViewEvent::TelemetryNoticeDecided { enabled, pending } => {
-                let applied = crate::telemetry_notice::apply_decision(&pending, enabled);
-                // Feed the just-made choice directly into the predicate. A
-                // failed write can make Codewhale ask again next launch, but
-                // it can never reverse Disable for this process.
-                crate::apply_tui_telemetry_decision(&pending, &applied.setup_state);
-                let status_message = app.tr(applied.status_message_id).into_owned();
-                app.push_status_toast(status_message, StatusToastLevel::Info, Some(8_000));
-                if std::mem::take(&mut app.start_remote_control_on_launch) {
-                    start_remote_control_session(app);
-                }
-                submit_initial_input_if_ready(app, config, engine_handle).await?;
-            }
-            ViewEvent::TelemetryNoticeCancelled => {
-                let _ = engine_handle.send(Op::Shutdown).await;
-                return Ok(true);
-            }
             ViewEvent::CommandPaletteSelected { action } => match action {
                 crate::tui::views::CommandPaletteAction::ExecuteCommand { command } => {
                     if execute_command_input(
