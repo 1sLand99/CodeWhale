@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- First-run onboarding no longer silently truncates its explanation in
+  languages that do not put spaces between words. `wrap_words` split on
+  whitespace, so a Japanese sentence arrived as a single token, the
+  line-break check (which only fires once a line is non-empty) never
+  triggered, and the over-wide line was clipped by the terminal. At 80
+  columns the provider screen read
+  "Hosted providers need a key, but loca" and stopped — losing exactly the
+  half that tells the reader local runtimes need no key, on the screen where
+  they choose a provider. Space-less scripts now break by display width on
+  grapheme clusters, and a line may not begin with closing punctuation
+  (`。`, `、`, `」`, `）` and friends). Wrapping for languages that do use
+  spaces is unchanged.
+
 - Project instructions are bounded by one budget and no longer treat other
   agents' files as law by default. Previously `.claude/instructions.md` and
   `CLAUDE.md` sat at ranks 2 and 3 of the canonical instruction list — *above*

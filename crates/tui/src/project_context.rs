@@ -137,6 +137,7 @@ pub struct ForeignInstructionImports {
 }
 
 impl ForeignInstructionImports {
+    #[cfg(test)]
     #[must_use]
     pub fn none() -> Self {
         Self::default()
@@ -172,12 +173,14 @@ impl ForeignInstructionImports {
         self.enabled.contains(format.key())
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.enabled.is_empty()
     }
 
     /// Enabled format keys, for provenance and diagnostics.
+    #[cfg(test)]
     #[must_use]
     pub fn keys(&self) -> Vec<&'static str> {
         self.enabled.iter().copied().collect()
@@ -432,6 +435,12 @@ pub(crate) fn enforce_project_instruction_budget(ctx: &mut ProjectContext) {
 /// Load project context from the workspace directory.
 ///
 /// This searches for known project context files and loads the first one found.
+/// Convenience wrapper that reads the process-wide opt-in set.
+///
+/// Production goes through [`load_project_context_with_imports`] so the import
+/// set is explicit at the call site; this exists for tests that only care about
+/// default behaviour.
+#[cfg(test)]
 pub fn load_project_context(workspace: &Path) -> ProjectContext {
     load_project_context_with_imports(workspace, &foreign_instruction_imports())
 }
