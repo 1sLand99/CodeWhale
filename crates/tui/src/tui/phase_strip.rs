@@ -398,38 +398,67 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
                 && !toast.text.trim().is_empty()
                 && toast.text.trim() != phase_label.as_ref()
         })
-        .and_then(|toast| {
-            // Fit the notice against the whole row it could have, then keep
-            // the key hints only if they cost the notice nothing. Standing
-            // metadata never competes — it stood down before we got here —
-            // and the hints are the one group that is optional twice over.
-            let alone = available.saturating_sub(phase_width + GROUP_GAP_WIDTH);
-            let text = fit_notice(&toast.text, alone)?;
-            let hints_survive = hint_cost > 0 && text.width() + hint_cost <= alone;
-            Some((text, status_toast_ink(toast.level), hints_survive))
+        .map(|toast| {
+            let urgent = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (toast.text.clone(), status_toast_ink(toast.level), urgent)
         });
 
-    let mut keep_hints = true;
-    if let Some((text, ink, hints_survive)) = notice {
-        keep_hints = hints_survive || hint_cost == 0;
+    // Identity is standing information: which model is answering does not stop
+    // being true because a notice appeared. A notice is also not necessarily
+    // transient — `sticky_status` carries `ttl_ms: None` for Warning and Error
+    // — so letting any notice erase the route would let one denied tool call
+    // hide it for the rest of the session.
+    //
+    // When both cannot fit, severity decides. A Warning or an Error is
+    // actionable and wins the columns; routine informational copy (the
+    // telemetry receipt is the common case) yields to the standing facts.
+    let mut used = phase_width + hint_cost;
+    let identity =
+        route_identity_fields(app, tier, available.saturating_sub(used + GROUP_GAP_WIDTH));
+    let identity_painted = identity.as_ref().map(|fields| {
+        let model_index = usize::from(fields.len() == 3);
+        identity_spans(fields, model_index, &app.ui_theme)
+    });
+    let identity_cost = identity_painted
+        .as_ref()
+        .map_or(0, |spans| GROUP_GAP_WIDTH + span_width(spans));
+
+    let mut show_identity = identity_painted.is_some();
+    let notice = notice.and_then(|(text, ink, urgent)| {
+        let beside = available.saturating_sub(used + identity_cost + GROUP_GAP_WIDTH);
+        if let Some(fitted) = fit_notice(&text, beside) {
+            return Some((fitted, ink));
+        }
+        if !urgent {
+            // Routine copy does not get to evict the route.
+            return None;
+        }
+        // Urgent: take identity's columns and refit against the whole row.
+        let alone = available.saturating_sub(used + GROUP_GAP_WIDTH);
+        let fitted = fit_notice(&text, alone)?;
+        show_identity = false;
+        Some((fitted, ink))
+    });
+
+    let keep_hints = true;
+    if show_identity && let Some(spans) = identity_painted {
+        used += identity_cost;
+        left.push(Span::raw(GROUP_GAP));
+        left.extend(spans);
+    }
+    if let Some((text, ink)) = notice {
         left.push(Span::raw(GROUP_GAP));
         left.push(Span::styled(
             text,
             Style::default().fg(ink.color(&app.ui_theme)),
         ));
     } else {
-        // No notice: the standing facts own the row. Identity first, then the
-        // ledger, then the session metrics strip on whatever is genuinely
-        // left. Each group fits whole or is not painted.
-        let mut used = phase_width + hint_cost;
-        let identity_budget = available.saturating_sub(used + GROUP_GAP_WIDTH);
-        if let Some(fields) = route_identity_fields(app, tier, identity_budget) {
-            let model_index = usize::from(fields.len() == 3);
-            let spans = identity_spans(&fields, model_index, &app.ui_theme);
-            used += GROUP_GAP_WIDTH + span_width(&spans);
-            left.push(Span::raw(GROUP_GAP));
-            left.extend(spans);
-        }
+        // No notice: the ledger and the session metrics strip may spend what
+        // identity did not. Each group fits whole or is not painted.
 
         let mut ledger: Vec<Span<'static>> = Vec::new();
         let chip = app.cumulative_usage_chip();
@@ -1134,12 +1163,14 @@ mod tests {
         }
     }
 
-    /// A notice is a transient thing the session is telling you; identity and
-    /// the ledger are standing facts that will still be there in ten seconds.
-    /// While a notice is live the standing facts stand down, so the notice
-    /// gets a whole sentence instead of a stump.
+    /// Identity is standing information; a notice is something the session is
+    /// telling you. When both cannot fit, severity decides — and severity, not
+    /// mere presence, is the right axis: `sticky_status` carries
+    /// `ttl_ms: None` for Warning and Error, so "any notice evicts identity"
+    /// would let one denied tool call hide which model is answering for the
+    /// rest of the session.
     #[test]
-    fn a_live_notice_stands_the_standing_facts_down() {
+    fn routine_notices_yield_to_the_route_but_urgent_ones_do_not() {
         let mut app = test_app();
         app.ui_locale = crate::localization::Locale::En;
         app.status_items = vec![crate::config::StatusItem::SessionMetrics];
@@ -1150,31 +1181,40 @@ mod tests {
             Some(12_000),
         );
 
+        // Wide: the receipt and the route coexist. The route is never the
+        // thing that gets dropped to make room for routine copy.
         let text = strip_text(&mut app, 120);
+        assert!(text.contains("Anonymous usage counts are on."), "{text}");
         assert!(
-            text.contains(
-                "Anonymous usage counts are on. Conversations and code are never collected."
-            ),
-            "{text}"
+            text.contains("deepseek-v4-flash"),
+            "a routine notice must not evict the route: {text}"
         );
-        assert!(
-            !text.contains("deepseek-v4-flash"),
-            "identity should stand down for a live notice: {text}"
-        );
-        assert!(!text.contains("turns"), "ledger stood down too: {text}");
-        assert!(text.contains("keys"), "hints still fit at 120: {text}");
 
-        // 80 columns holds one clause beside the hints.
+        // Narrow: the receipt sheds clauses; the route still stands.
         let text = strip_text(&mut app, 80);
-        assert!(text.contains("Anonymous usage counts are on."), "{text}");
-        assert!(!text.contains("Conversations"), "{text}");
-        assert!(text.contains("keys"), "{text}");
+        assert!(
+            text.contains("deepseek-v4-flash"),
+            "the route survives at 80: {text}"
+        );
+        assert!(!text.contains('…'), "no dangling ellipsis: {text}");
 
-        // 60 columns cannot hold a clause and the hints, so the hints — the
-        // one group that is optional twice over — yield last and yield whole.
-        let text = strip_text(&mut app, 60);
-        assert!(text.contains("Anonymous usage counts are on."), "{text}");
-        assert!(!text.contains("keys"), "{text}");
+        // An urgent notice is actionable and does get the columns when the row
+        // cannot hold both.
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.push_status_toast(
+            "Auto-denied exec_shell: denied earlier; restart Codewhale to re-enable it.",
+            crate::tui::app::StatusToastLevel::Warning,
+            None,
+        );
+        for width in [60u16, 80, 120] {
+            let text = strip_text(&mut app, width);
+            assert!(
+                text.contains("Auto-denied exec_shell"),
+                "{width} dropped an actionable warning: {text}"
+            );
+            assert!(!text.contains('…'), "{width} dangled: {text}");
+        }
     }
 
     #[test]
