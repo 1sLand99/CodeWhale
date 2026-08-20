@@ -1,174 +1,100 @@
 # Codewhale
 
-An open source coding agent for your terminal — bring your own model.
+Codewhale is an open source coding agent for your terminal, built in Rust and
+improved in public with the people who use it.
 
-Codewhale started as a native experience for DeepSeek. It has since grown into a
-community-driven project: one coding agent that fits a growing international
-community and supports as many models and providers as possible — open models
-first, hosted or local, none privileged over the rest.
+![Codewhale running in a terminal](assets/screenshot.webp)
 
-Give it a provider, a model, and a task. It reads your code, edits files, runs
-commands, and checks its own work, then stops when the job is done or it needs
-you. Switch models mid-task with `/model`. Work interactively in the TUI, or run
-`codewhale exec` in scripts and CI. It's written in Rust, licensed MIT, and runs
-on your machine.
-
-What sets it apart: **you pick the model for each
-role — and they don't have to match** — and **agents in Codewhale talk to each
-other, across models.** A fleet pins a provider, a model, and a reasoning tier
-per role, so a cheap fast model can direct an expensive reasoning one, or a
-GLM builder can work the same job as a Kimi reviewer. While they run, message
-any of them mid-flight, peek at its transcript, or interrupt it — and it isn't
-just parent-to-child: separate Codewhale tasks in the same workspace exchange
-durable, restart-safe Agent Mail, delivered once at a safe boundary, with
-credentials redacted. A `/goal` holds a long objective across turns until it's
-actually done. Roles are files you edit, and Codewhale stays yours.
-
-We're always looking for contributors and ways to improve. If a model or
-provider you use is missing, or something breaks, telling us is one of the most
-useful things you can do — see [Contributing](#contributing).
-
-[简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
 [![npm](https://img.shields.io/npm/v/codewhale?label=npm)](https://www.npmjs.com/package/codewhale)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
-
-![Codewhale running in a terminal](assets/screenshot.webp)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/37gfS3ksug)
 
 ## Install
 
 ```bash
 npm install -g codewhale
+codewhale
 ```
 
-Cargo, Docker, Nix, Scoop, prebuilt archives, Android/Termux, and a CNB mirror
-for anyone who can't reach GitHub are covered in
-[docs/INSTALL.md](docs/INSTALL.md). Coming from `deepseek-tui`? Your config and
-sessions carry over — see [docs/REBRAND.md](docs/REBRAND.md).
+The first run helps you connect a provider or stay offline. Codewhale also
+supports Cargo, Docker, Nix, Scoop, prebuilt archives, Android/Termux, and a CNB
+mirror. See [the installation guide](docs/INSTALL.md).
 
 ## Use
 
-```bash
-codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
-codewhale                                # open the TUI
-codewhale exec "fix the failing test"    # headless
-codewhale web                            # local browser client on 127.0.0.1
+Talk to Codewhale the same way you would talk to a teammate:
+
+```text
+Fix the failing tests and explain what changed.
 ```
 
-In the TUI: `/model` switches provider and model together, `/fleet` builds and
-runs the team — one role at a time, each with its own model — `/undo` reverts
-the last turn, and `/restore <N>` rolls the workspace back to an earlier
-snapshot (bare `/restore` lists them). `Tab`
-cycles Plan / Work / Operate when the composer is empty — with text in it, `Tab`
-completes slash commands and `@` mentions instead. `Shift+Tab` cycles the
-Ask / Auto-Review / Full Access permission posture at any time. `!` runs a
-shell command through the normal approval path.
+Or run a task without opening the TUI:
 
-## What it does
+```bash
+codewhale exec "fix the failing tests and explain what changed"
+```
 
-- **Any model, any provider — and any mix of them.** DeepSeek, Claude, GPT,
-  Kimi, GLM, and 30+ providers, plus your own vLLM, SGLang, or Ollama with no
-  key, all through one runtime and one toolset. The catalog tracks each
-  provider's live lineup — DeepSeek's V4 Pro backend (labeled
-  `DeepSeek-V4-Pro-0813`) stays callable as `deepseek-v4-pro`, Grok 4.6 is the
-  direct xAI default, and OrcaRouter routes through `orcarouter/auto`. A saved
-  role records its `provider`, `model`, and reasoning tier explicitly, so a
-  fleet can span vendors in a single run and a role's route never depends on
-  whichever provider happens to be active. Context limits and prices come from
-  the real route, and an unknown price shows as unknown rather than $0.
-- **Agents that talk to each other — across models.** Every agent in Codewhale
-  is reachable while it works: `message` queues a note to a running sub-agent,
-  `followup` wakes it with your note at its next safe boundary, `peek` reads its
-  transcript, and an interrupt stops just its turn. It goes further than the
-  parent-child tree: separate tasks in the same workspace exchange durable
-  **Agent Mail** — a queued handoff summary that survives restart, delivers
-  exactly once at the recipient's safe boundary, and redacts credentials and
-  paths — so a GLM session and a Kimi session can coordinate in two terminals
-  with you out of the relay loop. Each side can be a different model; Codewhale
-  carries the conversation either way.
-- **An agent you author.** Roles are files you can read and edit — a model, a
-  tool posture, and standing instructions per role — kept in the project so the
-  team shares them, or beside your other personal settings so they follow you
-  between repos. A constitution records how you want the agent to behave across
-  every session, so Codewhale matches your practice instead of ours.
-- **Read-only until you allow more.** Plan mode can't change files, and
-  approvals gate risky commands. When an OS sandbox actually wraps a command,
-  Codewhale says so: Seatbelt on macOS where available, opt-in bubblewrap on
-  Linux. A repo's `constitution.json` compiles into write holds that even Full
-  Access can't skip.
-- **Work you can resume.** A fleet records every step to an append-only ledger,
-  so `fleet resume` picks up where you left off. `/goal` holds a persistent
-  objective the agent keeps working toward across turns — pausable, resumable,
-  and restored with the session on restart — and `/workflows` opens a live
-  dashboard over every run this workspace's journal keeps.
+Codewhale can read your repository, edit files, run commands, inspect results,
+and keep working toward a goal. You decide how much access it has.
 
-## Integrations
+## Why Codewhale
 
-- **DeepSeek Harness (dsh) — connected through Codewhale.**
-  `codewhale integrations dsh connect` links an existing `@deepseek-ai/dsh`
-  install to your Codewhale provider route, permissions, and workspace, and
-  `integrations dsh install-bundle` adds the opt-in DSH plugin bundle so
-  `dsh --profile codewhale` carries that identity on its own. Codewhale owns
-  permissions and lifecycle authority; dsh keeps its own sessions, profiles,
-  and credentials untouched. See
-  [docs/INTEGRATIONS_DSH.md](docs/INTEGRATIONS_DSH.md).
-- **VS Code.** The official extension scaffold (`extensions/vscode`) opens
-  Codewhale in an integrated terminal and exposes a read-only Agent View over
-  the local runtime. It is a local-development preview, not a marketplace
-  release yet.
+- **Use the model you want.** Connect hosted providers or local models through
+  Ollama, vLLM, or SGLang. Switch provider and model with `/model`.
+- **Stay in control.** Plan is read-only. Ask, Auto-Review, and Full Access make
+  approval behavior visible. `/undo` reverts the last turn and `/restore`
+  returns the workspace to an earlier snapshot.
+- **Keep long work organized.** Save sessions, set a durable `/goal`, review
+  workflows before they run, and coordinate agents without turning their
+  internal instructions into your transcript.
+- **Extend the agent you already have.** Connect MCP servers and skills,
+  configure hooks, and keep agent roles as readable files in your project or
+  personal settings.
 
-## Learn more
+Run `/help` in the TUI for commands and keyboard shortcuts.
 
-- [docs/PROVIDERS.md](docs/PROVIDERS.md) — every provider route: hosted,
-  gateway, and local
-- [docs/FLEET.md](docs/FLEET.md) — fleets, the ledger, and resume
-- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — frozen, provider-neutral experimental search within Workflow
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks, and
-  the constitution
-- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — how modes,
-  hooks, permission rules, safety floors, repo law, approvals, and sandboxing
-  compose
-- [docs/HOOKS.md](docs/HOOKS.md) — the eleven TUI lifecycle hook events, their
-  payloads, and which three of them can steer a turn (`codewhale exec` and the
-  CLI subcommands do not fire hooks)
-- [docs/WEB.md](docs/WEB.md) — the loopback-only browser client and its one-time
-  authentication boundary
+## Safety
 
-Everything else — modes, keybindings, sandbox details, MCP, the runtime API,
-and architecture — lives in [docs](docs) and on
-[codewhale.net](https://codewhale.net/).
+Codewhale runs on your machine with the access you grant it. Approval modes and
+repository rules limit what the agent may do; optional OS sandboxing adds a
+stronger execution boundary where supported. Unknown model prices stay unknown
+instead of being reported as free.
 
-## Contributing
+Read [authorization order](docs/AUTHORIZATION_ORDER.md) for the exact policy
+stack and [configuration](docs/CONFIGURATION.md) for local settings.
 
-Issues, PRs, repro steps, logs, and feature requests are all real project work,
-and first contributions are welcome. When a PR can't merge as-is, maintainers
-harvest what works and keep the author credited — in the commit, the changelog,
-and [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
+## Documentation
 
-Want to talk through an idea before opening something? Join us on
-[Discord](https://discord.gg/37gfS3ksug), or add Hunter on WeChat
+- [Providers and local models](docs/PROVIDERS.md)
+- [Agent teams](docs/FLEET.md)
+- [MCP](docs/MCP.md), [hooks](docs/HOOKS.md), and [configuration](docs/CONFIGURATION.md)
+- [Local web client](docs/WEB.md)
+- [All documentation](docs)
+
+## Join the community
+
+Codewhale gets better when people use it, report what feels wrong, and help fix
+it. If a provider is missing, a workflow is awkward, or the terminal UI gets in
+your way, [open an issue](https://github.com/Hmbown/CodeWhale/issues). If you
+know how to improve it, [open a pull request](CONTRIBUTING.md). First
+contributions are welcome, and contributors keep credit for the work that
+lands.
+
+Join the [Discord](https://discord.gg/37gfS3ksug), or add Hunter on WeChat
 (`hunterbown`) and ask to join the Whale Brothers group.
 
-- [Open issues](https://github.com/Hmbown/CodeWhale/issues) — good first
-  contributions live here
-- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup and PR flow
-- [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) — everyone who has shaped this
-- [Buy me a coffee](https://www.buymeacoffee.com/hmbown)
+## Project history
 
-Thanks to [DeepSeek](https://github.com/deepseek-ai) for the models and support
-that started the project, [DataWhale](https://github.com/datawhalechina) 🐋 for
-welcoming us into the Whale Brother family, and
-[OpenWarp](https://github.com/zerx-lab/warp) and
-[Open Design](https://github.com/nexu-io/open-design) for collaborating on the
-terminal-agent experience.
+Codewhale began as `deepseek-tui` and still preserves that configuration and
+session compatibility. It is now provider-neutral and independently maintained;
+it is not affiliated with any model provider.
+
+Thanks to every contributor and to the open source communities that helped the
+project grow. See [the contributor record](docs/CONTRIBUTORS.md).
 
 ## License
 
-[MIT](LICENSE). An independent community project, not affiliated with any model
-provider.
-
-![Codewhale fanning out three read-only scout subagents in a terminal](assets/fanout.gif)
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Hmbown/CodeWhale&type=date&legend=top-left)](https://star-history.dera.page/#Hmbown/CodeWhale&type=date)
+[MIT](LICENSE)
