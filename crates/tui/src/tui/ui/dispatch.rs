@@ -136,6 +136,20 @@ pub(crate) fn build_queued_message(app: &mut App, input: String) -> QueuedMessag
     QueuedMessage::new(input, skill_instruction).with_skill_provenance(skill_provenance)
 }
 
+pub(crate) fn allowed_tools_for_message(
+    configured: Option<Vec<String>>,
+    message: &QueuedMessage,
+) -> Option<Vec<String>> {
+    if message.is_workflow_draft() {
+        // `/workflow <objective>` is review-first. The model may draft and ask
+        // for confirmation, but the host makes execution impossible in the
+        // same turn even if the provider ignores that instruction.
+        Some(Vec::new())
+    } else {
+        configured
+    }
+}
+
 pub(crate) async fn submit_initial_input_if_ready(
     app: &mut App,
     config: &Config,
@@ -596,6 +610,7 @@ pub(crate) fn prepare_user_dispatch(
     });
 
     let goal_objective = paused_dispatch.goal_objective(app);
+    let allowed_tools = allowed_tools_for_message(app.active_allowed_tools.clone(), &message);
 
     Ok(UserDispatchPrepare {
         message,
@@ -617,7 +632,7 @@ pub(crate) fn prepare_user_dispatch(
         auto_approve: app_auto_approve_enabled(app),
         approval_mode: app.approval_mode,
         translation_enabled: app.translation_enabled,
-        allowed_tools: app.active_allowed_tools.clone(),
+        allowed_tools,
         hook_executor: app.runtime_services.hook_executor.clone(),
         verbosity: app.verbosity.clone(),
         provenance: UserInputProvenance::ExternalUser,

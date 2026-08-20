@@ -1,12 +1,9 @@
-//! `/workflow` command — the user's opt-in to workflow orchestration.
+//! `/workflow` command — review, confirm, then orchestrate.
 //!
-//! The invocation carries authorization, not payload: bare `/workflow` asks
-//! the model to synthesize the objective from the conversation context and
-//! orchestrate it through the `workflow` tool (the same contract as goal-mode
-//! `/goal`: context-dependent, no argument required). `/workflow <objective>`
-//! narrows the run to an explicit objective. Control verbs (`status`,
-//! `cancel`, `settings`, `help`) are answered by the host from the run
-//! journal and live state — they never spend a model turn.
+//! Ordinary objectives produce a bounded, tool-less planning turn. The user
+//! reviews that draft and explicitly runs `/workflow confirm`; only that later
+//! turn can reach the canonical `workflow` tool. Control verbs (`status`,
+//! `cancel`, `settings`, `help`) remain host-owned and spend no model turn.
 //!
 //! `/workflows` (separate command, below) is the observation surface: the
 //! live run dashboard. It never orchestrates — that authority belongs to
@@ -14,6 +11,8 @@
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
+use crate::models::ContentBlock;
+use crate::tui::app::WORKFLOW_DRAFT_INSTRUCTION_PREFIX;
 use crate::tui::app::{App, AppAction, AppMode};
 #[cfg(test)]
 use crate::tui::approval::ApprovalMode;
@@ -23,7 +22,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "workflow",
     aliases: &["wf"],
-    usage: "/workflow [objective|run <path>|status [run_id]|cancel [run_id]|settings]",
+    usage: "/workflow [objective|confirm|run <path>|status [run_id]|cancel [run_id]|settings]",
     description_id: MessageId::CmdWorkflowDescription,
 };
 
@@ -39,57 +38,146 @@ impl RegisterCommand for WorkflowCmd {
     }
 }
 
-/// Shared orchestration contract appended to every start instruction. Mirrors
-/// what makes opt-in orchestration work well: the user's invocation is the
-/// authorization, fan-out scales to the ask, and receipts close the loop.
-const ORCHESTRATION_CONTRACT: &str = "Author a workflow script for the `workflow` tool (task()/parallel()/pipeline()/phase()/log()); \
-     you are the fan-in owner — fan out, wait for receipts, aggregate, verify, and synthesize one result. \
-     scale the fan-out to the size of the ask — a quick check gets a few tasks, an audit gets a wider sweep. \
-     Prefer pipeline() over barriers so items flow stage-to-stage without waiting. \
-     Use responseSchema on task() when you need structured child output; schema mismatches fail loudly in the run receipt. \
-     parallel() turns child failures into null — filter those slots and treat them as failures, not results. \
-     Run it with the `workflow` tool (`run` to block, or `start` then `status` for long runs), \
-     narrate phases as they complete, verify findings before reporting them as facts, \
-     and end with a compact receipt summary: run_id, status, and per-leaf outcomes.";
+const WORKFLOW_CONFIRM_INSTRUCTION_PREFIX: &str = "[codewhale.workflow-confirm.v1]";
+const WORKFLOW_OBJECTIVE_MAX_CHARS: usize = 1_000;
+const WORKFLOW_DISPLAY_MAX_CHARS: usize = 160;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkflowDraftEnvelope {
+    id: String,
+    objective: Option<String>,
+}
+
+fn truncate_workflow_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn workflow_display(prefix: &str, objective: Option<&str>) -> String {
+    let display = objective.map_or_else(
+        || format!("{prefix}current work"),
+        |objective| {
+            // Transcript rows are single-line summaries. The full (separately
+            // bounded) objective remains in the typed envelope reviewed by the
+            // model and later used by confirmation.
+            let objective = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!("{prefix}{objective}")
+        },
+    );
+    truncate_workflow_text(&display, WORKFLOW_DISPLAY_MAX_CHARS)
+}
+
+fn workflow_draft_instruction(id: &str, objective: Option<&str>) -> String {
+    let envelope = WorkflowDraftEnvelope {
+        id: id.to_string(),
+        objective: objective.map(ToOwned::to_owned),
+    };
+    let encoded =
+        serde_json::to_string(&envelope).expect("workflow draft envelope is serializable");
+    format!(
+        "{WORKFLOW_DRAFT_INSTRUCTION_PREFIX}{encoded}\n\
+         Draft a short, plain-language Workflow proposal for review. Include the objective, 1–4 \
+         phases, estimated workers, and material risks. Do not call tools or execute work. End by \
+         asking the user to run `/workflow confirm` to start or revise the objective instead."
+    )
+}
+
+fn workflow_confirm_instruction(draft: &WorkflowDraftEnvelope) -> String {
+    let encoded = serde_json::to_string(draft).expect("workflow confirmation is serializable");
+    format!(
+        "{WORKFLOW_CONFIRM_INSTRUCTION_PREFIX}{encoded}\n\
+         The user explicitly confirmed the Workflow proposal from the preceding review turn. \
+         Execute that reviewed plan through the canonical `workflow` tool now. Keep the existing \
+         approval, budget, scheduling, cancellation, and receipt behavior; do not teach or restate \
+         the tool schema."
+    )
+}
+
+fn envelope_from_instruction(prefix: &str, instruction: &str) -> Option<WorkflowDraftEnvelope> {
+    let first_line = instruction.lines().next()?;
+    let encoded = first_line.strip_prefix(prefix)?;
+    serde_json::from_str(encoded).ok()
+}
+
+fn user_instruction(message: &crate::models::Message) -> Option<&str> {
+    if message.role != "user" {
+        return None;
+    }
+    message.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn pending_workflow_draft(app: &App) -> Option<WorkflowDraftEnvelope> {
+    let mut resolved = std::collections::HashSet::new();
+
+    for queued in app.queued_messages.iter().chain(app.queued_draft.iter()) {
+        if let Some(instruction) = queued.skill_instruction.as_deref()
+            && let Some(envelope) =
+                envelope_from_instruction(WORKFLOW_CONFIRM_INSTRUCTION_PREFIX, instruction)
+        {
+            resolved.insert(envelope.id);
+        }
+    }
+
+    let mut reviewed = false;
+    for message in app.api_messages.iter().rev() {
+        if message.role == "assistant"
+            && message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if !text.trim().is_empty()),
+            )
+        {
+            reviewed = true;
+            continue;
+        }
+        let Some(instruction) = user_instruction(message) else {
+            continue;
+        };
+        if let Some(envelope) =
+            envelope_from_instruction(WORKFLOW_CONFIRM_INSTRUCTION_PREFIX, instruction)
+        {
+            resolved.insert(envelope.id);
+            continue;
+        }
+        if let Some(envelope) =
+            envelope_from_instruction(WORKFLOW_DRAFT_INSTRUCTION_PREFIX, instruction)
+            && !resolved.contains(&envelope.id)
+        {
+            // A failed or still-queued draft turn is not a review. Likewise,
+            // any newer ordinary user request supersedes the old proposal.
+            return reviewed.then_some(envelope);
+        }
+        if !instruction.starts_with(WORKFLOW_DRAFT_INSTRUCTION_PREFIX) {
+            return None;
+        }
+    }
+    None
+}
 
 pub fn workflow(app: &mut App, arg: Option<&str>) -> CommandResult {
-    let _app: &App = app;
     let arg = arg.map(str::trim).filter(|value| !value.is_empty());
 
-    if let Some(action) = parse_workflow_control_action(_app, arg) {
+    if let Some(action) = parse_workflow_control_action(app, arg) {
         return action;
     }
 
-    match arg {
-        // Explicit objective: the argument narrows the run.
-        Some(objective) => {
-            let message = format!(
-                "The user invoked /workflow with an explicit objective — this is authorization to \
-                 orchestrate it with the `workflow` tool. Objective: {objective:?}. \
-                 Use the conversation context to ground the work (files discussed, prior findings). \
-                 {ORCHESTRATION_CONTRACT}"
-            );
-            CommandResult::with_message_and_action(
-                format!("Orchestrating as a workflow: {objective}"),
-                AppAction::SendMessage(message),
-            )
-        }
-        // Bare invocation: context-dependent. The model derives the objective
-        // from what the session is already doing — no restating required.
-        None => {
-            let message = format!(
-                "The user invoked /workflow with no argument — this is authorization to orchestrate \
-                 the CURRENT work as a workflow. Synthesize the objective from the conversation \
-                 context: the task in flight, recent findings, and open items. Do not ask the user \
-                 to restate it unless the conversation genuinely contains no work yet. \
-                 {ORCHESTRATION_CONTRACT}"
-            );
-            CommandResult::with_message_and_action(
-                "Orchestrating the current work as a workflow...",
-                AppAction::SendMessage(message),
-            )
-        }
-    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let objective =
+        arg.map(|objective| truncate_workflow_text(objective, WORKFLOW_OBJECTIVE_MAX_CHARS));
+    let display = workflow_display("Workflow draft: ", objective.as_deref());
+    CommandResult::with_message_and_action(
+        "Drafting a workflow for review. Nothing will run until /workflow confirm.",
+        AppAction::WorkflowInstruction {
+            display,
+            instruction: workflow_draft_instruction(&id, objective.as_deref()),
+        },
+    )
 }
 
 /// Host-side `status` / `runs` / `cancel` / `settings`: read the run journal and
@@ -102,6 +190,21 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
         None => (arg, ""),
     };
     match verb {
+        "confirm" if rest.is_empty() => Some(match pending_workflow_draft(app) {
+            Some(draft) => {
+                let display = workflow_display("Workflow confirmed: ", draft.objective.as_deref());
+                CommandResult::with_message_and_action(
+                    "Workflow confirmed. Starting the reviewed plan...",
+                    AppAction::WorkflowInstruction {
+                        display,
+                        instruction: workflow_confirm_instruction(&draft),
+                    },
+                )
+            }
+            None => CommandResult::error(
+                "There is no reviewed Workflow draft to confirm. Use /workflow <objective> first.",
+            ),
+        }),
         "status" | "runs" | "list" | "inspect" => Some(workflow_status(app, rest)),
         "cancel" | "stop" | "abort" => Some(workflow_cancel(app, rest)),
         "settings" | "config" => Some(super::super::config::workflow_settings(app)),
@@ -127,8 +230,9 @@ fn parse_workflow_control_action(app: &App, arg: Option<&str>) -> Option<Command
 }
 
 const WORKFLOW_USAGE: &str =
-    "/workflow <objective> — orchestrate the objective with the workflow tool
-/workflow — orchestrate the current work
+    "/workflow <objective> — draft a Workflow for review (does not execute)
+/workflow — draft a Workflow for the current work
+/workflow confirm — explicitly start the latest reviewed draft
 /workflow status [run_id] — runs known to this workspace (no model turn)
 /workflow cancel [run_id] — stop a running workflow (no model turn)
 /workflow settings — the effective [workflow] configuration
@@ -367,33 +471,147 @@ mod tests {
     }
 
     #[test]
-    fn bare_workflow_is_context_dependent_opt_in() {
-        let mut app = test_app();
-        let result = workflow(&mut app, None);
-        assert!(!result.is_error);
-        let Some(AppAction::SendMessage(message)) = result.action else {
-            panic!("expected SendMessage action");
-        };
-        // The bare form must not demand an objective from the user.
-        assert!(message.contains("Synthesize the objective from the conversation"));
-        assert!(message.contains("authorization to orchestrate"));
-        assert!(message.contains("`workflow` tool"));
-
-        // Whitespace-only behaves like bare.
-        let result = workflow(&mut app, Some("   "));
-        assert!(matches!(result.action, Some(AppAction::SendMessage(_))));
-    }
-
-    #[test]
-    fn workflow_with_objective_forwards_it() {
+    fn ordinary_workflow_is_a_toolless_review_turn() {
         let mut app = test_app();
         let result = workflow(&mut app, Some("audit provider error handling"));
         assert!(!result.is_error);
-        let Some(AppAction::SendMessage(message)) = result.action else {
-            panic!("expected SendMessage action");
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = result.action
+        else {
+            panic!("expected WorkflowInstruction action");
         };
-        assert!(message.contains("audit provider error handling"));
-        assert!(message.contains("authorization"));
+        assert!(display.contains("audit provider error handling"));
+        assert!(!display.contains("workflow` tool"));
+        assert!(
+            display.len() < 80,
+            "visible transcript line must stay compact"
+        );
+        assert!(instruction.starts_with(WORKFLOW_DRAFT_INSTRUCTION_PREFIX));
+        assert!(
+            instruction.len() < 700,
+            "draft instruction grew into a manual"
+        );
+        assert!(!instruction.contains("parallel()"));
+        assert!(!instruction.contains("responseSchema"));
+
+        let queued = crate::tui::app::QueuedMessage::new(display, Some(instruction));
+        assert_eq!(
+            crate::tui::ui::allowed_tools_for_message(None, &queued),
+            Some(Vec::new()),
+            "the host, not model compliance, must prevent same-turn execution"
+        );
+    }
+
+    #[test]
+    fn oversized_multibyte_objective_is_bounded_once_and_confirmed_exactly() {
+        let mut app = test_app();
+        let original = "鲸".repeat(WORKFLOW_OBJECTIVE_MAX_CHARS + 50);
+        let drafted = workflow(&mut app, Some(&original));
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = drafted.action
+        else {
+            panic!("expected WorkflowInstruction action");
+        };
+
+        assert!(display.chars().count() <= WORKFLOW_DISPLAY_MAX_CHARS);
+        assert!(!display.contains('\n'));
+        let draft = envelope_from_instruction(WORKFLOW_DRAFT_INSTRUCTION_PREFIX, &instruction)
+            .expect("typed workflow draft envelope");
+        let objective = draft.objective.as_deref().expect("bounded objective");
+        assert_eq!(objective.chars().count(), WORKFLOW_OBJECTIVE_MAX_CHARS);
+        assert!(objective.ends_with('…'));
+
+        app.api_messages.push(crate::models::Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: instruction,
+                cache_control: None,
+            }],
+        });
+        app.api_messages.push(crate::models::Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Reviewed bounded objective and proposed phases.".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let confirmed = workflow(&mut app, Some("confirm"));
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = confirmed.action
+        else {
+            panic!("expected confirmed WorkflowInstruction action");
+        };
+        assert!(display.chars().count() <= WORKFLOW_DISPLAY_MAX_CHARS);
+        let confirmed =
+            envelope_from_instruction(WORKFLOW_CONFIRM_INSTRUCTION_PREFIX, &instruction)
+                .expect("typed workflow confirmation envelope");
+        assert_eq!(confirmed.objective.as_deref(), Some(objective));
+    }
+
+    #[test]
+    fn workflow_confirmation_is_a_separate_tool_enabled_turn() {
+        let mut app = test_app();
+        let drafted = workflow(&mut app, Some("audit provider error handling"));
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = drafted.action
+        else {
+            panic!("expected WorkflowInstruction action");
+        };
+        app.api_messages.push(crate::models::Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: format!("{instruction}\n\n---\n\nUser request: {display}"),
+                cache_control: None,
+            }],
+        });
+        assert!(
+            workflow(&mut app, Some("confirm")).is_error,
+            "a failed or unfinished draft turn is not a reviewed plan"
+        );
+        app.api_messages.push(crate::models::Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Objective, phases, workers, and risks. Run /workflow confirm to start."
+                    .to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let confirmed = workflow(&mut app, Some("confirm"));
+        assert!(!confirmed.is_error);
+        let Some(AppAction::WorkflowInstruction {
+            display,
+            instruction,
+        }) = confirmed.action
+        else {
+            panic!("expected confirmed WorkflowInstruction action");
+        };
+        assert!(instruction.starts_with(WORKFLOW_CONFIRM_INSTRUCTION_PREFIX));
+        let queued = crate::tui::app::QueuedMessage::new(display, Some(instruction.clone()));
+        assert_eq!(
+            crate::tui::ui::allowed_tools_for_message(None, &queued),
+            None,
+            "only the later explicit confirmation restores the normal catalog"
+        );
+
+        app.api_messages.push(crate::models::Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: instruction,
+                cache_control: None,
+            }],
+        });
+        let replay = workflow(&mut app, Some("confirm"));
+        assert!(replay.is_error, "one draft may not be confirmed twice");
     }
 
     #[test]

@@ -68,7 +68,9 @@ pub use types::{
     SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
-pub(crate) use types::{CacheReplayTarget, EffectiveReasoningEffort};
+pub(crate) use types::{
+    CacheReplayTarget, EffectiveReasoningEffort, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
+};
 
 // === Types ===
 

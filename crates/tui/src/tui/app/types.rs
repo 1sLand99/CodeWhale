@@ -758,6 +758,12 @@ pub struct QueuedMessage {
     pub skill_provenance: Option<crate::plugins::types::PluginAuthority>,
 }
 
+/// Prefix for the bounded, tool-less model turn produced by `/workflow`.
+///
+/// The marker travels with the queued message so a draft that waits behind an
+/// active turn keeps the same no-tools policy when it is eventually sent.
+pub(crate) const WORKFLOW_DRAFT_INSTRUCTION_PREFIX: &str = "[codewhale.workflow-draft.v1]";
+
 /// How a freshly-typed user input should be sent.
 ///
 /// Picked by [`App::decide_composer_submit`] when the user submits a
@@ -840,6 +846,13 @@ impl QueuedMessage {
     ) -> Self {
         self.skill_provenance = provenance;
         self
+    }
+
+    #[must_use]
+    pub(crate) fn is_workflow_draft(&self) -> bool {
+        self.skill_instruction
+            .as_deref()
+            .is_some_and(|instruction| instruction.starts_with(WORKFLOW_DRAFT_INSTRUCTION_PREFIX))
     }
 
     #[allow(dead_code)] // Tests and queue helpers use the display-only form; send path resolves @mentions.
@@ -959,6 +972,13 @@ pub enum AppAction {
     },
     /// Send a message to the AI (normal chat mode).
     SendMessage(String),
+    /// Send a built-in Workflow planning turn with separate user-visible text
+    /// and bounded runtime guidance. Draft instructions carry a typed marker
+    /// that makes the dispatch path expose no tools for that turn.
+    WorkflowInstruction {
+        display: String,
+        instruction: String,
+    },
     /// Cancel a running sub-agent through the engine manager.
     CancelSubAgent {
         agent_id: String,

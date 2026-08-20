@@ -1025,6 +1025,21 @@ pub(crate) async fn apply_command_result(
                 )
                 .await?;
             }
+            AppAction::WorkflowInstruction {
+                display,
+                instruction,
+            } => {
+                let queued = QueuedMessage::new(display, Some(instruction));
+                dispatch_composer_message(
+                    app,
+                    config,
+                    engine_handle,
+                    queued,
+                    DispatchRecovery::Immediate,
+                    ComposerSubmitAction::Submit(app.decide_submit_disposition()),
+                )
+                .await?;
+            }
             AppAction::SetGoalStatus { status, clear } => {
                 let _ = engine_handle
                     .send(Op::SetGoalStatus { status, clear })
