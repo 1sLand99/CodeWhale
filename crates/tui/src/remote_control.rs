@@ -483,7 +483,16 @@ pub struct RemoteControlController {
     account_ref: Option<String>,
     target_ref: Option<String>,
     links: RemoteLinks,
+    /// Latest server-confirmed run attachment. Kept separately from
+    /// `active_run`: an attachment can exist while the session is idle, and a
+    /// mid-turn `/rc` can bind the already-running local turn to it without
+    /// inventing a second prompt.
+    attached_run_id: Option<String>,
     active_run: Option<ActiveRelayRun>,
+    /// A local dispatch that was already in flight when the web attachment
+    /// became ready, but whose typed `TurnStarted` event has not landed yet.
+    /// The first such event promotes this exact run into `active_run`.
+    pending_local_turn_run: Option<String>,
     event_seq: HashMap<String, u64>,
     uploaded_snapshots: HashSet<String>,
     pending_runtime_events: HashMap<String, BTreeMap<u64, PendingRuntimeEnvelope>>,
@@ -515,7 +524,9 @@ impl Default for RemoteControlController {
             account_ref: None,
             target_ref: None,
             links: RemoteLinks::default(),
+            attached_run_id: None,
             active_run: None,
+            pending_local_turn_run: None,
             event_seq: HashMap::new(),
             uploaded_snapshots: HashSet::new(),
             pending_runtime_events: HashMap::new(),
@@ -586,6 +597,9 @@ impl RemoteControlController {
         self.status = Status::Connecting;
         self.status_detail = "waiting for account authorization".to_string();
         self.target_ref = Some(start.target_ref.clone());
+        self.attached_run_id = None;
+        self.active_run = None;
+        self.pending_local_turn_run = None;
         self.worker_tx = Some(worker_tx);
         self.event_rx = Some(event_rx);
         self.worker = Some(tokio::spawn(async move {
@@ -658,7 +672,9 @@ impl RemoteControlController {
         if self.status == Status::Off {
             self.account_ref = None;
             self.links = RemoteLinks::default();
+            self.attached_run_id = None;
             self.active_run = None;
+            self.pending_local_turn_run = None;
             self.pending_approvals.clear();
             self.command_fingerprints.clear();
             self.ownership_blocked_until = None;
@@ -726,6 +742,7 @@ impl RemoteControlController {
                     format!("{reason}; waiting for the last server lease to expire safely");
                 self.ownership_blocked_until = Some(Instant::now() + OWNERSHIP_LOCK_AFTER_FAILURE);
                 self.active_run = None;
+                self.pending_local_turn_run = None;
                 // Exact unacknowledged runtime envelopes remain owned by this
                 // controller (and its journal). A later worker reconnect
                 // resends them unchanged.
@@ -734,6 +751,8 @@ impl RemoteControlController {
                 self.status = Status::Off;
                 self.status_detail = "off".to_string();
                 self.active_run = None;
+                self.pending_local_turn_run = None;
+                self.attached_run_id = None;
                 self.links = RemoteLinks::default();
                 self.ownership_blocked_until = None;
                 // The worker only reports Stopped after draining through the
@@ -813,6 +832,30 @@ impl RemoteControlController {
         server_may_still_own && !self.applying_remote_command
     }
 
+    /// Whether an approval or structured question can be handed to the web.
+    ///
+    /// `Connecting` deliberately does not qualify. A server lease may be in
+    /// flight, so new local prompts stay blocked, but there is not yet an
+    /// attachment/run cursor able to carry a typed approval. Keeping the
+    /// approval local until `Connected` avoids hiding an actionable decision
+    /// behind a web surface that cannot receive it yet.
+    pub fn web_owns_turn_input(&self) -> bool {
+        let server_owns = match self.status {
+            // A connection alone is not a turn owner. Until a concrete typed
+            // turn id is bound, `record_remote_approval` has nowhere safe to
+            // send a decision and the local card must remain actionable.
+            Status::Connected | Status::Stopping => self.active_run.is_some(),
+            // After transport failure the old server lease may still own the
+            // turn. Keep decisions fail-closed; `OwnershipRestored` reopens
+            // every pending approval after the lease deadline.
+            Status::Failed => self
+                .ownership_blocked_until
+                .is_some_and(|deadline| Instant::now() < deadline),
+            Status::Off | Status::Connecting => false,
+        };
+        server_owns && !self.applying_remote_command
+    }
+
     pub fn set_applying_remote_command(&mut self, value: bool) {
         self.applying_remote_command = value;
     }
@@ -848,6 +891,7 @@ impl RemoteControlController {
         self.active_run
             .as_ref()
             .is_some_and(|active| active.run_id == run_id)
+            || self.pending_local_turn_run.as_deref() == Some(run_id)
     }
 
     /// A remotely-owned turn must reach a terminal engine event before the
@@ -855,7 +899,42 @@ impl RemoteControlController {
     /// discard the run binding and strand the control-plane ledger while the
     /// local engine continued producing results.
     pub fn has_active_run(&self) -> bool {
-        self.active_run.is_some()
+        self.active_run.is_some() || self.pending_local_turn_run.is_some()
+    }
+
+    /// Bind the server-confirmed attachment to the local turn that was
+    /// already running when `/rc` was invoked.
+    ///
+    /// With a typed runtime turn id the binding is immediate. During the
+    /// narrow dispatch-before-`TurnStarted` window, the run is parked and the
+    /// first typed start event completes the binding. Replays are idempotent:
+    /// an existing binding is never replaced and no runtime envelope is
+    /// emitted by this method itself.
+    pub fn attach_current_local_turn(&mut self, turn_id: Option<&str>) -> bool {
+        if self.status != Status::Connected || self.has_active_run() {
+            return false;
+        }
+        let Some(run_id) = self.attached_run_id.clone() else {
+            return false;
+        };
+        match turn_id.map(str::trim).filter(|turn_id| !turn_id.is_empty()) {
+            Some(turn_id) => {
+                self.active_run = Some(ActiveRelayRun {
+                    run_id,
+                    turn_id: turn_id.to_string(),
+                });
+            }
+            None => self.pending_local_turn_run = Some(run_id),
+        }
+        true
+    }
+
+    /// Release a dispatch-window binding when the local dispatcher becomes
+    /// idle without ever producing a typed `TurnStarted`. The account-owned
+    /// attachment remains connected and can accept a later web prompt; only
+    /// the nonexistent turn lease is removed.
+    pub fn release_unstarted_local_turn(&mut self) -> bool {
+        self.pending_local_turn_run.take().is_some()
     }
 
     /// A remote prompt can fail during local route preparation before the
@@ -866,6 +945,7 @@ impl RemoteControlController {
     }
 
     fn apply_attachment(&mut self, attachment: &RemoteAttachment) {
+        self.attached_run_id = Some(attachment.run_id.clone());
         self.reconcile_runtime_cursor(&attachment.run_id, attachment.runtime_cursor);
         let local_cursor = self
             .pending_runtime_events
@@ -959,6 +1039,19 @@ impl RemoteControlController {
     }
 
     pub fn observe_engine_event(&mut self, event: &EngineEvent) {
+        // `/rc` can attach while the host is still preparing a turn. The
+        // server run is known first; `TurnStarted` supplies the authoritative
+        // runtime turn id later. Promote exactly once, before the ordinary
+        // projection below observes the event.
+        if let EngineEvent::TurnStarted { turn_id, .. } = event
+            && self.active_run.is_none()
+            && let Some(run_id) = self.pending_local_turn_run.take()
+        {
+            self.active_run = Some(ActiveRelayRun {
+                run_id,
+                turn_id: turn_id.clone(),
+            });
+        }
         let Some(active) = self.active_run.clone() else {
             return;
         };
@@ -1029,6 +1122,7 @@ impl RemoteControlController {
                     self.resync_ready.push(active.run_id.clone());
                 }
                 self.active_run = None;
+                self.pending_local_turn_run = None;
             }
             EngineEvent::Error {
                 envelope,
@@ -1067,6 +1161,7 @@ impl RemoteControlController {
             json!({ "turn": { "status": "failed", "usage": {} } }),
         );
         self.active_run = None;
+        self.pending_local_turn_run = None;
     }
 
     fn upload_envelope(
@@ -3518,6 +3613,30 @@ mod tests {
     }
 
     #[test]
+    fn connecting_blocks_new_prompts_but_keeps_approvals_local_until_attached() {
+        let mut controller = RemoteControlController::default();
+        controller.status = Status::Connecting;
+        controller.status_detail = "waiting for account authorization".to_string();
+        assert!(
+            controller.blocks_local_input(),
+            "a possible server lease must prevent a second local prompt"
+        );
+        assert!(
+            !controller.web_owns_turn_input(),
+            "without a confirmed run cursor the web cannot receive an approval"
+        );
+
+        controller.status = Status::Connected;
+        controller.attached_run_id = Some("run_fixture".to_string());
+        assert!(
+            !controller.web_owns_turn_input(),
+            "a connected idle session has no typed turn to receive approvals"
+        );
+        assert!(controller.attach_current_local_turn(Some("turn_fixture")));
+        assert!(controller.web_owns_turn_input());
+    }
+
+    #[test]
     fn persisted_device_identity_survives_a_reload_and_outlives_enrollments() {
         let (minted, needs_save) = resolve_device_identity(None, None);
         assert!(needs_save);
@@ -3618,6 +3737,214 @@ mod tests {
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0]["event"], "session.snapshot");
         assert_eq!(envelopes[0]["seq"], 42);
+    }
+
+    #[test]
+    fn connected_attachment_adopts_the_existing_turn_and_streams_typed_state_once() {
+        let (mut controller, mut worker_rx, event_tx) = wired_controller();
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 11,
+                    snapshot_present: false,
+                },
+                links: RemoteLinks::default(),
+            })
+            .unwrap();
+        assert!(matches!(
+            controller.try_next_event(),
+            Some(RemoteEvent::Connected { .. })
+        ));
+        assert!(
+            !controller.web_owns_turn_input(),
+            "a connected attachment without a bound typed turn keeps approvals local"
+        );
+        assert!(controller.attach_current_local_turn(Some("turn_existing")));
+        assert!(
+            controller.web_owns_turn_input(),
+            "the bound active turn can carry typed approvals to the web"
+        );
+        assert!(controller.has_active_run());
+        assert!(controller.active_run_matches("run_fixture"));
+        assert!(
+            !controller.attach_current_local_turn(Some("turn_duplicate")),
+            "replaying the attachment must not replace or duplicate the turn"
+        );
+
+        controller.observe_engine_event(&EngineEvent::MessageDelta {
+            index: 0,
+            content: "existing turn output".to_string(),
+        });
+        controller.observe_engine_event(&EngineEvent::ToolCallStarted {
+            id: "tool_existing".to_string(),
+            name: "shell".to_string(),
+            input: json!({ "never": "relayed" }),
+        });
+        let gate = controller.record_remote_approval(
+            "tool_existing",
+            "shell",
+            "approve bounded fixture",
+            &json!({ "credential": "must-not-cross" }),
+            "approval-key",
+            None,
+        );
+
+        let mut envelopes = Vec::new();
+        for _ in 0..3 {
+            let WorkerCommand::Upload {
+                envelopes: batch, ..
+            } = worker_rx.try_recv().expect("typed active-turn upload")
+            else {
+                panic!("active-turn state must use the runtime envelope channel");
+            };
+            envelopes.extend(batch);
+        }
+        assert_eq!(
+            envelopes
+                .iter()
+                .map(|event| event["event"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["item.delta", "item.started", "approval.required"]
+        );
+        assert!(
+            envelopes
+                .iter()
+                .all(|event| event["turn_id"] == "turn_existing")
+        );
+        assert_eq!(
+            envelopes[2]["payload"]["approval_id"].as_str(),
+            Some(gate.as_str())
+        );
+        let projected = serde_json::to_string(&envelopes).unwrap();
+        assert!(!projected.contains("must-not-cross"));
+        assert!(!projected.contains("approval-key"));
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn dispatch_window_attachment_promotes_on_typed_start_and_reconnect_is_idempotent() {
+        let (mut controller, mut worker_rx, event_tx) = wired_controller();
+        let attachment = RemoteAttachment {
+            run_id: "run_fixture".to_string(),
+            workspace_id: "workspace_fixture".to_string(),
+            runtime_cursor: 3,
+            snapshot_present: false,
+        };
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: attachment.clone(),
+                links: RemoteLinks::default(),
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+
+        assert!(controller.attach_current_local_turn(None));
+        assert!(
+            controller.has_active_run(),
+            "the dispatch window gates stop"
+        );
+        assert!(controller.active_run_matches("run_fixture"));
+        assert!(
+            !controller.web_owns_turn_input(),
+            "a pending dispatch has no typed turn id, so approvals stay local"
+        );
+        assert!(worker_rx.try_recv().is_err());
+
+        controller.observe_engine_event(&EngineEvent::TurnStarted {
+            turn_id: "turn_started_later".to_string(),
+            created_at: chrono::Utc::now(),
+            route: None,
+        });
+        let WorkerCommand::Upload { envelopes, .. } =
+            worker_rx.try_recv().expect("one typed turn start")
+        else {
+            panic!("turn start must use the runtime envelope channel");
+        };
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["seq"], 4);
+        assert_eq!(envelopes[0]["event"], "turn.started");
+        assert_eq!(envelopes[0]["turn_id"], "turn_started_later");
+        let started_envelope = envelopes[0].clone();
+        assert!(
+            controller.web_owns_turn_input(),
+            "typed TurnStarted promotes the dispatch into a web-owned active turn"
+        );
+
+        event_tx
+            .send(RemoteEvent::Attachment {
+                attachment,
+                links: RemoteLinks::default(),
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+        assert!(
+            !controller.attach_current_local_turn(Some("turn_replayed")),
+            "a reconnect must not rebind the live turn"
+        );
+        let WorkerCommand::Upload { envelopes, .. } = worker_rx
+            .try_recv()
+            .expect("the unacknowledged start is replayed unchanged")
+        else {
+            panic!("runtime replay must use the envelope channel");
+        };
+        assert_eq!(
+            envelopes,
+            vec![started_envelope],
+            "retry safety preserves the original sequence and payload"
+        );
+        assert!(worker_rx.try_recv().is_err());
+
+        controller.observe_engine_event(&turn_complete_event());
+        let WorkerCommand::Upload { envelopes, .. } =
+            worker_rx.try_recv().expect("one terminal receipt")
+        else {
+            panic!("turn completion must use the runtime envelope channel");
+        };
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["seq"], 5);
+        assert_eq!(envelopes[0]["event"], "turn.completed");
+        assert_eq!(envelopes[0]["turn_id"], "turn_started_later");
+        assert!(!controller.has_active_run());
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn dispatch_window_that_ends_before_typed_start_returns_to_idle_attachment() {
+        let (mut controller, mut worker_rx, event_tx) = wired_controller();
+        event_tx
+            .send(RemoteEvent::Connected {
+                account_ref: "account_fixture".to_string(),
+                runner_id: "runner_fixture".to_string(),
+                target_ref: "target_fixture".to_string(),
+                attachment: RemoteAttachment {
+                    run_id: "run_fixture".to_string(),
+                    workspace_id: "workspace_fixture".to_string(),
+                    runtime_cursor: 8,
+                    snapshot_present: false,
+                },
+                links: RemoteLinks::default(),
+            })
+            .unwrap();
+        controller.try_next_event().unwrap();
+
+        assert!(controller.attach_current_local_turn(None));
+        assert!(controller.has_active_run());
+        assert!(controller.release_unstarted_local_turn());
+        assert!(!controller.has_active_run());
+        assert!(!controller.web_owns_turn_input());
+        assert!(
+            !controller.release_unstarted_local_turn(),
+            "reconciling the same idle boundary is idempotent"
+        );
+        assert!(worker_rx.try_recv().is_err());
     }
 
     #[test]

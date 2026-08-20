@@ -697,7 +697,11 @@ async fn drain_remote_control_events(
     config: &Config,
     engine_handle: &EngineHandle,
 ) -> Result<bool> {
-    let mut changed = false;
+    // A connection can become ready while a local approval card still owns
+    // the decision. Keep that card local; once it closes, bind the same
+    // already-running typed turn on the next loop tick. If the turn ended in
+    // the meantime this remains an ordinary idle attachment.
+    let mut changed = try_attach_active_local_turn_to_remote(app);
     while let Some(event) = app.remote_control.try_next_event() {
         changed = true;
         match event {
@@ -718,15 +722,20 @@ async fn drain_remote_control_events(
             } => {
                 app.remote_control
                     .upload_snapshot(&attachment.run_id, &app.api_messages);
+                let active_local_turn = local_turn_is_active(app);
+                let attached_active_turn = try_attach_active_local_turn_to_remote(app);
                 let status = crate::remote_control::remote_control_banner(
                     &account_ref,
                     &runner_id,
                     links.run_url.as_deref(),
                 );
+                let ownership = if active_local_turn && !attached_active_turn {
+                    "Finish the visible local approval to complete the handoff. New prompts stay locked until then."
+                } else {
+                    "The web now owns new prompts and approvals. This terminal remains readable."
+                };
                 app.add_message(HistoryCell::System {
-                    content: format!(
-                        "{status}\n\nThe web now owns new prompts and approvals. This terminal remains readable."
-                    ),
+                    content: format!("{status}\n\n{ownership}"),
                 });
                 if let Some(run_url) = links.run_url.as_deref() {
                     app.add_message(HistoryCell::System {
@@ -908,17 +917,49 @@ async fn drain_remote_control_events(
             }
         }
     }
+    // A Connected event and the local approval decision may be drained in the
+    // same UI iteration. Re-check after the event batch so the current turn is
+    // attached without waiting for another key or frame.
+    changed |= try_attach_active_local_turn_to_remote(app);
     Ok(changed)
 }
 
-fn start_remote_control_session(app: &mut App) {
-    if app.is_loading {
-        app.status_message = Some(
-            "Finish or interrupt the current turn before handing this session to the web."
-                .to_string(),
-        );
-        return;
+fn local_turn_is_active(app: &App) -> bool {
+    app.is_loading
+        || app.dispatch_in_flight
+        || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
+}
+
+/// Attach `/rc` to the current local turn only after the server has supplied
+/// a real run id and no pre-attachment approval card still owns the decision.
+/// There is no await between the state check and the controller mutation, so a
+/// terminal event cannot race this single-threaded ownership transition.
+fn try_attach_active_local_turn_to_remote(app: &mut App) -> bool {
+    if !local_turn_is_active(app) {
+        // A dispatch can fail before its typed TurnStarted receipt. In that
+        // case there is no turn to hand off and the connected attachment is
+        // simply idle, so do not strand a synthetic active lease.
+        return app.remote_control.release_unstarted_local_turn();
     }
+    if app
+        .view_stack
+        .contains_kind(crate::tui::views::ModalKind::Approval)
+    {
+        return false;
+    }
+    // `runtime_turn_id` intentionally survives the end of a turn for saved
+    // receipts. It is authoritative for this handoff only while the matching
+    // typed status is still in progress; a new dispatch otherwise parks until
+    // its own TurnStarted arrives instead of binding the previous turn id.
+    let turn_id = if matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
+        app.runtime_turn_id.as_deref()
+    } else {
+        None
+    };
+    app.remote_control.attach_current_local_turn(turn_id)
+}
+
+fn start_remote_control_session(app: &mut App) {
     let session_id = app
         .current_session_id
         .clone()

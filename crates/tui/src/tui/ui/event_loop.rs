@@ -2533,7 +2533,7 @@ pub(crate) async fn run_event_loop(
                         // user- or model-authored strings.
                         codewhale_telemetry::session_counters()
                             .bump(codewhale_telemetry::Counter::ApprovalModalShown);
-                        if app.remote_control.blocks_local_input() {
+                        if app.remote_control.web_owns_turn_input() {
                             let gate = app.remote_control.record_remote_approval(
                                 &id,
                                 &tool_name,
@@ -2695,7 +2695,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::UserInputRequired { id, request } => {
-                        if app.remote_control.blocks_local_input() {
+                        if app.remote_control.web_owns_turn_input() {
                             // Remote-control v1 deliberately admits only prompts, approval
                             // decisions, and run control. Do not leak a second controller
                             // through a local structured-question modal.

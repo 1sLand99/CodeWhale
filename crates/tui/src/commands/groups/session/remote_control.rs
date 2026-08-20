@@ -28,17 +28,14 @@ impl RegisterCommand for RemoteControlCmd {
 
     fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
         match arg.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("start") => {
-                if app.is_loading {
-                    return CommandResult::error(
-                        "Finish or interrupt the current turn before handing this session to the web.",
-                    );
-                }
-                CommandResult::with_message_and_action(
-                    "Starting account-owned web remote control…",
-                    AppAction::RemoteControl(RemoteControlAction::Start),
-                )
-            }
+            None | Some("start") => CommandResult::with_message_and_action(
+                if app.is_loading || app.dispatch_in_flight {
+                    "Connecting web remote control to the active turn…"
+                } else {
+                    "Starting account-owned web remote control…"
+                },
+                AppAction::RemoteControl(RemoteControlAction::Start),
+            ),
             Some("status") => CommandResult::message(app.remote_control.status_line()),
             Some("link") => match app.remote_control.run_url() {
                 Some(url) => {
@@ -87,15 +84,24 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn start_is_blocked_during_an_active_turn() {
+    fn start_during_an_active_turn_dispatches_the_typed_handoff() {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = crate::test_support::test_app_with_options(options);
         app.is_loading = true;
         let result = RemoteControlCmd::execute(&mut app, None);
-        assert!(result.is_error);
-        assert!(result.action.is_none());
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::RemoteControl(RemoteControlAction::Start))
+        ));
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("active turn"))
+        );
     }
 
     #[test]
