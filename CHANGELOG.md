@@ -56,6 +56,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /v1/user-input/{thread_id}/{request_id}` on the runtime API. The
   `/tool` path that mints the `UserInputRequest` is unchanged and still
   genuine.
+- Split the coordination ledger out of `tools/subagent/coord.rs` into
+  `tools/subagent/coord/ledger.rs`. The file held two unrelated things: the
+  model-facing `agents/*` tool wrappers, and the durable decision/claim/
+  contention records those wrappers happen to write — records whose consumers
+  are mostly *not* in the tool layer (`tui::coordination_detail`,
+  `tui::work_surface`, `tui::ui::tests`, `core::engine::tests` all name these
+  types). At 3.8k lines, reading either one started by scrolling past the
+  other. A pure move with a glob re-export from `coord`, so every
+  `crate::tools::subagent::coord::{…}` path still resolves and no consumer file
+  was edited; the only content change the move required is one constant going
+  from private to `pub(super)` because its caller stayed behind. `coord.rs` is
+  now 2.3k lines and `ledger.rs` 1.6k.
+
+- `agent` is now the only sub-agent tool the model can see. `AGENTS.md` has
+  said "the model-facing sub-agent surface is `agent` only" since the lifecycle
+  tools were removed, but six more were reachable: `agents/list`,
+  `agents/message`, `agents/followup`, `agents/interrupt`, `agents/coordinate`,
+  and `agents/wait` all defaulted to model-visible, so they shipped in the
+  catalog and `tool_search` could load any of them — and the `agent`
+  description told the model they existed. They now declare
+  `model_visible() -> false`, the same shape `rlm` and `exec_shell` use: still
+  registered, still executable by name so a persisted transcript replays
+  against the same implementation, never advertised and never returned by
+  either `tool_search` matcher.
+
+  Five of the six were already duplicates of an `agent` action. The sixth was
+  not: `agents/coordinate action=claim` was the *only* way to widen a write
+  claim, and write enforcement fails closed, so hiding it would have left a
+  refusal ("expand it first with…") pointing at a tool the model could no
+  longer call. `agent` gains one action, `claim`, taking the write scope
+  vocabulary `action=start` already uses (`write_roots`, plus parse-accepted
+  `exact_files` and `coordination_contracts`). It keeps `agents/coordinate`'s
+  `Auto` approval — gating it deadlocks autonomous fan-in — and it can only
+  widen the caller's own scope; peer contention still fails. A scopeless claim
+  is refused rather than reported as granted, because `expand_write_claim`
+  returns the unchanged claim with `Ok` when every list is empty.
+
+  Collapsing six tools into one action set also collapses the gating: `agent`
+  is deliberately exempt from both name-keyed gates (`posture_permits_tool`
+  short-circuits it so delegation depth governs spawning, and
+  `execution_envelope` classifies it `Bounded` so a read-only member can fan
+  out read-only work), so a capability folded into it inherits no gate. `claim`
+  is therefore gated per action, reproducing the envelope check that kept
+  `agents/coordinate` off a read-only role's catalog — in the catalog and again
+  at dispatch, since catalog shaping is not an authority boundary. The other
+  actions keep exactly the visibility they had.
 
 - Removed the placeholder engine tree in `crates/core/src/engine/`. Its
   `Engine::run` accepted `Op::SendMessage`, appended to a journal, and emitted
