@@ -276,6 +276,26 @@ impl HistoryCell {
         }
     }
 
+    /// Whether this cell is a completed (non-streaming) assistant answer —
+    /// the only variant a "copy the answer" affordance may serialize.
+    ///
+    /// This is the typed "final answer only" projection for copy surfaces:
+    /// everything else — user prompts, reasoning/thinking blocks, tool calls
+    /// and results, sub-agent transcripts, runtime status/system notes, and
+    /// archived-context seams — is excluded by construction, and a
+    /// still-streaming partial answer never qualifies. Pair it with
+    /// `history_cell_to_clipboard_text` for the canonical clean payload.
+    #[must_use]
+    pub fn is_completed_assistant_answer(&self) -> bool {
+        matches!(
+            self,
+            HistoryCell::Assistant {
+                streaming: false,
+                ..
+            }
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn update_incremental_streaming_render(
         &self,

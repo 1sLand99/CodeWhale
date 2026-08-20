@@ -485,11 +485,14 @@ pub(crate) fn open_details_pager_for_cell(app: &mut App, cell_index: usize) -> b
         .map(|area| area.width)
         .unwrap_or(80);
     let content = history_cell_to_text(cell, width);
-    app.view_stack.push(PagerView::from_text(
-        title,
-        &content,
-        width.saturating_sub(2),
-    ));
+    let mut pager = PagerView::from_text(title, &content, width.saturating_sub(2));
+    // A completed assistant cell gets a clean `a` (copy answer) action so
+    // this raw-detail pager can hand over the answer text without the
+    // glyph/label scaffolding that `c`/`y` (rendered body) would include.
+    if let Some(answer) = completed_assistant_answer_text(cell, width) {
+        pager = pager.with_copy_answer(answer);
+    }
+    app.view_stack.push(pager);
     true
 }
 
@@ -527,6 +530,29 @@ pub(crate) fn copy_cell_to_clipboard(app: &mut App, cell_index: usize) -> bool {
         app.status_message = Some("Copy failed".to_string());
         false
     }
+}
+
+/// Clean clipboard payload for a completed assistant answer cell.
+///
+/// Selection reuses the typed `HistoryCell::is_completed_assistant_answer`
+/// projection so reasoning/thinking blocks, tool calls and results, runtime
+/// status, and still-streaming partials never qualify; serialization reuses
+/// `history_cell_to_clipboard_text`, the canonical clean-copy path that
+/// returns the authored assistant Markdown with no glyph/label scaffolding.
+pub(crate) fn completed_assistant_answer_text(cell: &HistoryCell, width: u16) -> Option<String> {
+    cell.is_completed_assistant_answer()
+        .then(|| history_cell_to_clipboard_text(cell, width))
+}
+
+/// Latest completed assistant answer inside the virtual-cell range
+/// `[start, end)` — the payload behind the Turn Inspector's `a` (copy
+/// answer) action. Scanning backwards keeps each inspector page scoped to
+/// its own turn, so the latest page carries the latest completed answer.
+fn turn_answer_payload(app: &App, start: usize, end: usize, width: u16) -> Option<String> {
+    (start..end).rev().find_map(|idx| {
+        app.cell_at_virtual_index(idx)
+            .and_then(|cell| completed_assistant_answer_text(cell, width))
+    })
 }
 
 pub(super) fn detail_target_cell_index(app: &App) -> Option<usize> {
@@ -637,6 +663,12 @@ pub(super) fn open_turn_inspector_pager(app: &mut App) -> bool {
                 turn_inspector_text_for_range(app, start, end, page_index, page_count, latest);
             let page = PagerPage::from_text("Turn Inspector", &text, width.saturating_sub(2))
                 .with_copy_text(text);
+            // `a` copies only this turn's final assistant answer — the clean
+            // counterpart to `e` (whole-turn handoff markdown).
+            let page = match turn_answer_payload(app, start, end, width) {
+                Some(answer) => page.with_copy_answer(answer),
+                None => page,
+            };
             if latest {
                 // The existing handoff remains attached only to the
                 // current/latest turn it actually describes.
@@ -1894,5 +1926,73 @@ mod tests {
 
         assert!(copy_cell_to_clipboard(&mut app, 0));
         assert_eq!(app.clipboard.last_written_text(), Some(content));
+    }
+
+    #[test]
+    fn turn_inspector_copy_answer_copies_only_the_latest_completed_answer() {
+        use crate::tui::history::GenericToolCell;
+        use crate::tui::views::{ModalView, ViewAction, ViewEvent};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app();
+        app.history = vec![
+            HistoryCell::User {
+                content: "please summarize".to_string(),
+            },
+            HistoryCell::Thinking {
+                content: "private reasoning trace".to_string(),
+                streaming: false,
+                duration_secs: Some(1.0),
+            },
+            HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                name: "read_file".to_string(),
+                status: ToolStatus::Success,
+                input_summary: Some("src/lib.rs".to_string()),
+                output: Some("raw tool result body".to_string()),
+                prompts: None,
+                spillover_path: None,
+                output_summary: None,
+                is_diff: false,
+            })),
+            HistoryCell::System {
+                content: "runtime status note".to_string(),
+            },
+            HistoryCell::Assistant {
+                content: "still streaming partial".to_string(),
+                streaming: true,
+            },
+            HistoryCell::Assistant {
+                content: "FINAL ANSWER\nauthored markdown".to_string(),
+                streaming: false,
+            },
+        ];
+
+        assert!(open_turn_inspector_pager(&mut app));
+        let mut view = app.view_stack.pop().expect("turn inspector pager");
+        let pager = view
+            .as_any_mut()
+            .downcast_mut::<PagerView>()
+            .expect("turn inspector should reuse PagerView");
+        let copied = match pager.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)) {
+            ViewAction::Emit(ViewEvent::CopyToClipboard { text, label }) => {
+                assert_eq!(label, "Answer");
+                text
+            }
+            other => panic!("expected answer copy event, got {other:?}"),
+        };
+
+        assert_eq!(copied, "FINAL ANSWER\nauthored markdown");
+        for excluded in [
+            "please summarize",
+            "private reasoning trace",
+            "raw tool result body",
+            "runtime status note",
+            "still streaming partial",
+        ] {
+            assert!(
+                !copied.contains(excluded),
+                "answer copy leaked {excluded:?}"
+            );
+        }
     }
 }

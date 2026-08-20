@@ -3900,3 +3900,65 @@ fn shell_formatter_cases_render_truthful_localized_run_receipts() {
         "zh-Hans shell header must contain localized done: {or_header_zh}"
     );
 }
+
+#[test]
+fn completed_assistant_answer_projection_excludes_reasoning_tools_and_status() {
+    // The "copy answer" projection must select only a completed assistant
+    // cell, and the clean serializer must return exactly its authored text:
+    // no reasoning, tool calls/results, runtime status, or scaffolding.
+    use crate::tui::ui_text::history_cell_to_clipboard_text;
+
+    let cells = vec![
+        HistoryCell::User {
+            content: "please summarize".to_string(),
+        },
+        HistoryCell::Thinking {
+            content: "private reasoning trace".to_string(),
+            streaming: false,
+            duration_secs: Some(1.0),
+        },
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "read_file".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("src/lib.rs".to_string()),
+            output: Some("raw tool result body".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+        HistoryCell::System {
+            content: "runtime status note".to_string(),
+        },
+        HistoryCell::Assistant {
+            content: "still streaming partial".to_string(),
+            streaming: true,
+        },
+        HistoryCell::Assistant {
+            content: "## Final answer\nauthored markdown".to_string(),
+            streaming: false,
+        },
+    ];
+
+    let answer = cells
+        .iter()
+        .rev()
+        .find(|cell| cell.is_completed_assistant_answer())
+        .expect("the completed assistant cell must qualify");
+    let copied = history_cell_to_clipboard_text(answer, 80);
+
+    assert_eq!(copied, "## Final answer\nauthored markdown");
+    for excluded in [
+        "please summarize",
+        "private reasoning trace",
+        "raw tool result body",
+        "runtime status note",
+        "still streaming partial",
+        ASSISTANT_GLYPH,
+    ] {
+        assert!(
+            !copied.contains(excluded),
+            "answer copy leaked {excluded:?}"
+        );
+    }
+}

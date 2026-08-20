@@ -11,6 +11,8 @@
 //! - `Ctrl+B` / PageUp / Shift+Space — full page up
 //! - `/` — start search; `n` / `N` — next / previous match
 //! - `c` / `y` — copy the entire pager body to the system clipboard
+//! - `a` — copy the attached final assistant answer (answer-carrying pagers)
+//! - `e` — copy the attached turn handoff markdown (Turn Inspector only)
 //! - `q` / Esc — close pager
 
 use std::cell::Cell;
@@ -50,6 +52,7 @@ pub(crate) struct PagerPage {
     plain_lines: Vec<String>,
     export_markdown: Option<String>,
     copy_text: Option<String>,
+    answer_text: Option<String>,
 }
 
 impl PagerPage {
@@ -71,6 +74,7 @@ impl PagerPage {
             plain_lines,
             export_markdown: None,
             copy_text: None,
+            answer_text: None,
         }
     }
 
@@ -81,6 +85,15 @@ impl PagerPage {
 
     pub(crate) fn with_copy_text(mut self, text: impl Into<String>) -> Self {
         self.copy_text = Some(text.into());
+        self
+    }
+
+    /// Attach the clean final assistant answer that the `a` key copies to
+    /// the clipboard. Only surfaces that can produce an answer-only payload
+    /// (Turn Inspector pages, assistant detail pagers) set this; the pager
+    /// body itself stays free to render scaffolding around the answer.
+    pub(crate) fn with_copy_answer(mut self, text: impl Into<String>) -> Self {
+        self.answer_text = Some(text.into());
         self
     }
 }
@@ -113,6 +126,7 @@ impl PagerView {
                 plain_lines,
                 export_markdown: None,
                 copy_text: None,
+                answer_text: None,
             }],
             page_index: 0,
             scroll: 0,
@@ -158,6 +172,13 @@ impl PagerView {
     /// pager remains free to wrap content to its viewport.
     pub fn with_copy_text(mut self, text: impl Into<String>) -> Self {
         self.current_page_mut().copy_text = Some(text.into());
+        self
+    }
+
+    /// Attach the clean final assistant answer that the `a` key copies
+    /// (see [`PagerPage::with_copy_answer`]).
+    pub fn with_copy_answer(mut self, text: impl Into<String>) -> Self {
+        self.current_page_mut().answer_text = Some(text.into());
         self
     }
 
@@ -545,6 +566,20 @@ impl ModalView for PagerView {
                     label: "Turn handoff".to_string(),
                 })
             }
+            // `a` copies ONLY the final assistant answer — the clean
+            // answer-only payload attached by the Turn Inspector and the
+            // assistant detail pagers. Unlike `c`/`y` (rendered body) or `e`
+            // (whole-turn handoff markdown), this payload carries no
+            // reasoning, tool calls/results, runtime status, or transcript
+            // scaffolding. Elsewhere the guard fails and `a` is inert.
+            KeyCode::Char('a') if self.current_page().answer_text.is_some() => {
+                self.pending_g = false;
+                let text = self.current_page().answer_text.clone().unwrap_or_default();
+                ViewAction::Emit(ViewEvent::CopyToClipboard {
+                    text,
+                    label: "Answer".to_string(),
+                })
+            }
             _ => ViewAction::None,
         }
     }
@@ -592,6 +627,9 @@ impl ModalView for PagerView {
         ];
         if page.export_markdown.is_some() {
             hints.push(ActionHint::new("e", "copy handoff"));
+        }
+        if page.answer_text.is_some() {
+            hints.push(ActionHint::new("a", "copy answer"));
         }
         if let Some(action) = self.destructive_action.as_ref() {
             let key = action.key.to_string();
@@ -1078,6 +1116,30 @@ mod tests {
             }
             other => panic!("expected CopyToClipboard emit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_emits_copy_event_with_attached_answer_only() {
+        // `a` copies the attached answer-only payload — never the rendered
+        // body, which may carry scaffolding around the answer.
+        let mut pager = PagerView::from_text("Turn Inspector", "[◆ · done] body", 40)
+            .with_copy_answer("CLEAN-ANSWER");
+        let action = pager.handle_key(key(KeyCode::Char('a')));
+        match action {
+            ViewAction::Emit(ViewEvent::CopyToClipboard { text, label }) => {
+                assert_eq!(text, "CLEAN-ANSWER");
+                assert_eq!(label, "Answer");
+            }
+            other => panic!("expected CopyToClipboard emit, got {other:?}"),
+        }
+
+        // Without an attached answer `a` stays inert; it must never fall
+        // back to copying the rendered body.
+        let mut plain = PagerView::from_text("T", "body", 40);
+        assert!(matches!(
+            plain.handle_key(key(KeyCode::Char('a'))),
+            ViewAction::None
+        ));
     }
 
     #[test]

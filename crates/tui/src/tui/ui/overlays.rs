@@ -551,7 +551,13 @@ pub(crate) fn open_pager_for_last_message(app: &mut App) -> bool {
         .map(|area| area.width)
         .unwrap_or(80);
     let text = history_cell_to_text(cell, width);
-    let pager = PagerView::from_text("Message", &text, width.saturating_sub(2));
+    let mut pager = PagerView::from_text("Message", &text, width.saturating_sub(2));
+    // When the last message is a completed assistant answer, expose the
+    // clean answer-only payload via `a` (copy answer) — the rendered body
+    // that `c`/`y` copies still carries the glyph/label line.
+    if let Some(answer) = completed_assistant_answer_text(cell, width) {
+        pager = pager.with_copy_answer(answer);
+    }
     app.view_stack.push(pager);
     true
 }
