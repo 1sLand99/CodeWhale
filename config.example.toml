@@ -266,6 +266,18 @@ memory_path = "~/.codewhale/memory.md"
 allow_shell = true
 approval_policy = "on-request" # on-request | untrusted | never
 sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-access | external-sandbox
+
+# Whether a workspace-write sandbox also lets shell commands reach the
+# network. Default false: being allowed to edit this repository is not a
+# reason to be allowed to open outbound connections, so `curl`, package
+# installs, and `git fetch` are denied by the OS sandbox unless you opt in.
+# When a command is denied, Codewhale offers an elevation prompt that grants
+# network for that call only; set this to `true` to grant it for the whole
+# session instead. `danger-full-access` and `yolo` are unsandboxed and
+# unaffected by this key. Note that on platforms with no OS sandbox backend
+# (default Linux without bubblewrap, and Windows) nothing is enforced either
+# way -- `/status` and `doctor` both say so.
+# sandbox_network_access = false
 # prompt_suggestion = true  # opt-in: show ghost-text follow-up question in composer after each turn
 
 # Optional tab/window title shown as `[title] …` in front of the terminal

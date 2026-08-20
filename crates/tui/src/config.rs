@@ -2860,6 +2860,14 @@ pub struct Config {
     pub approval_policy: Option<String>,
     #[serde(alias = "sandboxMode")]
     pub sandbox_mode: Option<String>,
+    /// Whether a workspace-write sandbox also grants the shell outbound
+    /// network access. Defaults to `false`: editing the workspace is not a
+    /// reason to be able to reach the internet. Network comes from an explicit
+    /// opt-in here, from a `danger-full-access` posture, or from the
+    /// post-denial elevation prompt. `yolo`/`Bypass` is unaffected — it
+    /// resolves to `danger-full-access`, which is unsandboxed by definition.
+    #[serde(alias = "sandboxNetworkAccess")]
+    pub sandbox_network_access: Option<bool>,
     /// `telemetry` as written to the config file, before environment and
     /// default resolution. Kept so doctor and config displays can state the
     /// *resolved* consent with its source (default | env | config) instead of
@@ -8904,6 +8912,11 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
     {
         config.sandbox_mode = Some(value);
     }
+    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_NETWORK_ACCESS")
+        .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_NETWORK_ACCESS"))
+    {
+        config.sandbox_network_access = Some(value == "1" || value.eq_ignore_ascii_case("true"));
+    }
     if let Ok(value) = std::env::var("CODEWHALE_YOLO").or_else(|_| std::env::var("DEEPSEEK_YOLO")) {
         config.yolo = Some(value == "1" || value.eq_ignore_ascii_case("true"));
     }
@@ -10038,6 +10051,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         verbosity: override_cfg.verbosity.or(base.verbosity),
         approval_policy: override_cfg.approval_policy.or(base.approval_policy),
         sandbox_mode: override_cfg.sandbox_mode.or(base.sandbox_mode),
+        sandbox_network_access: override_cfg
+            .sandbox_network_access
+            .or(base.sandbox_network_access),
         fallback_providers: if override_cfg.fallback_providers.is_empty() {
             base.fallback_providers
         } else {

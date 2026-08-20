@@ -2367,6 +2367,7 @@ pub(crate) fn apply_setup_runtime_preset(
     config.allow_shell = Some(preset.allow_shell());
     config.sandbox_mode = Some(preset.sandbox_mode().to_string());
     app.configured_sandbox_mode = config.sandbox_mode.clone();
+    app.configured_sandbox_network = config.sandbox_network_access;
 
     let approval_mode = ApprovalMode::from_config_value(
         preset

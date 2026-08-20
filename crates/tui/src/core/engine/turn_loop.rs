@@ -2056,6 +2056,9 @@ impl Engine {
                 batch_approval_mode,
                 self.api_config.sandbox_mode.as_deref(),
                 &self.session.workspace,
+                crate::core::authority::SandboxNetworkAccess::from_config(
+                    self.api_config.sandbox_network_access,
+                ),
             );
             let batch_sandbox_read_only = matches!(
                 &batch_sandbox_policy,

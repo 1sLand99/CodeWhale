@@ -171,6 +171,7 @@ fn safety_summary(app: &App) -> &'static str {
         app.approval_mode,
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
+        crate::core::authority::SandboxNetworkAccess::from_config(app.configured_sandbox_network),
     );
     // The policy is the intent; `sandbox_backend` is what this platform can
     // actually enforce with. Default Linux (bubblewrap is opt-in) and all
@@ -183,11 +184,22 @@ fn safety_summary(app: &App) -> &'static str {
             "no OS sandbox on this platform (read-only requested, not enforced), network off"
         }
         crate::sandbox::SandboxPolicy::ReadOnly => "sandbox read-only, network off",
-        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } if unenforced => {
-            "no OS sandbox on this platform (workspace-write requested, not enforced), network on"
+        // Read the flag rather than assuming it. Workspace-write defaults to
+        // network-restricted, so a hardcoded "network on" here named a
+        // boundary the policy does not grant.
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { network_access, .. } if unenforced => {
+            if network_access {
+                "no OS sandbox on this platform (workspace-write requested, not enforced), network on"
+            } else {
+                "no OS sandbox on this platform (workspace-write requested, not enforced), network requested off, not enforced"
+            }
         }
-        crate::sandbox::SandboxPolicy::WorkspaceWrite { .. } => {
-            "sandbox workspace-write, network on"
+        crate::sandbox::SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+            if network_access {
+                "sandbox workspace-write, network on"
+            } else {
+                "sandbox workspace-write, network off"
+            }
         }
         crate::sandbox::SandboxPolicy::DangerFullAccess => "sandbox disabled, network unrestricted",
         crate::sandbox::SandboxPolicy::ExternalSandbox { .. } => {
@@ -401,7 +413,8 @@ mod tests {
         if unenforced {
             assert!(agent.contains("workspace-write requested, not enforced"));
         } else {
-            assert!(agent.contains("sandbox workspace-write, network on"));
+            // workspace-write no longer implies egress; /status must say so.
+            assert!(agent.contains("sandbox workspace-write, network off"));
         }
 
         app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
@@ -413,8 +426,20 @@ mod tests {
         if unenforced {
             assert!(clamped.contains("workspace-write requested, not enforced"));
         } else {
-            assert!(clamped.contains("sandbox workspace-write, network on"));
+            // Clamping full access down to workspace-write lands on the same
+            // restricted posture an ordinary Agent turn gets.
+            assert!(clamped.contains("sandbox workspace-write, network off"));
         }
+
+        // The explicit opt-in is the only thing that flips the reported label.
+        app.configured_sandbox_network = Some(true);
+        let networked = format_status(&app);
+        if unenforced {
+            assert!(networked.contains("workspace-write requested, not enforced"));
+        } else {
+            assert!(networked.contains("sandbox workspace-write, network on"));
+        }
+        app.configured_sandbox_network = None;
 
         app.mode = AppMode::Plan;
         let plan = format_status(&app);

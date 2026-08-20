@@ -12075,7 +12075,9 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
                     "{}",
                     case.name
                 );
-                assert!(*network_access, "{}", case.name);
+                // Workspace-write grants writes, not egress. Network is a
+                // separate, explicit grant in every mode that reaches here.
+                assert!(!*network_access, "{}", case.name);
             }
             (ExpectedSandbox::DangerFullAccess, SandboxPolicy::DangerFullAccess) => {}
             _ => panic!("{}: unexpected sandbox policy {sandbox:?}", case.name),
@@ -12429,12 +12431,17 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
 }
 
 #[test]
-fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
-    // Regression for #273: the seatbelt-default policy denies all outbound
-    // network (including DNS), which broke `curl`, `yt-dlp`, package managers,
-    // and similar shell commands in Agent mode. Elevation must include
-    // network access so the application-level NetworkPolicy stays the only
-    // outbound boundary.
+fn agent_mode_elevates_writes_without_granting_network() {
+    // #273 elevated Agent mode's sandbox so `curl`, package managers, and
+    // similar shell commands worked, and justified it by saying the
+    // application-level NetworkPolicy would remain "the only outbound
+    // boundary". That premise did not hold: NetworkPolicy governs
+    // fetch_url/web_search/MCP HTTP and never constrained shell subprocesses,
+    // so workspace-write turns had unrestricted egress with no boundary at
+    // all. Writing to the workspace is now decoupled from reaching the
+    // network: the write elevation stays, the network grant does not.
+    // Network comes from `sandbox_network_access`, from a danger-full-access
+    // posture, or from the post-denial elevation prompt.
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
 
     let agent_ctx = engine.build_tool_context(AppMode::Agent, false);
@@ -12443,8 +12450,14 @@ fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
         .as_ref()
         .expect("Agent mode should elevate the sandbox policy");
     assert!(
-        agent_policy.has_network_access(),
-        "Agent mode must allow shell network access; got {agent_policy:?}",
+        !agent_policy.has_network_access(),
+        "Agent mode must not grant shell network access by default; got {agent_policy:?}",
+    );
+    assert!(
+        !agent_policy
+            .get_writable_roots(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .is_empty(),
+        "Agent mode must still elevate workspace writes; got {agent_policy:?}",
     );
 
     let yolo_ctx = engine.build_tool_context(AppMode::Yolo, false);
@@ -12498,7 +12511,7 @@ fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
 
 #[test]
 fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
-    use crate::core::authority::sandbox_policy_for_turn;
+    use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
     use crate::sandbox::SandboxPolicy;
     use crate::tui::approval::ApprovalMode;
 
@@ -12506,26 +12519,64 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
 
     // Plan: ReadOnly. The whole point of #1077.
     assert!(matches!(
-        sandbox_policy_for_turn(AppMode::Plan, ApprovalMode::Suggest, None, &workspace,),
+        sandbox_policy_for_turn(
+            AppMode::Plan,
+            ApprovalMode::Suggest,
+            None,
+            &workspace,
+            SandboxNetworkAccess::Restricted,
+        ),
         SandboxPolicy::ReadOnly
     ));
 
-    // Agent: WorkspaceWrite with workspace as writable root, network on.
-    match sandbox_policy_for_turn(AppMode::Agent, ApprovalMode::Suggest, None, &workspace) {
+    // Agent: WorkspaceWrite with workspace as writable root, network OFF.
+    match sandbox_policy_for_turn(
+        AppMode::Agent,
+        ApprovalMode::Suggest,
+        None,
+        &workspace,
+        SandboxNetworkAccess::Restricted,
+    ) {
         SandboxPolicy::WorkspaceWrite {
             writable_roots,
             network_access,
             ..
         } => {
             assert_eq!(writable_roots, vec![workspace.clone()]);
-            assert!(network_access, "Agent mode must allow shell network access");
+            assert!(
+                !network_access,
+                "workspace-write must not imply shell network access"
+            );
+        }
+        other => panic!("Agent mode should be WorkspaceWrite; got {other:?}"),
+    }
+
+    // Agent with the explicit opt-in: same posture, network on.
+    match sandbox_policy_for_turn(
+        AppMode::Agent,
+        ApprovalMode::Suggest,
+        None,
+        &workspace,
+        SandboxNetworkAccess::Allowed,
+    ) {
+        SandboxPolicy::WorkspaceWrite { network_access, .. } => {
+            assert!(
+                network_access,
+                "sandbox_network_access = true must grant shell network access"
+            );
         }
         other => panic!("Agent mode should be WorkspaceWrite; got {other:?}"),
     }
 
     // YOLO: DangerFullAccess.
     assert!(matches!(
-        sandbox_policy_for_turn(AppMode::Yolo, ApprovalMode::Suggest, None, &workspace,),
+        sandbox_policy_for_turn(
+            AppMode::Yolo,
+            ApprovalMode::Suggest,
+            None,
+            &workspace,
+            SandboxNetworkAccess::Restricted,
+        ),
         SandboxPolicy::DangerFullAccess
     ));
 }
@@ -12712,7 +12763,7 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
             None,
             SandboxPolicy::WorkspaceWrite {
                 writable_roots: vec![tmp.path().to_path_buf()],
-                network_access: true,
+                network_access: false,
                 exclude_tmpdir: false,
                 exclude_slash_tmp: false,
             },

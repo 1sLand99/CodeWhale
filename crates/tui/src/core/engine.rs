@@ -3237,6 +3237,9 @@ impl Engine {
             approval_mode,
             self.api_config.sandbox_mode.as_deref(),
             &self.config.workspace,
+            crate::core::authority::SandboxNetworkAccess::from_config(
+                self.api_config.sandbox_network_access,
+            ),
         );
         let mut lines = vec![
             format!("Current local date: {today}"),
@@ -5482,6 +5485,9 @@ impl Engine {
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),
+            crate::core::authority::SandboxNetworkAccess::from_config(
+                self.api_config.sandbox_network_access,
+            ),
         ));
         context.shell_network_denied_hint = matches!(authority.mode, AppMode::Plan)
             .then(|| PLAN_SHELL_NETWORK_DENIED_HINT.to_string());
@@ -5590,6 +5596,9 @@ impl Engine {
         let policy = authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),
+            crate::core::authority::SandboxNetworkAccess::from_config(
+                self.api_config.sandbox_network_access,
+            ),
         );
         let mut ctx = ctx.with_elevated_sandbox_policy(policy);
         if matches!(authority.mode, AppMode::Plan) {

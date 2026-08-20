@@ -1281,6 +1281,9 @@ pub struct App {
     /// Effective explicit/managed filesystem scope captured at startup. The
     /// named permission posture supplies the default when this is `None`.
     pub configured_sandbox_mode: Option<String>,
+    /// Configured `sandbox_network_access`. `None`/`Some(false)` keep the
+    /// workspace-write sandbox network-restricted.
+    pub configured_sandbox_network: Option<bool>,
     /// The sandbox backend this platform+config can actually enforce with,
     /// resolved once at startup. `None` means there is NO enforcement
     /// available (default Linux without `prefer_bwrap`, and all Windows), so

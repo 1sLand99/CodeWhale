@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Editing the workspace no longer grants the shell outbound network access.
+  `workspace-write` sandboxes are created network-restricted; `curl`, package
+  installs, and `git fetch` inside a sandboxed shell are denied by the OS
+  sandbox unless network is granted explicitly. This closes a real gap rather
+  than tightening a working boundary: the elevation added in #273 was justified
+  by the application-level `NetworkPolicy` remaining "the only outbound
+  boundary", but that policy governs `fetch_url`, `web_search`, and MCP HTTP
+  and never constrained shell subprocesses, so workspace-write turns had
+  unrestricted egress with nothing enforcing anything. Network now comes from
+  one of three explicit places: the new `sandbox_network_access` config key
+  (also `CODEWHALE_SANDBOX_NETWORK_ACCESS`), a `danger-full-access` posture, or
+  the existing post-denial elevation prompt that grants network for a single
+  call. Yolo and `--yolo`/Bypass are unchanged — they resolve to
+  `danger-full-access`, which applies no sandbox at all. `external-sandbox`
+  reports the network it was actually granted instead of hardcoding `true`, and
+  `/status` reads the flag instead of printing "network on" for every
+  workspace-write policy. Platforms with no sandbox backend (default Linux
+  without bubblewrap, and Windows) still enforce nothing, and both `/status`
+  and `doctor` continue to say so.
+
 ## [0.9.10] - 2026-08-19
 
 - Show the full slash-command or `/model` completion row in a bounded, wrapping hover popover whenever narrow terminals truncate it, closing the remaining scoped gap from [#998](https://github.com/Hmbown/CodeWhale/issues/998). Thanks [@AiurArtanis](https://github.com/AiurArtanis) and [@formp3](https://github.com/formp3) for identifying the affected surfaces.

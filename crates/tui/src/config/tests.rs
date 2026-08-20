@@ -649,6 +649,26 @@ fn warns_when_allow_shell_nested_under_general_section() {
 }
 
 #[test]
+fn sandbox_network_access_parses_and_defaults_to_restricted() {
+    // Absent key: restricted. Editing the workspace does not imply egress.
+    let parsed: ConfigFile =
+        toml::from_str("sandbox_mode = \"workspace-write\"\n").expect("parse without the key");
+    assert_eq!(parsed.base.sandbox_network_access, None);
+
+    let parsed: ConfigFile =
+        toml::from_str("sandbox_network_access = true\n").expect("parse snake_case");
+    assert_eq!(parsed.base.sandbox_network_access, Some(true));
+
+    let parsed: ConfigFile =
+        toml::from_str("sandboxNetworkAccess = true\n").expect("parse camelCase alias");
+    assert_eq!(parsed.base.sandbox_network_access, Some(true));
+
+    let parsed: ConfigFile =
+        toml::from_str("sandbox_network_access = false\n").expect("parse explicit false");
+    assert_eq!(parsed.base.sandbox_network_access, Some(false));
+}
+
+#[test]
 fn load_honors_codewhale_home_for_primary_config_path() -> Result<()> {
     let _lock = lock_test_env();
     let dir = tempfile::tempdir()?;

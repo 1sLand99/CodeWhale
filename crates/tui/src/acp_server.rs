@@ -1868,6 +1868,7 @@ fn build_acp_tool_registry(
         crate::tui::approval::ApprovalMode::Suggest,
         config.sandbox_mode.as_deref(),
         workspace,
+        crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     );
     let mut context = ToolContext::new(workspace)
         .with_shell_policy(shell_policy)
