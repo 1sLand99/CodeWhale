@@ -360,3 +360,53 @@ export interface DocsTroubleshootingDict {
   dockerToolboxNote: string;
   sourceNote: string;
 }
+
+/**
+ * `app/[locale]/docs/constitution/page.tsx`.
+ *
+ * `overviewLead` carries three `{token}` placeholders and `authorityNote` one
+ * more. Per `docs/VOICE.md` — keep commands, key names and paths as code-owned
+ * placeholders — the literals themselves live in the page, along with the
+ * en/zh badge pair on each principle row, which is a fixed bilingual glyph
+ * rather than copy.
+ */
+export interface DocsConstitutionDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  /** Opposite-language echo the heading prints beside the title. */
+  overviewTitleAside: string;
+  overviewLead: string;
+  /** Three `[key, detail]` rows; the key selects the page's badge pair. */
+  principles: [string, string][];
+  authorityNote: string;
+  /** Link text inside `authorityNote`'s `{configDocs}` slot. */
+  configDocsLabel: string;
+  sourceNote: string;
+}
+
+/**
+ * `app/[locale]/docs/runtime-api/page.tsx`.
+ *
+ * Only `securityLead` is tokenized. The command names elsewhere on the page
+ * are set as prose rather than `<code>`, so they stay inside the sentences
+ * exactly as the `isZh` ternaries had them.
+ */
+export interface DocsRuntimeApiDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  /** Seven `[key, detail]` rows; the key selects the page's command literal. */
+  entries: [string, string][];
+  stdioTitle: string;
+  stdioLead: string;
+  interruptNote: string;
+  securityTitle: string;
+  securityLead: string;
+  sourceNote: string;
+}

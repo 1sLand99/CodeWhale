@@ -3,14 +3,18 @@ import {
   DICTIONARY_LOCALES,
   EN_CHROME,
   EN_DOCS_GUIDE,
+  EN_DOCS_CONSTITUTION,
   EN_DOCS_HOOKS,
+  EN_DOCS_RUNTIME_API,
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
   EN_HOME,
   fill,
   getChrome,
   getDocsGuide,
+  getDocsConstitution,
   getDocsHooks,
+  getDocsRuntimeApi,
   getDocsShell,
   getDocsTroubleshooting,
   getHome,
@@ -241,6 +245,8 @@ describe("website dictionaries", () => {
     for (const [label, get, reference] of [
       ["docs-hooks", getDocsHooks, EN_DOCS_HOOKS],
       ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING],
+      ["docs-constitution", getDocsConstitution, EN_DOCS_CONSTITUTION],
+      ["docs-runtime-api", getDocsRuntimeApi, EN_DOCS_RUNTIME_API],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
       for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
@@ -263,6 +269,14 @@ describe("website dictionaries", () => {
         getDocsTroubleshooting(locale).incidents,
         `${locale} triage entries`,
       ).toHaveLength(5);
+      expect(
+        getDocsConstitution(locale).principles.map(([key]) => key),
+        `${locale} constitution principles`,
+      ).toEqual(["userGlobal", "repoLocal", "runtime"]);
+      expect(
+        getDocsRuntimeApi(locale).entries.map(([key]) => key),
+        `${locale} runtime entries`,
+      ).toEqual(["http", "mobile", "stdio", "web", "doctor", "acp", "exec"]);
     }
   });
 
@@ -274,6 +288,31 @@ describe("website dictionaries", () => {
         "hooksTable",
         "hooksCommand",
         "enabledKey",
+      ]);
+    }
+  });
+
+  it("carries every code-span token through the constitution and runtime-api copy", () => {
+    const tokensOf = (template: string) =>
+      splitTokens(template).flatMap((part) => ("token" in part ? [part.token] : []));
+    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
+      const constitution = getDocsConstitution(locale);
+      expect(tokensOf(constitution.overviewLead), `${locale} overviewLead`).toEqual([
+        "constitutionCommand",
+        "homeConfig",
+        "repoConfig",
+      ]);
+      // Exactly one link slot, so the translated label is never concatenated
+      // onto a fragment the call site owns.
+      expect(tokensOf(constitution.authorityNote), `${locale} authorityNote`).toEqual([
+        "configDocs",
+      ]);
+      expect(tokensOf(getDocsRuntimeApi(locale).securityLead), `${locale} securityLead`).toEqual([
+        "authToken",
+        "runtimeTokenEnv",
+        "legacyTokenEnv",
+        "insecureFlag",
+        "mobileFlag",
       ]);
     }
   });

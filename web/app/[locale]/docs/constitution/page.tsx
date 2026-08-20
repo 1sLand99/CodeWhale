@@ -1,102 +1,93 @@
+import { Fragment } from "react";
 import Link from "next/link";
+import { getDocsConstitution, splitTokens } from "@/lib/i18n/dictionaries";
 import { buildPageMetadata } from "@/lib/page-meta";
+
+/**
+ * Paths and commands the overview sentence typesets as inline `<code>`.
+ * `docs/VOICE.md` keeps these code-owned, so the dictionaries carry a
+ * `{token}` for each one instead of the literal.
+ */
+const CODE_SPANS: Record<string, string> = {
+  constitutionCommand: "/constitution",
+  homeConfig: "$CODEWHALE_HOME/constitution.json",
+  repoConfig: ".codewhale/constitution.json",
+};
+
+/**
+ * The en/zh badge on each principle row. Both halves render in every locale —
+ * it is a fixed bilingual glyph rather than copy — so it stays here and the
+ * dictionaries key their rows by the same names.
+ */
+const PRINCIPLE_BADGES: Record<string, [string, string]> = {
+  userGlobal: ["User-global", "用户全局"],
+  repoLocal: ["Repo-local", "仓库本地"],
+  runtime: ["Runtime", "运行时"],
+};
+
+const CONFIG_DOCS_HREF =
+  "https://github.com/Hmbown/CodeWhale/blob/main/docs/CONFIGURATION.md#constitution-project-instructions-and-repo-authority";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
-  const isZh = locale === "zh";
+  const t = getDocsConstitution(locale);
   return buildPageMetadata({
     path: "/docs/constitution",
     locale,
-    title: isZh ? "宪章与 /constitution · Codewhale 文档" : "Constitution and /constitution · Codewhale Docs",
-    description: isZh
-      ? "用户全局宪章、仓库本地法、项目说明和运行时边界。"
-      : "User-global constitution, repo-local law, project instructions, and runtime boundaries.",
+    title: t.metaTitle,
+    description: t.metaDescription,
   });
 }
 
 export default async function ConstitutionPage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
-  const isZh = locale === "zh";
+  const t = getDocsConstitution(locale);
 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
         <h2 className="font-display text-3xl mb-1">
-          {isZh ? "宪章与 /constitution" : "Constitution and /constitution"}{" "}
-          <span className="font-cjk text-indigo text-2xl ml-2">
-            {isZh ? "Constitution" : "宪章与 /constitution"}
-          </span>
+          {t.overviewTitle}{" "}
+          <span className="font-cjk text-indigo text-2xl ml-2">{t.overviewTitleAside}</span>
         </h2>
-        {isZh ? (
-          <p className="text-ink-soft mt-3 leading-[1.9] tracking-wide">
-            Codewhale 先给 Agent 一个可追责的地址，再给上下文冲突一套法律。
-            <code className="inline">/constitution</code> 是管理个人常驻宪章的主入口：
-            它把结构化的用户全局设置保存在 <code className="inline">$CODEWHALE_HOME/constitution.json</code>，
-            再渲染成模型可读的 prose block。仓库仍可通过{" "}
-            <code className="inline">.codewhale/constitution.json</code> 增加本地 law；runtime
-            policy 独立负责模式、审批、沙箱、成本和工具边界。
-          </p>
-        ) : (
-          <p className="text-ink-soft mt-3 leading-relaxed">
-            Codewhale gives the agent an accountable address, then a legal system for
-            context conflicts. <code className="inline">/constitution</code> is the
-            primary personal constitution surface: guided setup stores structured
-            user-global data in <code className="inline">$CODEWHALE_HOME/constitution.json</code>
-            and renders it as model-facing prose. Repos can still add local law via{" "}
-            <code className="inline">.codewhale/constitution.json</code>; runtime policy
-            separately encodes modes, approval, sandbox, cost, and tool boundaries.
-          </p>
-        )}
+        <p className={`${t.bodyClassName} mt-3`}>
+          {splitTokens(t.overviewLead).map((part, i) =>
+            "token" in part ? (
+              <code key={`${i}-${part.token}`} className="inline">
+                {CODE_SPANS[part.token] ?? `{${part.token}}`}
+              </code>
+            ) : (
+              <Fragment key={`${i}-text`}>{part.text}</Fragment>
+            ),
+          )}
+        </p>
         <div className="hairline-t hairline-b mt-6 grid md:grid-cols-3 col-rule">
-          {[
-            {
-              name: "User-global",
-              cn: "用户全局",
-              en: "Use /constitution for standing personal law across projects. It is structured data rendered to prose, not a raw prompt editor.",
-              zh: "用 /constitution 管理跨项目个人常驻法。它是结构化数据渲染成 prose，不是裸 prompt 编辑器。",
-            },
-            {
-              name: "Repo-local",
-              cn: "仓库本地",
-              en: ".codewhale/constitution.json is optional project policy for protected invariants, branch rules, verification, and escalation.",
-              zh: ".codewhale/constitution.json 是可选项目 law，用于不变量、分支规则、验证和升级条件。",
-            },
-            {
-              name: "Runtime",
-              cn: "运行时",
-              en: "Constitution text may express preferences, but approval, sandbox, shell, network, trust, and MCP permissions remain enforced config.",
-              zh: "宪章文本可以表达偏好；审批、沙箱、Shell、网络、信任和 MCP 权限仍由运行时配置强制执行。",
-            },
-          ].map((row) => (
-            <div key={row.name} className="p-5">
-              <div className="font-display text-lg text-indigo mb-1">
-                {row.name} <span className="font-cjk text-sm ml-1.5">{row.cn}</span>
+          {t.principles.map(([key, detail]) => {
+            const [name, cn] = PRINCIPLE_BADGES[key] ?? [key, ""];
+            return (
+              <div key={key} className="p-5">
+                <div className="font-display text-lg text-indigo mb-1">
+                  {name} <span className="font-cjk text-sm ml-1.5">{cn}</span>
+                </div>
+                <p className={`text-sm ${t.bodyClassName}`}>{detail}</p>
               </div>
-              <p className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
-                {isZh ? row.zh : row.en}
-              </p>
-            </div>
-          ))}
+            );
+          })}
         </div>
-        <p className={`mt-4 text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
-          {isZh
-            ? "普通项目说明仍放在 AGENTS.md；记忆和交接低于宪章与项目说明；完整 base prompt Markdown 覆盖只是专家逃生口，不是普通设置路径。详见 "
-            : "Standard project instructions still live in AGENTS.md; memory and handoffs rank below constitutions and project instructions; the full base-prompt Markdown override is an expert escape hatch, not the normal setup path. See "}
-          <Link
-            href="https://github.com/Hmbown/CodeWhale/blob/main/docs/CONFIGURATION.md#constitution-project-instructions-and-repo-authority"
-            className="body-link"
-          >
-            {isZh ? "配置文档" : "configuration docs"}
-          </Link>
-          {isZh ? "。" : "."}
+        <p className={`mt-4 text-sm ${t.bodyClassName}`}>
+          {splitTokens(t.authorityNote).map((part, i) =>
+            "token" in part ? (
+              <Link key={`${i}-${part.token}`} href={CONFIG_DOCS_HREF} className="body-link">
+                {t.configDocsLabel}
+              </Link>
+            ) : (
+              <Fragment key={`${i}-text`}>{part.text}</Fragment>
+            ),
+          )}
         </p>
       </section>
       <section id="source" className="hairline-t pt-8">
-        <p className="text-sm text-ink-mute">
-          {isZh
-            ? "来源文档：docs/ARCHITECTURE.md · 更新时请同步修改 docs-map.ts。"
-            : "Source document: docs/ARCHITECTURE.md · Update docs-map.ts when changing."}
-        </p>
+        <p className="text-sm text-ink-mute">{t.sourceNote}</p>
       </section>
     </section>
   );
