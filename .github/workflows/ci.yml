@@ -170,6 +170,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v7
         with:
@@ -181,6 +183,7 @@ jobs:
       - name: Check release helper contracts
         run: |
           bash .github/scripts/agent-task-metadata.test.sh
+          bash scripts/release/check-feature-release-notes.test.sh
           bash scripts/release/generate-release-body.test.sh
           bash scripts/release/install-dogfood.test.sh
           bash scripts/release/prepare-release.test.sh

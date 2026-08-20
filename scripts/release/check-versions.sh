@@ -21,7 +21,8 @@
 #  10. Public install and version snippets point at the current release.
 #  11. `codewhale-app-server` stays library-only; the shipped app-server
 #      entrypoint belongs to `codewhale-cli`.
-#  12. `Cargo.lock` is in sync with the manifests (`cargo metadata --locked`
+#  12. Issue-linked feature commits have a durable changelog receipt.
+#  13. `Cargo.lock` is in sync with the manifests (`cargo metadata --locked`
 #      fails if not).
 set -euo pipefail
 
@@ -192,6 +193,9 @@ if [[ -n "${previous_tag}" ]]; then
     git fetch --quiet --depth=1 origin "refs/tags/${previous_tag}:refs/tags/${previous_tag}" || true
   fi
   if git rev-parse -q --verify "refs/tags/${previous_tag}" >/dev/null; then
+    if ! ./scripts/release/check-feature-release-notes.sh "${previous_tag}" HEAD; then
+      fail=1
+    fi
     while IFS= read -r line; do
       [[ -z "${line}" ]] && continue
       handle="$(sed -E 's#.*github.com/([^)/]+).*#\1#' <<<"${line}")"
@@ -296,7 +300,7 @@ if [[ -n "${app_server_bins}" ]]; then
   fail=1
 fi
 
-# 12) Cargo.lock in sync.
+# 13) Cargo.lock in sync.
 if ! cargo metadata --locked --format-version 1 --no-deps >/dev/null 2>&1; then
   echo "::error::Cargo.lock is out of sync with the manifests. Run 'cargo update -p codewhale-tui' or 'cargo build' and commit the result." >&2
   fail=1

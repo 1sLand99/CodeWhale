@@ -611,6 +611,10 @@ a published OpenAI-compatible host ship here (#5350).
 
 ### Added
 
+- Opt-in multiline composer mode (`composer_multiline_mode = true`) makes
+  Enter insert a newline and Shift+Enter send. Alt+Enter, Ctrl+J, and supported
+  Ctrl+Enter/Cmd+Enter behavior stays unchanged (#5345, @AiurArtanis).
+
 - `/plugin marketplace add|list|show|remove|install` completes the
   federated marketplace journey (#5311). `add` reads one LOCAL catalog
   document in the real published schemas (Kimi, Claude, Codex, or
