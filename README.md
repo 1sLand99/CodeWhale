@@ -147,9 +147,9 @@ and first contributions are welcome. When a PR can't merge as-is, maintainers
 harvest what works and keep the author credited — in the commit, the changelog,
 and [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md).
 
-Want to talk through an idea before opening something? Join
+Want to talk through an idea before opening something? Join us on
 [Discord](https://discord.gg/37gfS3ksug), or add Hunter on WeChat
-(`hunterbown`) and mention Codewhale.
+(`hunterbown`) and ask to join the Whale Brothers group.
 
 - [Open issues](https://github.com/Hmbown/CodeWhale/issues) — good first
   contributions live here
